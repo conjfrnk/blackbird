@@ -7,7 +7,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <stddef.h>
 
 #define BOLD (1 << 0)

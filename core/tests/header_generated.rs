@@ -20,4 +20,8 @@ fn header_file_exists_and_has_symbols() {
     ] {
         assert!(header.contains(sym), "BBCore.h missing {sym}");
     }
+    assert!(
+        !header.contains("bb_term_test_only_panic"),
+        "test-only FFI must not appear in public header"
+    );
 }

@@ -6,10 +6,10 @@ style = "tag"
 documentation = true
 documentation_style = "doxy"
 no_includes = false
-sys_includes = ["stdint.h", "stddef.h"]
+sys_includes = ["stddef.h"]
 
 [export]
-include = ["BBTerm", "BBSnap", "BBCell", "BBEvent", "BBEventKind"]
+include = ["BBTerm", "BBSnap", "BBCell", "BBEvent", "BBEventKind", "cell_flags"]
 exclude = ["bb_term_test_only_panic"]
 prefix = ""
 

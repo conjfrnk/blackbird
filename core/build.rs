@@ -17,6 +17,7 @@ fn main() {
         .expect("cbindgen failed")
         .write_to_file(&out_file);
 
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 }
