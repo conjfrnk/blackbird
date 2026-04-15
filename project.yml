@@ -1,0 +1,49 @@
+name: Blackbird
+options:
+  bundleIdPrefix: dev.conjfrnk
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    ARCHS: "arm64 x86_64"
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  Blackbird:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/Blackbird
+    info:
+      path: Sources/Blackbird/Info.plist
+      properties:
+        CFBundleName: Blackbird
+        CFBundleDisplayName: Blackbird
+        CFBundleShortVersionString: "0.1.0"
+        LSMinimumSystemVersion: "14.0"
+        NSHumanReadableCopyright: ""
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.conjfrnk.blackbird
+    dependencies:
+      - framework: AppKit.framework
+      - framework: SwiftUI.framework
+      - framework: Metal.framework
+      - framework: MetalKit.framework
+      - framework: CoreText.framework
+
+schemes:
+  Blackbird:
+    build:
+      targets:
+        Blackbird: all
+    run:
+      config: Debug
+    archive:
+      config: Release
