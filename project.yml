@@ -28,15 +28,17 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: ""
+        NSSupportsAutomaticTermination: true
+        NSSupportsSuddenTermination: true
+        LSApplicationCategoryType: public.app-category.developer-tools
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.conjfrnk.blackbird
     dependencies:
       - framework: AppKit.framework
+        embed: false
       - framework: SwiftUI.framework
-      - framework: Metal.framework
-      - framework: MetalKit.framework
-      - framework: CoreText.framework
+        embed: false
 
 schemes:
   Blackbird:

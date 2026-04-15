@@ -7,44 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		126CBCA7EFFAB94C8D637C83 /* MetalKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = BD76CB8636344020D6975E65 /* MetalKit.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		22EA46AC14DEA7E6A03FB8DF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */; };
 		4235C2A5FFE2A1329E886E96 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DF8E87FBF674AD466760D74A /* AppKit.framework */; };
-		4781D43577A67565668C45C4 /* SwiftUI.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
-		4C4BC81306A9C4BCAE4F8E5E /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 331E833EA759F27FBA2A680A /* Metal.framework */; };
-		5F528547BC3AEEB15D864EDD /* AppKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DF8E87FBF674AD466760D74A /* AppKit.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
-		675F5BE7F6F78829AC51D86B /* CoreText.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3FF347F98FBF492EE879F5F /* CoreText.framework */; };
-		A067CF28D2723D6653959523 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BD76CB8636344020D6975E65 /* MetalKit.framework */; };
-		C0EA047A736581ED770A608C /* Metal.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 331E833EA759F27FBA2A680A /* Metal.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3C166E3043F25B8791103E /* App.swift */; };
-		E8F179929FF23418A00D7CFE /* CoreText.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A3FF347F98FBF492EE879F5F /* CoreText.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		0A3EFE0409ADCB440DB61FDC /* Embed Frameworks */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 10;
-			files = (
-				5F528547BC3AEEB15D864EDD /* AppKit.framework in Embed Frameworks */,
-				4781D43577A67565668C45C4 /* SwiftUI.framework in Embed Frameworks */,
-				C0EA047A736581ED770A608C /* Metal.framework in Embed Frameworks */,
-				126CBCA7EFFAB94C8D637C83 /* MetalKit.framework in Embed Frameworks */,
-				E8F179929FF23418A00D7CFE /* CoreText.framework in Embed Frameworks */,
-			);
-			name = "Embed Frameworks";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		331E833EA759F27FBA2A680A /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = Metal.framework; sourceTree = "<group>"; };
-		A3FF347F98FBF492EE879F5F /* CoreText.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = CoreText.framework; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
-		BD76CB8636344020D6975E65 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = MetalKit.framework; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		DF8E87FBF674AD466760D74A /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppKit.framework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -56,9 +27,6 @@
 			files = (
 				4235C2A5FFE2A1329E886E96 /* AppKit.framework in Frameworks */,
 				22EA46AC14DEA7E6A03FB8DF /* SwiftUI.framework in Frameworks */,
-				4C4BC81306A9C4BCAE4F8E5E /* Metal.framework in Frameworks */,
-				A067CF28D2723D6653959523 /* MetalKit.framework in Frameworks */,
-				675F5BE7F6F78829AC51D86B /* CoreText.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -103,9 +71,6 @@
 			isa = PBXGroup;
 			children = (
 				DF8E87FBF674AD466760D74A /* AppKit.framework */,
-				A3FF347F98FBF492EE879F5F /* CoreText.framework */,
-				331E833EA759F27FBA2A680A /* Metal.framework */,
-				BD76CB8636344020D6975E65 /* MetalKit.framework */,
 				022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */,
 			);
 			name = Frameworks;
@@ -120,7 +85,6 @@
 			buildPhases = (
 				42B65E7EA891F238459C206E /* Sources */,
 				D6CDD3548C633ACD833D1F9E /* Frameworks */,
-				0A3EFE0409ADCB440DB61FDC /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
