@@ -3,5 +3,7 @@ resolver = "2"
 members = ["core"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
+# alacritty_terminal 0.26.0 declares rust-version = "1.85.0", setting the floor.
 rust-version = "1.85"
