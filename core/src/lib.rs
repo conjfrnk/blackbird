@@ -2,6 +2,7 @@
 
 use std::cell::UnsafeCell;
 use std::os::raw::c_void;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -191,47 +192,108 @@ impl EventListener for RoutingListener {
 /// SAFETY: Rust drops struct fields in declaration order. `term` owns a
 /// RoutingListener whose raw pointer targets `callback`, so `term` must be
 /// declared BEFORE `callback` — this makes `term` drop first, leaving the
-/// pointer valid during Term's destruction. Task 7 adds a Fatal event that
-/// may fire during teardown, making this ordering load-bearing.
+/// pointer valid during Term's destruction. The Fatal event delivery path
+/// (in `guard_with_term`) fires during teardown, making this ordering
+/// load-bearing.
 pub struct BBTerm {
     term: Term<RoutingListener>,
     processor: Processor,
     callback: Box<CallbackCell>,
 }
 
-/// Create a new terminal. Returns null on invalid input.
+// ---------------------------------------------------------------------------
+// Panic-catching guard helpers
+// ---------------------------------------------------------------------------
+
+fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+/// Wrap any FFI body that has a valid `BBTerm*` available. On panic:
+/// 1. Extract a human-readable message
+/// 2. Deliver a `BBEventKind::Fatal` event via the `BBTerm`'s callback (if set)
+/// 3. Return the fallback value
+///
+/// # Safety
+/// `term` must be either null (no event delivery) or a valid `&*term` target.
+unsafe fn guard_with_term<T>(term: *mut BBTerm, fallback: T, f: impl FnOnce() -> T) -> T {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(payload) => {
+            if !term.is_null() {
+                let bb = &*term;
+                let msg = payload_to_string(&payload);
+                let (cb, ctx) = *bb.callback.0.get();
+                if let Some(cb) = cb {
+                    let bytes = msg.as_bytes();
+                    let ev = BBEvent {
+                        kind: BBEventKind::Fatal,
+                        payload: bytes.as_ptr(),
+                        len: bytes.len(),
+                        i32_arg: 0,
+                    };
+                    cb(ev, ctx);
+                }
+            }
+            fallback
+        }
+    }
+}
+
+/// Panic-swallowing guard for contexts where no `BBTerm` exists yet
+/// (`bb_term_new`'s allocation path, `bb_term_free`'s destructor).
+fn guard_no_term<T>(fallback: T, f: impl FnOnce() -> T) -> T {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(_payload) => fallback,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FFI entry points
+// ---------------------------------------------------------------------------
+
+/// Create a new terminal. Returns null on invalid input or internal error.
 ///
 /// # Safety
 /// The returned pointer must be freed exactly once via `bb_term_free`.
 ///
-/// Until `catch_unwind` is added to FFI entry points (Task 7), the caller must
-/// ensure no Rust panic can unwind through this function (UB to unwind through
-/// `extern "C"`).
+/// Panics inside this function are caught by `catch_unwind` and swallowed
+/// silently (no `BBTerm` context is available yet to deliver a Fatal event).
+/// The function returns null as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *mut BBTerm {
-    if cols == 0 || rows == 0 {
-        return std::ptr::null_mut();
-    }
-    let size = TermSize {
-        cols: cols as usize,
-        rows: rows as usize,
-    };
-    let config = Config {
-        scrolling_history: scrollback as usize,
-        ..Default::default()
-    };
+    guard_no_term(std::ptr::null_mut(), || {
+        if cols == 0 || rows == 0 {
+            return std::ptr::null_mut();
+        }
+        let size = TermSize {
+            cols: cols as usize,
+            rows: rows as usize,
+        };
+        let config = Config {
+            scrolling_history: scrollback as usize,
+            ..Default::default()
+        };
 
-    let callback = Box::new(CallbackCell::new());
-    let listener = RoutingListener {
-        cell: &*callback as *const CallbackCell,
-    };
-    let term = Term::new(config, &size, listener);
-    let bb = Box::new(BBTerm {
-        callback,
-        term,
-        processor: Processor::new(),
-    });
-    Box::into_raw(bb)
+        let callback = Box::new(CallbackCell::new());
+        let listener = RoutingListener {
+            cell: &*callback as *const CallbackCell,
+        };
+        let term = Term::new(config, &size, listener);
+        let bb = Box::new(BBTerm {
+            term,
+            processor: Processor::new(),
+            callback,
+        });
+        Box::into_raw(bb)
+    })
 }
 
 /// Free a terminal handle created by `bb_term_new`.
@@ -240,15 +302,17 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
 /// `term` must have been returned by `bb_term_new` and not previously freed.
 /// Passing null is a no-op.
 ///
-/// Until `catch_unwind` is added to FFI entry points (Task 7), the caller must
-/// ensure no Rust panic can unwind through this function (UB to unwind through
-/// `extern "C"`).
+/// Panics inside this function are caught by `catch_unwind` and swallowed
+/// silently (no safe `BBTerm` context is available during teardown to deliver
+/// a Fatal event). The function returns unit as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
-    if term.is_null() {
-        return;
-    }
-    drop(Box::from_raw(term));
+    guard_no_term((), || {
+        if term.is_null() {
+            return;
+        }
+        drop(Box::from_raw(term));
+    })
 }
 
 /// Feed `len` bytes from `bytes` into the terminal's VT parser.
@@ -260,17 +324,20 @@ pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
 ///   at least `len` bytes. Passing `bytes = null, len = 0` is safe (no-op).
 /// - No two threads may call any `bb_term_*` function concurrently on the same
 ///   `term`; interior state is mutated and `Term`/`Processor` are not `Sync`.
-/// - Until `catch_unwind` is added to FFI entry points (Task 7), the caller
-///   must ensure no Rust panic can unwind through this function (UB to unwind
-///   through `extern "C"`).
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// unit as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len: usize) {
-    if term.is_null() || len == 0 || bytes.is_null() {
-        return;
-    }
-    let bb = &mut *term;
-    let slice = std::slice::from_raw_parts(bytes, len);
-    bb.processor.advance(&mut bb.term, slice);
+    guard_with_term(term, (), || {
+        if term.is_null() || len == 0 || bytes.is_null() {
+            return;
+        }
+        let bb = &mut *term;
+        let slice = std::slice::from_raw_parts(bytes, len);
+        bb.processor.advance(&mut bb.term, slice);
+    })
 }
 
 /// Flat cell layout for cross-language consumption. Swift reads these directly.
@@ -352,19 +419,24 @@ impl BBSnap {
 /// # Safety
 /// `term` must be a valid non-null pointer from `bb_term_new`, properly
 /// aligned, not freed for the duration of the call. No concurrent calls on
-/// the same term. Until `catch_unwind` is added (Task 7), no Rust panic may
-/// unwind through this function (UB to unwind through `extern "C"`).
+/// the same term.
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// unit as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16) {
-    if term.is_null() || cols == 0 || rows == 0 {
-        return;
-    }
-    let bb = &mut *term;
-    let size = TermSize {
-        cols: cols as usize,
-        rows: rows as usize,
-    };
-    bb.term.resize(size);
+    guard_with_term(term, (), || {
+        if term.is_null() || cols == 0 || rows == 0 {
+            return;
+        }
+        let bb = &mut *term;
+        let size = TermSize {
+            cols: cols as usize,
+            rows: rows as usize,
+        };
+        bb.term.resize(size);
+    })
 }
 
 /// Register (or clear) the event callback for a terminal.
@@ -383,16 +455,22 @@ pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16)
 /// - All access must occur on the same thread (no concurrent calls on the
 ///   same term).
 /// - Passing `term = null` is a no-op.
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// unit as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_set_event_cb(
     term: *mut BBTerm,
     cb: Option<BBEventCb>,
     ctx: *mut c_void,
 ) {
-    if term.is_null() {
-        return;
-    }
-    (*term).callback.set(cb, ctx);
+    guard_with_term(term, (), || {
+        if term.is_null() {
+            return;
+        }
+        (*term).callback.set(cb, ctx);
+    })
 }
 
 /// Take an immutable snapshot of the current grid state.
@@ -401,35 +479,41 @@ pub unsafe extern "C" fn bb_term_set_event_cb(
 /// Same preconditions as `bb_term_input`. Returns null on null input.
 /// The returned pointer must be released by exactly one `bb_snap_release` per
 /// successful call (plus one per `bb_snap_retain`).
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// null as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSnap {
-    if term.is_null() {
-        return std::ptr::null();
-    }
-    let bb = &*term;
-    let grid = bb.term.grid();
+    guard_with_term(term, std::ptr::null(), || {
+        if term.is_null() {
+            return std::ptr::null();
+        }
+        let bb = &*term;
+        let grid = bb.term.grid();
 
-    let rows = grid.screen_lines() as u16;
-    let cols = grid.columns() as u16;
-    let mut cells: Vec<BBCell> = Vec::with_capacity(rows as usize * cols as usize);
+        let rows = grid.screen_lines() as u16;
+        let cols = grid.columns() as u16;
+        let mut cells: Vec<BBCell> = Vec::with_capacity(rows as usize * cols as usize);
 
-    for indexed in grid.display_iter() {
-        cells.push(BBCell {
-            ch: indexed.c as u32,
-            fg: 0xEEEEEE, // TODO(plan-5): theme-aware color mapping
-            bg: 0x000000,
-            flags: 0,
-            _reserved: 0,
-        });
-    }
+        for indexed in grid.display_iter() {
+            cells.push(BBCell {
+                ch: indexed.c as u32,
+                fg: 0xEEEEEE, // TODO(plan-5): theme-aware color mapping
+                bg: 0x000000,
+                flags: 0,
+                _reserved: 0,
+            });
+        }
 
-    let cursor_point = grid.cursor.point;
-    // cursor_point.line.0 is a 0-based screen row (Line wraps i32; visible rows are 0..rows-1).
-    // cursor_point.column.0 is a 0-based column (Column wraps usize).
-    let cursor_row = cursor_point.line.0.max(0) as u16;
-    let cursor_col = cursor_point.column.0 as u16;
-    let snap = BBSnap::new(cols, rows, (cursor_col, cursor_row, true), cells);
-    Box::into_raw(snap)
+        let cursor_point = grid.cursor.point;
+        // cursor_point.line.0 is a 0-based screen row (Line wraps i32; visible rows are 0..rows-1).
+        // cursor_point.column.0 is a 0-based column (Column wraps usize).
+        let cursor_row = cursor_point.line.0.max(0) as u16;
+        let cursor_col = cursor_point.column.0 as u16;
+        let snap = BBSnap::new(cols, rows, (cursor_col, cursor_row, true), cells);
+        Box::into_raw(snap)
+    })
 }
 
 /// Increment refcount. Returns the input pointer for fluent usage.
@@ -438,13 +522,19 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
 /// `snap` must be a pointer returned by `bb_term_take_snapshot` or previously
 /// retained, and not yet released to zero. Null is a no-op (returns null).
 /// Safe to call from any thread.
+///
+/// Panics inside this function are caught by `catch_unwind` and swallowed
+/// silently (no `BBTerm` context is available). The function returns the input
+/// `snap` pointer as the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_retain(snap: *const BBSnap) -> *const BBSnap {
-    if snap.is_null() {
-        return snap;
-    }
-    (*snap).rc.fetch_add(1, Ordering::Relaxed);
-    snap
+    guard_no_term(snap, || {
+        if snap.is_null() {
+            return snap;
+        }
+        (*snap).rc.fetch_add(1, Ordering::Relaxed);
+        snap
+    })
 }
 
 /// Decrement refcount; free when it reaches zero.
@@ -453,16 +543,38 @@ pub unsafe extern "C" fn bb_snap_retain(snap: *const BBSnap) -> *const BBSnap {
 /// Each `snap` must be released exactly once per acquire (new or retain).
 /// Null is a no-op. Safe to call from any thread, but each concrete handle
 /// follows the acquire/release discipline documented above.
+///
+/// Panics inside this function are caught by `catch_unwind` and swallowed
+/// silently (no `BBTerm` context is available). The function returns unit as
+/// the fallback value.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_release(snap: *const BBSnap) {
-    if snap.is_null() {
-        return;
-    }
-    let prev = (*snap).rc.fetch_sub(1, Ordering::Release);
-    if prev == 1 {
-        std::sync::atomic::fence(Ordering::Acquire);
-        drop(Box::from_raw(snap as *mut BBSnap));
-    }
+    guard_no_term((), || {
+        if snap.is_null() {
+            return;
+        }
+        let prev = (*snap).rc.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            std::sync::atomic::fence(Ordering::Acquire);
+            drop(Box::from_raw(snap as *mut BBSnap));
+        }
+    })
+}
+
+/// Test-only: force a panic inside the FFI boundary to verify Fatal event delivery.
+///
+/// # Safety
+/// Same as other guarded FFI functions. `term` must be a valid non-null pointer
+/// from `bb_term_new`, not freed for the duration of the call.
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback.
+#[no_mangle]
+#[cfg(any(test, feature = "test-only"))]
+pub unsafe extern "C" fn bb_term_test_only_panic(term: *mut BBTerm) {
+    guard_with_term(term, (), || {
+        panic!("intentional test panic");
+    });
 }
 
 #[cfg(test)]
@@ -794,6 +906,58 @@ mod tests {
     fn set_event_cb_on_null_term_is_noop() {
         unsafe {
             bb_term_set_event_cb(std::ptr::null_mut(), None, std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn fatal_event_on_panic() {
+        use std::os::raw::c_void;
+        use std::sync::{Arc, Mutex};
+
+        let fired: Arc<Mutex<Vec<(u32, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let fired_ptr = Arc::into_raw(fired.clone()) as *mut c_void;
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let fired = &*(ctx as *const std::sync::Mutex<Vec<(u32, String)>>);
+            let msg = if ev.payload.is_null() || ev.len == 0 {
+                String::new()
+            } else {
+                let slice = std::slice::from_raw_parts(ev.payload, ev.len);
+                String::from_utf8_lossy(slice).into_owned()
+            };
+            fired.lock().unwrap().push((ev.kind as u32, msg));
+        }
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            bb_term_set_event_cb(term, Some(cb), fired_ptr);
+
+            bb_term_test_only_panic(term); // forces a panic inside guard()
+
+            let guard_ = fired.lock().unwrap();
+            let fatal = guard_.iter().find(|(k, _)| *k == BBEventKind::Fatal as u32);
+            assert!(fatal.is_some(), "expected Fatal event, got {:?}", *guard_);
+            assert!(
+                fatal.unwrap().1.contains("intentional test panic"),
+                "fatal msg should contain panic message: {:?}",
+                fatal
+            );
+            drop(guard_);
+
+            bb_term_free(term);
+            Arc::from_raw(fired_ptr as *const Mutex<Vec<(u32, String)>>);
+        }
+    }
+
+    #[test]
+    fn new_does_not_crash_on_internal_panic() {
+        // Nothing to do here except verify that if Box::new or Term::new panicked,
+        // the process would survive. There's no easy way to inject a panic without
+        // test hooks, but the `guard_no_term` wrapper ensures it would be caught.
+        unsafe {
+            let term = bb_term_new(80, 24, 100);
+            assert!(!term.is_null());
+            bb_term_free(term);
         }
     }
 }

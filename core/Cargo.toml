@@ -8,5 +8,8 @@ rust-version.workspace = true
 name = "blackbird_core"
 crate-type = ["staticlib", "rlib"]
 
+[features]
+test-only = []
+
 [dependencies]
 alacritty_terminal = "=0.26.0"
