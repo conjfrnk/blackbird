@@ -28,7 +28,7 @@ Default, Gruvbox, Solarized, Catppuccin. Each with light and dark variants. "Aut
 
 ## Status
 
-Design phase. No code yet.
+In development. Plan 1 (Rust core + FFI + build plumbing) complete — `blackbird_core` crate wraps `alacritty_terminal` behind a C ABI, Xcode project builds and links the universal static lib, Swift wrapper (`BBTerm` / `BBSnapshot`) exposes it to the app layer, XCTests run via `xcodebuild test`, CI enforces fmt / clippy / cargo test / xcodebuild test on every push.
 
 ## License
 

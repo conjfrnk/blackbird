@@ -51,5 +51,8 @@ Credentials.xcconfig
 dsa_priv.pem
 eddsa_priv.pem
 
+# cbindgen metadata artifact (written to repo root during header generation)
+libnull.rmeta
+
 # Logs and misc
 *.log

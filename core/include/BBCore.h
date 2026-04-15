@@ -31,6 +31,11 @@ enum BBEventKind
  {
   BB_EVENT_KIND_TITLE = 1,
   BB_EVENT_KIND_BELL = 2,
+  /**
+   * Reserved for future use. Not currently emitted by RoutingListener —
+   * alacritty 0.26 doesn't surface cursor-shape changes as events. Swift
+   * readers should consume cursor state from snapshots.
+   */
   BB_EVENT_KIND_CURSOR_SHAPE = 3,
   BB_EVENT_KIND_OSC52_CLIPBOARD = 4,
   BB_EVENT_KIND_FATAL = 99,

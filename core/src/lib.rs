@@ -50,6 +50,9 @@ impl Dimensions for TermSize {
 pub enum BBEventKind {
     Title = 1,
     Bell = 2,
+    /// Reserved for future use. Not currently emitted by RoutingListener —
+    /// alacritty 0.26 doesn't surface cursor-shape changes as events. Swift
+    /// readers should consume cursor state from snapshots.
     CursorShape = 3,
     Osc52Clipboard = 4,
     Fatal = 99,
@@ -687,9 +690,8 @@ mod tests {
             let bytes = b"hello";
             bb_term_input(term, bytes.as_ptr(), bytes.len());
 
-            // `display_iter()` is a flat cell-by-cell iterator over visible cells.
-            // Each item is `Indexed<&Cell>` which derefs to `&Cell`; `Cell.c` is the char.
-            // TODO(task-4): replace with bb_term_take_snapshot
+            // Lower-level test — reads the grid directly through the Rust API
+            // rather than via the FFI snapshot (covered by `snapshot_contains_input`).
             let bb = &*term;
             let text: String = bb
                 .term
