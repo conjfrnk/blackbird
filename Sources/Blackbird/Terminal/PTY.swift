@@ -110,13 +110,18 @@ public final class PTY {
                     read(self.masterFD, buf.baseAddress, buf.count)
                 }
                 if n <= 0 {
-                    // EOF or error — child has closed its side.
+                    // EOF or error — child has closed its side, or terminate()
+                    // sent SIGHUP which caused the child to hang up.
                     self.markStopped()
                     break
                 }
                 let data = Data(buffer[0..<n])
                 self.onBytes?(data)
             }
+            // The read queue is the sole owner of masterFD's close. Doing it
+            // here avoids a double-close / fd-reuse race against terminate()
+            // calling close() on another thread.
+            close(self.masterFD)
             // Blocking waitpid is safe here: the read loop exited because
             // the child closed the slave end, so it has exited or is about to.
             var status: Int32 = 0
@@ -159,9 +164,11 @@ public final class PTY {
     public func terminate() {
         guard shouldKeepRunning() else { return }
         markStopped()
-        // Closing the master fd causes the child to receive SIGHUP on next
-        // read/write. The read queue's blocking read(2) then returns <= 0 and
-        // reaps the child with a blocking waitpid at loop exit.
-        close(masterFD)
+        // Send SIGHUP to the child to make the blocked read(2) in the read
+        // queue return. The read queue is the sole owner of masterFD's close
+        // and the child's reap — see startReading(). This avoids racing close()
+        // against the read loop's read(), which could otherwise produce a
+        // double-close or an fd-reuse bug under rapid session churn (Plan 4).
+        kill(childPID, SIGHUP)
     }
 }

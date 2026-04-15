@@ -195,7 +195,10 @@ public final class TerminalView: NSView {
         case NSEvent.SpecialKey.end:        return .end
         case NSEvent.SpecialKey.pageUp:     return .pageUp
         case NSEvent.SpecialKey.pageDown:   return .pageDown
-        case NSEvent.SpecialKey.delete:     return .delete
+        // NSEvent.SpecialKey.delete is the Backspace key. We intentionally do
+        // NOT map it to SpecialKey.delete (CSI 3 ~) — Backspace must send the
+        // DEL byte (0x7F), which the char-based path produces naturally from
+        // event.charactersIgnoringModifiers. Only forward-delete maps here.
         case NSEvent.SpecialKey.deleteForward: return .delete
         default: return nil
         }
