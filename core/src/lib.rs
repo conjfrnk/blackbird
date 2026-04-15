@@ -100,14 +100,18 @@ pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
 /// Feed `len` bytes from `bytes` into the terminal's VT parser.
 ///
 /// # Safety
-/// `term` must be a valid pointer from `bb_term_new` that has not been freed.
-/// `bytes` must point to a readable region of at least `len` bytes.
-/// It is safe to pass `len == 0`, in which case `bytes` may be null.
-/// Until `catch_unwind` is added to FFI entry points (Task 7), the caller must
-/// ensure no Rust panic can unwind through this function.
+/// - `term` must be non-null, properly aligned (obtained from `bb_term_new`),
+///   and not freed for the duration of this call.
+/// - `bytes` must be non-null when `len > 0` and point to a readable region of
+///   at least `len` bytes. Passing `bytes = null, len = 0` is safe (no-op).
+/// - No two threads may call any `bb_term_*` function concurrently on the same
+///   `term`; interior state is mutated and `Term`/`Processor` are not `Sync`.
+/// - Until `catch_unwind` is added to FFI entry points (Task 7), the caller
+///   must ensure no Rust panic can unwind through this function (UB to unwind
+///   through `extern "C"`).
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len: usize) {
-    if term.is_null() || len == 0 {
+    if term.is_null() || len == 0 || bytes.is_null() {
         return;
     }
     let bb = &mut *term;
@@ -193,6 +197,7 @@ mod tests {
 
             // `display_iter()` is a flat cell-by-cell iterator over visible cells.
             // Each item is `Indexed<&Cell>` which derefs to `&Cell`; `Cell.c` is the char.
+            // TODO(task-4): replace with bb_term_take_snapshot
             let bb = &*term;
             let text: String = bb
                 .term
@@ -203,6 +208,36 @@ mod tests {
                 .collect();
             assert_eq!(text, "hello");
 
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn input_with_null_term_is_noop() {
+        unsafe {
+            let bytes = b"x";
+            bb_term_input(std::ptr::null_mut(), bytes.as_ptr(), bytes.len());
+        }
+    }
+
+    #[test]
+    fn input_with_zero_len_leaves_grid_unchanged() {
+        unsafe {
+            let term = bb_term_new(80, 24, 100);
+            bb_term_input(term, b"ignored".as_ptr(), 0);
+            let bb = &*term;
+            let grid = bb.term.grid();
+            let first_cell = grid.display_iter().next().expect("grid has cells");
+            assert_eq!(first_cell.c, ' ', "grid should be untouched");
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn input_with_null_bytes_is_noop() {
+        unsafe {
+            let term = bb_term_new(80, 24, 100);
+            bb_term_input(term, std::ptr::null(), 5);
             bb_term_free(term);
         }
     }
