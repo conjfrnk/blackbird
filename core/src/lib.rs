@@ -45,8 +45,6 @@ impl EventListener for NoopListener {
 }
 
 /// Opaque handle exposed to Swift.
-// TODO(task-3): remove #[allow(dead_code)] once fields are read
-#[allow(dead_code)]
 pub struct BBTerm {
     term: Term<NoopListener>,
     processor: Processor,
@@ -97,6 +95,24 @@ pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
         return;
     }
     drop(Box::from_raw(term));
+}
+
+/// Feed `len` bytes from `bytes` into the terminal's VT parser.
+///
+/// # Safety
+/// `term` must be a valid pointer from `bb_term_new` that has not been freed.
+/// `bytes` must point to a readable region of at least `len` bytes.
+/// It is safe to pass `len == 0`, in which case `bytes` may be null.
+/// Until `catch_unwind` is added to FFI entry points (Task 7), the caller must
+/// ensure no Rust panic can unwind through this function.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len: usize) {
+    if term.is_null() || len == 0 {
+        return;
+    }
+    let bb = &mut *term;
+    let slice = std::slice::from_raw_parts(bytes, len);
+    bb.processor.advance(&mut bb.term, slice);
 }
 
 #[cfg(test)]
@@ -165,5 +181,29 @@ mod tests {
             "expected {} scrollback lines, got {}",
             scrollback, history
         );
+    }
+
+    #[test]
+    fn input_writes_to_grid() {
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            assert!(!term.is_null());
+            let bytes = b"hello";
+            bb_term_input(term, bytes.as_ptr(), bytes.len());
+
+            // `display_iter()` is a flat cell-by-cell iterator over visible cells.
+            // Each item is `Indexed<&Cell>` which derefs to `&Cell`; `Cell.c` is the char.
+            let bb = &*term;
+            let text: String = bb
+                .term
+                .grid()
+                .display_iter()
+                .take(5)
+                .map(|indexed| indexed.c)
+                .collect();
+            assert_eq!(text, "hello");
+
+            bb_term_free(term);
+        }
     }
 }
