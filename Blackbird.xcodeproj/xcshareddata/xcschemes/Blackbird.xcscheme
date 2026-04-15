@@ -21,6 +21,20 @@
                ReferencedContainer = "container:Blackbird.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "F115D13DC4859DCF7B7E566B"
+               BuildableName = "BlackbirdTests.xctest"
+               BlueprintName = "BlackbirdTests"
+               ReferencedContainer = "container:Blackbird.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -39,7 +53,20 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "F115D13DC4859DCF7B7E566B"
+               BuildableName = "BlackbirdTests.xctest"
+               BlueprintName = "BlackbirdTests"
+               ReferencedContainer = "container:Blackbird.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"

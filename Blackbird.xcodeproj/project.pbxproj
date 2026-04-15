@@ -9,13 +9,26 @@
 /* Begin PBXBuildFile section */
 		22EA46AC14DEA7E6A03FB8DF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */; };
 		4235C2A5FFE2A1329E886E96 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DF8E87FBF674AD466760D74A /* AppKit.framework */; };
+		82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11194E0650067380506F53B2 /* BBTermTests.swift */; };
 		B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE9625B30620C23E398A2EB /* BBTerm.swift */; };
 		C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3C166E3043F25B8791103E /* App.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		6A5412602B95CDDB37B2323D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2EF3E8AD45BF095BECE47EA3 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DF42EE64A2AE306D955175B6;
+			remoteInfo = Blackbird;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
 		0AE9625B30620C23E398A2EB /* BBTerm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTerm.swift; sourceTree = "<group>"; };
+		0CFB9D9863A2F1D2ACD61D6E /* BlackbirdTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BlackbirdTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		11194E0650067380506F53B2 /* BBTermTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermTests.swift; sourceTree = "<group>"; };
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		568D389F2829611D1FDC43FA /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
@@ -45,6 +58,22 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		2E3B9889C50E2A5C4A18EA25 /* BlackbirdTests */ = {
+			isa = PBXGroup;
+			children = (
+				11194E0650067380506F53B2 /* BBTermTests.swift */,
+			);
+			path = BlackbirdTests;
+			sourceTree = "<group>";
+		};
+		48CC5BEBD516393A72169DED /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				2E3B9889C50E2A5C4A18EA25 /* BlackbirdTests */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
 		56199268787FB27B8B5EE72D /* Blackbird */ = {
 			isa = PBXGroup;
 			children = (
@@ -58,6 +87,7 @@
 			isa = PBXGroup;
 			children = (
 				14A26A1A1B1A4D9656B10D76 /* Blackbird.app */,
+				0CFB9D9863A2F1D2ACD61D6E /* BlackbirdTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -75,6 +105,7 @@
 			isa = PBXGroup;
 			children = (
 				0110230328436EAC7AF3D2F8 /* Sources */,
+				48CC5BEBD516393A72169DED /* Tests */,
 				EFD41DC75B888AE2E659BC6E /* Frameworks */,
 				615688EB6D838D8202CB4D3E /* Products */,
 			);
@@ -111,6 +142,24 @@
 			productReference = 14A26A1A1B1A4D9656B10D76 /* Blackbird.app */;
 			productType = "com.apple.product-type.application";
 		};
+		F115D13DC4859DCF7B7E566B /* BlackbirdTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E47ED96D5BF4919810B3D4FC /* Build configuration list for PBXNativeTarget "BlackbirdTests" */;
+			buildPhases = (
+				A411190EA880BFDB25984494 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9E3348A123644E3BA69121A2 /* PBXTargetDependency */,
+			);
+			name = BlackbirdTests;
+			packageProductDependencies = (
+			);
+			productName = BlackbirdTests;
+			productReference = 0CFB9D9863A2F1D2ACD61D6E /* BlackbirdTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -137,6 +186,7 @@
 			projectRoot = "";
 			targets = (
 				DF42EE64A2AE306D955175B6 /* Blackbird */,
+				F115D13DC4859DCF7B7E566B /* BlackbirdTests */,
 			);
 		};
 /* End PBXProject section */
@@ -178,7 +228,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A411190EA880BFDB25984494 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9E3348A123644E3BA69121A2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DF42EE64A2AE306D955175B6 /* Blackbird */;
+			targetProxy = 6A5412602B95CDDB37B2323D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		44510D91C7AD6AC1B997C99D /* Release */ = {
@@ -237,6 +303,60 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		586E260B439C3DA7E8BF859C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				COMBINE_HIDPI_IMAGES = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/core/include",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/core/target/universal/release",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.conjfrnk.BlackbirdTests;
+				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = (
+					"$(SRCROOT)/Sources/BBCore",
+				);
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blackbird.app/Contents/MacOS/Blackbird";
+			};
+			name = Debug;
+		};
+		89BDFE7BCEE3DCAF56832E2C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				COMBINE_HIDPI_IMAGES = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/core/include",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/core/target/universal/release",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.conjfrnk.BlackbirdTests;
+				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = (
+					"$(SRCROOT)/Sources/BBCore",
+				);
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blackbird.app/Contents/MacOS/Blackbird";
 			};
 			name = Release;
 		};
@@ -379,6 +499,15 @@
 			buildConfigurations = (
 				FAC57750ECDD36F4BB6B571D /* Debug */,
 				BC75E09B1485EEE0BC0EBCB8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E47ED96D5BF4919810B3D4FC /* Build configuration list for PBXNativeTarget "BlackbirdTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				586E260B439C3DA7E8BF859C /* Debug */,
+				89BDFE7BCEE3DCAF56832E2C /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

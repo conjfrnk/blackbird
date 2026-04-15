@@ -60,11 +60,34 @@ targets:
       - framework: SwiftUI.framework
         embed: false
 
+  BlackbirdTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/BlackbirdTests
+    dependencies:
+      - target: Blackbird
+    settings:
+      base:
+        BUNDLE_LOADER: $(TEST_HOST)
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Blackbird.app/Contents/MacOS/Blackbird
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        SWIFT_INCLUDE_PATHS:
+          - $(SRCROOT)/Sources/BBCore
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/core/include
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/core/target/universal/release
+
 schemes:
   Blackbird:
     build:
       targets:
         Blackbird: all
+        BlackbirdTests: [test]
+    test:
+      targets: [BlackbirdTests]
     run:
       config: Debug
     archive:
