@@ -20,6 +20,7 @@ targets:
     platform: macOS
     sources:
       - Sources/Blackbird
+      - Sources/BBCore
     preBuildScripts:
       - name: Build Rust core
         script: |
@@ -47,12 +48,12 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.conjfrnk.blackbird
+        SWIFT_INCLUDE_PATHS:
+          - $(SRCROOT)/Sources/BBCore
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/core/include
         LIBRARY_SEARCH_PATHS:
           - $(SRCROOT)/core/target/universal/release
-        OTHER_LDFLAGS:
-          - -lblackbird_core
     dependencies:
       - framework: AppKit.framework
         embed: false

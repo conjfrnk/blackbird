@@ -17,6 +17,7 @@
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1BC7F50A25175827071E2F32 /* FFILink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFILink.swift; sourceTree = "<group>"; };
+		568D389F2829611D1FDC43FA /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		DF8E87FBF674AD466760D74A /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppKit.framework; sourceTree = "<group>"; };
@@ -38,6 +39,7 @@
 		0110230328436EAC7AF3D2F8 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				86B8DF9EF6F9A1DCE81D8894 /* BBCore */,
 				56199268787FB27B8B5EE72D /* Blackbird */,
 			);
 			path = Sources;
@@ -59,6 +61,14 @@
 				14A26A1A1B1A4D9656B10D76 /* Blackbird.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		86B8DF9EF6F9A1DCE81D8894 /* BBCore */ = {
+			isa = PBXGroup;
+			children = (
+				568D389F2829611D1FDC43FA /* module.modulemap */,
+			);
+			path = BBCore;
 			sourceTree = "<group>";
 		};
 		EF3D991D46A40AD4000B1892 = {
@@ -250,11 +260,11 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/core/target/universal/release",
 				);
-				OTHER_LDFLAGS = (
-					"-lblackbird_core",
-				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.conjfrnk.blackbird;
 				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = (
+					"$(SRCROOT)/Sources/BBCore",
+				);
 			};
 			name = Release;
 		};
@@ -344,11 +354,11 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/core/target/universal/release",
 				);
-				OTHER_LDFLAGS = (
-					"-lblackbird_core",
-				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.conjfrnk.blackbird;
 				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = (
+					"$(SRCROOT)/Sources/BBCore",
+				);
 			};
 			name = Debug;
 		};

@@ -1,0 +1,5 @@
+module BBCore {
+    header "../../core/include/BBCore.h"
+    link "blackbird_core"
+    export *
+}
