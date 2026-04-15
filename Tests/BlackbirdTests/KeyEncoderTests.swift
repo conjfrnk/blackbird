@@ -46,6 +46,16 @@ final class KeyEncoderTests: XCTestCase {
         XCTAssertEqual(encoder.encode(chars: "z", modifiers: [.control]), Data([0x1A]))
     }
 
+    func test_ctrlBoundaryCases() {
+        let encoder = KeyEncoder()
+        // Ctrl-@ (0x40) -> NUL (0x00)
+        XCTAssertEqual(encoder.encode(chars: "@", modifiers: [.control]), Data([0x00]))
+        // Ctrl-Space (0x20) -> NUL (0x00)
+        XCTAssertEqual(encoder.encode(chars: " ", modifiers: [.control]), Data([0x00]))
+        // Ctrl-? (0x3F) -> DEL (0x7F)
+        XCTAssertEqual(encoder.encode(chars: "?", modifiers: [.control]), Data([0x7F]))
+    }
+
     func test_optionAsMeta() {
         let encoder = KeyEncoder()  // defaults to Option=Meta=ESC+
         XCTAssertEqual(encoder.encode(chars: "a", modifiers: [.option]), Data([0x1B, 0x61]))
