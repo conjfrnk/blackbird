@@ -83,4 +83,37 @@ final class TerminalViewTests: XCTestCase {
 
         session.terminate()
     }
+
+    func test_oscTitleReachesWindowTitle() throws {
+        let window = NSWindow(
+            contentRect: .zero,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        window.contentView = view
+
+        let session = try TerminalSession.start(
+            shell: "/bin/sh",
+            arguments: ["-c", "printf '\\033]2;blackbird-title-test\\007'; sleep 0.5"],
+            size: .init(cols: 80, rows: 24)
+        )
+        view.session = session
+
+        // Poll window.title — updates dispatch to main; the test runs on main.
+        let exp = expectation(description: "window title set")
+        var fulfilled = false
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { t in
+            if window.title == "blackbird-title-test", !fulfilled {
+                fulfilled = true
+                t.invalidate()
+                exp.fulfill()
+            }
+        }
+        wait(for: [exp], timeout: 3.0)
+        timer.invalidate()
+
+        session.terminate()
+    }
 }
