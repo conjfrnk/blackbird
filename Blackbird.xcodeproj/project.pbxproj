@@ -9,14 +9,14 @@
 /* Begin PBXBuildFile section */
 		22EA46AC14DEA7E6A03FB8DF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */; };
 		4235C2A5FFE2A1329E886E96 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DF8E87FBF674AD466760D74A /* AppKit.framework */; };
+		B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE9625B30620C23E398A2EB /* BBTerm.swift */; };
 		C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3C166E3043F25B8791103E /* App.swift */; };
-		E83E41C27E5A021DE3E66DA1 /* FFILink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BC7F50A25175827071E2F32 /* FFILink.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
+		0AE9625B30620C23E398A2EB /* BBTerm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTerm.swift; sourceTree = "<group>"; };
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		1BC7F50A25175827071E2F32 /* FFILink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFILink.swift; sourceTree = "<group>"; };
 		568D389F2829611D1FDC43FA /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -49,7 +49,6 @@
 			isa = PBXGroup;
 			children = (
 				AA3C166E3043F25B8791103E /* App.swift */,
-				1BC7F50A25175827071E2F32 /* FFILink.swift */,
 				DACE89CC5DC7A082BAF6BF37 /* Info.plist */,
 			);
 			path = Blackbird;
@@ -66,6 +65,7 @@
 		86B8DF9EF6F9A1DCE81D8894 /* BBCore */ = {
 			isa = PBXGroup;
 			children = (
+				0AE9625B30620C23E398A2EB /* BBTerm.swift */,
 				568D389F2829611D1FDC43FA /* module.modulemap */,
 			);
 			path = BBCore;
@@ -174,7 +174,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */,
-				E83E41C27E5A021DE3E66DA1 /* FFILink.swift in Sources */,
+				B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

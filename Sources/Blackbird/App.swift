@@ -13,9 +13,13 @@ struct BlackbirdApp: App {
     }
 
     static var status: String {
-        // Prove BBCore module types and functions are visible.
-        let term = bb_term_new(80, 24, 10_000)
-        defer { bb_term_free(term) }
-        return term != nil ? "BBCore linked." : "BBCore failed to init."
+        guard let term = BBTerm(size: .init(cols: 80, rows: 24)) else {
+            return "BBTerm failed to init."
+        }
+        term.input("hello")
+        guard let snap = term.snapshot() else {
+            return "Snapshot failed."
+        }
+        return "First cell: \(snap.character(at: 0, row: 0).map(String.init) ?? "?")"
     }
 }
