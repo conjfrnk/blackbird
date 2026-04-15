@@ -13,16 +13,21 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 # Ensure both targets are installed. `rustup` may be absent on some CI images
 # (e.g., Homebrew rust); don't fail hard if it's not present.
 if command -v rustup >/dev/null 2>&1; then
-    rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
+    rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
 fi
 
 echo "==> cargo build arm64"
-cargo build -p "$CRATE" --"$PROFILE" --target aarch64-apple-darwin
+cargo build -p "$CRATE" --release --target aarch64-apple-darwin
 
 echo "==> cargo build x86_64"
-cargo build -p "$CRATE" --"$PROFILE" --target x86_64-apple-darwin
+cargo build -p "$CRATE" --release --target x86_64-apple-darwin
 
-UNIVERSAL_DIR="$REPO_ROOT/core/target/universal/$PROFILE"
+# Universal output is always written to core/target/universal/release/ regardless of
+# CARGO_TARGET_DIR. This location is hardcoded to match Xcode's LIBRARY_SEARCH_PATHS.
+UNIVERSAL_DIR="$REPO_ROOT/core/target/universal/release"
+if [ "$TARGET_DIR" != "$REPO_ROOT/target" ]; then
+    echo "==> NOTE: per-arch artifacts in $TARGET_DIR; universal .a always written to $UNIVERSAL_DIR"
+fi
 mkdir -p "$UNIVERSAL_DIR"
 
 echo "==> lipo"
