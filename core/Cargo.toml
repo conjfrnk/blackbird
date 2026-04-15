@@ -13,3 +13,6 @@ test-only = []
 
 [dependencies]
 alacritty_terminal = "=0.26.0"
+
+[build-dependencies]
+cbindgen = "0.27"
