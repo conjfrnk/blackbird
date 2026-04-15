@@ -1,5 +1,7 @@
 //! blackbird_core — C ABI around `alacritty_terminal`.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term};
@@ -117,6 +119,139 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
     let bb = &mut *term;
     let slice = std::slice::from_raw_parts(bytes, len);
     bb.processor.advance(&mut bb.term, slice);
+}
+
+/// Flat cell layout for cross-language consumption. Swift reads these directly.
+/// Colors are hardcoded for now — TODO(plan-5) wires theme-aware colors.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BBCell {
+    pub ch: u32, // Unicode scalar; 0 means empty
+    pub fg: u32, // 0xRRGGBB
+    pub bg: u32,
+    pub flags: u16, // See cell_flags
+    pub _reserved: u16,
+}
+
+pub mod cell_flags {
+    pub const BOLD: u16 = 1 << 0;
+    pub const ITALIC: u16 = 1 << 1;
+    pub const UNDERLINE: u16 = 1 << 2;
+    pub const REVERSE: u16 = 1 << 3;
+    pub const DIM: u16 = 1 << 4;
+    pub const STRIKE: u16 = 1 << 5;
+}
+
+/// Immutable snapshot. Ref-counted. The `cells` pointer is stable for the lifetime of the snapshot.
+#[repr(C)]
+pub struct BBSnap {
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor_col: u16,
+    pub cursor_row: u16,
+    pub cursor_visible: u8,
+    pub _pad: [u8; 3],
+    pub cells_len: usize,
+    pub cells: *const BBCell,
+
+    // Non-C-visible fields below (cbindgen will skip these once we configure it in Task 8).
+    #[doc(hidden)]
+    rc: AtomicUsize,
+    #[doc(hidden)]
+    cells_owned: Vec<BBCell>,
+}
+
+unsafe impl Send for BBSnap {}
+unsafe impl Sync for BBSnap {} // safe because snapshot is immutable after creation
+
+impl BBSnap {
+    fn new(cols: u16, rows: u16, cursor: (u16, u16, bool), cells: Vec<BBCell>) -> Box<BBSnap> {
+        let mut s = Box::new(BBSnap {
+            cols,
+            rows,
+            cursor_col: cursor.0,
+            cursor_row: cursor.1,
+            cursor_visible: cursor.2 as u8,
+            _pad: [0; 3],
+            cells_len: cells.len(),
+            cells: std::ptr::null(),
+            rc: AtomicUsize::new(1),
+            cells_owned: cells,
+        });
+        // Once the Box is allocated and cells_owned is in place, take the stable pointer.
+        s.cells = s.cells_owned.as_ptr();
+        s
+    }
+}
+
+/// Take an immutable snapshot of the current grid state.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Returns null on null input.
+/// The returned pointer must be released by exactly one `bb_snap_release` per
+/// successful call (plus one per `bb_snap_retain`).
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSnap {
+    if term.is_null() {
+        return std::ptr::null();
+    }
+    let bb = &*term;
+    let grid = bb.term.grid();
+
+    let rows = grid.screen_lines() as u16;
+    let cols = grid.columns() as u16;
+    let mut cells: Vec<BBCell> = Vec::with_capacity(rows as usize * cols as usize);
+
+    for indexed in grid.display_iter() {
+        cells.push(BBCell {
+            ch: indexed.c as u32,
+            fg: 0xEEEEEE, // TODO(plan-5): theme-aware color mapping
+            bg: 0x000000,
+            flags: 0,
+            _reserved: 0,
+        });
+    }
+
+    let cursor_point = grid.cursor.point;
+    // cursor_point.line.0 is a 0-based screen row (Line wraps i32; visible rows are 0..rows-1).
+    // cursor_point.column.0 is a 0-based column (Column wraps usize).
+    let cursor_row = cursor_point.line.0.max(0) as u16;
+    let cursor_col = cursor_point.column.0 as u16;
+    let snap = BBSnap::new(cols, rows, (cursor_col, cursor_row, true), cells);
+    Box::into_raw(snap)
+}
+
+/// Increment refcount. Returns the input pointer for fluent usage.
+///
+/// # Safety
+/// `snap` must be a pointer returned by `bb_term_take_snapshot` or previously
+/// retained, and not yet released to zero. Null is a no-op (returns null).
+/// Safe to call from any thread.
+#[no_mangle]
+pub unsafe extern "C" fn bb_snap_retain(snap: *const BBSnap) -> *const BBSnap {
+    if snap.is_null() {
+        return snap;
+    }
+    (*snap).rc.fetch_add(1, Ordering::Relaxed);
+    snap
+}
+
+/// Decrement refcount; free when it reaches zero.
+///
+/// # Safety
+/// Each `snap` must be released exactly once per acquire (new or retain).
+/// Null is a no-op. Safe to call from any thread, but each concrete handle
+/// follows the acquire/release discipline documented above.
+#[no_mangle]
+pub unsafe extern "C" fn bb_snap_release(snap: *const BBSnap) {
+    if snap.is_null() {
+        return;
+    }
+    let prev = (*snap).rc.fetch_sub(1, Ordering::Release);
+    if prev == 1 {
+        std::sync::atomic::fence(Ordering::Acquire);
+        drop(Box::from_raw(snap as *mut BBSnap));
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +374,57 @@ mod tests {
             let term = bb_term_new(80, 24, 100);
             bb_term_input(term, std::ptr::null(), 5);
             bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn snapshot_contains_input() {
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            let bytes = b"hi";
+            bb_term_input(term, bytes.as_ptr(), bytes.len());
+
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null());
+
+            let s = &*snap;
+            assert_eq!(s.cols, 80);
+            assert_eq!(s.rows, 24);
+            // `cells` is a flat row-major array of length cols*rows.
+            let cell0 = &*s.cells;
+            let cell1 = &*s.cells.add(1);
+            assert_eq!(char::from_u32(cell0.ch), Some('h'));
+            assert_eq!(char::from_u32(cell1.ch), Some('i'));
+
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn snap_refcount_lifecycle() {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            let snap = bb_term_take_snapshot(term);
+            let _again = bb_snap_retain(snap); // rc = 2
+            bb_snap_release(snap); // rc = 1
+            bb_snap_release(snap); // rc = 0, freed
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn snap_null_retain_release_are_noops() {
+        unsafe {
+            let _ = bb_snap_retain(std::ptr::null());
+            bb_snap_release(std::ptr::null());
+        }
+    }
+
+    #[test]
+    fn take_snapshot_from_null_term_returns_null() {
+        unsafe {
+            assert!(bb_term_take_snapshot(std::ptr::null_mut()).is_null());
         }
     }
 }
