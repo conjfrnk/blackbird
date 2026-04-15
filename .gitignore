@@ -1,0 +1,55 @@
+# Claude and AI-generated artifacts
+.claude/
+.superpowers/
+docs/
+CLAUDE.md
+AGENTS.md
+.cursor/
+.aider*
+plan.md
+plans/
+.specstory/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Xcode
+DerivedData/
+build/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.hmap
+*.moved-aside
+
+# Swift Package Manager (Package.resolved in xcshareddata stays committed)
+.build/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# Rust / Cargo
+target/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Credentials and signing
+*.p12
+*.mobileprovision
+AuthKey_*.p8
+Credentials.xcconfig
+.env
+.env.*
+!.env.example
+dsa_priv.pem
+eddsa_priv.pem
+
+# Logs and misc
+*.log
