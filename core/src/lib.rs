@@ -137,6 +137,10 @@ struct RoutingListener {
 
 // SAFETY: the owning BBTerm is never moved to another thread while in use.
 unsafe impl Send for RoutingListener {}
+// Sync is deliberately NOT implemented — RoutingListener holds a raw pointer
+// that is only valid on the thread that owns its BBTerm. If alacritty_terminal
+// ever requires EventListener: Sync, revisit the whole synchronization model
+// (likely by switching CallbackCell to atomic pointers).
 
 impl EventListener for RoutingListener {
     fn send_event(&self, event: Event) {
@@ -184,14 +188,15 @@ impl EventListener for RoutingListener {
 
 /// Opaque handle exposed to Swift.
 ///
-/// `callback` must be declared before `term` so that it is dropped *after*
-/// `term`.  (Rust drops fields in declaration order.)  This guarantees that
-/// the `RoutingListener`'s pointer into `callback` remains valid until `Term`
-/// is fully destroyed.
+/// SAFETY: Rust drops struct fields in declaration order. `term` owns a
+/// RoutingListener whose raw pointer targets `callback`, so `term` must be
+/// declared BEFORE `callback` — this makes `term` drop first, leaving the
+/// pointer valid during Term's destruction. Task 7 adds a Fatal event that
+/// may fire during teardown, making this ordering load-bearing.
 pub struct BBTerm {
-    callback: Box<CallbackCell>,
     term: Term<RoutingListener>,
     processor: Processor,
+    callback: Box<CallbackCell>,
 }
 
 /// Create a new terminal. Returns null on invalid input.
@@ -752,11 +757,36 @@ mod tests {
 
     #[test]
     fn setting_null_cb_disables_callback() {
+        use std::os::raw::c_void;
+        use std::sync::{Arc, Mutex};
+
+        let count: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let count_ptr = Arc::into_raw(count.clone()) as *mut c_void;
+
+        unsafe extern "C" fn cb(_ev: BBEvent, ctx: *mut c_void) {
+            let count = &*(ctx as *const Mutex<u32>);
+            *count.lock().unwrap() += 1;
+        }
+
         unsafe {
             let term = bb_term_new(20, 5, 100);
+
+            // Register callback, fire BEL, expect 1 invocation.
+            bb_term_set_event_cb(term, Some(cb), count_ptr);
+            bb_term_input(term, b"\x07".as_ptr(), 1);
+            assert_eq!(*count.lock().unwrap(), 1);
+
+            // Clear callback, fire BEL again, count must NOT increase.
             bb_term_set_event_cb(term, None, std::ptr::null_mut());
             bb_term_input(term, b"\x07".as_ptr(), 1);
+            assert_eq!(
+                *count.lock().unwrap(),
+                1,
+                "cleared callback should not fire"
+            );
+
             bb_term_free(term);
+            Arc::from_raw(count_ptr as *const Mutex<u32>);
         }
     }
 
