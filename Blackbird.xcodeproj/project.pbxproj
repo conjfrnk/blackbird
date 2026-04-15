@@ -12,8 +12,10 @@
 		7462C02E74143E52FD628DA5 /* PTY.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5995252272D652667DB2D2D9 /* PTY.swift */; };
 		82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11194E0650067380506F53B2 /* BBTermTests.swift */; };
 		92B08E10BCF3923F92AA994B /* PTYTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */; };
+		AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6E41D23703A7FE0195559D6 /* KeyEncoder.swift */; };
 		B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE9625B30620C23E398A2EB /* BBTerm.swift */; };
 		C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3C166E3043F25B8791103E /* App.swift */; };
+		CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -34,10 +36,12 @@
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		568D389F2829611D1FDC43FA /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		5995252272D652667DB2D2D9 /* PTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTY.swift; sourceTree = "<group>"; };
+		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
 		7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYTests.swift; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		DF8E87FBF674AD466760D74A /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppKit.framework; sourceTree = "<group>"; };
+		E6E41D23703A7FE0195559D6 /* KeyEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoder.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,9 +70,18 @@
 			isa = PBXGroup;
 			children = (
 				11194E0650067380506F53B2 /* BBTermTests.swift */,
+				68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */,
 				7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */,
 			);
 			path = BlackbirdTests;
+			sourceTree = "<group>";
+		};
+		38F741D68EDDA0273488DABA /* Input */ = {
+			isa = PBXGroup;
+			children = (
+				E6E41D23703A7FE0195559D6 /* KeyEncoder.swift */,
+			);
+			path = Input;
 			sourceTree = "<group>";
 		};
 		48CC5BEBD516393A72169DED /* Tests */ = {
@@ -84,6 +97,7 @@
 			children = (
 				AA3C166E3043F25B8791103E /* App.swift */,
 				DACE89CC5DC7A082BAF6BF37 /* Info.plist */,
+				38F741D68EDDA0273488DABA /* Input */,
 				5F1676B85FA25D96FF07A051 /* Terminal */,
 			);
 			path = Blackbird;
@@ -239,6 +253,7 @@
 			files = (
 				C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */,
 				B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */,
+				AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */,
 				7462C02E74143E52FD628DA5 /* PTY.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -248,6 +263,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */,
+				CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */,
 				92B08E10BCF3923F92AA994B /* PTYTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
