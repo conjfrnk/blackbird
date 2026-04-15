@@ -20,6 +20,19 @@ targets:
     platform: macOS
     sources:
       - Sources/Blackbird
+    preBuildScripts:
+      - name: Build Rust core
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/scripts/build-core.sh"
+        inputFiles:
+          - $(SRCROOT)/core/Cargo.toml
+          - $(SRCROOT)/core/src/lib.rs
+          - $(SRCROOT)/core/cbindgen.toml
+          - $(SRCROOT)/core/build.rs
+        outputFiles:
+          - $(SRCROOT)/core/target/universal/release/libblackbird_core.a
+          - $(SRCROOT)/core/include/BBCore.h
     info:
       path: Sources/Blackbird/Info.plist
       properties:
@@ -34,6 +47,12 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.conjfrnk.blackbird
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/core/include
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/core/target/universal/release
+        OTHER_LDFLAGS:
+          - -lblackbird_core
     dependencies:
       - framework: AppKit.framework
         embed: false

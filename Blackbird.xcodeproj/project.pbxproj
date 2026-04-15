@@ -10,11 +10,13 @@
 		22EA46AC14DEA7E6A03FB8DF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */; };
 		4235C2A5FFE2A1329E886E96 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DF8E87FBF674AD466760D74A /* AppKit.framework */; };
 		C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3C166E3043F25B8791103E /* App.swift */; };
+		E83E41C27E5A021DE3E66DA1 /* FFILink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BC7F50A25175827071E2F32 /* FFILink.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1BC7F50A25175827071E2F32 /* FFILink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFILink.swift; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		DF8E87FBF674AD466760D74A /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppKit.framework; sourceTree = "<group>"; };
@@ -45,6 +47,7 @@
 			isa = PBXGroup;
 			children = (
 				AA3C166E3043F25B8791103E /* App.swift */,
+				1BC7F50A25175827071E2F32 /* FFILink.swift */,
 				DACE89CC5DC7A082BAF6BF37 /* Info.plist */,
 			);
 			path = Blackbird;
@@ -83,6 +86,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = CDE5CF7B6D370F0C8F6DB8E7 /* Build configuration list for PBXNativeTarget "Blackbird" */;
 			buildPhases = (
+				533306341900705D0B8D3780 /* Build Rust core */,
 				42B65E7EA891F238459C206E /* Sources */,
 				D6CDD3548C633ACD833D1F9E /* Frameworks */,
 			);
@@ -127,12 +131,40 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		533306341900705D0B8D3780 /* Build Rust core */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/core/Cargo.toml",
+				"$(SRCROOT)/core/src/lib.rs",
+				"$(SRCROOT)/core/cbindgen.toml",
+				"$(SRCROOT)/core/build.rs",
+			);
+			name = "Build Rust core";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/core/target/universal/release/libblackbird_core.a",
+				"$(SRCROOT)/core/include/BBCore.h",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -euo pipefail\n\"${SRCROOT}/scripts/build-core.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		42B65E7EA891F238459C206E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */,
+				E83E41C27E5A021DE3E66DA1 /* FFILink.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -207,10 +239,19 @@
 					"$(inherited)",
 					"\".\"",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/core/include",
+				);
 				INFOPLIST_FILE = Sources/Blackbird/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/core/target/universal/release",
+				);
+				OTHER_LDFLAGS = (
+					"-lblackbird_core",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.conjfrnk.blackbird;
 				SDKROOT = macosx;
@@ -292,10 +333,19 @@
 					"$(inherited)",
 					"\".\"",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/core/include",
+				);
 				INFOPLIST_FILE = Sources/Blackbird/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/core/target/universal/release",
+				);
+				OTHER_LDFLAGS = (
+					"-lblackbird_core",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.conjfrnk.blackbird;
 				SDKROOT = macosx;
