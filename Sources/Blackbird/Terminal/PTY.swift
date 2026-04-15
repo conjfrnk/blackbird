@@ -21,8 +21,6 @@ public final class PTY {
 
     public enum Error: Swift.Error {
         case forkFailed(errno: Int32)
-        case pathTooLong
-        case execFailed(errno: Int32)
     }
 
     /// Invoked with raw output bytes from the child. Called on the read queue.
@@ -32,8 +30,17 @@ public final class PTY {
     private let childPID: pid_t
     private let readQueue = DispatchQueue(label: "blackbird.pty.read", qos: .userInitiated)
     private let writeQueue = DispatchQueue(label: "blackbird.pty.write", qos: .userInitiated)
-    private var isRunning = true
+    private let stateQueue = DispatchQueue(label: "blackbird.pty.state")
+    private var _isRunning = true
     private let readBufferSize = 16 * 1024
+
+    private func shouldKeepRunning() -> Bool {
+        stateQueue.sync { _isRunning }
+    }
+
+    private func markStopped() {
+        stateQueue.sync { _isRunning = false }
+    }
 
     /// Spawn a child process attached to a new PTY.
     public static func spawn(
@@ -98,18 +105,22 @@ public final class PTY {
         readQueue.async { [weak self] in
             guard let self else { return }
             var buffer = [UInt8](repeating: 0, count: self.readBufferSize)
-            while self.isRunning {
+            while self.shouldKeepRunning() {
                 let n = buffer.withUnsafeMutableBufferPointer { buf -> Int in
                     read(self.masterFD, buf.baseAddress, buf.count)
                 }
                 if n <= 0 {
-                    // EOF or error.
-                    self.isRunning = false
+                    // EOF or error — child has closed its side.
+                    self.markStopped()
                     break
                 }
                 let data = Data(buffer[0..<n])
                 self.onBytes?(data)
             }
+            // Blocking waitpid is safe here: the read loop exited because
+            // the child closed the slave end, so it has exited or is about to.
+            var status: Int32 = 0
+            _ = waitpid(self.childPID, &status, 0)
         }
     }
 
@@ -146,12 +157,11 @@ public final class PTY {
     // MARK: - Teardown
 
     public func terminate() {
-        guard isRunning else { return }
-        isRunning = false
-        // Close master fd; the child sees SIGHUP and exits.
+        guard shouldKeepRunning() else { return }
+        markStopped()
+        // Closing the master fd causes the child to receive SIGHUP on next
+        // read/write. The read queue's blocking read(2) then returns <= 0 and
+        // reaps the child with a blocking waitpid at loop exit.
         close(masterFD)
-        // Reap the child so we don't leave a zombie.
-        var status: Int32 = 0
-        _ = waitpid(childPID, &status, WNOHANG)
     }
 }

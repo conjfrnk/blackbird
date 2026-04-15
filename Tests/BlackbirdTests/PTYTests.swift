@@ -12,11 +12,15 @@ final class PTYTests: XCTestCase {
         )
 
         let exp = expectation(description: "got bytes")
-        exp.assertForOverFulfill = false
         var collected = Data()
-        pty.onBytes = { chunk in
+        var fulfilled = false
+        pty.onBytes = { [weak pty] chunk in
             collected.append(chunk)
-            if collected.count >= 5 { exp.fulfill() }
+            if collected.count >= 5, !fulfilled {
+                fulfilled = true
+                pty?.onBytes = nil
+                exp.fulfill()
+            }
         }
 
         wait(for: [exp], timeout: 3.0)
@@ -35,12 +39,16 @@ final class PTYTests: XCTestCase {
         )
 
         let exp = expectation(description: "echoed")
-        exp.assertForOverFulfill = false
         var seen = Data()
-        pty.onBytes = { chunk in
+        var fulfilled = false
+        pty.onBytes = { [weak pty] chunk in
             seen.append(chunk)
             // sh echoes the command before running it.
-            if seen.contains("exit".data(using: .utf8)!) { exp.fulfill() }
+            if seen.contains("exit".data(using: .utf8)!), !fulfilled {
+                fulfilled = true
+                pty?.onBytes = nil
+                exp.fulfill()
+            }
         }
 
         pty.write("exit\n".data(using: .utf8)!)
@@ -58,14 +66,16 @@ final class PTYTests: XCTestCase {
             size: .init(cols: 80, rows: 24)
         )
 
-        // Resize BEFORE the shell starts stty is a race — instead wait a tick, then resize,
-        // then read. Simpler: just check initial size is what we set.
         let exp = expectation(description: "size")
-        exp.assertForOverFulfill = false
         var out = Data()
-        pty.onBytes = { chunk in
+        var fulfilled = false
+        pty.onBytes = { [weak pty] chunk in
             out.append(chunk)
-            if out.contains("\n".data(using: .utf8)!) { exp.fulfill() }
+            if out.contains("\n".data(using: .utf8)!), !fulfilled {
+                fulfilled = true
+                pty?.onBytes = nil
+                exp.fulfill()
+            }
         }
 
         wait(for: [exp], timeout: 3.0)
