@@ -161,6 +161,15 @@ public final class TerminalView: NSView {
     // MARK: - Input
 
     public override func keyDown(with event: NSEvent) {
+        // ⌘-prefixed events never encode into PTY bytes. They're reserved for
+        // application-level shortcuts (menu items, window management). This
+        // enforces the spec's ⌘C/⌃C strict separation: ⌃C always sends 0x03
+        // (via KeyEncoder's control path), ⌘C is never re-encoded as 'c'.
+        if event.modifierFlags.contains(.command) {
+            super.keyDown(with: event)
+            return
+        }
+
         guard let session else { super.keyDown(with: event); return }
         let mods = KeyEncoder.Modifiers(event: event)
 
