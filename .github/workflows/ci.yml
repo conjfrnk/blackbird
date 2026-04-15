@@ -75,3 +75,15 @@ jobs:
             -destination "platform=macOS,arch=arm64" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
+
+      - name: Headless launch smoke
+        run: |
+          xcodebuild build \
+            -project Blackbird.xcodeproj \
+            -scheme Blackbird \
+            -configuration Debug \
+            -destination "platform=macOS,arch=arm64" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=""
+          scripts/smoke.sh
+        continue-on-error: true
