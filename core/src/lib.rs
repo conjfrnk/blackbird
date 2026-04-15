@@ -195,6 +195,26 @@ impl BBSnap {
     }
 }
 
+/// Resize the terminal grid. Out-of-range (zero) dimensions are ignored.
+///
+/// # Safety
+/// `term` must be a valid non-null pointer from `bb_term_new`, properly
+/// aligned, not freed for the duration of the call. No concurrent calls on
+/// the same term. Until `catch_unwind` is added (Task 7), no Rust panic may
+/// unwind through this function (UB to unwind through `extern "C"`).
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16) {
+    if term.is_null() || cols == 0 || rows == 0 {
+        return;
+    }
+    let bb = &mut *term;
+    let size = TermSize {
+        cols: cols as usize,
+        rows: rows as usize,
+    };
+    bb.term.resize(size);
+}
+
 /// Take an immutable snapshot of the current grid state.
 ///
 /// # Safety
@@ -452,6 +472,40 @@ mod tests {
     fn take_snapshot_from_null_term_returns_null() {
         unsafe {
             assert!(bb_term_take_snapshot(std::ptr::null_mut()).is_null());
+        }
+    }
+
+    #[test]
+    fn resize_changes_dimensions() {
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_resize(term, 120, 40);
+            let snap = bb_term_take_snapshot(term);
+            assert_eq!((*snap).cols, 120);
+            assert_eq!((*snap).rows, 40);
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn resize_to_zero_is_noop() {
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_resize(term, 0, 40); // no-op
+            bb_term_resize(term, 120, 0); // no-op
+            let snap = bb_term_take_snapshot(term);
+            assert_eq!((*snap).cols, 80);
+            assert_eq!((*snap).rows, 24);
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn resize_null_term_is_noop() {
+        unsafe {
+            bb_term_resize(std::ptr::null_mut(), 80, 24);
         }
     }
 }
