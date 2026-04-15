@@ -1,0 +1,12 @@
+[package]
+name = "blackbird_core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "blackbird_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+alacritty_terminal = "=0.26.0"
