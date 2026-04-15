@@ -4,6 +4,11 @@ import Combine
 
 final class TerminalSessionTests: XCTestCase {
 
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
     func test_shellOutputAppearsInSnapshot() throws {
         let session = try TerminalSession.start(
             shell: "/bin/sh",
@@ -27,13 +32,17 @@ final class TerminalSessionTests: XCTestCase {
     }
 
     func test_sendBytesReachesShell() throws {
+        // Use /bin/cat: deterministic echo. Interactive /bin/sh was flaky
+        // because sh's decision to echo depends on whether the kernel PTY
+        // driver sees ECHO ON AND the shell has reached its read(2) — a
+        // race. cat just echoes stdin after each newline, reliably.
         let session = try TerminalSession.start(
-            shell: "/bin/sh",
+            shell: "/bin/cat",
             arguments: [],
             size: .init(cols: 80, rows: 24)
         )
 
-        let exp = expectation(description: "echo appears")
+        let exp = expectation(description: "cat echoed back")
         var c: AnyCancellable?
         c = session.$snapshot
             .compactMap { $0 }
@@ -47,7 +56,8 @@ final class TerminalSessionTests: XCTestCase {
                 }
             }
 
-        session.send(Data("hello".utf8))
+        // cat echoes each line after newline.
+        session.send(Data("hello\n".utf8))
         wait(for: [exp], timeout: 3.0)
         session.terminate()
     }

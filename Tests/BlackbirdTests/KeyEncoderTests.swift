@@ -3,6 +3,11 @@ import XCTest
 
 final class KeyEncoderTests: XCTestCase {
 
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
     func test_printableAscii() {
         let encoder = KeyEncoder()
         XCTAssertEqual(encoder.encode(chars: "a", modifiers: []), Data([0x61]))

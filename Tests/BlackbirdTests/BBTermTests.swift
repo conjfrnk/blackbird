@@ -3,6 +3,11 @@ import XCTest
 
 final class BBTermTests: XCTestCase {
 
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
     func test_initAndDeinit() {
         let term = BBTerm(size: .init(cols: 80, rows: 24))
         XCTAssertNotNil(term)

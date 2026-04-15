@@ -3,6 +3,11 @@ import XCTest
 
 final class PTYTests: XCTestCase {
 
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
     func test_spawnEchoAndReadBack() throws {
         let pty = try PTY.spawn(
             executable: "/bin/sh",

@@ -59,12 +59,16 @@ public final class TerminalSession: ObservableObject {
     }
 
     public func resize(to size: Size) {
-        pty.resize(to: size)
-        coreQueue.async { [bbterm] in
+        // Serialize PTY + BBTerm resize on the core queue. Calling pty.resize
+        // before bbterm.resize creates a window where bytes from a SIGWINCH-
+        // reactive shell feed into bbterm at the old dimensions. The core
+        // queue is already the single-writer for bbterm, so doing PTY resize
+        // there too closes the window (PTY writes are serialized internally).
+        coreQueue.async { [weak self, bbterm] in
+            self?.pty.resize(to: size)
             bbterm.resize(to: .init(cols: size.cols, rows: size.rows))
-            // Emit a fresh snapshot so observers see the new dimensions.
             if let snap = bbterm.snapshot() {
-                DispatchQueue.main.async { [weak self] in
+                DispatchQueue.main.async {
                     self?.snapshot = snap
                 }
             }
