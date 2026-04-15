@@ -133,6 +133,9 @@ public final class BBSnapshot {
 
     public var cols: Int { Int(handle.pointee.cols) }
     public var rows: Int { Int(handle.pointee.rows) }
+    public var cursorCol: Int { Int(handle.pointee.cursor_col) }
+    public var cursorRow: Int { Int(handle.pointee.cursor_row) }
+    public var cursorVisible: Bool { handle.pointee.cursor_visible != 0 }
 
     public func character(at col: Int, row: Int) -> Character? {
         guard col < cols, row < rows else { return nil }
