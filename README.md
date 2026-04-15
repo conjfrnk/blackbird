@@ -28,7 +28,7 @@ Default, Gruvbox, Solarized, Catppuccin. Each with light and dark variants. "Aut
 
 ## Status
 
-In development. Plan 1 (Rust core + FFI + build plumbing) complete — `blackbird_core` crate wraps `alacritty_terminal` behind a C ABI, Xcode project builds and links the universal static lib, Swift wrapper (`BBTerm` / `BBSnapshot`) exposes it to the app layer, XCTests run via `xcodebuild test`, CI enforces fmt / clippy / cargo test / xcodebuild test on every push.
+In development. Plan 2 (Minimum viable app) complete — launches an AppKit window running your login shell, renders output via CoreText, window resize propagates to the PTY, OSC 2 title updates the window, ⌘C/⌃C are entirely separate. No tabs, no Metal GPU renderer, no themes yet (Plans 3-8).
 
 ## License
 
