@@ -205,7 +205,7 @@ pub struct BBTerm {
 // Panic-catching guard helpers
 // ---------------------------------------------------------------------------
 
-fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+fn payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -228,7 +228,7 @@ unsafe fn guard_with_term<T>(term: *mut BBTerm, fallback: T, f: impl FnOnce() ->
         Err(payload) => {
             if !term.is_null() {
                 let bb = &*term;
-                let msg = payload_to_string(&payload);
+                let msg = payload_to_string(&*payload);
                 let (cb, ctx) = *bb.callback.0.get();
                 if let Some(cb) = cb {
                     let bytes = msg.as_bytes();
@@ -238,7 +238,12 @@ unsafe fn guard_with_term<T>(term: *mut BBTerm, fallback: T, f: impl FnOnce() ->
                         len: bytes.len(),
                         i32_arg: 0,
                     };
-                    cb(ev, ctx);
+                    // Double-panic safety: if the callback itself panics,
+                    // catch and discard. Better to drop the Fatal notification
+                    // than to unwind across extern "C" (UB).
+                    // AssertUnwindSafe is sound here: state after a double-panic
+                    // is considered poisoned; callers won't reuse this BBTerm.
+                    let _ = catch_unwind(AssertUnwindSafe(|| cb(ev, ctx)));
                 }
             }
             fallback
@@ -946,18 +951,6 @@ mod tests {
 
             bb_term_free(term);
             Arc::from_raw(fired_ptr as *const Mutex<Vec<(u32, String)>>);
-        }
-    }
-
-    #[test]
-    fn new_does_not_crash_on_internal_panic() {
-        // Nothing to do here except verify that if Box::new or Term::new panicked,
-        // the process would survive. There's no easy way to inject a panic without
-        // test hooks, but the `guard_no_term` wrapper ensures it would be caught.
-        unsafe {
-            let term = bb_term_new(80, 24, 100);
-            assert!(!term.is_null());
-            bb_term_free(term);
         }
     }
 }
