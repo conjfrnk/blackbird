@@ -143,6 +143,11 @@ pub mod cell_flags {
 }
 
 /// Immutable snapshot. Ref-counted. The `cells` pointer is stable for the lifetime of the snapshot.
+///
+/// `cells` is non-null and points to exactly `cells_len` consecutive `BBCell` elements for the
+/// lifetime of this snapshot. It is never null for any snapshot returned by
+/// `bb_term_take_snapshot`, because `bb_term_new` rejects zero dimensions and `display_iter()`
+/// always yields `cols * rows` cells.
 #[repr(C)]
 pub struct BBSnap {
     pub cols: u16,
@@ -150,7 +155,7 @@ pub struct BBSnap {
     pub cursor_col: u16,
     pub cursor_row: u16,
     pub cursor_visible: u8,
-    pub _pad: [u8; 3],
+    pub _pad: [u8; 7],
     pub cells_len: usize,
     pub cells: *const BBCell,
 
@@ -162,7 +167,13 @@ pub struct BBSnap {
 }
 
 unsafe impl Send for BBSnap {}
-unsafe impl Sync for BBSnap {} // safe because snapshot is immutable after creation
+// SAFETY: after BBSnap::new returns, no field is ever mutated:
+// - cols/rows/cursor_*/_pad/cells_len/cells are set once in the struct literal
+// - cells_owned is private and no method mutates it (no push/pop/reallocate)
+// - rc is AtomicUsize, which is Sync
+// - cells aliases cells_owned's heap buffer, which is sound because both are
+//   read-only after construction
+unsafe impl Sync for BBSnap {}
 
 impl BBSnap {
     fn new(cols: u16, rows: u16, cursor: (u16, u16, bool), cells: Vec<BBCell>) -> Box<BBSnap> {
@@ -172,7 +183,7 @@ impl BBSnap {
             cursor_col: cursor.0,
             cursor_row: cursor.1,
             cursor_visible: cursor.2 as u8,
-            _pad: [0; 3],
+            _pad: [0; 7],
             cells_len: cells.len(),
             cells: std::ptr::null(),
             rc: AtomicUsize::new(1),
@@ -402,15 +413,31 @@ mod tests {
     }
 
     #[test]
-    fn snap_refcount_lifecycle() {
+    fn snap_two_owners_release_cleanly() {
         unsafe {
             let term = bb_term_new(10, 3, 100);
-            let snap = bb_term_take_snapshot(term);
-            let _again = bb_snap_retain(snap); // rc = 2
-            bb_snap_release(snap); // rc = 1
-            bb_snap_release(snap); // rc = 0, freed
+            let owner_a = bb_term_take_snapshot(term); // rc = 1
+            let owner_b = bb_snap_retain(owner_a); // rc = 2, same address
+            assert_eq!(owner_a, owner_b); // retain returns the input pointer
+            bb_snap_release(owner_b); // rc = 1 (owner_b done)
+            bb_snap_release(owner_a); // rc = 0, freed (owner_a done)
             bb_term_free(term);
         }
+    }
+
+    #[test]
+    fn snap_layout_matches_expected() {
+        // C-visible portion: 32 bytes. Full struct (with private rc + Vec) is larger; we only assert the public layout.
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, cells_len),
+            16,
+            "cells_len must be at offset 16 for a clean C ABI"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, cells),
+            24,
+            "cells must be at offset 24 for a clean C ABI"
+        );
     }
 
     #[test]
