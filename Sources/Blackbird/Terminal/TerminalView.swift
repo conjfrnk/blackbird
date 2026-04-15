@@ -62,6 +62,28 @@ public final class TerminalView: NSView {
 
     public override var acceptsFirstResponder: Bool { true }
 
+    public override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        propagateResize()
+    }
+
+    public override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        // Outside live resize (e.g., zoom button, programmatic resize), still
+        // propagate. During live resize, viewDidEndLiveResize handles the final
+        // commit so we avoid thrashing PTY + core during the drag.
+        if !inLiveResize {
+            propagateResize()
+        }
+    }
+
+    private func propagateResize() {
+        guard let session else { return }
+        let grid = metrics.grid(forPixelSize: bounds.size)
+        session.resize(to: .init(cols: UInt16(grid.cols), rows: UInt16(grid.rows)))
+        needsDisplay = true
+    }
+
     // MARK: - Rendering
 
     public func render(snapshot: BBSnapshot) {

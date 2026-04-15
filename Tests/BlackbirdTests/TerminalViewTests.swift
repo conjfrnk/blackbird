@@ -24,6 +24,37 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertGreaterThan(metrics.ascent, 0)
     }
 
+    func test_resizeForwardsToSession() throws {
+        let session = try TerminalSession.start(
+            shell: "/bin/cat",
+            arguments: [],
+            size: .init(cols: 80, rows: 24)
+        )
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        view.session = session
+
+        // Expand to a new size. The view computes grid from pixel size.
+        view.setFrameSize(NSSize(width: 1600, height: 900))
+
+        // Wait for the resize to propagate through coreQueue → snapshot publish.
+        let snapExp = expectation(description: "snap with new dims")
+        var finalSnap: BBSnapshot?
+        var c: AnyCancellable?
+        c = session.$snapshot.sink { s in
+            if let s, (s.cols != 80 || s.rows != 24), finalSnap == nil {
+                finalSnap = s
+                c?.cancel()
+                snapExp.fulfill()
+            }
+        }
+        wait(for: [snapExp], timeout: 3.0)
+
+        XCTAssertGreaterThan(finalSnap?.cols ?? 0, 80)
+        XCTAssertGreaterThan(finalSnap?.rows ?? 0, 24)
+
+        session.terminate()
+    }
+
     func test_viewRendersGivenSnapshotWithoutCrash() throws {
         let session = try TerminalSession.start(
             shell: "/bin/cat",
