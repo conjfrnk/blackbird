@@ -1,5 +1,7 @@
 //! blackbird_core — C ABI around `alacritty_terminal`.
 
+use std::cell::UnsafeCell;
+use std::os::raw::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -37,18 +39,158 @@ impl Dimensions for TermSize {
     }
 }
 
-/// We don't listen to `alacritty_terminal` events yet — events we care about
-/// are re-emitted to Swift via `bb_term_set_event_cb` in a later task.
-#[derive(Clone, Default)]
-struct NoopListener;
+// ---------------------------------------------------------------------------
+// Public event-callback types
+// ---------------------------------------------------------------------------
 
-impl EventListener for NoopListener {
-    fn send_event(&self, _event: Event) {}
+/// Kind of terminal event forwarded to the C caller.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BBEventKind {
+    Title = 1,
+    Bell = 2,
+    CursorShape = 3,
+    Osc52Clipboard = 4,
+    Fatal = 99,
 }
 
+/// Event forwarded to the C callback.
+///
+/// `payload` is valid **only for the duration of the callback**; callers must
+/// copy the bytes if they need them after the callback returns.
+#[repr(C)]
+pub struct BBEvent {
+    pub kind: BBEventKind,
+    /// Borrowed pointer into Rust-owned memory; null when `len == 0`.
+    pub payload: *const u8,
+    pub len: usize,
+    /// Cursor-shape variant: 0 = block, 1 = bar, 2 = underline; 0 otherwise.
+    pub i32_arg: i32,
+}
+
+/// C callback signature for terminal events.
+pub type BBEventCb = unsafe extern "C" fn(BBEvent, *mut c_void);
+
+// ---------------------------------------------------------------------------
+// CallbackCell — shared mutable slot between BBTerm and RoutingListener
+// ---------------------------------------------------------------------------
+
+/// Interior-mutable storage for the registered C callback and its context
+/// pointer.  Both `BBTerm` and `RoutingListener` reference the same cell;
+/// `BBTerm` owns it via `Box`.
+///
+/// # Thread-safety contract
+/// All access to `CallbackCell` is restricted to the single thread that owns
+/// the `BBTerm`.  `Term<RoutingListener>` and `Processor` are not `Sync`; the
+/// FFI contract already forbids concurrent calls on the same `term` handle
+/// (documented on `bb_term_input`).  Under this single-thread discipline no
+/// data race can occur, making the `UnsafeCell` sound.
+struct CallbackCell(UnsafeCell<(Option<BBEventCb>, *mut c_void)>);
+
+// SAFETY: the owning BBTerm is never shared across threads; see contract above.
+unsafe impl Send for CallbackCell {}
+// SAFETY: same — no concurrent access is ever made.
+unsafe impl Sync for CallbackCell {}
+
+impl CallbackCell {
+    fn new() -> Self {
+        CallbackCell(UnsafeCell::new((None, std::ptr::null_mut())))
+    }
+
+    /// Update the stored callback and context.
+    ///
+    /// # Safety
+    /// Caller must ensure no concurrent access.
+    unsafe fn set(&self, cb: Option<BBEventCb>, ctx: *mut c_void) {
+        *self.0.get() = (cb, ctx);
+    }
+
+    /// Invoke the stored callback if one is registered.
+    ///
+    /// # Safety
+    /// Caller must ensure no concurrent access and that the `BBEvent` fields
+    /// are valid for the duration of the call.
+    unsafe fn fire(&self, event: BBEvent) {
+        let (cb, ctx) = *self.0.get();
+        if let Some(f) = cb {
+            f(event, ctx);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RoutingListener — bridges alacritty_terminal events to C callbacks
+// ---------------------------------------------------------------------------
+
+/// Event listener that forwards terminal events to a registered C callback.
+///
+/// Holds a raw pointer into the `CallbackCell` owned by the parent `BBTerm`.
+/// The pointer is valid for the entire lifetime of the `Term<RoutingListener>`
+/// because `Term` is always dropped before `BBTerm`.
+///
+/// # Thread-safety contract
+/// Must be constructed and used exclusively on the thread that owns the
+/// `BBTerm`.  No concurrent access to the callback state is permitted.
+struct RoutingListener {
+    cell: *const CallbackCell,
+}
+
+// SAFETY: the owning BBTerm is never moved to another thread while in use.
+unsafe impl Send for RoutingListener {}
+
+impl EventListener for RoutingListener {
+    fn send_event(&self, event: Event) {
+        // SAFETY: `cell` is non-null and valid (owned by the enclosing BBTerm
+        // which is alive whenever Term<RoutingListener>::send_event runs).
+        // Single-thread discipline means no concurrent access.
+        unsafe {
+            match event {
+                Event::Bell => {
+                    (*self.cell).fire(BBEvent {
+                        kind: BBEventKind::Bell,
+                        payload: std::ptr::null(),
+                        len: 0,
+                        i32_arg: 0,
+                    });
+                }
+                Event::Title(ref s) => {
+                    (*self.cell).fire(BBEvent {
+                        kind: BBEventKind::Title,
+                        payload: s.as_ptr(),
+                        len: s.len(),
+                        i32_arg: 0,
+                    });
+                }
+                Event::ClipboardStore(_, ref s) => {
+                    (*self.cell).fire(BBEvent {
+                        kind: BBEventKind::Osc52Clipboard,
+                        payload: s.as_ptr(),
+                        len: s.len(),
+                        i32_arg: 0,
+                    });
+                }
+                // All other variants (MouseCursorDirty, ResetTitle, ClipboardLoad,
+                // ColorRequest, PtyWrite, TextAreaSizeRequest, CursorBlinkingChange,
+                // Wakeup, Exit, ChildExit) are intentionally ignored.
+                _ => {}
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BBTerm
+// ---------------------------------------------------------------------------
+
 /// Opaque handle exposed to Swift.
+///
+/// `callback` must be declared before `term` so that it is dropped *after*
+/// `term`.  (Rust drops fields in declaration order.)  This guarantees that
+/// the `RoutingListener`'s pointer into `callback` remains valid until `Term`
+/// is fully destroyed.
 pub struct BBTerm {
-    term: Term<NoopListener>,
+    callback: Box<CallbackCell>,
+    term: Term<RoutingListener>,
     processor: Processor,
 }
 
@@ -74,8 +216,13 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         ..Default::default()
     };
 
-    let term = Term::new(config, &size, NoopListener);
+    let callback = Box::new(CallbackCell::new());
+    let listener = RoutingListener {
+        cell: &*callback as *const CallbackCell,
+    };
+    let term = Term::new(config, &size, listener);
     let bb = Box::new(BBTerm {
+        callback,
         term,
         processor: Processor::new(),
     });
@@ -215,6 +362,34 @@ pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16)
     bb.term.resize(size);
 }
 
+/// Register (or clear) the event callback for a terminal.
+///
+/// Pass `cb = None` to disable event delivery.  `ctx` is an opaque pointer
+/// forwarded verbatim to every callback invocation; pass `null` if unused.
+///
+/// # Safety
+/// - `term` must be non-null, valid, and not freed while the callback is
+///   registered.
+/// - `ctx` must remain valid for all subsequent `bb_term_input` calls until
+///   the callback is cleared or the terminal is freed.
+/// - The callback may be invoked synchronously from within `bb_term_input`;
+///   it must not call any `bb_term_*` function on the same `term` handle
+///   (no re-entrant use).
+/// - All access must occur on the same thread (no concurrent calls on the
+///   same term).
+/// - Passing `term = null` is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_set_event_cb(
+    term: *mut BBTerm,
+    cb: Option<BBEventCb>,
+    ctx: *mut c_void,
+) {
+    if term.is_null() {
+        return;
+    }
+    (*term).callback.set(cb, ctx);
+}
+
 /// Take an immutable snapshot of the current grid state.
 ///
 /// # Safety
@@ -334,7 +509,11 @@ mod tests {
             scrolling_history: scrollback,
             ..Default::default()
         };
-        let mut term = Term::new(config, &size, NoopListener);
+        let callback = Box::new(CallbackCell::new());
+        let listener = RoutingListener {
+            cell: &*callback as *const CallbackCell,
+        };
+        let mut term = Term::new(config, &size, listener);
 
         // Feed (rows + scrollback) newlines so that exactly `scrollback` lines
         // are pushed into history.
@@ -506,6 +685,85 @@ mod tests {
     fn resize_null_term_is_noop() {
         unsafe {
             bb_term_resize(std::ptr::null_mut(), 80, 24);
+        }
+    }
+
+    #[test]
+    fn bell_event_fires_callback() {
+        use std::os::raw::c_void;
+        use std::sync::{Arc, Mutex};
+
+        let fired: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let fired_ptr = Arc::into_raw(fired.clone()) as *mut c_void;
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let fired = &*(ctx as *const std::sync::Mutex<Vec<u32>>);
+            fired.lock().unwrap().push(ev.kind as u32);
+        }
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            bb_term_set_event_cb(term, Some(cb), fired_ptr);
+            let byte = b"\x07"; // BEL
+            bb_term_input(term, byte.as_ptr(), 1);
+
+            let guard = fired.lock().unwrap();
+            assert!(guard.contains(&(BBEventKind::Bell as u32)));
+            drop(guard);
+
+            bb_term_free(term);
+            Arc::from_raw(fired_ptr as *const Mutex<Vec<u32>>);
+        }
+    }
+
+    #[test]
+    fn title_event_fires_callback() {
+        use std::os::raw::c_void;
+        use std::sync::{Arc, Mutex};
+
+        let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let received_ptr = Arc::into_raw(received.clone()) as *mut c_void;
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            if matches!(ev.kind, BBEventKind::Title) {
+                let received = &*(ctx as *const std::sync::Mutex<Vec<String>>);
+                let bytes = std::slice::from_raw_parts(ev.payload, ev.len);
+                received
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(bytes).into_owned());
+            }
+        }
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            bb_term_set_event_cb(term, Some(cb), received_ptr);
+            // OSC 2 ; <title> BEL
+            let seq = b"\x1b]2;my-title\x07";
+            bb_term_input(term, seq.as_ptr(), seq.len());
+
+            let got = received.lock().unwrap().clone();
+            assert!(got.iter().any(|s| s == "my-title"), "got: {:?}", got);
+
+            bb_term_free(term);
+            Arc::from_raw(received_ptr as *const Mutex<Vec<String>>);
+        }
+    }
+
+    #[test]
+    fn setting_null_cb_disables_callback() {
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            bb_term_set_event_cb(term, None, std::ptr::null_mut());
+            bb_term_input(term, b"\x07".as_ptr(), 1);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn set_event_cb_on_null_term_is_noop() {
+        unsafe {
+            bb_term_set_event_cb(std::ptr::null_mut(), None, std::ptr::null_mut());
         }
     }
 }
