@@ -6,12 +6,10 @@ struct BlackbirdApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // Settings placeholder — Plan 5 will wire the real settings pane.
-        // Required by SwiftUI: `App.body` must produce at least one Scene.
-        // Settings doesn't open a window until the user picks ⌘, so it
-        // doesn't interfere with AppDelegate's AppKit-managed main window.
+        // Settings scene is SwiftUI-managed; only opens when the user picks
+        // ⌘, so it doesn't interfere with AppDelegate's AppKit main window.
         Settings {
-            EmptyView()
+            SettingsView()
         }
     }
 }
