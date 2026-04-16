@@ -78,11 +78,20 @@ public final class PTY {
         if pid < 0 { throw Error.forkFailed(errno: errno) }
 
         if pid == 0 {
-            // Child: set env, then exec.
+            // Child: set env, chdir to home, then exec.
             for (k, v) in envOverrides {
                 setenv(k, v, 1)
             }
             setenv("TERM", "xterm-256color", 1)
+            // Apps launched from Finder inherit cwd = `/` from launchd. Move
+            // into the user's home directory so the shell starts where users
+            // expect. `getpwuid(getuid())` is authoritative; fall back to
+            // $HOME if the passwd lookup fails for any reason.
+            if let pw = getpwuid(getuid()), pw.pointee.pw_dir != nil {
+                _ = chdir(pw.pointee.pw_dir)
+            } else if let home = getenv("HOME") {
+                _ = chdir(home)
+            }
             // Build argv
             let cArgv: [UnsafeMutablePointer<CChar>?] =
                 ([executable] + arguments).map { strdup($0) } + [nil]
