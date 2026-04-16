@@ -31,7 +31,15 @@ final class SettingsWindowController {
         if window == nil {
             let w = makeWindow()
             let h = NSHostingController(rootView: SettingsView())
-            w.contentViewController = h
+            // IMPORTANT: set `contentView`, not `contentViewController`.
+            // Assigning a fresh NSHostingController as contentViewController
+            // triggers NSWindow to adopt the controller's preferredContentSize,
+            // which is (0, 0) until SwiftUI first lays out. The window
+            // collapses to titlebar-only (~0×28 content), nothing ever draws,
+            // and the user sees an empty white window. Keep `host` as a
+            // property so SwiftUI's view controller lifecycle stays alive.
+            w.contentView = h.view
+            h.view.autoresizingMask = [.width, .height]
             window = w
             host = h
         }
@@ -52,6 +60,9 @@ final class SettingsWindowController {
         )
         w.title = "Settings"
         w.isReleasedWhenClosed = false
+        // Prevent users (and buggy prior autosaves) from shrinking below the
+        // SwiftUI form's useful minimum.
+        w.contentMinSize = NSSize(width: 480, height: 320)
         w.setFrameAutosaveName("BlackbirdSettings")
         // Settings lives above other app windows even when the user
         // switches back to the terminal briefly.
