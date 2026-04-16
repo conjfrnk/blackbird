@@ -55,6 +55,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
 
+    public private(set) var selection: Selection? {
+        didSet {
+            if oldValue != selection { setNeedsDisplay(bounds) }
+        }
+    }
+    private var isDragging = false
+
     #if DEBUG
     private var frameCount = 0
     private var lastFrameLogTime = Date()
@@ -264,6 +271,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
 
+        // Any shell-bound keystroke also cancels an active selection.
+        if selection != nil { selection = nil }
+
         // Any non-⌘ keystroke represents user input headed for the shell, so
         // snap the viewport back to the live grid first. Users reading
         // scrollback get pulled back to the prompt the moment they type —
@@ -402,13 +412,40 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public override func mouseDown(with event: NSEvent) {
-        guard mouseReportingEnabled(), let session else { super.mouseDown(with: event); return }
-        sendMouseEvent(event, button: 0, press: true, session: session)
+        let optionHeld = event.modifierFlags.contains(.option)
+        if mouseReportingEnabled() && !optionHeld, let session {
+            sendMouseEvent(event, button: 0, press: true, session: session)
+            return
+        }
+        let point = bufferPointFromEvent(event)
+        let mode: Selection.Mode
+        switch event.clickCount {
+        case 3: mode = .line
+        case 2: mode = .word
+        default:
+            mode = event.modifierFlags.contains(.command) ? .rectangular : .character
+        }
+        selection = Selection(anchor: point, cursor: point, mode: mode)
+        isDragging = true
+        if mode == .word || mode == .line {
+            expandSelectionUnderAnchor()
+        }
     }
 
     public override func mouseUp(with event: NSEvent) {
-        guard mouseReportingEnabled(), let session else { super.mouseUp(with: event); return }
-        sendMouseEvent(event, button: 0, press: false, session: session)
+        if isDragging {
+            isDragging = false
+            // Collapse a zero-width char-mode selection so the overlay
+            // doesn't show a 1-cell highlight from a stray click.
+            if let s = selection, s.anchor == s.cursor, s.mode == .character {
+                selection = nil
+            }
+            return
+        }
+        let optionHeld = event.modifierFlags.contains(.option)
+        if mouseReportingEnabled() && !optionHeld, let session {
+            sendMouseEvent(event, button: 0, press: false, session: session)
+        }
     }
 
     public override func rightMouseDown(with event: NSEvent) {
@@ -460,10 +497,52 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public override func mouseDragged(with event: NSEvent) {
-        guard let mode = currentSnapshot?.termMode,
-              (mode.contains(.mouseMotion) || mode.contains(.mouseDrag)),
-              let session else { super.mouseDragged(with: event); return }
-        sendMouseEvent(event, button: 32, press: true, session: session)
+        if isDragging, var sel = selection {
+            // Autoscroll when dragging past the viewport edges so the user
+            // can select into scrollback / future output.
+            let local = convert(event.locationInWindow, from: nil)
+            if local.y > bounds.height - metrics.cellHeight {
+                session?.scroll(delta: -1)
+            } else if local.y < metrics.cellHeight {
+                session?.scroll(delta: 1)
+            }
+            sel.cursor = bufferPointFromEvent(event)
+            selection = sel
+            return
+        }
+        // No selection in progress — forward to PTY if the app asked for
+        // motion/drag reporting.
+        if let mode = currentSnapshot?.termMode,
+           (mode.contains(.mouseMotion) || mode.contains(.mouseDrag)),
+           let session {
+            sendMouseEvent(event, button: 32, press: true, session: session)
+        }
+    }
+
+    private func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
+        let local = convert(event.locationInWindow, from: nil)
+        let snap = currentSnapshot
+        return bufferPoint(
+            forView: local,
+            cellWidth: metrics.cellWidth,
+            cellHeight: metrics.cellHeight,
+            viewportHeight: bounds.height,
+            displayOffset: snap?.displayOffset ?? 0,
+            cols: snap?.cols ?? 80,
+            rows: snap?.rows ?? 24
+        )
+    }
+
+    /// Grow the current `.word` or `.line` selection outward from `anchor`.
+    /// Task 4 fills in word-boundary logic; for now, handle `.line` (and
+    /// leave `.word` to collapse to a single cell until Task 4).
+    private func expandSelectionUnderAnchor() {
+        guard var sel = selection, let snap = currentSnapshot else { return }
+        if sel.mode == .line {
+            sel.anchor = BufferPoint(line: sel.anchor.line, col: 0)
+            sel.cursor = BufferPoint(line: sel.cursor.line, col: snap.cols - 1)
+            selection = sel
+        }
     }
 
     private func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool, session: TerminalSession) {
