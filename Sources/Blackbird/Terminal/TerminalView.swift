@@ -63,6 +63,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         super.init(frame: frameRect, device: device)
         self.delegate = self
         self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        // Must match the render pipeline's colorAttachments[0].pixelFormat
+        // set up by MetalRenderer (Task 2+).
         self.colorPixelFormat = .bgra8Unorm
         self.framebufferOnly = true
         self.isPaused = false
@@ -105,7 +107,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - MTKViewDelegate
 
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        propagateResize()
+        // Intentionally empty: setFrameSize + viewDidEndLiveResize already
+        // cover the points-based resize path. Adding a PTY resize here would
+        // double-fire SIGWINCH on every non-live resize (zoom button, etc).
+        // This hook remains for future per-pixel tracking (e.g., Retina
+        // scale-factor changes) but doesn't drive the grid geometry today.
     }
 
     public func draw(in view: MTKView) {
