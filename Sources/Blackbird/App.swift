@@ -153,6 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onClose = { [weak self, weak controller] in
             guard let self, let controller else { return }
             self.controllers.removeAll { $0 === controller }
+            // Dropping a tab shrinks the group — repaint all remaining
+            // tabs' pill strips. If the last tab in the group closed,
+            // nothing to refresh here anyway.
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshAllTabBars()
+            }
         }
         controllers.append(controller)
         return controller
@@ -198,6 +204,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.showWindow(nil)
         }
         newWindow.makeKeyAndOrderFront(nil)
+        // Tell every controller in the group to refresh its custom tab
+        // bar. NSWindowTabGroup's `.windows` property is not reliably
+        // KVO-fireable on tab-add, so we invalidate explicitly.
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshAllTabBars()
+        }
+    }
+
+    /// Re-run `refreshTabBar` on every MainWindowController so the pill
+    /// strip matches the current tab group. Used after tab-add / -close
+    /// since NSWindowTabGroup KVO isn't reliable.
+    private func refreshAllTabBars() {
+        for c in controllers { c.refreshTabBar() }
     }
 
     /// Opens a new independent window (⌘N). Inherits cwd from the currently

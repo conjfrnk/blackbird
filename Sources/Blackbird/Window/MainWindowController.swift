@@ -61,9 +61,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // ourselves (titlebar-integrated) and suppress the default strip.
         window.tabbingMode = .preferred
         window.tabbingIdentifier = "dev.conjfrnk.blackbird.terminal"
-        // Window title is redundant when the tab pill shows the title; drop
-        // it here to avoid "zsh / [zsh] [zsh] +" double-labeling.
-        window.titleVisibility = .hidden
+        // Single-tab default: show the window title normally. Multi-tab
+        // switches to hidden + custom pill strip; see refreshTabBar.
+        window.titleVisibility = .visible
         super.init(window: window)
         window.delegate = self
         installTitlebarTabBar()
@@ -236,8 +236,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         tabGroupObservers = [winObs, selObs, visObs]
     }
 
-    private func refreshTabBar() {
-        titlebarTabBar?.refresh()
+    func refreshTabBar() {
+        guard let window else { return }
+        let tabCount = window.tabGroup?.windows.count ?? 1
+        if tabCount <= 1 {
+            // Restore the stock single-tab titlebar: title text centered,
+            // no custom pill chrome. Hide the accessory view entirely so
+            // it doesn't eat layout width.
+            titlebarTabBar?.view.isHidden = true
+            window.titleVisibility = .visible
+        } else {
+            titlebarTabBar?.view.isHidden = false
+            // Tab pills carry the title; suppressing the system title
+            // avoids stacking 'zsh' twice.
+            window.titleVisibility = .hidden
+            titlebarTabBar?.refresh()
+        }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        // Pills divide the available titlebar width equally, so resize
+        // needs to re-lay them out.
+        refreshTabBar()
     }
 
     // MARK: - Tab bar affordances
