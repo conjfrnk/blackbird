@@ -108,6 +108,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard Preferences.shared.confirmClose else { return true }
+        guard let s = session, s.hasForegroundChild() else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Close this tab?"
+        alert.informativeText = "A process is still running. Closing will terminate it."
+        alert.addButton(withTitle: "Close")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     func windowWillClose(_ notification: Notification) {
         terminateSessions()
         onClose?()

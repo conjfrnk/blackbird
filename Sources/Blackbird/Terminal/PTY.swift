@@ -193,6 +193,21 @@ public final class PTY {
         }
     }
 
+    /// True when the tty has a foreground process group distinct from our
+    /// child (the shell). This means `command-running` — useful for the
+    /// "Confirm close while running" prompt. When the shell is at its
+    /// prompt, the fg pgroup equals the shell pgroup and this returns
+    /// false.
+    public func hasForegroundChild() -> Bool {
+        let fg = tcgetpgrp(masterFD)
+        guard fg > 0 else { return false }
+        // pgid of the shell process = same as its pid unless something
+        // weird is happening. getpgid(pid) returns the pgroup of pid.
+        let shellPgid = getpgid(childPID)
+        if shellPgid <= 0 { return false }
+        return fg != shellPgid
+    }
+
     /// Send a signal directly to the foreground process group of the terminal.
     /// For SIGINT (Ctrl+C) this is more reliable than writing 0x03 to the
     /// master fd, because the shell may have turned off ISIG or changed VINTR

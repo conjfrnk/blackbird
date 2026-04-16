@@ -69,6 +69,12 @@ public final class TerminalSession: ObservableObject {
         pty.writeImmediate(data)
     }
 
+    /// Whether the shell currently has a foreground child process (anything
+    /// other than the shell itself). Used to gate the confirm-close prompt.
+    public func hasForegroundChild() -> Bool {
+        pty.hasForegroundChild()
+    }
+
     /// Send a POSIX signal directly to the terminal's foreground process group.
     /// More reliable than writing 0x03 for SIGINT because it bypasses the
     /// line discipline — works even if the shell changed termios (ISIG off,
