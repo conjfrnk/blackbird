@@ -83,7 +83,11 @@ public func displayRow(for bufferLine: Int32, displayOffset: Int, rows: Int) -> 
 /// or whitespace stops the word.
 private let wordBreakers: Set<Character> = [
     " ", "\t", "\n", "\r",
-    ".", ",", ";", ":",
+    // `.` and `:` intentionally OMITTED — double-click on paths
+    // (`/usr/local/bin`), dotted identifiers (`config.ini`), and host:port
+    // (`example.com:8080`) should select as single units. `,` and `;` stay
+    // as breakers because they're almost always prose punctuation.
+    ",", ";",
     "(", ")", "[", "]", "{", "}",
     "'", "\"", "`", "<", ">", "|",
     "=", "&", "$", "#", "@", "!", "?",
@@ -104,10 +108,11 @@ public func wordRange(
     let cols = snapshot.cols
     func ch(_ c: Int) -> Character? { snapshot.character(at: c, row: row) }
 
-    // Point is on a blank / break — select just that cell rather than
-    // spreading across adjacent whitespace.
+    // Point is on a blank / break / empty cell — there is no word to
+    // expand. Return nil so callers (e.g. .word selection expansion) keep
+    // their existing range instead of collapsing to a zero-width point.
     guard let here = ch(point.col), !wordBreakers.contains(here) else {
-        return (point, point)
+        return nil
     }
 
     var l = point.col
