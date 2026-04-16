@@ -447,6 +447,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         session?.clearAll()
     }
 
+    @objc public func increaseFontSize(_ sender: Any?) {
+        let p = Preferences.shared
+        p.fontSize = min(32, p.fontSize + 1)
+    }
+
+    @objc public func decreaseFontSize(_ sender: Any?) {
+        let p = Preferences.shared
+        p.fontSize = max(9, p.fontSize - 1)
+    }
+
+    @objc public func resetFontSize(_ sender: Any?) {
+        Preferences.shared.fontSize = 13
+    }
+
     private func installFindBar() {
         let h: CGFloat = 32
         let bar = FindBar(frame: NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h))
@@ -531,6 +545,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         case #selector(performFindNextAction(_:)):     return !findMatches.isEmpty
         case #selector(performFindPreviousAction(_:)): return !findMatches.isEmpty
         case #selector(clearBufferAndScrollback(_:)):  return session != nil
+        case #selector(increaseFontSize(_:)),
+             #selector(decreaseFontSize(_:)),
+             #selector(resetFontSize(_:)): return session != nil
         default:                                       return true
         }
     }

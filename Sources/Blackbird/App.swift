@@ -130,6 +130,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(editItem)
         editItem.submenu = buildEditMenu()
 
+        let viewItem = NSMenuItem()
+        main.addItem(viewItem)
+        viewItem.submenu = buildViewMenu()
+
         let windowItem = NSMenuItem()
         main.addItem(windowItem)
         windowItem.submenu = buildWindowMenu()
@@ -206,6 +210,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(TerminalView.clearBufferAndScrollback(_:)),
             keyEquivalent: "k"
         )
+        return menu
+    }
+
+    private func buildViewMenu() -> NSMenu {
+        let menu = NSMenu(title: "View")
+        // ⌘+/⌘-/⌘0 adjust font size. The "+" key equivalent actually fires
+        // on ⌘⇧= on most layouts; spelling it as "+" with the default command
+        // mask matches what users expect to see in the menu and what AppKit
+        // matches against the incoming keyDown.
+        let biggerItem = NSMenuItem(
+            title: "Bigger Text",
+            action: #selector(TerminalView.increaseFontSize(_:)),
+            keyEquivalent: "+"
+        )
+        biggerItem.keyEquivalentModifierMask = [.command]
+        menu.addItem(biggerItem)
+
+        let smallerItem = NSMenuItem(
+            title: "Smaller Text",
+            action: #selector(TerminalView.decreaseFontSize(_:)),
+            keyEquivalent: "-"
+        )
+        smallerItem.keyEquivalentModifierMask = [.command]
+        menu.addItem(smallerItem)
+
+        let resetItem = NSMenuItem(
+            title: "Actual Size",
+            action: #selector(TerminalView.resetFontSize(_:)),
+            keyEquivalent: "0"
+        )
+        resetItem.keyEquivalentModifierMask = [.command]
+        menu.addItem(resetItem)
         return menu
     }
 
