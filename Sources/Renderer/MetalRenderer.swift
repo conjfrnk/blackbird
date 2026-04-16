@@ -28,6 +28,14 @@ public final class MetalRenderer {
     private var backgroundOpacity: Float = 1.0
     private var keepBgOpaque: Bool = true
 
+    /// Vertical offset (in points) added to every cell and cursor. Used by
+    /// TerminalView to keep text out of the titlebar region when the window
+    /// uses `.fullSizeContentView` so the Metal clearColor can tint under the
+    /// titlebar. TerminalView passes `safeAreaInsets.top` here on each layout.
+    private var topInsetPoints: Float = 0.0
+
+    public func setTopInsetPoints(_ points: Float) { topInsetPoints = points }
+
     public func setDefaultBgRgb(_ rgb: UInt32) { defaultBgRgb = rgb }
 
     public func setBackgroundOpacity(_ opacity: Float, keepBgOpaque: Bool) {
@@ -162,12 +170,14 @@ public final class MetalRenderer {
                 let effectiveBg = selected ? selectionTint : bg
                 let effectiveHasBg = selected ? true : hasBg
 
+                let xPx = Float(col) * cellW
+                let yPx = Float(row) * cellH + topInsetPoints
                 // Render cell if it has a glyph OR a non-default background.
                 if scalar != 0 && scalar != 0x20 /* space */ {
                     if let us = Unicode.Scalar(scalar),
                        let entry = atlas.lookupOrInsert(scalar: us) {
                         ptr[count] = CellInstance(
-                            cellPosPx: SIMD2<Float>(Float(col) * cellW, Float(row) * cellH),
+                            cellPosPx: SIMD2<Float>(xPx, yPx),
                             uvOrigin: entry.uvOrigin,
                             uvSize: entry.uvSize,
                             fgColor: fg,
@@ -180,7 +190,7 @@ public final class MetalRenderer {
                     // or inside an active selection. Draw a full-cell quad with
                     // zero coverage → pure bg fill.
                     ptr[count] = CellInstance(
-                        cellPosPx: SIMD2<Float>(Float(col) * cellW, Float(row) * cellH),
+                        cellPosPx: SIMD2<Float>(xPx, yPx),
                         uvOrigin: .zero,
                         uvSize: .zero,
                         fgColor: fg,
@@ -279,7 +289,7 @@ public final class MetalRenderer {
                 var cu = CursorUniforms(
                     viewportPx: viewportPoints,
                     cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth),
-                                              Float(screenCursorRow) * Float(metrics.cellHeight)),
+                                              Float(screenCursorRow) * Float(metrics.cellHeight) + topInsetPoints),
                     cellSizePx: cellSizePoints,
                     color: cursorColor,
                     strokeWidthPx: 1.0,

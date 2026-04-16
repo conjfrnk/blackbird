@@ -25,7 +25,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     init(initialWorkingDirectory: String? = nil, autosaveFrame: Bool = true) {
         self.initialWorkingDirectory = initialWorkingDirectory
         self.shouldAutosaveFrame = autosaveFrame
-        let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
+        // `.fullSizeContentView` extends the content view (the Metal view) all
+        // the way under the titlebar. Combined with `titlebarAppearsTransparent`
+        // (set by TerminalView when translucent), the Metal clearColor fills the
+        // whole window — titlebar + body — with one continuous tinted blur. The
+        // traffic-light buttons overlay on top as normal. Without this flag the
+        // titlebar gets its own material layer, visually seamed against the
+        // body below.
+        let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         let rect = NSRect(x: 0, y: 0, width: 800, height: 480)
         let window = NSWindow(
             contentRect: rect,
@@ -65,10 +72,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // Prevent the user from shrinking the window below a usable minimum.
         // 20 cols × 4 rows is plenty for interactive use; stops layout
         // degenerating into a single column where the shell becomes unusable.
+        // With `.fullSizeContentView`, the content view includes the titlebar
+        // area — so reserve the standard 28pt titlebar + the bottom inset on
+        // top of the 4-row grid.
         let m = view.metrics
         window.contentMinSize = NSSize(
             width: m.cellWidth * 20,
-            height: m.cellHeight * 4
+            height: m.cellHeight * 4 + 28 + TerminalView.bottomContentInsetPoints
         )
         // Snap window size to whole-cell increments during drag. Eliminates
         // the transient blank-edge/clip effect you'd otherwise see while the

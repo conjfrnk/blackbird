@@ -174,13 +174,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func layout() {
         super.layout()
-        let inset = Self.bottomContentInsetPoints
+        let bottom = Self.bottomContentInsetPoints
+        // `.fullSizeContentView` extends our frame under the titlebar so the
+        // Metal clearColor can tint the whole window uniformly. safeAreaInsets
+        // automatically reports the titlebar (and any future toolbar/tab bar)
+        // height, so the renderer can offset the text grid to sit below it.
+        let top = safeAreaInsets.top
+        renderer.setTopInsetPoints(Float(top))
         let width: CGFloat = 10
         scrollIndicator.frame = NSRect(
             x: bounds.width - width,
-            y: inset,
+            y: bottom,
             width: width,
-            height: max(0, bounds.height - inset)
+            height: max(0, bounds.height - bottom - top)
         )
     }
 
@@ -217,7 +223,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private func propagateResize() {
         guard let session else { return }
-        let usableHeight = max(metrics.cellHeight, bounds.height - Self.bottomContentInsetPoints)
+        // `.fullSizeContentView` means our bounds include the titlebar region —
+        // subtract it (via safeAreaInsets.top) so we don't size the grid as
+        // though we had titlebar-height extra rows of real estate.
+        let usableHeight = max(
+            metrics.cellHeight,
+            bounds.height - safeAreaInsets.top - Self.bottomContentInsetPoints
+        )
         let grid = metrics.grid(forPixelSize: CGSize(width: bounds.width, height: usableHeight))
         guard grid.cols > 0, grid.rows > 0 else { return }
         let size = PTY.Size(cols: UInt16(grid.cols), rows: UInt16(grid.rows))
@@ -610,7 +622,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private func installFindBar() {
         let h: CGFloat = 32
-        let bar = FindBar(frame: NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h))
+        // Sit just below the titlebar, not under it.
+        let top = safeAreaInsets.top
+        let bar = FindBar(frame: NSRect(x: 0, y: bounds.height - h - top, width: bounds.width, height: h))
         bar.autoresizingMask = [.width, .minYMargin]
         bar.delegate = self
         addSubview(bar)
@@ -924,7 +938,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // Autoscroll when dragging past the viewport edges so the user
             // can select into scrollback / future output.
             let local = convert(event.locationInWindow, from: nil)
-            if local.y > bounds.height - metrics.cellHeight {
+            // Top edge is `safeAreaInsets.top` below the raw view top because
+            // the titlebar sits in the upper inset under fullSizeContentView.
+            if local.y > bounds.height - safeAreaInsets.top - metrics.cellHeight {
                 session?.scroll(delta: -1)
             } else if local.y < metrics.cellHeight {
                 session?.scroll(delta: 1)
@@ -945,11 +961,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
         let local = convert(event.locationInWindow, from: nil)
         let snap = currentSnapshot
+        // Pass the text-area height (bounds minus the titlebar inset), since
+        // `.fullSizeContentView` means `bounds.height` includes the titlebar
+        // region which the text grid doesn't occupy.
         return bufferPoint(
             forView: local,
             cellWidth: metrics.cellWidth,
             cellHeight: metrics.cellHeight,
-            viewportHeight: bounds.height,
+            viewportHeight: bounds.height - safeAreaInsets.top,
             displayOffset: snap?.displayOffset ?? 0,
             cols: snap?.cols ?? 80,
             rows: snap?.rows ?? 24
@@ -980,7 +999,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool, session: TerminalSession) {
         let loc = convert(event.locationInWindow, from: nil)
         let col = max(0, Int(loc.x / metrics.cellWidth))
-        let row = max(0, Int((bounds.height - loc.y) / metrics.cellHeight))
+        // Text grid starts at `safeAreaInsets.top` (the titlebar), so subtract
+        // that before converting to row.
+        let row = max(0, Int((bounds.height - safeAreaInsets.top - loc.y) / metrics.cellHeight))
         if sgrMouseEnabled() {
             // SGR 1006: ESC [ < button ; col+1 ; row+1 M/m
             let finalChar: Character = press ? "M" : "m"
