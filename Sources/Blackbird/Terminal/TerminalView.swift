@@ -57,6 +57,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
 
+    private final class FlashView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    private let bellFlashView: FlashView = {
+        let v = FlashView(frame: .zero)
+        v.wantsLayer = true
+        v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        v.alphaValue = 0
+        return v
+    }()
+    private var lastBellCounter: UInt64 = 0
+
     public private(set) var selection: Selection? {
         didSet {
             if oldValue != selection { setNeedsDisplay(bounds) }
@@ -110,6 +122,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // never swallows mouse events). Positioned in layout() so it tracks
         // the bottom inset shared with the grid.
         addSubview(scrollIndicator)
+
+        bellFlashView.frame = bounds
+        bellFlashView.autoresizingMask = [.width, .height]
+        addSubview(bellFlashView)
 
         prefsCancellable = Preferences.shared.objectWillChange
             .sink { [weak self] _ in
@@ -296,6 +312,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 self.window?.title = useTitle ?? "Blackbird"
             }
         }.store(in: &cancellables)
+
+        session.$bellCounter.sink { [weak self] counter in
+            guard let self else { return }
+            guard counter > self.lastBellCounter else { return }
+            self.lastBellCounter = counter
+            DispatchQueue.main.async { self.flashBell() }
+        }.store(in: &cancellables)
+    }
+
+    private func flashBell() {
+        guard Preferences.shared.bell == .visual else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.08
+            bellFlashView.animator().alphaValue = 1.0
+        } completionHandler: { [weak self] in
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                self?.bellFlashView.animator().alphaValue = 0
+            }
+        }
     }
 
     // MARK: - Input
