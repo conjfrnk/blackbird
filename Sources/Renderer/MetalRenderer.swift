@@ -220,7 +220,9 @@ public final class MetalRenderer {
             // isn't visible and we skip drawing it — scrolling back should
             // never show a phantom cursor on a scrollback line.
             let screenCursorRow = snap.cursorRow + snap.displayOffset
+            let shape = UInt32(snap.cursorShape)
             if snap.cursorVisible,
+               shape != 3,                 // DECSCUSR hidden — skip entirely
                snap.cursorCol < snap.cols,
                screenCursorRow < snap.rows {
                 var cu = CursorUniforms(
@@ -231,7 +233,8 @@ public final class MetalRenderer {
                     color: cursorColor,
                     strokeWidthPx: 1.0,
                     filled: focused ? 1.0 : 0.0,
-                    _pad: .zero
+                    shape: shape,
+                    _pad: 0
                 )
                 encoder.setRenderPipelineState(cursorPipelineState)
                 encoder.setVertexBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
@@ -258,5 +261,6 @@ struct CursorUniforms {
     var color: SIMD4<Float>
     var strokeWidthPx: Float
     var filled: Float       // 1.0 = solid block (window focused), 0.0 = outline
-    var _pad: SIMD2<Float>
+    var shape: UInt32       // 0 = block, 1 = bar, 2 = underline, 3 = hidden
+    var _pad: Float         // keeps struct layout / alignment stable
 }

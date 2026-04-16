@@ -69,8 +69,9 @@ struct CursorUniforms {
     float2 cellSizePx;
     float4 color;
     float strokeWidthPx;
-    float filled;           // 1.0 = solid block (focused), 0.0 = outline
-    float2 _pad;
+    float filled;           // 1.0 = solid (focused), 0.0 = outline (block only)
+    uint  shape;            // 0 = block, 1 = bar, 2 = underline, 3 = hidden
+    float _pad;
 };
 
 struct CursorOut {
@@ -103,11 +104,22 @@ fragment float4 fragment_cursor(
 ) {
     float2 p = in.localPx;
     float2 s = u.cellSizePx;
-    if (u.filled > 0.5) {
-        // Focused: fill the whole cell.
+    // DECSCUSR shape dispatch. Shape 3 (hidden) never reaches the shader —
+    // the CPU path skips the draw entirely.
+    // Bar: 2-pixel vertical column on the left edge of the cell.
+    if (u.shape == 1u) {
+        if (p.x >= 2.0) discard_fragment();
         return u.color;
     }
-    // Unfocused: draw only the stroke band.
+    // Underline: 2-pixel horizontal band at the bottom of the cell.
+    if (u.shape == 2u) {
+        if ((s.y - p.y) >= 2.0) discard_fragment();
+        return u.color;
+    }
+    // Block (shape == 0). Focused = solid; unfocused = outline stroke.
+    if (u.filled > 0.5) {
+        return u.color;
+    }
     bool stroke =
         p.x < u.strokeWidthPx ||
         p.y < u.strokeWidthPx ||

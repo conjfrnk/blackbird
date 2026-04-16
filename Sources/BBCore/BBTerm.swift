@@ -217,6 +217,8 @@ public final class BBSnapshot {
     public var displayOffset: Int { Int(handle.pointee.display_offset) }
     /// Total scrollback lines retained (up to the scrollback limit).
     public var historySize: Int { Int(handle.pointee.history_size) }
+    /// DECSCUSR cursor shape: 0 = block, 1 = bar/beam, 2 = underline, 3 = hidden.
+    public var cursorShape: Int { Int(handle.pointee.cursor_shape) }
     public var mode: UInt32 { handle.pointee.mode }
     public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 

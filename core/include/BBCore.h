@@ -152,7 +152,14 @@ struct BBSnap {
    * Appended here to preserve the existing offsets of cells_len/cells.
    */
   uint32_t history_size;
-  uint32_t _pad2;
+  /**
+   * DECSCUSR cursor shape: 0 = block, 1 = bar/beam, 2 = underline, 3 = hidden.
+   * Sourced from `Term::cursor_style().shape` at snapshot time. Callers
+   * render according to this; a value of 3 means the renderer should skip
+   * drawing the cursor entirely.
+   */
+  uint8_t cursor_shape;
+  uint8_t _pad2b[3];
 };
 
 /**

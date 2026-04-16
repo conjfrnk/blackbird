@@ -456,7 +456,12 @@ pub struct BBSnap {
     /// indicator to size its thumb proportional to total-buffer vs viewport.
     /// Appended here to preserve the existing offsets of cells_len/cells.
     pub history_size: u32,
-    pub _pad2: u32,
+    /// DECSCUSR cursor shape: 0 = block, 1 = bar/beam, 2 = underline, 3 = hidden.
+    /// Sourced from `Term::cursor_style().shape` at snapshot time. Callers
+    /// render according to this; a value of 3 means the renderer should skip
+    /// drawing the cursor entirely.
+    pub cursor_shape: u8,
+    pub _pad2b: [u8; 3],
 }
 
 unsafe impl Send for BBSnap {}
@@ -487,6 +492,7 @@ impl BBSnapOwned {
         display_offset: u16,
         history_size: u32,
         mode: u32,
+        cursor_shape: u8,
         cells: Vec<BBCell>,
     ) -> Box<BBSnapOwned> {
         let mut owned = Box::new(BBSnapOwned {
@@ -502,7 +508,8 @@ impl BBSnapOwned {
                 cells_len: cells.len(),
                 cells: std::ptr::null(),
                 history_size,
-                _pad2: 0,
+                cursor_shape,
+                _pad2b: [0; 3],
             },
             rc: AtomicUsize::new(1),
             cells_owned: cells,
@@ -748,7 +755,22 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let display_offset = grid.display_offset().min(u16::MAX as usize) as u16;
         let history_size = grid.history_size().min(u32::MAX as usize) as u32;
         let mode = extract_mode(bb.term.mode());
-        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), display_offset, history_size, mode, cells);
+        // Read current DECSCUSR cursor shape. alacritty_terminal 0.26 exposes
+        // `Term::cursor_style() -> CursorStyle` whose `.shape` is one of
+        // Block/Underline/Beam/HollowBlock/Hidden. We pack to a stable u8:
+        // 0 = block (default), 1 = bar/beam, 2 = underline, 3 = hidden.
+        // HollowBlock renders as block in v1 (no dedicated outline shape).
+        let cursor_shape: u8 = {
+            use alacritty_terminal::vte::ansi::CursorShape;
+            match bb.term.cursor_style().shape {
+                CursorShape::Block       => 0,
+                CursorShape::Beam        => 1,
+                CursorShape::Underline   => 2,
+                CursorShape::Hidden      => 3,
+                CursorShape::HollowBlock => 0,
+            }
+        };
+        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), display_offset, history_size, mode, cursor_shape, cells);
         // Expose the public `snap` field (first field at offset 0).
         let owned_ptr = Box::into_raw(owned);
         &(*owned_ptr).snap as *const BBSnap
@@ -1602,6 +1624,30 @@ mod tests {
     #[test]
     fn set_named_color_null_term_is_noop() {
         unsafe { bb_term_set_named_color(std::ptr::null_mut(), 0, 0xFFFFFF); }
+    }
+
+    #[test]
+    fn cursor_shape_defaults_to_block() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            let snap = bb_term_take_snapshot(term);
+            assert_eq!((*snap).cursor_shape, 0);
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn cursor_shape_set_by_decscusr() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            // DECSCUSR 5 = steady bar (beam).
+            bb_term_input(term, b"\x1B[5 q".as_ptr(), 5);
+            let snap = bb_term_take_snapshot(term);
+            assert_eq!((*snap).cursor_shape, 1);  // 1 = bar
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
     }
 
     #[test]
