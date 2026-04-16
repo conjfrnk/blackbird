@@ -22,6 +22,7 @@
 		B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE9625B30620C23E398A2EB /* BBTerm.swift */; };
 		B7DB0F3545C7837C281C722C /* TerminalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 489C78DC347E6FC5D826215C /* TerminalSession.swift */; };
 		BF0ADDAAD252C3F8D7FD3F79 /* CellInstance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C735D6264882444369074ACB /* CellInstance.swift */; };
+		C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E03399349EE1327FBF8F2F /* Selection.swift */; };
 		C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */; };
 		C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3C166E3043F25B8791103E /* App.swift */; };
 		CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4612F747000A5316DE0CD55F /* TerminalView.swift */; };
@@ -42,6 +43,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		00E03399349EE1327FBF8F2F /* Selection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Selection.swift; sourceTree = "<group>"; };
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
 		0AE9625B30620C23E398A2EB /* BBTerm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTerm.swift; sourceTree = "<group>"; };
 		0CFB9D9863A2F1D2ACD61D6E /* BlackbirdTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BlackbirdTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -152,6 +154,7 @@
 			children = (
 				5995252272D652667DB2D2D9 /* PTY.swift */,
 				7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */,
+				00E03399349EE1327FBF8F2F /* Selection.swift */,
 				489C78DC347E6FC5D826215C /* TerminalSession.swift */,
 				4612F747000A5316DE0CD55F /* TerminalView.swift */,
 			);
@@ -315,6 +318,7 @@
 				25F0BDE5FF93EEACCBE4DA8C /* MetalRenderer.swift in Sources */,
 				7462C02E74143E52FD628DA5 /* PTY.swift in Sources */,
 				C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */,
+				C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */,
 				552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */,
 				B7DB0F3545C7837C281C722C /* TerminalSession.swift in Sources */,
 				CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */,
