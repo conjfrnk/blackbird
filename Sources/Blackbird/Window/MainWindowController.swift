@@ -1,4 +1,5 @@
 import AppKit
+import Metal
 
 final class MainWindowController: NSWindowController, NSWindowDelegate {
 
@@ -21,7 +22,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
 
-        let view = TerminalView(frame: rect)
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            window.title = "Blackbird — no Metal device available"
+            return
+        }
+        let view = TerminalView(frame: rect, device: device)
         view.autoresizingMask = [.width, .height]
         window.contentView = view
         terminalView = view

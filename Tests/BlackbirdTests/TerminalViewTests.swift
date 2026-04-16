@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import Combine
+import Metal
 @testable import Blackbird
 
 final class TerminalViewTests: XCTestCase {
@@ -30,7 +31,8 @@ final class TerminalViewTests: XCTestCase {
             arguments: [],
             size: .init(cols: 80, rows: 24)
         )
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let device = MTLCreateSystemDefaultDevice()!
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
         view.session = session
 
         // Expand to a new size. The view computes grid from pixel size.
@@ -77,7 +79,8 @@ final class TerminalViewTests: XCTestCase {
         session.send(Data("hi\n".utf8))
         wait(for: [exp], timeout: 3.0)
 
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let device = MTLCreateSystemDefaultDevice()!
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
         view.session = session
         view.render(snapshot: seen!)  // must not crash
 
@@ -101,7 +104,8 @@ final class TerminalViewTests: XCTestCase {
             arguments: [],
             size: .init(cols: 80, rows: 24)
         )
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let device = MTLCreateSystemDefaultDevice()!
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
         view.session = session
 
         // First, send a known byte so we have a baseline the snapshot contains.
@@ -156,7 +160,8 @@ final class TerminalViewTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480))
+        let device = MTLCreateSystemDefaultDevice()!
+        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
         window.contentView = view
 
         let session = try TerminalSession.start(

@@ -1,6 +1,8 @@
 import AppKit
 import CoreText
 import Combine
+import Metal
+import MetalKit
 
 /// Fixed-cell metrics derived from a monospaced font.
 public struct CellMetrics {
@@ -34,31 +36,41 @@ public struct CellMetrics {
     }
 }
 
-/// NSView that draws a BBSnapshot via CoreText and forwards keyboard input
+/// MTKView that renders a BBSnapshot via Metal and forwards keyboard input
 /// through a KeyEncoder to a TerminalSession.
 ///
-/// Plan 2 scope: CoreText-per-character drawing (slow but correct). Plan 3
-/// replaces with a Metal glyph atlas for 120Hz performance.
-public final class TerminalView: NSView {
+/// Plan 3 Task 1: clears to solid black via MetalRenderer. Task 2+ adds
+/// shader pipeline, glyph atlas, and per-cell instancing for 120Hz performance.
+public final class TerminalView: MTKView, MTKViewDelegate {
 
     public weak var session: TerminalSession? {
         didSet { subscribeToSession() }
     }
 
+    public let renderer: MetalRenderer
     public let metrics: CellMetrics
     public let encoder = KeyEncoder()
 
     private var currentSnapshot: BBSnapshot?
     private var cancellables: [AnyCancellable] = []
 
-    public override init(frame frameRect: NSRect) {
+    public init(frame frameRect: NSRect, device: MTLDevice) {
+        guard let renderer = MetalRenderer(device: device) else {
+            fatalError("Metal device could not produce a command queue")
+        }
+        self.renderer = renderer
         self.metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
-        super.init(frame: frameRect)
-        self.wantsLayer = true
-        self.layer?.backgroundColor = NSColor.black.cgColor
+        super.init(frame: frameRect, device: device)
+        self.delegate = self
+        self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        self.colorPixelFormat = .bgra8Unorm
+        self.framebufferOnly = true
+        self.isPaused = false
+        self.enableSetNeedsDisplay = false
+        self.preferredFramesPerSecond = 120
     }
 
-    public required init?(coder: NSCoder) { fatalError("not supported") }
+    public required init(coder: NSCoder) { fatalError("not supported") }
 
     public override var acceptsFirstResponder: Bool { true }
 
@@ -81,60 +93,23 @@ public final class TerminalView: NSView {
         guard let session else { return }
         let grid = metrics.grid(forPixelSize: bounds.size)
         session.resize(to: .init(cols: UInt16(grid.cols), rows: UInt16(grid.rows)))
-        needsDisplay = true
     }
 
     // MARK: - Rendering
 
     public func render(snapshot: BBSnapshot) {
         self.currentSnapshot = snapshot
-        self.needsDisplay = true
+        // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.
     }
 
-    public override func draw(_ dirtyRect: NSRect) {
-        guard let snap = currentSnapshot, let ctx = NSGraphicsContext.current?.cgContext else {
-            return
-        }
+    // MARK: - MTKViewDelegate
 
-        ctx.setFillColor(NSColor.black.cgColor)
-        ctx.fill(dirtyRect)
-
-        ctx.setAllowsFontSmoothing(true)
-        ctx.setAllowsFontSubpixelQuantization(true)
-        ctx.setAllowsAntialiasing(true)
-        ctx.textMatrix = CGAffineTransform(scaleX: 1.0, y: 1.0)
-
-        let rows = min(snap.rows, Int(bounds.height / metrics.cellHeight))
-        let cols = min(snap.cols, Int(bounds.width  / metrics.cellWidth))
-
-        for row in 0..<rows {
-            let baselineFromTop = CGFloat(row) * metrics.cellHeight + metrics.ascent
-            let y = bounds.height - baselineFromTop
-            for col in 0..<cols {
-                guard let ch = snap.character(at: col, row: row), ch != " " else { continue }
-                let x = CGFloat(col) * metrics.cellWidth
-                drawCharacter(ch, at: CGPoint(x: x, y: y), in: ctx)
-            }
-        }
-
-        // Cursor.
-        if snap.cursorVisible, snap.cursorRow < rows, snap.cursorCol < cols {
-            let cx = CGFloat(snap.cursorCol) * metrics.cellWidth
-            let cy = bounds.height - (CGFloat(snap.cursorRow + 1) * metrics.cellHeight)
-            ctx.setStrokeColor(NSColor.white.cgColor)
-            ctx.setLineWidth(1.0)
-            ctx.stroke(CGRect(x: cx, y: cy, width: metrics.cellWidth, height: metrics.cellHeight))
-        }
+    public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        propagateResize()
     }
 
-    private func drawCharacter(_ ch: Character, at point: CGPoint, in ctx: CGContext) {
-        let attr = NSAttributedString(
-            string: String(ch),
-            attributes: [.font: metrics.font, .foregroundColor: NSColor.white]
-        )
-        let line = CTLineCreateWithAttributedString(attr)
-        ctx.textPosition = point
-        CTLineDraw(line, ctx)
+    public func draw(in view: MTKView) {
+        renderer.render(in: view)
     }
 
     // MARK: - Session observation

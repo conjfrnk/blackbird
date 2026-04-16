@@ -21,6 +21,7 @@ targets:
     sources:
       - Sources/Blackbird
       - Sources/BBCore
+      - Sources/Renderer
     preBuildScripts:
       - name: Build Rust core
         script: |
