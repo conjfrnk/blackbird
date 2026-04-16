@@ -1,10 +1,12 @@
 import AppKit
+import Combine
 import Metal
 
 final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
+    private var exitCancellable: AnyCancellable?
 
     init() {
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -31,6 +33,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.contentView = view
         terminalView = view
 
+        // Prevent the user from shrinking the window below a usable minimum.
+        // 20 cols × 4 rows is plenty for interactive use; stops layout
+        // degenerating into a single column where the shell becomes unusable.
+        let m = view.metrics
+        window.contentMinSize = NSSize(
+            width: m.cellWidth * 20,
+            height: m.cellHeight * 4
+        )
+
         // Keyboard input routes to the TerminalView.
         window.makeFirstResponder(view)
 
@@ -53,6 +64,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             )
             view.session = s
             self.session = s
+            // Close the window when the shell exits (typed `exit`, SIGHUP, etc).
+            // applicationShouldTerminateAfterLastWindowClosed then quits the app.
+            exitCancellable = s.$exitCode
+                .compactMap { $0 }
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.window?.performClose(nil)
+                }
         } catch {
             window?.title = "Blackbird — failed to start shell: \(error)"
         }

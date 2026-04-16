@@ -26,6 +26,12 @@ public final class PTY {
     /// Invoked with raw output bytes from the child. Called on the read queue.
     public var onBytes: ((Data) -> Void)?
 
+    /// Invoked once after the child process has exited and been reaped.
+    /// Fires whether the exit was natural (shell typed `exit`) or induced by
+    /// `terminate()` (which sends SIGHUP). Called on the main queue exactly
+    /// once. Nil by default; callers opt in to observe.
+    public var onExit: ((Int32) -> Void)?
+
     private let masterFD: Int32
     private let childPID: pid_t
     private let readQueue = DispatchQueue(label: "blackbird.pty.read", qos: .userInitiated)
@@ -126,6 +132,11 @@ public final class PTY {
             // the child closed the slave end, so it has exited or is about to.
             var status: Int32 = 0
             _ = waitpid(self.childPID, &status, 0)
+            // Extract the exit code if the child exited normally; else -1.
+            let exitCode: Int32 = (status & 0x7f == 0) ? ((status >> 8) & 0xff) : -1
+            DispatchQueue.main.async { [weak self] in
+                self?.onExit?(exitCode)
+            }
         }
     }
 

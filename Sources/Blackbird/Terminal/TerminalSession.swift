@@ -16,6 +16,10 @@ public final class TerminalSession: ObservableObject {
     @Published public private(set) var snapshot: BBSnapshot?
     @Published public private(set) var title: String?
     @Published public private(set) var bellCounter: UInt64 = 0
+    /// Set once after the shell process has exited. The value is the child's
+    /// exit code (-1 for abnormal termination). Observers (e.g. the window
+    /// controller) close the window in response.
+    @Published public private(set) var exitCode: Int32?
 
     private let bbterm: BBTerm
     private let pty: PTY
@@ -88,6 +92,11 @@ public final class TerminalSession: ObservableObject {
             self.coreQueue.async {
                 self.feed(data)
             }
+        }
+
+        // When the child exits (natural or SIGHUP), publish the exit code.
+        pty.onExit = { [weak self] code in
+            self?.exitCode = code
         }
 
         // Route bbterm events (title/bell/fatal) to published properties.
