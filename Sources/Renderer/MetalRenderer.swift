@@ -15,7 +15,7 @@ public final class MetalRenderer {
     private var instanceBuffer: MTLBuffer
     private var instanceCapacity: Int
 
-    public init?(device: MTLDevice) {
+    public init?(device: MTLDevice, metrics: CellMetrics) {
         guard let queue = device.makeCommandQueue() else { return nil }
         guard let library = device.makeDefaultLibrary() else { return nil }
         guard let vertexFn = library.makeFunction(name: "vertex_cell"),
@@ -44,7 +44,6 @@ public final class MetalRenderer {
         // Cursor is opaque white — no blending.
         guard let cursorPSO = try? device.makeRenderPipelineState(descriptor: cursorDesc) else { return nil }
 
-        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         guard let atlas = GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 1024) else {
             return nil
         }
@@ -112,13 +111,24 @@ public final class MetalRenderer {
         else { return }
 
         if let snap = snapshot {
+            // Viewport and cell sizes are in points, not pixels. NDC conversion
+            // in the shader divides point positions by point viewport, giving
+            // a scale-independent result that the hardware rasterizes to the
+            // drawable's pixel space. Using drawableSize here would double-scale
+            // on Retina and render text at half size.
+            let viewportPoints = SIMD2<Float>(
+                Float(view.bounds.size.width),
+                Float(view.bounds.size.height)
+            )
+            let cellSizePoints = SIMD2<Float>(
+                Float(metrics.cellWidth),
+                Float(metrics.cellHeight)
+            )
             let instanceCount = buildInstances(snapshot: snap)
             if instanceCount > 0 {
                 var uniforms = FrameUniforms(
-                    viewportPx: SIMD2<Float>(Float(view.drawableSize.width),
-                                             Float(view.drawableSize.height)),
-                    cellSizePx: SIMD2<Float>(Float(metrics.cellWidth),
-                                             Float(metrics.cellHeight))
+                    viewportPx: viewportPoints,
+                    cellSizePx: cellSizePoints
                 )
                 encoder.setRenderPipelineState(pipelineState)
                 encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
@@ -133,12 +143,10 @@ public final class MetalRenderer {
             }
             if snap.cursorVisible, snap.cursorCol < snap.cols, snap.cursorRow < snap.rows {
                 var cu = CursorUniforms(
-                    viewportPx: SIMD2<Float>(Float(view.drawableSize.width),
-                                             Float(view.drawableSize.height)),
+                    viewportPx: viewportPoints,
                     cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth),
                                               Float(snap.cursorRow) * Float(metrics.cellHeight)),
-                    cellSizePx: SIMD2<Float>(Float(metrics.cellWidth),
-                                             Float(metrics.cellHeight)),
+                    cellSizePx: cellSizePoints,
                     color: SIMD4<Float>(1, 1, 1, 1),
                     strokeWidthPx: 1.0,
                     _pad1: 0,

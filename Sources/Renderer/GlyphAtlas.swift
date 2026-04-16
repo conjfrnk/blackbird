@@ -46,7 +46,9 @@ public final class GlyphAtlas {
             mipmapped: false
         )
         desc.usage = [.shaderRead]
-        desc.storageMode = .managed
+        // Shared storage avoids explicit didModifyRange synchronization and
+        // works identically on Apple Silicon unified memory and Intel Macs.
+        desc.storageMode = .shared
         guard let tex = device.makeTexture(descriptor: desc) else { return nil }
         self.texture = tex
 

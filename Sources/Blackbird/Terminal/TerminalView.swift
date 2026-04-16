@@ -60,11 +60,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     #endif
 
     public init(frame frameRect: NSRect, device: MTLDevice) {
-        guard let renderer = MetalRenderer(device: device) else {
+        // TerminalView is the authoritative owner of CellMetrics; the renderer
+        // shares this same instance so layout and rendering never diverge.
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        guard let renderer = MetalRenderer(device: device, metrics: metrics) else {
             fatalError("Metal device could not produce a command queue")
         }
         self.renderer = renderer
-        self.metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        self.metrics = metrics
         super.init(frame: frameRect, device: device)
         self.delegate = self
         self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)

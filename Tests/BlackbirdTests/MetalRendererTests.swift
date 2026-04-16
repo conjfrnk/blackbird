@@ -13,7 +13,8 @@ final class MetalRendererTests: XCTestCase {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("no Metal device available")
         }
-        let renderer = MetalRenderer(device: device)
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = MetalRenderer(device: device, metrics: metrics)
         XCTAssertNotNil(renderer)
         XCTAssertTrue(renderer!.device === device)
     }
@@ -23,7 +24,8 @@ final class MetalRendererTests: XCTestCase {
             throw XCTSkip("no Metal device available")
         }
         // If init returns non-nil, both the library and the pipeline state loaded.
-        let renderer = MetalRenderer(device: device)
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = MetalRenderer(device: device, metrics: metrics)
         XCTAssertNotNil(renderer)
     }
 
@@ -31,7 +33,8 @@ final class MetalRendererTests: XCTestCase {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("no Metal device")
         }
-        let renderer = try XCTUnwrap(MetalRenderer(device: device))
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         // Create a BBTerm directly, feed bytes, take snapshot. No MTKView
         // drawable available in tests — we only verify atlas lookup doesn't crash.
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
