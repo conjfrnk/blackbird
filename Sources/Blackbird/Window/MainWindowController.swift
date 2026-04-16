@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import Metal
 
-final class MainWindowController: NSWindowController, NSWindowDelegate {
+final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
 
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
@@ -178,10 +178,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.toggleTabBar(sender)
     }
 
-    override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(toggleTabBar(_:)) {
             return hasMultipleTabs
         }
-        return super.validateMenuItem(menuItem)
+        return true
     }
 }
