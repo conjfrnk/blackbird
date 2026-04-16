@@ -57,3 +57,53 @@ fragment float4 fragment_cell(
     // White glyph on black background.
     return float4(1.0, 1.0, 1.0, coverage);
 }
+
+struct CursorUniforms {
+    float2 viewportPx;
+    float2 cursorPosPx;
+    float2 cellSizePx;
+    float4 color;
+    float strokeWidthPx;
+    float _pad1;
+    float2 _pad2;
+};
+
+struct CursorOut {
+    float4 position [[position]];
+    float2 localPx;
+};
+
+vertex CursorOut vertex_cursor(
+    uint vid [[vertex_id]],
+    constant CursorUniforms& u [[buffer(0)]]
+) {
+    float2 corners[6] = {
+        float2(0, 0), float2(1, 0), float2(0, 1),
+        float2(1, 0), float2(1, 1), float2(0, 1)
+    };
+    float2 cornerPx = u.cursorPosPx + corners[vid] * u.cellSizePx;
+    float2 ndc;
+    ndc.x = (cornerPx.x / u.viewportPx.x) * 2.0 - 1.0;
+    ndc.y = 1.0 - (cornerPx.y / u.viewportPx.y) * 2.0;
+
+    CursorOut out;
+    out.position = float4(ndc, 0, 1);
+    out.localPx = corners[vid] * u.cellSizePx;
+    return out;
+}
+
+fragment float4 fragment_cursor(
+    CursorOut in [[stage_in]],
+    constant CursorUniforms& u [[buffer(0)]]
+) {
+    float2 p = in.localPx;
+    float2 s = u.cellSizePx;
+    // Inside the stroke band if any edge is within strokeWidthPx.
+    bool stroke =
+        p.x < u.strokeWidthPx ||
+        p.y < u.strokeWidthPx ||
+        (s.x - p.x) < u.strokeWidthPx ||
+        (s.y - p.y) < u.strokeWidthPx;
+    if (!stroke) discard_fragment();
+    return u.color;
+}

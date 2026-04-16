@@ -7,6 +7,7 @@ public final class MetalRenderer {
     public let device: MTLDevice
     public let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
+    private let cursorPipelineState: MTLRenderPipelineState
     public let atlas: GlyphAtlas
     public let metrics: CellMetrics
 
@@ -34,6 +35,15 @@ public final class MetalRenderer {
 
         guard let pso = try? device.makeRenderPipelineState(descriptor: desc) else { return nil }
 
+        guard let cursorVertex = library.makeFunction(name: "vertex_cursor"),
+              let cursorFragment = library.makeFunction(name: "fragment_cursor") else { return nil }
+        let cursorDesc = MTLRenderPipelineDescriptor()
+        cursorDesc.vertexFunction = cursorVertex
+        cursorDesc.fragmentFunction = cursorFragment
+        cursorDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
+        // Cursor is opaque white — no blending.
+        guard let cursorPSO = try? device.makeRenderPipelineState(descriptor: cursorDesc) else { return nil }
+
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         guard let atlas = GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 1024) else {
             return nil
@@ -49,6 +59,7 @@ public final class MetalRenderer {
         self.device = device
         self.commandQueue = queue
         self.pipelineState = pso
+        self.cursorPipelineState = cursorPSO
         self.atlas = atlas
         self.metrics = metrics
         self.instanceBuffer = buf
@@ -120,6 +131,24 @@ public final class MetalRenderer {
                     instanceCount: instanceCount
                 )
             }
+            if snap.cursorVisible, snap.cursorCol < snap.cols, snap.cursorRow < snap.rows {
+                var cu = CursorUniforms(
+                    viewportPx: SIMD2<Float>(Float(view.drawableSize.width),
+                                             Float(view.drawableSize.height)),
+                    cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth),
+                                              Float(snap.cursorRow) * Float(metrics.cellHeight)),
+                    cellSizePx: SIMD2<Float>(Float(metrics.cellWidth),
+                                             Float(metrics.cellHeight)),
+                    color: SIMD4<Float>(1, 1, 1, 1),
+                    strokeWidthPx: 1.0,
+                    _pad1: 0,
+                    _pad2: .zero
+                )
+                encoder.setRenderPipelineState(cursorPipelineState)
+                encoder.setVertexBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
+                encoder.setFragmentBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
+            }
         }
 
         encoder.endEncoding()
@@ -131,4 +160,14 @@ public final class MetalRenderer {
 struct FrameUniforms {
     var viewportPx: SIMD2<Float>
     var cellSizePx: SIMD2<Float>
+}
+
+struct CursorUniforms {
+    var viewportPx: SIMD2<Float>
+    var cursorPosPx: SIMD2<Float>
+    var cellSizePx: SIMD2<Float>
+    var color: SIMD4<Float>
+    var strokeWidthPx: Float
+    var _pad1: Float
+    var _pad2: SIMD2<Float>
 }
