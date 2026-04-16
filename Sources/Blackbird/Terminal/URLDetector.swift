@@ -37,7 +37,7 @@ public enum URLDetector {
                 guard var r = result?.range else { return }
                 while r.length > 0 {
                     let last = nsLine.character(at: r.location + r.length - 1)
-                    if ".,);:]".utf16.contains(last) { r.length -= 1 } else { break }
+                    if ".,);:]}>'\"".utf16.contains(last) { r.length -= 1 } else { break }
                 }
                 guard r.length > 0 else { return }
                 let substring = nsLine.substring(with: r)

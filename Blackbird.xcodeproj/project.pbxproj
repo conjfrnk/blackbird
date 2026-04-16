@@ -15,6 +15,7 @@
 		25F0BDE5FF93EEACCBE4DA8C /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 472AADACAE02B9A6CB01750B /* MetalRenderer.swift */; };
 		26551D9D45C969B410CFE79C /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51A54ACD363A09E47E79F62 /* MainWindowController.swift */; };
 		2981BF48385C26CDAFC92476 /* URLDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1D8A560291CE5E7A0CAD11 /* URLDetector.swift */; };
+		3B86A68789792CCB0FB4F990 /* WordRangeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35DF65A02FBCBD6EC7C6FB15 /* WordRangeTests.swift */; };
 		3C3768AC47652608F2DBE7BF /* ThemeResolutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */; };
 		405BF1745156AB5C7AF12842 /* KeyEncoderExtendedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */; };
 		4235C2A5FFE2A1329E886E96 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DF8E87FBF674AD466760D74A /* AppKit.framework */; };
@@ -23,6 +24,7 @@
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
 		7462C02E74143E52FD628DA5 /* PTY.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5995252272D652667DB2D2D9 /* PTY.swift */; };
 		75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F455C591EC38A7B3955CD5B8 /* FindBar.swift */; };
+		7ACE07558D328D4B0273A975 /* URLDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */; };
 		7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */; };
 		82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11194E0650067380506F53B2 /* BBTermTests.swift */; };
 		8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82C57C6702E92EB2488AC798 /* Theme.swift */; };
@@ -72,6 +74,7 @@
 		15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasTests.swift; sourceTree = "<group>"; };
 		157ABF0CFF0DDECE748E0149 /* HackNerdFontMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-Bold.ttf"; sourceTree = "<group>"; };
 		24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRendererTests.swift; sourceTree = "<group>"; };
+		35DF65A02FBCBD6EC7C6FB15 /* WordRangeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordRangeTests.swift; sourceTree = "<group>"; };
 		3F7D804048B62FEB3D66F4F0 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		4612F747000A5316DE0CD55F /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		472AADACAE02B9A6CB01750B /* MetalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRenderer.swift; sourceTree = "<group>"; };
@@ -84,6 +87,7 @@
 		720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderExtendedTests.swift; sourceTree = "<group>"; };
 		75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewTests.swift; sourceTree = "<group>"; };
 		75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlas.swift; sourceTree = "<group>"; };
+		7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetectorTests.swift; sourceTree = "<group>"; };
 		7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollIndicator.swift; sourceTree = "<group>"; };
 		7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYTests.swift; sourceTree = "<group>"; };
 		82C57C6702E92EB2488AC798 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
@@ -159,6 +163,8 @@
 				A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */,
 				C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */,
 				D766892D203AEA71CC70B95C /* TranslucencyCurveTests.swift */,
+				7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */,
+				35DF65A02FBCBD6EC7C6FB15 /* WordRangeTests.swift */,
 			);
 			path = BlackbirdTests;
 			sourceTree = "<group>";
@@ -448,6 +454,8 @@
 				F8C99250E001E2D862D19244 /* TestHostTermination.swift in Sources */,
 				3C3768AC47652608F2DBE7BF /* ThemeResolutionTests.swift in Sources */,
 				21EF977F67811E7BCCE03C22 /* TranslucencyCurveTests.swift in Sources */,
+				7ACE07558D328D4B0273A975 /* URLDetectorTests.swift in Sources */,
+				3B86A68789792CCB0FB4F990 /* WordRangeTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
