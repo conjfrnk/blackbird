@@ -77,3 +77,43 @@ public func displayRow(for bufferLine: Int32, displayOffset: Int, rows: Int) -> 
     guard row >= 0 && row < rows else { return nil }
     return row
 }
+
+/// Characters that break word runs for double-click selection. Matches
+/// Terminal.app / iTerm2 defaults — anything that feels like punctuation
+/// or whitespace stops the word.
+private let wordBreakers: Set<Character> = [
+    " ", "\t", "\n", "\r",
+    ".", ",", ";", ":",
+    "(", ")", "[", "]", "{", "}",
+    "'", "\"", "`", "<", ">", "|",
+    "=", "&", "$", "#", "@", "!", "?",
+]
+
+/// Extend `point` outward along its line until a word-break character
+/// is hit. Returns `(start, end)` inclusive, or `nil` when the point is
+/// not on a line currently visible in `snapshot` (required because
+/// `BBSnapshot.character(at:row:)` is display-row addressed).
+public func wordRange(
+    around point: BufferPoint,
+    in snapshot: BBSnapshot,
+    displayOffset: Int
+) -> (BufferPoint, BufferPoint)? {
+    guard let row = displayRow(for: point.line, displayOffset: displayOffset, rows: snapshot.rows) else {
+        return nil
+    }
+    let cols = snapshot.cols
+    func ch(_ c: Int) -> Character? { snapshot.character(at: c, row: row) }
+
+    // Point is on a blank / break — select just that cell rather than
+    // spreading across adjacent whitespace.
+    guard let here = ch(point.col), !wordBreakers.contains(here) else {
+        return (point, point)
+    }
+
+    var l = point.col
+    while l > 0, let c = ch(l - 1), !wordBreakers.contains(c) { l -= 1 }
+    var r = point.col
+    while r + 1 < cols, let c = ch(r + 1), !wordBreakers.contains(c) { r += 1 }
+
+    return (BufferPoint(line: point.line, col: l), BufferPoint(line: point.line, col: r))
+}

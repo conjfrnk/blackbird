@@ -534,14 +534,23 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     /// Grow the current `.word` or `.line` selection outward from `anchor`.
-    /// Task 4 fills in word-boundary logic; for now, handle `.line` (and
-    /// leave `.word` to collapse to a single cell until Task 4).
+    /// `.word` uses the shared `wordRange(around:in:displayOffset:)` helper;
+    /// `.line` selects the entire grid line.
     private func expandSelectionUnderAnchor() {
         guard var sel = selection, let snap = currentSnapshot else { return }
-        if sel.mode == .line {
+        switch sel.mode {
+        case .word:
+            if let (a, b) = wordRange(around: sel.anchor, in: snap, displayOffset: snap.displayOffset) {
+                sel.anchor = a
+                sel.cursor = b
+                selection = sel
+            }
+        case .line:
             sel.anchor = BufferPoint(line: sel.anchor.line, col: 0)
             sel.cursor = BufferPoint(line: sel.cursor.line, col: snap.cols - 1)
             selection = sel
+        default:
+            break
         }
     }
 
