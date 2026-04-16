@@ -8,8 +8,8 @@ public final class MetalRenderer {
     public let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
     private let cursorPipelineState: MTLRenderPipelineState
-    public let atlas: GlyphAtlas
-    public let metrics: CellMetrics
+    public var atlas: GlyphAtlas
+    public var metrics: CellMetrics
 
     // Preallocated instance buffer. Growable via reallocateInstanceBuffer.
     private var instanceBuffer: MTLBuffer
@@ -72,6 +72,16 @@ public final class MetalRenderer {
         self.metrics = metrics
         self.instanceBuffer = buf
         self.instanceCapacity = startCap
+    }
+
+    /// Rebuild metrics + atlas for a new font size. Safe to call from the
+    /// main thread — allocations happen synchronously, but the next draw
+    /// picks up the new atlas immediately.
+    public func reconfigure(metrics newMetrics: CellMetrics, scale: CGFloat) {
+        self.metrics = newMetrics
+        if let a = GlyphAtlas(device: device, metrics: newMetrics, capacityGlyphs: 1024, scale: scale) {
+            self.atlas = a
+        }
     }
 
     /// Write cell instance data into `instanceBuffer`. Returns the count

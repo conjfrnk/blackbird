@@ -48,8 +48,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public let renderer: MetalRenderer
-    public let metrics: CellMetrics
+    public private(set) var metrics: CellMetrics
     public let encoder = KeyEncoder()
+
+    private var prefsCancellable: AnyCancellable?
 
     private var currentSnapshot: BBSnapshot?
     private var cancellables: [AnyCancellable] = []
@@ -108,6 +110,44 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // never swallows mouse events). Positioned in layout() so it tracks
         // the bottom inset shared with the grid.
         addSubview(scrollIndicator)
+
+        prefsCancellable = Preferences.shared.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.syncFontFromPreferences() }
+            }
+    }
+
+    /// Rebuild metrics/atlas when Preferences.fontName or fontSize changes.
+    /// Called on every objectWillChange emission; compares against the
+    /// currently-applied font to avoid redundant atlas rebuilds.
+    private func syncFontFromPreferences() {
+        let p = Preferences.shared
+        let wantName = p.fontName
+        let wantSize = CGFloat(p.fontSize)
+        if metrics.font.familyName == wantName && metrics.font.pointSize == wantSize {
+            return
+        }
+        let newFont: NSFont
+        if let f = NSFont(name: wantName, size: wantSize) {
+            newFont = f
+        } else {
+            newFont = .monospacedSystemFont(ofSize: wantSize, weight: .regular)
+        }
+        let newMetrics = CellMetrics(font: newFont)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        self.metrics = newMetrics
+        renderer.reconfigure(metrics: newMetrics, scale: scale)
+        // Window resize increments should follow the new cell size too.
+        window?.contentResizeIncrements = NSSize(
+            width: newMetrics.cellWidth,
+            height: newMetrics.cellHeight
+        )
+        // Force a grid recomputation on the next layout — propagateResize
+        // compares against lastPropagatedSize, so clear it.
+        lastPropagatedSize = nil
+        propagateResize()
+        // Re-layout the scroll indicator (its Y depends on cellHeight).
+        needsLayout = true
     }
 
     public override func layout() {
