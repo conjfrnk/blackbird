@@ -17,4 +17,13 @@ final class MetalRendererTests: XCTestCase {
         XCTAssertNotNil(renderer)
         XCTAssertTrue(renderer!.device === device)
     }
+
+    func test_rendererPipelineStateLoads() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device available")
+        }
+        // If init returns non-nil, both the library and the pipeline state loaded.
+        let renderer = MetalRenderer(device: device)
+        XCTAssertNotNil(renderer)
+    }
 }

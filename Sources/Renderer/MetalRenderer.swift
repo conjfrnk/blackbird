@@ -1,24 +1,36 @@
 import Metal
 import MetalKit
 
-/// Owns the Metal rendering pipeline for a single TerminalView. Stateful: the
-/// caller (TerminalView's MTKView delegate) calls `render(in:)` each frame.
-///
-/// Plan 3 Task 1 scope: clears the drawable to black via MTKView's clearColor.
-/// Subsequent tasks add shader pipeline, glyph atlas, per-cell instancing.
 public final class MetalRenderer {
 
     public let device: MTLDevice
     public let commandQueue: MTLCommandQueue
+    private let pipelineState: MTLRenderPipelineState
 
     public init?(device: MTLDevice) {
         guard let queue = device.makeCommandQueue() else { return nil }
+        guard let library = device.makeDefaultLibrary() else {
+            // Xcode compiles .metal files into the default library automatically.
+            return nil
+        }
+        guard let vertexFn = library.makeFunction(name: "vertex_solid"),
+              let fragmentFn = library.makeFunction(name: "fragment_solid")
+        else { return nil }
+
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = vertexFn
+        desc.fragmentFunction = fragmentFn
+        desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+
+        guard let pso = try? device.makeRenderPipelineState(descriptor: desc) else {
+            return nil
+        }
+
         self.device = device
         self.commandQueue = queue
+        self.pipelineState = pso
     }
 
-    /// Issue a single frame's draw commands for `view`. No-op if the view has
-    /// no current drawable (window not yet on screen).
     public func render(in view: MTKView) {
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
@@ -26,9 +38,16 @@ public final class MetalRenderer {
               let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
         else { return }
 
-        // Plan 3 Task 1: just clear. Future tasks insert real geometry here.
+        var uniforms = Uniforms(clearColor: SIMD4<Float>(0.04, 0.04, 0.04, 1.0))
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.size, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
         buffer.present(drawable)
         buffer.commit()
     }
+}
+
+struct Uniforms {
+    var clearColor: SIMD4<Float>
 }
