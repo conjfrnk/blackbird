@@ -24,7 +24,6 @@
 		92B08E10BCF3923F92AA994B /* PTYTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */; };
 		92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */; };
 		9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */; };
-		9BF7FC78BC5AC4C36F4B62AA /* ShellExitOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72BBB64E82995338A81A5385 /* ShellExitOverlay.swift */; };
 		AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6E41D23703A7FE0195559D6 /* KeyEncoder.swift */; };
 		B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE9625B30620C23E398A2EB /* BBTerm.swift */; };
 		B7DB0F3545C7837C281C722C /* TerminalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 489C78DC347E6FC5D826215C /* TerminalSession.swift */; };
@@ -68,7 +67,6 @@
 		5995252272D652667DB2D2D9 /* PTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTY.swift; sourceTree = "<group>"; };
 		5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
 		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
-		72BBB64E82995338A81A5385 /* ShellExitOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellExitOverlay.swift; sourceTree = "<group>"; };
 		75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewTests.swift; sourceTree = "<group>"; };
 		75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlas.swift; sourceTree = "<group>"; };
 		7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollIndicator.swift; sourceTree = "<group>"; };
@@ -232,7 +230,6 @@
 			isa = PBXGroup;
 			children = (
 				E51A54ACD363A09E47E79F62 /* MainWindowController.swift */,
-				72BBB64E82995338A81A5385 /* ShellExitOverlay.swift */,
 			);
 			path = Window;
 			sourceTree = "<group>";
@@ -358,7 +355,6 @@
 				C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */,
 				EEA685668C43AB5E5DECAAED /* SettingsView.swift in Sources */,
 				552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */,
-				9BF7FC78BC5AC4C36F4B62AA /* ShellExitOverlay.swift in Sources */,
 				B7DB0F3545C7837C281C722C /* TerminalSession.swift in Sources */,
 				CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */,
 				8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */,
