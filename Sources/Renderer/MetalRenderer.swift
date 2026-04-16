@@ -16,6 +16,24 @@ public final class MetalRenderer {
     private var instanceCapacity: Int
 
     private var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
+    /// When a cell's resolved bg equals this value, we treat it as "default
+    /// background" and skip drawing a bg quad. That lets the transparent
+    /// clearColor show through — the window-level transparency effect.
+    /// `0xFFFFFFFF` acts as a sentinel meaning "no theme bg configured yet".
+    private var defaultBgRgb: UInt32 = 0xFFFFFFFF
+    /// Overall opacity applied to non-default cell backgrounds. 1.0 keeps
+    /// them solid; lower values let the framebuffer (clearColor) peek
+    /// through — used when the user wants even vim status lines to be
+    /// translucent (keepBgOpaque == false in iTerm2 terms).
+    private var backgroundOpacity: Float = 1.0
+    private var keepBgOpaque: Bool = true
+
+    public func setDefaultBgRgb(_ rgb: UInt32) { defaultBgRgb = rgb }
+
+    public func setBackgroundOpacity(_ opacity: Float, keepBgOpaque: Bool) {
+        self.backgroundOpacity = opacity
+        self.keepBgOpaque = keepBgOpaque
+    }
 
     public func setCursorColor(rgb: UInt32) {
         let r = Float((rgb >> 16) & 0xFF) / 255.0
@@ -113,8 +131,31 @@ public final class MetalRenderer {
                 let cell = cellsPtr[idx]
                 let scalar = cell.ch
                 let fg = Self.rgbToSIMD(cell.fg)
-                let bg = Self.rgbToSIMD(cell.bg)
-                let hasBg = cell.bg != 0x000000  // non-black bg → need to render the cell
+                var bg = Self.rgbToSIMD(cell.bg)
+                // Treat the theme's default bg as "no bg" so the transparent
+                // clearColor can show through. Cells with explicit colors
+                // (vim highlights, status lines, syntax bg) still draw their
+                // bg quad; whether they stay solid or become translucent is
+                // a user choice (keepBgOpaque).
+                let isDefaultBg = cell.bg == defaultBgRgb
+                let hasBg = !isDefaultBg && cell.bg != 0x000000
+
+                // Determine the bg alpha for what we'll write into
+                // CellInstance:
+                //   - Default bg → alpha 0 so the shader's mix() produces a
+                //     transparent result where the glyph doesn't cover —
+                //     clearColor (already transparent) shows through.
+                //   - Explicit bg, keepBgOpaque on → alpha 1 (unchanged).
+                //   - Explicit bg, keepBgOpaque off → alpha = opacity.
+                let bgAlpha: Float
+                if isDefaultBg {
+                    bgAlpha = 0.0
+                } else if keepBgOpaque {
+                    bgAlpha = 1.0
+                } else {
+                    bgAlpha = backgroundOpacity
+                }
+                bg.w = bgAlpha
 
                 let bufferLine = Int32(row) - Int32(snapshot.displayOffset)
                 let selected = isSelected(bufferLine, col)

@@ -34,6 +34,18 @@ public final class Preferences: ObservableObject {
     @AppStorage("confirmClose")   public var confirmClose: Bool = true
     @AppStorage("autoUpdateChecks") public var autoUpdateChecks: Bool = false
     @AppStorage("osc52Enabled")   public var osc52Enabled: Bool = true
+    /// Window transparency percent, 0…100 (iTerm2 scale). 0 = opaque, higher
+    /// = more see-through. Resolved opacity = 1 - transparency/100.
+    @AppStorage("transparency")   public var transparency: Double = 9
+    /// When on, cells with explicit background colors (vim status lines,
+    /// syntax highlight bg) stay fully opaque even while the window is
+    /// transparent. Matches iTerm2's "Keep background colors opaque" flag.
+    @AppStorage("keepBgOpaque")   public var keepBgOpaque: Bool = false
+    /// When on, apply a CoreGraphics background-blur behind the window so
+    /// the desktop is legibly blurred rather than sharp-transparent.
+    @AppStorage("blurEnabled")    public var blurEnabled: Bool = true
+    /// Blur radius, 0…30. Higher = more blur.
+    @AppStorage("blurRadius")     public var blurRadius: Double = 4
 
     public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }
