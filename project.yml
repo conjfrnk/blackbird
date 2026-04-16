@@ -51,7 +51,7 @@ targets:
         CFBundleDisplayName: Blackbird
         CFBundleShortVersionString: "0.1.0"
         LSMinimumSystemVersion: "14.0"
-        NSHumanReadableCopyright: ""
+        NSHumanReadableCopyright: "Copyright © 2026 Connor Frank. MIT License."
         NSSupportsAutomaticTermination: true
         NSSupportsSuddenTermination: true
         LSApplicationCategoryType: public.app-category.developer-tools
