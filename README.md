@@ -28,7 +28,7 @@ Default, Gruvbox, Solarized, Catppuccin. Each with light and dark variants. "Aut
 
 ## Status
 
-In development. Plan 2 (Minimum viable app) complete — launches an AppKit window running your login shell, renders output via CoreText, window resize propagates to the PTY, OSC 2 title updates the window, ⌘C/⌃C are entirely separate. No tabs, no Metal GPU renderer, no themes yet (Plans 3-8).
+In development. Plan 3 (Metal renderer) complete — terminal rendering now uses a Metal glyph atlas with per-cell instanced drawing at 120 Hz on ProMotion. Plan 2's visible behavior is unchanged (white-on-black, single window, login shell, OSC 2 title, ⌘C/⌃C separated); under the hood, CoreText per-character drawing has been replaced with a single instanced draw call per frame. Plans 4-8 remain: tabs + keybindings (Plan 4), settings UI + themes (Plan 5), selection + find + clipboard (Plan 6), test infrastructure (Plan 7), distribution (Plan 8).
 
 ## License
 
