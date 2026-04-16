@@ -62,6 +62,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
     private var isDragging = false
 
+    private var findBar: FindBar?
+    private var findMatches: [(line: Int32, startCol: Int, endCol: Int)] = []
+    private var findCurrentIndex: Int = 0
+    private var findQuery: String = ""
+
     #if DEBUG
     private var frameCount = 0
     private var lastFrameLogTime = Date()
@@ -421,12 +426,99 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         selection = Selection(anchor: top, cursor: bot, mode: .character)
     }
 
+    @objc public func performFindPanelAction(_ sender: Any?) {
+        // Cocoa's Edit > Find submenu maps ⌘F to this selector.
+        if findBar == nil { installFindBar() }
+        findBar?.focus()
+    }
+
+    @objc public func performFindNextAction(_ sender: Any?)     { advanceFind(direction: .forward) }
+    @objc public func performFindPreviousAction(_ sender: Any?) { advanceFind(direction: .backward) }
+
+    private func installFindBar() {
+        let h: CGFloat = 32
+        let bar = FindBar(frame: NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h))
+        bar.autoresizingMask = [.width, .minYMargin]
+        bar.delegate = self
+        addSubview(bar)
+        findBar = bar
+    }
+
+    fileprivate func advanceFind(direction: FindBar.Direction) {
+        guard !findMatches.isEmpty else { return }
+        switch direction {
+        case .forward:  findCurrentIndex = (findCurrentIndex + 1) % findMatches.count
+        case .backward: findCurrentIndex = (findCurrentIndex - 1 + findMatches.count) % findMatches.count
+        }
+        findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
+        highlightCurrentMatch()
+    }
+
+    fileprivate func performSearch(query: String) {
+        findQuery = query
+        findMatches.removeAll()
+        findCurrentIndex = 0
+        guard let session, let snap = currentSnapshot, !query.isEmpty else {
+            findBar?.setMatchCount(0, of: 0)
+            selection = nil
+            return
+        }
+        // Search the entire retained buffer: from -historySize through rows-1.
+        // textRange clamps out-of-range lines itself.
+        let topLine: Int32 = -Int32(snap.historySize)
+        let bottomLine = Int32(snap.rows - 1)
+        if topLine > bottomLine { return }
+        for ln in topLine...bottomLine {
+            let hay = session.textRange(
+                from: BufferPoint(line: ln, col: 0),
+                to:   BufferPoint(line: ln, col: snap.cols - 1),
+                rectangular: false
+            )
+            guard !hay.isEmpty else { continue }
+            var cursor = hay.startIndex
+            while let r = hay.range(of: query, options: [.caseInsensitive], range: cursor..<hay.endIndex) {
+                let startCol = hay.distance(from: hay.startIndex, to: r.lowerBound)
+                let endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
+                findMatches.append((line: ln, startCol: startCol, endCol: endCol))
+                cursor = r.upperBound
+            }
+        }
+        findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
+        highlightCurrentMatch()
+    }
+
+    private func highlightCurrentMatch() {
+        guard !findMatches.isEmpty, findCurrentIndex < findMatches.count else {
+            selection = nil
+            return
+        }
+        let m = findMatches[findCurrentIndex]
+        selection = Selection(
+            anchor: BufferPoint(line: m.line, col: m.startCol),
+            cursor: BufferPoint(line: m.line, col: m.endCol),
+            mode: .character
+        )
+        // Scroll the match into view. displayOffset is how many lines
+        // the viewport is above the live grid; positive delta to scroll()
+        // means "show older content" (upward).
+        guard let snap = currentSnapshot else { return }
+        let displayRowForMatch = Int(m.line) + snap.displayOffset
+        if displayRowForMatch < 0 {
+            session?.scroll(delta: Int32(-displayRowForMatch))
+        } else if displayRowForMatch >= snap.rows {
+            session?.scroll(delta: Int32(snap.rows - 1 - displayRowForMatch))
+        }
+    }
+
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
-        case #selector(copy(_:)):      return selection != nil
-        case #selector(selectAll(_:)): return currentSnapshot != nil
-        case #selector(paste(_:)):     return NSPasteboard.general.string(forType: .string) != nil
-        default: return true
+        case #selector(copy(_:)):                      return selection != nil
+        case #selector(selectAll(_:)):                 return currentSnapshot != nil
+        case #selector(paste(_:)):                     return NSPasteboard.general.string(forType: .string) != nil
+        case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
+        case #selector(performFindNextAction(_:)):     return !findMatches.isEmpty
+        case #selector(performFindPreviousAction(_:)): return !findMatches.isEmpty
+        default:                                       return true
         }
     }
 
@@ -645,5 +737,22 @@ extension KeyEncoder.Modifiers {
         if flags.contains(.option)  { mods.insert(.option) }
         if flags.contains(.command) { mods.insert(.command) }
         self = mods
+    }
+}
+
+extension TerminalView: FindBarDelegate {
+    public func findBar(_ bar: FindBar, didChangeQuery query: String) {
+        performSearch(query: query)
+    }
+
+    public func findBar(_ bar: FindBar, didAdvance direction: FindBar.Direction) {
+        advanceFind(direction: direction)
+    }
+
+    public func findBarDidClose(_ bar: FindBar) {
+        findBar?.removeFromSuperview()
+        findBar = nil
+        selection = nil
+        window?.makeFirstResponder(self)
     }
 }
