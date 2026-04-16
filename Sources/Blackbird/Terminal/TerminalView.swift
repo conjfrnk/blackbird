@@ -369,7 +369,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
         } else {
             // Normal mode: scroll the display through scrollback history.
-            let lines = Int32(event.scrollingDeltaY / 3.0)  // convert pixels to ~lines
+            // Two input types to reconcile:
+            //
+            //   Trackpad / Magic Mouse (hasPreciseScrollingDeltas == true):
+            //     scrollingDeltaY is in points. Scaling by cellHeight gives
+            //     pixel-accurate scrolling (move the pointer one row's worth
+            //     of points → scroll one row). Multiply by 2 so a casual
+            //     two-finger flick covers ~2 screenfuls, matching Terminal.app
+            //     feel.
+            //
+            //   Classic wheel (hasPreciseScrollingDeltas == false):
+            //     scrollingDeltaY is ~1 per physical click. 3 lines per click
+            //     is the common terminal-emulator default (alacritty, kitty).
+            //
+            // Rounding away from zero ensures tiny trackpad flicks register
+            // at least one line instead of truncating to 0.
+            let delta = event.scrollingDeltaY
+            let raw: Double = event.hasPreciseScrollingDeltas
+                ? Double(delta) / Double(metrics.cellHeight) * 2.0
+                : Double(delta) * 3.0
+            let lines = Int32(raw.rounded(.toNearestOrAwayFromZero))
             if lines != 0 {
                 session.scroll(delta: lines)
             }
