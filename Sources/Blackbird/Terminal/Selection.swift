@@ -30,10 +30,28 @@ public struct Selection: Equatable {
     public var cursor: BufferPoint
     public var mode: Mode
 
-    /// `(top-left, bottom-right)` ordered so `start <= end`.
+    /// Ordered pair: start <= end.
+    /// - Prose modes (`.character`, `.word`, `.line`): line-major, col-minor —
+    ///   so a cross-line selection unfolds as `start.line < end.line`.
+    /// - `.rectangular`: the bounding rectangle — `start` is the top-left
+    ///   (min line, min col) and `end` is the bottom-right (max line, max
+    ///   col). Important: without this, a rectangular drag that went from
+    ///   (line 2, col 10) down-and-left to (line 5, col 3) would normalize
+    ///   under line-major to `((2,10), (5,3))`, and the copy path in the
+    ///   Rust core (which expects `s_col <= e_col` for rect mode) returns an
+    ///   empty string.
     public var normalized: (start: BufferPoint, end: BufferPoint) {
-        if anchor <= cursor { return (anchor, cursor) }
-        return (cursor, anchor)
+        switch mode {
+        case .rectangular:
+            let loLine = min(anchor.line, cursor.line)
+            let hiLine = max(anchor.line, cursor.line)
+            let loCol = min(anchor.col, cursor.col)
+            let hiCol = max(anchor.col, cursor.col)
+            return (BufferPoint(line: loLine, col: loCol),
+                    BufferPoint(line: hiLine, col: hiCol))
+        case .character, .word, .line:
+            return anchor <= cursor ? (anchor, cursor) : (cursor, anchor)
+        }
     }
 
     public init(anchor: BufferPoint, cursor: BufferPoint, mode: Mode) {
