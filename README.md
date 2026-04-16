@@ -28,7 +28,7 @@ Default, Gruvbox, Solarized, Catppuccin. Each with light and dark variants. "Aut
 
 ## Status
 
-In development. Plan 3 (Metal renderer) complete — terminal rendering now uses a Metal glyph atlas with per-cell instanced drawing at 120 Hz on ProMotion. Plan 2's visible behavior is unchanged (white-on-black, single window, login shell, OSC 2 title, ⌘C/⌃C separated); under the hood, CoreText per-character drawing has been replaced with a single instanced draw call per frame. Plans 4-8 remain: tabs + keybindings (Plan 4), settings UI + themes (Plan 5), selection + find + clipboard (Plan 6), test infrastructure (Plan 7), distribution (Plan 8).
+In development. Plan 4 (tabs + keybindings) complete — macOS-native tabs via Cmd+T, Cmd+N for new window, Cmd+1-9 and Cmd+Shift bracket to switch, Cmd+Shift+W to close all tabs. Each tab runs its own shell session. Metal GPU renderer at 120Hz, modern TUI support (application cursor keys, mouse reporting, bracketed paste, F-keys, 24-bit color). Plans 5-8 remain: settings UI + themes (Plan 5), selection + find + clipboard (Plan 6), test infrastructure (Plan 7), distribution (Plan 8).
 
 ## License
 
