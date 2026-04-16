@@ -60,6 +60,14 @@ enum BBEventKind
    */
   BB_EVENT_KIND_CURSOR_SHAPE = 3,
   BB_EVENT_KIND_OSC52_CLIPBOARD = 4,
+  /**
+   * Bytes that should be written BACK to the PTY (terminal → shell).
+   * alacritty_terminal generates these in response to DSR queries (ESC[6n),
+   * DA1/DA2, DECRPM, and similar terminal-identification sequences. If the
+   * host ignores these, apps like nvim that probe terminal capabilities
+   * will time out waiting for a response.
+   */
+  BB_EVENT_KIND_PTY_WRITE = 5,
   BB_EVENT_KIND_FATAL = 99,
 };
 #ifndef __cplusplus
@@ -99,7 +107,6 @@ struct BBEvent {
 
 /**
  * Flat cell layout for cross-language consumption. Swift reads these directly.
- * Colors are hardcoded for now — TODO(plan-5) wires theme-aware colors.
  */
 struct BBCell {
   uint32_t ch;

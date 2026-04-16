@@ -85,22 +85,52 @@ public final class MetalRenderer {
         var count = 0
         let cellW = Float(metrics.cellWidth)
         let cellH = Float(metrics.cellHeight)
+        let cellsPtr = snapshot.cellsPointer
 
         for row in 0..<snapshot.rows {
             for col in 0..<snapshot.cols {
-                guard let ch = snapshot.character(at: col, row: row), ch != " " else { continue }
-                guard let scalar = String(ch).unicodeScalars.first else { continue }
-                guard let entry = atlas.lookupOrInsert(scalar: scalar) else { continue }
-                ptr[count] = CellInstance(
-                    cellPosPx: SIMD2<Float>(Float(col) * cellW, Float(row) * cellH),
-                    uvOrigin: entry.uvOrigin,
-                    uvSize: entry.uvSize,
-                    _pad: .zero
-                )
-                count += 1
+                let idx = row * snapshot.cols + col
+                let cell = cellsPtr[idx]
+                let scalar = cell.ch
+                let fg = Self.rgbToSIMD(cell.fg)
+                let bg = Self.rgbToSIMD(cell.bg)
+                let hasBg = cell.bg != 0x000000  // non-black bg → need to render the cell
+
+                // Render cell if it has a glyph OR a non-default background.
+                if scalar != 0 && scalar != 0x20 /* space */ {
+                    if let us = Unicode.Scalar(scalar),
+                       let entry = atlas.lookupOrInsert(scalar: us) {
+                        ptr[count] = CellInstance(
+                            cellPosPx: SIMD2<Float>(Float(col) * cellW, Float(row) * cellH),
+                            uvOrigin: entry.uvOrigin,
+                            uvSize: entry.uvSize,
+                            fgColor: fg,
+                            bgColor: bg
+                        )
+                        count += 1
+                    }
+                } else if hasBg {
+                    // Space with colored background (status lines, vim highlights).
+                    // Draw a full-cell quad with zero coverage → pure bg fill.
+                    ptr[count] = CellInstance(
+                        cellPosPx: SIMD2<Float>(Float(col) * cellW, Float(row) * cellH),
+                        uvOrigin: .zero,
+                        uvSize: .zero,
+                        fgColor: fg,
+                        bgColor: bg
+                    )
+                    count += 1
+                }
             }
         }
         return count
+    }
+
+    private static func rgbToSIMD(_ rgb: UInt32) -> SIMD4<Float> {
+        let r = Float((rgb >> 16) & 0xFF) / 255.0
+        let g = Float((rgb >> 8) & 0xFF) / 255.0
+        let b = Float(rgb & 0xFF) / 255.0
+        return SIMD4<Float>(r, g, b, 1.0)
     }
 
     public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool) {

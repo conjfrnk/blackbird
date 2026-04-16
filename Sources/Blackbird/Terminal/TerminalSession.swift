@@ -116,6 +116,12 @@ public final class TerminalSession: ObservableObject {
                     self.title = t
                 case .bell:
                     self.bellCounter &+= 1
+                case .ptyWrite(let data):
+                    // Terminal-to-shell response (DSR, DA1, DA2, etc). Write
+                    // the bytes back to the PTY so the querying app receives
+                    // the answer. Without this, nvim and other apps time out
+                    // waiting for terminal identification.
+                    self.send(data)
                 case .osc52Clipboard:
                     break  // Plan 6 wires this.
                 case .cursorShape:

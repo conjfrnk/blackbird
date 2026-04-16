@@ -5,17 +5,20 @@ struct CellInstance {
     float2 cellPosPx;
     float2 uvOrigin;
     float2 uvSize;
-    float2 _pad;
+    float4 fgColor;
+    float4 bgColor;
 };
 
 struct FrameUniforms {
-    float2 viewportPx;       // pixel dimensions of the drawable
-    float2 cellSizePx;       // per-cell pixel size
+    float2 viewportPx;
+    float2 cellSizePx;
 };
 
 struct VertexOut {
     float4 position [[position]];
     float2 uv;
+    float4 fgColor;
+    float4 bgColor;
 };
 
 vertex VertexOut vertex_cell(
@@ -45,6 +48,8 @@ vertex VertexOut vertex_cell(
     VertexOut out;
     out.position = float4(ndc, 0, 1);
     out.uv = inst.uvOrigin + uvs[vid] * inst.uvSize;
+    out.fgColor = inst.fgColor;
+    out.bgColor = inst.bgColor;
     return out;
 }
 
@@ -54,8 +59,8 @@ fragment float4 fragment_cell(
 ) {
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     float coverage = atlas.sample(s, in.uv).r;
-    // White glyph on black background.
-    return float4(1.0, 1.0, 1.0, coverage);
+    // Blend fg glyph over bg. coverage = 0 → pure bg, coverage = 1 → pure fg.
+    return mix(in.bgColor, in.fgColor, coverage);
 }
 
 struct CursorUniforms {

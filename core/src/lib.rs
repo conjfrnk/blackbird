@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::term::cell::Flags as CellFlags;
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 
 /// Dimensions struct required by `Term::new`.
 ///
@@ -55,6 +56,12 @@ pub enum BBEventKind {
     /// readers should consume cursor state from snapshots.
     CursorShape = 3,
     Osc52Clipboard = 4,
+    /// Bytes that should be written BACK to the PTY (terminal → shell).
+    /// alacritty_terminal generates these in response to DSR queries (ESC[6n),
+    /// DA1/DA2, DECRPM, and similar terminal-identification sequences. If the
+    /// host ignores these, apps like nvim that probe terminal capabilities
+    /// will time out waiting for a response.
+    PtyWrite = 5,
     Fatal = 99,
 }
 
@@ -177,8 +184,17 @@ impl EventListener for RoutingListener {
                         i32_arg: 0,
                     });
                 }
+                Event::PtyWrite(ref s) => {
+                    let bytes = s.as_bytes();
+                    (*self.cell).fire(BBEvent {
+                        kind: BBEventKind::PtyWrite,
+                        payload: bytes.as_ptr(),
+                        len: bytes.len(),
+                        i32_arg: 0,
+                    });
+                }
                 // All other variants (MouseCursorDirty, ResetTitle, ClipboardLoad,
-                // ColorRequest, PtyWrite, TextAreaSizeRequest, CursorBlinkingChange,
+                // ColorRequest, TextAreaSizeRequest, CursorBlinkingChange,
                 // Wakeup, Exit, ChildExit) are intentionally ignored.
                 _ => {}
             }
@@ -349,7 +365,6 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
 }
 
 /// Flat cell layout for cross-language consumption. Swift reads these directly.
-/// Colors are hardcoded for now — TODO(plan-5) wires theme-aware colors.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BBCell {
@@ -521,6 +536,94 @@ pub unsafe extern "C" fn bb_term_set_event_cb(
     })
 }
 
+/// Convert an alacritty `Color` to a 0xRRGGBB u32.
+fn color_to_rgb(color: &Color) -> u32 {
+    match color {
+        Color::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32),
+        Color::Named(name) => named_color_rgb(name),
+        Color::Indexed(idx) => indexed_color_rgb(*idx),
+    }
+}
+
+/// Map the 16 ANSI named colors (and semantic aliases) to xterm defaults.
+fn named_color_rgb(name: &NamedColor) -> u32 {
+    match name {
+        NamedColor::Black         => 0x000000,
+        NamedColor::Red           => 0xCC0000,
+        NamedColor::Green         => 0x4E9A06,
+        NamedColor::Yellow        => 0xC4A000,
+        NamedColor::Blue          => 0x3465A4,
+        NamedColor::Magenta       => 0x75507B,
+        NamedColor::Cyan          => 0x06989A,
+        NamedColor::White         => 0xD3D7CF,
+        NamedColor::BrightBlack   => 0x555753,
+        NamedColor::BrightRed     => 0xEF2929,
+        NamedColor::BrightGreen   => 0x8AE234,
+        NamedColor::BrightYellow  => 0xFCE94F,
+        NamedColor::BrightBlue    => 0x729FCF,
+        NamedColor::BrightMagenta => 0xAD7FA8,
+        NamedColor::BrightCyan    => 0x34E2E2,
+        NamedColor::BrightWhite   => 0xEEEEEC,
+        // Semantic aliases — Foreground defaults to light grey, Background to black
+        NamedColor::Foreground | NamedColor::BrightForeground => 0xEEEEEE,
+        NamedColor::Background                                 => 0x000000,
+        // Dim variants: map to the base color (terminal dims it visually)
+        NamedColor::DimBlack   => 0x000000,
+        NamedColor::DimRed     => 0xCC0000,
+        NamedColor::DimGreen   => 0x4E9A06,
+        NamedColor::DimYellow  => 0xC4A000,
+        NamedColor::DimBlue    => 0x3465A4,
+        NamedColor::DimMagenta => 0x75507B,
+        NamedColor::DimCyan    => 0x06989A,
+        NamedColor::DimWhite   => 0xD3D7CF,
+        NamedColor::DimForeground => 0xEEEEEE,
+        // Cursor and any future variants
+        _ => 0xEEEEEE,
+    }
+}
+
+/// Map xterm 256-color palette index to 0xRRGGBB.
+fn indexed_color_rgb(idx: u8) -> u32 {
+    match idx {
+        0..=15 => {
+            // Standard 16 colors — same mapping as named_color_rgb
+            const TABLE: [u32; 16] = [
+                0x000000, 0xCC0000, 0x4E9A06, 0xC4A000,
+                0x3465A4, 0x75507B, 0x06989A, 0xD3D7CF,
+                0x555753, 0xEF2929, 0x8AE234, 0xFCE94F,
+                0x729FCF, 0xAD7FA8, 0x34E2E2, 0xEEEEEC,
+            ];
+            TABLE[idx as usize]
+        }
+        16..=231 => {
+            // 6×6×6 color cube
+            let i = (idx - 16) as u32;
+            let r = (i / 36) % 6;
+            let g = (i / 6) % 6;
+            let b = i % 6;
+            let to_byte = |v: u32| -> u32 { if v == 0 { 0 } else { 55 + 40 * v } };
+            (to_byte(r) << 16) | (to_byte(g) << 8) | to_byte(b)
+        }
+        232..=255 => {
+            // 24-step grayscale ramp
+            let v = 8 + 10 * (idx - 232) as u32;
+            (v << 16) | (v << 8) | v
+        }
+    }
+}
+
+/// Extract our stable `cell_flags` bitset from alacritty's `Flags`.
+fn extract_cell_flags(f: CellFlags) -> u16 {
+    let mut out: u16 = 0;
+    if f.contains(CellFlags::BOLD)                            { out |= cell_flags::BOLD; }
+    if f.contains(CellFlags::ITALIC)                          { out |= cell_flags::ITALIC; }
+    if f.contains(CellFlags::UNDERLINE)                       { out |= cell_flags::UNDERLINE; }
+    if f.contains(CellFlags::INVERSE)                         { out |= cell_flags::REVERSE; }
+    if f.contains(CellFlags::DIM)                             { out |= cell_flags::DIM; }
+    if f.contains(CellFlags::STRIKEOUT)                       { out |= cell_flags::STRIKE; }
+    out
+}
+
 /// Map `alacritty_terminal::term::TermMode` to our stable `bb_mode` bitflags.
 fn extract_mode(term_mode: &TermMode) -> u32 {
     let mut m: u32 = 0;
@@ -564,9 +667,9 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         for indexed in grid.display_iter() {
             cells.push(BBCell {
                 ch: indexed.c as u32,
-                fg: 0xEEEEEE, // TODO(plan-5): theme-aware color mapping
-                bg: 0x000000,
-                flags: 0,
+                fg: color_to_rgb(&indexed.fg),
+                bg: color_to_rgb(&indexed.bg),
+                flags: extract_cell_flags(indexed.flags),
                 _reserved: 0,
             });
         }
