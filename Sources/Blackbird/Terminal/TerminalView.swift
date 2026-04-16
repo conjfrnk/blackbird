@@ -430,6 +430,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        let m = NSMenu()
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
+        copyItem.target = self
+        pasteItem.target = self
+        m.addItem(copyItem)
+        m.addItem(pasteItem)
+        return m
+    }
+
     // MARK: - Mouse reporting
 
     private func mouseReportingEnabled() -> Bool {
