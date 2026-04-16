@@ -177,6 +177,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - Input
 
     public override func keyDown(with event: NSEvent) {
+        #if DEBUG
+        NSLog("[Blackbird] keyDown: keyCode=%d flags=0x%lx chars=%@ charsIgnoring=%@",
+              event.keyCode,
+              UInt(event.modifierFlags.rawValue),
+              event.characters?.debugDescription ?? "nil",
+              event.charactersIgnoringModifiers?.debugDescription ?? "nil")
+        #endif
+
         // ⌘-prefixed events never encode into PTY bytes. They're reserved for
         // application-level shortcuts (menu items, window management). This
         // enforces the spec's ⌘C/⌃C strict separation: ⌃C always sends 0x03
@@ -186,19 +194,37 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
 
-        guard let session else { super.keyDown(with: event); return }
+        guard let session else {
+            NSLog("[Blackbird] keyDown: no session, passing to super")
+            super.keyDown(with: event)
+            return
+        }
 
         // Fast path for control characters: macOS translates Ctrl+letter into
         // the corresponding control byte (0x01-0x1A) in event.characters.
         // Send that byte directly to the PTY without round-tripping through
         // the encoder. This is the most reliable path for Ctrl+C (0x03),
         // Ctrl+D (0x04), Ctrl+Z (0x1A), etc.
-        if event.modifierFlags.contains(.control),
-           let chars = event.characters,
-           let scalar = chars.unicodeScalars.first,
-           scalar.value >= 1, scalar.value <= 0x1F {
-            session.send(Data([UInt8(scalar.value)]))
-            return
+        if event.modifierFlags.contains(.control) {
+            #if DEBUG
+            NSLog("[Blackbird] keyDown: Control modifier detected")
+            #endif
+            if let chars = event.characters,
+               let scalar = chars.unicodeScalars.first,
+               scalar.value >= 1, scalar.value <= 0x1F {
+                #if DEBUG
+                NSLog("[Blackbird] keyDown: sending control byte 0x%02x IMMEDIATE", scalar.value)
+                #endif
+                // Synchronous write — bypasses writeQueue so SIGINT/SIGTSTP
+                // reach the terminal driver with zero async dispatch latency.
+                session.sendImmediate(Data([UInt8(scalar.value)]))
+                return
+            }
+            // Fast path didn't match — fall through to encoder which also
+            // handles Ctrl via controlByte().
+            #if DEBUG
+            NSLog("[Blackbird] keyDown: fast path didn't match, trying encoder")
+            #endif
         }
 
         let mods = KeyEncoder.Modifiers(event: event)
@@ -212,6 +238,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
         let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
         let bytes = encoder.encode(chars: chars, modifiers: mods)
+        #if DEBUG
+        if !bytes.isEmpty {
+            NSLog("[Blackbird] keyDown: encoder produced %d bytes: %@",
+                  bytes.count,
+                  bytes.map { String(format: "0x%02x", $0) }.joined(separator: " "))
+        } else {
+            NSLog("[Blackbird] keyDown: encoder produced empty data for chars=%@ mods=%d",
+                  chars.debugDescription, mods.rawValue)
+        }
+        #endif
         if !bytes.isEmpty { session.send(bytes) }
     }
 

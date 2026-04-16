@@ -62,6 +62,13 @@ public final class TerminalSession: ObservableObject {
         pty.write(data)
     }
 
+    /// Write bytes synchronously, bypassing the async write queue. Use for
+    /// urgent control characters (Ctrl+C → 0x03, Ctrl+Z → 0x1A) where the
+    /// user expects instant response.
+    public func sendImmediate(_ data: Data) {
+        pty.writeImmediate(data)
+    }
+
     public func resize(to size: Size) {
         // Synchronous on the caller's thread. coreQueue serializes PTY +
         // BBTerm resize (same guarantee as before) but we block the caller

@@ -170,6 +170,17 @@ public final class PTY {
         }
     }
 
+    /// Write bytes synchronously on the caller's thread, bypassing writeQueue.
+    /// Use for urgent control bytes (SIGINT, SIGTSTP) where async dispatch
+    /// latency is perceptible. Safe for single-byte writes — the kernel write
+    /// is atomic at that size.
+    public func writeImmediate(_ data: Data) {
+        data.withUnsafeBytes { rawBuf in
+            guard let base = rawBuf.baseAddress else { return }
+            _ = Darwin.write(masterFD, base, rawBuf.count)
+        }
+    }
+
     // MARK: - Resize
 
     public func resize(to size: Size) {
