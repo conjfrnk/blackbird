@@ -58,13 +58,16 @@ public final class GlyphAtlas {
         guard let tex = device.makeTexture(descriptor: desc) else { return nil }
         self.texture = tex
 
-        // Zero the texture initially.
+        // Zero the texture initially. baseAddress can't be nil because
+        // `count: texW * texH` is positive for any valid atlas (init bails
+        // earlier on zero-dim textures via MTLTextureDescriptor).
         let zero = [UInt8](repeating: 0, count: texW * texH)
         zero.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
             tex.replace(
                 region: MTLRegionMake2D(0, 0, texW, texH),
                 mipmapLevel: 0,
-                withBytes: ptr.baseAddress!,
+                withBytes: base,
                 bytesPerRow: texW
             )
         }
