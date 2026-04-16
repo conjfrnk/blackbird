@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Sparkle
 
 @main
 struct BlackbirdApp: App {
@@ -17,6 +18,18 @@ struct BlackbirdApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var controllers: [MainWindowController] = []
+
+    /// Sparkle updater. Instantiated lazily so XCTest hosts don't spin it up.
+    /// `startingUpdater: true` kicks off the background scheduled-check loop
+    /// as soon as this is first referenced (which we do from
+    /// `applicationDidFinishLaunching` for non-test launches).
+    private lazy var updaterController: SPUStandardUpdaterController = {
+        SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+    }()
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
@@ -43,8 +56,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Normal (non-test) launch: open the main window with a shell session.
         installMainMenu()
+        installSparkleMenuItem()
         let controller = createTerminalController()
         controller.showWindow(nil)
+    }
+
+    /// Inserts a "Check for Updates…" item into the app submenu right after
+    /// "About Blackbird". Target is the Sparkle controller so the standard
+    /// `checkForUpdates(_:)` selector is dispatched correctly. Kept separate
+    /// from `buildAppMenu()` because `updaterController` is lazy and tests
+    /// shouldn't trigger it.
+    private func installSparkleMenuItem() {
+        guard
+            let firstItem = NSApp.mainMenu?.items.first,
+            let appSubmenu = firstItem.submenu
+        else { return }
+        let checkItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        checkItem.target = updaterController
+        appSubmenu.insertItem(checkItem, at: 1)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

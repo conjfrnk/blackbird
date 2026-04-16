@@ -19,6 +19,7 @@
 		75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F455C591EC38A7B3955CD5B8 /* FindBar.swift */; };
 		82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11194E0650067380506F53B2 /* BBTermTests.swift */; };
 		8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82C57C6702E92EB2488AC798 /* Theme.swift */; };
+		903AE2C38D9B7F69973CC158 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 9EE9FF088456C53438AA86BE /* Sparkle */; };
 		91497F92ABED24A383320845 /* TerminalSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */; };
 		92B08E10BCF3923F92AA994B /* PTYTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */; };
 		92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */; };
@@ -93,6 +94,7 @@
 			files = (
 				4235C2A5FFE2A1329E886E96 /* AppKit.framework in Frameworks */,
 				22EA46AC14DEA7E6A03FB8DF /* SwiftUI.framework in Frameworks */,
+				903AE2C38D9B7F69973CC158 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -252,6 +254,7 @@
 			);
 			name = Blackbird;
 			packageProductDependencies = (
+				9EE9FF088456C53438AA86BE /* Sparkle */,
 			);
 			productName = Blackbird;
 			productReference = 14A26A1A1B1A4D9656B10D76 /* Blackbird.app */;
@@ -295,6 +298,9 @@
 			);
 			mainGroup = EF3D991D46A40AD4000B1892;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E908E71794A4BA8720472823 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 615688EB6D838D8202CB4D3E /* Products */;
 			projectDirPath = "";
@@ -653,6 +659,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E908E71794A4BA8720472823 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.6.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		9EE9FF088456C53438AA86BE /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E908E71794A4BA8720472823 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 2EF3E8AD45BF095BECE47EA3 /* Project object */;
 }

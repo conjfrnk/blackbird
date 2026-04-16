@@ -6,6 +6,11 @@ options:
   createIntermediateGroups: true
   generateEmptyDirectories: true
 
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.0
+
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -46,6 +51,11 @@ targets:
         NSSupportsAutomaticTermination: true
         NSSupportsSuddenTermination: true
         LSApplicationCategoryType: public.app-category.developer-tools
+        SUFeedURL: https://example.com/appcast.xml
+        SUPublicEDKey: ""
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+        SUEnableInstallerLauncherService: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.conjfrnk.blackbird
@@ -60,6 +70,7 @@ targets:
         embed: false
       - framework: SwiftUI.framework
         embed: false
+      - package: Sparkle
 
   BlackbirdTests:
     type: bundle.unit-test
