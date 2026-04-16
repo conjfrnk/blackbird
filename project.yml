@@ -53,7 +53,7 @@ targets:
         LSApplicationCategoryType: public.app-category.developer-tools
         SUFeedURL: https://example.com/appcast.xml
         SUPublicEDKey: ""
-        SUEnableAutomaticChecks: true
+        SUEnableAutomaticChecks: false
         SUScheduledCheckInterval: 86400
         SUEnableInstallerLauncherService: true
     settings:

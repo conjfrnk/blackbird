@@ -24,8 +24,8 @@ public final class Preferences: ObservableObject {
         public var id: String { rawValue }
     }
 
-    @AppStorage("theme")          public var themeRaw: String  = Theme.defaultTheme.rawValue
-    @AppStorage("themeMode")      public var themeModeRaw: String = ThemeMode.auto.rawValue
+    @AppStorage("theme")          public var themeRaw: String  = Theme.gruvbox.rawValue
+    @AppStorage("themeMode")      public var themeModeRaw: String = ThemeMode.dark.rawValue
     @AppStorage("fontName")       public var fontName: String = "SFMono-Regular"
     @AppStorage("fontSize")       public var fontSize: Double = 13
     @AppStorage("cursorBlink")    public var cursorBlink: Bool = false

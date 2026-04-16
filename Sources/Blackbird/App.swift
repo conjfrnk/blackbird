@@ -85,6 +85,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controllers.removeAll()
     }
 
+    @objc func openSettings(_ sender: Any?) {
+        // SwiftUI's hidden Settings handler lives off the responder chain; it
+        // registers for `showSettingsWindow:` (macOS 14+) via a private NSApp
+        // target. `sendAction(_:to:from:)` with nil target delegates to NSApp
+        // which walks ITS internal target list including SwiftUI's registered
+        // handlers — this is the documented way to trigger the Settings scene
+        // from AppKit code.
+        if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: sender) {
+            return
+        }
+        // Older macOS fallback (pre-13 used showPreferencesWindow:).
+        _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: sender)
+    }
+
     // MARK: - Controller factory
 
     @discardableResult
@@ -182,16 +196,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         menu.addItem(.separator())
-        // SwiftUI's Settings scene responds to the private selector
-        // `showSettingsWindow:` on the application (macOS 13+). Without this
-        // menu item, ⌘, silently does nothing because our installMainMenu
-        // replaces the auto-generated main menu that SwiftUI normally
-        // populates. Leave target=nil so the responder chain hits NSApp.
+        // SwiftUI's Settings scene registers a hidden controller that handles
+        // `showSettingsWindow:`. With @NSApplicationDelegateAdaptor + a fully
+        // custom main menu, the responder chain doesn't reliably reach that
+        // controller (NSApp isn't a handler, and the hidden SwiftUI controller
+        // isn't in the chain). Route via AppDelegate.openSettings(_:) which
+        // calls NSApp.sendAction — sendAction IS what correctly dispatches
+        // to SwiftUI's registered selector handler. Fallback covers older
+        // macOS that still uses `showPreferencesWindow:`.
         let settingsItem = NSMenuItem(
             title: "Settings…",
-            action: Selector(("showSettingsWindow:")),
+            action: #selector(openSettings(_:)),
             keyEquivalent: ","
         )
+        settingsItem.target = self
         menu.addItem(settingsItem)
         menu.addItem(.separator())
         menu.addItem(
