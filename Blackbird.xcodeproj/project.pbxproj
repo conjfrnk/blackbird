@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2128B6F807CB069799F1A479 /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DD21160AFF51FCA0B6374 /* Preferences.swift */; };
 		22EA46AC14DEA7E6A03FB8DF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */; };
 		25F0BDE5FF93EEACCBE4DA8C /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 472AADACAE02B9A6CB01750B /* MetalRenderer.swift */; };
 		26551D9D45C969B410CFE79C /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51A54ACD363A09E47E79F62 /* MainWindowController.swift */; };
@@ -50,6 +51,7 @@
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
 		0AE9625B30620C23E398A2EB /* BBTerm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTerm.swift; sourceTree = "<group>"; };
 		0CFB9D9863A2F1D2ACD61D6E /* BlackbirdTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BlackbirdTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0D7DD21160AFF51FCA0B6374 /* Preferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Preferences.swift; sourceTree = "<group>"; };
 		11194E0650067380506F53B2 /* BBTermTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermTests.swift; sourceTree = "<group>"; };
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasTests.swift; sourceTree = "<group>"; };
@@ -104,6 +106,7 @@
 		019B2409D2F4991FA45E6153 /* Settings */ = {
 			isa = PBXGroup;
 			children = (
+				0D7DD21160AFF51FCA0B6374 /* Preferences.swift */,
 				82C57C6702E92EB2488AC798 /* Theme.swift */,
 			);
 			path = Settings;
@@ -335,6 +338,7 @@
 				26551D9D45C969B410CFE79C /* MainWindowController.swift in Sources */,
 				25F0BDE5FF93EEACCBE4DA8C /* MetalRenderer.swift in Sources */,
 				7462C02E74143E52FD628DA5 /* PTY.swift in Sources */,
+				2128B6F807CB069799F1A479 /* Preferences.swift in Sources */,
 				C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */,
 				C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */,
 				552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */,
