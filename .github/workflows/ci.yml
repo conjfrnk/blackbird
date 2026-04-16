@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     name: Rust — fmt, clippy, test (debug + release)
@@ -76,7 +80,97 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Headless launch smoke
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-test-logs-${{ github.run_id }}
+          path: ~/Library/Developer/Xcode/DerivedData/**/Logs/Test
+          if-no-files-found: ignore
+          retention-days: 7
+
+  swift-release-universal:
+    name: Xcode — Release build (arm64 + x86_64 universal)
+    runs-on: macos-14
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build Rust core (universal)
+        run: scripts/build-core.sh
+
+      - name: xcodebuild build (Release, universal)
+        run: |
+          xcodebuild build \
+            -project Blackbird.xcodeproj \
+            -scheme Blackbird \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Verify universal binary
+        run: |
+          set -euo pipefail
+          DD="$(find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 1 -type d -name 'Blackbird-*' | head -1)"
+          BIN="$DD/Build/Products/Release/Blackbird.app/Contents/MacOS/Blackbird"
+          file "$BIN"
+          lipo -info "$BIN" | tee /tmp/lipo.out
+          grep -Eq 'arm64 x86_64|x86_64 arm64' /tmp/lipo.out
+
+  smoke:
+    name: Smoke — launch, 3s, SIGTERM
+    runs-on: macos-14
+    needs: xcode
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build Rust core (universal)
+        run: scripts/build-core.sh
+
+      - name: Build Debug
         run: |
           xcodebuild build \
             -project Blackbird.xcodeproj \
@@ -85,5 +179,43 @@ jobs:
             -destination "platform=macOS,arch=arm64" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
-          scripts/smoke.sh
-        continue-on-error: true
+
+      - name: Run smoke
+        run: scripts/smoke.sh
+
+  rust-fuzz-smoke:
+    name: Rust — fuzz smoke (30s/target)
+    runs-on: macos-14
+    # Fuzz findings are surfaced but don't block merges yet. Promote to
+    # required once the corpus stabilises and finds fewer false flakes.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly (cargo-fuzz needs nightly)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "core/fuzz -> target"
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Short fuzz each target
+        working-directory: core/fuzz
+        run: |
+          set -euo pipefail
+          TARGETS="$(cargo fuzz list)"
+          if [ -z "$TARGETS" ]; then
+            echo "No fuzz targets defined — skipping."
+            exit 0
+          fi
+          for target in $TARGETS; do
+            echo "==> fuzzing $target for 30s"
+            cargo fuzz run "$target" -- -max_total_time=30
+          done
