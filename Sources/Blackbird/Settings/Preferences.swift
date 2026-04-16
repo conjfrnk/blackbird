@@ -35,10 +35,10 @@ public final class Preferences: ObservableObject {
     @AppStorage("autoUpdateChecks") public var autoUpdateChecks: Bool = false
     @AppStorage("osc52Enabled")   public var osc52Enabled: Bool = true
     /// Combined transparency + blur intensity on a 1…10 scale. 1 = fully
-    /// opaque, 10 = maximum transparency with heavy blur. 3 is a mild
-    /// default: a little see-through, a subtle blur that keeps content
-    /// behind the window legible without it competing for attention.
-    @AppStorage("translucency") public var translucency: Double = 3
+    /// opaque, 10 = maximum transparency with heavy blur. 5 is the
+    /// daily-driver default — the lift Connor ended up preferring after
+    /// A/B'ing the curve. See `translucencyResolved` for the anchor points.
+    @AppStorage("translucency") public var translucency: Double = 5
 
     public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }
@@ -46,23 +46,27 @@ public final class Preferences: ObservableObject {
     public var optionKey: OptionKey { OptionKey(rawValue: optionKeyRaw) ?? .meta }
 
     /// Resolved `(opacity, blurRadius)` from the single translucency slider.
-    /// Anchored so the daily-driver look sits at v=3 instead of v=7 on the
-    /// previous linear curve. The slider is piecewise-linear:
-    ///   new v 1..3  → stretches old v 1..7  (quick ramp to the useful zone)
-    ///   new v 3..10 → stretches old v 7..10 (gentle tail out to Ghost)
-    /// Endpoint appearance is unchanged; only where the curve lives along
-    /// the 1..10 knob moves.
-    /// - value 1 (Solid)  → opacity 1.00, blur 0
-    /// - value 3 (default)→ opacity 0.73, blur 12
-    /// - value 10 (Ghost) → opacity 0.595, blur 18
+    /// Piecewise-linear with three anchors:
+    ///   v=1  (Solid)   → opacity 1.000, blur 0
+    ///   v=5  (default) → opacity 0.595, blur 18  ← daily-driver lift
+    ///   v=10 (Ghost)   → opacity 0.400, blur 30  ← max readability-preserving
+    /// The bottom half (1..5) ramps quickly into the useful range; the top
+    /// half (5..10) tapers out to the Ghost extreme so users who want it
+    /// can still reach it without the default sitting too close to the wall.
     public var translucencyResolved: (opacity: Double, blurRadius: Int) {
         let v = max(1.0, min(10.0, translucency))
-        let mapped: Double = v <= 3
-            ? 1.0 + (v - 1.0) * 3.0
-            : 7.0 + (v - 3.0) * (3.0 / 7.0)
-        let opacity = 1.0 - (mapped - 1.0) * 0.045
-        let blur = Int(round(max(0, (mapped - 1.0) * 2.0)))
-        return (opacity, blur)
+        let opacity: Double
+        let blurFloat: Double
+        if v <= 5 {
+            let t = (v - 1.0) / 4.0
+            opacity = 1.0 - t * (1.0 - 0.595)
+            blurFloat = t * 18.0
+        } else {
+            let t = (v - 5.0) / 5.0
+            opacity = 0.595 - t * (0.595 - 0.4)
+            blurFloat = 18.0 + t * (30.0 - 18.0)
+        }
+        return (opacity, Int(round(max(0, blurFloat))))
     }
 
     private init() {
