@@ -187,6 +187,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
 
         guard let session else { super.keyDown(with: event); return }
+
+        // Fast path for control characters: macOS translates Ctrl+letter into
+        // the corresponding control byte (0x01-0x1A) in event.characters.
+        // Send that byte directly to the PTY without round-tripping through
+        // the encoder. This is the most reliable path for Ctrl+C (0x03),
+        // Ctrl+D (0x04), Ctrl+Z (0x1A), etc.
+        if event.modifierFlags.contains(.control),
+           let chars = event.characters,
+           let scalar = chars.unicodeScalars.first,
+           scalar.value >= 1, scalar.value <= 0x1F {
+            session.send(Data([UInt8(scalar.value)]))
+            return
+        }
+
         let mods = KeyEncoder.Modifiers(event: event)
 
         if let special = Self.specialKey(for: event) {
@@ -282,12 +296,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public override func scrollWheel(with event: NSEvent) {
-        guard mouseReportingEnabled(), let session else { super.scrollWheel(with: event); return }
-        // Wheel up = button 64, wheel down = button 65.
-        if event.scrollingDeltaY > 0 {
-            sendMouseEvent(event, button: 64, press: true, session: session)
-        } else if event.scrollingDeltaY < 0 {
-            sendMouseEvent(event, button: 65, press: true, session: session)
+        guard let session else { super.scrollWheel(with: event); return }
+        if mouseReportingEnabled() {
+            // Mouse mode: forward as SGR/X10 scroll events.
+            // Wheel up = button 64, wheel down = button 65.
+            if event.scrollingDeltaY > 0 {
+                sendMouseEvent(event, button: 64, press: true, session: session)
+            } else if event.scrollingDeltaY < 0 {
+                sendMouseEvent(event, button: 65, press: true, session: session)
+            }
+        } else {
+            // Normal mode: scroll the display through scrollback history.
+            let lines = Int32(event.scrollingDeltaY / 3.0)  // convert pixels to ~lines
+            if lines != 0 {
+                session.scroll(delta: lines)
+            }
         }
     }
 

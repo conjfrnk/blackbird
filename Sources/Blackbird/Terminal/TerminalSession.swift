@@ -87,6 +87,21 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
+    public func scroll(delta: Int32) {
+        var snap: BBSnapshot?
+        coreQueue.sync {
+            bbterm.scroll(delta: delta)
+            snap = bbterm.snapshot()
+        }
+        if let snap {
+            if Thread.isMainThread {
+                self.snapshot = snap
+            } else {
+                DispatchQueue.main.async { self.snapshot = snap }
+            }
+        }
+    }
+
     public func terminate() {
         pty.terminate()
     }

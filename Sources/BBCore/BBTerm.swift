@@ -79,6 +79,11 @@ public final class BBTerm {
         bb_term_resize(h, size.cols, size.rows)
     }
 
+    public func scroll(delta: Int32) {
+        guard let h = handle else { return }
+        bb_term_scroll(h, delta)
+    }
+
     public func snapshot() -> BBSnapshot? {
         guard let h = handle else { return nil }
         guard let raw = bb_term_take_snapshot(h) else { return nil }

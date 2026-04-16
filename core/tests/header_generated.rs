@@ -9,6 +9,7 @@ fn header_file_exists_and_has_symbols() {
         "bb_term_free",
         "bb_term_input",
         "bb_term_resize",
+        "bb_term_scroll",
         "bb_term_take_snapshot",
         "bb_snap_retain",
         "bb_snap_release",

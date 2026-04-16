@@ -266,6 +266,19 @@ const struct BBSnap *bb_snap_retain(const struct BBSnap *snap);
  */
 void bb_snap_release(const struct BBSnap *snap);
 
+/**
+ * Scroll the display by `delta` lines. Positive = scroll up (show older
+ * content), negative = scroll down (show newer content, towards bottom).
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Passing null or delta == 0 is a no-op.
+ *
+ * Panics inside this function are caught by `catch_unwind` and delivered as a
+ * `BBEventKind::Fatal` event to the registered callback. The function returns
+ * unit as the fallback value.
+ */
+void bb_term_scroll(struct BBTerm *term, int32_t delta);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

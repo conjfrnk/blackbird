@@ -734,6 +734,27 @@ pub unsafe extern "C" fn bb_snap_release(snap: *const BBSnap) {
     })
 }
 
+/// Scroll the display by `delta` lines. Positive = scroll up (show older
+/// content), negative = scroll down (show newer content, towards bottom).
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Passing null or delta == 0 is a no-op.
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// unit as the fallback value.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_scroll(term: *mut BBTerm, delta: i32) {
+    guard_with_term(term, (), || {
+        if term.is_null() || delta == 0 {
+            return;
+        }
+        let bb = &mut *term;
+        use alacritty_terminal::grid::Scroll;
+        bb.term.scroll_display(Scroll::Delta(delta));
+    })
+}
+
 /// Test-only: force a panic inside the FFI boundary to verify Fatal event delivery.
 ///
 /// # Safety
