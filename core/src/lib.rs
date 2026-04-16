@@ -582,12 +582,27 @@ pub unsafe extern "C" fn bb_term_set_event_cb(
     })
 }
 
-/// Convert an alacritty `Color` to a 0xRRGGBB u32.
-fn color_to_rgb(color: &Color) -> u32 {
+/// Convert an alacritty `Color` to a 0xRRGGBB u32, consulting the terminal's
+/// palette first (so OSC 4/10/11/12 and `bb_term_set_named_color` overrides
+/// route through). Falls back to built-in xterm defaults when a slot is unset.
+fn color_to_rgb(color: &Color, palette: &alacritty_terminal::term::color::Colors) -> u32 {
     match color {
         Color::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32),
-        Color::Named(name) => named_color_rgb(name),
-        Color::Indexed(idx) => indexed_color_rgb(*idx),
+        Color::Named(name) => {
+            let idx = *name as usize;
+            if let Some(rgb) = palette[idx] {
+                ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32)
+            } else {
+                named_color_rgb(name)
+            }
+        }
+        Color::Indexed(idx) => {
+            if let Some(rgb) = palette[*idx as usize] {
+                ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32)
+            } else {
+                indexed_color_rgb(*idx)
+            }
+        }
     }
 }
 
@@ -704,6 +719,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             return std::ptr::null();
         }
         let bb = &*term;
+        let palette = bb.term.colors();
         let grid = bb.term.grid();
 
         let rows = grid.screen_lines() as u16;
@@ -713,8 +729,8 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         for indexed in grid.display_iter() {
             cells.push(BBCell {
                 ch: indexed.c as u32,
-                fg: color_to_rgb(&indexed.fg),
-                bg: color_to_rgb(&indexed.bg),
+                fg: color_to_rgb(&indexed.fg, palette),
+                bg: color_to_rgb(&indexed.bg, palette),
                 flags: extract_cell_flags(indexed.flags),
                 _reserved: 0,
             });
@@ -826,6 +842,28 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
         let bb = &mut *term;
         use alacritty_terminal::grid::Scroll;
         bb.term.scroll_display(Scroll::Bottom);
+    })
+}
+
+/// Update one slot of the terminal's color palette. Slot indices match
+/// alacritty's `NamedColor` ordering: 0..=15 = 16 ANSI colors, 16..=255 =
+/// extended 256-palette, 256 = Foreground, 257 = Background, 258 = Cursor,
+/// 259 = BrightForeground, plus a few more (see alacritty's NamedColor enum).
+/// `rgb` is packed 0xRRGGBB.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null `term` is a no-op. Out-of-
+/// range slots are silently ignored by alacritty's Colors setter.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, rgb: u32) {
+    guard_with_term(term, (), || {
+        if term.is_null() { return; }
+        let bb = &mut *term;
+        let r = ((rgb >> 16) & 0xFF) as u8;
+        let g = ((rgb >> 8)  & 0xFF) as u8;
+        let b = (rgb & 0xFF) as u8;
+        use alacritty_terminal::vte::ansi::{Handler, Rgb};
+        bb.term.set_color(slot as usize, Rgb { r, g, b });
     })
 }
 
@@ -1526,5 +1564,26 @@ mod tests {
             bb_term_free(term);
             Arc::from_raw(fired_ptr as *const Mutex<Vec<(u32, String)>>);
         }
+    }
+
+    #[test]
+    fn set_named_color_changes_background_default() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            bb_term_input(term, b"x".as_ptr(), 1);
+            // Slot 257 = NamedColor::Background in alacritty 0.26.
+            bb_term_set_named_color(term, 257, 0xFF00AA);
+            let snap = bb_term_take_snapshot(term);
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+            // Second cell in row 0 wasn't written → uses default bg → now 0xFF00AA.
+            assert_eq!(cells[1].bg, 0xFF00AA);
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn set_named_color_null_term_is_noop() {
+        unsafe { bb_term_set_named_color(std::ptr::null_mut(), 0, 0xFFFFFF); }
     }
 }

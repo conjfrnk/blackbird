@@ -335,6 +335,19 @@ void bb_term_scroll(struct BBTerm *term, int32_t delta);
 void bb_term_scroll_to_bottom(struct BBTerm *term);
 
 /**
+ * Update one slot of the terminal's color palette. Slot indices match
+ * alacritty's `NamedColor` ordering: 0..=15 = 16 ANSI colors, 16..=255 =
+ * extended 256-palette, 256 = Foreground, 257 = Background, 258 = Cursor,
+ * 259 = BrightForeground, plus a few more (see alacritty's NamedColor enum).
+ * `rgb` is packed 0xRRGGBB.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null `term` is a no-op. Out-of-
+ * range slots are silently ignored by alacritty's Colors setter.
+ */
+void bb_term_set_named_color(struct BBTerm *term, uint16_t slot, uint32_t rgb);
+
+/**
  * Extract UTF-8 text from the terminal buffer between two buffer-relative
  * points. `start_line`/`end_line` are grid lines where 0 is the top of the
  * visible viewport and negative values reach into scrollback (buffer-relative,
