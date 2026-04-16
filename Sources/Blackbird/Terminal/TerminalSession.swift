@@ -63,19 +63,27 @@ public final class TerminalSession: ObservableObject {
     }
 
     public func resize(to size: Size) {
-        // Serialize PTY + BBTerm resize on the core queue. Calling pty.resize
-        // before bbterm.resize creates a window where bytes from a SIGWINCH-
-        // reactive shell feed into bbterm at the old dimensions. The core
-        // queue is already the single-writer for bbterm, so doing PTY resize
-        // there too closes the window (PTY writes are serialized internally).
-        coreQueue.async { [weak self, bbterm] in
-            self?.pty.resize(to: size)
-            bbterm.resize(to: .init(cols: size.cols, rows: size.rows))
-            if let snap = bbterm.snapshot() {
-                DispatchQueue.main.async {
-                    self?.snapshot = snap
-                }
-            }
+        // Synchronous on the caller's thread. coreQueue serializes PTY +
+        // BBTerm resize (same guarantee as before) but we block the caller
+        // (typically main during a window drag) so the returned snapshot is
+        // already new-size when the next MTKView frame draws. Async resize
+        // produced a one-frame lag that users saw as jitter — content at old
+        // grid size against new viewport for ~8ms, then catching up.
+        //
+        // Blocking cost: a single bb_term_resize call plus snapshot, well
+        // under a millisecond in practice. Safe from deadlock: coreQueue
+        // never syncs back to the caller's queue.
+        var newSnap: BBSnapshot?
+        coreQueue.sync {
+            self.pty.resize(to: size)
+            self.bbterm.resize(to: .init(cols: size.cols, rows: size.rows))
+            newSnap = self.bbterm.snapshot()
+        }
+        guard let newSnap else { return }
+        if Thread.isMainThread {
+            self.snapshot = newSnap
+        } else {
+            DispatchQueue.main.async { self.snapshot = newSnap }
         }
     }
 

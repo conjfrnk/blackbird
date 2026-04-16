@@ -64,8 +64,8 @@ struct CursorUniforms {
     float2 cellSizePx;
     float4 color;
     float strokeWidthPx;
-    float _pad1;
-    float2 _pad2;
+    float filled;           // 1.0 = solid block (focused), 0.0 = outline
+    float2 _pad;
 };
 
 struct CursorOut {
@@ -98,7 +98,11 @@ fragment float4 fragment_cursor(
 ) {
     float2 p = in.localPx;
     float2 s = u.cellSizePx;
-    // Inside the stroke band if any edge is within strokeWidthPx.
+    if (u.filled > 0.5) {
+        // Focused: fill the whole cell.
+        return u.color;
+    }
+    // Unfocused: draw only the stroke band.
     bool stroke =
         p.x < u.strokeWidthPx ||
         p.y < u.strokeWidthPx ||

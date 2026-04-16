@@ -92,18 +92,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
-        // Always commit at the end of a drag, even if a prior propagateResize
-        // call already saw the final dimensions — propagateResize dedupes.
+        // Drag ended — commit the real grid size now. The renderer's stretched
+        // viewport (used during drag) flips back to the bounds-based viewport
+        // on the next frame, and the shell gets a single SIGWINCH to the
+        // final dimensions.
         propagateResize()
     }
 
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        // Always propagate so the shell sees the new dimensions immediately
-        // during live resize. TerminalSession.resize serializes PTY +
-        // BBTerm updates on the core queue, and propagateResize dedupes
-        // against the last-propagated grid so we don't thrash the shell when
-        // several setFrameSize calls land in the same cell-snap bucket.
+        // propagateResize is a no-op during live resize; content stretches via
+        // the renderer's in-drag viewport until viewDidEndLiveResize fires.
+        // Outside live resize (programmatic set, zoom button, window first
+        // appears), this is where the session learns the current size.
         propagateResize()
     }
 
@@ -116,6 +117,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let size = PTY.Size(cols: UInt16(grid.cols), rows: UInt16(grid.rows))
         guard size != lastPropagatedSize else { return }
         lastPropagatedSize = size
+        // TerminalSession.resize is synchronous — returns after the snapshot
+        // is in place so the next MTKView frame renders at the new size.
         session.resize(to: size)
     }
 
@@ -137,7 +140,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public func draw(in view: MTKView) {
-        renderer.render(in: view, snapshot: currentSnapshot)
+        let focused = window?.isKeyWindow ?? false
+        renderer.render(in: view, snapshot: currentSnapshot, focused: focused)
         #if DEBUG
         frameCount += 1
         let now = Date()
@@ -186,7 +190,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let mods = KeyEncoder.Modifiers(event: event)
 
         if let special = Self.specialKey(for: event) {
-            let bytes = encoder.encodeSpecial(special, modifiers: mods)
+            let appCursor = currentSnapshot?.termMode.contains(.appCursor) ?? false
+            let bytes = encoder.encodeSpecial(special, modifiers: mods, applicationCursorKeys: appCursor)
             if !bytes.isEmpty { session.send(bytes) }
             return
         }
@@ -212,7 +217,103 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // DEL byte (0x7F), which the char-based path produces naturally from
         // event.charactersIgnoringModifiers. Only forward-delete maps here.
         case NSEvent.SpecialKey.deleteForward: return .delete
+        case NSEvent.SpecialKey.f1:  return .f1
+        case NSEvent.SpecialKey.f2:  return .f2
+        case NSEvent.SpecialKey.f3:  return .f3
+        case NSEvent.SpecialKey.f4:  return .f4
+        case NSEvent.SpecialKey.f5:  return .f5
+        case NSEvent.SpecialKey.f6:  return .f6
+        case NSEvent.SpecialKey.f7:  return .f7
+        case NSEvent.SpecialKey.f8:  return .f8
+        case NSEvent.SpecialKey.f9:  return .f9
+        case NSEvent.SpecialKey.f10: return .f10
+        case NSEvent.SpecialKey.f11: return .f11
+        case NSEvent.SpecialKey.f12: return .f12
         default: return nil
+        }
+    }
+
+    // MARK: - Paste
+
+    @objc public func paste(_ sender: Any?) {
+        guard let session else { return }
+        guard let str = NSPasteboard.general.string(forType: .string) else { return }
+        let bytes = Data(str.utf8)
+        let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
+        if bracketedPaste {
+            var wrapped = Data([0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])  // ESC[200~
+            wrapped.append(bytes)
+            wrapped.append(Data([0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]))  // ESC[201~
+            session.send(wrapped)
+        } else {
+            session.send(bytes)
+        }
+    }
+
+    // MARK: - Mouse reporting
+
+    private func mouseReportingEnabled() -> Bool {
+        guard let mode = currentSnapshot?.termMode else { return false }
+        return mode.contains(.mouseReportClick) || mode.contains(.mouseMotion) || mode.contains(.mouseDrag)
+    }
+
+    private func sgrMouseEnabled() -> Bool {
+        currentSnapshot?.termMode.contains(.sgrMouse) ?? false
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        guard mouseReportingEnabled(), let session else { super.mouseDown(with: event); return }
+        sendMouseEvent(event, button: 0, press: true, session: session)
+    }
+
+    public override func mouseUp(with event: NSEvent) {
+        guard mouseReportingEnabled(), let session else { super.mouseUp(with: event); return }
+        sendMouseEvent(event, button: 0, press: false, session: session)
+    }
+
+    public override func rightMouseDown(with event: NSEvent) {
+        guard mouseReportingEnabled(), let session else { super.rightMouseDown(with: event); return }
+        sendMouseEvent(event, button: 2, press: true, session: session)
+    }
+
+    public override func rightMouseUp(with event: NSEvent) {
+        guard mouseReportingEnabled(), let session else { super.rightMouseUp(with: event); return }
+        sendMouseEvent(event, button: 2, press: false, session: session)
+    }
+
+    public override func scrollWheel(with event: NSEvent) {
+        guard mouseReportingEnabled(), let session else { super.scrollWheel(with: event); return }
+        // Wheel up = button 64, wheel down = button 65.
+        if event.scrollingDeltaY > 0 {
+            sendMouseEvent(event, button: 64, press: true, session: session)
+        } else if event.scrollingDeltaY < 0 {
+            sendMouseEvent(event, button: 65, press: true, session: session)
+        }
+    }
+
+    public override func mouseDragged(with event: NSEvent) {
+        guard let mode = currentSnapshot?.termMode,
+              (mode.contains(.mouseMotion) || mode.contains(.mouseDrag)),
+              let session else { super.mouseDragged(with: event); return }
+        sendMouseEvent(event, button: 32, press: true, session: session)
+    }
+
+    private func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool, session: TerminalSession) {
+        let loc = convert(event.locationInWindow, from: nil)
+        let col = max(0, Int(loc.x / metrics.cellWidth))
+        let row = max(0, Int((bounds.height - loc.y) / metrics.cellHeight))
+        if sgrMouseEnabled() {
+            // SGR 1006: ESC [ < button ; col+1 ; row+1 M/m
+            let finalChar: Character = press ? "M" : "m"
+            let seq = "\u{1B}[<\(button);\(col + 1);\(row + 1)\(finalChar)"
+            session.send(Data(seq.utf8))
+        } else {
+            // X10/normal: ESC [ M cb cx cy (6-byte, limited to 223 cols/rows).
+            guard col < 223, row < 223 else { return }
+            let cb = UInt8(button + 32)
+            let cx = UInt8(col + 33)
+            let cy = UInt8(row + 33)
+            session.send(Data([0x1B, 0x5B, 0x4D, cb, cx, cy]))
         }
     }
 }

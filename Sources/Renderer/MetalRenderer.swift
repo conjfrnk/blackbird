@@ -103,7 +103,7 @@ public final class MetalRenderer {
         return count
     }
 
-    public func render(in view: MTKView, snapshot: BBSnapshot?) {
+    public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool) {
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
               let buffer = commandQueue.makeCommandBuffer(),
@@ -111,15 +111,18 @@ public final class MetalRenderer {
         else { return }
 
         if let snap = snapshot {
-            // Viewport and cell sizes are in points, not pixels. NDC conversion
-            // in the shader divides point positions by point viewport, giving
-            // a scale-independent result that the hardware rasterizes to the
-            // drawable's pixel space. Using drawableSize here would double-scale
-            // on Retina and render text at half size.
+            // Viewport in points, not pixels. NDC conversion in the shader
+            // divides point positions by point viewport, giving a scale-
+            // independent result that the hardware rasterizes to the drawable's
+            // pixel space. Text stays at its absolute cell-sized position as
+            // the window grows/shrinks, with empty space on the right/bottom
+            // when the grid hasn't caught up yet (which synchronous
+            // session.resize now eliminates).
             let viewportPoints = SIMD2<Float>(
                 Float(view.bounds.size.width),
                 Float(view.bounds.size.height)
             )
+            _ = snap
             let cellSizePoints = SIMD2<Float>(
                 Float(metrics.cellWidth),
                 Float(metrics.cellHeight)
@@ -149,8 +152,8 @@ public final class MetalRenderer {
                     cellSizePx: cellSizePoints,
                     color: SIMD4<Float>(1, 1, 1, 1),
                     strokeWidthPx: 1.0,
-                    _pad1: 0,
-                    _pad2: .zero
+                    filled: focused ? 1.0 : 0.0,
+                    _pad: .zero
                 )
                 encoder.setRenderPipelineState(cursorPipelineState)
                 encoder.setVertexBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
@@ -176,6 +179,6 @@ struct CursorUniforms {
     var cellSizePx: SIMD2<Float>
     var color: SIMD4<Float>
     var strokeWidthPx: Float
-    var _pad1: Float
-    var _pad2: SIMD2<Float>
+    var filled: Float       // 1.0 = solid block (window focused), 0.0 = outline
+    var _pad: SIMD2<Float>
 }

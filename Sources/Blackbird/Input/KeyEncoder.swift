@@ -20,7 +20,7 @@ public final class KeyEncoder {
         case up, down, right, left
         case home, end, pageUp, pageDown
         case delete, insert
-        case f1, f2, f3, f4  // extend later
+        case f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
     }
 
     /// If true, Option modifier produces ESC+char (traditional Meta behavior).
@@ -54,25 +54,111 @@ public final class KeyEncoder {
     }
 
     /// Encode a special key (arrow, function key, etc.) with modifiers.
-    /// Plan 2 only handles the bare-modifier cases for arrow keys.
-    public func encodeSpecial(_ key: SpecialKey, modifiers: Modifiers) -> Data {
-        // Bare arrow keys use CSI (ESC [) sequences.
+    ///
+    /// - Parameter applicationCursorKeys: When true and no modifiers are set,
+    ///   arrow and Home/End keys use SS3 (`ESC O …`) sequences instead of CSI.
+    ///   This is xterm's DECCKM mode, enabled by the shell via `ESC [ ? 1 h`.
+    ///   vim, nvim, less, and most full-screen TUIs set this.
+    public func encodeSpecial(
+        _ key: SpecialKey,
+        modifiers: Modifiers,
+        applicationCursorKeys: Bool = false
+    ) -> Data {
+        // Modifier-encoded keys use CSI with a trailing modifier parameter.
+        // Modern xterm convention: CSI 1;M <final> where M = 1 + bitmask.
+        // Bitmask: shift=1, alt=2, ctrl=4, meta=8.
+        let modBits = modifierParam(modifiers)
+        let hasMods = modBits > 1
+
         switch key {
-        case .up:    return Data([0x1B, 0x5B, 0x41])
-        case .down:  return Data([0x1B, 0x5B, 0x42])
-        case .right: return Data([0x1B, 0x5B, 0x43])
-        case .left:  return Data([0x1B, 0x5B, 0x44])
-        case .home:     return Data([0x1B, 0x5B, 0x48])
-        case .end:      return Data([0x1B, 0x5B, 0x46])
-        case .pageUp:   return Data([0x1B, 0x5B, 0x35, 0x7E])
-        case .pageDown: return Data([0x1B, 0x5B, 0x36, 0x7E])
-        case .delete:   return Data([0x1B, 0x5B, 0x33, 0x7E])
-        case .insert:   return Data([0x1B, 0x5B, 0x32, 0x7E])
-        case .f1:       return Data([0x1B, 0x4F, 0x50])  // ESC O P
-        case .f2:       return Data([0x1B, 0x4F, 0x51])
-        case .f3:       return Data([0x1B, 0x4F, 0x52])
-        case .f4:       return Data([0x1B, 0x4F, 0x53])
+        case .up, .down, .right, .left, .home, .end:
+            let final: UInt8 = {
+                switch key {
+                case .up: return 0x41       // A
+                case .down: return 0x42     // B
+                case .right: return 0x43    // C
+                case .left: return 0x44     // D
+                case .home: return 0x48     // H
+                case .end: return 0x46      // F
+                default: return 0x41
+                }
+            }()
+            if hasMods {
+                // CSI 1 ; M <final>
+                return Data([0x1B, 0x5B, 0x31, 0x3B]) + Data(String(modBits).utf8) + Data([final])
+            }
+            if applicationCursorKeys {
+                // SS3 <final> — ESC O <final>
+                return Data([0x1B, 0x4F, final])
+            }
+            // CSI <final> — ESC [ <final>
+            return Data([0x1B, 0x5B, final])
+
+        case .pageUp, .pageDown, .delete, .insert:
+            let num: UInt8 = {
+                switch key {
+                case .pageUp: return 0x35   // "5"
+                case .pageDown: return 0x36 // "6"
+                case .delete: return 0x33   // "3"
+                case .insert: return 0x32   // "2"
+                default: return 0x35
+                }
+            }()
+            if hasMods {
+                // CSI <num> ; M ~
+                return Data([0x1B, 0x5B, num, 0x3B]) + Data(String(modBits).utf8) + Data([0x7E])
+            }
+            return Data([0x1B, 0x5B, num, 0x7E])
+
+        case .f1, .f2, .f3, .f4:
+            let final: UInt8 = {
+                switch key {
+                case .f1: return 0x50       // P
+                case .f2: return 0x51       // Q
+                case .f3: return 0x52       // R
+                case .f4: return 0x53       // S
+                default: return 0x50
+                }
+            }()
+            if hasMods {
+                // CSI 1 ; M <final>
+                return Data([0x1B, 0x5B, 0x31, 0x3B]) + Data(String(modBits).utf8) + Data([final])
+            }
+            // SS3 <final> — ESC O P
+            return Data([0x1B, 0x4F, final])
+
+        case .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12:
+            // CSI <code> ~    — codes per xterm:
+            // F5=15, F6=17, F7=18, F8=19, F9=20, F10=21, F11=23, F12=24.
+            let code: String = {
+                switch key {
+                case .f5: return "15"
+                case .f6: return "17"
+                case .f7: return "18"
+                case .f8: return "19"
+                case .f9: return "20"
+                case .f10: return "21"
+                case .f11: return "23"
+                case .f12: return "24"
+                default: return "15"
+                }
+            }()
+            if hasMods {
+                // CSI <code> ; M ~
+                return Data([0x1B, 0x5B]) + Data(code.utf8) + Data([0x3B]) + Data(String(modBits).utf8) + Data([0x7E])
+            }
+            return Data([0x1B, 0x5B]) + Data(code.utf8) + Data([0x7E])
         }
+    }
+
+    /// xterm-style modifier parameter: 1 + (shift|alt|ctrl|meta bits).
+    private func modifierParam(_ m: Modifiers) -> Int {
+        var bits = 0
+        if m.contains(.shift) { bits |= 1 }
+        if m.contains(.option) { bits |= 2 }   // alt
+        if m.contains(.control) { bits |= 4 }
+        // Ignore .command — never reaches the encoder (TerminalView filters it).
+        return 1 + bits
     }
 
     // MARK: - Helpers

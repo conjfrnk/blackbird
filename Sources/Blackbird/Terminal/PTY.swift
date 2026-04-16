@@ -83,6 +83,9 @@ public final class PTY {
                 setenv(k, v, 1)
             }
             setenv("TERM", "xterm-256color", 1)
+            setenv("COLORTERM", "truecolor", 1)   // tells modern TUIs (nvim, tmux, claude-code) 24-bit color is safe
+            setenv("TERM_PROGRAM", "Blackbird", 1)
+            setenv("TERM_PROGRAM_VERSION", "0.1.0", 1)
             // Apps launched from Finder inherit cwd = `/` from launchd. Move
             // into the user's home directory so the shell starts where users
             // expect. `getpwuid(getuid())` is authoritative; fall back to
