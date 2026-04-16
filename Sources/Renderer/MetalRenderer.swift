@@ -302,9 +302,11 @@ public final class MetalRenderer {
             // Reset the blink cycle every time the cursor moves, so a
             // moving cursor is continuously visible. Tracked in
             // grid-coordinate space (cursorRow/Col), not screen row.
-            if snap.cursorRow != lastCursorRow || snap.cursorCol != lastCursorCol {
-                lastCursorRow = snap.cursorRow
-                lastCursorCol = snap.cursorCol
+            let curRow = Int32(snap.cursorRow)
+            let curCol = Int32(snap.cursorCol)
+            if curRow != lastCursorRow || curCol != lastCursorCol {
+                lastCursorRow = curRow
+                lastCursorCol = curCol
                 blinkPhaseStart = CACurrentMediaTime()
             }
             // When enabled, skip the draw in the second half of each cycle.
