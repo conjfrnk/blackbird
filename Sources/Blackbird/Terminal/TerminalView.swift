@@ -215,9 +215,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 #if DEBUG
                 NSLog("[Blackbird] keyDown: sending control byte 0x%02x IMMEDIATE", scalar.value)
                 #endif
-                // Synchronous write — bypasses writeQueue so SIGINT/SIGTSTP
-                // reach the terminal driver with zero async dispatch latency.
+                // Write the control byte to the PTY master for line-discipline
+                // processing (standard path).
                 session.sendImmediate(Data([UInt8(scalar.value)]))
+                // For SIGINT (0x03) and SIGTSTP (0x1A), also send the signal
+                // directly to the foreground process group. This guarantees
+                // interrupt delivery even if the shell has disabled ISIG or
+                // remapped VINTR in its termios settings (common with conda,
+                // custom .zshrc, etc.).
+                if scalar.value == 0x03 {
+                    session.sendSignalToForeground(SIGINT)
+                } else if scalar.value == 0x1A {
+                    session.sendSignalToForeground(SIGTSTP)
+                }
                 return
             }
             // Fast path didn't match — fall through to encoder which also

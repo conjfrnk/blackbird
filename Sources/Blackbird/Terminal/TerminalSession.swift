@@ -69,6 +69,14 @@ public final class TerminalSession: ObservableObject {
         pty.writeImmediate(data)
     }
 
+    /// Send a POSIX signal directly to the terminal's foreground process group.
+    /// More reliable than writing 0x03 for SIGINT because it bypasses the
+    /// line discipline — works even if the shell changed termios (ISIG off,
+    /// VINTR remapped, etc.).
+    public func sendSignalToForeground(_ sig: Int32) {
+        pty.sendSignalToForeground(sig)
+    }
+
     public func resize(to size: Size) {
         // Synchronous on the caller's thread. coreQueue serializes PTY +
         // BBTerm resize (same guarantee as before) but we block the caller

@@ -181,6 +181,18 @@ public final class PTY {
         }
     }
 
+    /// Send a signal directly to the foreground process group of the terminal.
+    /// For SIGINT (Ctrl+C) this is more reliable than writing 0x03 to the
+    /// master fd, because the shell may have turned off ISIG or changed VINTR
+    /// in its termios settings. `tcgetpgrp` returns the foreground pgroup of
+    /// the slave side; `kill(-pgrp, sig)` targets the whole group.
+    public func sendSignalToForeground(_ sig: Int32) {
+        let pgrp = tcgetpgrp(masterFD)
+        if pgrp > 0 {
+            kill(-pgrp, sig)
+        }
+    }
+
     // MARK: - Resize
 
     public func resize(to size: Size) {
