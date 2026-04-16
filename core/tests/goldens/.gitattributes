@@ -1,0 +1,2 @@
+*.bytes binary
+*.golden text eol=lf
