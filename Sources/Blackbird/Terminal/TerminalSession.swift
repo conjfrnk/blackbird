@@ -135,6 +135,26 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
+    /// Push a full palette into the Rust term + publish a fresh snapshot so
+    /// cells re-color on the next draw. Serialized through `coreQueue`.
+    public func applyPalette(_ palette: ThemePalette) {
+        var newSnap: BBSnapshot?
+        coreQueue.sync {
+            for (i, c) in palette.ansi.enumerated() {
+                bbterm.setColor(slot: i, rgb: c)
+            }
+            // NamedColor layout in alacritty 0.26:
+            //   256 = Foreground, 257 = Background, 258 = Cursor
+            bbterm.setColor(slot: 256, rgb: palette.foreground)
+            bbterm.setColor(slot: 257, rgb: palette.background)
+            bbterm.setColor(slot: 258, rgb: palette.cursor)
+            newSnap = bbterm.snapshot()
+        }
+        guard let newSnap else { return }
+        if Thread.isMainThread { snapshot = newSnap }
+        else { DispatchQueue.main.async { self.snapshot = newSnap } }
+    }
+
     /// Extract text between two buffer points. Serialized through the core
     /// queue so the grid can't mutate mid-read (same discipline as other
     /// `bbterm.*` accessors).

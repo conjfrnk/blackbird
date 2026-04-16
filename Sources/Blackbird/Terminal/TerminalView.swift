@@ -168,6 +168,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     // MARK: - Rendering
 
+    public func applyTheme(_ palette: ThemePalette) {
+        let bgR = Double((palette.background >> 16) & 0xFF) / 255.0
+        let bgG = Double((palette.background >> 8)  & 0xFF) / 255.0
+        let bgB = Double(palette.background & 0xFF) / 255.0
+        clearColor = MTLClearColor(red: bgR, green: bgG, blue: bgB, alpha: 1)
+        renderer.setCursorColor(rgb: palette.cursor)
+    }
+
     public func render(snapshot: BBSnapshot) {
         self.currentSnapshot = snapshot
         // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.

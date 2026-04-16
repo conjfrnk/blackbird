@@ -91,6 +91,12 @@ public final class BBTerm {
         bb_term_scroll_to_bottom(h)
     }
 
+    /// Update one palette slot. See BBCore.h for slot conventions.
+    public func setColor(slot: Int, rgb: UInt32) {
+        guard let h = handle else { return }
+        bb_term_set_named_color(h, UInt16(slot), rgb)
+    }
+
     /// Extract UTF-8 text between two buffer points. `rectangular` selects
     /// the axis-aligned bounding box between start/end; `false` selects the
     /// prose-style sweep (first line from startCol, middle lines full, last

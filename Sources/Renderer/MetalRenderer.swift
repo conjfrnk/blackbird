@@ -15,6 +15,15 @@ public final class MetalRenderer {
     private var instanceBuffer: MTLBuffer
     private var instanceCapacity: Int
 
+    private var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
+
+    public func setCursorColor(rgb: UInt32) {
+        let r = Float((rgb >> 16) & 0xFF) / 255.0
+        let g = Float((rgb >> 8)  & 0xFF) / 255.0
+        let b = Float(rgb & 0xFF) / 255.0
+        cursorColor = SIMD4<Float>(r, g, b, 1.0)
+    }
+
     public init?(device: MTLDevice, metrics: CellMetrics, scale: CGFloat = 2.0) {
         guard let queue = device.makeCommandQueue() else { return nil }
         guard let library = device.makeDefaultLibrary() else { return nil }
@@ -219,7 +228,7 @@ public final class MetalRenderer {
                     cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth),
                                               Float(screenCursorRow) * Float(metrics.cellHeight)),
                     cellSizePx: cellSizePoints,
-                    color: SIMD4<Float>(1, 1, 1, 1),
+                    color: cursorColor,
                     strokeWidthPx: 1.0,
                     filled: focused ? 1.0 : 0.0,
                     _pad: .zero
