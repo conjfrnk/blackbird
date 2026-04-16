@@ -41,6 +41,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             width: m.cellWidth * 20,
             height: m.cellHeight * 4
         )
+        // Snap window size to whole-cell increments during drag. Eliminates
+        // the transient blank-edge/clip effect you'd otherwise see while the
+        // shell catches up with SIGWINCH after a sub-cell pointer movement.
+        // Same approach Terminal.app and iTerm use.
+        window.contentResizeIncrements = NSSize(
+            width: m.cellWidth,
+            height: m.cellHeight
+        )
 
         // Keyboard input routes to the TerminalView.
         window.makeFirstResponder(view)
