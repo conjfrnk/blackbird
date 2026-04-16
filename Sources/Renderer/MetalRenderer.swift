@@ -68,7 +68,8 @@ public final class MetalRenderer {
     /// Write cell instance data into `instanceBuffer`. Returns the count
     /// of instances actually written (= non-empty cells).
     @discardableResult
-    private func buildInstances(snapshot: BBSnapshot) -> Int {
+    private func buildInstances(snapshot: BBSnapshot, isSelected: (Int32, Int) -> Bool = { _, _ in false }) -> Int {
+        let selectionTint = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)  // AppKit accent-ish blue
         let needed = snapshot.cols * snapshot.rows
         if needed > instanceCapacity {
             let newCap = max(needed, instanceCapacity * 2)
@@ -96,6 +97,11 @@ public final class MetalRenderer {
                 let bg = Self.rgbToSIMD(cell.bg)
                 let hasBg = cell.bg != 0x000000  // non-black bg → need to render the cell
 
+                let bufferLine = Int32(row) - Int32(snapshot.displayOffset)
+                let selected = isSelected(bufferLine, col)
+                let effectiveBg = selected ? selectionTint : bg
+                let effectiveHasBg = selected ? true : hasBg
+
                 // Render cell if it has a glyph OR a non-default background.
                 if scalar != 0 && scalar != 0x20 /* space */ {
                     if let us = Unicode.Scalar(scalar),
@@ -105,19 +111,20 @@ public final class MetalRenderer {
                             uvOrigin: entry.uvOrigin,
                             uvSize: entry.uvSize,
                             fgColor: fg,
-                            bgColor: bg
+                            bgColor: effectiveBg
                         )
                         count += 1
                     }
-                } else if hasBg {
-                    // Space with colored background (status lines, vim highlights).
-                    // Draw a full-cell quad with zero coverage → pure bg fill.
+                } else if effectiveHasBg {
+                    // Space with colored background (status lines, vim highlights)
+                    // or inside an active selection. Draw a full-cell quad with
+                    // zero coverage → pure bg fill.
                     ptr[count] = CellInstance(
                         cellPosPx: SIMD2<Float>(Float(col) * cellW, Float(row) * cellH),
                         uvOrigin: .zero,
                         uvSize: .zero,
                         fgColor: fg,
-                        bgColor: bg
+                        bgColor: effectiveBg
                     )
                     count += 1
                 }
@@ -133,12 +140,34 @@ public final class MetalRenderer {
         return SIMD4<Float>(r, g, b, 1.0)
     }
 
-    public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool) {
+    public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
               let buffer = commandQueue.makeCommandBuffer(),
               let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
         else { return }
+
+        // Build a cheap closure that answers "is buffer-(line, col) inside
+        // the current selection?". Called once per cell while building the
+        // instance array. Rectangular mode hits an axis-aligned bounding
+        // box; prose-style modes use the standard (start, end) sweep where
+        // interior lines select the full width.
+        let isSelected: (Int32, Int) -> Bool = { [selection] line, col in
+            guard let sel = selection else { return false }
+            let (a, b) = sel.normalized
+            switch sel.mode {
+            case .rectangular:
+                let lo = min(a.line, b.line), hi = max(a.line, b.line)
+                let cLo = min(a.col, b.col), cHi = max(a.col, b.col)
+                return line >= lo && line <= hi && col >= cLo && col <= cHi
+            default:
+                if line < a.line || line > b.line { return false }
+                if a.line == b.line { return col >= a.col && col <= b.col }
+                if line == a.line { return col >= a.col }
+                if line == b.line { return col <= b.col }
+                return true
+            }
+        }
 
         if let snap = snapshot {
             // Viewport in points, not pixels. NDC conversion in the shader
@@ -157,7 +186,7 @@ public final class MetalRenderer {
                 Float(metrics.cellWidth),
                 Float(metrics.cellHeight)
             )
-            let instanceCount = buildInstances(snapshot: snap)
+            let instanceCount = buildInstances(snapshot: snap, isSelected: isSelected)
             if instanceCount > 0 {
                 var uniforms = FrameUniforms(
                     viewportPx: viewportPoints,

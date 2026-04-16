@@ -205,7 +205,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public func draw(in view: MTKView) {
         let focused = window?.isKeyWindow ?? false
-        renderer.render(in: view, snapshot: currentSnapshot, focused: focused)
+        renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         #if DEBUG
         frameCount += 1
         let now = Date()
