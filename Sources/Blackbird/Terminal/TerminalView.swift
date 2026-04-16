@@ -190,6 +190,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
     }
 
+
     public required init(coder: NSCoder) { fatalError("not supported") }
 
     public override var acceptsFirstResponder: Bool { true }
@@ -213,6 +214,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     private var lastPropagatedSize: PTY.Size?
+    private var lastSafeAreaTop: Float = -1
 
     /// Space reserved at the bottom of the view so the last grid row never
     /// runs into the window's rounded corner. macOS window corner radius is
@@ -341,6 +343,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public func draw(in view: MTKView) {
+        // Safe-area insets change when the tab bar appears/disappears
+        // (opening or closing a second tab), but AppKit doesn't always
+        // re-run layout() on existing tabs when that happens. Pin the
+        // renderer's top inset every frame so row 0 never draws behind
+        // the newly-materialized tab strip. One property read per frame,
+        // no perceptible overhead. Also re-propagate the grid size if
+        // the usable height actually changed, so the shell sees the new
+        // row count.
+        let currentTop = Float(safeAreaInsets.top)
+        renderer.setTopInsetPoints(currentTop)
+        if currentTop != lastSafeAreaTop {
+            lastSafeAreaTop = currentTop
+            lastPropagatedSize = nil
+            propagateResize()
+        }
         let focused = window?.isKeyWindow ?? false
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         #if DEBUG
