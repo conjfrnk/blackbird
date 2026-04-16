@@ -55,6 +55,13 @@ public struct SettingsView: View {
                 }
             }
             Toggle("Confirm close while running", isOn: $prefs.confirmClose)
+
+            Divider()
+            Toggle("Remote clipboard write (OSC 52)", isOn: $prefs.osc52Enabled)
+            Text("When on, remote shells (e.g., a server emitting OSC 52 or `tmux set -g set-clipboard on`) can write text directly to your Mac clipboard. Turn off if you're working on untrusted remotes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding()
     }

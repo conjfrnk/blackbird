@@ -33,11 +33,24 @@ public final class Preferences: ObservableObject {
     @AppStorage("optionKey")      public var optionKeyRaw: String = OptionKey.meta.rawValue
     @AppStorage("confirmClose")   public var confirmClose: Bool = true
     @AppStorage("autoUpdateChecks") public var autoUpdateChecks: Bool = false
+    @AppStorage("osc52Enabled")   public var osc52Enabled: Bool = true
 
     public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }
     public var bell: BellStyle      { BellStyle(rawValue: bellRaw) ?? .visual }
     public var optionKey: OptionKey { OptionKey(rawValue: optionKeyRaw) ?? .meta }
 
-    private init() {}
+    private init() {
+        // Migrate legacy PostScript names written by earlier builds
+        // ("SFMono-Regular", "HackNerdFontMono-Regular") to the family name
+        // the Settings picker uses. Without this, the picker shows nothing
+        // selected because its rows are family names and the stored value
+        // isn't one of them. Idempotent — runs once per launch but only
+        // writes when a rewrite is needed.
+        switch fontName {
+        case "SFMono-Regular":          fontName = "SF Mono"
+        case "HackNerdFontMono-Regular": fontName = "Hack Nerd Font Mono"
+        default: break
+        }
+    }
 }

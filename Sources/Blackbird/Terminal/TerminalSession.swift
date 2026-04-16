@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AppKit
 
 /// Owns a PTY and a BBTerm. Wires PTY output into the VT parser, publishes
 /// snapshots of the grid to observers.
@@ -226,8 +227,25 @@ public final class TerminalSession: ObservableObject {
                     // the answer. Without this, nvim and other apps time out
                     // waiting for terminal identification.
                     self.send(data)
-                case .osc52Clipboard:
-                    break  // Plan 6 wires this.
+                case .osc52Clipboard(let raw):
+                    // OSC 52 payload is "<target>;<base64>"; target chars
+                    // are a subset of c,p,q,s,0-7. Strip everything up to
+                    // the first ';' and base64-decode the rest. Silently
+                    // drop when the pref is off, when the payload is a
+                    // read request ("?"), or when decoding fails — a
+                    // misbehaving remote shouldn't stuff arbitrary bytes
+                    // into the user's clipboard or crash the session.
+                    guard Preferences.shared.osc52Enabled else { break }
+                    guard let sep = raw.firstIndex(of: ";") else { break }
+                    let b64 = String(raw[raw.index(after: sep)...])
+                    if b64 == "?" { break }
+                    guard let data = Data(base64Encoded: b64, options: .ignoreUnknownCharacters),
+                          let text = String(data: data, encoding: .utf8) else {
+                        break
+                    }
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(text, forType: .string)
                 case .cursorShape:
                     break  // Plan 5/3 will surface cursor shape.
                 case .fatal(let msg):
