@@ -21,6 +21,28 @@
 
 #define STRIKE (1 << 5)
 
+#define ALT_SCREEN (1 << 0)
+
+#define APP_CURSOR (1 << 1)
+
+#define APP_KEYPAD (1 << 2)
+
+#define BRACKETED_PASTE (1 << 3)
+
+#define MOUSE_REPORT_CLICK (1 << 4)
+
+#define MOUSE_MOTION (1 << 5)
+
+#define MOUSE_DRAG (1 << 6)
+
+#define SGR_MOUSE (1 << 7)
+
+#define FOCUS_IN_OUT (1 << 8)
+
+#define SHOW_CURSOR (1 << 9)
+
+#define LINE_WRAP (1 << 10)
+
 /**
  * Kind of terminal event forwarded to the C caller.
  */
@@ -105,7 +127,8 @@ struct BBSnap {
   uint16_t cursor_col;
   uint16_t cursor_row;
   uint8_t cursor_visible;
-  uint8_t _pad[7];
+  uint8_t _pad[3];
+  uint32_t mode;
   uintptr_t cells_len;
   const struct BBCell *cells;
 };

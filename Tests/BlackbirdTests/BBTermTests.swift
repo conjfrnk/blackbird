@@ -68,4 +68,15 @@ final class BBTermTests: XCTestCase {
         wait(for: [exp], timeout: 1.0)
         XCTAssertEqual(received, "my-title")
     }
+
+    func test_modeExposedInSnapshot() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        // Send DECSET 1 (enable application cursor keys).
+        term.input("\u{1B}[?1h")
+        let snap = try XCTUnwrap(term.snapshot())
+        XCTAssertTrue(snap.termMode.contains(.appCursor), "APP_CURSOR should be set after DECSET 1")
+        // Default modes — show cursor and line wrap are on at startup.
+        XCTAssertTrue(snap.termMode.contains(.showCursor), "SHOW_CURSOR should be on by default")
+        XCTAssertTrue(snap.termMode.contains(.lineWrap), "LINE_WRAP should be on by default")
+    }
 }

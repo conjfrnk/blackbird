@@ -119,6 +119,25 @@ public final class BBTerm {
     }
 }
 
+/// Terminal mode flags mirrored from the Rust `bb_mode` constants.
+/// Bits correspond 1-to-1 with the `BBSnap.mode` field.
+public struct BBTermMode: OptionSet {
+    public let rawValue: UInt32
+    public init(rawValue: UInt32) { self.rawValue = rawValue }
+
+    public static let altScreen        = BBTermMode(rawValue: 1 << 0)
+    public static let appCursor        = BBTermMode(rawValue: 1 << 1)
+    public static let appKeypad        = BBTermMode(rawValue: 1 << 2)
+    public static let bracketedPaste   = BBTermMode(rawValue: 1 << 3)
+    public static let mouseReportClick = BBTermMode(rawValue: 1 << 4)
+    public static let mouseMotion      = BBTermMode(rawValue: 1 << 5)
+    public static let mouseDrag        = BBTermMode(rawValue: 1 << 6)
+    public static let sgrMouse         = BBTermMode(rawValue: 1 << 7)
+    public static let focusInOut       = BBTermMode(rawValue: 1 << 8)
+    public static let showCursor       = BBTermMode(rawValue: 1 << 9)
+    public static let lineWrap         = BBTermMode(rawValue: 1 << 10)
+}
+
 /// Immutable snapshot of the grid. Holds a ref until deinit.
 public final class BBSnapshot {
     private let handle: UnsafePointer<BBSnap>
@@ -136,6 +155,8 @@ public final class BBSnapshot {
     public var cursorCol: Int { Int(handle.pointee.cursor_col) }
     public var cursorRow: Int { Int(handle.pointee.cursor_row) }
     public var cursorVisible: Bool { handle.pointee.cursor_visible != 0 }
+    public var mode: UInt32 { handle.pointee.mode }
+    public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 
     public func character(at col: Int, row: Int) -> Character? {
         guard col < cols, row < rows else { return nil }

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 
 /// Dimensions struct required by `Term::new`.
@@ -369,6 +369,23 @@ pub mod cell_flags {
     pub const STRIKE: u16 = 1 << 5;
 }
 
+/// Terminal mode bitflags mirrored from `alacritty_terminal::term::TermMode`.
+/// These are stable across Blackbird versions; the underlying alacritty bits
+/// are intentionally not exposed directly so we can version them independently.
+pub mod bb_mode {
+    pub const ALT_SCREEN: u32         = 1 << 0;
+    pub const APP_CURSOR: u32         = 1 << 1;
+    pub const APP_KEYPAD: u32         = 1 << 2;
+    pub const BRACKETED_PASTE: u32    = 1 << 3;
+    pub const MOUSE_REPORT_CLICK: u32 = 1 << 4;
+    pub const MOUSE_MOTION: u32       = 1 << 5;
+    pub const MOUSE_DRAG: u32         = 1 << 6;
+    pub const SGR_MOUSE: u32          = 1 << 7;
+    pub const FOCUS_IN_OUT: u32       = 1 << 8;
+    pub const SHOW_CURSOR: u32        = 1 << 9;
+    pub const LINE_WRAP: u32          = 1 << 10;
+}
+
 /// Immutable snapshot of terminal grid state. Ref-counted via `bb_snap_retain` /
 /// `bb_snap_release`. The `cells` pointer is stable for the lifetime of the snapshot.
 ///
@@ -386,7 +403,8 @@ pub struct BBSnap {
     pub cursor_col: u16,
     pub cursor_row: u16,
     pub cursor_visible: u8,
-    pub _pad: [u8; 7],
+    pub _pad: [u8; 3],  // pad cursor_visible(1) to 4-byte boundary for mode
+    pub mode: u32,       // terminal mode bitflags — see bb_mode constants
     pub cells_len: usize,
     pub cells: *const BBCell,
 }
@@ -412,7 +430,7 @@ unsafe impl Send for BBSnapOwned {}
 unsafe impl Sync for BBSnapOwned {}
 
 impl BBSnapOwned {
-    fn new(cols: u16, rows: u16, cursor: (u16, u16, bool), cells: Vec<BBCell>) -> Box<BBSnapOwned> {
+    fn new(cols: u16, rows: u16, cursor: (u16, u16, bool), mode: u32, cells: Vec<BBCell>) -> Box<BBSnapOwned> {
         let mut owned = Box::new(BBSnapOwned {
             snap: BBSnap {
                 cols,
@@ -420,7 +438,8 @@ impl BBSnapOwned {
                 cursor_col: cursor.0,
                 cursor_row: cursor.1,
                 cursor_visible: cursor.2 as u8,
-                _pad: [0; 7],
+                _pad: [0; 3],
+                mode,
                 cells_len: cells.len(),
                 cells: std::ptr::null(),
             },
@@ -502,6 +521,23 @@ pub unsafe extern "C" fn bb_term_set_event_cb(
     })
 }
 
+/// Map `alacritty_terminal::term::TermMode` to our stable `bb_mode` bitflags.
+fn extract_mode(term_mode: &TermMode) -> u32 {
+    let mut m: u32 = 0;
+    if term_mode.contains(TermMode::ALT_SCREEN)        { m |= bb_mode::ALT_SCREEN; }
+    if term_mode.contains(TermMode::APP_CURSOR)        { m |= bb_mode::APP_CURSOR; }
+    if term_mode.contains(TermMode::APP_KEYPAD)        { m |= bb_mode::APP_KEYPAD; }
+    if term_mode.contains(TermMode::BRACKETED_PASTE)   { m |= bb_mode::BRACKETED_PASTE; }
+    if term_mode.contains(TermMode::MOUSE_REPORT_CLICK){ m |= bb_mode::MOUSE_REPORT_CLICK; }
+    if term_mode.contains(TermMode::MOUSE_MOTION)      { m |= bb_mode::MOUSE_MOTION; }
+    if term_mode.contains(TermMode::MOUSE_DRAG)        { m |= bb_mode::MOUSE_DRAG; }
+    if term_mode.contains(TermMode::SGR_MOUSE)         { m |= bb_mode::SGR_MOUSE; }
+    if term_mode.contains(TermMode::FOCUS_IN_OUT)      { m |= bb_mode::FOCUS_IN_OUT; }
+    if term_mode.contains(TermMode::SHOW_CURSOR)       { m |= bb_mode::SHOW_CURSOR; }
+    if term_mode.contains(TermMode::LINE_WRAP)         { m |= bb_mode::LINE_WRAP; }
+    m
+}
+
 /// Take an immutable snapshot of the current grid state.
 ///
 /// # Safety
@@ -540,7 +576,8 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // cursor_point.column.0 is a 0-based column (Column wraps usize).
         let cursor_row = cursor_point.line.0.max(0) as u16;
         let cursor_col = cursor_point.column.0 as u16;
-        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), cells);
+        let mode = extract_mode(bb.term.mode());
+        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), mode, cells);
         // Expose the public `snap` field (first field at offset 0).
         let owned_ptr = Box::into_raw(owned);
         &(*owned_ptr).snap as *const BBSnap
@@ -769,6 +806,49 @@ mod tests {
             assert_eq!(owner_a, owner_b); // retain returns the input pointer
             bb_snap_release(owner_b); // rc = 1 (owner_b done)
             bb_snap_release(owner_a); // rc = 0, freed (owner_a done)
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn mode_app_cursor_set_by_decset_1() {
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            assert!(!term.is_null());
+
+            // Default mode: APP_CURSOR should be off.
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null());
+            assert_eq!(
+                (*snap).mode & bb_mode::APP_CURSOR,
+                0,
+                "APP_CURSOR should be clear before DECSET 1"
+            );
+            bb_snap_release(snap);
+
+            // Send DECSET 1 — enables application cursor keys.
+            let seq = b"\x1b[?1h";
+            bb_term_input(term, seq.as_ptr(), seq.len());
+
+            let snap2 = bb_term_take_snapshot(term);
+            assert!(!snap2.is_null());
+            assert_ne!(
+                (*snap2).mode & bb_mode::APP_CURSOR,
+                0,
+                "APP_CURSOR should be set after DECSET 1"
+            );
+            // Default modes should also be set.
+            assert_ne!(
+                (*snap2).mode & bb_mode::SHOW_CURSOR,
+                0,
+                "SHOW_CURSOR should be set by default"
+            );
+            assert_ne!(
+                (*snap2).mode & bb_mode::LINE_WRAP,
+                0,
+                "LINE_WRAP should be set by default"
+            );
+            bb_snap_release(snap2);
             bb_term_free(term);
         }
     }

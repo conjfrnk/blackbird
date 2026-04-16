@@ -9,7 +9,7 @@ no_includes = false
 sys_includes = ["stddef.h"]
 
 [export]
-include = ["BBTerm", "BBSnap", "BBCell", "BBEvent", "BBEventKind", "cell_flags"]
+include = ["BBTerm", "BBSnap", "BBCell", "BBEvent", "BBEventKind", "cell_flags", "bb_mode"]
 exclude = ["bb_term_test_only_panic"]
 prefix = ""
 
