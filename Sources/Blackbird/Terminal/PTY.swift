@@ -182,9 +182,22 @@ public final class PTY {
                 var offset = 0
                 while remaining > 0 {
                     let written = Darwin.write(masterFD, base.advanced(by: offset), remaining)
-                    if written <= 0 { break }
-                    remaining -= written
-                    offset += written
+                    if written > 0 {
+                        remaining -= written
+                        offset += written
+                        continue
+                    }
+                    // EINTR / EAGAIN: retry. The master-side pipe can
+                    // legitimately report "try again" under back-pressure
+                    // (slow consumer). Previously we swallowed the whole
+                    // remaining payload on any non-positive return — silent
+                    // data loss on paste.
+                    if errno == EINTR || errno == EAGAIN { continue }
+                    #if DEBUG
+                    NSLog("[Blackbird] PTY.write FAILED after %d/%d bytes errno=%d fd=%d",
+                          offset, rawBuf.count, errno, masterFD)
+                    #endif
+                    break
                 }
             }
         }
