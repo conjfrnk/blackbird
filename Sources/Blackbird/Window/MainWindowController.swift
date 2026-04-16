@@ -8,6 +8,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private(set) var terminalView: TerminalView?
     private var exitCancellable: AnyCancellable?
 
+    /// Called when the window is about to close. AppDelegate uses this to
+    /// remove the controller from its tracking array.
+    var onClose: (() -> Void)?
+
     init() {
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
         let rect = NSRect(x: 0, y: 0, width: 800, height: 480)
@@ -21,6 +25,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.center()
         window.setFrameAutosaveName("BlackbirdMainWindow")
+        // Group all terminal windows into a shared tab bar. .preferred means
+        // the tab bar appears automatically when there are ≥2 tabs.
+        window.tabbingMode = .preferred
+        window.tabbingIdentifier = "dev.conjfrnk.blackbird.terminal"
         super.init(window: window)
         window.delegate = self
 
@@ -94,5 +102,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         terminateSessions()
+        onClose?()
     }
 }
