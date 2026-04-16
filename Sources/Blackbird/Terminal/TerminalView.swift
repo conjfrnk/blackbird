@@ -172,14 +172,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         needsLayout = true
     }
 
+    /// Top chrome height that excludes AppKit's phantom reservation for
+    /// the suppressed native tab bar. Uses `NSWindow.frameRect(forContentRect:
+    /// styleMask:)` on the window's real style mask minus `.fullSizeContentView`
+    /// — the delta between that and the window's content-view height is the
+    /// pure titlebar offset.
+    private var titlebarOnlyTopInset: CGFloat {
+        guard let window else { return 28 }
+        var maskWithoutFullSize = window.styleMask
+        maskWithoutFullSize.remove(.fullSizeContentView)
+        let contentRectForStyle = NSWindow.contentRect(
+            forFrameRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: maskWithoutFullSize
+        )
+        let titlebar = 100 - contentRectForStyle.height
+        return max(22, titlebar)
+    }
+
     public override func layout() {
         super.layout()
         let bottom = Self.bottomContentInsetPoints
-        // `.fullSizeContentView` extends our frame under the titlebar so the
-        // Metal clearColor can tint the whole window uniformly. safeAreaInsets
-        // automatically reports the titlebar (and any future toolbar/tab bar)
-        // height, so the renderer can offset the text grid to sit below it.
-        let top = safeAreaInsets.top
+        let top = titlebarOnlyTopInset
         renderer.setTopInsetPoints(Float(top))
         let width: CGFloat = 10
         scrollIndicator.frame = NSRect(
@@ -226,11 +239,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private func propagateResize() {
         guard let session else { return }
         // `.fullSizeContentView` means our bounds include the titlebar region —
-        // subtract it (via safeAreaInsets.top) so we don't size the grid as
+        // subtract it (via titlebarOnlyTopInset) so we don't size the grid as
         // though we had titlebar-height extra rows of real estate.
         let usableHeight = max(
             metrics.cellHeight,
-            bounds.height - safeAreaInsets.top - Self.bottomContentInsetPoints
+            bounds.height - titlebarOnlyTopInset - Self.bottomContentInsetPoints
         )
         let grid = metrics.grid(forPixelSize: CGSize(width: bounds.width, height: usableHeight))
         guard grid.cols > 0, grid.rows > 0 else { return }
@@ -343,15 +356,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public func draw(in view: MTKView) {
-        // Safe-area insets change when the tab bar appears/disappears
-        // (opening or closing a second tab), but AppKit doesn't always
-        // re-run layout() on existing tabs when that happens. Pin the
-        // renderer's top inset every frame so row 0 never draws behind
-        // the newly-materialized tab strip. One property read per frame,
-        // no perceptible overhead. Also re-propagate the grid size if
-        // the usable height actually changed, so the shell sees the new
-        // row count.
-        let currentTop = Float(safeAreaInsets.top)
+        // Top chrome is always just the titlebar — our custom tab bar
+        // lives INSIDE the titlebar row (iTerm2/Safari style), not as
+        // a separate strip below it, so the text grid should start
+        // right below the titlebar regardless of tab count.
+        //
+        // We can't use `titlebarOnlyTopInset` directly: when the native
+        // tab bar is suppressed via view-walk, AppKit still reserves
+        // its 36pt of layout in `safeAreaInsets` and `contentLayoutRect`
+        // even though the views are hidden and our custom pills occupy
+        // the titlebar itself — so titlebarOnlyTopInset jumps 32 → 68 on
+        // every 2-tab window and the prompt drops a row.
+        //
+        // Instead, compute the real titlebar height from the window's
+        // style: (window frame height) − (contentRect for the same style
+        // with NO tab-bar reservation). This gives us the stable titlebar
+        // content offset (~28 pt on standard windows), independent of
+        // AppKit's phantom tab-bar bookkeeping.
+        let currentTop = Float(titlebarOnlyTopInset)
         renderer.setTopInsetPoints(currentTop)
         if currentTop != lastSafeAreaTop {
             lastSafeAreaTop = currentTop
@@ -647,7 +669,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private func installFindBar() {
         let h: CGFloat = 32
         // Sit just below the titlebar, not under it.
-        let top = safeAreaInsets.top
+        let top = titlebarOnlyTopInset
         let bar = FindBar(frame: NSRect(x: 0, y: bounds.height - h - top, width: bounds.width, height: h))
         bar.autoresizingMask = [.width, .minYMargin]
         bar.delegate = self
@@ -962,9 +984,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // Autoscroll when dragging past the viewport edges so the user
             // can select into scrollback / future output.
             let local = convert(event.locationInWindow, from: nil)
-            // Top edge is `safeAreaInsets.top` below the raw view top because
+            // Top edge is `titlebarOnlyTopInset` below the raw view top because
             // the titlebar sits in the upper inset under fullSizeContentView.
-            if local.y > bounds.height - safeAreaInsets.top - metrics.cellHeight {
+            if local.y > bounds.height - titlebarOnlyTopInset - metrics.cellHeight {
                 session?.scroll(delta: -1)
             } else if local.y < metrics.cellHeight {
                 session?.scroll(delta: 1)
@@ -992,7 +1014,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             forView: local,
             cellWidth: metrics.cellWidth,
             cellHeight: metrics.cellHeight,
-            viewportHeight: bounds.height - safeAreaInsets.top,
+            viewportHeight: bounds.height - titlebarOnlyTopInset,
             displayOffset: snap?.displayOffset ?? 0,
             cols: snap?.cols ?? 80,
             rows: snap?.rows ?? 24
@@ -1023,9 +1045,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool, session: TerminalSession) {
         let loc = convert(event.locationInWindow, from: nil)
         let col = max(0, Int(loc.x / metrics.cellWidth))
-        // Text grid starts at `safeAreaInsets.top` (the titlebar), so subtract
+        // Text grid starts at `titlebarOnlyTopInset` (the titlebar), so subtract
         // that before converting to row.
-        let row = max(0, Int((bounds.height - safeAreaInsets.top - loc.y) / metrics.cellHeight))
+        let row = max(0, Int((bounds.height - titlebarOnlyTopInset - loc.y) / metrics.cellHeight))
         if sgrMouseEnabled() {
             // SGR 1006: ESC [ < button ; col+1 ; row+1 M/m
             let finalChar: Character = press ? "M" : "m"

@@ -59,7 +59,11 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
 /// pill. Designed to live inside an `NSTitlebarAccessoryViewController`.
 final class TabStripView: NSView {
 
-    static let height: CGFloat = 28
+    /// Match the native titlebar's content height so adding this accessory
+    /// doesn't grow the chrome — any taller and AppKit expands the
+    /// titlebar and `safeAreaInsets.top` jumps, pushing the terminal grid
+    /// down for multi-tab windows.
+    static let height: CGFloat = 22
 
     var onSelectWindow: ((NSWindow) -> Void)?
     var onCloseWindow:  ((NSWindow) -> Void)?
