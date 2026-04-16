@@ -182,6 +182,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         menu.addItem(.separator())
+        // SwiftUI's Settings scene responds to the private selector
+        // `showSettingsWindow:` on the application (macOS 13+). Without this
+        // menu item, ⌘, silently does nothing because our installMainMenu
+        // replaces the auto-generated main menu that SwiftUI normally
+        // populates. Leave target=nil so the responder chain hits NSApp.
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: Selector(("showSettingsWindow:")),
+            keyEquivalent: ","
+        )
+        menu.addItem(settingsItem)
+        menu.addItem(.separator())
         menu.addItem(
             withTitle: "Hide Blackbird",
             action: #selector(NSApplication.hide(_:)),
