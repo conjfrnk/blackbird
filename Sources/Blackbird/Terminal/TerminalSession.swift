@@ -135,6 +135,21 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
+    /// Extract text between two buffer points. Serialized through the core
+    /// queue so the grid can't mutate mid-read (same discipline as other
+    /// `bbterm.*` accessors).
+    public func textRange(from start: BufferPoint, to end: BufferPoint, rectangular: Bool) -> String {
+        var out = ""
+        coreQueue.sync {
+            out = bbterm.textRange(
+                startLine: start.line, startCol: start.col,
+                endLine: end.line, endCol: end.col,
+                rectangular: rectangular
+            ) ?? ""
+        }
+        return out
+    }
+
     public func terminate() {
         pty.terminate()
     }

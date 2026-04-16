@@ -91,6 +91,31 @@ public final class BBTerm {
         bb_term_scroll_to_bottom(h)
     }
 
+    /// Extract UTF-8 text between two buffer points. `rectangular` selects
+    /// the axis-aligned bounding box between start/end; `false` selects the
+    /// prose-style sweep (first line from startCol, middle lines full, last
+    /// line to endCol). Lines outside the buffer are silently skipped.
+    /// Returns `nil` when the underlying FFI call fails (null handle or
+    /// out-of-range arguments).
+    public func textRange(
+        startLine: Int32, startCol: Int,
+        endLine: Int32,   endCol: Int,
+        rectangular: Bool
+    ) -> String? {
+        guard let h = handle else { return nil }
+        guard let raw = bb_term_text_range(
+            h,
+            startLine, UInt16(startCol),
+            endLine,   UInt16(endCol),
+            rectangular ? 1 : 0
+        ) else {
+            return nil
+        }
+        defer { bb_string_release(raw) }
+        let buf = UnsafeBufferPointer(start: raw.pointee.bytes, count: Int(raw.pointee.len))
+        return String(decoding: buf, as: UTF8.self)
+    }
+
     public func snapshot() -> BBSnapshot? {
         guard let h = handle else { return nil }
         guard let raw = bb_term_take_snapshot(h) else { return nil }

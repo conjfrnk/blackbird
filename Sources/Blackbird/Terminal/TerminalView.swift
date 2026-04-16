@@ -400,6 +400,36 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
+    @objc public func copy(_ sender: Any?) {
+        guard let sel = selection, let session else { return }
+        let (a, b) = sel.normalized
+        let text = session.textRange(from: a, to: b, rectangular: sel.mode == .rectangular)
+        guard !text.isEmpty else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
+
+    @objc public override func selectAll(_ sender: Any?) {
+        guard let snap = currentSnapshot else { return }
+        // "All visible" = top row of the current viewport through bottom row.
+        // Buffer line for the top of the viewport is -displayOffset.
+        let topLine    = -Int32(snap.displayOffset)
+        let bottomLine = Int32(snap.rows - 1) - Int32(snap.displayOffset)
+        let top = BufferPoint(line: topLine,    col: 0)
+        let bot = BufferPoint(line: bottomLine, col: snap.cols - 1)
+        selection = Selection(anchor: top, cursor: bot, mode: .character)
+    }
+
+    public func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(copy(_:)):      return selection != nil
+        case #selector(selectAll(_:)): return currentSnapshot != nil
+        case #selector(paste(_:)):     return NSPasteboard.general.string(forType: .string) != nil
+        default: return true
+        }
+    }
+
     // MARK: - Mouse reporting
 
     private func mouseReportingEnabled() -> Bool {
