@@ -36,6 +36,23 @@ public final class MetalRenderer {
 
     public func setTopInsetPoints(_ points: Float) { topInsetPoints = points }
 
+    /// Whether the cursor should blink when the window is focused. When on,
+    /// the cursor renders for the first half of each ~1.06 s cycle and is
+    /// skipped for the second half. The cycle resets every time the cursor
+    /// moves (typing, arrow keys, output scrolling the prompt) so a moving
+    /// cursor is always visible — just like xterm/iTerm/Terminal.app.
+    private var cursorBlinkEnabled: Bool = false
+    private var blinkPhaseStart: CFTimeInterval = 0
+    private var lastCursorRow: Int32 = -1
+    private var lastCursorCol: Int32 = -1
+
+    public func setCursorBlinkEnabled(_ enabled: Bool) {
+        if enabled != cursorBlinkEnabled {
+            cursorBlinkEnabled = enabled
+            blinkPhaseStart = CACurrentMediaTime()
+        }
+    }
+
     public func setDefaultBgRgb(_ rgb: UInt32) { defaultBgRgb = rgb }
 
     public func setBackgroundOpacity(_ opacity: Float, keepBgOpaque: Bool) {
@@ -282,10 +299,29 @@ public final class MetalRenderer {
             // never show a phantom cursor on a scrollback line.
             let screenCursorRow = snap.cursorRow + snap.displayOffset
             let shape = UInt32(snap.cursorShape)
+            // Reset the blink cycle every time the cursor moves, so a
+            // moving cursor is continuously visible. Tracked in
+            // grid-coordinate space (cursorRow/Col), not screen row.
+            if snap.cursorRow != lastCursorRow || snap.cursorCol != lastCursorCol {
+                lastCursorRow = snap.cursorRow
+                lastCursorCol = snap.cursorCol
+                blinkPhaseStart = CACurrentMediaTime()
+            }
+            // When enabled, skip the draw in the second half of each cycle.
+            // Blink only runs while the window is focused; unfocused windows
+            // already render a hollow outline that stays steady. The filled
+            // state is driven by `focused` in the uniforms below.
+            let blinkSkip: Bool = {
+                guard cursorBlinkEnabled, focused else { return false }
+                let elapsed = CACurrentMediaTime() - blinkPhaseStart
+                let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
+                return phase >= 0.53
+            }()
             if snap.cursorVisible,
                shape != 3,                 // DECSCUSR hidden — skip entirely
                snap.cursorCol < snap.cols,
-               screenCursorRow < snap.rows {
+               screenCursorRow < snap.rows,
+               !blinkSkip {
                 var cu = CursorUniforms(
                     viewportPx: viewportPoints,
                     cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth),

@@ -258,6 +258,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // with the window. Users who want solid highlights just lower
         // translucency.
         renderer.setBackgroundOpacity(Float(opacity), keepBgOpaque: false)
+        renderer.setCursorBlinkEnabled(Preferences.shared.cursorBlink)
         setWindowAppearance(opacity: opacity, themeBg: (bgR, bgG, bgB))
         window?.setBackgroundBlurRadius(blurRadius)
     }
