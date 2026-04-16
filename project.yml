@@ -27,6 +27,10 @@ targets:
       - Sources/Blackbird
       - Sources/BBCore
       - Sources/Renderer
+      - path: Sources/Blackbird/Resources/Fonts
+        buildPhase: resources
+        type: folder
+        optional: false
     preBuildScripts:
       - name: Build Rust core
         script: |
@@ -51,6 +55,11 @@ targets:
         NSSupportsAutomaticTermination: true
         NSSupportsSuddenTermination: true
         LSApplicationCategoryType: public.app-category.developer-tools
+        # macOS auto-registers every font under Contents/Resources/Fonts at
+        # app launch — no runtime CTFontManagerRegister* calls needed. Pair
+        # this with the Fonts folder listed under `sources` so xcodegen
+        # copies them into Resources during the build.
+        ATSApplicationFontsPath: Fonts/
         SUFeedURL: https://example.com/appcast.xml
         SUPublicEDKey: ""
         SUEnableAutomaticChecks: false

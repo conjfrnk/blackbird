@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import Sparkle
 
 @main
@@ -25,14 +26,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Sparkle updater. Instantiated lazily so XCTest hosts don't spin it up.
     /// `startingUpdater: true` kicks off the background scheduled-check loop
     /// as soon as this is first referenced (which we do from
-    /// `applicationDidFinishLaunching` for non-test launches).
+    /// `applicationDidFinishLaunching` for non-test launches). The auto-
+    /// check cadence itself is gated by `Preferences.autoUpdateChecks` —
+    /// when the user flips the toggle we update `SPUUpdater` live so the
+    /// setting takes effect without a relaunch.
     private lazy var updaterController: SPUStandardUpdaterController = {
-        SPUStandardUpdaterController(
+        let ctrl = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        ctrl.updater.automaticallyChecksForUpdates = Preferences.shared.autoUpdateChecks
+        return ctrl
     }()
+
+    private var autoUpdateObserver: AnyCancellable?
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
@@ -60,6 +68,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Normal (non-test) launch: open the main window with a shell session.
         installMainMenu()
         installSparkleMenuItem()
+        // Live-toggle Sparkle's auto-check when the pref changes, so the
+        // Settings > Updates toggle takes effect without relaunching.
+        autoUpdateObserver = Preferences.shared.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.updaterController.updater.automaticallyChecksForUpdates
+                        = Preferences.shared.autoUpdateChecks
+                }
+            }
         let controller = createTerminalController()
         controller.showWindow(nil)
     }

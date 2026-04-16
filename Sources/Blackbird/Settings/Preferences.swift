@@ -26,12 +26,13 @@ public final class Preferences: ObservableObject {
 
     @AppStorage("theme")          public var themeRaw: String  = Theme.gruvbox.rawValue
     @AppStorage("themeMode")      public var themeModeRaw: String = ThemeMode.dark.rawValue
-    @AppStorage("fontName")       public var fontName: String = "SFMono-Regular"
+    @AppStorage("fontName")       public var fontName: String = "Hack Nerd Font Mono"
     @AppStorage("fontSize")       public var fontSize: Double = 13
     @AppStorage("cursorBlink")    public var cursorBlink: Bool = false
     @AppStorage("bell")           public var bellRaw: String = BellStyle.visual.rawValue
     @AppStorage("optionKey")      public var optionKeyRaw: String = OptionKey.meta.rawValue
     @AppStorage("confirmClose")   public var confirmClose: Bool = true
+    @AppStorage("autoUpdateChecks") public var autoUpdateChecks: Bool = false
 
     public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }

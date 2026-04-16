@@ -725,14 +725,99 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public override func rightMouseDown(with event: NSEvent) {
+        // ⌘ + right-drag → resize the window from the corner nearest the
+        // click. Matches the borderless-window idiom from apps like iTerm2
+        // and VS Code: ⌘-drag moves, ⌘-right-drag resizes. Anchor the
+        // OPPOSITE corner so dragging from (say) the top-right pulls the
+        // top-right while bottom-left stays pinned.
+        if event.modifierFlags.contains(.command), let win = window {
+            let local = convert(event.locationInWindow, from: nil)
+            let left = local.x < bounds.width / 2
+            // AppKit's Y-axis points up, so "below the midline" = smaller y.
+            let lower = local.y < bounds.height / 2
+            let corner: ResizeCorner = switch (left, lower) {
+                case (true,  true):  .bottomLeft
+                case (false, true):  .bottomRight
+                case (true,  false): .topLeft
+                case (false, false): .topRight
+            }
+            resizeContext = ResizeContext(
+                corner: corner,
+                startMouseGlobal: NSEvent.mouseLocation,
+                startFrame: win.frame
+            )
+            return
+        }
         guard mouseReportingEnabled(), let session else { super.rightMouseDown(with: event); return }
         sendMouseEvent(event, button: 2, press: true, session: session)
     }
 
+    public override func rightMouseDragged(with event: NSEvent) {
+        if let ctx = resizeContext, let win = window {
+            let now = NSEvent.mouseLocation
+            let dx = now.x - ctx.startMouseGlobal.x
+            let dy = now.y - ctx.startMouseGlobal.y
+            var frame = ctx.startFrame
+            switch ctx.corner {
+            case .topLeft:
+                frame.origin.x    += dx
+                frame.size.width  -= dx
+                frame.size.height += dy
+            case .topRight:
+                frame.size.width  += dx
+                frame.size.height += dy
+            case .bottomLeft:
+                frame.origin.x    += dx
+                frame.size.width  -= dx
+                frame.origin.y    += dy
+                frame.size.height -= dy
+            case .bottomRight:
+                frame.size.width  += dx
+                frame.origin.y    += dy
+                frame.size.height -= dy
+            }
+            // Clamp to contentMinSize (set by MainWindowController). When the
+            // dragged corner would shrink the window below the minimum, pin
+            // its corresponding edge instead of letting the opposite corner
+            // drift.
+            let minContent = win.contentMinSize
+            let chrome = win.frame.height - (win.contentView?.bounds.height ?? win.frame.height)
+            let minWidth  = max(minContent.width, 200)
+            let minHeight = max(minContent.height + chrome, 120)
+            if frame.size.width < minWidth {
+                if ctx.corner == .topLeft || ctx.corner == .bottomLeft {
+                    frame.origin.x = ctx.startFrame.maxX - minWidth
+                }
+                frame.size.width = minWidth
+            }
+            if frame.size.height < minHeight {
+                if ctx.corner == .bottomLeft || ctx.corner == .bottomRight {
+                    frame.origin.y = ctx.startFrame.maxY - minHeight
+                }
+                frame.size.height = minHeight
+            }
+            win.setFrame(frame, display: true)
+            return
+        }
+        super.rightMouseDragged(with: event)
+    }
+
     public override func rightMouseUp(with event: NSEvent) {
+        if resizeContext != nil {
+            resizeContext = nil
+            return
+        }
         guard mouseReportingEnabled(), let session else { super.rightMouseUp(with: event); return }
         sendMouseEvent(event, button: 2, press: false, session: session)
     }
+
+    private enum ResizeCorner { case topLeft, topRight, bottomLeft, bottomRight }
+    private struct ResizeContext {
+        let corner: ResizeCorner
+        let startMouseGlobal: CGPoint
+        let startFrame: CGRect
+    }
+    private var resizeContext: ResizeContext?
 
     public override func scrollWheel(with event: NSEvent) {
         guard let session else { super.scrollWheel(with: event); return }

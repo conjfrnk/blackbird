@@ -10,6 +10,7 @@ public struct SettingsView: View {
         TabView {
             appearanceTab.tabItem { Label("Appearance", systemImage: "paintpalette") }
             behaviorTab.tabItem   { Label("Behavior",   systemImage: "keyboard") }
+            updatesTab.tabItem    { Label("Updates",    systemImage: "arrow.down.circle") }
         }
         .frame(minWidth: 480, minHeight: 280)
         .padding()
@@ -54,6 +55,17 @@ public struct SettingsView: View {
                 }
             }
             Toggle("Confirm close while running", isOn: $prefs.confirmClose)
+        }
+        .padding()
+    }
+
+    private var updatesTab: some View {
+        Form {
+            Toggle("Check for updates automatically", isOn: $prefs.autoUpdateChecks)
+            Text("Blackbird can check the official release feed at app launch and notify you when a new version is available. Off by default.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding()
     }
