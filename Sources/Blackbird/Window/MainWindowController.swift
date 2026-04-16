@@ -84,6 +84,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             )
             view.session = s
             self.session = s
+            ThemeManager.shared.register(
+                sessionProvider: { [weak self] in self?.session },
+                viewProvider:    { [weak self] in self?.terminalView }
+            )
             // Close the window when the shell exits (typed `exit`, SIGHUP, etc).
             // applicationShouldTerminateAfterLastWindowClosed then quits the app.
             exitCancellable = s.$exitCode

@@ -25,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ThemeManager.shared.attach(toApp: NSApp)
+
         let underTest =
             ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
             || ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] != nil
