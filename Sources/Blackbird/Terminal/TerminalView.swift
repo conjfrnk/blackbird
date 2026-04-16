@@ -93,10 +93,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         self.preferredFramesPerSecond = 120
 
         // Minimal right-edge scroll indicator (pass-through hit testing —
-        // never swallows mouse events). Positioned in layout().
-        scrollIndicator.frame = NSRect(x: bounds.width - 10, y: 0, width: 10, height: bounds.height)
-        scrollIndicator.autoresizingMask = [.minXMargin, .height]
+        // never swallows mouse events). Positioned in layout() so it tracks
+        // the bottom inset shared with the grid.
         addSubview(scrollIndicator)
+    }
+
+    public override func layout() {
+        super.layout()
+        let inset = Self.bottomContentInsetPoints
+        let width: CGFloat = 10
+        scrollIndicator.frame = NSRect(
+            x: bounds.width - width,
+            y: inset,
+            width: width,
+            height: max(0, bounds.height - inset)
+        )
     }
 
     public required init(coder: NSCoder) { fatalError("not supported") }
@@ -123,9 +134,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private var lastPropagatedSize: PTY.Size?
 
+    /// Space reserved at the bottom of the view so the last grid row never
+    /// runs into the window's rounded corner. macOS window corner radius is
+    /// ~10 pt; keep the bottom row one cell-height above so descenders and
+    /// block cursors clear comfortably. Matches the feel of Terminal.app and
+    /// iTerm2, which both leave breathing room below the prompt.
+    public static let bottomContentInsetPoints: CGFloat = 10
+
     private func propagateResize() {
         guard let session else { return }
-        let grid = metrics.grid(forPixelSize: bounds.size)
+        let usableHeight = max(metrics.cellHeight, bounds.height - Self.bottomContentInsetPoints)
+        let grid = metrics.grid(forPixelSize: CGSize(width: bounds.width, height: usableHeight))
         guard grid.cols > 0, grid.rows > 0 else { return }
         let size = PTY.Size(cols: UInt16(grid.cols), rows: UInt16(grid.rows))
         guard size != lastPropagatedSize else { return }
