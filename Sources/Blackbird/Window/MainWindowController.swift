@@ -156,4 +156,32 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         terminateSessions()
         onClose?()
     }
+
+    // MARK: - Tab bar affordances
+
+    /// True when the current window is part of a multi-window tab group.
+    /// A single-window "group" is AppKit's default, and toggling the tab
+    /// bar in that state exposes a near-empty strip with only a `+` button
+    /// — visually jarring and functionally useless.
+    private var hasMultipleTabs: Bool {
+        (window?.tabbedWindows?.count ?? 1) >= 2
+    }
+
+    /// Intercept AppKit's toggleTabBar responder action — the one fired by
+    /// ⇧⌘T, the View menu's "Show Tab Bar", and the window titlebar's
+    /// right-click menu. Forward only when there are ≥2 tabs; otherwise
+    /// no-op so the user doesn't get the empty-strip state. The tab bar
+    /// still auto-appears the moment a second tab is created (AppKit's
+    /// default behaviour at `.preferred` tabbing mode).
+    @objc func toggleTabBar(_ sender: Any?) {
+        guard hasMultipleTabs, let window else { return }
+        window.toggleTabBar(sender)
+    }
+
+    override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleTabBar(_:)) {
+            return hasMultipleTabs
+        }
+        return super.validateMenuItem(menuItem)
+    }
 }
