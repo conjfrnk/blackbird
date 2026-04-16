@@ -155,6 +155,32 @@ struct BBSnap {
   uint32_t _pad2;
 };
 
+/**
+ * Owned UTF-8 byte buffer returned from text-extraction FFIs.
+ *
+ * `bytes`/`len` describe a read-only view into the heap buffer whose raw
+ * parts are stored in `_owned_ptr` / `_owned_cap`. The Rust side
+ * heap-allocates a `Box<BBString>`, builds the payload as a `Vec<u8>`, then
+ * decomposes the vec (ptr + capacity) and installs the pointer into
+ * `bytes`. Callers must free via `bb_string_release` exactly once; nothing
+ * else keeps the backing allocation alive.
+ *
+ * The `_owned_*` fields are intentionally present in the C-visible layout
+ * to keep the struct self-contained (one `Box<BBString>` + one `Vec<u8>`
+ * buffer, freed together by `bb_string_release`). Consumers on the C side
+ * should read only `bytes` and `len` and otherwise treat the struct as
+ * opaque — never poke into the owned fields. Using raw pointer + capacity
+ * instead of a literal `Vec<u8>` field lets cbindgen emit a complete,
+ * FFI-safe layout that Swift can import: `Vec<u8>` is not `repr(C)`, so a
+ * `Vec` field would surface as an incomplete type in the generated header.
+ */
+struct BBString {
+  const uint8_t *bytes;
+  uintptr_t len;
+  uint8_t *_owned_ptr;
+  uintptr_t _owned_cap;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -307,6 +333,60 @@ void bb_term_scroll(struct BBTerm *term, int32_t delta);
  * unit as the fallback value.
  */
 void bb_term_scroll_to_bottom(struct BBTerm *term);
+
+/**
+ * Extract UTF-8 text from the terminal buffer between two buffer-relative
+ * points. `start_line`/`end_line` are grid lines where 0 is the top of the
+ * visible viewport and negative values reach into scrollback (buffer-relative,
+ * matching alacritty's `Line(i32)` convention).
+ *
+ * `rect == 0` selects prose mode: the first line is emitted from `start_col`
+ * to the end of the row, the last line from column 0 to `end_col`, and
+ * middle lines are taken in full. Trailing spaces are trimmed from every
+ * line except the last to avoid pulling the grid's blank fill into copied
+ * output.
+ *
+ * `rect != 0` selects rectangular mode: every line is clipped to
+ * `[start_col, end_col]` with no trimming.
+ *
+ * `\0` cells (alacritty's "unrendered" sentinel) are emitted as spaces. Real
+ * spaces come through as-is. Lines outside `[topmost_line, bottommost_line]`
+ * are skipped silently. Points are normalized so `(start_line, start_col)
+ * <= (end_line, end_col)` before iterating.
+ *
+ * Returns a heap-allocated `BBString` the caller must free with
+ * `bb_string_release`. Returns null when `term` is null.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Caller owns the returned pointer.
+ *
+ * Panics inside this function are caught by `catch_unwind` and delivered as a
+ * `BBEventKind::Fatal` event to the registered callback. The function returns
+ * null as the fallback value.
+ */
+struct BBString *bb_term_text_range(struct BBTerm *term,
+                                    int32_t start_line,
+                                    uint16_t start_col,
+                                    int32_t end_line,
+                                    uint16_t end_col,
+                                    uint8_t rect);
+
+/**
+ * Free a `BBString` returned by `bb_term_text_range`.
+ *
+ * Rebuilds the owned `Vec<u8>` from `_owned_ptr`/`_owned_cap`/`len` so its
+ * heap buffer is deallocated with the matching `Vec` allocator, then drops
+ * the `Box<BBString>`.
+ *
+ * # Safety
+ * `s` must have been returned by `bb_term_text_range` and not previously
+ * released. Passing null is a no-op.
+ *
+ * Panics inside this function are caught by `catch_unwind` and swallowed
+ * silently (no `BBTerm` context is available). The function returns unit as
+ * the fallback value.
+ */
+void bb_string_release(struct BBString *s);
 
 #ifdef __cplusplus
 }  // extern "C"

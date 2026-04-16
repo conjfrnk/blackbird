@@ -829,6 +829,203 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
     })
 }
 
+/// Owned UTF-8 byte buffer returned from text-extraction FFIs.
+///
+/// `bytes`/`len` describe a read-only view into the heap buffer whose raw
+/// parts are stored in `_owned_ptr` / `_owned_cap`. The Rust side
+/// heap-allocates a `Box<BBString>`, builds the payload as a `Vec<u8>`, then
+/// decomposes the vec (ptr + capacity) and installs the pointer into
+/// `bytes`. Callers must free via `bb_string_release` exactly once; nothing
+/// else keeps the backing allocation alive.
+///
+/// The `_owned_*` fields are intentionally present in the C-visible layout
+/// to keep the struct self-contained (one `Box<BBString>` + one `Vec<u8>`
+/// buffer, freed together by `bb_string_release`). Consumers on the C side
+/// should read only `bytes` and `len` and otherwise treat the struct as
+/// opaque — never poke into the owned fields. Using raw pointer + capacity
+/// instead of a literal `Vec<u8>` field lets cbindgen emit a complete,
+/// FFI-safe layout that Swift can import: `Vec<u8>` is not `repr(C)`, so a
+/// `Vec` field would surface as an incomplete type in the generated header.
+#[repr(C)]
+pub struct BBString {
+    pub bytes: *const u8,
+    pub len: usize,
+    _owned_ptr: *mut u8,
+    _owned_cap: usize,
+}
+
+/// Extract UTF-8 text from the terminal buffer between two buffer-relative
+/// points. `start_line`/`end_line` are grid lines where 0 is the top of the
+/// visible viewport and negative values reach into scrollback (buffer-relative,
+/// matching alacritty's `Line(i32)` convention).
+///
+/// `rect == 0` selects prose mode: the first line is emitted from `start_col`
+/// to the end of the row, the last line from column 0 to `end_col`, and
+/// middle lines are taken in full. Trailing spaces are trimmed from every
+/// line except the last to avoid pulling the grid's blank fill into copied
+/// output.
+///
+/// `rect != 0` selects rectangular mode: every line is clipped to
+/// `[start_col, end_col]` with no trimming.
+///
+/// `\0` cells (alacritty's "unrendered" sentinel) are emitted as spaces. Real
+/// spaces come through as-is. Lines outside `[topmost_line, bottommost_line]`
+/// are skipped silently. Points are normalized so `(start_line, start_col)
+/// <= (end_line, end_col)` before iterating.
+///
+/// Returns a heap-allocated `BBString` the caller must free with
+/// `bb_string_release`. Returns null when `term` is null.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Caller owns the returned pointer.
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// null as the fallback value.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_text_range(
+    term: *mut BBTerm,
+    start_line: i32,
+    start_col: u16,
+    end_line: i32,
+    end_col: u16,
+    rect: u8,
+) -> *mut BBString {
+    guard_with_term(term, std::ptr::null_mut(), || {
+        if term.is_null() {
+            return std::ptr::null_mut();
+        }
+        use alacritty_terminal::index::{Column, Line};
+
+        let bb = &*term;
+        let grid = bb.term.grid();
+
+        let cols = grid.columns();
+        if cols == 0 {
+            // No columns to read from; return an empty string for C-side
+            // convenience (single allocation pair, len == 0).
+            return bb_string_new(Vec::new());
+        }
+        let last_col = cols - 1;
+
+        // Normalize so (start_line, start_col) <= (end_line, end_col).
+        let (s_line, s_col, e_line, e_col) = {
+            let a = (start_line, start_col as usize);
+            let b = (end_line, end_col as usize);
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            (lo.0, lo.1.min(last_col), hi.0, hi.1.min(last_col))
+        };
+
+        let topmost = grid.topmost_line().0;
+        let bottommost = grid.bottommost_line().0;
+
+        // Collect each line's emitted text, then join with '\n' at the end.
+        let mut lines: Vec<String> = Vec::new();
+
+        let rectangular = rect != 0;
+        let single_line = s_line == e_line;
+
+        let mut line_i = s_line;
+        while line_i <= e_line {
+            if line_i < topmost || line_i > bottommost {
+                line_i += 1;
+                continue;
+            }
+
+            let (col_lo, col_hi, trim) = if rectangular {
+                (s_col, e_col, false)
+            } else if single_line {
+                (s_col, e_col, false)
+            } else if line_i == s_line {
+                (s_col, last_col, true)
+            } else if line_i == e_line {
+                (0usize, e_col, false)
+            } else {
+                (0usize, last_col, true)
+            };
+
+            let mut text = String::with_capacity(col_hi.saturating_sub(col_lo) + 1);
+            let row = &grid[Line(line_i)];
+            let mut c = col_lo;
+            while c <= col_hi {
+                let ch = row[Column(c)].c;
+                // alacritty uses '\0' for unrendered/empty cells; surface as
+                // a plain space so callers can concatenate without seeing
+                // embedded NULs in their UTF-8.
+                let out = if ch == '\0' { ' ' } else { ch };
+                text.push(out);
+                c += 1;
+            }
+
+            if trim {
+                let trimmed_len = text.trim_end_matches(' ').len();
+                text.truncate(trimmed_len);
+            }
+
+            lines.push(text);
+            line_i += 1;
+        }
+
+        let joined = lines.join("\n");
+        bb_string_new(joined.into_bytes())
+    })
+}
+
+/// Allocate a `BBString` wrapping `bytes`. The vec's heap buffer is stolen
+/// (via `Vec::into_raw_parts`-style decomposition) and held in `_owned_ptr` +
+/// `_owned_cap` so `bb_string_release` can rebuild and drop it.
+///
+/// # Safety
+/// The returned pointer must be released exactly once via `bb_string_release`.
+unsafe fn bb_string_new(bytes: Vec<u8>) -> *mut BBString {
+    let mut v = bytes;
+    v.shrink_to_fit();
+    let len = v.len();
+    let cap = v.capacity();
+    // SAFETY: leaking the vec is safe; its raw parts are recorded below and
+    // will be reconstituted in bb_string_release.
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    let boxed = Box::new(BBString {
+        bytes: ptr as *const u8,
+        len,
+        _owned_ptr: ptr,
+        _owned_cap: cap,
+    });
+    Box::into_raw(boxed)
+}
+
+/// Free a `BBString` returned by `bb_term_text_range`.
+///
+/// Rebuilds the owned `Vec<u8>` from `_owned_ptr`/`_owned_cap`/`len` so its
+/// heap buffer is deallocated with the matching `Vec` allocator, then drops
+/// the `Box<BBString>`.
+///
+/// # Safety
+/// `s` must have been returned by `bb_term_text_range` and not previously
+/// released. Passing null is a no-op.
+///
+/// Panics inside this function are caught by `catch_unwind` and swallowed
+/// silently (no `BBTerm` context is available). The function returns unit as
+/// the fallback value.
+#[no_mangle]
+pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
+    guard_no_term((), || {
+        if s.is_null() {
+            return;
+        }
+        let boxed = Box::from_raw(s);
+        // Reconstitute the owned vec so its heap buffer is freed via the
+        // matching `Vec<u8>` allocator. `_owned_ptr` may be a dangling
+        // sentinel when `_owned_cap == 0` (empty-string case); that's what
+        // `Vec::as_mut_ptr` handed us in `bb_string_new`, and
+        // `Vec::from_raw_parts` accepts the round-trip as long as the triple
+        // came from a real `Vec`, which it did.
+        let _ = Vec::from_raw_parts(boxed._owned_ptr, boxed.len, boxed._owned_cap);
+        drop(boxed);
+    })
+}
+
 /// Test-only: force a panic inside the FFI boundary to verify Fatal event delivery.
 ///
 /// # Safety
@@ -1223,6 +1420,72 @@ mod tests {
         unsafe {
             bb_term_set_event_cb(std::ptr::null_mut(), None, std::ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn text_range_extracts_single_line() {
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            bb_term_input(term, b"hello world".as_ptr(), 11);
+            let s = bb_term_text_range(term, 0, 0, 0, 10, 0);
+            assert!(!s.is_null());
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            assert_eq!(std::str::from_utf8(bytes).unwrap(), "hello world");
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn text_range_spans_multiple_lines() {
+        unsafe {
+            let term = bb_term_new(5, 3, 100);
+            bb_term_input(term, b"aaa\r\nbbb\r\nccc".as_ptr(), 13);
+            let s = bb_term_text_range(term, 0, 0, 2, 2, 0);
+            assert!(!s.is_null());
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            assert_eq!(std::str::from_utf8(bytes).unwrap(), "aaa\nbbb\nccc");
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn text_range_reads_scrollback() {
+        unsafe {
+            let term = bb_term_new(3, 2, 100);
+            bb_term_input(term, b"AAA\r\nBBB\r\nCCC\r\nDDD\r\nEEE".as_ptr(), 23);
+            let s = bb_term_text_range(term, -3, 0, -3, 2, 0);
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            assert_eq!(std::str::from_utf8(bytes).unwrap(), "AAA");
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn text_range_rectangular_clips_columns() {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            bb_term_input(term, b"abcdefghij\r\nABCDEFGHIJ\r\n1234567890".as_ptr(), 32);
+            let s = bb_term_text_range(term, 0, 2, 2, 4, 1);
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            assert_eq!(std::str::from_utf8(bytes).unwrap(), "cde\nCDE\n345");
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn text_range_null_term_returns_null() {
+        unsafe {
+            assert!(bb_term_text_range(std::ptr::null_mut(), 0, 0, 0, 0, 0).is_null());
+        }
+    }
+
+    #[test]
+    fn string_release_null_is_noop() {
+        unsafe { bb_string_release(std::ptr::null_mut()); }
     }
 
     #[test]
