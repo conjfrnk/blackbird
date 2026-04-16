@@ -12,7 +12,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// remove the controller from its tracking array.
     var onClose: (() -> Void)?
 
-    init() {
+    /// Directory this controller's shell should start in. Nil = default
+    /// (user's home via getpwuid). Set by `App.newWindow` / `newWindowForTab`
+    /// to inherit the previous tab's cwd.
+    private let initialWorkingDirectory: String?
+
+    /// Whether this window should participate in NSWindow frame autosave.
+    /// Only the first window of a session does — otherwise multiple windows
+    /// contending for the same autosave key clobber each other's position.
+    private let shouldAutosaveFrame: Bool
+
+    init(initialWorkingDirectory: String? = nil, autosaveFrame: Bool = true) {
+        self.initialWorkingDirectory = initialWorkingDirectory
+        self.shouldAutosaveFrame = autosaveFrame
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
         let rect = NSRect(x: 0, y: 0, width: 800, height: 480)
         let window = NSWindow(
@@ -23,8 +35,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         )
         window.title = "Blackbird"
         window.isReleasedWhenClosed = false
-        window.center()
-        window.setFrameAutosaveName("BlackbirdMainWindow")
+        if autosaveFrame {
+            // Only the first window persists its frame. New tabs/windows use
+            // AppKit's tab-group positioning or a cascaded default — having
+            // every window share one autosave name would race them.
+            window.center()
+            window.setFrameAutosaveName("BlackbirdMainWindow")
+        } else {
+            // Cascade new standalone windows so they don't stack exactly.
+            // Tabs don't need this — AppKit positions them within the group.
+            window.setContentSize(rect.size)
+        }
         // Group all terminal windows into a shared tab bar. .preferred means
         // the tab bar appears automatically when there are ≥2 tabs.
         window.tabbingMode = .preferred
@@ -80,7 +101,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             let s = try TerminalSession.start(
                 shell: shell,
                 arguments: ["-il"],  // interactive login shell
-                size: .init(cols: UInt16(grid.cols), rows: UInt16(grid.rows))
+                size: .init(cols: UInt16(grid.cols), rows: UInt16(grid.rows)),
+                initialWorkingDirectory: initialWorkingDirectory
             )
             view.session = s
             self.session = s

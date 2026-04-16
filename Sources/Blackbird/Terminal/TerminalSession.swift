@@ -29,7 +29,8 @@ public final class TerminalSession: ObservableObject {
     public static func start(
         shell: String,
         arguments: [String],
-        size: Size
+        size: Size,
+        initialWorkingDirectory: String? = nil
     ) throws -> TerminalSession {
         guard let bb = BBTerm(size: .init(cols: size.cols, rows: size.rows)) else {
             throw SessionError.coreInitFailed
@@ -38,7 +39,8 @@ public final class TerminalSession: ObservableObject {
             executable: shell,
             arguments: arguments,
             envOverrides: [:],
-            size: size
+            size: size,
+            initialWorkingDirectory: initialWorkingDirectory
         )
         return TerminalSession(bbterm: bb, pty: pty)
     }
@@ -74,6 +76,12 @@ public final class TerminalSession: ObservableObject {
     /// other than the shell itself). Used to gate the confirm-close prompt.
     public func hasForegroundChild() -> Bool {
         pty.hasForegroundChild()
+    }
+
+    /// Current working directory of the foreground process — inherited by
+    /// new tabs / windows created via ⌘T / ⌘N.
+    public func foregroundWorkingDirectory() -> String? {
+        pty.foregroundWorkingDirectory()
     }
 
     /// Send a POSIX signal directly to the terminal's foreground process group.

@@ -48,12 +48,16 @@ public final class PTY {
         stateQueue.sync { _isRunning = false }
     }
 
-    /// Spawn a child process attached to a new PTY.
+    /// Spawn a child process attached to a new PTY. `initialWorkingDirectory`
+    /// (when provided and existent) is chdir'd before exec — used to inherit
+    /// the previous tab's cwd for ⌘T / ⌘N. Falls back to the user's home
+    /// directory if the value is nil, empty, or not a valid directory.
     public static func spawn(
         executable: String,
         arguments: [String],
         envOverrides: [String: String],
-        size: Size
+        size: Size,
+        initialWorkingDirectory: String? = nil
     ) throws -> PTY {
         var master: Int32 = -1
         var winsize = Darwin.winsize(
@@ -90,14 +94,26 @@ public final class PTY {
             setenv("COLORTERM", "truecolor", 1)   // tells modern TUIs (nvim, tmux, claude-code) 24-bit color is safe
             setenv("TERM_PROGRAM", "Blackbird", 1)
             setenv("TERM_PROGRAM_VERSION", "0.1.0", 1)
-            // Apps launched from Finder inherit cwd = `/` from launchd. Move
-            // into the user's home directory so the shell starts where users
-            // expect. `getpwuid(getuid())` is authoritative; fall back to
-            // $HOME if the passwd lookup fails for any reason.
-            if let pw = getpwuid(getuid()), pw.pointee.pw_dir != nil {
-                _ = chdir(pw.pointee.pw_dir)
-            } else if let home = getenv("HOME") {
-                _ = chdir(home)
+            // Pick the child's starting directory:
+            //  1. Explicit `initialWorkingDirectory` (from ⌘T / ⌘N inherit)
+            //     if it still resolves to a real directory.
+            //  2. The user's home via getpwuid — authoritative.
+            //  3. $HOME fallback if passwd lookup somehow fails.
+            // Apps launched from Finder inherit cwd=`/` from launchd, which
+            // would otherwise start the shell in /.
+            var chdired = false
+            if let cwd = initialWorkingDirectory, !cwd.isEmpty {
+                var st = stat()
+                if stat(cwd, &st) == 0 && (st.st_mode & S_IFDIR) != 0 {
+                    if chdir(cwd) == 0 { chdired = true }
+                }
+            }
+            if !chdired {
+                if let pw = getpwuid(getuid()), pw.pointee.pw_dir != nil {
+                    _ = chdir(pw.pointee.pw_dir)
+                } else if let home = getenv("HOME") {
+                    _ = chdir(home)
+                }
             }
             // Build argv
             let cArgv: [UnsafeMutablePointer<CChar>?] =
@@ -206,6 +222,32 @@ public final class PTY {
         let shellPgid = getpgid(childPID)
         if shellPgid <= 0 { return false }
         return fg != shellPgid
+    }
+
+    /// Current working directory of the tty's foreground process. Reads via
+    /// `proc_pidinfo(PROC_PIDVNODEPATHINFO)` on the foreground pgroup leader
+    /// — that gives the "active" cwd: if the shell is at a prompt it's the
+    /// shell's cwd, if a subshell/command is running it's that child's cwd.
+    /// This matches what Terminal.app / iTerm2 inherit when you hit ⌘T.
+    /// Returns nil on any syscall failure.
+    public func foregroundWorkingDirectory() -> String? {
+        let fg = tcgetpgrp(masterFD)
+        let targetPID: pid_t = fg > 0 ? fg : childPID
+        var info = proc_vnodepathinfo()
+        let bytes = proc_pidinfo(
+            targetPID,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            &info,
+            Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        )
+        guard bytes > 0 else { return nil }
+        return withUnsafePointer(to: &info.pvi_cdir.vip_path) { tuple -> String? in
+            tuple.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { cstr in
+                let s = String(cString: cstr)
+                return s.isEmpty ? nil : s
+            }
+        }
     }
 
     /// Send a signal directly to the foreground process group of the terminal.

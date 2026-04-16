@@ -140,8 +140,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Controller factory
 
     @discardableResult
-    private func createTerminalController() -> MainWindowController {
-        let controller = MainWindowController()
+    private func createTerminalController(
+        inheritingCwdFrom source: MainWindowController? = nil,
+        autosaveFrame: Bool = true
+    ) -> MainWindowController {
+        let cwd = source?.session?.foregroundWorkingDirectory()
+        let controller = MainWindowController(
+            initialWorkingDirectory: cwd,
+            autosaveFrame: autosaveFrame
+        )
         controller.onClose = { [weak self, weak controller] in
             guard let self, let controller else { return }
             self.controllers.removeAll { $0 === controller }
@@ -150,22 +157,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return controller
     }
 
-    // MARK: - Tab / window actions
-
-    /// Called by the tab bar "+" button and by the ⌘T menu item.
-    @objc func newWindowForTab(_ sender: Any?) {
-        let controller = createTerminalController()
-        // Merge into the key window's tab group so it appears as a new tab.
-        if let currentWindow = NSApp.keyWindow {
-            currentWindow.addTabbedWindow(controller.window!, ordered: .above)
+    /// Find the currently-foregrounded Blackbird terminal controller, if any.
+    /// Walks our controller list rather than trusting `NSApp.keyWindow`, which
+    /// may point at the Settings window or a non-Blackbird window.
+    private var activeTerminalController: MainWindowController? {
+        if let keyWindow = NSApp.keyWindow,
+           let match = controllers.first(where: { $0.window === keyWindow }) {
+            return match
         }
-        controller.showWindow(nil)
-        controller.window?.makeKeyAndOrderFront(nil)
+        // Fallback: last-focused Blackbird window. `orderedIndex` is lower
+        // for more recently used windows.
+        return controllers
+            .compactMap { $0 }
+            .filter { $0.window != nil }
+            .sorted { ($0.window?.orderedIndex ?? .max) < ($1.window?.orderedIndex ?? .max) }
+            .first
     }
 
-    /// Opens a new independent window (⌘N).
+    // MARK: - Tab / window actions
+
+    /// Called by the tab bar "+" button and by the ⌘T menu item. New tabs
+    /// inherit the previous tab's cwd so ⌘T inside `~/projects/foo` lands
+    /// in `~/projects/foo`, matching Terminal.app / iTerm2.
+    @objc func newWindowForTab(_ sender: Any?) {
+        let source = activeTerminalController
+        let controller = createTerminalController(
+            inheritingCwdFrom: source,
+            autosaveFrame: false   // tabs use the group's position
+        )
+        guard let newWindow = controller.window else { return }
+        if let sourceWindow = source?.window {
+            // addTabbedWindow(_:ordered:) orders-front and makes-key as a
+            // side effect — no separate showWindow / makeKeyAndOrderFront
+            // needed. Doing both was causing a brief standalone-window
+            // flash before the merge on some launches.
+            sourceWindow.addTabbedWindow(newWindow, ordered: .above)
+        } else {
+            // No existing Blackbird window — fall back to a standalone.
+            controller.showWindow(nil)
+        }
+        newWindow.makeKeyAndOrderFront(nil)
+    }
+
+    /// Opens a new independent window (⌘N). Inherits cwd from the currently
+    /// active tab, same as ⌘T, but never merges into a tab group.
     @objc func newWindow(_ sender: Any?) {
-        let controller = createTerminalController()
+        let source = activeTerminalController
+        let controller = createTerminalController(
+            inheritingCwdFrom: source,
+            autosaveFrame: false
+        )
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
     }
