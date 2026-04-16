@@ -7,6 +7,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
     private var exitCancellable: AnyCancellable?
+    private var titlebarTabBar: TitlebarTabBarViewController?
+    private var tabGroupObservers: [NSKeyValueObservation] = []
+    private var titleObserver: NSKeyValueObservation?
 
     /// Called when the window is about to close. AppDelegate uses this to
     /// remove the controller from its tracking array.
@@ -54,11 +57,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             window.setContentSize(rect.size)
         }
         // Group all terminal windows into a shared tab bar. .preferred means
-        // the tab bar appears automatically when there are ≥2 tabs.
+        // AppKit keeps them in one tabGroup; we'll render the tab pills
+        // ourselves (titlebar-integrated) and suppress the default strip.
         window.tabbingMode = .preferred
         window.tabbingIdentifier = "dev.conjfrnk.blackbird.terminal"
+        // Window title is redundant when the tab pill shows the title; drop
+        // it here to avoid "zsh / [zsh] [zsh] +" double-labeling.
+        window.titleVisibility = .hidden
         super.init(window: window)
         window.delegate = self
+        installTitlebarTabBar()
 
         guard let device = MTLCreateSystemDefaultDevice() else {
             window.title = "Blackbird — no Metal device available"
@@ -155,6 +163,81 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func windowWillClose(_ notification: Notification) {
         terminateSessions()
         onClose?()
+    }
+
+    // MARK: - Titlebar-integrated tab bar
+
+    /// Attach the custom tab pill strip as a titlebar accessory, and hide
+    /// AppKit's default strip-below-titlebar so only one tab UI is visible.
+    /// Also wire up KVO on `tabGroup.windows` and `.selectedWindow` so the
+    /// pills refresh when tabs are added, removed, or reordered.
+    private func installTitlebarTabBar() {
+        guard let window else { return }
+        let vc = TitlebarTabBarViewController(window: window)
+        window.addTitlebarAccessoryViewController(vc)
+        titlebarTabBar = vc
+        refreshTabBar()
+        // Defer the first "hide native strip" toggle until after the
+        // window joins a tab group; tabGroup is nil before show.
+        DispatchQueue.main.async { [weak self] in
+            self?.hideNativeTabStrip()
+            self?.observeTabGroup()
+        }
+    }
+
+    private func hideNativeTabStrip() {
+        guard let window else { return }
+        // NSWindowTabGroup's public API only exposes a read-only
+        // isTabBarVisible and a toggleTabBar(_:) that some macOS builds
+        // decline to call when KVO-driven. Walk the theme frame instead
+        // and hide any view whose class name contains "TabBar" — that's
+        // what both iTerm2 and WezTerm end up doing. `isHidden` also
+        // removes the view's height contribution, so safeAreaInsets.top
+        // drops back to the titlebar-only 32pt value.
+        if let themeFrame = window.contentView?.superview {
+            hideTabBarViews(in: themeFrame)
+        }
+    }
+
+    private func hideTabBarViews(in view: NSView) {
+        let className = String(describing: type(of: view))
+        if className.contains("TabBar") || className == "NSTitlebarView" {
+            // NSTitlebarView itself we KEEP — it holds the traffic lights
+            // and our accessory. Only the subclassed TabBar variants go.
+            if className.contains("TabBar") {
+                view.isHidden = true
+                view.frame = .zero
+            }
+        }
+        for sub in view.subviews {
+            hideTabBarViews(in: sub)
+        }
+    }
+
+    private func observeTabGroup() {
+        tabGroupObservers.removeAll()
+        guard let group = window?.tabGroup else { return }
+        let winObs = group.observe(\.windows, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.hideNativeTabStrip()
+                self?.refreshTabBar()
+            }
+        }
+        let selObs = group.observe(\.selectedWindow, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshTabBar() }
+        }
+        // AppKit re-shows the native strip every time a tab is added. KVO
+        // on `isTabBarVisible` lets us flip it back off the moment it
+        // happens, before the user ever sees a second tab UI.
+        let visObs = group.observe(\.isTabBarVisible, options: [.new]) { [weak self] _, change in
+            guard change.newValue == true else { return }
+            DispatchQueue.main.async { self?.hideNativeTabStrip() }
+        }
+        tabGroupObservers = [winObs, selObs, visObs]
+    }
+
+    private func refreshTabBar() {
+        titlebarTabBar?.refresh()
     }
 
     // MARK: - Tab bar affordances

@@ -25,6 +25,7 @@
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
 		7462C02E74143E52FD628DA5 /* PTY.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5995252272D652667DB2D2D9 /* PTY.swift */; };
 		75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F455C591EC38A7B3955CD5B8 /* FindBar.swift */; };
+		7849DEE8A0065721883B426D /* TitlebarTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002A862CFC149DF32E992C50 /* TitlebarTabBar.swift */; };
 		7ACE07558D328D4B0273A975 /* URLDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */; };
 		7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */; };
 		82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11194E0650067380506F53B2 /* BBTermTests.swift */; };
@@ -65,6 +66,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		002A862CFC149DF32E992C50 /* TitlebarTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TitlebarTabBar.swift; sourceTree = "<group>"; };
 		00E03399349EE1327FBF8F2F /* Selection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Selection.swift; sourceTree = "<group>"; };
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
 		0AE9625B30620C23E398A2EB /* BBTerm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTerm.swift; sourceTree = "<group>"; };
@@ -292,6 +294,7 @@
 			isa = PBXGroup;
 			children = (
 				E51A54ACD363A09E47E79F62 /* MainWindowController.swift */,
+				002A862CFC149DF32E992C50 /* TitlebarTabBar.swift */,
 				54EE4D20D3C306349C12E69A /* WindowBlur.swift */,
 			);
 			path = Window;
@@ -439,6 +442,7 @@
 				CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */,
 				8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */,
 				47C98A15F7530D2D7BC49CA3 /* ThemeManager.swift in Sources */,
+				7849DEE8A0065721883B426D /* TitlebarTabBar.swift in Sources */,
 				2981BF48385C26CDAFC92476 /* URLDetector.swift in Sources */,
 				E96F4B91B70AA6443185F96D /* WindowBlur.swift in Sources */,
 			);
