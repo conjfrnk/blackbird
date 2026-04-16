@@ -451,6 +451,12 @@ pub struct BBSnap {
     pub mode: u32,              // terminal mode bitflags — see bb_mode constants
     pub cells_len: usize,
     pub cells: *const BBCell,
+    /// Total lines currently retained in scrollback (grows as output flows
+    /// off-screen, capped at the scrollback limit). Used by the scroll
+    /// indicator to size its thumb proportional to total-buffer vs viewport.
+    /// Appended here to preserve the existing offsets of cells_len/cells.
+    pub history_size: u32,
+    pub _pad2: u32,
 }
 
 unsafe impl Send for BBSnap {}
@@ -479,6 +485,7 @@ impl BBSnapOwned {
         rows: u16,
         cursor: (u16, u16, bool),
         display_offset: u16,
+        history_size: u32,
         mode: u32,
         cells: Vec<BBCell>,
     ) -> Box<BBSnapOwned> {
@@ -494,6 +501,8 @@ impl BBSnapOwned {
                 mode,
                 cells_len: cells.len(),
                 cells: std::ptr::null(),
+                history_size,
+                _pad2: 0,
             },
             rc: AtomicUsize::new(1),
             cells_owned: cells,
@@ -721,8 +730,9 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // is actually `cursor_row + display_offset` from the top of the
         // visible viewport — and may be below it entirely.
         let display_offset = grid.display_offset().min(u16::MAX as usize) as u16;
+        let history_size = grid.history_size().min(u32::MAX as usize) as u32;
         let mode = extract_mode(bb.term.mode());
-        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), display_offset, mode, cells);
+        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), display_offset, history_size, mode, cells);
         // Expose the public `snap` field (first field at offset 0).
         let owned_ptr = Box::into_raw(owned);
         &(*owned_ptr).snap as *const BBSnap

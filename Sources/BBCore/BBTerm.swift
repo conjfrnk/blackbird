@@ -179,6 +179,8 @@ public final class BBSnapshot {
     public var cursorVisible: Bool { handle.pointee.cursor_visible != 0 }
     /// Lines scrolled above the live grid. 0 = pinned to bottom.
     public var displayOffset: Int { Int(handle.pointee.display_offset) }
+    /// Total scrollback lines retained (up to the scrollback limit).
+    public var historySize: Int { Int(handle.pointee.history_size) }
     public var mode: UInt32 { handle.pointee.mode }
     public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 

@@ -145,6 +145,14 @@ struct BBSnap {
   uint32_t mode;
   uintptr_t cells_len;
   const struct BBCell *cells;
+  /**
+   * Total lines currently retained in scrollback (grows as output flows
+   * off-screen, capped at the scrollback limit). Used by the scroll
+   * indicator to size its thumb proportional to total-buffer vs viewport.
+   * Appended here to preserve the existing offsets of cells_len/cells.
+   */
+  uint32_t history_size;
+  uint32_t _pad2;
 };
 
 #ifdef __cplusplus

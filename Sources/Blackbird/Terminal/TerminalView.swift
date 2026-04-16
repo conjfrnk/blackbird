@@ -53,6 +53,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private var currentSnapshot: BBSnapshot?
     private var cancellables: [AnyCancellable] = []
+    private let scrollIndicator = ScrollIndicator(frame: .zero)
 
     #if DEBUG
     private var frameCount = 0
@@ -83,7 +84,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         self.framebufferOnly = true
         self.isPaused = false
         self.enableSetNeedsDisplay = false
+        // Upper-bound the redraw rate. CVDisplayLink syncs to the display's
+        // vblank, so this effectively becomes "whatever the screen supports":
+        // 60 Hz on a standard Retina, 120 Hz on a ProMotion MacBook or Studio
+        // Display. Moving the window between displays is handled by the OS —
+        // the link reattaches to the new screen automatically. The observer
+        // below (viewDidMoveToWindow) is just belt-and-suspenders logging.
         self.preferredFramesPerSecond = 120
+
+        // Minimal right-edge scroll indicator (pass-through hit testing —
+        // never swallows mouse events). Positioned in layout().
+        scrollIndicator.frame = NSRect(x: bounds.width - 10, y: 0, width: 10, height: bounds.height)
+        scrollIndicator.autoresizingMask = [.minXMargin, .height]
+        addSubview(scrollIndicator)
     }
 
     public required init(coder: NSCoder) { fatalError("not supported") }
@@ -127,6 +140,31 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     public func render(snapshot: BBSnapshot) {
         self.currentSnapshot = snapshot
         // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.
+        // Scroll indicator consumes the same snapshot — keep it in lockstep
+        // with the grid so a sudden `clear` or big output reshapes the thumb
+        // on the frame the viewport itself changes.
+        scrollIndicator.update(
+            displayOffset: snapshot.displayOffset,
+            historySize: snapshot.historySize,
+            rows: snapshot.rows
+        )
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        #if DEBUG
+        if let screen = window?.screen {
+            // On macOS, `maximumFramesPerSecond` reflects the screen's native
+            // refresh rate (60 on standard displays, 120 on ProMotion). The
+            // OS clamps our preferred rate to this automatically via the
+            // internal CVDisplayLink, so no manual retarget is needed — this
+            // is just so the DEBUG fps log can be sanity-checked against the
+            // expected ceiling.
+            let maxFPS = screen.maximumFramesPerSecond
+            NSLog("[Blackbird] attached to screen '%@' @ %d Hz max",
+                  screen.localizedName, maxFPS)
+        }
+        #endif
     }
 
     // MARK: - MTKViewDelegate
@@ -169,7 +207,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         session.$title.sink { [weak self] title in
             guard let self else { return }
             DispatchQueue.main.async {
-                self.window?.title = title ?? "Blackbird"
+                // Tab labels in AppKit's native tab group mirror window.title,
+                // so one write covers both the titlebar and the tab. When the
+                // shell hasn't emitted OSC 0/2 yet (stock zsh/bash until the
+                // user configures precmd), fall back to the session's default
+                // (shell basename) set by MainWindowController.
+                let fallback = self.window?.title ?? "Blackbird"
+                let useTitle = title?.isEmpty == false ? title : fallback
+                self.window?.title = useTitle ?? "Blackbird"
             }
         }.store(in: &cancellables)
     }

@@ -70,6 +70,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     private func startSession(inView view: TerminalView) {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        // Seed a useful default title (shell basename) so tabs aren't all
+        // "Blackbird" before the shell emits OSC 0/2. The TerminalView
+        // subscriber will replace this the moment the shell sets its own.
+        window?.title = (shell as NSString).lastPathComponent
         let metrics = view.metrics
         let grid = metrics.grid(forPixelSize: view.bounds.size)
         do {
