@@ -3,19 +3,20 @@ import AppKit
 import Combine
 import Sparkle
 
+/// Traditional AppKit entry point. We don't use a SwiftUI `App` because the
+/// only scene we'd declare is `Settings { … }` — and that scene registers a
+/// hidden handler that intercepts ⌘, at the app level, opening SwiftUI's
+/// own (blank) Settings window instead of the custom AppKit one we built in
+/// `SettingsWindowController`. Removing the SwiftUI App wrapper removes the
+/// interception; AppDelegate drives the whole lifecycle.
 @main
-struct BlackbirdApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
-    var body: some Scene {
-        // We deliberately ship an empty scene body. Windows are built by
-        // `AppDelegate.createTerminalController()` as AppKit `NSWindow`s, and
-        // Settings is a standalone AppKit-hosted `NSHostingController`
-        // (see SettingsWindowController) — that path is more reliable under
-        // @NSApplicationDelegateAdaptor + custom main menu than SwiftUI's
-        // `Settings { … }` scene, which has flaky `showSettingsWindow:`
-        // wiring when the main menu is replaced.
-        Settings { EmptyView() }  // placeholder — never presented.
+enum BlackbirdMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.setActivationPolicy(.regular)
+        app.run()
     }
 }
 
