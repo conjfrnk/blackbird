@@ -212,17 +212,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             if let chars = event.characters,
                let scalar = chars.unicodeScalars.first,
                scalar.value >= 1, scalar.value <= 0x1F {
-                // Write the control byte directly to the PTY master. The
-                // terminal line discipline handles signal generation (ISIG →
-                // SIGINT for 0x03, SIGTSTP for 0x1A) and echo (ECHOCTL →
-                // ^C visible on screen). This is the standard path every
-                // terminal uses — it works correctly for shell commands,
-                // TUI apps, and editors alike.
-                //
-                // Using sendImmediate (synchronous write) instead of send
-                // (async writeQueue) so there's no GCD dispatch latency
-                // between keypress and signal delivery.
+                // Write the control byte to the PTY master (for echo + apps
+                // that read raw bytes from stdin).
                 session.sendImmediate(Data([UInt8(scalar.value)]))
+                // For Ctrl+C and Ctrl+Z, ALSO send the signal directly to the
+                // foreground process group. Writing 0x03 alone relies on the
+                // line discipline's ISIG flag, which the shell may have
+                // disabled. The direct kill() guarantees the process dies.
+                if scalar.value == 0x03 {
+                    session.sendSignalToForeground(SIGINT)
+                } else if scalar.value == 0x1A {
+                    session.sendSignalToForeground(SIGTSTP)
+                }
                 return
             }
             // Fast path didn't match — fall through to encoder which also
