@@ -656,6 +656,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // non-mouse-reporting context (or ⌥-held inside a TUI) so that
         // vim's own <C-click> binding still works when the TUI asks for
         // the click.
+        //
+        // If no URL is under the click, ⌘-drag acts like a titlebar drag
+        // and moves the window (matches iTerm2 "⌘-drag to move"). Any view
+        // can initiate window drag by calling `performDrag(with:)`; the
+        // call blocks until the mouse is released, so this returns cleanly
+        // without triggering the selection path below.
         if event.modifierFlags.contains(.command) {
             let underlyingOption = event.modifierFlags.contains(.option)
             if !mouseReportingEnabled() || underlyingOption,
@@ -669,6 +675,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                     return
                 }
             }
+            // No URL under the click — treat as window drag.
+            window?.performDrag(with: event)
+            return
         }
         let optionHeld = event.modifierFlags.contains(.option)
         if mouseReportingEnabled() && !optionHeld, let session {

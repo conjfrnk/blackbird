@@ -125,7 +125,6 @@ public final class GlyphAtlas {
         // cell at the proper scale.
         ctx.scaleBy(x: scale, y: scale)
         ctx.textMatrix = .identity
-        ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
 
         let str = String(scalar)
         let attr = NSAttributedString(
@@ -133,6 +132,24 @@ public final class GlyphAtlas {
             attributes: [.font: metrics.font, .foregroundColor: NSColor.white]
         )
         let line = CTLineCreateWithAttributedString(attr)
+
+        // Box-drawing and block-element glyphs must tile edge-to-edge with
+        // zero seam so ASCII art like Claude Code's startup avatar or the
+        // output of `tree`/`htop` frames render as one continuous shape. SF
+        // Mono's natural advance for these ranges is slightly narrower than
+        // our rounded `cellWidth` — enough to leave a ~1px gap between
+        // adjacent cells on Retina. Scale X (and for half-height blocks,
+        // Y) so the glyph fills the cell exactly. Applied ONLY to the
+        // cell-fill ranges so normal text keeps its natural advance.
+        if Self.isCellFillCharacter(scalar) {
+            let typographicWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            if typographicWidth > 0 {
+                let xScale = metrics.cellWidth / typographicWidth
+                ctx.scaleBy(x: xScale, y: 1)
+            }
+        }
+
+        ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
         CTLineDraw(line, ctx)
 
         guard let bytes = ctx.data else { return }
@@ -142,5 +159,20 @@ public final class GlyphAtlas {
             withBytes: bytes,
             bytesPerRow: w
         )
+    }
+
+    /// True for Unicode ranges where the glyph is *designed* to tile with its
+    /// neighbors — box drawing (`─│┌┐…`), block elements (`▀▄█▟…`), braille
+    /// patterns (used by some TUIs as a 2×4 super-pixel grid), and Unicode
+    /// 13's Symbols for Legacy Computing. For these we force horizontal fit
+    /// so there's no seam between cells.
+    private static func isCellFillCharacter(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        case 0x2500...0x259F: return true   // Box Drawing + Block Elements
+        case 0x25A0...0x25FF: return true   // Geometric Shapes
+        case 0x2800...0x28FF: return true   // Braille Patterns
+        case 0x1FB00...0x1FBFF: return true // Symbols for Legacy Computing
+        default: return false
+        }
     }
 }
