@@ -88,8 +88,16 @@ schemes:
         Blackbird: all
         BlackbirdTests: [test]
     test:
+      config: Debug
       targets: [BlackbirdTests]
+      gatherCoverageData: false
+      disableMainThreadChecker: false
+      enableAddressSanitizer: true
+      enableUBSanitizer: true
     run:
       config: Debug
+      disableMainThreadChecker: false
+      enableAddressSanitizer: true
+      enableUBSanitizer: true
     archive:
       config: Release
