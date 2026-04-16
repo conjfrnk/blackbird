@@ -1,0 +1,133 @@
+import Metal
+import CoreText
+import CoreGraphics
+import AppKit
+
+/// A fixed-capacity texture atlas of monochrome glyphs. Each glyph occupies
+/// one cell-sized slot. Slots are allocated in insertion order; we don't
+/// evict for Plan 3. If `capacityGlyphs` is exceeded `lookupOrInsert`
+/// returns nil for new scalars (existing ones still work).
+public final class GlyphAtlas {
+
+    public struct Entry {
+        public let uvOrigin: SIMD2<Float>
+        public let uvSize: SIMD2<Float>
+    }
+
+    public let texture: MTLTexture
+    public let metrics: CellMetrics
+    public let capacityGlyphs: Int
+    public let slotCols: Int
+    public let slotRows: Int
+    public let cellPxWidth: Int
+    public let cellPxHeight: Int
+
+    private var byScalar: [UInt32: Entry] = [:]
+    private var nextSlot: Int = 0
+
+    public init?(device: MTLDevice, metrics: CellMetrics, capacityGlyphs: Int) {
+        self.metrics = metrics
+        self.capacityGlyphs = capacityGlyphs
+        self.cellPxWidth = Int(metrics.cellWidth.rounded())
+        self.cellPxHeight = Int(metrics.cellHeight.rounded())
+
+        // Choose a near-square grid that holds `capacityGlyphs` slots.
+        let cols = Int(Double(capacityGlyphs).squareRoot().rounded(.up))
+        let rows = (capacityGlyphs + cols - 1) / cols
+        self.slotCols = cols
+        self.slotRows = rows
+
+        let texW = cols * cellPxWidth
+        let texH = rows * cellPxHeight
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm,
+            width: texW,
+            height: texH,
+            mipmapped: false
+        )
+        desc.usage = [.shaderRead]
+        desc.storageMode = .managed
+        guard let tex = device.makeTexture(descriptor: desc) else { return nil }
+        self.texture = tex
+
+        // Zero the texture initially.
+        let zero = [UInt8](repeating: 0, count: texW * texH)
+        zero.withUnsafeBytes { ptr in
+            tex.replace(
+                region: MTLRegionMake2D(0, 0, texW, texH),
+                mipmapLevel: 0,
+                withBytes: ptr.baseAddress!,
+                bytesPerRow: texW
+            )
+        }
+    }
+
+    /// Return the atlas entry for `scalar`, rasterizing it into the next free
+    /// slot on first use. Returns nil if the atlas is full and the glyph
+    /// hasn't been inserted before.
+    public func lookupOrInsert(scalar: UnicodeScalar) -> Entry? {
+        if let existing = byScalar[scalar.value] { return existing }
+        guard nextSlot < capacityGlyphs else { return nil }
+
+        let slot = nextSlot
+        let col = slot % slotCols
+        let row = slot / slotCols
+        let pxX = col * cellPxWidth
+        let pxY = row * cellPxHeight
+
+        rasterize(scalar: scalar, intoSlotAt: (pxX, pxY))
+
+        let uvOrigin = SIMD2<Float>(
+            Float(pxX) / Float(texture.width),
+            Float(pxY) / Float(texture.height)
+        )
+        let uvSize = SIMD2<Float>(
+            Float(cellPxWidth) / Float(texture.width),
+            Float(cellPxHeight) / Float(texture.height)
+        )
+        let entry = Entry(uvOrigin: uvOrigin, uvSize: uvSize)
+        byScalar[scalar.value] = entry
+        nextSlot += 1
+        return entry
+    }
+
+    // MARK: - Rasterization
+
+    private func rasterize(scalar: UnicodeScalar, intoSlotAt origin: (x: Int, y: Int)) {
+        let w = cellPxWidth
+        let h = cellPxHeight
+        let cs = CGColorSpaceCreateDeviceGray()
+        let bitmapInfo = CGImageAlphaInfo.none.rawValue
+        guard let ctx = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w,
+            space: cs,
+            bitmapInfo: bitmapInfo
+        ) else { return }
+
+        ctx.setFillColor(gray: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setFillColor(gray: 1, alpha: 1)
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
+
+        let str = String(scalar)
+        let attr = NSAttributedString(
+            string: str,
+            attributes: [.font: metrics.font, .foregroundColor: NSColor.white]
+        )
+        let line = CTLineCreateWithAttributedString(attr)
+        CTLineDraw(line, ctx)
+
+        guard let bytes = ctx.data else { return }
+        texture.replace(
+            region: MTLRegionMake2D(origin.x, origin.y, w, h),
+            mipmapLevel: 0,
+            withBytes: bytes,
+            bytesPerRow: w
+        )
+    }
+}
