@@ -93,8 +93,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             exitCancellable = s.$exitCode
                 .compactMap { $0 }
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in
-                    self?.window?.performClose(nil)
+                .sink { [weak self] code in
+                    self?.showExitOverlay(code: code)
                 }
         } catch {
             window?.title = "Blackbird — failed to start shell: \(error)"
@@ -104,6 +104,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func terminateSessions() {
         session?.terminate()
         session = nil
+    }
+
+    // MARK: - Exit overlay
+
+    private var exitOverlay: ShellExitOverlay?
+
+    private func showExitOverlay(code: Int32) {
+        guard let contentView = window?.contentView else { return }
+        let overlay = ShellExitOverlay(exitCode: code)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.onRestart = { [weak self] in self?.restartShell() }
+        contentView.addSubview(overlay)
+        NSLayoutConstraint.activate([
+            overlay.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            overlay.topAnchor.constraint(equalTo: contentView.topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+        ])
+        window?.makeFirstResponder(overlay)
+        exitOverlay = overlay
+    }
+
+    private func restartShell() {
+        exitOverlay?.removeFromSuperview()
+        exitOverlay = nil
+        terminateSessions()
+        guard let view = terminalView else { return }
+        startSession(inView: view)
+        window?.makeFirstResponder(view)
     }
 
     // MARK: - NSWindowDelegate
