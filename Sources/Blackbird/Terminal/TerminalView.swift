@@ -272,25 +272,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         layer?.isOpaque = !transparent
         guard let window else { return }
         window.isOpaque = !transparent
-        if transparent {
-            // `titlebarAppearsTransparent` strips the opaque titlebar
-            // material; the window's backgroundColor then fills that area.
-            // Setting the backgroundColor to the same tinted theme color
-            // the Metal clearColor uses makes the titlebar and the content
-            // visually uniform — same tint, same blur, one continuous
-            // surface. Much cheaper than extending the Metal drawable
-            // under the titlebar.
-            window.titlebarAppearsTransparent = true
-            window.backgroundColor = NSColor(
-                calibratedRed: themeBg.r,
-                green: themeBg.g,
-                blue: themeBg.b,
-                alpha: opacity
-            )
-        } else {
-            window.titlebarAppearsTransparent = false
-            window.backgroundColor = .windowBackgroundColor
-        }
+        // Always strip the titlebar material — even at fully opaque. If we
+        // let AppKit draw its default chrome over the top, it reads as a
+        // separate lighter bar against the Metal-tinted body. With it off,
+        // the full-size content view's Metal clearColor fills the titlebar
+        // region too, continuous with the body. Traffic lights and the
+        // title text still render on top as usual.
+        window.titlebarAppearsTransparent = true
+        // Paint backgroundColor with the same tint the Metal clearColor
+        // uses, so any pre-first-frame or resize-tear area matches instead
+        // of flashing to NSWindow's default gray.
+        window.backgroundColor = NSColor(
+            calibratedRed: themeBg.r,
+            green: themeBg.g,
+            blue: themeBg.b,
+            alpha: opacity
+        )
     }
 
     public func render(snapshot: BBSnapshot) {

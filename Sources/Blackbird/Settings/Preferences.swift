@@ -46,13 +46,15 @@ public final class Preferences: ObservableObject {
     public var optionKey: OptionKey { OptionKey(rawValue: optionKeyRaw) ?? .meta }
 
     /// Resolved `(opacity, blurRadius)` from the single translucency slider.
-    /// - value 1 → opaque, no blur
-    /// - value 3 (default) → ~0.9 opacity, blur 6
-    /// - value 10 → 0.55 opacity, blur 27
+    /// Tuned so v=3 matches iTerm2's out-of-box look (transparency 9/100,
+    /// blur radius 4), which is the lift most users actually want.
+    /// - value 1 (Solid)  → opacity 1.00, blur 0
+    /// - value 3 (default)→ opacity 0.91, blur 4  ← matches iTerm2 defaults
+    /// - value 10 (Ghost) → opacity 0.595, blur 18
     public var translucencyResolved: (opacity: Double, blurRadius: Int) {
         let v = max(1.0, min(10.0, translucency))
-        let opacity = max(0.4, 1.0 - (v - 1) * 0.05)
-        let blur = Int(max(0, (v - 1) * 3))
+        let opacity = 1.0 - (v - 1) * 0.045
+        let blur = Int(round(max(0, (v - 1) * 2.0)))
         return (opacity, blur)
     }
 

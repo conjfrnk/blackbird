@@ -17,24 +17,25 @@ final class SettingsWindowController {
     static let shared = SettingsWindowController()
 
     private var window: NSWindow?
+    private var host: NSHostingController<SettingsView>?
 
     private init() {}
 
-    /// Show the settings window. Rebuilds the SwiftUI content view on every
-    /// show — NSHostingController caches its view tree across dismiss, and
-    /// the second attachment can leave the content blank until a resize
-    /// re-lays it out. Re-creating is cheap (few SwiftUI nodes) and makes
-    /// the behavior deterministic.
+    /// Show the settings window. The hosting controller + window are built
+    /// once and reused — swapping a fresh NSHostingController into the same
+    /// window on every show has a race where the second attachment commits
+    /// an empty view tree (blank white content). SettingsView binds to the
+    /// shared Preferences @StateObject, so the cached view picks up any
+    /// preference change automatically; no need to rebuild it.
     func show() {
-        let w = window ?? makeWindow()
-        window = w
-
-        let host = NSHostingController(rootView: SettingsView())
-        // Match the final window size the SwiftUI view wants, so the
-        // titlebar doesn't jump after the first layout pass.
-        w.contentViewController = host
-        w.title = "Settings"
-
+        if window == nil {
+            let w = makeWindow()
+            let h = NSHostingController(rootView: SettingsView())
+            w.contentViewController = h
+            window = w
+            host = h
+        }
+        guard let w = window else { return }
         if !w.isVisible {
             w.center()
         }
