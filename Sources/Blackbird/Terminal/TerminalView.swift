@@ -213,21 +213,33 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                let scalar = chars.unicodeScalars.first,
                scalar.value >= 1, scalar.value <= 0x1F {
                 #if DEBUG
-                NSLog("[Blackbird] keyDown: sending control byte 0x%02x IMMEDIATE", scalar.value)
+                NSLog("[Blackbird] keyDown: control byte 0x%02x", scalar.value)
                 #endif
-                // Write the control byte to the PTY master for line-discipline
-                // processing (standard path).
-                session.sendImmediate(Data([UInt8(scalar.value)]))
-                // For SIGINT (0x03) and SIGTSTP (0x1A), also send the signal
-                // directly to the foreground process group. This guarantees
-                // interrupt delivery even if the shell has disabled ISIG or
-                // remapped VINTR in its termios settings (common with conda,
-                // custom .zshrc, etc.).
+                let inTUI = currentSnapshot?.termMode.contains(.altScreen) ?? false
                 if scalar.value == 0x03 {
-                    session.sendSignalToForeground(SIGINT)
+                    if inTUI {
+                        // TUI app (vim, nvim, htop) — send byte so the app
+                        // reads it via stdin. TUIs have ISIG off and handle
+                        // Ctrl+C internally.
+                        session.sendImmediate(Data([0x03]))
+                    } else {
+                        // Normal shell — send SIGINT directly to the foreground
+                        // process group. Avoids the ^C echo that would appear
+                        // if we also wrote 0x03 through the line discipline.
+                        session.sendSignalToForeground(SIGINT)
+                    }
+                    return
                 } else if scalar.value == 0x1A {
-                    session.sendSignalToForeground(SIGTSTP)
+                    if inTUI {
+                        session.sendImmediate(Data([0x1A]))
+                    } else {
+                        session.sendSignalToForeground(SIGTSTP)
+                    }
+                    return
                 }
+                // All other control bytes (Ctrl+D, Ctrl+L, etc.) — write to
+                // PTY for the line discipline to handle normally.
+                session.sendImmediate(Data([UInt8(scalar.value)]))
                 return
             }
             // Fast path didn't match — fall through to encoder which also
