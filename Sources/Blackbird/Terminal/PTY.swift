@@ -201,6 +201,18 @@ public final class PTY {
         }
     }
 
+    /// True if the line discipline has ISIG enabled. When ISIG is on (shell
+    /// at prompt, sleep running) the line discipline generates SIGINT from
+    /// 0x03 in the byte stream. When ISIG is off (vim, nvim, tmux — apps in
+    /// raw mode), the byte is delivered to the app's stdin untouched and we
+    /// must NOT also send SIGINT via kill() or the app will be killed
+    /// instead of handling Ctrl+C internally.
+    public func isLineDisciplineISIGEnabled() -> Bool {
+        var t = termios()
+        guard tcgetattr(masterFD, &t) == 0 else { return true }
+        return (t.c_lflag & UInt(ISIG)) != 0
+    }
+
     // MARK: - Resize
 
     public func resize(to size: Size) {

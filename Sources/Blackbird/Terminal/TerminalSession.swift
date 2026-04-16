@@ -77,6 +77,13 @@ public final class TerminalSession: ObservableObject {
         pty.sendSignalToForeground(sig)
     }
 
+    /// True if the line discipline will convert control bytes (0x03, 0x1A)
+    /// into signals. False when the foreground app has put the tty in raw
+    /// mode (nvim, tmux, htop) and wants to receive those bytes directly.
+    public func isISIGEnabled() -> Bool {
+        pty.isLineDisciplineISIGEnabled()
+    }
+
     public func resize(to size: Size) {
         // Synchronous on the caller's thread. coreQueue serializes PTY +
         // BBTerm resize (same guarantee as before) but we block the caller

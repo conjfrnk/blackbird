@@ -212,17 +212,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             if let chars = event.characters,
                let scalar = chars.unicodeScalars.first,
                scalar.value >= 1, scalar.value <= 0x1F {
-                // Write the control byte to the PTY master (for echo + apps
-                // that read raw bytes from stdin).
+                // Write the control byte to the PTY master. The line
+                // discipline handles the rest — IF it's configured to.
                 session.sendImmediate(Data([UInt8(scalar.value)]))
-                // For Ctrl+C and Ctrl+Z, ALSO send the signal directly to the
-                // foreground process group. Writing 0x03 alone relies on the
-                // line discipline's ISIG flag, which the shell may have
-                // disabled. The direct kill() guarantees the process dies.
-                if scalar.value == 0x03 {
-                    session.sendSignalToForeground(SIGINT)
-                } else if scalar.value == 0x1A {
-                    session.sendSignalToForeground(SIGTSTP)
+                // For Ctrl+C / Ctrl+Z, also force-signal the foreground
+                // pgroup ONLY when the line discipline has ISIG enabled
+                // (shell at prompt, `sleep 100`, cmatrix in cooked-ish
+                // mode). When ISIG is off — the foreground app has put the
+                // tty in raw mode (nvim, tmux, htop, claude-code) — we must
+                // NOT also kill(), or nvim reports "Caught deadly signal"
+                // and exits instead of handling Ctrl+C internally (cancel
+                // current op / close buffer prompt).
+                //
+                // The ISIG query reads termios from the master fd, which
+                // reflects whatever the slave app last set. This is cheap
+                // (one tcgetattr per Ctrl keystroke) and robust against
+                // apps toggling raw mode mid-session.
+                if (scalar.value == 0x03 || scalar.value == 0x1A) &&
+                   session.isISIGEnabled() {
+                    let sig: Int32 = (scalar.value == 0x03) ? SIGINT : SIGTSTP
+                    session.sendSignalToForeground(sig)
                 }
                 return
             }
