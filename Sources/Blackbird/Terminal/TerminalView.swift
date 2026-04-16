@@ -212,22 +212,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             if let chars = event.characters,
                let scalar = chars.unicodeScalars.first,
                scalar.value >= 1, scalar.value <= 0x1F {
-                if scalar.value == 0x03 {
-                    // Ctrl+C: send SIGINT directly to the foreground process
-                    // group. This works for ALL programs — shell commands
-                    // (sleep, cat), TUI apps (cmatrix, htop), and editors
-                    // (vim, nvim) which install their own SIGINT handlers.
-                    // We don't also write 0x03 to the PTY because that causes
-                    // a ^C echo artifact on the prompt.
-                    session.sendSignalToForeground(SIGINT)
-                    return
-                } else if scalar.value == 0x1A {
-                    // Ctrl+Z: SIGTSTP to suspend the foreground process.
-                    session.sendSignalToForeground(SIGTSTP)
-                    return
-                }
-                // All other control bytes (Ctrl+D, Ctrl+L, etc.) — write to
-                // PTY for the line discipline to handle normally.
+                // Write the control byte directly to the PTY master. The
+                // terminal line discipline handles signal generation (ISIG →
+                // SIGINT for 0x03, SIGTSTP for 0x1A) and echo (ECHOCTL →
+                // ^C visible on screen). This is the standard path every
+                // terminal uses — it works correctly for shell commands,
+                // TUI apps, and editors alike.
+                //
+                // Using sendImmediate (synchronous write) instead of send
+                // (async writeQueue) so there's no GCD dispatch latency
+                // between keypress and signal delivery.
                 session.sendImmediate(Data([UInt8(scalar.value)]))
                 return
             }
