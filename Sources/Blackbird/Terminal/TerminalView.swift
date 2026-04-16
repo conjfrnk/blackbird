@@ -234,11 +234,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let bgR = Double((palette.background >> 16) & 0xFF) / 255.0
         let bgG = Double((palette.background >> 8)  & 0xFF) / 255.0
         let bgB = Double(palette.background & 0xFF) / 255.0
-        let p = Preferences.shared
-        // iTerm2 scale: transparency 0..100, opacity = 1 - t/100. Clamp well
-        // above 0 so the user can't leave themselves invisible.
-        let opacity = max(0.1, min(1.0, 1.0 - p.transparency / 100.0))
-        let keepOpaque = p.keepBgOpaque
+        let (opacity, blurRadius) = Preferences.shared.translucencyResolved
         // clearColor gets the theme bg at user opacity. Cells with default bg
         // skip their bg quad (in buildInstances) so clearColor shows — that's
         // where the desktop bleed-through happens.
@@ -246,9 +242,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         themeDefaultBgRgb = palette.background
         renderer.setDefaultBgRgb(palette.background)
         renderer.setCursorColor(rgb: palette.cursor)
-        renderer.setBackgroundOpacity(Float(opacity), keepBgOpaque: keepOpaque)
-        setWindowOpacity(opacity)
-        applyWindowBlur(enabled: p.blurEnabled, radius: Int(p.blurRadius))
+        // Single slider — explicit colors (status lines, highlights) fade
+        // with the window. Users who want solid highlights just lower
+        // translucency.
+        renderer.setBackgroundOpacity(Float(opacity), keepBgOpaque: false)
+        setWindowAppearance(opacity: opacity, themeBg: (bgR, bgG, bgB))
+        window?.setBackgroundBlurRadius(blurRadius)
     }
 
     /// Theme's default background RGB, captured so the renderer can skip
@@ -256,23 +255,30 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// transparent clearColor).
     private var themeDefaultBgRgb: UInt32 = 0x000000
 
-    private func setWindowOpacity(_ opacity: Double) {
+    private func setWindowAppearance(opacity: Double, themeBg: (r: Double, g: Double, b: Double)) {
         let transparent = opacity < 0.999
         layer?.isOpaque = !transparent
-        window?.isOpaque = !transparent
+        guard let window else { return }
+        window.isOpaque = !transparent
         if transparent {
-            window?.backgroundColor = .clear
+            // `titlebarAppearsTransparent` strips the opaque titlebar
+            // material; the window's backgroundColor then fills that area.
+            // Setting the backgroundColor to the same tinted theme color
+            // the Metal clearColor uses makes the titlebar and the content
+            // visually uniform — same tint, same blur, one continuous
+            // surface. Much cheaper than extending the Metal drawable
+            // under the titlebar.
+            window.titlebarAppearsTransparent = true
+            window.backgroundColor = NSColor(
+                calibratedRed: themeBg.r,
+                green: themeBg.g,
+                blue: themeBg.b,
+                alpha: opacity
+            )
         } else {
-            window?.backgroundColor = .windowBackgroundColor
+            window.titlebarAppearsTransparent = false
+            window.backgroundColor = .windowBackgroundColor
         }
-    }
-
-    private func applyWindowBlur(enabled: Bool, radius: Int) {
-        // Blur is meaningless for a fully-opaque window, but we still honor
-        // the user's toggle — if they crank transparency later, their blur
-        // setting is already where they left it.
-        let radiusToApply = enabled ? max(0, min(30, radius)) : 0
-        window?.setBackgroundBlurRadius(radiusToApply)
     }
 
     public func render(snapshot: BBSnapshot) {

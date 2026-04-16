@@ -40,40 +40,19 @@ public struct SettingsView: View {
 
             Divider()
 
-            // Transparency (iTerm2 layout): Opaque ← slider → Transparent,
-            // with the numeric value shown to the right.
+            // Single combined translucency slider (1 = opaque, 10 = very
+            // see-through with heavy blur). Default 3 is a subtle lift.
             HStack {
-                Text("Transparency:").frame(width: 110, alignment: .trailing)
+                Text("Translucency:").frame(width: 110, alignment: .trailing)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Slider(value: $prefs.transparency, in: 0...100, step: 1)
-                        Text("\(Int(prefs.transparency))").frame(width: 32, alignment: .trailing)
+                        Slider(value: $prefs.translucency, in: 1...10, step: 1)
+                        Text("\(Int(prefs.translucency))").frame(width: 32, alignment: .trailing)
                     }
                     HStack {
-                        Text("Opaque").font(.caption).foregroundStyle(.secondary)
+                        Text("Solid").font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        Text("Transparent").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            HStack {
-                Spacer().frame(width: 110)
-                Toggle("Keep background colors opaque", isOn: $prefs.keepBgOpaque)
-            }
-
-            HStack(alignment: .top) {
-                Text("Blur:").frame(width: 110, alignment: .trailing)
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle("Blur content behind the window", isOn: $prefs.blurEnabled)
-                    HStack {
-                        Slider(value: $prefs.blurRadius, in: 0...30, step: 1)
-                            .disabled(!prefs.blurEnabled)
-                        Text("\(Int(prefs.blurRadius))").frame(width: 32, alignment: .trailing)
-                    }
-                    HStack {
-                        Text("Small Radius").font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Text("Large Radius").font(.caption).foregroundStyle(.secondary)
+                        Text("Ghost").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
