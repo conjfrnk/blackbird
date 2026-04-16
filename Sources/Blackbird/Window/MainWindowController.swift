@@ -57,21 +57,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // the tab bar appears automatically when there are ≥2 tabs.
         window.tabbingMode = .preferred
         window.tabbingIdentifier = "dev.conjfrnk.blackbird.terminal"
-        // Install an (empty) NSToolbar so AppKit renders tabs **inside** the
-        // titlebar area (Safari / iTerm2 style) instead of as a separate
-        // strip below the titlebar. Without a toolbar, a 2+ tab window gets
-        // a second row of chrome that eats vertical space and looks off
-        // against the transparent titlebar. `toolbarStyle = .unifiedCompact`
-        // keeps the bar the same height as the traffic lights. Title
-        // visibility is hidden because the tab's own label is the title —
-        // otherwise the single-tab case double-labels "zsh / zsh".
-        let toolbar = NSToolbar(identifier: "dev.conjfrnk.blackbird.toolbar")
-        toolbar.showsBaselineSeparator = false
-        toolbar.allowsUserCustomization = false
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
-        window.toolbarStyle = .unifiedCompact
-        window.titleVisibility = .hidden
         super.init(window: window)
         window.delegate = self
 
