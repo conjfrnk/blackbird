@@ -177,7 +177,15 @@ public final class PTY {
     public func writeImmediate(_ data: Data) {
         data.withUnsafeBytes { rawBuf in
             guard let base = rawBuf.baseAddress else { return }
-            _ = Darwin.write(masterFD, base, rawBuf.count)
+            let n = Darwin.write(masterFD, base, rawBuf.count)
+            #if DEBUG
+            if n != rawBuf.count {
+                NSLog("[Blackbird] writeImmediate FAILED: wanted %d, got %d, errno=%d fd=%d",
+                      rawBuf.count, n, errno, masterFD)
+            } else {
+                NSLog("[Blackbird] writeImmediate OK: %d bytes to fd %d", n, masterFD)
+            }
+            #endif
         }
     }
 
