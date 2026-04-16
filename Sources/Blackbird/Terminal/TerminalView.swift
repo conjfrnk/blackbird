@@ -115,7 +115,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public func draw(in view: MTKView) {
-        renderer.render(in: view)
+        renderer.render(in: view, snapshot: currentSnapshot)
     }
 
     // MARK: - Session observation
