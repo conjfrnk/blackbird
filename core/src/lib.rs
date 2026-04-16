@@ -845,6 +845,23 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
     })
 }
 
+/// Clear the visible screen AND the scrollback, moving the cursor to the
+/// top-left. Implemented by feeding the VT sequences directly to the
+/// parser (same path a shell's `clear` would take), so the rest of the
+/// terminal state (palette, cursor color, etc.) is untouched.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
+    guard_with_term(term, (), || {
+        if term.is_null() { return; }
+        let bb = &mut *term;
+        // H = cursor home, 2J = erase display, 3J = erase scrollback.
+        bb.processor.advance(&mut bb.term, b"\x1b[H\x1b[2J\x1b[3J");
+    })
+}
+
 /// Update one slot of the terminal's color palette. Slot indices match
 /// alacritty's `NamedColor` ordering: 0..=15 = 16 ANSI colors, 16..=255 =
 /// extended 256-palette, 256 = Foreground, 257 = Background, 258 = Cursor,
@@ -1585,5 +1602,21 @@ mod tests {
     #[test]
     fn set_named_color_null_term_is_noop() {
         unsafe { bb_term_set_named_color(std::ptr::null_mut(), 0, 0xFFFFFF); }
+    }
+
+    #[test]
+    fn clear_all_wipes_viewport_and_scrollback() {
+        unsafe {
+            let term = bb_term_new(3, 2, 100);
+            bb_term_input(term, b"AAA\r\nBBB\r\nCCC\r\nDDD".as_ptr(), 16);
+            bb_term_clear_all(term);
+            let snap = bb_term_take_snapshot(term);
+            // Display has 2 rows of blanks. History should be empty.
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+            for c in cells { assert!(c.ch == 0 || c.ch == b' ' as u32, "got ch={}", c.ch); }
+            assert_eq!((*snap).history_size, 0, "history not cleared");
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
     }
 }

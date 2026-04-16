@@ -198,6 +198,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Copy",  action: #selector(NSText.copy(_:)),  keyEquivalent: "c")
         menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        menu.addItem(.separator())
+        // ⌘K clears viewport + scrollback. Action is dispatched via the
+        // responder chain (target = nil) so the focused TerminalView handles it.
+        menu.addItem(
+            withTitle: "Clear Buffer",
+            action: #selector(TerminalView.clearBufferAndScrollback(_:)),
+            keyEquivalent: "k"
+        )
         return menu
     }
 

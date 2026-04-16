@@ -141,6 +141,21 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
+    /// ⌘K target — clear viewport + scrollback while preserving palette /
+    /// cursor / title. Publishes a fresh snapshot so the renderer shows the
+    /// empty grid on the next frame.
+    public func clearAll() {
+        var s: BBSnapshot?
+        coreQueue.sync {
+            bbterm.clearAll()
+            s = bbterm.snapshot()
+        }
+        if let s {
+            if Thread.isMainThread { snapshot = s }
+            else { DispatchQueue.main.async { self.snapshot = s } }
+        }
+    }
+
     /// Push a full palette into the Rust term + publish a fresh snapshot so
     /// cells re-color on the next draw. Serialized through `coreQueue`.
     public func applyPalette(_ palette: ThemePalette) {

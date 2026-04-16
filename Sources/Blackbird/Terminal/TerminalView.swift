@@ -443,6 +443,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     @objc public func performFindNextAction(_ sender: Any?)     { advanceFind(direction: .forward) }
     @objc public func performFindPreviousAction(_ sender: Any?) { advanceFind(direction: .backward) }
 
+    @objc public func clearBufferAndScrollback(_ sender: Any?) {
+        session?.clearAll()
+    }
+
     private func installFindBar() {
         let h: CGFloat = 32
         let bar = FindBar(frame: NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h))
@@ -526,6 +530,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
         case #selector(performFindNextAction(_:)):     return !findMatches.isEmpty
         case #selector(performFindPreviousAction(_:)): return !findMatches.isEmpty
+        case #selector(clearBufferAndScrollback(_:)):  return session != nil
         default:                                       return true
         }
     }

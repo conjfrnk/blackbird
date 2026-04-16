@@ -335,6 +335,17 @@ void bb_term_scroll(struct BBTerm *term, int32_t delta);
 void bb_term_scroll_to_bottom(struct BBTerm *term);
 
 /**
+ * Clear the visible screen AND the scrollback, moving the cursor to the
+ * top-left. Implemented by feeding the VT sequences directly to the
+ * parser (same path a shell's `clear` would take), so the rest of the
+ * terminal state (palette, cursor color, etc.) is untouched.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null is a no-op.
+ */
+void bb_term_clear_all(struct BBTerm *term);
+
+/**
  * Update one slot of the terminal's color palette. Slot indices match
  * alacritty's `NamedColor` ordering: 0..=15 = 16 ANSI colors, 16..=255 =
  * extended 256-palette, 256 = Foreground, 257 = Background, 258 = Cursor,

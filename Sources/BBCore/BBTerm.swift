@@ -91,6 +91,11 @@ public final class BBTerm {
         bb_term_scroll_to_bottom(h)
     }
 
+    public func clearAll() {
+        guard let h = handle else { return }
+        bb_term_clear_all(h)
+    }
+
     /// Update one palette slot. See BBCore.h for slot conventions.
     public func setColor(slot: Int, rgb: UInt32) {
         guard let h = handle else { return }
