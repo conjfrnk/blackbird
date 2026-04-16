@@ -117,6 +117,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // the link reattaches to the new screen automatically. The observer
         // below (viewDidMoveToWindow) is just belt-and-suspenders logging.
         self.preferredFramesPerSecond = 120
+        // Opt in to triple-buffered presentation. On ProMotion displays this
+        // signals "high-framerate workload" so macOS's adaptive refresh
+        // promotes the display to 120 Hz while we're the frontmost window
+        // (inactive apps still throttle to 60 Hz for battery — that's
+        // intentional OS-level behavior and not something we should fight).
+        if let metalLayer = self.layer as? CAMetalLayer {
+            metalLayer.maximumDrawableCount = 3
+            metalLayer.displaySyncEnabled = true
+        }
 
         // Minimal right-edge scroll indicator (pass-through hit testing —
         // never swallows mouse events). Positioned in layout() so it tracks

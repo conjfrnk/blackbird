@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::term::cell::Flags as CellFlags;
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 
 /// Dimensions struct required by `Term::new`.
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             .windows(needle.len())
             .position(|w| w == needle)
         {
-            let end = cursor + rel + needle.len();  // one past the J
+            let end = cursor + rel + needle.len(); // one past the J
             bb.processor.advance(&mut bb.term, &slice[cursor..end]);
             bb.processor.advance(&mut bb.term, extra);
             cursor = end;
@@ -412,17 +412,17 @@ pub mod cell_flags {
 /// These are stable across Blackbird versions; the underlying alacritty bits
 /// are intentionally not exposed directly so we can version them independently.
 pub mod bb_mode {
-    pub const ALT_SCREEN: u32         = 1 << 0;
-    pub const APP_CURSOR: u32         = 1 << 1;
-    pub const APP_KEYPAD: u32         = 1 << 2;
-    pub const BRACKETED_PASTE: u32    = 1 << 3;
+    pub const ALT_SCREEN: u32 = 1 << 0;
+    pub const APP_CURSOR: u32 = 1 << 1;
+    pub const APP_KEYPAD: u32 = 1 << 2;
+    pub const BRACKETED_PASTE: u32 = 1 << 3;
     pub const MOUSE_REPORT_CLICK: u32 = 1 << 4;
-    pub const MOUSE_MOTION: u32       = 1 << 5;
-    pub const MOUSE_DRAG: u32         = 1 << 6;
-    pub const SGR_MOUSE: u32          = 1 << 7;
-    pub const FOCUS_IN_OUT: u32       = 1 << 8;
-    pub const SHOW_CURSOR: u32        = 1 << 9;
-    pub const LINE_WRAP: u32          = 1 << 10;
+    pub const MOUSE_MOTION: u32 = 1 << 5;
+    pub const MOUSE_DRAG: u32 = 1 << 6;
+    pub const SGR_MOUSE: u32 = 1 << 7;
+    pub const FOCUS_IN_OUT: u32 = 1 << 8;
+    pub const SHOW_CURSOR: u32 = 1 << 9;
+    pub const LINE_WRAP: u32 = 1 << 10;
 }
 
 /// Immutable snapshot of terminal grid state. Ref-counted via `bb_snap_retain` /
@@ -442,13 +442,13 @@ pub struct BBSnap {
     pub cursor_col: u16,
     pub cursor_row: u16,
     pub cursor_visible: u8,
-    pub _pad: u8,               // align display_offset to 2-byte boundary
+    pub _pad: u8, // align display_offset to 2-byte boundary
     /// Number of lines the viewport is scrolled above the live grid. 0 means
     /// we're pinned to the bottom (live content). When > 0 the renderer must
     /// offset the cursor by this amount or hide it if the live cursor row is
     /// no longer visible.
     pub display_offset: u16,
-    pub mode: u32,              // terminal mode bitflags — see bb_mode constants
+    pub mode: u32, // terminal mode bitflags — see bb_mode constants
     pub cells_len: usize,
     pub cells: *const BBCell,
     /// Total lines currently retained in scrollback (grows as output flows
@@ -485,6 +485,10 @@ unsafe impl Send for BBSnapOwned {}
 unsafe impl Sync for BBSnapOwned {}
 
 impl BBSnapOwned {
+    // Passing 8 args is deliberate — collapsing into a struct just to appease
+    // the lint would obscure the call site, which is a single private caller
+    // inside `bb_term_take_snapshot`.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         cols: u16,
         rows: u16,
@@ -616,34 +620,34 @@ fn color_to_rgb(color: &Color, palette: &alacritty_terminal::term::color::Colors
 /// Map the 16 ANSI named colors (and semantic aliases) to xterm defaults.
 fn named_color_rgb(name: &NamedColor) -> u32 {
     match name {
-        NamedColor::Black         => 0x000000,
-        NamedColor::Red           => 0xCC0000,
-        NamedColor::Green         => 0x4E9A06,
-        NamedColor::Yellow        => 0xC4A000,
-        NamedColor::Blue          => 0x3465A4,
-        NamedColor::Magenta       => 0x75507B,
-        NamedColor::Cyan          => 0x06989A,
-        NamedColor::White         => 0xD3D7CF,
-        NamedColor::BrightBlack   => 0x555753,
-        NamedColor::BrightRed     => 0xEF2929,
-        NamedColor::BrightGreen   => 0x8AE234,
-        NamedColor::BrightYellow  => 0xFCE94F,
-        NamedColor::BrightBlue    => 0x729FCF,
+        NamedColor::Black => 0x000000,
+        NamedColor::Red => 0xCC0000,
+        NamedColor::Green => 0x4E9A06,
+        NamedColor::Yellow => 0xC4A000,
+        NamedColor::Blue => 0x3465A4,
+        NamedColor::Magenta => 0x75507B,
+        NamedColor::Cyan => 0x06989A,
+        NamedColor::White => 0xD3D7CF,
+        NamedColor::BrightBlack => 0x555753,
+        NamedColor::BrightRed => 0xEF2929,
+        NamedColor::BrightGreen => 0x8AE234,
+        NamedColor::BrightYellow => 0xFCE94F,
+        NamedColor::BrightBlue => 0x729FCF,
         NamedColor::BrightMagenta => 0xAD7FA8,
-        NamedColor::BrightCyan    => 0x34E2E2,
-        NamedColor::BrightWhite   => 0xEEEEEC,
+        NamedColor::BrightCyan => 0x34E2E2,
+        NamedColor::BrightWhite => 0xEEEEEC,
         // Semantic aliases — Foreground defaults to light grey, Background to black
         NamedColor::Foreground | NamedColor::BrightForeground => 0xEEEEEE,
-        NamedColor::Background                                 => 0x000000,
+        NamedColor::Background => 0x000000,
         // Dim variants: map to the base color (terminal dims it visually)
-        NamedColor::DimBlack   => 0x000000,
-        NamedColor::DimRed     => 0xCC0000,
-        NamedColor::DimGreen   => 0x4E9A06,
-        NamedColor::DimYellow  => 0xC4A000,
-        NamedColor::DimBlue    => 0x3465A4,
+        NamedColor::DimBlack => 0x000000,
+        NamedColor::DimRed => 0xCC0000,
+        NamedColor::DimGreen => 0x4E9A06,
+        NamedColor::DimYellow => 0xC4A000,
+        NamedColor::DimBlue => 0x3465A4,
         NamedColor::DimMagenta => 0x75507B,
-        NamedColor::DimCyan    => 0x06989A,
-        NamedColor::DimWhite   => 0xD3D7CF,
+        NamedColor::DimCyan => 0x06989A,
+        NamedColor::DimWhite => 0xD3D7CF,
         NamedColor::DimForeground => 0xEEEEEE,
         // Cursor and any future variants
         _ => 0xEEEEEE,
@@ -656,10 +660,8 @@ fn indexed_color_rgb(idx: u8) -> u32 {
         0..=15 => {
             // Standard 16 colors — same mapping as named_color_rgb
             const TABLE: [u32; 16] = [
-                0x000000, 0xCC0000, 0x4E9A06, 0xC4A000,
-                0x3465A4, 0x75507B, 0x06989A, 0xD3D7CF,
-                0x555753, 0xEF2929, 0x8AE234, 0xFCE94F,
-                0x729FCF, 0xAD7FA8, 0x34E2E2, 0xEEEEEC,
+                0x000000, 0xCC0000, 0x4E9A06, 0xC4A000, 0x3465A4, 0x75507B, 0x06989A, 0xD3D7CF,
+                0x555753, 0xEF2929, 0x8AE234, 0xFCE94F, 0x729FCF, 0xAD7FA8, 0x34E2E2, 0xEEEEEC,
             ];
             TABLE[idx as usize]
         }
@@ -669,7 +671,13 @@ fn indexed_color_rgb(idx: u8) -> u32 {
             let r = (i / 36) % 6;
             let g = (i / 6) % 6;
             let b = i % 6;
-            let to_byte = |v: u32| -> u32 { if v == 0 { 0 } else { 55 + 40 * v } };
+            let to_byte = |v: u32| -> u32 {
+                if v == 0 {
+                    0
+                } else {
+                    55 + 40 * v
+                }
+            };
             (to_byte(r) << 16) | (to_byte(g) << 8) | to_byte(b)
         }
         232..=255 => {
@@ -683,29 +691,63 @@ fn indexed_color_rgb(idx: u8) -> u32 {
 /// Extract our stable `cell_flags` bitset from alacritty's `Flags`.
 fn extract_cell_flags(f: CellFlags) -> u16 {
     let mut out: u16 = 0;
-    if f.contains(CellFlags::BOLD)                            { out |= cell_flags::BOLD; }
-    if f.contains(CellFlags::ITALIC)                          { out |= cell_flags::ITALIC; }
-    if f.contains(CellFlags::UNDERLINE)                       { out |= cell_flags::UNDERLINE; }
-    if f.contains(CellFlags::INVERSE)                         { out |= cell_flags::REVERSE; }
-    if f.contains(CellFlags::DIM)                             { out |= cell_flags::DIM; }
-    if f.contains(CellFlags::STRIKEOUT)                       { out |= cell_flags::STRIKE; }
+    if f.contains(CellFlags::BOLD) {
+        out |= cell_flags::BOLD;
+    }
+    if f.contains(CellFlags::ITALIC) {
+        out |= cell_flags::ITALIC;
+    }
+    if f.contains(CellFlags::UNDERLINE) {
+        out |= cell_flags::UNDERLINE;
+    }
+    if f.contains(CellFlags::INVERSE) {
+        out |= cell_flags::REVERSE;
+    }
+    if f.contains(CellFlags::DIM) {
+        out |= cell_flags::DIM;
+    }
+    if f.contains(CellFlags::STRIKEOUT) {
+        out |= cell_flags::STRIKE;
+    }
     out
 }
 
 /// Map `alacritty_terminal::term::TermMode` to our stable `bb_mode` bitflags.
 fn extract_mode(term_mode: &TermMode) -> u32 {
     let mut m: u32 = 0;
-    if term_mode.contains(TermMode::ALT_SCREEN)        { m |= bb_mode::ALT_SCREEN; }
-    if term_mode.contains(TermMode::APP_CURSOR)        { m |= bb_mode::APP_CURSOR; }
-    if term_mode.contains(TermMode::APP_KEYPAD)        { m |= bb_mode::APP_KEYPAD; }
-    if term_mode.contains(TermMode::BRACKETED_PASTE)   { m |= bb_mode::BRACKETED_PASTE; }
-    if term_mode.contains(TermMode::MOUSE_REPORT_CLICK){ m |= bb_mode::MOUSE_REPORT_CLICK; }
-    if term_mode.contains(TermMode::MOUSE_MOTION)      { m |= bb_mode::MOUSE_MOTION; }
-    if term_mode.contains(TermMode::MOUSE_DRAG)        { m |= bb_mode::MOUSE_DRAG; }
-    if term_mode.contains(TermMode::SGR_MOUSE)         { m |= bb_mode::SGR_MOUSE; }
-    if term_mode.contains(TermMode::FOCUS_IN_OUT)      { m |= bb_mode::FOCUS_IN_OUT; }
-    if term_mode.contains(TermMode::SHOW_CURSOR)       { m |= bb_mode::SHOW_CURSOR; }
-    if term_mode.contains(TermMode::LINE_WRAP)         { m |= bb_mode::LINE_WRAP; }
+    if term_mode.contains(TermMode::ALT_SCREEN) {
+        m |= bb_mode::ALT_SCREEN;
+    }
+    if term_mode.contains(TermMode::APP_CURSOR) {
+        m |= bb_mode::APP_CURSOR;
+    }
+    if term_mode.contains(TermMode::APP_KEYPAD) {
+        m |= bb_mode::APP_KEYPAD;
+    }
+    if term_mode.contains(TermMode::BRACKETED_PASTE) {
+        m |= bb_mode::BRACKETED_PASTE;
+    }
+    if term_mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+        m |= bb_mode::MOUSE_REPORT_CLICK;
+    }
+    if term_mode.contains(TermMode::MOUSE_MOTION) {
+        m |= bb_mode::MOUSE_MOTION;
+    }
+    if term_mode.contains(TermMode::MOUSE_DRAG) {
+        m |= bb_mode::MOUSE_DRAG;
+    }
+    if term_mode.contains(TermMode::SGR_MOUSE) {
+        m |= bb_mode::SGR_MOUSE;
+    }
+    if term_mode.contains(TermMode::FOCUS_IN_OUT) {
+        m |= bb_mode::FOCUS_IN_OUT;
+    }
+    if term_mode.contains(TermMode::SHOW_CURSOR) {
+        m |= bb_mode::SHOW_CURSOR;
+    }
+    if term_mode.contains(TermMode::LINE_WRAP) {
+        m |= bb_mode::LINE_WRAP;
+    }
     m
 }
 
@@ -763,14 +805,23 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let cursor_shape: u8 = {
             use alacritty_terminal::vte::ansi::CursorShape;
             match bb.term.cursor_style().shape {
-                CursorShape::Block       => 0,
-                CursorShape::Beam        => 1,
-                CursorShape::Underline   => 2,
-                CursorShape::Hidden      => 3,
+                CursorShape::Block => 0,
+                CursorShape::Beam => 1,
+                CursorShape::Underline => 2,
+                CursorShape::Hidden => 3,
                 CursorShape::HollowBlock => 0,
             }
         };
-        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), display_offset, history_size, mode, cursor_shape, cells);
+        let owned = BBSnapOwned::new(
+            cols,
+            rows,
+            (cursor_col, cursor_row, true),
+            display_offset,
+            history_size,
+            mode,
+            cursor_shape,
+            cells,
+        );
         // Expose the public `snap` field (first field at offset 0).
         let owned_ptr = Box::into_raw(owned);
         &(*owned_ptr).snap as *const BBSnap
@@ -877,7 +928,9 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
     guard_with_term(term, (), || {
-        if term.is_null() { return; }
+        if term.is_null() {
+            return;
+        }
         let bb = &mut *term;
         // H = cursor home, 2J = erase display, 3J = erase scrollback.
         bb.processor.advance(&mut bb.term, b"\x1b[H\x1b[2J\x1b[3J");
@@ -896,10 +949,12 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, rgb: u32) {
     guard_with_term(term, (), || {
-        if term.is_null() { return; }
+        if term.is_null() {
+            return;
+        }
         let bb = &mut *term;
         let r = ((rgb >> 16) & 0xFF) as u8;
-        let g = ((rgb >> 8)  & 0xFF) as u8;
+        let g = ((rgb >> 8) & 0xFF) as u8;
         let b = (rgb & 0xFF) as u8;
         use alacritty_terminal::vte::ansi::{Handler, Rgb};
         bb.term.set_color(slot as usize, Rgb { r, g, b });
@@ -1009,9 +1064,7 @@ pub unsafe extern "C" fn bb_term_text_range(
                 continue;
             }
 
-            let (col_lo, col_hi, trim) = if rectangular {
-                (s_col, e_col, false)
-            } else if single_line {
+            let (col_lo, col_hi, trim) = if rectangular || single_line {
                 (s_col, e_col, false)
             } else if line_i == s_line {
                 (s_col, last_col, true)
@@ -1562,7 +1615,9 @@ mod tests {
 
     #[test]
     fn string_release_null_is_noop() {
-        unsafe { bb_string_release(std::ptr::null_mut()); }
+        unsafe {
+            bb_string_release(std::ptr::null_mut());
+        }
     }
 
     #[test]
@@ -1623,7 +1678,9 @@ mod tests {
 
     #[test]
     fn set_named_color_null_term_is_noop() {
-        unsafe { bb_term_set_named_color(std::ptr::null_mut(), 0, 0xFFFFFF); }
+        unsafe {
+            bb_term_set_named_color(std::ptr::null_mut(), 0, 0xFFFFFF);
+        }
     }
 
     #[test]
@@ -1644,7 +1701,7 @@ mod tests {
             // DECSCUSR 5 = steady bar (beam).
             bb_term_input(term, b"\x1B[5 q".as_ptr(), 5);
             let snap = bb_term_take_snapshot(term);
-            assert_eq!((*snap).cursor_shape, 1);  // 1 = bar
+            assert_eq!((*snap).cursor_shape, 1); // 1 = bar
             bb_snap_release(snap);
             bb_term_free(term);
         }
@@ -1659,7 +1716,9 @@ mod tests {
             let snap = bb_term_take_snapshot(term);
             // Display has 2 rows of blanks. History should be empty.
             let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
-            for c in cells { assert!(c.ch == 0 || c.ch == b' ' as u32, "got ch={}", c.ch); }
+            for c in cells {
+                assert!(c.ch == 0 || c.ch == b' ' as u32, "got ch={}", c.ch);
+            }
             assert_eq!((*snap).history_size, 0, "history not cleared");
             bb_snap_release(snap);
             bb_term_free(term);

@@ -7,11 +7,14 @@ struct BlackbirdApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // Settings scene is SwiftUI-managed; only opens when the user picks
-        // ⌘, so it doesn't interfere with AppDelegate's AppKit main window.
-        Settings {
-            SettingsView()
-        }
+        // We deliberately ship an empty scene body. Windows are built by
+        // `AppDelegate.createTerminalController()` as AppKit `NSWindow`s, and
+        // Settings is a standalone AppKit-hosted `NSHostingController`
+        // (see SettingsWindowController) — that path is more reliable under
+        // @NSApplicationDelegateAdaptor + custom main menu than SwiftUI's
+        // `Settings { … }` scene, which has flaky `showSettingsWindow:`
+        // wiring when the main menu is replaced.
+        Settings { EmptyView() }  // placeholder — never presented.
     }
 }
 
@@ -86,17 +89,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings(_ sender: Any?) {
-        // SwiftUI's hidden Settings handler lives off the responder chain; it
-        // registers for `showSettingsWindow:` (macOS 14+) via a private NSApp
-        // target. `sendAction(_:to:from:)` with nil target delegates to NSApp
-        // which walks ITS internal target list including SwiftUI's registered
-        // handlers — this is the documented way to trigger the Settings scene
-        // from AppKit code.
-        if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: sender) {
-            return
-        }
-        // Older macOS fallback (pre-13 used showPreferencesWindow:).
-        _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: sender)
+        // AppKit-hosted settings window — see SettingsWindowController for
+        // why we don't rely on SwiftUI's `Settings { … }` scene wiring.
+        SettingsWindowController.shared.show()
     }
 
     // MARK: - Controller factory

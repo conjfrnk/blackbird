@@ -17,6 +17,7 @@
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
 		7462C02E74143E52FD628DA5 /* PTY.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5995252272D652667DB2D2D9 /* PTY.swift */; };
 		75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F455C591EC38A7B3955CD5B8 /* FindBar.swift */; };
+		7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */; };
 		82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11194E0650067380506F53B2 /* BBTermTests.swift */; };
 		8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82C57C6702E92EB2488AC798 /* Theme.swift */; };
 		903AE2C38D9B7F69973CC158 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 9EE9FF088456C53438AA86BE /* Sparkle */; };
@@ -75,6 +76,7 @@
 		9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
 		A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHostTermination.swift; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
 		C735D6264882444369074ACB /* CellInstance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstance.swift; sourceTree = "<group>"; };
 		C9E38BAB38899CD10A229243 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -114,6 +116,7 @@
 			children = (
 				0D7DD21160AFF51FCA0B6374 /* Preferences.swift */,
 				3F7D804048B62FEB3D66F4F0 /* SettingsView.swift */,
+				C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */,
 				82C57C6702E92EB2488AC798 /* Theme.swift */,
 				9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */,
 			);
@@ -354,6 +357,7 @@
 				C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */,
 				C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */,
 				EEA685668C43AB5E5DECAAED /* SettingsView.swift in Sources */,
+				7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */,
 				552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */,
 				B7DB0F3545C7837C281C722C /* TerminalSession.swift in Sources */,
 				CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */,

@@ -25,19 +25,25 @@ unsafe fn render_grid(term: *mut blackbird_core::BBTerm) -> String {
         }
         // Trim trailing spaces so the golden stays stable under cell-fill
         // quirks.
-        while row.ends_with(' ') { row.pop(); }
+        while row.ends_with(' ') {
+            row.pop();
+        }
         out.push_str(&row);
         out.push('\n');
     }
     // Strip the final newline block from the bottom of the grid.
-    while out.ends_with('\n') { out.pop(); }
+    while out.ends_with('\n') {
+        out.pop();
+    }
 
     blackbird_core::bb_snap_release(snap);
     out
 }
 
 fn golden_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/goldens").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/goldens")
+        .join(name)
 }
 
 fn assert_golden(name: &str, actual: &str) {
