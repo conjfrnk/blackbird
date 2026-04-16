@@ -453,6 +453,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public override func mouseDown(with event: NSEvent) {
+        // ⌘-click on a URL → open it. Runs before mouse-reporting and
+        // selection so TUIs can't swallow the gesture. Restricted to
+        // non-mouse-reporting context (or ⌥-held inside a TUI) so that
+        // vim's own <C-click> binding still works when the TUI asks for
+        // the click.
+        if event.modifierFlags.contains(.command) {
+            let underlyingOption = event.modifierFlags.contains(.option)
+            if !mouseReportingEnabled() || underlyingOption,
+               let snap = currentSnapshot {
+                let p = bufferPointFromEvent(event)
+                if let m = URLDetector.match(
+                    at: p,
+                    in: URLDetector.scan(snapshot: snap)
+                ) {
+                    NSWorkspace.shared.open(m.url)
+                    return
+                }
+            }
+        }
         let optionHeld = event.modifierFlags.contains(.option)
         if mouseReportingEnabled() && !optionHeld, let session {
             sendMouseEvent(event, button: 0, press: true, session: session)
