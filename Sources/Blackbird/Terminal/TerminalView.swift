@@ -54,6 +54,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var currentSnapshot: BBSnapshot?
     private var cancellables: [AnyCancellable] = []
 
+    #if DEBUG
+    private var frameCount = 0
+    private var lastFrameLogTime = Date()
+    #endif
+
     public init(frame frameRect: NSRect, device: MTLDevice) {
         guard let renderer = MetalRenderer(device: device) else {
             fatalError("Metal device could not produce a command queue")
@@ -116,6 +121,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public func draw(in view: MTKView) {
         renderer.render(in: view, snapshot: currentSnapshot)
+        #if DEBUG
+        frameCount += 1
+        let now = Date()
+        if now.timeIntervalSince(lastFrameLogTime) >= 1.0 {
+            NSLog("[Blackbird] %d fps", frameCount)
+            frameCount = 0
+            lastFrameLogTime = now
+        }
+        #endif
     }
 
     // MARK: - Session observation
