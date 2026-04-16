@@ -207,6 +207,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             inheritingCwdFrom: source,
             autosaveFrame: false
         )
+        // Default `tabbingMode = .preferred` would let macOS auto-merge this
+        // into the existing tab group when the user's system "Prefer Tabs"
+        // setting is "Always" (or "In Full Screen" while fullscreen). ⌘N
+        // must *always* produce a separate window — flip to .disallowed for
+        // this specific window before showing. ⌘T stays on the sibling
+        // newWindowForTab path, which uses `addTabbedWindow` explicitly and
+        // isn't subject to the tabbingMode check.
+        controller.window?.tabbingMode = .disallowed
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
     }
