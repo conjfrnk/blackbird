@@ -288,6 +288,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             blue: themeBg.b,
             alpha: opacity
         )
+        // Pin the window's effective appearance to the theme's lightness, not
+        // the OS's. Otherwise the title text (drawn by AppKit in labelColor)
+        // and the traffic-light tinting follow the OS appearance — a dark
+        // theme under Light OS mode renders a dark title on a dark bg and
+        // the title becomes unreadable. Rec. 709 luminance on the theme bg
+        // picks dark vs light; AppKit then handles the label + chrome
+        // coloring automatically.
+        let luminance = 0.2126 * themeBg.r + 0.7152 * themeBg.g + 0.0722 * themeBg.b
+        window.appearance = NSAppearance(named: luminance > 0.5 ? .aqua : .darkAqua)
     }
 
     public func render(snapshot: BBSnapshot) {
