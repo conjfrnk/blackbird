@@ -46,15 +46,22 @@ public final class Preferences: ObservableObject {
     public var optionKey: OptionKey { OptionKey(rawValue: optionKeyRaw) ?? .meta }
 
     /// Resolved `(opacity, blurRadius)` from the single translucency slider.
-    /// Tuned so v=3 matches iTerm2's out-of-box look (transparency 9/100,
-    /// blur radius 4), which is the lift most users actually want.
+    /// Anchored so the daily-driver look sits at v=3 instead of v=7 on the
+    /// previous linear curve. The slider is piecewise-linear:
+    ///   new v 1..3  → stretches old v 1..7  (quick ramp to the useful zone)
+    ///   new v 3..10 → stretches old v 7..10 (gentle tail out to Ghost)
+    /// Endpoint appearance is unchanged; only where the curve lives along
+    /// the 1..10 knob moves.
     /// - value 1 (Solid)  → opacity 1.00, blur 0
-    /// - value 3 (default)→ opacity 0.91, blur 4  ← matches iTerm2 defaults
+    /// - value 3 (default)→ opacity 0.73, blur 12
     /// - value 10 (Ghost) → opacity 0.595, blur 18
     public var translucencyResolved: (opacity: Double, blurRadius: Int) {
         let v = max(1.0, min(10.0, translucency))
-        let opacity = 1.0 - (v - 1) * 0.045
-        let blur = Int(round(max(0, (v - 1) * 2.0)))
+        let mapped: Double = v <= 3
+            ? 1.0 + (v - 1.0) * 3.0
+            : 7.0 + (v - 3.0) * (3.0 / 7.0)
+        let opacity = 1.0 - (mapped - 1.0) * 0.045
+        let blur = Int(round(max(0, (mapped - 1.0) * 2.0)))
         return (opacity, blur)
     }
 
