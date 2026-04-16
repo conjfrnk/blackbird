@@ -212,27 +212,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             if let chars = event.characters,
                let scalar = chars.unicodeScalars.first,
                scalar.value >= 1, scalar.value <= 0x1F {
-                // Write the control byte to the PTY master. The line
-                // discipline handles the rest — IF it's configured to.
-                session.sendImmediate(Data([UInt8(scalar.value)]))
-                // For Ctrl+C / Ctrl+Z, also force-signal the foreground
-                // pgroup ONLY when the line discipline has ISIG enabled
-                // (shell at prompt, `sleep 100`, cmatrix in cooked-ish
-                // mode). When ISIG is off — the foreground app has put the
-                // tty in raw mode (nvim, tmux, htop, claude-code) — we must
-                // NOT also kill(), or nvim reports "Caught deadly signal"
-                // and exits instead of handling Ctrl+C internally (cancel
-                // current op / close buffer prompt).
+                // Synchronous write so there's no perceptible latency before
+                // the line discipline sees the byte. From here the kernel
+                // does exactly the right thing — without any kill() from us:
                 //
-                // The ISIG query reads termios from the master fd, which
-                // reflects whatever the slave app last set. This is cheap
-                // (one tcgetattr per Ctrl keystroke) and robust against
-                // apps toggling raw mode mid-session.
-                if (scalar.value == 0x03 || scalar.value == 0x1A) &&
-                   session.isISIGEnabled() {
-                    let sig: Int32 = (scalar.value == 0x03) ? SIGINT : SIGTSTP
-                    session.sendSignalToForeground(sig)
-                }
+                //   ISIG on  (shell prompt, `sleep 100`, cmatrix cbreak):
+                //     0x03 matches c_cc[VINTR] → echo `^C\n` (ECHOCTL) →
+                //     SIGINT to fg pgroup → shell/sleep handles, prints the
+                //     new prompt on the next line. Order is correct because
+                //     the echo and the signal come from the same code path
+                //     inside the tty layer.
+                //
+                //   ISIG off (nvim, tmux, htop — apps in raw mode):
+                //     byte passes through to the app's stdin untouched. The
+                //     app handles Ctrl+C internally (cancel op, close prompt)
+                //     instead of dying from a "deadly signal".
+                //
+                // Getting VINTR/VSUSP/VEOF/VERASE right required passing nil
+                // termios to forkpty (see PTY.swift) so the kernel's
+                // TTYDEF_* defaults apply. Without that, c_cc was all-zeros
+                // and Ctrl+C was just data.
+                session.sendImmediate(Data([UInt8(scalar.value)]))
                 return
             }
             // Fast path didn't match — fall through to encoder which also

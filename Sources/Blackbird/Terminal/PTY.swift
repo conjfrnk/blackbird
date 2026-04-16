@@ -60,18 +60,22 @@ public final class PTY {
             ws_row: size.rows, ws_col: size.cols,
             ws_xpixel: 0, ws_ypixel: 0
         )
-        // termios with common defaults.
-        var termios = Darwin.termios()
-        cfmakeraw(&termios)
-        termios.c_lflag |= UInt(ECHO | ICANON | ISIG | IEXTEN)
-        termios.c_iflag |= UInt(ICRNL | IXON | BRKINT)
-        termios.c_oflag |= UInt(OPOST | ONLCR)
-
+        // Pass nil for termios so forkpty uses the kernel's TTYDEF_* defaults
+        // from <sys/ttydefaults.h>. That gives us correct c_cc values:
+        // VINTR=3, VQUIT=28, VSUSP=26, VEOF=4, VERASE=0x7F, VKILL=21, plus
+        // flags = (BRKINT|ICRNL|IMAXBEL|IXON|IXANY) | (OPOST|ONLCR) |
+        // (ECHO|ICANON|ISIG|IEXTEN|ECHOE|ECHOKE|ECHOCTL) | (CS8|CREAD|HUPCL).
+        //
+        // Building these ourselves from cfmakeraw() + |= flag fixups produced
+        // a broken termios: Darwin.termios() zero-inits c_cc, cfmakeraw only
+        // touches VMIN/VTIME, and we never set VINTR. VINTR=0 meant Ctrl+C
+        // wasn't recognized as the interrupt character at all — the line
+        // discipline neither SIGINT'd the foreground pgroup nor echoed `^C`,
+        // forcing a workaround of kill(-pgrp, SIGINT) that raced ahead of the
+        // echo path and drew the new shell prompt before `^C\n` landed.
         let pid = withUnsafeMutablePointer(to: &master) { masterPtr in
-            withUnsafeMutablePointer(to: &termios) { tPtr in
-                withUnsafeMutablePointer(to: &winsize) { wPtr in
-                    forkpty(masterPtr, nil, tPtr, wPtr)
-                }
+            withUnsafeMutablePointer(to: &winsize) { wPtr in
+                forkpty(masterPtr, nil, nil, wPtr)
             }
         }
 
@@ -199,18 +203,6 @@ public final class PTY {
         if pgrp > 0 {
             kill(-pgrp, sig)
         }
-    }
-
-    /// True if the line discipline has ISIG enabled. When ISIG is on (shell
-    /// at prompt, sleep running) the line discipline generates SIGINT from
-    /// 0x03 in the byte stream. When ISIG is off (vim, nvim, tmux — apps in
-    /// raw mode), the byte is delivered to the app's stdin untouched and we
-    /// must NOT also send SIGINT via kill() or the app will be killed
-    /// instead of handling Ctrl+C internally.
-    public func isLineDisciplineISIGEnabled() -> Bool {
-        var t = termios()
-        guard tcgetattr(masterFD, &t) == 0 else { return true }
-        return (t.c_lflag & UInt(ISIG)) != 0
     }
 
     // MARK: - Resize
