@@ -15,7 +15,7 @@ public final class MetalRenderer {
     private var instanceBuffer: MTLBuffer
     private var instanceCapacity: Int
 
-    public init?(device: MTLDevice, metrics: CellMetrics) {
+    public init?(device: MTLDevice, metrics: CellMetrics, scale: CGFloat = 2.0) {
         guard let queue = device.makeCommandQueue() else { return nil }
         guard let library = device.makeDefaultLibrary() else { return nil }
         guard let vertexFn = library.makeFunction(name: "vertex_cell"),
@@ -44,7 +44,7 @@ public final class MetalRenderer {
         // Cursor is opaque white — no blending.
         guard let cursorPSO = try? device.makeRenderPipelineState(descriptor: cursorDesc) else { return nil }
 
-        guard let atlas = GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 1024) else {
+        guard let atlas = GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 1024, scale: scale) else {
             return nil
         }
 

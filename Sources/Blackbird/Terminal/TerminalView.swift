@@ -63,7 +63,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // TerminalView is the authoritative owner of CellMetrics; the renderer
         // shares this same instance so layout and rendering never diverge.
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
-        guard let renderer = MetalRenderer(device: device, metrics: metrics) else {
+        // The atlas rasterizes glyphs at pixel resolution for sharp text on
+        // Retina displays. Use the primary screen's scale at construction;
+        // if the window later moves to a display with a different scale the
+        // atlas will still render correctly (linear filtering covers mild
+        // upsampling), just without re-rasterizing at the new resolution.
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        guard let renderer = MetalRenderer(device: device, metrics: metrics, scale: scale) else {
             fatalError("Metal device could not produce a command queue")
         }
         self.renderer = renderer
@@ -86,23 +92,31 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
+        // Always commit at the end of a drag, even if a prior propagateResize
+        // call already saw the final dimensions — propagateResize dedupes.
         propagateResize()
     }
 
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        // Outside live resize (e.g., zoom button, programmatic resize), still
-        // propagate. During live resize, viewDidEndLiveResize handles the final
-        // commit so we avoid thrashing PTY + core during the drag.
-        if !inLiveResize {
-            propagateResize()
-        }
+        // Always propagate so the shell sees the new dimensions immediately
+        // during live resize. TerminalSession.resize serializes PTY +
+        // BBTerm updates on the core queue, and propagateResize dedupes
+        // against the last-propagated grid so we don't thrash the shell when
+        // several setFrameSize calls land in the same cell-snap bucket.
+        propagateResize()
     }
+
+    private var lastPropagatedSize: PTY.Size?
 
     private func propagateResize() {
         guard let session else { return }
         let grid = metrics.grid(forPixelSize: bounds.size)
-        session.resize(to: .init(cols: UInt16(grid.cols), rows: UInt16(grid.rows)))
+        guard grid.cols > 0, grid.rows > 0 else { return }
+        let size = PTY.Size(cols: UInt16(grid.cols), rows: UInt16(grid.rows))
+        guard size != lastPropagatedSize else { return }
+        lastPropagatedSize = size
+        session.resize(to: size)
     }
 
     // MARK: - Rendering

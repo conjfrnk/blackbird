@@ -21,15 +21,21 @@ public final class GlyphAtlas {
     public let slotRows: Int
     public let cellPxWidth: Int
     public let cellPxHeight: Int
+    /// Backing scale factor used when rasterizing — 2.0 on Retina, 1.0 on
+    /// standard displays. The atlas texture stores glyphs at pixel resolution
+    /// (point_size × scale); UVs stay normalized [0, 1] regardless.
+    public let scale: CGFloat
 
     private var byScalar: [UInt32: Entry] = [:]
     private var nextSlot: Int = 0
 
-    public init?(device: MTLDevice, metrics: CellMetrics, capacityGlyphs: Int) {
+    public init?(device: MTLDevice, metrics: CellMetrics, capacityGlyphs: Int, scale: CGFloat = 1.0) {
         self.metrics = metrics
         self.capacityGlyphs = capacityGlyphs
-        self.cellPxWidth = Int(metrics.cellWidth.rounded())
-        self.cellPxHeight = Int(metrics.cellHeight.rounded())
+        self.scale = scale
+        // Pixel-resolution cell dimensions so glyphs are sharp on Retina.
+        self.cellPxWidth = Int((metrics.cellWidth * scale).rounded())
+        self.cellPxHeight = Int((metrics.cellHeight * scale).rounded())
 
         // Choose a near-square grid that holds `capacityGlyphs` slots.
         let cols = Int(Double(capacityGlyphs).squareRoot().rounded(.up))
@@ -113,6 +119,11 @@ public final class GlyphAtlas {
         ctx.setFillColor(gray: 0, alpha: 1)
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.setFillColor(gray: 1, alpha: 1)
+        // Scale the CTM so drawing calls work in point coordinates while the
+        // backing pixels are at scale resolution. Font metrics (descent,
+        // advance) stay in points; the rasterized glyph fills the full pixel
+        // cell at the proper scale.
+        ctx.scaleBy(x: scale, y: scale)
         ctx.textMatrix = .identity
         ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
 
