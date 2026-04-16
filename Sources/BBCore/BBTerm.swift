@@ -84,6 +84,13 @@ public final class BBTerm {
         bb_term_scroll(h, delta)
     }
 
+    /// Snap the viewport back to the live grid. Called after any keystroke so
+    /// typing always brings the user out of scrollback.
+    public func scrollToBottom() {
+        guard let h = handle else { return }
+        bb_term_scroll_to_bottom(h)
+    }
+
     public func snapshot() -> BBSnapshot? {
         guard let h = handle else { return nil }
         guard let raw = bb_term_take_snapshot(h) else { return nil }
@@ -170,6 +177,8 @@ public final class BBSnapshot {
     public var cursorCol: Int { Int(handle.pointee.cursor_col) }
     public var cursorRow: Int { Int(handle.pointee.cursor_row) }
     public var cursorVisible: Bool { handle.pointee.cursor_visible != 0 }
+    /// Lines scrolled above the live grid. 0 = pinned to bottom.
+    public var displayOffset: Int { Int(handle.pointee.display_offset) }
     public var mode: UInt32 { handle.pointee.mode }
     public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 

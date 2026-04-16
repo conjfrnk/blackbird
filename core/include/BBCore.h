@@ -134,7 +134,14 @@ struct BBSnap {
   uint16_t cursor_col;
   uint16_t cursor_row;
   uint8_t cursor_visible;
-  uint8_t _pad[3];
+  uint8_t _pad;
+  /**
+   * Number of lines the viewport is scrolled above the live grid. 0 means
+   * we're pinned to the bottom (live content). When > 0 the renderer must
+   * offset the cursor by this amount or hide it if the live cursor row is
+   * no longer visible.
+   */
+  uint16_t display_offset;
   uint32_t mode;
   uintptr_t cells_len;
   const struct BBCell *cells;
@@ -278,6 +285,20 @@ void bb_snap_release(const struct BBSnap *snap);
  * unit as the fallback value.
  */
 void bb_term_scroll(struct BBTerm *term, int32_t delta);
+
+/**
+ * Snap the viewport back to the live grid (display_offset = 0). Called after
+ * any user keystroke so typing/Enter always brings them back from scrollback
+ * history. A no-op if already at the bottom.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null is a no-op.
+ *
+ * Panics inside this function are caught by `catch_unwind` and delivered as a
+ * `BBEventKind::Fatal` event to the registered callback. The function returns
+ * unit as the fallback value.
+ */
+void bb_term_scroll_to_bottom(struct BBTerm *term);
 
 #ifdef __cplusplus
 }  // extern "C"

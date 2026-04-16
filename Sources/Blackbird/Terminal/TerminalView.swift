@@ -200,6 +200,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
 
+        // Any non-⌘ keystroke represents user input headed for the shell, so
+        // snap the viewport back to the live grid first. Users reading
+        // scrollback get pulled back to the prompt the moment they type —
+        // matching Terminal.app and iTerm2. No-op when already at bottom.
+        if (currentSnapshot?.displayOffset ?? 0) > 0 {
+            session.scrollToBottom()
+        }
+
         // Fast path for control characters: macOS translates Ctrl+letter into
         // the corresponding control byte (0x01-0x1A) in event.characters.
         // Send that byte directly to the PTY without round-tripping through
@@ -303,6 +311,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     @objc public func paste(_ sender: Any?) {
         guard let session else { return }
         guard let str = NSPasteboard.general.string(forType: .string) else { return }
+        if (currentSnapshot?.displayOffset ?? 0) > 0 {
+            session.scrollToBottom()
+        }
         let bytes = Data(str.utf8)
         let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
         if bracketedPaste {

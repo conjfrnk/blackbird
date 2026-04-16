@@ -360,7 +360,31 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         }
         let bb = &mut *term;
         let slice = std::slice::from_raw_parts(bytes, len);
-        bb.processor.advance(&mut bb.term, slice);
+        // Augment every `ESC [ 2 J` (ED All — erase the visible screen) with
+        // a trailing `ESC [ 3 J` (ED Saved — erase scrollback). `clear(1)`
+        // on macOS only emits 2J (from the xterm-256color terminfo); users
+        // expect it to also wipe scrollback, as iTerm2 and the util-linux
+        // `clear -x` do by default. Matching the exact 4-byte sequence is
+        // robust for the common case — shell and ncurses write the whole
+        // clear capability in a single write(2), so we don't need to track
+        // parser state across input batches. Edge cases (0-padded params,
+        // semicolon-separated params, sequence split across reads) fall
+        // through to normal processing without breaking anything.
+        let needle = b"\x1B[2J";
+        let extra = b"\x1B[3J";
+        let mut cursor = 0usize;
+        while let Some(rel) = slice[cursor..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+        {
+            let end = cursor + rel + needle.len();  // one past the J
+            bb.processor.advance(&mut bb.term, &slice[cursor..end]);
+            bb.processor.advance(&mut bb.term, extra);
+            cursor = end;
+        }
+        if cursor < slice.len() {
+            bb.processor.advance(&mut bb.term, &slice[cursor..]);
+        }
     })
 }
 
@@ -418,8 +442,13 @@ pub struct BBSnap {
     pub cursor_col: u16,
     pub cursor_row: u16,
     pub cursor_visible: u8,
-    pub _pad: [u8; 3],  // pad cursor_visible(1) to 4-byte boundary for mode
-    pub mode: u32,       // terminal mode bitflags — see bb_mode constants
+    pub _pad: u8,               // align display_offset to 2-byte boundary
+    /// Number of lines the viewport is scrolled above the live grid. 0 means
+    /// we're pinned to the bottom (live content). When > 0 the renderer must
+    /// offset the cursor by this amount or hide it if the live cursor row is
+    /// no longer visible.
+    pub display_offset: u16,
+    pub mode: u32,              // terminal mode bitflags — see bb_mode constants
     pub cells_len: usize,
     pub cells: *const BBCell,
 }
@@ -445,7 +474,14 @@ unsafe impl Send for BBSnapOwned {}
 unsafe impl Sync for BBSnapOwned {}
 
 impl BBSnapOwned {
-    fn new(cols: u16, rows: u16, cursor: (u16, u16, bool), mode: u32, cells: Vec<BBCell>) -> Box<BBSnapOwned> {
+    fn new(
+        cols: u16,
+        rows: u16,
+        cursor: (u16, u16, bool),
+        display_offset: u16,
+        mode: u32,
+        cells: Vec<BBCell>,
+    ) -> Box<BBSnapOwned> {
         let mut owned = Box::new(BBSnapOwned {
             snap: BBSnap {
                 cols,
@@ -453,7 +489,8 @@ impl BBSnapOwned {
                 cursor_col: cursor.0,
                 cursor_row: cursor.1,
                 cursor_visible: cursor.2 as u8,
-                _pad: [0; 3],
+                _pad: 0,
+                display_offset,
                 mode,
                 cells_len: cells.len(),
                 cells: std::ptr::null(),
@@ -679,8 +716,13 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // cursor_point.column.0 is a 0-based column (Column wraps usize).
         let cursor_row = cursor_point.line.0.max(0) as u16;
         let cursor_col = cursor_point.column.0 as u16;
+        // display_offset: lines scrolled above the live grid. When > 0 the
+        // `cells` above are from scrollback; the live cursor at `cursor_row`
+        // is actually `cursor_row + display_offset` from the top of the
+        // visible viewport — and may be below it entirely.
+        let display_offset = grid.display_offset().min(u16::MAX as usize) as u16;
         let mode = extract_mode(bb.term.mode());
-        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), mode, cells);
+        let owned = BBSnapOwned::new(cols, rows, (cursor_col, cursor_row, true), display_offset, mode, cells);
         // Expose the public `snap` field (first field at offset 0).
         let owned_ptr = Box::into_raw(owned);
         &(*owned_ptr).snap as *const BBSnap
@@ -752,6 +794,28 @@ pub unsafe extern "C" fn bb_term_scroll(term: *mut BBTerm, delta: i32) {
         let bb = &mut *term;
         use alacritty_terminal::grid::Scroll;
         bb.term.scroll_display(Scroll::Delta(delta));
+    })
+}
+
+/// Snap the viewport back to the live grid (display_offset = 0). Called after
+/// any user keystroke so typing/Enter always brings them back from scrollback
+/// history. A no-op if already at the bottom.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null is a no-op.
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// unit as the fallback value.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
+    guard_with_term(term, (), || {
+        if term.is_null() {
+            return;
+        }
+        let bb = &mut *term;
+        use alacritty_terminal::grid::Scroll;
+        bb.term.scroll_display(Scroll::Bottom);
     })
 }
 

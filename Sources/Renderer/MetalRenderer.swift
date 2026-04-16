@@ -174,11 +174,21 @@ public final class MetalRenderer {
                     instanceCount: instanceCount
                 )
             }
-            if snap.cursorVisible, snap.cursorCol < snap.cols, snap.cursorRow < snap.rows {
+            // Cursor position in viewport rows. When the user is scrolled back
+            // into history (displayOffset > 0), the live cursor_row is offset
+            // downward on-screen by that amount: rows 0..displayOffset-1 show
+            // scrollback, and the live grid starts at screen row displayOffset.
+            // If the resulting row falls below the viewport, the live cursor
+            // isn't visible and we skip drawing it — scrolling back should
+            // never show a phantom cursor on a scrollback line.
+            let screenCursorRow = snap.cursorRow + snap.displayOffset
+            if snap.cursorVisible,
+               snap.cursorCol < snap.cols,
+               screenCursorRow < snap.rows {
                 var cu = CursorUniforms(
                     viewportPx: viewportPoints,
                     cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth),
-                                              Float(snap.cursorRow) * Float(metrics.cellHeight)),
+                                              Float(screenCursorRow) * Float(metrics.cellHeight)),
                     cellSizePx: cellSizePoints,
                     color: SIMD4<Float>(1, 1, 1, 1),
                     strokeWidthPx: 1.0,

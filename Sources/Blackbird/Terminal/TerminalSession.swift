@@ -117,6 +117,24 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
+    /// Snap the viewport back to the live grid. Call from the input path
+    /// (keystrokes, paste) so the user is never left "orphaned" in scrollback
+    /// while typing. No-op if already pinned.
+    public func scrollToBottom() {
+        var snap: BBSnapshot?
+        coreQueue.sync {
+            bbterm.scrollToBottom()
+            snap = bbterm.snapshot()
+        }
+        if let snap {
+            if Thread.isMainThread {
+                self.snapshot = snap
+            } else {
+                DispatchQueue.main.async { self.snapshot = snap }
+            }
+        }
+    }
+
     public func terminate() {
         pty.terminate()
     }
