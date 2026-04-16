@@ -89,7 +89,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     public init(frame frameRect: NSRect, device: MTLDevice) {
         // TerminalView is the authoritative owner of CellMetrics; the renderer
         // shares this same instance so layout and rendering never diverge.
-        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let prefs = Preferences.shared
+        let font = Self.resolveFont(name: prefs.fontName, size: CGFloat(prefs.fontSize))
+        let metrics = CellMetrics(font: font)
         // The atlas rasterizes glyphs at pixel resolution for sharp text on
         // Retina displays. Use the primary screen's scale at construction;
         // if the window later moves to a display with a different scale the
@@ -152,12 +154,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if metrics.font.familyName == wantName && metrics.font.pointSize == wantSize {
             return
         }
-        let newFont: NSFont
-        if let f = NSFont(name: wantName, size: wantSize) {
-            newFont = f
-        } else {
-            newFont = .monospacedSystemFont(ofSize: wantSize, weight: .regular)
-        }
+        let newFont = Self.resolveFont(name: wantName, size: wantSize)
         let newMetrics = CellMetrics(font: newFont)
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         self.metrics = newMetrics
@@ -444,6 +441,28 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         #endif
         if !bytes.isEmpty { session.send(bytes) }
+    }
+
+    /// Resolve a font from the preferences value. `name` can be either:
+    ///   - a family name like "Hack Nerd Font Mono" (what the Settings font
+    ///     picker stores — it iterates `availableFontFamilies`),
+    ///   - a PostScript name like "HackNerdFontMono-Regular" or
+    ///     "SFMono-Regular" (older stored values).
+    ///
+    /// NSFontManager.font(withFamily:traits:weight:size:) handles the family
+    /// case cleanly; NSFont(name:size:) handles the PS-name case. Fall back
+    /// to the system monospace font so a typo'd preferences value can't
+    /// leave the user with an unreadable terminal.
+    private static func resolveFont(name: String, size: CGFloat) -> NSFont {
+        let mgr = NSFontManager.shared
+        // 5 is the regular weight in the NSFontManager scale (0…15).
+        if let f = mgr.font(withFamily: name, traits: [], weight: 5, size: size) {
+            return f
+        }
+        if let f = NSFont(name: name, size: size) {
+            return f
+        }
+        return .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
     private static func specialKey(for event: NSEvent) -> KeyEncoder.SpecialKey? {

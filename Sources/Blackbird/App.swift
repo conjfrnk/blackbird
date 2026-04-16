@@ -23,22 +23,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var controllers: [MainWindowController] = []
 
-    /// Sparkle updater. Instantiated lazily so XCTest hosts don't spin it up.
-    /// `startingUpdater: true` kicks off the background scheduled-check loop
-    /// as soon as this is first referenced (which we do from
-    /// `applicationDidFinishLaunching` for non-test launches). The auto-
-    /// check cadence itself is gated by `Preferences.autoUpdateChecks` —
-    /// when the user flips the toggle we update `SPUUpdater` live so the
-    /// setting takes effect without a relaunch.
-    private lazy var updaterController: SPUStandardUpdaterController = {
+    /// Sparkle updater — present ONLY when the app is properly configured
+    /// for auto-updates (real `SUFeedURL` and `SUPublicEDKey` set in
+    /// Info.plist). On a dev build the Info.plist ships placeholders, which
+    /// would otherwise cause `SPUStandardUpdaterController` to fail during
+    /// init and show the "Unable to Check For Updates" alert on every
+    /// launch. We refuse to instantiate until the config is real — the
+    /// updater comes to life the moment we paste in a real appcast URL
+    /// and EdDSA public key and rebuild, without any further code change.
+    private lazy var updaterController: SPUStandardUpdaterController? = {
+        guard Self.isUpdaterConfigured else { return nil }
         let ctrl = SPUStandardUpdaterController(
-            startingUpdater: true,
+            startingUpdater: false,       // don't auto-start — we flip the
+                                          // switch below after setting the
+                                          // user's preference.
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
         ctrl.updater.automaticallyChecksForUpdates = Preferences.shared.autoUpdateChecks
+        ctrl.startUpdater()
         return ctrl
     }()
+
+    /// True when Info.plist has a non-placeholder SUFeedURL and a non-empty
+    /// SUPublicEDKey (both required by Sparkle 2.x). Kept here so the whole
+    /// Sparkle integration is a single gate — flip the config values and
+    /// every dependent path lights up.
+    private static var isUpdaterConfigured: Bool {
+        let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? ""
+        let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String ?? ""
+        let placeholder = feed.isEmpty
+            || feed.contains("example.com")
+            || key.isEmpty
+        return !placeholder
+    }
 
     private var autoUpdateObserver: AnyCancellable?
 
@@ -69,11 +87,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMainMenu()
         installSparkleMenuItem()
         // Live-toggle Sparkle's auto-check when the pref changes, so the
-        // Settings > Updates toggle takes effect without relaunching.
+        // Settings > Updates toggle takes effect without relaunching. No-op
+        // when the updater isn't configured (dev builds); the Preferences
+        // observer still fires, it just hits a nil controller.
         autoUpdateObserver = Preferences.shared.objectWillChange
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
-                    self?.updaterController.updater.automaticallyChecksForUpdates
+                    self?.updaterController?.updater.automaticallyChecksForUpdates
                         = Preferences.shared.autoUpdateChecks
                 }
             }
@@ -87,6 +107,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// from `buildAppMenu()` because `updaterController` is lazy and tests
     /// shouldn't trigger it.
     private func installSparkleMenuItem() {
+        // Only show the menu entry when the updater is actually usable. A
+        // visible "Check for Updates…" that pops an "Unable to check" alert
+        // every time is worse than no menu item at all — users either click
+        // it expecting a check (and get an error) or avoid it for fear of
+        // hitting that error again. Hide until we ship real appcast config.
+        guard let controller = updaterController else { return }
         guard
             let firstItem = NSApp.mainMenu?.items.first,
             let appSubmenu = firstItem.submenu
@@ -96,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
             keyEquivalent: ""
         )
-        checkItem.target = updaterController
+        checkItem.target = controller
         appSubmenu.insertItem(checkItem, at: 1)
     }
 
