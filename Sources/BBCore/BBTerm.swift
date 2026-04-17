@@ -247,6 +247,26 @@ public final class BBSnapshot {
     public var cellCount: Int {
         Int(handle.pointee.cells_len)
     }
+
+    // MARK: - OSC 8 hyperlink attribution
+
+    /// Non-zero OSC 8 link id associated with the cell at (row, col), or 0
+    /// when the cell has no attribution. Resolve to a URL via `linkURL(id:)`.
+    /// Out-of-range inputs return 0 (matching the FFI's bounds check).
+    public func linkID(row: Int, col: Int) -> UInt32 {
+        guard row >= 0, col >= 0, row < rows, col < cols else { return 0 }
+        return bb_snap_link_id_at(handle, UInt16(row), UInt16(col))
+    }
+
+    /// Resolve an OSC 8 link id to its UTF-8 URL string. The FFI returns a
+    /// pointer valid for the lifetime of this snapshot; we copy the bytes
+    /// into a Swift String so callers don't need to reason about lifetime.
+    /// Returns nil for `id == 0` or an unknown id.
+    public func linkURL(id: UInt32) -> String? {
+        guard id != 0 else { return nil }
+        guard let c = bb_snap_link_url(handle, id) else { return nil }
+        return String(cString: c)
+    }
 }
 
 // MARK: - Accessibility surface -------------------------------------------

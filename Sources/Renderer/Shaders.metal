@@ -8,11 +8,13 @@ struct CellInstance {
     float2 uvSize;
     float4 fgColor;
     float4 bgColor;
+    uint4  attrs;         // .x = attribute bitmask (bit 0 = link hover underline); rest reserved/padding
 };
 
 struct FrameUniforms {
     float2 viewportPx;
     float2 cellSizePx;
+    float4 accentColor;   // sRGB RGBA underline colour for accent attributes
 };
 
 struct VertexOut {
@@ -20,6 +22,10 @@ struct VertexOut {
     float2 uv;
     float4 fgColor;
     float4 bgColor;
+    float4 accentColor;   // plumbed in via uniform, stamped per-vertex for the fragment
+    uint   flags;
+    float2 localPx;       // position within the cell's quad, in points
+    float2 quadSizePx;    // cell quad size (same for all 6 verts per instance)
 };
 
 vertex VertexOut vertex_cell(
@@ -51,6 +57,10 @@ vertex VertexOut vertex_cell(
     out.uv = inst.uvOrigin + uvs[vid] * inst.uvSize;
     out.fgColor = inst.fgColor;
     out.bgColor = inst.bgColor;
+    out.accentColor = u.accentColor;
+    out.flags = inst.attrs.x;
+    out.localPx = corners[vid] * inst.quadSizePx;
+    out.quadSizePx = inst.quadSizePx;
     return out;
 }
 
@@ -61,7 +71,18 @@ fragment float4 fragment_cell(
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     float coverage = atlas.sample(s, in.uv).r;
     // Blend fg glyph over bg. coverage = 0 → pure bg, coverage = 1 → pure fg.
-    return mix(in.bgColor, in.fgColor, coverage);
+    float4 base = mix(in.bgColor, in.fgColor, coverage);
+
+    // Accent-coloured underline for attribute bit 0 (currently the OSC 8
+    // hover highlight). Drawn as a 2-point band along the bottom of the
+    // cell, fully opaque accent — sits over whatever glyph/bg came before.
+    if ((in.flags & 1u) != 0u) {
+        float distFromBottom = in.quadSizePx.y - in.localPx.y;
+        if (distFromBottom <= 2.0) {
+            return in.accentColor;
+        }
+    }
+    return base;
 }
 
 struct CursorUniforms {

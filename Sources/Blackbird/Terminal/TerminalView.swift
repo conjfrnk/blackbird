@@ -78,7 +78,39 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// render path uses `currentSnapshot`.
     #if DEBUG
     private var a11ySnapshotOverride: A11ySnapshotSource?
+    /// Test-only override for the ⌘-click URL resolver. When set, the click
+    /// path goes through this fake instead of building a
+    /// `SnapshotHyperlinkResolver` from `currentSnapshot`. Production leaves
+    /// it nil.
+    private var hyperlinkResolverOverride: HyperlinkResolver?
     #endif
+
+    /// Hook for opening a URL on ⌘-click. Production hands the URL to
+    /// `NSWorkspace`; tests inject a recording fake so assertions can
+    /// match what the click path actually dispatched.
+    var urlOpener: URLOpener = DefaultURLOpener()
+
+    // MARK: - Hover state (OSC 8 dwell tooltip + hover underline)
+
+    /// Buffer row under the cursor on the last `mouseMoved` delivery, used
+    /// to cancel the dwell timer as soon as the pointer leaves the current
+    /// cell. `nil` means the pointer is outside the grid.
+    private var lastHoverCell: (row: Int, col: Int)?
+    /// Link id under the pointer right now, or 0 when the hovered cell has
+    /// no OSC 8 attribution. The renderer reads this each frame to draw
+    /// the accent underline on every cell sharing the id.
+    var hoveredLinkID: UInt32 = 0
+    /// Scheduled tooltip reveal. Cancelled on pointer movement, scroll,
+    /// keydown, or view teardown.
+    private var hoverTooltipItem: DispatchWorkItem?
+    /// Lightweight panel that shows the resolved URL after the 500 ms dwell.
+    /// Kept around between shows so repeated hovers don't thrash NSPanel
+    /// allocation; hidden when not in use.
+    private var hoverTooltipPanel: NSPanel?
+    private var hoverTooltipLabel: NSTextField?
+    /// Tracking area that delivers `mouseMoved` / `mouseExited`. Rebuilt on
+    /// bounds changes via `updateTrackingAreas`.
+    private var hoverTrackingArea: NSTrackingArea?
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
 
@@ -550,6 +582,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             propagateResize()
         }
         let focused = window?.isKeyWindow ?? false
+        // Hovered OSC 8 link id is set by `mouseMoved`; the renderer reads
+        // it here so cells with a matching `link_id` get the accent-
+        // underline attribute bit this frame. UInt32 → UInt16 is lossy
+        // in principle (link ids are stored as u16 in BBCell), but the
+        // snapshot API returns u32 to leave room for future expansion —
+        // truncation here is safe because the FFI only ever returns ids
+        // that originated as u16.
+        renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         #if DEBUG
         frameCount += 1
@@ -1141,14 +1181,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // without triggering the selection path below.
         if event.modifierFlags.contains(.command) {
             let underlyingOption = event.modifierFlags.contains(.option)
-            if !mouseReportingEnabled() || underlyingOption,
-               let snap = currentSnapshot {
+            if !mouseReportingEnabled() || underlyingOption {
                 let p = bufferPointFromEvent(event)
-                if let m = URLDetector.match(
-                    at: p,
-                    in: URLDetector.scan(snapshot: snap)
-                ) {
-                    NSWorkspace.shared.open(m.url)
+                // Buffer-relative line → screen row. OSC 8 attribution is
+                // keyed on screen-space cells since the snapshot only carries
+                // the visible viewport. When the user is scrolled back into
+                // history the regex path still honours buffer coordinates
+                // (URLDetector output uses buffer lines).
+                let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
+                if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
+                    urlOpener.open(url)
                     return
                 }
             }
@@ -1401,6 +1443,217 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
     }
 
+    // MARK: - ⌘-click URL resolution (OSC 8 first, regex fallback)
+
+    /// Resolve a click to a URL. OSC 8 attribution on the cell wins; only
+    /// when the cell has no OSC 8 href do we fall back to regex URL
+    /// detection (matching pre-Task-7 behaviour for tools that don't emit
+    /// OSC 8 hyperlinks). Returns nil when neither path produces a URL.
+    ///
+    /// `screenRow` is 0-based from the top of the visible viewport — OSC 8
+    /// attribution is stored keyed to screen cells, not buffer lines.
+    private func resolveClickURL(screenRow: Int, col: Int) -> URL? {
+        #if DEBUG
+        if let override = hyperlinkResolverOverride {
+            if let u = override.osc8URL(row: screenRow, col: col) { return u }
+            return override.regexURL(row: screenRow, col: col)
+        }
+        #endif
+        guard let snap = currentSnapshot else { return nil }
+        let resolver = SnapshotHyperlinkResolver(snapshot: snap)
+        if let u = resolver.osc8URL(row: screenRow, col: col) { return u }
+        return resolver.regexURL(row: screenRow, col: col)
+    }
+
+    // MARK: - Hover dwell tooltip + accent underline
+
+    /// Install a full-bounds tracking area that delivers `mouseMoved` even
+    /// when no buttons are down. Recreated on every bounds change; the
+    /// `.inVisibleRect` option makes AppKit re-resolve the rect on each
+    /// delivery so tab splits / window resizes don't leave a stale region.
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = hoverTrackingArea {
+            removeTrackingArea(existing)
+            hoverTrackingArea = nil
+        }
+        let ta = NSTrackingArea(
+            rect: .zero,
+            options: [
+                .mouseMoved,
+                .mouseEnteredAndExited,
+                .activeInKeyWindow,
+                .inVisibleRect,
+            ],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(ta)
+        hoverTrackingArea = ta
+    }
+
+    public override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        let point = bufferPointFromEvent(event)
+        let screenRow = Int(point.line) + (currentSnapshot?.displayOffset ?? 0)
+        let col = point.col
+        updateHover(screenRow: screenRow, col: col, locationInWindow: event.locationInWindow)
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        clearHover()
+    }
+
+    private func updateHover(screenRow: Int, col: Int, locationInWindow: NSPoint) {
+        // Resolve the OSC 8 link id for the cell under the pointer. A
+        // test-supplied fake may override; otherwise consult the live
+        // snapshot directly. `linkID` bounds-checks internally, so an
+        // out-of-grid coordinate just returns 0 (which clears the hover).
+        let newLinkID: UInt32 = {
+            #if DEBUG
+            if let override = hyperlinkResolverOverride {
+                // Fakes answer via osc8URL — collapse URL presence into a
+                // stable non-zero id so the renderer underline path still
+                // fires without us needing a real link-id table in tests.
+                return override.osc8URL(row: screenRow, col: col) != nil ? UInt32(bitPattern: Int32(-1)) : 0
+            }
+            #endif
+            return currentSnapshot?.linkID(row: screenRow, col: col) ?? 0
+        }()
+
+        // Same cell as last move → nothing to update except the tooltip
+        // position is already correct. Bail to avoid timer churn.
+        if let last = lastHoverCell, last.row == screenRow, last.col == col {
+            return
+        }
+        lastHoverCell = (row: screenRow, col: col)
+
+        if newLinkID != hoveredLinkID {
+            hoveredLinkID = newLinkID
+            // Redraw so the accent underline picks up / drops off the cells
+            // sharing the new hovered id.
+            needsDisplay = true
+        }
+
+        // Reset any pending tooltip when the pointer moves to a different
+        // cell. Production matches VS Code / iTerm2 feel: tooltip appears
+        // only after a steady dwell.
+        hoverTooltipItem?.cancel()
+        hoverTooltipItem = nil
+        dismissHoverTooltip()
+
+        guard newLinkID != 0 else { return }
+
+        // Resolve the URL so the tooltip shows the href, not just "there is
+        // a link here". For the test fake this goes through osc8URL; for
+        // production it's the snapshot's link table.
+        let resolvedURLString: String? = {
+            #if DEBUG
+            if let override = hyperlinkResolverOverride {
+                return override.osc8URL(row: screenRow, col: col)?.absoluteString
+            }
+            #endif
+            return currentSnapshot?.linkURL(id: newLinkID)
+        }()
+        guard let urlString = resolvedURLString else { return }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.showHoverTooltip(urlString: urlString, anchor: locationInWindow)
+        }
+        hoverTooltipItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private func clearHover() {
+        lastHoverCell = nil
+        if hoveredLinkID != 0 {
+            hoveredLinkID = 0
+            needsDisplay = true
+        }
+        hoverTooltipItem?.cancel()
+        hoverTooltipItem = nil
+        dismissHoverTooltip()
+    }
+
+    private func showHoverTooltip(urlString: String, anchor: NSPoint) {
+        guard let window else { return }
+        let panel: NSPanel
+        let label: NSTextField
+        if let existingPanel = hoverTooltipPanel, let existingLabel = hoverTooltipLabel {
+            panel = existingPanel
+            label = existingLabel
+        } else {
+            // .nonactivatingPanel keeps the terminal's key-window / first-
+            // responder state intact while the tooltip is visible, so a
+            // hover-peek doesn't disrupt typing.
+            panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 200, height: 20),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: true
+            )
+            panel.isFloatingPanel = true
+            panel.hidesOnDeactivate = true
+            panel.hasShadow = true
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.ignoresMouseEvents = true
+
+            let container = NSView(frame: .zero)
+            container.wantsLayer = true
+            container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            container.layer?.cornerRadius = 4
+            container.layer?.borderWidth = 0.5
+            container.layer?.borderColor = NSColor.separatorColor.cgColor
+
+            let lbl = NSTextField(labelWithString: "")
+            lbl.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            lbl.textColor = .labelColor
+            lbl.lineBreakMode = .byTruncatingMiddle
+            lbl.maximumNumberOfLines = 1
+            container.addSubview(lbl)
+            panel.contentView = container
+
+            hoverTooltipPanel = panel
+            hoverTooltipLabel = lbl
+            label = lbl
+        }
+        label.stringValue = urlString
+        label.sizeToFit()
+        let padX: CGFloat = 8, padY: CGFloat = 4
+        let labelFrame = NSRect(
+            x: padX, y: padY,
+            width: min(label.frame.width, 600),
+            height: label.frame.height
+        )
+        label.frame = labelFrame
+        let panelSize = NSSize(
+            width: labelFrame.width + padX * 2,
+            height: labelFrame.height + padY * 2
+        )
+        panel.contentView?.frame = NSRect(origin: .zero, size: panelSize)
+
+        // Anchor just below the pointer. Convert the view-local anchor to
+        // screen space via the window's coordinate system.
+        let windowPoint = anchor
+        let screenPoint = window.convertPoint(toScreen: windowPoint)
+        let origin = NSPoint(
+            x: screenPoint.x + 12,
+            y: screenPoint.y - panelSize.height - 12
+        )
+        panel.setFrame(
+            NSRect(origin: origin, size: panelSize),
+            display: true
+        )
+        panel.orderFront(nil)
+    }
+
+    private func dismissHoverTooltip() {
+        hoverTooltipPanel?.orderOut(nil)
+    }
+
     /// Grow the current `.word` or `.line` selection outward from `anchor`.
     /// `.word` uses the shared `wordRange(around:in:displayOffset:)` helper;
     /// `.line` selects the entire grid line.
@@ -1516,6 +1769,36 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // New identity ⇒ next accessibilityValue() must recompute.
         a11yCache.snapshotIdentity = nil
     }
+
+    /// Test mutator for `urlOpener`. Kept as a DEBUG property so production
+    /// code can't accidentally repoint it — the click path uses the
+    /// internal `urlOpener` directly.
+    var urlOpenerForTests: URLOpener {
+        get { urlOpener }
+        set { urlOpener = newValue }
+    }
+
+    /// Install a fake hyperlink resolver that answers both OSC 8 and regex
+    /// queries without needing a live `BBTerm`. `rows` is the visible grid
+    /// as strings (one per row) and `spans` describes every OSC 8 region.
+    /// Any cell inside a span resolves its `osc8URL`; everything else
+    /// falls through to regex detection against the row text.
+    func installHyperlinkSnapshotForTests(
+        rows: [String],
+        linkAt spans: [(row: Int, cols: Range<Int>, url: String)]
+    ) {
+        hyperlinkResolverOverride = FakeHyperlinkSnapshot(rows: rows, spans: spans)
+    }
+
+    /// Exercise the production ⌘-click resolution against the current
+    /// snapshot (real or fake). Tests call this instead of synthesising
+    /// NSEvents so the mouse-reporting / option-modifier gating above
+    /// doesn't need a full windowed host.
+    func performCmdClickForTests(row: Int, col: Int) {
+        if let url = resolveClickURL(screenRow: row, col: col) {
+            urlOpener.open(url)
+        }
+    }
     #endif
 
     /// Pure encoder for xterm mouse reports — extracted so the branches that
@@ -1587,6 +1870,66 @@ final class A11yFakeSnapshot: A11ySnapshotSource {
         // guarantees a non-null pointer unique for the life of this
         // instance, which is exactly the cache-key contract we need.
         UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
+    }
+}
+
+/// Test-only hyperlink resolver. Production goes through
+/// `SnapshotHyperlinkResolver`, which needs a real `BBSnapshot`; this fake
+/// answers both OSC 8 and regex queries from plain strings so tests can
+/// exercise the ⌘-click path without starting a PTY.
+final class FakeHyperlinkSnapshot: HyperlinkResolver {
+    struct Span {
+        let row: Int
+        let cols: Range<Int>
+        let url: URL?
+    }
+
+    private let rows: [String]
+    private let spans: [Span]
+
+    init(rows: [String], spans: [(row: Int, cols: Range<Int>, url: String)]) {
+        self.rows = rows
+        self.spans = spans.map {
+            Span(row: $0.row, cols: $0.cols, url: URL(string: $0.url))
+        }
+    }
+
+    func osc8URL(row: Int, col: Int) -> URL? {
+        for span in spans where span.row == row && span.cols.contains(col) {
+            return span.url
+        }
+        return nil
+    }
+
+    func regexURL(row: Int, col: Int) -> URL? {
+        guard row >= 0, row < rows.count else { return nil }
+        let line = rows[row]
+        let nsLine = line as NSString
+        // Same pattern the production `URLDetector` uses so fallback
+        // semantics match. The regex is rebuilt per call — fine for tests,
+        // the grid is tiny.
+        let pattern = #"(?i)(?:https?|ftp|file)://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(location: 0, length: nsLine.length)
+        var found: URL?
+        regex.enumerateMatches(in: line, range: range) { result, _, stop in
+            guard var r = result?.range else { return }
+            // Trim trailing punctuation that production trims too, so the
+            // fallback URL matches what the real URLDetector would return.
+            while r.length > 0 {
+                let last = nsLine.character(at: r.location + r.length - 1)
+                if ".,);:]}>'\"".utf16.contains(last) { r.length -= 1 } else { break }
+            }
+            guard r.length > 0 else { return }
+            if col >= r.location && col < r.location + r.length {
+                let sub = nsLine.substring(with: r)
+                if let url = URL(string: sub) {
+                    found = url
+                    stop.pointee = true
+                }
+            }
+        }
+        return found
     }
 }
 #endif

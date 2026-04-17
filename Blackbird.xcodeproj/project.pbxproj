@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		188E5D391CA19FE7A0B4400E /* HackNerdFontMono-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 96ECD242F27E94BA194BECD6 /* HackNerdFontMono-Italic.ttf */; };
 		19A90E50E12A0234010B511A /* HackNerdFontMono-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 157ABF0CFF0DDECE748E0149 /* HackNerdFontMono-Bold.ttf */; };
+		1DFA371FD2502A8FA6AB320B /* HyperlinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */; };
 		1EFCAE939B4A1B5F562F54E0 /* kitty.terminfo in Resources */ = {isa = PBXBuildFile; fileRef = 673FE2E71DCD08F9286D5C60 /* kitty.terminfo */; };
 		2128B6F807CB069799F1A479 /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DD21160AFF51FCA0B6374 /* Preferences.swift */; };
 		21EF977F67811E7BCCE03C22 /* TranslucencyCurveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D766892D203AEA71CC70B95C /* TranslucencyCurveTests.swift */; };
@@ -21,6 +22,7 @@
 		3C3768AC47652608F2DBE7BF /* ThemeResolutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */; };
 		405BF1745156AB5C7AF12842 /* KeyEncoderExtendedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */; };
 		4235C2A5FFE2A1329E886E96 /* AppKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DF8E87FBF674AD466760D74A /* AppKit.framework */; };
+		46A5F55FC8F712CEB85EF215 /* AccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6160AD20DD99CBE80ABC5C40 /* AccessibilityTests.swift */; };
 		47C98A15F7530D2D7BC49CA3 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */; };
 		4D9B5BAF29650F44CDBAD0A8 /* HackNerdFontMono-BoldItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D92FE63DFF4EA7FE8A338897 /* HackNerdFontMono-BoldItalic.ttf */; };
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
@@ -30,7 +32,6 @@
 		7849DEE8A0065721883B426D /* TitlebarTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002A862CFC149DF32E992C50 /* TitlebarTabBar.swift */; };
 		7ACE07558D328D4B0273A975 /* URLDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */; };
 		7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */; };
-		4F02761C0C344C38B34FDAFF /* AccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 877C650428BE48E5AABC2076 /* AccessibilityTests.swift */; };
 		82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11194E0650067380506F53B2 /* BBTermTests.swift */; };
 		8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82C57C6702E92EB2488AC798 /* Theme.swift */; };
 		8E940FAAE63AB7BE99D79886 /* SelectionModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83BD7639AA0AD9A74DDB61B6 /* SelectionModeTests.swift */; };
@@ -54,6 +55,7 @@
 		CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4612F747000A5316DE0CD55F /* TerminalView.swift */; };
 		CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */; };
 		E0E1272012D9B7B00E10E664 /* GlyphAtlasTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */; };
+		E4DA4ACE49EE0D3113E8955D /* HyperlinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9400CC161B796E22A62232EE /* HyperlinkTests.swift */; };
 		E96F4B91B70AA6443185F96D /* WindowBlur.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54EE4D20D3C306349C12E69A /* WindowBlur.swift */; };
 		ED812F94FE464AE1F4E86007 /* MetalRendererTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */; };
 		EEA685668C43AB5E5DECAAED /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F7D804048B62FEB3D66F4F0 /* SettingsView.swift */; };
@@ -80,12 +82,12 @@
 		0CFB9D9863A2F1D2ACD61D6E /* BlackbirdTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BlackbirdTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		0D7DD21160AFF51FCA0B6374 /* Preferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Preferences.swift; sourceTree = "<group>"; };
 		11194E0650067380506F53B2 /* BBTermTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermTests.swift; sourceTree = "<group>"; };
-		877C650428BE48E5AABC2076 /* AccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityTests.swift; sourceTree = "<group>"; };
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasTests.swift; sourceTree = "<group>"; };
 		157ABF0CFF0DDECE748E0149 /* HackNerdFontMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-Bold.ttf"; sourceTree = "<group>"; };
 		24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRendererTests.swift; sourceTree = "<group>"; };
 		35DF65A02FBCBD6EC7C6FB15 /* WordRangeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordRangeTests.swift; sourceTree = "<group>"; };
+		3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HyperlinkResolver.swift; sourceTree = "<group>"; };
 		3F7D804048B62FEB3D66F4F0 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		4612F747000A5316DE0CD55F /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		472AADACAE02B9A6CB01750B /* MetalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRenderer.swift; sourceTree = "<group>"; };
@@ -96,6 +98,7 @@
 		568D389F2829611D1FDC43FA /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		5995252272D652667DB2D2D9 /* PTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTY.swift; sourceTree = "<group>"; };
 		5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
+		6160AD20DD99CBE80ABC5C40 /* AccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityTests.swift; sourceTree = "<group>"; };
 		673FE2E71DCD08F9286D5C60 /* kitty.terminfo */ = {isa = PBXFileReference; path = kitty.terminfo; sourceTree = "<group>"; };
 		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
 		6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+Dragging.swift"; sourceTree = "<group>"; };
@@ -107,6 +110,7 @@
 		7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYTests.swift; sourceTree = "<group>"; };
 		82C57C6702E92EB2488AC798 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		83BD7639AA0AD9A74DDB61B6 /* SelectionModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionModeTests.swift; sourceTree = "<group>"; };
+		9400CC161B796E22A62232EE /* HyperlinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HyperlinkTests.swift; sourceTree = "<group>"; };
 		96ECD242F27E94BA194BECD6 /* HackNerdFontMono-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-Italic.ttf"; sourceTree = "<group>"; };
 		9D26D02D80D934AC18571AB9 /* HackNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
 		9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
@@ -169,11 +173,12 @@
 		2E3B9889C50E2A5C4A18EA25 /* BlackbirdTests */ = {
 			isa = PBXGroup;
 			children = (
-				877C650428BE48E5AABC2076 /* AccessibilityTests.swift */,
+				6160AD20DD99CBE80ABC5C40 /* AccessibilityTests.swift */,
 				11194E0650067380506F53B2 /* BBTermTests.swift */,
 				0B671ECA2BD417DF4532B282 /* BufferPointTests.swift */,
 				55708BAFA22EAB8E62D45DF1 /* DragDropTests.swift */,
 				15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */,
+				9400CC161B796E22A62232EE /* HyperlinkTests.swift */,
 				720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */,
 				68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */,
 				CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */,
@@ -238,6 +243,7 @@
 			isa = PBXGroup;
 			children = (
 				F455C591EC38A7B3955CD5B8 /* FindBar.swift */,
+				3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */,
 				5995252272D652667DB2D2D9 /* PTY.swift */,
 				7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */,
 				00E03399349EE1327FBF8F2F /* Selection.swift */,
@@ -455,6 +461,7 @@
 				BF0ADDAAD252C3F8D7FD3F79 /* CellInstance.swift in Sources */,
 				75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */,
 				9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */,
+				1DFA371FD2502A8FA6AB320B /* HyperlinkResolver.swift in Sources */,
 				AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */,
 				26551D9D45C969B410CFE79C /* MainWindowController.swift in Sources */,
 				25F0BDE5FF93EEACCBE4DA8C /* MetalRenderer.swift in Sources */,
@@ -480,11 +487,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				4F02761C0C344C38B34FDAFF /* AccessibilityTests.swift in Sources */,
+				46A5F55FC8F712CEB85EF215 /* AccessibilityTests.swift in Sources */,
 				82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */,
 				BD9DFA4CCAD8CC3074E535BB /* BufferPointTests.swift in Sources */,
 				BF8C522F82650E26EE4BDBE7 /* DragDropTests.swift in Sources */,
 				E0E1272012D9B7B00E10E664 /* GlyphAtlasTests.swift in Sources */,
+				E4DA4ACE49EE0D3113E8955D /* HyperlinkTests.swift in Sources */,
 				405BF1745156AB5C7AF12842 /* KeyEncoderExtendedTests.swift in Sources */,
 				CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */,
 				FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */,
