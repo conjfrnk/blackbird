@@ -162,6 +162,14 @@ public final class MetalRenderer {
     ) -> Int {
         let selectionTint = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)  // AppKit accent-ish blue
         let needed = snapshot.cols * snapshot.rows
+        // Defensive: alacritty's display_iter always yields cols×rows cells,
+        // and the Rust FFI preserves that invariant via Vec::with_capacity +
+        // push-per-cell. But the cells pointer lives in Rust-owned memory
+        // and we're about to index into it; a future refactor that breaks
+        // the invariant would silently read past the buffer end with
+        // assumingMemoryBound pointer arithmetic. Bail on the frame rather
+        // than emit UB into the GPU's instance buffer.
+        guard snapshot.cellCount >= needed else { return 0 }
         if needed > instanceCapacity {
             let newCap = max(needed, instanceCapacity * 2)
             if let newBuf = device.makeBuffer(
