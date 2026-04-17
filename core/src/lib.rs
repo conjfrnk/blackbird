@@ -1064,7 +1064,16 @@ pub unsafe extern "C" fn bb_term_text_range(
                 continue;
             }
 
-            let (col_lo, col_hi, trim) = if rectangular || single_line {
+            let (col_lo, col_hi, trim) = if rectangular {
+                // Rectangular mode clips every row to the column span of
+                // the bounding box. Tuple-normalisation above only orders
+                // (line, col) as a pair, so a rectangle anchored at
+                // top-right+bottom-left would land here with s_col > e_col
+                // and the inner `while c <= col_hi` loop would skip the
+                // row entirely. Sort columns independently so the box's
+                // geometry is always extracted.
+                (s_col.min(e_col), s_col.max(e_col), false)
+            } else if single_line {
                 (s_col, e_col, false)
             } else if line_i == s_line {
                 (s_col, last_col, true)
@@ -1626,6 +1635,30 @@ mod tests {
             let s = bb_term_text_range(term, -3, 0, -3, 2, 0);
             let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
             assert_eq!(std::str::from_utf8(bytes).unwrap(), "AAA");
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression: rectangular selection anchored top-right + bottom-left
+    /// arrives with s_col > e_col after tuple-normalisation. The previous
+    /// rectangular branch passed those straight into the inner loop, so
+    /// `while c <= col_hi` never executed and every line came back empty.
+    /// Now sort columns independently.
+    #[test]
+    fn text_range_rectangular_independent_col_sort() {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            bb_term_input(term, b"abcdefghij\r\nABCDEFGHIJ\r\n1234567890".as_ptr(), 32);
+            // Anchor at (0, 4), cursor at (2, 2) — rectangular mode. The
+            // bounding rect spans cols 2..=4 on rows 0..=2.
+            let s = bb_term_text_range(term, 0, 4, 2, 2, 1);
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            assert_eq!(
+                std::str::from_utf8(bytes).unwrap(),
+                "cde\nCDE\n345",
+                "rectangular mode must extract the bounding rect regardless of corner order"
+            );
             bb_string_release(s);
             bb_term_free(term);
         }
