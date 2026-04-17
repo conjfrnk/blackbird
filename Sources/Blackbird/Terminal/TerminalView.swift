@@ -73,6 +73,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var prefsCancellable: AnyCancellable?
 
     private var currentSnapshot: BBSnapshot?
+    /// Optional test-only override that feeds the NSAccessibility value
+    /// path without a real `BBTerm`. Production never sets this — the live
+    /// render path uses `currentSnapshot`.
+    #if DEBUG
+    private var a11ySnapshotOverride: A11ySnapshotSource?
+    #endif
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
 
@@ -1432,6 +1438,86 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         session.send(bytes)
     }
 
+    // MARK: - NSAccessibility -------------------------------------------
+
+    /// Cached accessibility value keyed by snapshot identity. Building the
+    /// string walks the entire grid (rows × cols) and allocates a fresh
+    /// `String` per row, so VoiceOver's habit of polling `accessibilityValue`
+    /// many times per snapshot would otherwise turn into a per-frame tax on
+    /// the main thread. Identity-via-raw-pointer works because BBSnapshot
+    /// instances are immutable + ref-counted: equal address ⇒ equal content.
+    private struct A11yCache {
+        var snapshotIdentity: UnsafeRawPointer? = nil
+        var value: String = ""
+        /// Number of times `accessibilityValue()` walked the grid. Used by
+        /// tests to assert the cache short-circuits repeat reads.
+        var computations: Int = 0
+    }
+
+    private var a11yCache = A11yCache()
+
+    public override func isAccessibilityElement() -> Bool { true }
+
+    public override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
+
+    public override func accessibilityLabel() -> String? { "Terminal" }
+
+    public override func accessibilityHelp() -> String? {
+        "Terminal output. Scroll back to read earlier content."
+    }
+
+    public override func accessibilityValue() -> Any? {
+        // Test overrides take precedence so headless tests can inject a
+        // deterministic grid without a running BBTerm. Under production
+        // builds the #if DEBUG branch compiles out entirely.
+        #if DEBUG
+        let source: A11ySnapshotSource? = a11ySnapshotOverride ?? currentSnapshot
+        #else
+        let source: A11ySnapshotSource? = currentSnapshot
+        #endif
+        guard let source else { return "" }
+        let identity = source.a11yIdentity
+        if a11yCache.snapshotIdentity == identity {
+            return a11yCache.value
+        }
+        let computed = source.visibleRowsAsText()
+            .map { $0.trimmingTrailingWhitespace() }
+            .joined(separator: "\n")
+        a11yCache.snapshotIdentity = identity
+        a11yCache.value = computed
+        a11yCache.computations += 1
+        return computed
+    }
+
+    #if DEBUG
+    /// Test introspection for the a11y cache. Lets `AccessibilityTests`
+    /// assert that `accessibilityValue()` short-circuits when the snapshot
+    /// hasn't changed.
+    var accessibilityCacheStatsForTests: (computations: Int, snapshotIdentity: UnsafeRawPointer?) {
+        (a11yCache.computations, a11yCache.snapshotIdentity)
+    }
+
+    /// Headless constructor for tests. Uses the system Metal device so the
+    /// renderer's command-queue requirement is satisfied; tests never call
+    /// `draw(in:)` so no frames are rendered. Skips the test entirely on
+    /// hosts without a Metal device (CI runners sometimes don't have one).
+    static func makeHeadlessForTests() -> TerminalView? {
+        guard let device = MTLCreateSystemDefaultDevice() else { return nil }
+        return TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 100, height: 100),
+            device: device
+        )
+    }
+
+    /// Install a fake snapshot that the a11y value path will consume.
+    /// Assigns a fresh identity each call so cache invalidation is exercised.
+    func installSnapshotForTests(rows: [String]) {
+        a11ySnapshotOverride = A11yFakeSnapshot(rows: rows)
+        // New identity ⇒ next accessibilityValue() must recompute.
+        a11yCache.snapshotIdentity = nil
+    }
+    #endif
+
     /// Pure encoder for xterm mouse reports — extracted so the branches that
     /// matter for correctness (SGR 1006 vs X10 fallback, press/release,
     /// wheel/motion) can be unit-tested without synthesizing NSEvents.
@@ -1483,6 +1569,27 @@ extension KeyEncoder.Modifiers {
         self = mods
     }
 }
+
+#if DEBUG
+/// Test-only snapshot source. Emits the rows it was constructed with
+/// verbatim, and uses its own `ObjectIdentifier` as a stable-but-unique
+/// raw-pointer identity. Living in the Blackbird module (not BBCore) keeps
+/// it out of shipping binaries via the #if DEBUG guard around the whole
+/// file scope.
+final class A11yFakeSnapshot: A11ySnapshotSource {
+    private let rows: [String]
+    init(rows: [String]) { self.rows = rows }
+
+    func visibleRowsAsText() -> [String] { rows }
+
+    var a11yIdentity: UnsafeRawPointer {
+        // ObjectIdentifier wraps the class-instance address; unwrapping
+        // guarantees a non-null pointer unique for the life of this
+        // instance, which is exactly the cache-key contract we need.
+        UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
+    }
+}
+#endif
 
 extension TerminalView: FindBarDelegate {
     public func findBar(_ bar: FindBar, didChangeQuery query: String) {

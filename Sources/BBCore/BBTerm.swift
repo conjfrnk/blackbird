@@ -248,3 +248,80 @@ public final class BBSnapshot {
         Int(handle.pointee.cells_len)
     }
 }
+
+// MARK: - Accessibility surface -------------------------------------------
+
+/// Narrow read-only view of a grid snapshot, consumed by the NSAccessibility
+/// value path on `TerminalView`. Extracted so headless tests can feed a fake
+/// grid into the view without needing to construct a real `BBTerm` +
+/// `BBSnap`. Production code uses the `BBSnapshot` conformance below.
+public protocol A11ySnapshotSource: AnyObject {
+    /// Visible rows as text, one `String` per row, with NO trailing
+    /// whitespace stripping — the a11y path decides whether to trim, and
+    /// the copy / search paths have different needs.
+    ///
+    /// Wide-glyph spacer cells (`WIDE_CHAR_SPACER`, `LEADING_WIDE_CHAR_SPACER`)
+    /// must be skipped so a CJK character or wide emoji appears exactly once
+    /// in the returned text, even though it paints two visual cells.
+    func visibleRowsAsText() -> [String]
+
+    /// Stable identity for a11y cache invalidation. Equal-identity means
+    /// equal content — no need to recompute. Snapshots are immutable and
+    /// ref-counted, so the raw pointer address is a sound identity: a new
+    /// snapshot always gets a fresh allocation.
+    var a11yIdentity: UnsafeRawPointer { get }
+}
+
+extension BBSnapshot: A11ySnapshotSource {
+    /// Visible rows as text, one String per row. Skips wide-glyph spacer
+    /// cells so each wide character (CJK, wide emoji) contributes exactly
+    /// one scalar to the row's text.
+    public func visibleRowsAsText() -> [String] {
+        var out: [String] = []
+        out.reserveCapacity(rows)
+        let cellsPtr = cellsPointer
+        let spacerMask = UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER)
+        for r in 0..<rows {
+            var chars: [Character] = []
+            chars.reserveCapacity(cols)
+            for c in 0..<cols {
+                let cell = cellsPtr[r * cols + c]
+                if cell.flags & spacerMask != 0 {
+                    continue   // wide-glyph tail, already painted by the leading cell
+                }
+                // Zero means "unrendered" (blank). Treat as space so column
+                // alignment of subsequent non-empty cells is preserved for
+                // screen readers that navigate by character.
+                let scalar: Unicode.Scalar
+                if cell.ch == 0 {
+                    scalar = Unicode.Scalar(32)!
+                } else {
+                    scalar = Unicode.Scalar(cell.ch) ?? Unicode.Scalar(32)!
+                }
+                chars.append(Character(scalar))
+            }
+            out.append(String(chars))
+        }
+        return out
+    }
+
+    /// Raw pointer identity for a11y cache invalidation. The underlying
+    /// `BBSnap` allocation is retained for the lifetime of this wrapper, so
+    /// using the pointer as a key is safe — when the wrapper goes away and a
+    /// new one comes in, the address differs.
+    public var a11yIdentity: UnsafeRawPointer {
+        UnsafeRawPointer(handle)
+    }
+}
+
+extension String {
+    /// Drop trailing whitespace (per `Character.isWhitespace`) without
+    /// touching leading whitespace. Used by the a11y path so indented lines
+    /// keep their shape while the grid's blank fill at row ends doesn't
+    /// bloat the screen-reader readout with trailing spaces.
+    public func trimmingTrailingWhitespace() -> String {
+        var s = Substring(self)
+        while let last = s.last, last.isWhitespace { s = s.dropLast() }
+        return String(s)
+    }
+}
