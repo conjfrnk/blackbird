@@ -610,11 +610,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Send that byte directly to the PTY without round-tripping through
         // the encoder. This is the most reliable path for Ctrl+C (0x03),
         // Ctrl+D (0x04), Ctrl+Z (0x1A), etc.
+        //
+        // When the TUI has enabled kitty's disambiguate-escape-codes flag, the
+        // four aliasing letters (Ctrl+i, Ctrl+m, Ctrl+[, Ctrl+h) must NOT take
+        // the fast path — they need to become `CSI <cp>;5u` sequences so the
+        // TUI can distinguish them from Tab / Enter / Esc / Backspace.
         if event.modifierFlags.contains(.control) {
             #if DEBUG
             NSLog("[Blackbird] keyDown: Control modifier detected")
             #endif
-            if let chars = event.characters,
+            let kittyActive = currentSnapshot?.termMode.contains(.disambiguateEscCodes) ?? false
+            let baseLetter = event.charactersIgnoringModifiers?.lowercased().first
+            let collidesWithC0: Bool = {
+                guard let c = baseLetter else { return false }
+                return c == "i" || c == "m" || c == "[" || c == "h"
+            }()
+            if kittyActive && collidesWithC0 {
+                // Fall through — encoder will emit CSI u for the four
+                // C0-aliasing letters under kitty disambiguation.
+            } else if let chars = event.characters,
                let scalar = chars.unicodeScalars.first,
                scalar.value >= 1, scalar.value <= 0x1F {
                 // Synchronous write so there's no perceptible latency before
@@ -648,9 +662,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
 
         let mods = KeyEncoder.Modifiers(event: event)
+        let termMode = currentSnapshot?.termMode ?? []
 
         if let special = Self.specialKey(for: event) {
-            let appCursor = currentSnapshot?.termMode.contains(.appCursor) ?? false
+            let appCursor = termMode.contains(.appCursor)
             let bytes = encoder.encodeSpecial(special, modifiers: mods, applicationCursorKeys: appCursor)
             if !bytes.isEmpty { session.send(bytes) }
             return
@@ -677,7 +692,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
             return event.charactersIgnoringModifiers ?? event.characters ?? ""
         }()
-        let bytes = encoder.encode(chars: chars, modifiers: mods)
+        let bytes = encoder.encode(chars: chars, modifiers: mods, mode: termMode)
         #if DEBUG
         if !bytes.isEmpty {
             NSLog("[Blackbird] keyDown: encoder produced %d bytes: %@",

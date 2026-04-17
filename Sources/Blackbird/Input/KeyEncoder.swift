@@ -1,10 +1,20 @@
 import Foundation
+import BBCore
 
 /// Maps keyboard input into the byte sequences the shell expects.
 ///
-/// Plan 2 scope: bare-key ASCII, Return, Tab, Backspace, Escape, Arrow keys,
-/// Ctrl+printable, Option-as-Meta (ESC+). Full CSI u modifier encoding for
-/// non-arrow modifier combinations is deferred to later plans.
+/// Encodes two protocols:
+///   * **Legacy** (default): bare ASCII, Return=CR, Tab=HT, Backspace=DEL,
+///     Ctrl+printable=C0 byte, Option-as-Meta (ESC+), xterm `CSI 1;M <final>`
+///     for modified arrows / F-keys, CSI Z for Shift+Tab.
+///   * **Kitty progressive enhancement** (active when the TUI has pushed
+///     flag 1 via `ESC[>1u` and `mode` contains `.disambiguateEscCodes`):
+///     modified Enter/Esc/Tab/Backspace become `CSI <cp>;<mod>u`, and
+///     Ctrl+letter combinations that alias C0 control codes (Ctrl+i, Ctrl+m,
+///     Ctrl+[, Ctrl+h) also switch to CSI u so the TUI can tell them apart
+///     from the unmodified Tab/Enter/Esc/Backspace keys they collide with.
+///
+/// Shift+Enter in Claude Code depends on the kitty path.
 public final class KeyEncoder {
 
     public struct Modifiers: OptionSet, Sendable {
@@ -33,7 +43,11 @@ public final class KeyEncoder {
     }
 
     /// Encode a character sequence plus modifiers into bytes.
-    public func encode(chars: String, modifiers: Modifiers) -> Data {
+    ///
+    /// - Parameter mode: terminal mode bits from the current snapshot.
+    ///   When `mode.contains(.disambiguateEscCodes)` the kitty progressive
+    ///   enhancement path is active; otherwise we emit legacy bytes.
+    public func encode(chars: String, modifiers: Modifiers, mode: BBTermMode = []) -> Data {
         guard !chars.isEmpty else { return Data() }
 
         // ⌘-prefixed keys belong to the app layer (menu shortcuts, window
@@ -43,15 +57,38 @@ public final class KeyEncoder {
         // a future caller exercising the encoder directly still won't leak.
         if modifiers.contains(.command) { return Data() }
 
+        let kitty = mode.contains(.disambiguateEscCodes)
+        let nonCmdMods = modifiers.subtracting(.command)
+        let hasMods = !nonCmdMods.subtracting(.option).isEmpty
+            || (nonCmdMods.contains(.option) && optionIsMeta == false && nonCmdMods != [.option])
+            || nonCmdMods.contains(.shift)
+            || nonCmdMods.contains(.control)
+
+        // Kitty disambiguation: Enter / Esc / Tab / Backspace with any
+        // modifier must emit `CSI <cp>;<mod>u` so the TUI can distinguish
+        // Shift+Enter from plain Enter, Ctrl+Tab from Tab, etc.
+        if kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) {
+            return csiU(codepoint: cp, modifiers: nonCmdMods)
+        }
+
         // Shift+Tab → CSI Z (reverse tab, "backtab"). Completion widgets and
         // the readline/zsh reverse-menu selection all expect this specific
-        // sequence. AppKit delivers Shift+Tab as chars "\t" with .shift set.
-        if modifiers.contains(.shift), chars == "\t" {
+        // sequence when kitty mode is NOT active. AppKit delivers Shift+Tab
+        // as chars "\t" with .shift set.
+        if !kitty, modifiers.contains(.shift), chars == "\t" {
             return Data([0x1B, 0x5B, 0x5A])    // ESC [ Z
         }
 
         // Ctrl+printable: only the first character is transformed.
         if modifiers.contains(.control), let scalar = chars.unicodeScalars.first {
+            // Kitty disambiguation: Ctrl+{i,m,[,h} legacy-alias Tab/Enter/Esc/
+            // Backspace. Under flag 1, emit CSI u so the TUI can tell them
+            // apart. Other Ctrl+letter combinations are unambiguous (Ctrl+c
+            // only comes from Ctrl+c) and stay as their C0 byte so shells'
+            // SIGINT / SIGQUIT / word-motion bindings keep working.
+            if kitty, isCtrlOnly(nonCmdMods), ctrlLetterCollidesWithC0(scalar) {
+                return csiU(codepoint: UInt32(scalar.value), modifiers: nonCmdMods)
+            }
             if let ctrlByte = controlByte(for: scalar) {
                 return Data([ctrlByte])
             }
@@ -65,6 +102,48 @@ public final class KeyEncoder {
         }
 
         return Data(chars.utf8)
+    }
+
+    /// Kitty progressive-enhancement maps one of four "ambiguous" keys to its
+    /// protocol codepoint. Any modifier on these keys must emit `CSI <cp>;<mod>u`.
+    /// Returns nil for other inputs — they take the legacy path.
+    private func kittyDisambiguationCodepoint(for chars: String) -> UInt32? {
+        switch chars {
+        case "\r":     return 13   // Enter
+        case "\u{1B}": return 27   // Escape
+        case "\t":     return 9    // Tab
+        case "\u{7F}": return 127  // Backspace (DEL)
+        default:       return nil
+        }
+    }
+
+    /// True when `mods` is exactly `.control` (possibly with `.option` when
+    /// Option is acting as Meta, which we collapse into the CSI u mod bits).
+    private func isCtrlOnly(_ mods: Modifiers) -> Bool {
+        mods == [.control]
+    }
+
+    /// Ctrl+{i, m, [, h} legacy-alias Tab/Enter/Esc/Backspace respectively.
+    /// These are the four cases the kitty protocol explicitly disambiguates.
+    private func ctrlLetterCollidesWithC0(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar {
+        case "i", "I", "m", "M", "[", "h", "H": return true
+        default: return false
+        }
+    }
+
+    /// `CSI <codepoint> ; <modParam> u`. Collapses the `;M` when modParam==1
+    /// (no effective modifiers, per the kitty spec).
+    private func csiU(codepoint: UInt32, modifiers: Modifiers) -> Data {
+        let mod = modifierParam(modifiers)
+        var bytes: [UInt8] = [0x1B, 0x5B]                 // ESC [
+        bytes.append(contentsOf: Array(String(codepoint).utf8))
+        if mod > 1 {
+            bytes.append(0x3B)                            // ;
+            bytes.append(contentsOf: Array(String(mod).utf8))
+        }
+        bytes.append(0x75)                                // u
+        return Data(bytes)
     }
 
     /// Encode a special key (arrow, function key, etc.) with modifiers.
