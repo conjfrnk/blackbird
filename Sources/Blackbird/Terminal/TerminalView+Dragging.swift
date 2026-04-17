@@ -5,12 +5,10 @@ import AppKit
 /// session — matching Terminal.app and iTerm2 ergonomics (you can drag a
 /// PNG from Finder onto `open ` at the prompt and get `open '/path/to/foo.png'`).
 ///
-/// The pure path-formatting helpers live here so they can be unit-tested
-/// without building an NSDraggingInfo fake. The NSDraggingDestination
-/// callback overrides are on the main class in `TerminalView.swift`
-/// because Swift forbids `override` keywords on methods declared in an
-/// extension of the same module, and `NSView` already provides
-/// empty default implementations of those methods that we need to replace.
+/// The `NSDraggingDestination` overrides live on the main class so they
+/// sit next to the `isDropTargeted` stored state they mutate. The pure
+/// formatters (`shellQuote`, `joinedDroppedPaths`) stay in the extension
+/// so they can be unit-tested without constructing a drag fake.
 extension TerminalView {
     /// Wrap a file path in single quotes using the POSIX `'\''` recipe to
     /// escape any embedded single quote. Single-quoted strings in sh/zsh

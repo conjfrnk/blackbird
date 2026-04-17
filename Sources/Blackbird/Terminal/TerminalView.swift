@@ -892,12 +892,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     // MARK: - Drag and drop
 
-    // NSDraggingDestination callbacks. Live on the main class (not an
-    // extension) because NSView declares default empty implementations and
-    // Swift requires `override` for those, which isn't permitted in an
-    // extension of the same module. The pure formatters (`shellQuote`,
-    // `joinedDroppedPaths`) live in TerminalView+Dragging.swift so they
-    // can be unit-tested without building a drag fake.
+    // The `NSDraggingDestination` overrides live on the main class so they
+    // sit next to the `isDropTargeted` stored state they mutate. The pure
+    // formatters (`shellQuote`, `joinedDroppedPaths`) stay in
+    // TerminalView+Dragging.swift so they can be unit-tested without
+    // constructing a drag fake.
 
     public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard draggingPasteboardHasFileURLs(sender) else { return [] }
