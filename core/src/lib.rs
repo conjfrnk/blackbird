@@ -418,6 +418,18 @@ pub mod cell_flags {
     pub const REVERSE: u16 = 1 << 3;
     pub const DIM: u16 = 1 << 4;
     pub const STRIKE: u16 = 1 << 5;
+    /// Cell holds the left half of a wide (double-width) glyph — CJK, some
+    /// emoji, and private-use ranges like Nerd Font glyphs tagged wide. The
+    /// renderer draws the glyph from this cell occupying two cell widths.
+    pub const WIDE_CHAR: u16 = 1 << 6;
+    /// Cell is the right half of a wide glyph — the renderer must not draw
+    /// a glyph here (the wide one in the preceding cell already covers it).
+    /// Filling this cell with a space overpaints the CJK/emoji character.
+    pub const WIDE_CHAR_SPACER: u16 = 1 << 7;
+    /// Cell is the unused column to the LEFT of a wide glyph that wrapped
+    /// because only one column remained on the prior row. Same rule as
+    /// WIDE_CHAR_SPACER — don't draw.
+    pub const LEADING_WIDE_CHAR_SPACER: u16 = 1 << 8;
 }
 
 /// Terminal mode bitflags mirrored from `alacritty_terminal::term::TermMode`.
@@ -740,6 +752,15 @@ fn extract_cell_flags(f: CellFlags) -> u16 {
     }
     if f.contains(CellFlags::STRIKEOUT) {
         out |= cell_flags::STRIKE;
+    }
+    if f.contains(CellFlags::WIDE_CHAR) {
+        out |= cell_flags::WIDE_CHAR;
+    }
+    if f.contains(CellFlags::WIDE_CHAR_SPACER) {
+        out |= cell_flags::WIDE_CHAR_SPACER;
+    }
+    if f.contains(CellFlags::LEADING_WIDE_CHAR_SPACER) {
+        out |= cell_flags::LEADING_WIDE_CHAR_SPACER;
     }
     out
 }

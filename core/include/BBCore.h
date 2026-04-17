@@ -21,6 +21,27 @@
 
 #define STRIKE (1 << 5)
 
+/**
+ * Cell holds the left half of a wide (double-width) glyph — CJK, some
+ * emoji, and private-use ranges like Nerd Font glyphs tagged wide. The
+ * renderer draws the glyph from this cell occupying two cell widths.
+ */
+#define WIDE_CHAR (1 << 6)
+
+/**
+ * Cell is the right half of a wide glyph — the renderer must not draw
+ * a glyph here (the wide one in the preceding cell already covers it).
+ * Filling this cell with a space overpaints the CJK/emoji character.
+ */
+#define WIDE_CHAR_SPACER (1 << 7)
+
+/**
+ * Cell is the unused column to the LEFT of a wide glyph that wrapped
+ * because only one column remained on the prior row. Same rule as
+ * WIDE_CHAR_SPACER — don't draw.
+ */
+#define LEADING_WIDE_CHAR_SPACER (1 << 8)
+
 #define ALT_SCREEN (1 << 0)
 
 #define APP_CURSOR (1 << 1)
