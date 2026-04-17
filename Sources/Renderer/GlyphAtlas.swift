@@ -3,15 +3,21 @@ import CoreText
 import CoreGraphics
 import AppKit
 
-/// A fixed-capacity texture atlas of monochrome glyphs. Each glyph occupies
-/// one cell-sized slot. Slots are allocated in insertion order; we don't
-/// evict for Plan 3. If `capacityGlyphs` is exceeded `lookupOrInsert`
-/// returns nil for new scalars (existing ones still work).
+/// A fixed-capacity texture atlas of monochrome glyphs. Narrow glyphs occupy
+/// one cell-sized slot; wide glyphs (CJK, emoji) occupy two horizontally-
+/// adjacent slots so the full glyph rasterises without clipping. Slots are
+/// allocated in insertion order; we don't evict — if `capacityGlyphs` is
+/// exceeded `lookupOrInsert` returns nil for new scalars (existing ones still
+/// work).
 public final class GlyphAtlas {
 
     public struct Entry {
         public let uvOrigin: SIMD2<Float>
         public let uvSize: SIMD2<Float>
+        /// True when this glyph was rasterised into two horizontally-adjacent
+        /// atlas slots (CJK, wide emoji). The renderer must draw it at double
+        /// cell width so the glyph's right half isn't clipped.
+        public let isWide: Bool
     }
 
     public let texture: MTLTexture
@@ -81,38 +87,53 @@ public final class GlyphAtlas {
     }
 
     /// Return the atlas entry for `scalar`, rasterizing it into the next free
-    /// slot on first use. Returns nil if the atlas is full and the glyph
-    /// hasn't been inserted before.
-    public func lookupOrInsert(scalar: UnicodeScalar) -> Entry? {
+    /// slot(s) on first use. `wide == true` allocates two adjacent slots and
+    /// rasterises into a 2x-wide bitmap — required for CJK and wide emoji so
+    /// the glyph doesn't clip at the slot boundary. Returns nil if the atlas
+    /// is full and the glyph hasn't been inserted before.
+    public func lookupOrInsert(scalar: UnicodeScalar, wide: Bool = false) -> Entry? {
         if let existing = byScalar[scalar.value] { return existing }
-        guard nextSlot < capacityGlyphs else { return nil }
+        let slotsNeeded = wide ? 2 : 1
 
-        let slot = nextSlot
+        // If the wide glyph wouldn't fit in the current row (only one slot
+        // left) we skip that orphan slot so the glyph stays on one row. The
+        // leftover slot is then dead for the lifetime of the atlas — worth
+        // it: splitting a wide glyph across two rows would need a separate
+        // uv for each half and complicate both the atlas and the renderer.
+        var slot = nextSlot
+        if wide {
+            let col = slot % slotCols
+            if col + slotsNeeded > slotCols {
+                slot = (slot / slotCols + 1) * slotCols
+            }
+        }
+        guard slot + slotsNeeded <= capacityGlyphs else { return nil }
+
         let col = slot % slotCols
         let row = slot / slotCols
         let pxX = col * cellPxWidth
         let pxY = row * cellPxHeight
 
-        rasterize(scalar: scalar, intoSlotAt: (pxX, pxY))
+        rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide)
 
         let uvOrigin = SIMD2<Float>(
             Float(pxX) / Float(texture.width),
             Float(pxY) / Float(texture.height)
         )
         let uvSize = SIMD2<Float>(
-            Float(cellPxWidth) / Float(texture.width),
+            Float(cellPxWidth * slotsNeeded) / Float(texture.width),
             Float(cellPxHeight) / Float(texture.height)
         )
-        let entry = Entry(uvOrigin: uvOrigin, uvSize: uvSize)
+        let entry = Entry(uvOrigin: uvOrigin, uvSize: uvSize, isWide: wide)
         byScalar[scalar.value] = entry
-        nextSlot += 1
+        nextSlot = slot + slotsNeeded
         return entry
     }
 
     // MARK: - Rasterization
 
-    private func rasterize(scalar: UnicodeScalar, intoSlotAt origin: (x: Int, y: Int)) {
-        let w = cellPxWidth
+    private func rasterize(scalar: UnicodeScalar, intoSlotAt origin: (x: Int, y: Int), wide: Bool = false) {
+        let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
         let cs = CGColorSpaceCreateDeviceGray()
         let bitmapInfo = CGImageAlphaInfo.none.rawValue

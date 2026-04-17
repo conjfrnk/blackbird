@@ -272,12 +272,45 @@ public final class MetalRenderer {
 
                 let xPx = Float(col) * cellW
                 let yPx = Float(row) * cellH + topInsetPoints
+
+                // WIDE_CHAR_SPACER / LEADING_WIDE_CHAR_SPACER sit to the right
+                // of (or on the wrapped-leading col before) a wide glyph. The
+                // wide glyph's 2x quad already covers this column, so any
+                // draw here would overpaint its right half. Skip unless the
+                // selection highlight needs a bg quad — in that case the
+                // highlight must span both halves of the wide cell.
+                let isSpacer = (cell.flags &
+                    (UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER))) != 0
+                if isSpacer {
+                    if selected || effectiveHasBg {
+                        ptr[count] = CellInstance(
+                            cellPosPx: SIMD2<Float>(xPx, yPx),
+                            quadSizePx: SIMD2<Float>(cellW, cellH),
+                            uvOrigin: .zero,
+                            uvSize: .zero,
+                            fgColor: fg,
+                            bgColor: effectiveBg
+                        )
+                        count += 1
+                    }
+                    continue
+                }
+
+                // WIDE_CHAR cells carry a CJK / wide-emoji glyph that logically
+                // spans two cells. The atlas rasterises them into a 2x-wide
+                // slot and reports a doubled uvSize.x; we draw a 2x-wide quad
+                // so the full glyph lands on screen.
+                let isWide = (cell.flags & UInt16(WIDE_CHAR)) != 0
+                let quadW = isWide ? cellW * 2.0 : cellW
+                let quadSize = SIMD2<Float>(quadW, cellH)
+
                 // Render cell if it has a glyph OR a non-default background.
                 if scalar != 0 && scalar != 0x20 /* space */ {
                     if let us = Unicode.Scalar(scalar),
-                       let entry = atlas.lookupOrInsert(scalar: us) {
+                       let entry = atlas.lookupOrInsert(scalar: us, wide: isWide) {
                         ptr[count] = CellInstance(
                             cellPosPx: SIMD2<Float>(xPx, yPx),
+                            quadSizePx: quadSize,
                             uvOrigin: entry.uvOrigin,
                             uvSize: entry.uvSize,
                             fgColor: fg,
@@ -291,6 +324,7 @@ public final class MetalRenderer {
                     // zero coverage → pure bg fill.
                     ptr[count] = CellInstance(
                         cellPosPx: SIMD2<Float>(xPx, yPx),
+                        quadSizePx: quadSize,
                         uvOrigin: .zero,
                         uvSize: .zero,
                         fgColor: fg,

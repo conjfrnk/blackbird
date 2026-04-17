@@ -3,6 +3,7 @@ using namespace metal;
 
 struct CellInstance {
     float2 cellPosPx;
+    float2 quadSizePx;    // per-cell quad size: cellSizePx for narrow, 2x for wide (CJK, emoji)
     float2 uvOrigin;
     float2 uvSize;
     float4 fgColor;
@@ -38,7 +39,7 @@ vertex VertexOut vertex_cell(
     };
 
     CellInstance inst = instances[iid];
-    float2 cornerPx = inst.cellPosPx + corners[vid] * u.cellSizePx;
+    float2 cornerPx = inst.cellPosPx + corners[vid] * inst.quadSizePx;
 
     // Convert pixel space -> clip space: top-left (0,0), bottom-right (viewport).
     float2 ndc;
