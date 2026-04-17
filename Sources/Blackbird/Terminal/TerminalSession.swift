@@ -2,15 +2,6 @@ import Foundation
 import Combine
 import AppKit
 
-extension Notification.Name {
-    /// Fired whenever a `TerminalSession`'s effective title changes (either
-    /// the shell emitted a new OSC 0/2, or the user set/cleared a manual
-    /// override). Observers read `session.displayTitle` to pick up the new
-    /// value. `object` is the session that changed.
-    public static let terminalSessionTitleDidChange =
-        Notification.Name("BlackbirdTerminalSessionTitleDidChange")
-}
-
 /// Owns a PTY and a BBTerm. Wires PTY output into the VT parser, publishes
 /// snapshots of the grid to observers.
 ///
@@ -81,21 +72,19 @@ public final class TerminalSession: ObservableObject {
         publishTitle()
     }
 
-    /// Recompute `displayTitle` and republish on the published `title`
-    /// pipeline plus post the notification. Callers on any thread hop to
-    /// main if needed.
+    /// Recompute `displayTitle` and republish on the `@Published title`
+    /// pipeline. UI observes via Combine (`TerminalView.$title.sink`);
+    /// there's no notification channel — Combine is canonical. Callers on
+    /// any thread hop to main if needed.
     private func publishTitle() {
         let value: String? = displayTitle
-        let fire = { [weak self] in
-            guard let self else { return }
+        if Thread.isMainThread {
             self.title = value
-            NotificationCenter.default.post(
-                name: .terminalSessionTitleDidChange,
-                object: self
-            )
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.title = value
+            }
         }
-        if Thread.isMainThread { fire() }
-        else { DispatchQueue.main.async(execute: fire) }
     }
 
     private let bbterm: BBTerm
@@ -390,11 +379,15 @@ public final class TerminalSession: ObservableObject {
                     break  // Plan 5/3 will surface cursor shape.
                 case .fatal(let msg):
                     // Surface as a title prefix for visibility; Plan 7 adds a
-                    // dedicated diagnostics channel. Write directly to the
-                    // published `title` rather than through applyOscTitle —
-                    // a fatal panic should display regardless of override
-                    // state, and there's no "recompute" path after this.
-                    self.title = "[fatal] core panic: \(msg)"
+                    // dedicated diagnostics channel. Fatal should display
+                    // regardless of any user-set override AND must not let a
+                    // stale override resurface later. Clear the override and
+                    // route through the state machine so the
+                    // oscTitle/titleOverride/displayTitle invariant holds —
+                    // single writer, no divergence between `title` and
+                    // `displayTitle`.
+                    self.titleOverride = nil
+                    self.applyOscTitle("[fatal] core panic: \(msg)")
                 }
             }
         }

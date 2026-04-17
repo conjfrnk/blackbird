@@ -367,33 +367,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
         if menuItem.action == #selector(renameActiveTab(_:)) {
             // Only enabled when there's a live session to rename.
-            return activeSession != nil
+            return session != nil
         }
         if menuItem.action == #selector(resetActiveTabTitle(_:)) {
             // "Reset to Auto" only makes sense when an override is active.
-            return activeSession?.titleOverride != nil
+            return session?.titleOverride != nil
         }
         return true
     }
 
     // MARK: - Tab rename
 
-    /// The session this window controller currently renders. The titlebar
-    /// tab bar right-click and the View > Rename Tab… menu both target
-    /// *this* window's session — AppKit's tab group routes ⌘R through the
-    /// responder chain to the key window, which already corresponds to the
-    /// focused pill. Alias for clarity at the call site.
-    var activeSession: TerminalSession? { session }
-
     @objc func renameActiveTab(_ sender: Any?) {
         beginRenameActiveTab()
     }
 
-    /// Show a simple Rename alert targeting `activeSession`. Empty input
-    /// clears any existing override and reverts to the auto (OSC) title.
-    /// Cancel leaves the current state untouched.
+    /// Show a simple Rename alert targeting this window's `session`. Empty
+    /// input clears any existing override and reverts to the auto (OSC)
+    /// title. Cancel leaves the current state untouched.
     func beginRenameActiveTab() {
-        guard let session = activeSession else { return }
+        guard let session else { return }
         let alert = NSAlert()
         alert.messageText = "Rename tab"
         alert.informativeText = "Enter a new title. Leave empty to keep the current auto title."
@@ -414,6 +407,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     @objc func resetActiveTabTitle(_ sender: Any?) {
-        activeSession?.titleOverride = nil
+        session?.titleOverride = nil
     }
 }
