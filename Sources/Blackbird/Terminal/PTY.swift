@@ -175,8 +175,13 @@ public final class PTY {
             self.writeQueue.sync { }
             // The read queue is the sole owner of masterFD's close. Doing it
             // here avoids a double-close / fd-reuse race against terminate()
-            // calling close() on another thread.
-            close(self.masterFD)
+            // calling close() on another thread. The stateQueue sync serialises
+            // with writeImmediate's Darwin.write so an urgent control byte
+            // (Ctrl+C, Ctrl+D) in flight from the main thread can't land on a
+            // freshly-closed — and potentially reused — fd.
+            self.stateQueue.sync {
+                close(self.masterFD)
+            }
             // Blocking waitpid is safe here: the read loop exited because
             // the child closed the slave end, so it has exited or is about to.
             var status: Int32 = 0
@@ -227,22 +232,35 @@ public final class PTY {
     /// latency is perceptible. Safe for single-byte writes — the kernel write
     /// is atomic at that size.
     public func writeImmediate(_ data: Data) {
-        // Skip once terminate() has set us stopped: after markStopped the
-        // read queue's tail is going to close masterFD, and a concurrent
-        // Darwin.write from here would race into either a closed fd (harmless,
-        // just EBADF) or — worse — a reused fd owned by something else.
-        guard shouldKeepRunning() else { return }
-        data.withUnsafeBytes { rawBuf in
-            guard let base = rawBuf.baseAddress else { return }
-            let n = Darwin.write(masterFD, base, rawBuf.count)
-            #if DEBUG
-            if n != rawBuf.count {
-                NSLog("[Blackbird] writeImmediate FAILED: wanted %d, got %d, errno=%d fd=%d",
-                      rawBuf.count, n, errno, masterFD)
-            } else {
-                NSLog("[Blackbird] writeImmediate OK: %d bytes to fd %d", n, masterFD)
+        // Hold stateQueue across the running check AND the Darwin.write. The
+        // read queue's cleanup path (markStopped → writeQueue.sync drain →
+        // close(masterFD)) also acquires stateQueue for the close, so one of
+        // two things happens:
+        //
+        //   1. We run first: markStopped / close wait for our sync block to
+        //      finish before touching _isRunning or closing the fd.
+        //   2. They run first: our guard sees _isRunning=false and bails — we
+        //      never touch a closed (possibly reused) fd.
+        //
+        // Previously the guard-then-write pair wasn't atomic, so a Ctrl+C
+        // arriving concurrently with session teardown could land on a reused
+        // fd owned by an unrelated subsystem. Single-byte writes to a PTY
+        // master aren't going to block meaningfully, so serialising with
+        // teardown is cheap.
+        stateQueue.sync {
+            guard _isRunning else { return }
+            data.withUnsafeBytes { rawBuf in
+                guard let base = rawBuf.baseAddress else { return }
+                let n = Darwin.write(masterFD, base, rawBuf.count)
+                #if DEBUG
+                if n != rawBuf.count {
+                    NSLog("[Blackbird] writeImmediate FAILED: wanted %d, got %d, errno=%d fd=%d",
+                          rawBuf.count, n, errno, masterFD)
+                } else {
+                    NSLog("[Blackbird] writeImmediate OK: %d bytes to fd %d", n, masterFD)
+                }
+                #endif
             }
-            #endif
         }
     }
 
