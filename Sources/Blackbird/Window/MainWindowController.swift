@@ -4,6 +4,12 @@ import Metal
 
 final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
 
+    /// When AppDelegate.closeWindow batch-closes every tab, it already asked
+    /// the user once. Flip this for the sweep so each individual tab's
+    /// windowShouldClose doesn't re-prompt for "process is still running".
+    /// Always reset immediately after the batch via a `defer`.
+    static var bypassCloseConfirm: Bool = false
+
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
     private var exitCancellable: AnyCancellable?
@@ -149,6 +155,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     // MARK: - NSWindowDelegate
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // AppDelegate's ⌘⇧W handler already got consent for the whole batch.
+        if Self.bypassCloseConfirm { return true }
         guard Preferences.shared.confirmClose else { return true }
         guard let s = session, s.hasForegroundChild() else { return true }
         let alert = NSAlert()

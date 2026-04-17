@@ -262,6 +262,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.alertStyle = .warning
             if alert.runModal() == .alertSecondButtonReturn { return }
         }
+        // Suppress the per-tab "process is still running" confirm for this
+        // sweep — the multi-tab alert above already covered consent. Without
+        // this, closing two tabs with running commands would pop an extra
+        // alert per tab.
+        MainWindowController.bypassCloseConfirm = true
+        defer { MainWindowController.bypassCloseConfirm = false }
         for tab in tabs {
             tab.performClose(nil)
         }
