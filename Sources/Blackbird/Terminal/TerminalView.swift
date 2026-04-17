@@ -1172,12 +1172,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             //     is the common terminal-emulator default (alacritty, kitty).
             //
             // Rounding away from zero ensures tiny trackpad flicks register
-            // at least one line instead of truncating to 0.
+            // at least one line instead of truncating to 0. Clamp before
+            // casting to Int32 — a misbehaving input device or a NaN delta
+            // would otherwise trap the app in `Int32(Double)` on overflow.
             let delta = event.scrollingDeltaY
-            let raw: Double = event.hasPreciseScrollingDeltas
+            let rawUnclamped: Double = event.hasPreciseScrollingDeltas
                 ? Double(delta) / Double(metrics.cellHeight) * 2.0
                 : Double(delta) * 3.0
-            let lines = Int32(raw.rounded(.toNearestOrAwayFromZero))
+            let raw = rawUnclamped.isFinite ? rawUnclamped : 0
+            let clamped = min(Double(Int32.max), max(Double(Int32.min), raw))
+            let lines = Int32(clamped.rounded(.toNearestOrAwayFromZero))
             if lines != 0 {
                 session.scroll(delta: lines)
             }
