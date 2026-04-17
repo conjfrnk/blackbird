@@ -156,7 +156,11 @@ struct BBCell {
   uint32_t fg;
   uint32_t bg;
   uint16_t flags;
-  uint16_t _reserved;
+  /**
+   * Index into `BBSnap::links` (0 means no OSC 8 attribution on this cell).
+   * Resolve via `bb_snap_link_url(snap, link_id)`.
+   */
+  uint16_t link_id;
 };
 
 /**
@@ -356,6 +360,31 @@ const struct BBSnap *bb_snap_retain(const struct BBSnap *snap);
  * the fallback value.
  */
 void bb_snap_release(const struct BBSnap *snap);
+
+/**
+ * Look up the OSC 8 link id at a snapshot cell. Returns 0 when `snap` is
+ * null, `(row, col)` is outside the grid, or the cell has no OSC 8
+ * attribution.
+ *
+ * Pass the returned non-zero id to `bb_snap_link_url` to get the URL.
+ *
+ * # Safety
+ * `snap` must be non-null and returned by `bb_term_take_snapshot` /
+ * `bb_snap_retain`, not yet released to zero.
+ */
+uint32_t bb_snap_link_id_at(const struct BBSnap *snap, uint16_t row, uint16_t col);
+
+/**
+ * Resolve an OSC 8 link id to its UTF-8 URL. Returns null when `snap` is
+ * null, `link_id == 0`, or the id is unknown. The returned pointer is
+ * valid for the snapshot's lifetime (until the matching `bb_snap_release`
+ * drops the refcount to zero).
+ *
+ * # Safety
+ * `snap` must be non-null and returned by `bb_term_take_snapshot` /
+ * `bb_snap_retain`, not yet released to zero.
+ */
+const char *bb_snap_link_url(const struct BBSnap *snap, uint32_t link_id);
 
 /**
  * Scroll the display by `delta` lines. Positive = scroll up (show older

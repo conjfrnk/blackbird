@@ -537,7 +537,9 @@ pub struct BBCell {
     pub fg: u32, // 0xRRGGBB
     pub bg: u32,
     pub flags: u16, // See cell_flags
-    pub _reserved: u16,
+    /// Index into `BBSnap::links` (0 means no OSC 8 attribution on this cell).
+    /// Resolve via `bb_snap_link_url(snap, link_id)`.
+    pub link_id: u16,
 }
 
 pub mod cell_flags {
@@ -639,6 +641,10 @@ struct BBSnapOwned {
     snap: BBSnap,
     rc: AtomicUsize,
     cells_owned: Vec<BBCell>,
+    /// Index 0 reserved as a sentinel "no link"; index N matches `BBCell.link_id`.
+    /// CStrings live for the snapshot's lifetime so `bb_snap_link_url` can hand
+    /// out raw pointers without copying.
+    links: Vec<std::ffi::CString>,
 }
 
 // SAFETY: see BBSnap's unsafe impl Send above; same reasoning applies.
@@ -660,6 +666,7 @@ impl BBSnapOwned {
         mode: u32,
         cursor_shape: u8,
         cells: Vec<BBCell>,
+        links: Vec<std::ffi::CString>,
     ) -> Box<BBSnapOwned> {
         let mut owned = Box::new(BBSnapOwned {
             snap: BBSnap {
@@ -679,6 +686,7 @@ impl BBSnapOwned {
             },
             rc: AtomicUsize::new(1),
             cells_owned: cells,
+            links,
         });
         // Capture the stable heap pointer into the public field.
         owned.snap.cells = owned.cells_owned.as_ptr();
@@ -977,13 +985,50 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let cols = grid.columns() as u16;
         let mut cells: Vec<BBCell> = Vec::with_capacity(rows as usize * cols as usize);
 
+        // OSC 8 hyperlink interning. `links[0]` is a placeholder so cell
+        // `link_id == 0` always means "no OSC 8 attribution". Subsequent URIs
+        // get 1-based indices. Cap at u16::MAX - 1 distinct links per snapshot;
+        // on overflow we silently drop the attribution (cell stays at 0).
+        let mut links: Vec<std::ffi::CString> = Vec::new();
+        links.push(std::ffi::CString::new("").expect("empty CString is infallible"));
+        let mut link_ids: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+
         for indexed in grid.display_iter() {
+            let link_id: u16 = match indexed.cell.hyperlink() {
+                Some(h) => {
+                    let uri = h.uri();
+                    // alacritty's OSC 8 parser rejects empty URIs upstream, but
+                    // we defensively treat an empty uri as "no link".
+                    if uri.is_empty() {
+                        0
+                    } else if let Some(&id) = link_ids.get(uri) {
+                        id
+                    } else if links.len() >= u16::MAX as usize {
+                        // Out of ids — drop attribution silently. 65 534 links
+                        // per snapshot is already well past any realistic TUI.
+                        0
+                    } else {
+                        // Skip if the URI contains an interior NUL (can't be a
+                        // CString); fall back to "no link" rather than panic.
+                        match std::ffi::CString::new(uri) {
+                            Ok(cs) => {
+                                let id = links.len() as u16;
+                                links.push(cs);
+                                link_ids.insert(uri.to_owned(), id);
+                                id
+                            }
+                            Err(_) => 0,
+                        }
+                    }
+                }
+                None => 0,
+            };
             cells.push(BBCell {
                 ch: indexed.c as u32,
                 fg: color_to_rgb(&indexed.fg, palette),
                 bg: color_to_rgb(&indexed.bg, palette),
                 flags: extract_cell_flags(indexed.flags),
-                _reserved: 0,
+                link_id,
             });
         }
 
@@ -1029,6 +1074,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             mode,
             cursor_shape,
             cells,
+            links,
         );
         // Expose the public `snap` field (first field at offset 0).
         let owned_ptr = Box::into_raw(owned);
@@ -1079,6 +1125,61 @@ pub unsafe extern "C" fn bb_snap_release(snap: *const BBSnap) {
         if prev == 1 {
             std::sync::atomic::fence(Ordering::Acquire);
             drop(Box::from_raw(owned));
+        }
+    })
+}
+
+/// Look up the OSC 8 link id at a snapshot cell. Returns 0 when `snap` is
+/// null, `(row, col)` is outside the grid, or the cell has no OSC 8
+/// attribution.
+///
+/// Pass the returned non-zero id to `bb_snap_link_url` to get the URL.
+///
+/// # Safety
+/// `snap` must be non-null and returned by `bb_term_take_snapshot` /
+/// `bb_snap_retain`, not yet released to zero.
+#[no_mangle]
+pub unsafe extern "C" fn bb_snap_link_id_at(snap: *const BBSnap, row: u16, col: u16) -> u32 {
+    guard_no_term(0u32, || {
+        if snap.is_null() {
+            return 0;
+        }
+        let s = &*snap;
+        if (row as usize) >= (s.rows as usize) || (col as usize) >= (s.cols as usize) {
+            return 0;
+        }
+        let idx = (row as usize) * (s.cols as usize) + (col as usize);
+        if idx >= s.cells_len {
+            return 0;
+        }
+        let cell = &*s.cells.add(idx);
+        cell.link_id as u32
+    })
+}
+
+/// Resolve an OSC 8 link id to its UTF-8 URL. Returns null when `snap` is
+/// null, `link_id == 0`, or the id is unknown. The returned pointer is
+/// valid for the snapshot's lifetime (until the matching `bb_snap_release`
+/// drops the refcount to zero).
+///
+/// # Safety
+/// `snap` must be non-null and returned by `bb_term_take_snapshot` /
+/// `bb_snap_retain`, not yet released to zero.
+#[no_mangle]
+pub unsafe extern "C" fn bb_snap_link_url(
+    snap: *const BBSnap,
+    link_id: u32,
+) -> *const std::os::raw::c_char {
+    guard_no_term(std::ptr::null(), || {
+        if snap.is_null() || link_id == 0 {
+            return std::ptr::null();
+        }
+        let owned = BBSnapOwned::from_snap_ptr(snap);
+        let links = &(*owned).links;
+        match links.get(link_id as usize) {
+            // Index 0 is the empty-string sentinel, already filtered above.
+            Some(cstr) => cstr.as_ptr(),
+            None => std::ptr::null(),
         }
     })
 }
