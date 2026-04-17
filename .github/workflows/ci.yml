@@ -71,7 +71,11 @@ jobs:
       - name: Build Rust core (universal)
         run: scripts/build-core.sh
 
-      - name: xcodebuild build + test
+      # The Blackbird scheme has enableAddressSanitizer + enableUBSanitizer
+      # both set to true (project.yml:119-120). Xcode reports any sanitizer
+      # violation as a test failure, and xcodebuild test exits non-zero on any
+      # failure, so this job is *also* the ASan/UBSan gate — do not weaken.
+      - name: xcodebuild build + test (ASan + UBSan gated)
         run: |
           xcodebuild test \
             -project Blackbird.xcodeproj \
@@ -186,9 +190,10 @@ jobs:
   rust-fuzz-smoke:
     name: Rust — fuzz smoke (30s/target)
     runs-on: macos-14
-    # Fuzz findings are surfaced but don't block merges yet. Promote to
-    # required once the corpus stabilises and finds fewer false flakes.
-    continue-on-error: true
+    # Blocking. Corpus is stable; a new crash here should fail the build so we
+    # fix it rather than accumulating latent bugs. If a flake emerges, prefer
+    # shrinking + committing the offending input to corpus/ over reintroducing
+    # continue-on-error.
     steps:
       - uses: actions/checkout@v4
 
