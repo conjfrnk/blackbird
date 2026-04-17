@@ -340,6 +340,24 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
     }
 
+    func test_normalizePaste_composedWithSanitiser() {
+        // Real paste flow: Windows-origin text that also happens to contain
+        // an embedded bracketed-paste terminator. Normalisation runs first,
+        // then the sanitiser strips the terminator. Verify both stages apply
+        // cleanly to the same bytes. The test composes them manually (the
+        // real `paste(_:)` does this internally, but we can't easily drive
+        // the NSPasteboard side from XCTest).
+        var input = Data("line1\r\n".utf8)
+        input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E])  // ESC [ 201 ~
+        input.append(Data("line2".utf8))
+        let normalised = TerminalView.normalizePasteLineEndings(input)
+        let sanitised = TerminalView.sanitizeBracketedPaste(normalised)
+        XCTAssertEqual(
+            sanitised, Data("line1\nline2".utf8),
+            "Normalise CRLF → LF, then strip the embedded terminator bytes"
+        )
+    }
+
     // MARK: - Mouse-report encoding (pure path)
 
     func test_mouseReport_sgr_leftPress_final_M() {
