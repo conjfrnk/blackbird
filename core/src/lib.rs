@@ -961,8 +961,8 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
 /// `rgb` is packed 0xRRGGBB.
 ///
 /// # Safety
-/// Same preconditions as `bb_term_input`. Null `term` is a no-op. Out-of-
-/// range slots are silently ignored by alacritty's Colors setter.
+/// Same preconditions as `bb_term_input`. Null `term` is a no-op. Slots
+/// beyond alacritty's palette length are silently ignored.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, rgb: u32) {
     guard_with_term(term, (), || {
@@ -970,6 +970,18 @@ pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, r
             return;
         }
         let bb = &mut *term;
+        // alacritty's Term::set_color indexes its Colors array directly; any
+        // slot ≥ the array length panics with an index-out-of-bounds. The
+        // Colors layout is `[Option<Rgb>; COUNT]` with COUNT = 269 in 0.26
+        // (256 palette + 13 named). The Swift side only uses 0..=258, but
+        // the FFI must survive arbitrary input (fuzzer, misbehaving API
+        // user) without panicking — libFuzzer's panic hook aborts the
+        // process before `guard_with_term`'s `catch_unwind` ever runs, so
+        // "catch the panic" is not a substitute for "don't panic". Gate
+        // against the constant COUNT from alacritty's public API.
+        if (slot as usize) >= alacritty_terminal::term::color::COUNT {
+            return;
+        }
         let r = ((rgb >> 16) & 0xFF) as u8;
         let g = ((rgb >> 8) & 0xFF) as u8;
         let b = (rgb & 0xFF) as u8;
@@ -1851,10 +1863,14 @@ mod tests {
         }
     }
 
-    /// Out-of-range slot indices shouldn't panic through the FFI guard —
-    /// alacritty's Colors indexer returns Option, and we use its setter
-    /// (which ignores unknown slots gracefully). Belt-and-braces: exercise
-    /// u16::MAX so no future refactor silently introduces a panic path.
+    /// Out-of-range slot indices shouldn't panic through the FFI guard.
+    /// alacritty's `Term::set_color` indexes the `Colors` array (fixed
+    /// length `COUNT` = 269 in 0.26) directly: slots ≥ `COUNT` panic with
+    /// index-out-of-bounds. A fuzzer found 0x0E0E (3598) reproduces this.
+    /// `catch_unwind` inside `guard_with_term` does catch the panic in
+    /// normal process space, but libFuzzer installs a panic hook that
+    /// aborts first — so relying on `catch_unwind` isn't enough. Clamp in
+    /// the FFI instead.
     #[test]
     fn set_named_color_out_of_range_slot_is_noop() {
         unsafe {
@@ -1862,6 +1878,16 @@ mod tests {
             // Should neither crash nor panic.
             bb_term_set_named_color(term, u16::MAX, 0x123456);
             bb_term_set_named_color(term, 9999, 0x987654);
+            // Specific fuzzer-discovered value — 0x0E0E from a little-endian
+            // u16. Must not panic.
+            bb_term_set_named_color(term, 0x0E0E, 0x0E0E0E);
+            // Right on the boundary — COUNT itself is invalid, COUNT-1 is
+            // valid (exact last slot).
+            bb_term_set_named_color(
+                term,
+                alacritty_terminal::term::color::COUNT as u16,
+                0x010203,
+            );
             // Sanity: a legit slot still works.
             bb_term_set_named_color(term, 257, 0xAABBCC);
             let snap = bb_term_take_snapshot(term);

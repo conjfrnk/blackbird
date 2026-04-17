@@ -47,6 +47,26 @@ fuzz_target!(|data: &[u8]| {
             blackbird_core::bb_term_resize(term, cols, rows);
         }
 
+        // Exercise palette setter with fuzzed slot indices so extreme/
+        // out-of-range slots go through the FFI guard. alacritty's Colors
+        // setter ignores unknown slots, but the FFI boundary has to stay a
+        // no-panic zone regardless.
+        if data.len() >= 4 {
+            let slot = u16::from_le_bytes([data[0], data[1]]);
+            let rgb = u32::from_le_bytes([
+                data[0],
+                data[1],
+                data[2],
+                data.get(3).copied().unwrap_or(0),
+            ]);
+            blackbird_core::bb_term_set_named_color(term, slot, rgb);
+        }
+
+        // And clear_all after all the above — so the cycle "chaotic input →
+        // scrollback → clear → clean state" is reachable. Any stale state
+        // left by prior calls that would panic clear_all surfaces here.
+        blackbird_core::bb_term_clear_all(term);
+
         blackbird_core::bb_term_free(term);
     }
 });
