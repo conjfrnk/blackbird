@@ -488,6 +488,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private func subscribeToSession() {
         cancellables.removeAll()
+        // Reset the bell de-dup counter so a fresh session's first bell
+        // (counter=1) always flashes, even if a prior session's counter
+        // had grown past 0. Only matters if the view ever reuses sessions;
+        // still belt-and-braces.
+        lastBellCounter = 0
         guard let session else { return }
 
         session.$snapshot.sink { [weak self] snap in
