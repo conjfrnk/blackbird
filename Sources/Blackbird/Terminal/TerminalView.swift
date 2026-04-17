@@ -991,13 +991,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if isDragging, var sel = selection {
             // Autoscroll when dragging past the viewport edges so the user
             // can select into scrollback / future output.
+            //
+            // scroll(delta:) follows alacritty's convention:
+            //   positive → show older (scrollback), negative → show newer.
+            // AppKit coords place y=0 at the visual bottom, so:
+            //   - cursor near the TOP (high y)    → reveal older content → +1
+            //   - cursor near the BOTTOM (low y) → reveal newer content → -1
+            // The previous signs were swapped, so autoscroll fought the drag.
             let local = convert(event.locationInWindow, from: nil)
             // Top edge is `titlebarOnlyTopInset` below the raw view top because
             // the titlebar sits in the upper inset under fullSizeContentView.
             if local.y > bounds.height - titlebarOnlyTopInset - metrics.cellHeight {
-                session?.scroll(delta: -1)
-            } else if local.y < metrics.cellHeight {
                 session?.scroll(delta: 1)
+            } else if local.y < metrics.cellHeight {
+                session?.scroll(delta: -1)
             }
             sel.cursor = bufferPointFromEvent(event)
             selection = sel

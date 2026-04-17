@@ -84,6 +84,47 @@ final class TerminalSessionTests: XCTestCase {
         session.terminate()
     }
 
+    // Pin the scroll sign convention: positive delta reveals older content
+    // (scrollback) by growing displayOffset. The mouseDragged autoscroll path
+    // relies on this; a previous bug had the signs swapped.
+    func test_scrollPositiveDeltaShowsOlderContent() throws {
+        let session = try TerminalSession.start(
+            shell: "/bin/sh",
+            // Enough newlines to push lines into scrollback beyond the 5-row grid.
+            arguments: ["-c", "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo line$i; done; sleep 0.3"],
+            size: .init(cols: 20, rows: 5)
+        )
+
+        // Wait until history has accumulated.
+        let histExp = expectation(description: "history built")
+        var c: AnyCancellable?
+        c = session.$snapshot.sink { snap in
+            if let snap, snap.historySize > 0 {
+                c?.cancel()
+                histExp.fulfill()
+            }
+        }
+        wait(for: [histExp], timeout: 3.0)
+
+        let before = session.snapshot?.displayOffset ?? 0
+        session.scroll(delta: 1)
+        let after = session.snapshot?.displayOffset ?? 0
+        XCTAssertGreaterThan(
+            after, before,
+            "scroll(delta: 1) should advance displayOffset into scrollback (show older)"
+        )
+
+        // And the reverse brings us back toward the live grid.
+        session.scroll(delta: -1)
+        let afterBack = session.snapshot?.displayOffset ?? 0
+        XCTAssertLessThan(
+            afterBack, after,
+            "scroll(delta: -1) should move displayOffset back toward the live grid"
+        )
+
+        session.terminate()
+    }
+
     func test_resizePropagatesToCoreAndPty() throws {
         let session = try TerminalSession.start(
             shell: "/bin/sh",
