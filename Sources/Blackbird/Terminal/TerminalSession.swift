@@ -241,25 +241,31 @@ public final class TerminalSession: ObservableObject {
                     self.bellCounter &+= 1
                 case .ptyWrite:
                     break  // handled above, before the main hop
-                case .osc52Clipboard(let raw):
-                    // OSC 52 payload is "<target>;<base64>"; target chars
-                    // are a subset of c,p,q,s,0-7. Strip everything up to
-                    // the first ';' and base64-decode the rest. Silently
-                    // drop when the pref is off, when the payload is a
-                    // read request ("?"), or when decoding fails — a
-                    // misbehaving remote shouldn't stuff arbitrary bytes
-                    // into the user's clipboard or crash the session.
+                case .osc52Clipboard(let text):
+                    // alacritty_terminal 0.26 already decodes the OSC 52
+                    // payload: ClipboardStore(target, plaintext). The
+                    // `target` char (c/p/q/s/0-7) isn't surfaced through
+                    // the C ABI — we always write to NSPasteboard.general,
+                    // which is the only clipboard macOS exposes anyway.
+                    //
+                    // The previous implementation assumed `text` was
+                    // "target;base64" and stripped the first ';' then
+                    // base64-decoded the tail. With the real payload that
+                    // silently dropped every write (no ';' in decoded
+                    // plaintext, or base64 decode failed on the text
+                    // after it), so OSC 52 never actually pasted.
+                    //
+                    // Treat an empty payload as a clipboard-clear (OSC 52
+                    // ; c ; ST). Silently drop when the pref is off —
+                    // a misbehaving remote shouldn't stuff arbitrary
+                    // bytes into the user's clipboard or crash the
+                    // session.
                     guard Preferences.shared.osc52Enabled else { break }
-                    guard let sep = raw.firstIndex(of: ";") else { break }
-                    let b64 = String(raw[raw.index(after: sep)...])
-                    if b64 == "?" { break }
-                    guard let data = Data(base64Encoded: b64, options: .ignoreUnknownCharacters),
-                          let text = String(data: data, encoding: .utf8) else {
-                        break
-                    }
                     let pb = NSPasteboard.general
                     pb.clearContents()
-                    pb.setString(text, forType: .string)
+                    if !text.isEmpty {
+                        pb.setString(text, forType: .string)
+                    }
                 case .cursorShape:
                     break  // Plan 5/3 will surface cursor shape.
                 case .fatal(let msg):

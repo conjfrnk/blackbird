@@ -69,6 +69,35 @@ final class BBTermTests: XCTestCase {
         XCTAssertEqual(received, "my-title")
     }
 
+    // Pin down what alacritty_terminal hands us in Event::ClipboardStore.
+    // The Swift session layer currently splits the payload at the first ';'
+    // expecting "<target>;<base64>", so if this test ever shows we're being
+    // handed the decoded text (or the raw base64 without the target prefix)
+    // the OSC 52 pipeline is broken on the receiver side.
+    func test_osc52Payload_shapeViaAlacritty() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 40, rows: 5)))
+        let exp = expectation(description: "osc52 payload")
+        var captured: String?
+        term.onEvent { ev in
+            if case .osc52Clipboard(let s) = ev, captured == nil {
+                captured = s
+                exp.fulfill()
+            }
+        }
+        // OSC 52 ; c ; base64("hello") ST. ST = ESC \ (0x1B 0x5C) or BEL.
+        // aGVsbG8= is base64("hello").
+        term.input("\u{1B}]52;c;aGVsbG8=\u{07}")
+        wait(for: [exp], timeout: 1.0)
+        let payload = try XCTUnwrap(captured, "no OSC 52 event received")
+        // Pin the shape so the TerminalSession parser matches what
+        // alacritty_terminal 0.26 hands back. The Swift side must agree.
+        // Fails loudly if alacritty changes what it emits in a future bump.
+        XCTAssertEqual(
+            payload, "hello",
+            "alacritty 0.26 should hand us the decoded OSC 52 text; got \(payload.debugDescription)"
+        )
+    }
+
     func test_modeExposedInSnapshot() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
         // Send DECSET 1 (enable application cursor keys).
