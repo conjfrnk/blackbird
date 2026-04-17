@@ -376,13 +376,19 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // parser state across input batches. Edge cases (0-padded params,
         // semicolon-separated params, sequence split across reads) fall
         // through to normal processing without breaking anything.
+        //
+        // Fast path: if the chunk contains no ESC byte at all, we can't have
+        // ESC[2J. memchr does this in a few ns via SIMD even for 64 KiB.
+        // On a `yes` / `cat log` stream (no escapes) this is >90% of reads,
+        // and skips ~linear time scanning for the 4-byte needle.
+        if memchr::memchr(0x1B, slice).is_none() {
+            bb.processor.advance(&mut bb.term, slice);
+            return;
+        }
         let needle = b"\x1B[2J";
         let extra = b"\x1B[3J";
         let mut cursor = 0usize;
-        while let Some(rel) = slice[cursor..]
-            .windows(needle.len())
-            .position(|w| w == needle)
-        {
+        while let Some(rel) = memchr::memmem::find(&slice[cursor..], needle) {
             let end = cursor + rel + needle.len(); // one past the J
             bb.processor.advance(&mut bb.term, &slice[cursor..end]);
             bb.processor.advance(&mut bb.term, extra);

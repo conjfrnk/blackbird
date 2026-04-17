@@ -13,6 +13,9 @@ test-only = []
 
 [dependencies]
 alacritty_terminal = "=0.26.0"
+# SIMD byte search for the `ESC[2J` augmentation fast path in bb_term_input.
+# Already transitively in the tree (alacritty uses it), so no new weight.
+memchr = "2"
 
 [build-dependencies]
 cbindgen = "0.27"

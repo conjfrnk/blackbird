@@ -219,3 +219,27 @@ jobs:
             echo "==> fuzzing $target for 30s"
             cargo fuzz run "$target" -- -max_total_time=30
           done
+
+  rust-throughput:
+    name: Rust — parser throughput gate
+    runs-on: macos-14
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # --ignored picks up core/tests/throughput.rs, which is hidden from the
+      # default `cargo test` run (release-only regression gate, not a
+      # correctness check). Failing here means parser throughput dropped below
+      # the documented floor.
+      - name: Run throughput gate
+        run: cargo test -p blackbird_core --test throughput --release -- --ignored --nocapture
