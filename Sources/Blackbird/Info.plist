@@ -29,9 +29,9 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Connor Frank. MIT License.</string>
 	<key>NSSupportsAutomaticTermination</key>
-	<true/>
+	<false/>
 	<key>NSSupportsSuddenTermination</key>
-	<true/>
+	<false/>
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
 	<key>SUEnableInstallerLauncherService</key>
