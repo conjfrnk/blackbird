@@ -821,7 +821,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         case 3: mode = .line
         case 2: mode = .word
         default:
-            mode = event.modifierFlags.contains(.command) ? .rectangular : .character
+            // ⌥-drag for rectangular (column-block) selection — iTerm2 /
+            // Terminal.app default. ⌘ is reserved for URL-open / window-drag
+            // and never reaches here (the .command branch above returns).
+            mode = event.modifierFlags.contains(.option) ? .rectangular : .character
         }
         selection = Selection(anchor: point, cursor: point, mode: mode)
         isDragging = true
@@ -833,9 +836,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     public override func mouseUp(with event: NSEvent) {
         if isDragging {
             isDragging = false
-            // Collapse a zero-width char-mode selection so the overlay
-            // doesn't show a 1-cell highlight from a stray click.
-            if let s = selection, s.anchor == s.cursor, s.mode == .character {
+            // A zero-width selection means the user clicked without
+            // dragging — no content to show, so clear. Applies to every
+            // mode: .character clicks leave anchor == cursor directly;
+            // .word / .line clicks that landed on non-word cells also
+            // leave anchor == cursor (expandSelectionUnderAnchor is a
+            // no-op there); .rectangular clicks start at anchor == cursor
+            // and only grow during the drag.
+            if let s = selection, s.anchor == s.cursor {
                 selection = nil
             }
             return

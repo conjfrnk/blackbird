@@ -153,6 +153,90 @@ final class TerminalViewTests: XCTestCase {
         session.terminate()
     }
 
+    // MARK: - Selection mode routing in mouseDown
+
+    private func makeViewForSelection() throws -> TerminalView {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let view = TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 480),
+            device: device
+        )
+        // Session + snapshot so bufferPointFromEvent can resolve cols/rows.
+        let session = try TerminalSession.start(
+            shell: "/bin/cat",
+            arguments: [],
+            size: .init(cols: 80, rows: 24)
+        )
+        view.session = session
+        let exp = expectation(description: "initial snapshot")
+        var c: AnyCancellable?
+        c = session.$snapshot.sink { s in
+            if s != nil {
+                c?.cancel()
+                exp.fulfill()
+            }
+        }
+        wait(for: [exp], timeout: 3.0)
+        return view
+    }
+
+    private func mouseDownEvent(at local: NSPoint,
+                                modifiers: NSEvent.ModifierFlags,
+                                clickCount: Int = 1) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: local,
+            modifierFlags: modifiers,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: clickCount,
+            pressure: 1.0
+        ))
+    }
+
+    func test_mouseDown_option_triggersRectangularSelection() throws {
+        let view = try makeViewForSelection()
+        // Middle of the view → somewhere inside the grid.
+        let mid = NSPoint(x: 200, y: 200)
+        let ev = try mouseDownEvent(at: mid, modifiers: [.option])
+        view.mouseDown(with: ev)
+        XCTAssertEqual(view.selection?.mode, .rectangular,
+                       "⌥-drag should trigger rectangular selection")
+        view.session?.terminate()
+    }
+
+    func test_mouseDown_noModifiers_triggersCharacterSelection() throws {
+        let view = try makeViewForSelection()
+        let mid = NSPoint(x: 200, y: 200)
+        let ev = try mouseDownEvent(at: mid, modifiers: [])
+        view.mouseDown(with: ev)
+        XCTAssertEqual(view.selection?.mode, .character,
+                       "Plain drag should be prose-style character selection")
+        view.session?.terminate()
+    }
+
+    func test_mouseDown_doubleClick_triggersWordSelection() throws {
+        let view = try makeViewForSelection()
+        let mid = NSPoint(x: 200, y: 200)
+        let ev = try mouseDownEvent(at: mid, modifiers: [], clickCount: 2)
+        view.mouseDown(with: ev)
+        XCTAssertEqual(view.selection?.mode, .word,
+                       "Double-click should start a word-mode selection")
+        view.session?.terminate()
+    }
+
+    func test_mouseDown_tripleClick_triggersLineSelection() throws {
+        let view = try makeViewForSelection()
+        let mid = NSPoint(x: 200, y: 200)
+        let ev = try mouseDownEvent(at: mid, modifiers: [], clickCount: 3)
+        view.mouseDown(with: ev)
+        XCTAssertEqual(view.selection?.mode, .line,
+                       "Triple-click should start a line-mode selection")
+        view.session?.terminate()
+    }
+
     func test_oscTitleReachesWindowTitle() throws {
         let window = NSWindow(
             contentRect: .zero,
