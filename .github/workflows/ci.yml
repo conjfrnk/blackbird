@@ -248,3 +248,26 @@ jobs:
       # the documented floor.
       - name: Run throughput gate
         run: cargo test -p blackbird_core --test throughput --release -- --ignored --nocapture
+
+  rust-memory:
+    name: Rust — long-session memory gate
+    runs-on: macos-14
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # Asserts the new/input/snap/free and snapshot-churn loops don't leak
+      # by measuring RSS via mach_task_basic_info. An actual leak shows up
+      # as RSS growth scaling with iterations; this gate catches that.
+      - name: Run long-session memory gate
+        run: cargo test -p blackbird_core --test long_session_memory --release -- --ignored --nocapture
