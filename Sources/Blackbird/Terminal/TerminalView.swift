@@ -657,12 +657,46 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
         if bracketedPaste {
             var wrapped = Data([0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])  // ESC[200~
-            wrapped.append(bytes)
+            wrapped.append(Self.sanitizeBracketedPaste(bytes))
             wrapped.append(Data([0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]))  // ESC[201~
             session.send(wrapped)
         } else {
             session.send(bytes)
         }
+    }
+
+    /// Strip any literal `ESC [ 2 0 1 ~` terminators from a bracketed-paste
+    /// payload so they can't prematurely close the paste window and let
+    /// subsequent bytes execute as shell input — the classic paste-injection
+    /// attack. Copying another terminal's output that happens to include
+    /// that exact sequence is the realistic trigger. We only redact the
+    /// closing marker (ESC[200~ inside a paste is harmless — bracketed paste
+    /// doesn't nest).
+    static func sanitizeBracketedPaste(_ input: Data) -> Data {
+        let terminator: [UInt8] = [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]
+        guard input.count >= terminator.count else { return input }
+        var out = Data()
+        out.reserveCapacity(input.count)
+        var i = input.startIndex
+        while i < input.endIndex {
+            let remaining = input.distance(from: i, to: input.endIndex)
+            if remaining >= terminator.count {
+                var match = true
+                for k in 0..<terminator.count {
+                    if input[input.index(i, offsetBy: k)] != terminator[k] {
+                        match = false
+                        break
+                    }
+                }
+                if match {
+                    i = input.index(i, offsetBy: terminator.count)
+                    continue
+                }
+            }
+            out.append(input[i])
+            i = input.index(after: i)
+        }
+        return out
     }
 
     @objc public func copy(_ sender: Any?) {

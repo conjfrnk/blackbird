@@ -237,6 +237,45 @@ final class TerminalViewTests: XCTestCase {
         view.session?.terminate()
     }
 
+    // MARK: - Bracketed-paste sanitiser
+
+    func test_bracketedPasteSanitiser_leavesNormalPayloadUntouched() {
+        let input = Data("hello\nworld\n".utf8)
+        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), input)
+    }
+
+    func test_bracketedPasteSanitiser_stripsEmbeddedClose() {
+        // "foo" + ESC[201~ + "bar" — the embedded terminator would close the
+        // paste window early without sanitisation.
+        var input = Data("foo".utf8)
+        input.append(Data([0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]))
+        input.append(Data("bar".utf8))
+        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), Data("foobar".utf8))
+    }
+
+    func test_bracketedPasteSanitiser_stripsMultipleOccurrences() {
+        var input = Data()
+        input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E])
+        input.append(Data("a".utf8))
+        input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E])
+        input.append(Data("b".utf8))
+        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), Data("ab".utf8))
+    }
+
+    func test_bracketedPasteSanitiser_preservesOpener() {
+        // ESC[200~ *inside* a paste is harmless (bracketed paste doesn't
+        // nest) and stripping it would alter the user's content. Keep it.
+        var input = Data()
+        input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])
+        input.append(Data("payload".utf8))
+        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), input)
+    }
+
+    func test_bracketedPasteSanitiser_truncatedTerminator_leftIntact() {
+        let input = Data([0x1B, 0x5B, 0x32, 0x30, 0x31])  // 5-byte prefix of terminator
+        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), input)
+    }
+
     // MARK: - Mouse-report encoding (pure path)
 
     func test_mouseReport_sgr_leftPress_final_M() {
