@@ -131,11 +131,15 @@ final class TabStripView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        // Colour tiers tuned so both the active and inactive pills read
-        // as tabs against the theme-tinted titlebar. Lighter = active.
-        let selectedBg = NSColor(white: 1.0, alpha: 0.18).cgColor
-        let hoverBg    = NSColor(white: 1.0, alpha: 0.10).cgColor
-        let inactiveBg = NSColor(white: 1.0, alpha: 0.04).cgColor
+        // Tint the pill bodies with labelColor (dark on light, light on
+        // dark) so they stay visible regardless of whether the theme has
+        // a light or dark titlebar. Hard-coding white meant the entire
+        // pill strip disappeared on Gruvbox-light / Solarized-light /
+        // Catppuccin-latte / Default-light.
+        let tint = NSColor.labelColor
+        let selectedBg = tint.withAlphaComponent(0.18).cgColor
+        let hoverBg    = tint.withAlphaComponent(0.10).cgColor
+        let inactiveBg = tint.withAlphaComponent(0.04).cgColor
         let textColor  = NSColor.labelColor
         let inactiveText = NSColor.secondaryLabelColor
 
@@ -156,14 +160,16 @@ final class TabStripView: NSView {
             ctx.fillPath()
 
             // Close `×` shown only when the pill is hovered. Drawn at
-            // leading edge so text center stays stable.
+            // leading edge so text center stays stable. Tint with
+            // labelColor so the × circle stays visible on both light and
+            // dark themes (see pill body tinting rationale above).
             let closeRect = closeHotspot(in: rect)
             if isHovered {
                 let xFillColor: CGColor
                 if hoveredClose {
-                    xFillColor = NSColor(white: 1.0, alpha: 0.20).cgColor
+                    xFillColor = tint.withAlphaComponent(0.20).cgColor
                 } else {
-                    xFillColor = NSColor(white: 1.0, alpha: 0.08).cgColor
+                    xFillColor = tint.withAlphaComponent(0.08).cgColor
                 }
                 ctx.addPath(NSBezierPath(ovalIn: closeRect).cgPath)
                 ctx.setFillColor(xFillColor)
@@ -203,10 +209,11 @@ final class TabStripView: NSView {
             ))
         }
 
-        // Trailing `+` button.
+        // Trailing `+` button. Same label-tint so it stays visible on
+        // light themes too.
         let addPath = NSBezierPath(ovalIn: addButtonFrame).cgPath
         ctx.addPath(addPath)
-        ctx.setFillColor(NSColor(white: 1.0, alpha: hoveredAdd ? 0.16 : 0.08).cgColor)
+        ctx.setFillColor(tint.withAlphaComponent(hoveredAdd ? 0.16 : 0.08).cgColor)
         ctx.fillPath()
         let plusAttr: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
