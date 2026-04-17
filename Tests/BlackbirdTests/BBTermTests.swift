@@ -70,10 +70,11 @@ final class BBTermTests: XCTestCase {
     }
 
     // Pin down what alacritty_terminal hands us in Event::ClipboardStore.
-    // The Swift session layer currently splits the payload at the first ';'
-    // expecting "<target>;<base64>", so if this test ever shows we're being
-    // handed the decoded text (or the raw base64 without the target prefix)
-    // the OSC 52 pipeline is broken on the receiver side.
+    // The Swift session layer writes the payload straight through to
+    // NSPasteboard, so alacritty changing this shape in a future bump would
+    // mean we're either double-decoding (corrupts clipboard) or stuffing a
+    // "c;<base64>" literal into the user's clipboard. This test locks the
+    // assumption that alacritty 0.26 already decoded the base64.
     func test_osc52Payload_shapeViaAlacritty() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 40, rows: 5)))
         let exp = expectation(description: "osc52 payload")
