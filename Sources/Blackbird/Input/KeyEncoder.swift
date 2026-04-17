@@ -67,7 +67,15 @@ public final class KeyEncoder {
         // Modifier-encoded keys use CSI with a trailing modifier parameter.
         // Modern xterm convention: CSI 1;M <final> where M = 1 + bitmask.
         // Bitmask: shift=1, alt=2, ctrl=4, meta=8.
-        let modBits = modifierParam(modifiers)
+        //
+        // `optionIsMeta=false` means the user picked "Native" for the Option
+        // key: Option should produce macOS-native glyphs for printables and
+        // is invisible to the shell otherwise. Strip it from the modifier
+        // param so Option+Arrow emits plain ESC[A rather than alt-modified
+        // ESC[1;3A — the app isn't supposed to be treating Option as alt
+        // in Native mode.
+        let effectiveMods: Modifiers = optionIsMeta ? modifiers : modifiers.subtracting(.option)
+        let modBits = modifierParam(effectiveMods)
         let hasMods = modBits > 1
 
         switch key {
