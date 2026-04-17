@@ -50,6 +50,14 @@ public final class ThemeManager {
         return p.theme.palette(dark: dark)
     }
 
+    /// Re-apply the resolved palette to every registration. Use from any
+    /// "the window just became ready for a palette" hook (e.g. first show),
+    /// so quantities that need a live windowNumber — like the CGS blur
+    /// radius — actually take effect.
+    public func refresh() {
+        applyToAll()
+    }
+
     private func applyToAll() {
         // Reap registrations whose window controller has been deallocated
         // (both providers return nil), then apply to the survivors. Without

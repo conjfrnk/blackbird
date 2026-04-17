@@ -111,6 +111,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     required init?(coder: NSCoder) { fatalError("not supported") }
 
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        // Private CGS blur API needs a live windowNumber; windowNumber is
+        // only assigned once the window is ordered in. The first theme
+        // apply happens during init (before super), so the blur call then
+        // was a no-op. Re-run the palette push now that the window is
+        // visible so the blur actually lights up on first show.
+        DispatchQueue.main.async {
+            ThemeManager.shared.refresh()
+        }
+    }
+
     // MARK: - Session lifecycle
 
     private func startSession(inView view: TerminalView) {
