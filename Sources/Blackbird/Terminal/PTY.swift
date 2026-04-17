@@ -89,7 +89,20 @@ public final class PTY {
             }
         }
 
-        if pid < 0 { throw Error.forkFailed(errno: errno) }
+        if pid < 0 {
+            // On macOS forkpty closes both fds when fork itself fails, but the
+            // BSD contract isn't uniform — some derivatives leave the master
+            // open. Belt-and-braces: close if we hold a valid fd, so a
+            // Blackbird that keeps retrying shell spawns under resource
+            // pressure (hit RLIMIT_NPROC once) can't run the descriptor table
+            // dry from leaked PTY masters. errno is preserved across close.
+            if master >= 0 {
+                let savedErrno = errno
+                _ = Darwin.close(master)
+                errno = savedErrno
+            }
+            throw Error.forkFailed(errno: errno)
+        }
 
         if pid == 0 {
             // Child: set env, chdir to home, then exec.
