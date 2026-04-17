@@ -30,15 +30,22 @@ public final class GlyphAtlas {
     private var nextSlot: Int = 0
 
     public init?(device: MTLDevice, metrics: CellMetrics, capacityGlyphs: Int, scale: CGFloat = 1.0) {
+        // Guard against nonsensical inputs up front: zero capacity would
+        // compute cols = 0 and then divide by zero when picking rows, and
+        // zero-scale would produce a zero-pixel cell (invalid texture).
+        guard capacityGlyphs > 0, scale > 0 else { return nil }
         self.metrics = metrics
         self.capacityGlyphs = capacityGlyphs
         self.scale = scale
         // Pixel-resolution cell dimensions so glyphs are sharp on Retina.
-        self.cellPxWidth = Int((metrics.cellWidth * scale).rounded())
-        self.cellPxHeight = Int((metrics.cellHeight * scale).rounded())
+        // CellMetrics already clamps cellWidth/cellHeight ≥ 1pt; multiply
+        // by scale (>0 per above guard) and round up to keep at least 1
+        // pixel so the atlas texture is always non-degenerate.
+        self.cellPxWidth = max(1, Int((metrics.cellWidth * scale).rounded()))
+        self.cellPxHeight = max(1, Int((metrics.cellHeight * scale).rounded()))
 
         // Choose a near-square grid that holds `capacityGlyphs` slots.
-        let cols = Int(Double(capacityGlyphs).squareRoot().rounded(.up))
+        let cols = max(1, Int(Double(capacityGlyphs).squareRoot().rounded(.up)))
         let rows = (capacityGlyphs + cols - 1) / cols
         self.slotCols = cols
         self.slotRows = rows
