@@ -25,6 +25,20 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertGreaterThan(metrics.ascent, 0)
     }
 
+    func test_cellMetrics_gridClampsOnTinyPixelSize() {
+        // Tiny input (sub-cell) should still yield a 1×1 grid rather than
+        // 0 cols or 0 rows — downstream BBTerm rejects 0 dims and the
+        // view would render nothing at all. Confirm the floor.
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let tiny = metrics.grid(forPixelSize: CGSize(width: 0.1, height: 0.1))
+        XCTAssertEqual(tiny.cols, 1)
+        XCTAssertEqual(tiny.rows, 1)
+        // Zero also clamps (was `max(1, Int(0 / cellWidth)) = 1`).
+        let zero = metrics.grid(forPixelSize: CGSize(width: 0, height: 0))
+        XCTAssertEqual(zero.cols, 1)
+        XCTAssertEqual(zero.rows, 1)
+    }
+
     func test_resizeForwardsToSession() throws {
         let session = try TerminalSession.start(
             shell: "/bin/cat",
