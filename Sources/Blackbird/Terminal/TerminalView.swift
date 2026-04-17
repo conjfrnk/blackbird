@@ -100,6 +100,34 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var findCurrentIndex: Int = 0
     private var findQuery: String = ""
 
+    /// True while an active drag with file URLs is hovering the view. Drives
+    /// the accent-coloured drop-target ring. Set by the NSDraggingDestination
+    /// callbacks in TerminalView+Dragging.swift.
+    var isDropTargeted: Bool = false {
+        didSet {
+            guard oldValue != isDropTargeted else { return }
+            dropHighlightView.isHidden = !isDropTargeted
+        }
+    }
+
+    /// Accent-coloured border overlay shown while a file drag is hovering.
+    /// Implemented as an NSBox rather than a Metal draw because the view is
+    /// an MTKView — compositing an AppKit child over the Metal layer is
+    /// simpler, hit-transparent, and cheap to show/hide on a dragging
+    /// enter/exit event. Sized in `layout()`; initially hidden.
+    private let dropHighlightView: NSBox = {
+        let b = NSBox(frame: .zero)
+        b.boxType = .custom
+        b.borderType = .lineBorder
+        b.borderColor = .controlAccentColor
+        b.borderWidth = 2
+        b.cornerRadius = 4
+        b.fillColor = .clear
+        b.titlePosition = .noTitle
+        b.isHidden = true
+        return b
+    }()
+
     #if DEBUG
     private var frameCount = 0
     private var lastFrameLogTime = Date()
@@ -156,6 +184,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         bellFlashView.frame = bounds
         bellFlashView.autoresizingMask = [.width, .height]
         addSubview(bellFlashView)
+
+        // Drop-target ring sits on top of the bell flash so a dropped file
+        // feedback never gets visually swamped by a simultaneous ^G bell.
+        // Autoresizes with the view so layout() only adjusts explicit frames.
+        dropHighlightView.frame = bounds
+        dropHighlightView.autoresizingMask = [.width, .height]
+        addSubview(dropHighlightView)
 
         prefsCancellable = Preferences.shared.objectWillChange
             .sink { [weak self] _ in
@@ -399,6 +434,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // Register every time the view attaches to a new window — AppKit
+        // doesn't carry dragging-destination registration across window
+        // moves reliably, and this is idempotent so repeated calls are safe.
+        // The NSDraggingDestination conformance lives in
+        // TerminalView+Dragging.swift.
+        registerForDraggedTypes([.fileURL])
         #if DEBUG
         if let screen = window?.screen {
             // On macOS, `maximumFramesPerSecond` reflects the screen's native
@@ -763,12 +804,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - Paste
 
     @objc public func paste(_ sender: Any?) {
-        guard let session else { return }
         guard let str = NSPasteboard.general.string(forType: .string) else { return }
+        pasteText(str)
+    }
+
+    /// Shared paste implementation: applies CRLF normalisation, wraps in
+    /// bracketed-paste markers when the app has enabled mode 2004, and sends
+    /// to the session. Used by both the menu/keyboard paste action and the
+    /// drag-and-drop code path (file URLs are shell-quoted into a single
+    /// string which is then fed through here).
+    func pasteText(_ text: String) {
+        guard let session else { return }
         if (currentSnapshot?.displayOffset ?? 0) > 0 {
             session.scrollToBottom()
         }
-        let bytes = Self.normalizePasteLineEndings(Data(str.utf8))
+        let bytes = Self.normalizePasteLineEndings(Data(text.utf8))
         let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
         if bracketedPaste {
             var wrapped = Data([0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])  // ESC[200~
@@ -838,6 +888,54 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             i = input.index(after: i)
         }
         return out
+    }
+
+    // MARK: - Drag and drop
+
+    // NSDraggingDestination callbacks. Live on the main class (not an
+    // extension) because NSView declares default empty implementations and
+    // Swift requires `override` for those, which isn't permitted in an
+    // extension of the same module. The pure formatters (`shellQuote`,
+    // `joinedDroppedPaths`) live in TerminalView+Dragging.swift so they
+    // can be unit-tested without building a drag fake.
+
+    public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard draggingPasteboardHasFileURLs(sender) else { return [] }
+        isDropTargeted = true
+        return .copy
+    }
+
+    public override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        // Re-answer the accepted operation on each move so the OS keeps the
+        // copy-cursor badge for the whole hover, not just the initial enter.
+        guard draggingPasteboardHasFileURLs(sender) else { return [] }
+        return .copy
+    }
+
+    public override func draggingExited(_ sender: NSDraggingInfo?) {
+        isDropTargeted = false
+    }
+
+    public override func draggingEnded(_ sender: NSDraggingInfo) {
+        isDropTargeted = false
+    }
+
+    public override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        // Always clear the ring before returning — whether we accept the
+        // drop or not, the drag is over.
+        defer { isDropTargeted = false }
+        let pb = sender.draggingPasteboard
+        let items = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] ?? []
+        // Keep only file-scheme URLs. `readObjects(forClasses: [NSURL.self])`
+        // can also return https: URLs from a web-browser drag; those would
+        // turn into garbage arguments if we blindly `path`-stringified them.
+        let paths = items.compactMap { url -> String? in
+            guard url.isFileURL else { return nil }
+            return url.path
+        }
+        guard !paths.isEmpty else { return false }
+        pasteText(Self.joinedDroppedPaths(paths))
+        return true
     }
 
     @objc public func copy(_ sender: Any?) {

@@ -43,6 +43,8 @@
 		B7DB0F3545C7837C281C722C /* TerminalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 489C78DC347E6FC5D826215C /* TerminalSession.swift */; };
 		BD9DFA4CCAD8CC3074E535BB /* BufferPointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B671ECA2BD417DF4532B282 /* BufferPointTests.swift */; };
 		BF0ADDAAD252C3F8D7FD3F79 /* CellInstance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C735D6264882444369074ACB /* CellInstance.swift */; };
+		BF8C522F82650E26EE4BDBE7 /* DragDropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55708BAFA22EAB8E62D45DF1 /* DragDropTests.swift */; };
+		C069AA35BA0D585A12C68B98 /* TerminalView+Dragging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */; };
 		C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E03399349EE1327FBF8F2F /* Selection.swift */; };
 		C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */; };
 		C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3C166E3043F25B8791103E /* App.swift */; };
@@ -87,11 +89,13 @@
 		489C78DC347E6FC5D826215C /* TerminalSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSession.swift; sourceTree = "<group>"; };
 		4EC02EBECC88454DC42A0233 /* PreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesTests.swift; sourceTree = "<group>"; };
 		54EE4D20D3C306349C12E69A /* WindowBlur.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowBlur.swift; sourceTree = "<group>"; };
+		55708BAFA22EAB8E62D45DF1 /* DragDropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DragDropTests.swift; sourceTree = "<group>"; };
 		568D389F2829611D1FDC43FA /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		5995252272D652667DB2D2D9 /* PTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTY.swift; sourceTree = "<group>"; };
 		5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
 		673FE2E71DCD08F9286D5C60 /* kitty.terminfo */ = {isa = PBXFileReference; path = kitty.terminfo; sourceTree = "<group>"; };
 		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
+		6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+Dragging.swift"; sourceTree = "<group>"; };
 		720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderExtendedTests.swift; sourceTree = "<group>"; };
 		75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewTests.swift; sourceTree = "<group>"; };
 		75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlas.swift; sourceTree = "<group>"; };
@@ -163,6 +167,7 @@
 			children = (
 				11194E0650067380506F53B2 /* BBTermTests.swift */,
 				0B671ECA2BD417DF4532B282 /* BufferPointTests.swift */,
+				55708BAFA22EAB8E62D45DF1 /* DragDropTests.swift */,
 				15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */,
 				720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */,
 				68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */,
@@ -232,6 +237,7 @@
 				00E03399349EE1327FBF8F2F /* Selection.swift */,
 				489C78DC347E6FC5D826215C /* TerminalSession.swift */,
 				4612F747000A5316DE0CD55F /* TerminalView.swift */,
+				6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */,
 				EC1D8A560291CE5E7A0CAD11 /* URLDetector.swift */,
 			);
 			path = Terminal;
@@ -454,6 +460,7 @@
 				7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */,
 				552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */,
 				B7DB0F3545C7837C281C722C /* TerminalSession.swift in Sources */,
+				C069AA35BA0D585A12C68B98 /* TerminalView+Dragging.swift in Sources */,
 				CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */,
 				8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */,
 				47C98A15F7530D2D7BC49CA3 /* ThemeManager.swift in Sources */,
@@ -469,6 +476,7 @@
 			files = (
 				82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */,
 				BD9DFA4CCAD8CC3074E535BB /* BufferPointTests.swift in Sources */,
+				BF8C522F82650E26EE4BDBE7 /* DragDropTests.swift in Sources */,
 				E0E1272012D9B7B00E10E664 /* GlyphAtlasTests.swift in Sources */,
 				405BF1745156AB5C7AF12842 /* KeyEncoderExtendedTests.swift in Sources */,
 				CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */,
