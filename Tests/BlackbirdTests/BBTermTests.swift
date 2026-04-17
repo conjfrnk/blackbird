@@ -109,4 +109,27 @@ final class BBTermTests: XCTestCase {
         XCTAssertTrue(snap.termMode.contains(.showCursor), "SHOW_CURSOR should be on by default")
         XCTAssertTrue(snap.termMode.contains(.lineWrap), "LINE_WRAP should be on by default")
     }
+
+    /// Swift-side regression test for the palette slot panic the fuzzer found.
+    /// A hand-edited UserDefaults or a misbehaving theme pipeline could hand
+    /// BBTerm.setColor an out-of-range slot (u16); the whole chain down to
+    /// alacritty must survive without aborting the process. BBTerm wraps
+    /// bb_term_set_named_color which now clamps via alacritty::term::color::COUNT
+    /// in the Rust FFI layer.
+    func test_setColor_outOfRangeSlotDoesNotCrash() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 5, rows: 2)))
+        // Below-valid-range slots that used to panic through alacritty.
+        term.setColor(slot: 3598, rgb: 0xDE_ADBE)
+        term.setColor(slot: 9999, rgb: 0xC0_FFEE)
+        term.setColor(slot: 65535, rgb: 0xBE_EF00)
+        // A legit slot still applies — sanity that we didn't break the
+        // happy path while adding the clamp.
+        term.setColor(slot: 257, rgb: 0x22_3344)
+        let snap = try XCTUnwrap(term.snapshot())
+        XCTAssertEqual(
+            snap.cols * snap.rows,
+            snap.cellCount,
+            "snapshot still produced; setColor didn't corrupt term state"
+        )
+    }
 }

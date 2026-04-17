@@ -360,8 +360,8 @@ void bb_term_clear_all(struct BBTerm *term);
  * `rgb` is packed 0xRRGGBB.
  *
  * # Safety
- * Same preconditions as `bb_term_input`. Null `term` is a no-op. Out-of-
- * range slots are silently ignored by alacritty's Colors setter.
+ * Same preconditions as `bb_term_input`. Null `term` is a no-op. Slots
+ * beyond alacritty's palette length are silently ignored.
  */
 void bb_term_set_named_color(struct BBTerm *term, uint16_t slot, uint32_t rgb);
 
