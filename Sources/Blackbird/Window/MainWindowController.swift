@@ -254,6 +254,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             DispatchQueue.main.async { self?.hideNativeTabStrip() }
         }
         tabGroupObservers = [winObs, selObs, visObs]
+
+        // When the shell emits OSC 2 / OSC 0, TerminalView writes the new
+        // string into window.title — but the custom pill strip doesn't
+        // auto-redraw from that (refreshTabBar is only invoked on
+        // add/remove/select). Observe title so tab pills stay in sync with
+        // the shell's reported title.
+        if let hostWindow = window {
+            titleObserver = hostWindow.observe(\.title, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.refreshTabBar() }
+            }
+        }
     }
 
     func refreshTabBar() {
