@@ -29,6 +29,16 @@ final class KeyEncoderTests: XCTestCase {
         XCTAssertEqual(encoder.encode(chars: "\t", modifiers: []), Data([0x09]))
     }
 
+    func test_shiftTab_emitsCsiZ() {
+        // Shift+Tab is xterm's "back-tab" (reverse tab). zsh's reverse-menu,
+        // bash readline's menu-complete, and tab-cycling pickers in TUIs
+        // all bind CSI Z. Delivering a plain 0x09 is indistinguishable from
+        // a forward Tab and breaks those bindings.
+        let encoder = KeyEncoder()
+        XCTAssertEqual(encoder.encode(chars: "\t", modifiers: [.shift]),
+                       Data([0x1B, 0x5B, 0x5A]))
+    }
+
     func test_escape() {
         let encoder = KeyEncoder()
         XCTAssertEqual(encoder.encode(chars: "\u{1B}", modifiers: []), Data([0x1B]))

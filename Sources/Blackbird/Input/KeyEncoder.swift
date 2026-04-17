@@ -43,6 +43,13 @@ public final class KeyEncoder {
         // a future caller exercising the encoder directly still won't leak.
         if modifiers.contains(.command) { return Data() }
 
+        // Shift+Tab → CSI Z (reverse tab, "backtab"). Completion widgets and
+        // the readline/zsh reverse-menu selection all expect this specific
+        // sequence. AppKit delivers Shift+Tab as chars "\t" with .shift set.
+        if modifiers.contains(.shift), chars == "\t" {
+            return Data([0x1B, 0x5B, 0x5A])    // ESC [ Z
+        }
+
         // Ctrl+printable: only the first character is transformed.
         if modifiers.contains(.control), let scalar = chars.unicodeScalars.first {
             if let ctrlByte = controlByte(for: scalar) {
