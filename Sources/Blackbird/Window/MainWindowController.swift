@@ -244,6 +244,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     private func observeTabGroup() {
         tabGroupObservers.removeAll()
+        // Tear down the notification observer on re-registration (e.g., if
+        // we ever re-run observeTabGroup after the tab group changes) so
+        // we don't leak duplicate observers that all fire on every title
+        // change. titleObserver (KVO) auto-invalidates when reassigned.
+        if let old = titleBroadcastObserver {
+            NotificationCenter.default.removeObserver(old)
+            titleBroadcastObserver = nil
+        }
         guard let group = window?.tabGroup else { return }
         let winObs = group.observe(\.windows, options: [.new]) { [weak self] _, _ in
             DispatchQueue.main.async {
