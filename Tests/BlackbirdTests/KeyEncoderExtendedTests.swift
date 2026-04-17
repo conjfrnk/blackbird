@@ -214,6 +214,28 @@ final class KeyEncoderExtendedTests: XCTestCase {
         XCTAssertEqual(result, csiOne(param: 3, letter: 0x41))
     }
 
+    // MARK: - Native Option mode passes macOS-shaped glyphs through verbatim
+
+    func test_optionPrintable_native_sendsChar() {
+        let encoder = KeyEncoder(optionIsMeta: false)
+        // Option+E → `´` (U+00B4 ACUTE ACCENT) on US layout; Native mode
+        // must send those bytes straight through so the shell can paste the
+        // accent character in. Meta mode (optionIsMeta=true) would instead
+        // prepend ESC to the base letter.
+        let result = encoder.encode(chars: "´", modifiers: [.option])
+        XCTAssertEqual(result, Data("´".utf8),
+                       "Native mode must pass Option-modified glyph verbatim")
+    }
+
+    func test_optionPrintable_meta_prependsEsc() {
+        let encoder = KeyEncoder(optionIsMeta: true)
+        // Caller (TerminalView) in Meta mode supplies charactersIgnoringModifiers
+        // (the base key), NOT the Option-modified glyph, and expects ESC-prefix.
+        let result = encoder.encode(chars: "e", modifiers: [.option])
+        XCTAssertEqual(result, Data([0x1B, 0x65]),
+                       "Meta mode must produce ESC+base-char, not the shifted glyph")
+    }
+
     // MARK: - ⌘-prefix events must never produce PTY bytes
 
     // TerminalView filters ⌘ at the event boundary (⌘C / ⌘V / ⌘T etc. are

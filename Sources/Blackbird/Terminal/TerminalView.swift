@@ -639,7 +639,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
 
-        let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
+        // In Native Option mode, the user wants macOS's keyboard layout to
+        // decide what Option+<key> produces (e.g. Option+E → ´, Option+N →
+        // ˜, Option+A → å on US layout). `charactersIgnoringModifiers`
+        // strips Option and returns the base key, which would send plain
+        // "e"/"n"/"a" to the shell — defeating Native mode. `event.characters`
+        // reflects the Option-modified glyph macOS produced, which is what
+        // Native mode should deliver verbatim. In Meta mode we still want
+        // `charactersIgnoringModifiers` so Option+E → ESC+"e" (the classic
+        // readline metafied byte) and not ESC+"´".
+        let chars: String = {
+            if !encoder.optionIsMeta, event.modifierFlags.contains(.option) {
+                // Fall back through characters → charactersIgnoringModifiers
+                // so dead-key in-progress events (characters may be empty
+                // while the user is mid-composition) still yield something
+                // sensible.
+                return event.characters?.isEmpty == false
+                    ? (event.characters ?? "")
+                    : (event.charactersIgnoringModifiers ?? "")
+            }
+            return event.charactersIgnoringModifiers ?? event.characters ?? ""
+        }()
         let bytes = encoder.encode(chars: chars, modifiers: mods)
         #if DEBUG
         if !bytes.isEmpty {
