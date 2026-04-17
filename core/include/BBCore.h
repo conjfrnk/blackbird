@@ -99,6 +99,18 @@ enum BBEventKind
    * will time out waiting for a response.
    */
   BB_EVENT_KIND_PTY_WRITE = 5,
+  /**
+   * New in 2026-04-17 gaps plan. Payload: UTF-8 bytes of the local
+   * filesystem path decoded from an OSC 7 `file://` URL. Only emitted
+   * when scheme is `file` and authority is empty or `localhost`.
+   *
+   * OSC 7 is not parsed by `alacritty_terminal` 0.26 / `vte` 0.15 —
+   * the sequence falls through vte's `osc_dispatch` unhandled branch.
+   * We run a parallel `vte::Parser` in `bb_term_input` against an
+   * `Osc7Scanner` that fires only on this one sequence. See the
+   * scanner impl and the fragmentation test for details.
+   */
+  BB_EVENT_KIND_CWD_CHANGED = 6,
   BB_EVENT_KIND_FATAL = 99,
 };
 #ifndef __cplusplus
