@@ -300,7 +300,13 @@ public final class MetalRenderer {
                 let lo = min(a.line, b.line), hi = max(a.line, b.line)
                 let cLo = min(a.col, b.col), cHi = max(a.col, b.col)
                 return line >= lo && line <= hi && col >= cLo && col <= cHi
-            default:
+            case .line:
+                // Line mode always highlights whole rows between a.line and
+                // b.line — the drag path keeps anchor/cursor on their
+                // original col, so without this the last (or first) dragged
+                // line would only highlight up to the pointer's column.
+                return line >= a.line && line <= b.line
+            case .character, .word:
                 if line < a.line || line > b.line { return false }
                 if a.line == b.line { return col >= a.col && col <= b.col }
                 if line == a.line { return col >= a.col }

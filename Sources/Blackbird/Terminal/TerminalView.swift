@@ -619,13 +619,34 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     @objc public func copy(_ sender: Any?) {
-        guard let sel = selection, let session else { return }
-        let (a, b) = sel.normalized
-        let text = session.textRange(from: a, to: b, rectangular: sel.mode == .rectangular)
+        guard let sel = selection, let session, let snap = currentSnapshot else { return }
+        let (start, end) = Self.copyRange(for: sel, cols: snap.cols)
+        let text = session.textRange(from: start, to: end, rectangular: sel.mode == .rectangular)
         guard !text.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
+    }
+
+    /// Compute the (start, end) buffer points to pass into
+    /// `TerminalSession.textRange` given a selection and the current grid
+    /// width. Pure so the mode-specific fixups can be unit-tested.
+    ///
+    /// `.line` mode highlights full rows on screen; mirror that in the copy
+    /// so triple-click + drag yields "every whole line between the anchor
+    /// and the pointer" instead of truncating the first/last line to the
+    /// pointer's column. All other modes copy the normalized pair as-is.
+    static func copyRange(for selection: Selection, cols: Int) -> (start: BufferPoint, end: BufferPoint) {
+        let (a, b) = selection.normalized
+        switch selection.mode {
+        case .line:
+            return (
+                BufferPoint(line: a.line, col: 0),
+                BufferPoint(line: b.line, col: max(0, cols - 1))
+            )
+        case .character, .word, .rectangular:
+            return (a, b)
+        }
     }
 
     @objc public override func selectAll(_ sender: Any?) {
