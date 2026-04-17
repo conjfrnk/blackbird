@@ -131,16 +131,17 @@ public final class MetalRenderer {
     /// picks up the new atlas immediately.
     ///
     /// Atomic: metrics only change if the new atlas built successfully.
-    /// Otherwise the renderer keeps rendering the old font at the old
-    /// cell size — a mismatched (new metrics, old atlas) would produce
-    /// visibly wrong glyph sizes because the old atlas rasterised at
-    /// different dimensions.
-    public func reconfigure(metrics newMetrics: CellMetrics, scale: CGFloat) {
+    /// Returns `true` on success, `false` when the atlas couldn't be
+    /// allocated (e.g., GPU memory pressure) so callers can keep their
+    /// own mirror of metrics in sync.
+    @discardableResult
+    public func reconfigure(metrics newMetrics: CellMetrics, scale: CGFloat) -> Bool {
         guard let a = GlyphAtlas(device: device, metrics: newMetrics, capacityGlyphs: Self.atlasCapacity, scale: scale) else {
-            return
+            return false
         }
         self.metrics = newMetrics
         self.atlas = a
+        return true
     }
 
     /// Write cell instance data into `instanceBuffer`. Returns the count

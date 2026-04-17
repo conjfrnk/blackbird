@@ -183,8 +183,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let newFont = Self.resolveFont(name: wantName, size: wantSize)
         let newMetrics = CellMetrics(font: newFont)
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        // Only commit the new metrics if the renderer actually rebuilt its
+        // atlas; otherwise grid math and glyph rasterisation would drift
+        // apart (cells laid out at new size but drawn with an old-size
+        // atlas → smeared / wrong-sized glyphs).
+        guard renderer.reconfigure(metrics: newMetrics, scale: scale) else { return }
         self.metrics = newMetrics
-        renderer.reconfigure(metrics: newMetrics, scale: scale)
         if let window {
             // Window resize increments should follow the new cell size too.
             window.contentResizeIncrements = NSSize(
