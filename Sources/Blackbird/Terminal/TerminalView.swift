@@ -123,7 +123,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// `setMarkedText` → `insertText`/`unmarkText` cycle. The NSTextInputClient
     /// conformance lives in `TerminalView+IME.swift`; this property is the
     /// one piece of shared state keyDown and the IME path both inspect.
-    var composition: Composition?
+    var composition: TerminalView.Composition?
     /// Flag raised by `insertText(_:)` for the duration of a single
     /// `keyDown(with:)` pass. Lets keyDown tell "the IME already committed
     /// bytes for this event" apart from "no IME activity at all" after
@@ -398,6 +398,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             width: width,
             height: max(0, bounds.height - bottom - top)
         )
+        // Re-anchor the IME preedit overlay to the current cursor cell
+        // whenever our bounds change — a window resize mid-composition
+        // would otherwise leave the overlay stranded at stale pixel
+        // coordinates until the user committed or cancelled.
+        if composition != nil {
+            refreshPreeditOverlay()
+        }
     }
 
 
@@ -465,6 +472,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // where the desktop bleed-through happens.
         clearColor = MTLClearColor(red: bgR, green: bgG, blue: bgB, alpha: opacity)
         themeDefaultBgRgb = palette.background
+        themeDefaultFgRgb = palette.foreground
         renderer.setDefaultBgRgb(palette.background)
         renderer.setCursorColor(rgb: palette.cursor)
         // Single slider — explicit colors (status lines, highlights) fade
@@ -474,12 +482,29 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         renderer.setCursorBlinkEnabled(Preferences.shared.cursorBlink)
         setWindowAppearance(opacity: opacity, themeBg: (bgR, bgG, bgB))
         window?.setBackgroundBlurRadius(blurRadius)
+        // If an IME composition is in flight when the theme changes, repaint
+        // the preedit overlay so its fg/bg track the new palette. Without
+        // this the overlay holds its pre-change colours until the next
+        // setMarkedText/insertText callback — visible to anyone mid-kana
+        // composition at the moment they toggle light/dark.
+        if composition != nil {
+            refreshPreeditOverlay()
+        }
     }
 
     /// Theme's default background RGB, captured so the renderer can skip
     /// drawing a bg quad for cells at the default bg (they inherit the
-    /// transparent clearColor).
-    private var themeDefaultBgRgb: UInt32 = 0x000000
+    /// transparent clearColor). Internal so `TerminalView+IME.swift`'s
+    /// preedit-overlay path can render against the same theme bg that
+    /// committed text will land on.
+    var themeDefaultBgRgb: UInt32 = 0x000000
+
+    /// Theme's default foreground RGB. Cached so the IME preedit overlay
+    /// can render composing glyphs in the same colour committed text will
+    /// land in, rather than AppKit's `.labelColor` (which ignores the
+    /// Blackbird theme and flips to white on dark system appearance even
+    /// under a light theme).
+    var themeDefaultFgRgb: UInt32 = 0xFFFFFF
 
     private func setWindowAppearance(opacity: Double, themeBg: (r: Double, g: Double, b: Double)) {
         let transparent = opacity < 0.999

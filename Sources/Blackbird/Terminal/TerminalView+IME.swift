@@ -1,26 +1,16 @@
 import AppKit
 
-/// In-flight IME composition. While non-nil the view is in preedit mode:
-/// `hasMarkedText()` is true, `keyDown` hands every event to the input
-/// context, and nothing reaches the PTY until `insertText(_:)` commits.
-struct Composition {
-    var attributedText: NSAttributedString
-    /// Caret offset *inside the preedit string* as reported by the IME. We
-    /// surface it via `selectedRange()` so the input method can position
-    /// its candidate window correctly mid-composition.
-    var selectedRange: NSRange
-}
-
 #if DEBUG
 /// Records bytes that would have been written to a real PTY. Swapped in via
 /// `TerminalView.ptyRecorderForTests` so the IME tests can assert exactly
 /// which commits reach the shell without spinning up a forkpty. Declared
 /// in the production target (gated on DEBUG) so `TerminalView`'s stored
-/// property type is resolvable from the test bundle without forcing the
-/// test module to inject it — matches the `urlOpenerForTests` pattern.
-public final class RecordingPTY {
-    public var sent = Data()
-    public init() {}
+/// property type is resolvable from the test bundle via `@testable import
+/// Blackbird`. Internal access is sufficient — the test module pulls it
+/// in through `@testable`, and nothing ships this symbol in release.
+final class RecordingPTY {
+    var sent = Data()
+    init() {}
 }
 #endif
 
@@ -39,8 +29,19 @@ final class PreeditOverlayView: NSView {
     private var preeditString: NSAttributedString = NSAttributedString(string: "")
     private var cellWidth: CGFloat = 1
     private var cellHeight: CGFloat = 1
+    /// Resolved theme foreground — kept in sync with `TerminalView`'s cached
+    /// `themeDefaultFgRgb` so the composing text reads in the same colour
+    /// committed output will take.
     private var fgColor: NSColor = .labelColor
+    /// Resolved theme background — kept in sync with `themeDefaultBgRgb` so
+    /// the overlay paints against the same tint a default-bg cell would.
+    private var bgColor: NSColor = .textBackgroundColor
     private var underlineColor: NSColor = .controlAccentColor
+    /// Font used to render the composing text. Matches the terminal's
+    /// configured font so a user on "Hack Nerd Font Mono" sees `´` in Hack,
+    /// not SF Mono, and doesn't get a font flip at commit. Defaults to
+    /// system mono until `update(...)` is called with the real one.
+    private var font: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular)
 
     override var isFlipped: Bool { true }
 
@@ -48,12 +49,16 @@ final class PreeditOverlayView: NSView {
 
     func update(text: NSAttributedString,
                 cellSize: NSSize,
+                font: NSFont,
                 foreground: NSColor,
+                background: NSColor,
                 underline: NSColor) {
         preeditString = text
         cellWidth = max(1, cellSize.width)
         cellHeight = max(1, cellSize.height)
+        self.font = font
         fgColor = foreground
+        bgColor = background
         underlineColor = underline
         needsDisplay = true
     }
@@ -61,20 +66,24 @@ final class PreeditOverlayView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard preeditString.length > 0 else { return }
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        // Fill the entire preedit span with a solid bg so the underlying
-        // terminal cells don't bleed through the composition. Uses the
-        // view's textBackgroundColor — in practice this matches what the
-        // theme paints for default-bg cells.
-        ctx.setFillColor(NSColor.textBackgroundColor.cgColor)
+        // Fill the entire preedit span with the theme background so the
+        // underlying terminal cells don't bleed through the composition. The
+        // colour tracks the user's active Blackbird theme — not AppKit's
+        // system `textBackgroundColor`, which would flip with the OS
+        // appearance even when the theme is pinned to light or dark.
+        ctx.setFillColor(bgColor.cgColor)
         ctx.fill(bounds)
-        // Text: left-aligned, top-of-cell baseline matching the grid.
+        // Text: left-aligned, vertically centered in the cell. Hoist `font`
+        // to a local so we don't round-trip through the attributes dict
+        // just to read back its pointSize.
+        let glyphFont = font
         let attrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: fgColor,
-            .font: NSFont.monospacedSystemFont(ofSize: cellHeight * 0.7, weight: .regular)
+            .font: glyphFont
         ]
         let mutable = NSMutableAttributedString(attributedString: preeditString)
         mutable.addAttributes(attrs, range: NSRange(location: 0, length: mutable.length))
-        mutable.draw(at: NSPoint(x: 0, y: (cellHeight - (attrs[.font] as! NSFont).pointSize) / 2))
+        mutable.draw(at: NSPoint(x: 0, y: (cellHeight - glyphFont.pointSize) / 2))
         // Dotted underline across the full preedit width. Matches macOS's
         // conventional "uncommitted composition" affordance.
         ctx.saveGState()
@@ -91,6 +100,20 @@ final class PreeditOverlayView: NSView {
 }
 
 extension TerminalView: NSTextInputClient {
+
+    /// In-flight IME composition. While non-nil the view is in preedit mode:
+    /// `hasMarkedText()` is true, `keyDown` hands every event to the input
+    /// context, and nothing reaches the PTY until `insertText(_:)` commits.
+    ///
+    /// Nested inside `TerminalView` to keep the generic-sounding
+    /// "Composition" name from taking up a module-wide identifier.
+    struct Composition {
+        var attributedText: NSAttributedString
+        /// Caret offset *inside the preedit string* as reported by the IME.
+        /// Surfaced via `selectedRange()` so the input method can position
+        /// its candidate window correctly mid-composition.
+        var selectedRange: NSRange
+    }
 
     // MARK: - NSTextInputClient
 
@@ -121,7 +144,19 @@ extension TerminalView: NSTextInputClient {
         if attrs.length == 0 {
             composition = nil
         } else {
-            composition = Composition(attributedText: attrs, selectedRange: selectedRange)
+            // Defensive clamp on the caret range: a malformed IME could
+            // hand us a location or length that overruns `attrs`, and
+            // `selectedRange()` would then return a range the candidate
+            // window can't interpret. Use the same pattern
+            // `attributedSubstring` uses so behaviour is consistent.
+            let total = attrs.length
+            let loc = max(0, min(selectedRange.location, total))
+            let len = max(0, min(selectedRange.length, total - loc))
+            let clampedSel = NSRange(location: loc, length: len)
+            composition = TerminalView.Composition(
+                attributedText: attrs,
+                selectedRange: clampedSel
+            )
         }
         refreshPreeditOverlay()
     }
@@ -247,6 +282,15 @@ extension TerminalView: NSTextInputClient {
     /// Reposition the preedit overlay subview against the current composition.
     /// Creates it lazily on first use; removes it entirely when composition
     /// ends so idle sessions keep a clean view hierarchy.
+    ///
+    /// Called from four places:
+    ///   - `setMarkedText` / `unmarkText` / `insertText` (composition state
+    ///     changed),
+    ///   - `layout()` in `TerminalView` (bounds changed — keeps the overlay
+    ///     anchored to the cursor cell while the user resizes the window
+    ///     mid-composition),
+    ///   - `applyTheme(_:)` (palette swap — repaints the overlay in the new
+    ///     theme fg/bg without waiting for the next IME callback).
     func refreshPreeditOverlay() {
         guard let composition else {
             preeditOverlay?.removeFromSuperview()
@@ -279,16 +323,31 @@ extension TerminalView: NSTextInputClient {
         overlay.update(
             text: composition.attributedText,
             cellSize: NSSize(width: metrics.cellWidth, height: metrics.cellHeight),
-            foreground: .labelColor,
+            font: metrics.font,
+            foreground: Self.nsColor(fromRgb: themeDefaultFgRgb),
+            background: Self.nsColor(fromRgb: themeDefaultBgRgb),
             underline: .controlAccentColor
         )
         needsDisplay = true
     }
 
-    /// Wrapper around `session.send(bytes)` that routes through an injected
-    /// recorder in DEBUG builds so tests can assert exactly which bytes the
-    /// IME commit path would have emitted without forkpty'ing a real shell.
-    /// Production always calls `session?.send` directly.
+    /// Unpack a packed 0x00RRGGBB integer into an `NSColor`. Extension-local
+    /// because the existing SIMD converter in the renderer wants `SIMD4<Float>`,
+    /// and the preedit overlay draws via Core Graphics which wants NSColor.
+    fileprivate static func nsColor(fromRgb rgb: UInt32) -> NSColor {
+        let r = CGFloat((rgb >> 16) & 0xFF) / 255.0
+        let g = CGFloat((rgb >> 8)  & 0xFF) / 255.0
+        let b = CGFloat(rgb & 0xFF) / 255.0
+        return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+    }
+
+    /// IME-commit wrapper around `session.send(bytes)` — used ONLY by the
+    /// NSTextInputClient commit path and the main `keyDown` encoder
+    /// fall-through. Does NOT intercept paste, mouse reporting, focus
+    /// events, or the Ctrl-letter fast path: those remain on `session.send`
+    /// / `session.sendImmediate` directly. Gated on DEBUG so the IME tests
+    /// can capture commit bytes via `ptyRecorderForTests` without a real
+    /// forkpty; release builds collapse to a plain `session?.send`.
     func sendToSession(_ bytes: Data) {
         #if DEBUG
         if let recorder = ptyRecorderForTests {
