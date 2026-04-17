@@ -31,6 +31,8 @@ targets:
         buildPhase: resources
         type: folder
         optional: false
+      - path: Sources/Blackbird/Resources/Terminfo/kitty.terminfo
+        buildPhase: resources
     preBuildScripts:
       - name: Build Rust core
         script: |

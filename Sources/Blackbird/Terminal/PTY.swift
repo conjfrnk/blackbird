@@ -48,6 +48,65 @@ public final class PTY {
         stateQueue.sync { _isRunning = false }
     }
 
+    /// Whether `xterm-kitty` is currently reachable via ncurses terminfo
+    /// lookup. Computed once per process: we try to install the bundled
+    /// kitty terminfo to ~/.terminfo if needed, then probe `infocmp`. When
+    /// true, the child gets `TERM=xterm-kitty` so kitty-aware TUIs (Claude
+    /// Code, nvim, tmux 3.3+) negotiate the keyboard protocol and Shift+Enter
+    /// actually produces `ESC[13;2u` instead of bare `\r`. When false, we
+    /// fall back to `xterm-256color` — legacy but universally understood.
+    private static let kittyTerminfoAvailable: Bool = installKittyTerminfoIfNeeded()
+
+    /// Install the bundled kitty terminfo to `~/.terminfo/x/xterm-kitty` if
+    /// it isn't already reachable. Idempotent. Returns true iff ncurses can
+    /// resolve `xterm-kitty` afterwards — which is what the child really
+    /// needs before we hand it `TERM=xterm-kitty`.
+    private static func installKittyTerminfoIfNeeded() -> Bool {
+        if infocmpSucceeds(term: "xterm-kitty") { return true }
+
+        guard
+            let src = Bundle.main.url(forResource: "kitty", withExtension: "terminfo"),
+            FileManager.default.fileExists(atPath: src.path)
+        else {
+            return false
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dst = home.appendingPathComponent(".terminfo")
+        // tic with -o writes <dst>/x/xterm-kitty. The directory is created
+        // for us. Swallow stderr — this is opportunistic; any failure just
+        // means we fall back to xterm-256color.
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tic")
+        task.arguments = ["-x", "-o", dst.path, src.path]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return false
+        }
+        return infocmpSucceeds(term: "xterm-kitty")
+    }
+
+    /// True when `infocmp <term>` exits 0 — i.e. ncurses can find the entry.
+    /// Uses /usr/bin/infocmp directly so we don't depend on $PATH being
+    /// sane at this point in app startup.
+    private static func infocmpSucceeds(term: String) -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/infocmp")
+        task.arguments = [term]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return false
+        }
+        return task.terminationStatus == 0
+    }
+
     /// Spawn a child process attached to a new PTY. `initialWorkingDirectory`
     /// (when provided and existent) is chdir'd before exec — used to inherit
     /// the previous tab's cwd for ⌘T / ⌘N. Falls back to the user's home
@@ -59,6 +118,11 @@ public final class PTY {
         size: Size,
         initialWorkingDirectory: String? = nil
     ) throws -> PTY {
+        // Resolve TERM before fork. kittyTerminfoAvailable is evaluated once
+        // per process so this is cheap on subsequent spawns.
+        let termValue = kittyTerminfoAvailable ? "xterm-kitty" : "xterm-256color"
+        let termCStr = strdup(termValue)
+        defer { free(termCStr) }
         var master: Int32 = -1
         var winsize = Darwin.winsize(
             ws_row: size.rows, ws_col: size.cols,
@@ -109,7 +173,9 @@ public final class PTY {
             for (k, v) in envOverrides {
                 setenv(k, v, 1)
             }
-            setenv("TERM", "xterm-256color", 1)
+            // TERM resolved in the parent so we don't call Foundation /
+            // Process APIs between fork and exec (not async-signal-safe).
+            setenv("TERM", termCStr, 1)
             setenv("COLORTERM", "truecolor", 1)   // tells modern TUIs (nvim, tmux, claude-code) 24-bit color is safe
             setenv("TERM_PROGRAM", "Blackbird", 1)
             if let v = versionCStr {

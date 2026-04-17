@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		188E5D391CA19FE7A0B4400E /* HackNerdFontMono-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 96ECD242F27E94BA194BECD6 /* HackNerdFontMono-Italic.ttf */; };
 		19A90E50E12A0234010B511A /* HackNerdFontMono-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 157ABF0CFF0DDECE748E0149 /* HackNerdFontMono-Bold.ttf */; };
+		1EFCAE939B4A1B5F562F54E0 /* kitty.terminfo in Resources */ = {isa = PBXBuildFile; fileRef = 673FE2E71DCD08F9286D5C60 /* kitty.terminfo */; };
 		2128B6F807CB069799F1A479 /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DD21160AFF51FCA0B6374 /* Preferences.swift */; };
 		21EF977F67811E7BCCE03C22 /* TranslucencyCurveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D766892D203AEA71CC70B95C /* TranslucencyCurveTests.swift */; };
 		22EA46AC14DEA7E6A03FB8DF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */; };
@@ -89,6 +90,7 @@
 		568D389F2829611D1FDC43FA /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		5995252272D652667DB2D2D9 /* PTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTY.swift; sourceTree = "<group>"; };
 		5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
+		673FE2E71DCD08F9286D5C60 /* kitty.terminfo */ = {isa = PBXFileReference; path = kitty.terminfo; sourceTree = "<group>"; };
 		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
 		720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderExtendedTests.swift; sourceTree = "<group>"; };
 		75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewTests.swift; sourceTree = "<group>"; };
@@ -258,6 +260,7 @@
 			children = (
 				E4B31AE0836F0D3000C219D2 /* Fonts */,
 				AA06D8AE7A763BC89D67BF2C /* Fonts */,
+				E78DD4939FF211A70389EBD1 /* Terminfo */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -272,6 +275,14 @@
 				9D26D02D80D934AC18571AB9 /* HackNerdFontMono-Regular.ttf */,
 			);
 			path = Fonts;
+			sourceTree = "<group>";
+		};
+		E78DD4939FF211A70389EBD1 /* Terminfo */ = {
+			isa = PBXGroup;
+			children = (
+				673FE2E71DCD08F9286D5C60 /* kitty.terminfo */,
+			);
+			path = Terminfo;
 			sourceTree = "<group>";
 		};
 		EF3D991D46A40AD4000B1892 = {
@@ -389,6 +400,7 @@
 				4D9B5BAF29650F44CDBAD0A8 /* HackNerdFontMono-BoldItalic.ttf in Resources */,
 				188E5D391CA19FE7A0B4400E /* HackNerdFontMono-Italic.ttf in Resources */,
 				CB093791F908A038E9B9C70F /* HackNerdFontMono-Regular.ttf in Resources */,
+				1EFCAE939B4A1B5F562F54E0 /* kitty.terminfo in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
