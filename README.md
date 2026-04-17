@@ -7,7 +7,7 @@ A macOS-only terminal emulator. Native AppKit + SwiftUI. Metal-rendered. NSWindo
 - Perfect for macOS. Feels like Apple could have shipped it.
 - Extremely minimal. Tabs, no splits. Preferences live in a single native window.
 - Rendering-correct for modern TUIs. VT parsing via `alacritty_terminal` (Rust), the same engine used by Alacritty and Zed.
-- Performant and bulletproof. 120 Hz on ProMotion, low input-to-pixel latency, fuzz-tested parser, ASan + UBSan on Debug.
+- Performant and bulletproof. 120 Hz on ProMotion, low input-to-pixel latency, fuzz-tested parser, ASan + UBSan on Debug, hardened runtime on Release (posture gated in CI).
 
 ## Non-goals
 
@@ -19,20 +19,20 @@ A macOS-only terminal emulator. Native AppKit + SwiftUI. Metal-rendered. NSWindo
 ## Stack
 
 - Swift, Metal, AppKit, SwiftUI for the app shell, renderer, and Settings UI.
-- Rust `alacritty_terminal` 0.26.0 for the VT core, wrapped in a thin C ABI (~10 functions, header auto-generated via `cbindgen`).
+- Rust `alacritty_terminal` 0.26.0 for the VT core, wrapped in a thin C ABI (14 functions, header auto-generated via `cbindgen`).
 - Sparkle 2.x for auto-updates (inert until the appcast URL and EdDSA public key are configured; dev builds no-op).
 - Universal binary (arm64 + x86_64), macOS 14+.
 
 ## Features
 
 - **Rendering.** Metal GPU renderer, fixed-capacity glyph atlas, 120 Hz opt-in on ProMotion via triple-buffered drawable, right-edge scroll indicator, visual bell flash.
-- **VT support.** Application cursor keys (DECCKM), bracketed paste, X10 and SGR mouse reporting including motion and drag, F1–F12, 24-bit color, DECSCUSR cursor shapes (block/bar/underline), CSI u modifier encoding, 10,000-line scrollback.
+- **VT support.** Application cursor keys (DECCKM), bracketed paste, X10 and SGR mouse reporting including motion and drag, F1–F12, 24-bit color, DECSCUSR cursor shapes (block/bar/underline), Kitty keyboard protocol (advertised as `xterm-kitty` with a bundled terminfo that auto-installs on first launch; progressive enhancement via `CSI u`), 10,000-line scrollback.
 - **Tabs and windows.** Native `NSWindow` tab group, per-tab shell session, confirmation before closing a window with multiple tabs, content-size snap to whole cells, ⌘-drag anywhere to move the window, ⌘ + right-drag to resize from the nearest corner, auto-close on shell exit.
 - **Selection and clipboard.** Character / word / line / rectangular selection, ⌘C copies, ⌘V pastes (bracketed when the TUI requests it), ⌃C always sends `0x03` and never copies, right-click menu, OSC 52 remote clipboard writes with an opt-out toggle.
 - **Find.** ⌘F opens the bar, ⌘G / ⌘⇧G step through matches across visible buffer and scrollback.
 - **URLs.** ⌘-click on any `http`/`https`/`ftp`/`file` URL opens it in the default browser.
 - **Themes.** Default, Gruvbox, Solarized, Catppuccin — each with light and dark palettes. Auto mode follows `NSApp.effectiveAppearance`; changes apply live to every open session.
-- **Settings.** SwiftUI window hosted through AppKit, backed by `@AppStorage` — Theme mode, Theme, Font family (monospace only), Font size, Cursor blink, Bell, Option key (Meta / Native), Confirm close, OSC 52 toggle, auto-update check.
+- **Settings.** SwiftUI window hosted through AppKit, backed by `@AppStorage` — Theme mode, Theme, Font family (monospace only), Font size, Translucency (combined opacity + blur, 1–10), Cursor blink, Bell (visual / off), Option key (Meta / Native), Confirm close, OSC 52 toggle, auto-update check.
 - **Fonts.** Hack Nerd Font Mono ships inside the bundle (Regular / Bold / Italic / Bold-Italic); any monospaced family installed on the system is selectable in Settings. ⌘+ / ⌘− / ⌘0 adjust size live.
 - **Distribution.** Tag-triggered GitHub Actions workflow builds the universal binary, signs with Developer ID, notarizes, staples, and attaches the DMG to a GitHub release.
 
@@ -70,7 +70,7 @@ From a clean checkout:
 ```sh
 xcodegen generate             # generates Blackbird.xcodeproj from project.yml
 scripts/build-core.sh         # builds the universal Rust static lib
-xcodebuild -scheme Blackbird build
+xcodebuild -project Blackbird.xcodeproj -scheme Blackbird build
 ```
 
 The Xcode target runs `scripts/build-core.sh` as a pre-build step, so `xcodebuild build` after `xcodegen generate` also works from scratch.
@@ -78,19 +78,24 @@ The Xcode target runs `scripts/build-core.sh` as a pre-build step, so `xcodebuil
 ## Tests
 
 ```sh
-# Rust core — fmt, clippy, unit, golden parser tests
+# Rust core — fmt, clippy, lib unit tests, and integration tests
+# (golden parser, Kitty keyboard, Unicode cells, terminal replies,
+#  long-session memory, throughput, generated-header shape).
 cargo fmt --all -- --check
 cargo clippy -p blackbird_core --all-targets -- -D warnings
 cargo test  -p blackbird_core --lib --tests
 
-# Swift — PTY, TerminalSession, MetalRenderer, GlyphAtlas, KeyEncoder, TerminalView
+# Swift — full XCTest suite under Tests/BlackbirdTests/ (PTY, TerminalSession,
+# MetalRenderer, GlyphAtlas, KeyEncoder + extended, Kitty keyboard protocol,
+# TerminalView, Selection, Word ranges, Buffer points, BBTerm, URL detection,
+# Theme resolution, Translucency curve, Preferences, host-termination).
 xcodebuild test \
   -project Blackbird.xcodeproj \
   -scheme Blackbird \
   -destination 'platform=macOS,arch=arm64'
 ```
 
-The Debug scheme enables Address and Undefined-Behaviour sanitizers. A cargo-fuzz target for `bb_term_input` lives in `core/fuzz/` — run manually with `cargo +nightly fuzz run fuzz_term_input`. `scripts/smoke.sh` launches the built app for three seconds and checks it exits cleanly.
+The Debug scheme enables Address and Undefined-Behaviour sanitizers. A cargo-fuzz target for `bb_term_input` lives in `core/fuzz/` (see [`core/fuzz/README.md`](core/fuzz/README.md)) — run manually with `cargo +nightly fuzz run fuzz_term_input`. `scripts/smoke.sh` launches the built app for three seconds and checks it exits cleanly. `scripts/bench.sh` offers interactive throughput workloads for eyeballing rendering performance; `scripts/check-security-posture.sh` is the same hardened-runtime / entitlements gate CI runs.
 
 ## Packaging a release
 
