@@ -707,7 +707,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if (currentSnapshot?.displayOffset ?? 0) > 0 {
             session.scrollToBottom()
         }
-        let bytes = Data(str.utf8)
+        let bytes = Self.normalizePasteLineEndings(Data(str.utf8))
         let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
         if bracketedPaste {
             var wrapped = Data([0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])  // ESC[200~
@@ -717,6 +717,32 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         } else {
             session.send(bytes)
         }
+    }
+
+    /// Collapse CRLF → LF in pasted content. Cross-platform clipboards (Windows,
+    /// web copy) often carry CRLF; the PTY's ICRNL flag then maps the CR to an
+    /// extra LF, so a two-line paste becomes four shell prompts. Matches
+    /// Terminal.app / iTerm2 behaviour. Lone CR is left alone — it's rare in
+    /// real paste content and some applications still want it as Enter.
+    static func normalizePasteLineEndings(_ input: Data) -> Data {
+        guard input.contains(0x0D) else { return input }
+        var out = Data()
+        out.reserveCapacity(input.count)
+        var i = input.startIndex
+        while i < input.endIndex {
+            let b = input[i]
+            if b == 0x0D {
+                let next = input.index(after: i)
+                if next < input.endIndex, input[next] == 0x0A {
+                    out.append(0x0A)
+                    i = input.index(after: next)
+                    continue
+                }
+            }
+            out.append(b)
+            i = input.index(after: i)
+        }
+        return out
     }
 
     /// Strip any literal `ESC [ 2 0 1 ~` terminators from a bracketed-paste

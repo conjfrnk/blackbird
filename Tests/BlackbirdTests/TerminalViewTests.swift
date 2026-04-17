@@ -301,6 +301,45 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), input)
     }
 
+    // MARK: - Paste line-ending normalisation
+
+    func test_normalizePaste_collapsesCRLF() {
+        let input = Data("line1\r\nline2\r\nline3".utf8)
+        let expected = Data("line1\nline2\nline3".utf8)
+        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), expected)
+    }
+
+    func test_normalizePaste_preservesLoneCR() {
+        // Lone CR is left alone — progress-bar output (`\r[###  ]`) and some
+        // applications legitimately want the bare CR.
+        let input = Data("progress\r".utf8)
+        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
+    }
+
+    func test_normalizePaste_preservesLoneLF() {
+        let input = Data("unix\nstyle\nlines".utf8)
+        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
+    }
+
+    func test_normalizePaste_emptyInput() {
+        XCTAssertEqual(TerminalView.normalizePasteLineEndings(Data()), Data())
+    }
+
+    func test_normalizePaste_fastPathWhenNoCR() {
+        // Sanity: implementation short-circuits when there's no CR. The
+        // assertion here is functional (unchanged output); the perf claim is
+        // in the comment.
+        let input = Data("no carriage returns here".utf8)
+        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
+    }
+
+    func test_normalizePaste_trailingCROnly() {
+        // Edge case: a CR at the very end, with no following LF, must pass
+        // through untouched (can't peek past endIndex).
+        let input = Data("hello\r".utf8)
+        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
+    }
+
     // MARK: - Mouse-report encoding (pure path)
 
     func test_mouseReport_sgr_leftPress_final_M() {
