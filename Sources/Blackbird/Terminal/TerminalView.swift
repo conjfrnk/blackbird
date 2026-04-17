@@ -25,14 +25,21 @@ public struct CellMetrics {
         // (for which both dimensions are real positive numbers), but an
         // exotic font or a manually-edited UserDefault can still sneak
         // through and we don't want to crash the app in response.
-        self.cellHeight = max(1, (ascent + descent + leading).rounded())
+        //
+        // isFinite sanitisation catches NaN/Infinity from a malformed font
+        // — rare but not impossible on a user-installed font. max(1, NaN)
+        // would produce NaN (NaN propagates through max), which then traps
+        // Int(NaN) later in grid(forPixelSize:). Normalise first.
+        let rawCellHeight = (ascent + descent + leading).rounded()
+        self.cellHeight = rawCellHeight.isFinite ? max(1, rawCellHeight) : 1
         // Measure the advance of 'M' — a reliable monospace cell width.
         var glyph = CGGlyph(0)
         var chars: [UniChar] = [UInt16(("M" as Character).asciiValue ?? 77)]
         CTFontGetGlyphsForCharacters(ct, &chars, &glyph, 1)
         var advance = CGSize.zero
         CTFontGetAdvancesForGlyphs(ct, .horizontal, &glyph, &advance, 1)
-        self.cellWidth = max(1, advance.width.rounded())
+        let rawCellWidth = advance.width.rounded()
+        self.cellWidth = rawCellWidth.isFinite ? max(1, rawCellWidth) : 1
     }
 
     public func grid(forPixelSize size: CGSize) -> (cols: Int, rows: Int) {
