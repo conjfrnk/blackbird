@@ -223,18 +223,24 @@ public final class TerminalSession: ObservableObject {
         // Route bbterm events (title/bell/fatal) to published properties.
         bbterm.onEvent { [weak self] event in
             guard let self else { return }
+            // Terminal → shell replies (DSR, DA1, DA2, DECRPM) must round-
+            // trip with minimum latency. The event fires from inside
+            // bbterm.input on coreQueue, so handing directly to pty.write
+            // skips a main-thread bounce that otherwise stalls nvim's
+            // startup probes behind unrelated main-queue work (redraws,
+            // animation tick, etc).
+            if case .ptyWrite(let data) = event {
+                self.send(data)
+                return
+            }
             DispatchQueue.main.async {
                 switch event {
                 case .title(let t):
                     self.title = t
                 case .bell:
                     self.bellCounter &+= 1
-                case .ptyWrite(let data):
-                    // Terminal-to-shell response (DSR, DA1, DA2, etc). Write
-                    // the bytes back to the PTY so the querying app receives
-                    // the answer. Without this, nvim and other apps time out
-                    // waiting for terminal identification.
-                    self.send(data)
+                case .ptyWrite:
+                    break  // handled above, before the main hop
                 case .osc52Clipboard(let raw):
                     // OSC 52 payload is "<target>;<base64>"; target chars
                     // are a subset of c,p,q,s,0-7. Strip everything up to
