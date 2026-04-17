@@ -86,5 +86,17 @@ public final class Preferences: ObservableObject {
         case "HackNerdFontMono-Regular": fontName = "Hack Nerd Font Mono"
         default: break
         }
+
+        // Repair the enum-backed @AppStorage strings when we find a value
+        // that doesn't match any case. Otherwise the Settings Picker shows
+        // an empty row (no tag matches) while the app silently falls back
+        // to the default via Theme(rawValue:) ?? .defaultTheme, so the
+        // user can't pick from the list without first choosing something
+        // valid. Repair at init so the picker and the running palette
+        // agree on first render.
+        if Theme(rawValue: themeRaw) == nil { themeRaw = Theme.defaultTheme.rawValue }
+        if ThemeMode(rawValue: themeModeRaw) == nil { themeModeRaw = ThemeMode.auto.rawValue }
+        if BellStyle(rawValue: bellRaw) == nil { bellRaw = BellStyle.visual.rawValue }
+        if OptionKey(rawValue: optionKeyRaw) == nil { optionKeyRaw = OptionKey.meta.rawValue }
     }
 }
