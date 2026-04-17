@@ -65,6 +65,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// ⌘Q goes through here before any window-close notification fires. Show a
+    /// single "processes are running" alert if confirmClose is on and any tab
+    /// has a foreground child; then suppress the per-tab confirms for the
+    /// rest of the termination so the user doesn't click through one alert
+    /// per tab.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard Preferences.shared.confirmClose else { return .terminateNow }
+        let running = controllers
+            .compactMap { $0.session }
+            .filter { $0.hasForegroundChild() }
+        guard !running.isEmpty else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = running.count == 1
+            ? "Quit with a process still running?"
+            : "Quit with \(running.count) processes still running?"
+        alert.informativeText = "Every open shell session will be terminated."
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        if alert.runModal() == .alertSecondButtonReturn {
+            return .terminateCancel
+        }
+        // User consented — skip the per-tab "process is still running" alert.
+        MainWindowController.bypassCloseConfirm = true
+        return .terminateNow
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         ThemeManager.shared.attach(toApp: NSApp)
 
