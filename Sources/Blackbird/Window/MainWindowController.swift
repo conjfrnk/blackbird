@@ -307,6 +307,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     func refreshTabBar() {
         guard let window else { return }
+        // The FIRST window's installTitlebarTabBar runs its async
+        // observeTabGroup before any other window joins — so tabGroup is
+        // nil at that moment and observers never attach. Subsequent ⌘T
+        // calls form a tab group but only the newly-added controller has
+        // tabGroup observers. Retry here: every refresh (fired by
+        // AppDelegate.refreshAllTabBars on add/remove) now re-attempts to
+        // install observers, so once the group exists every controller
+        // ends up subscribed and selection KVO fires for all of them.
+        if tabGroupObservers.isEmpty, window.tabGroup != nil {
+            observeTabGroup()
+        }
         let tabCount = window.tabGroup?.windows.count ?? 1
         if tabCount <= 1 {
             // Restore the stock single-tab titlebar: title text centered,
