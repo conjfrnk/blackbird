@@ -194,6 +194,14 @@ public struct BBTermMode: OptionSet {
     public static let focusInOut       = BBTermMode(rawValue: 1 << 8)
     public static let showCursor       = BBTermMode(rawValue: 1 << 9)
     public static let lineWrap         = BBTermMode(rawValue: 1 << 10)
+    // Kitty keyboard protocol. When `disambiguateEscCodes` is set, the encoder
+    // must emit CSI u sequences for modified keys so TUIs can distinguish
+    // Shift+Enter from Enter, Ctrl+i from Tab, etc.
+    public static let disambiguateEscCodes = BBTermMode(rawValue: 1 << 11)
+    public static let reportEventTypes     = BBTermMode(rawValue: 1 << 12)
+    public static let reportAlternateKeys  = BBTermMode(rawValue: 1 << 13)
+    public static let reportAllKeysAsEsc   = BBTermMode(rawValue: 1 << 14)
+    public static let reportAssociatedText = BBTermMode(rawValue: 1 << 15)
 }
 
 /// Immutable snapshot of the grid. Holds a ref until deinit.

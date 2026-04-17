@@ -365,6 +365,18 @@ final class TerminalViewTests: XCTestCase {
                        "focusInOut bit must remain at position 8")
     }
 
+    func test_termModeFlag_kittyKeyboardBits() {
+        // Pin the kitty keyboard protocol bit positions. KeyEncoder reads
+        // these directly; a shift here would silently start emitting CSI u
+        // under the wrong conditions (or stop emitting entirely) and break
+        // Shift+Enter / Ctrl+i disambiguation in Claude Code, nvim, etc.
+        XCTAssertEqual(BBTermMode.disambiguateEscCodes.rawValue, 1 << 11)
+        XCTAssertEqual(BBTermMode.reportEventTypes.rawValue,     1 << 12)
+        XCTAssertEqual(BBTermMode.reportAlternateKeys.rawValue,  1 << 13)
+        XCTAssertEqual(BBTermMode.reportAllKeysAsEsc.rawValue,   1 << 14)
+        XCTAssertEqual(BBTermMode.reportAssociatedText.rawValue, 1 << 15)
+    }
+
     // MARK: - Paste composition
 
     func test_normalizePaste_composedWithSanitiser() {

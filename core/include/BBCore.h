@@ -43,6 +43,16 @@
 
 #define LINE_WRAP (1 << 10)
 
+#define DISAMBIGUATE_ESC_CODES (1 << 11)
+
+#define REPORT_EVENT_TYPES (1 << 12)
+
+#define REPORT_ALTERNATE_KEYS (1 << 13)
+
+#define REPORT_ALL_KEYS_AS_ESC (1 << 14)
+
+#define REPORT_ASSOCIATED_TEXT (1 << 15)
+
 /**
  * Kind of terminal event forwarded to the C caller.
  */

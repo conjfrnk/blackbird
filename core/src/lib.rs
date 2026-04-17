@@ -303,6 +303,12 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         };
         let config = Config {
             scrolling_history: scrollback as usize,
+            // Opt into alacritty's kitty keyboard protocol dispatch. Without
+            // this, push_keyboard_mode / pop_keyboard_modes / set_keyboard_mode
+            // handlers early-return and the TermMode bits never light, even
+            // when the TUI asks for disambiguated escape codes via ESC[>1u.
+            // Claude Code, nvim 0.10+, WezTerm shells all expect this.
+            kitty_keyboard: true,
             ..Default::default()
         };
 
@@ -423,6 +429,15 @@ pub mod bb_mode {
     pub const FOCUS_IN_OUT: u32 = 1 << 8;
     pub const SHOW_CURSOR: u32 = 1 << 9;
     pub const LINE_WRAP: u32 = 1 << 10;
+    // Kitty keyboard protocol bits. The TUI enables these via ESC[>{flags}u
+    // progressive-enhancement pushes; once `DISAMBIGUATE_ESC_CODES` is set the
+    // input encoder must emit CSI u sequences for modified keys so apps can
+    // distinguish Shift+Enter from Enter, Ctrl+i from Tab, etc.
+    pub const DISAMBIGUATE_ESC_CODES: u32 = 1 << 11;
+    pub const REPORT_EVENT_TYPES: u32 = 1 << 12;
+    pub const REPORT_ALTERNATE_KEYS: u32 = 1 << 13;
+    pub const REPORT_ALL_KEYS_AS_ESC: u32 = 1 << 14;
+    pub const REPORT_ASSOCIATED_TEXT: u32 = 1 << 15;
 }
 
 /// Immutable snapshot of terminal grid state. Ref-counted via `bb_snap_retain` /
@@ -758,6 +773,26 @@ fn extract_mode(term_mode: &TermMode) -> u32 {
     }
     if term_mode.contains(TermMode::LINE_WRAP) {
         m |= bb_mode::LINE_WRAP;
+    }
+    // Kitty keyboard protocol sub-flags. Tested against each bit individually
+    // because TermMode::KITTY_KEYBOARD_PROTOCOL is a *composite* mask (all five
+    // bits); using `.contains()` on the composite would require every bit to be
+    // set before we expose any, which loses fidelity when the TUI enables just
+    // DISAMBIGUATE_ESC_CODES (the common case for Claude Code / vim / tmux).
+    if term_mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+        m |= bb_mode::DISAMBIGUATE_ESC_CODES;
+    }
+    if term_mode.contains(TermMode::REPORT_EVENT_TYPES) {
+        m |= bb_mode::REPORT_EVENT_TYPES;
+    }
+    if term_mode.contains(TermMode::REPORT_ALTERNATE_KEYS) {
+        m |= bb_mode::REPORT_ALTERNATE_KEYS;
+    }
+    if term_mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+        m |= bb_mode::REPORT_ALL_KEYS_AS_ESC;
+    }
+    if term_mode.contains(TermMode::REPORT_ASSOCIATED_TEXT) {
+        m |= bb_mode::REPORT_ASSOCIATED_TEXT;
     }
     m
 }
