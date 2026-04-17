@@ -1707,6 +1707,67 @@ mod tests {
         }
     }
 
+    /// SGR 7 (reverse video) must surface on the cell via the REVERSE flag
+    /// so the Metal renderer can draw the inverted highlight. Without this
+    /// the vim/less/ncurses highlight bars come through as plain text.
+    #[test]
+    fn sgr_reverse_sets_cell_reverse_flag() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            // ESC [ 7 m  switches to reverse video; then "A" writes the cell.
+            bb_term_input(term, b"\x1b[7mA".as_ptr(), 5);
+            let snap = bb_term_take_snapshot(term);
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+            assert_eq!(char::from_u32(cells[0].ch), Some('A'));
+            assert_ne!(
+                cells[0].flags & cell_flags::REVERSE,
+                0,
+                "cell written under SGR 7 should report REVERSE flag"
+            );
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    /// SGR 2 (dim / faint) — plain text renders normally, dim cells are
+    /// surfaced via the DIM flag so the renderer can halve their brightness.
+    #[test]
+    fn sgr_dim_sets_cell_dim_flag() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            bb_term_input(term, b"\x1b[2mx".as_ptr(), 5);
+            let snap = bb_term_take_snapshot(term);
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+            assert_ne!(cells[0].flags & cell_flags::DIM, 0);
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    /// SGR 0 (reset) must clear accumulated attribute flags so subsequent
+    /// text doesn't inherit the highlight.
+    #[test]
+    fn sgr_reset_clears_reverse_flag() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            bb_term_input(term, b"\x1b[7mA\x1b[0mB".as_ptr(), 10);
+            let snap = bb_term_take_snapshot(term);
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+            assert_ne!(
+                cells[0].flags & cell_flags::REVERSE,
+                0,
+                "A should be REVERSE"
+            );
+            assert_eq!(
+                cells[1].flags & cell_flags::REVERSE,
+                0,
+                "B should not be REVERSE after SGR 0"
+            );
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
     #[test]
     fn clear_all_wipes_viewport_and_scrollback() {
         unsafe {

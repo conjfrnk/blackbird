@@ -1,6 +1,7 @@
 import Metal
 import MetalKit
 import AppKit
+import BBCore
 
 public final class MetalRenderer {
 
@@ -169,13 +170,35 @@ public final class MetalRenderer {
                 let scalar = cell.ch
                 var fg = Self.rgbToSIMD(cell.fg)
                 var bg = Self.rgbToSIMD(cell.bg)
+                // Reverse video (SGR 7): swap the cell's fg and bg so the
+                // glyph reads against the inverted highlight. Forces a bg
+                // quad (we can't skip drawing into the clearColor because
+                // the "new bg" is the original fg, which is a real colour).
+                let reverse = (cell.flags & UInt16(REVERSE)) != 0
+                if reverse {
+                    let orig = fg
+                    fg = bg
+                    bg = orig
+                }
+                // DIM (SGR 2): halve the fg brightness so dimmed text reads
+                // softer without affecting bg. Applied after REVERSE so the
+                // resulting glyph colour is what's visibly dimmed.
+                if (cell.flags & UInt16(DIM)) != 0 {
+                    fg.x *= 0.5
+                    fg.y *= 0.5
+                    fg.z *= 0.5
+                }
                 // Treat the theme's default bg as "no bg" so the transparent
                 // clearColor can show through. Cells with explicit colors
                 // (vim highlights, status lines, syntax bg) still draw their
                 // bg quad; whether they stay solid or become translucent is
                 // a user choice (keepBgOpaque).
-                let isDefaultBg = cell.bg == defaultBgRgb
-                let hasBg = !isDefaultBg && cell.bg != 0x000000
+                // After a REVERSE swap the effective bg is the original fg,
+                // which is always a concrete palette value — treat it as a
+                // real background so the highlight paints.
+                let effectiveBgRgb = reverse ? cell.fg : cell.bg
+                let isDefaultBg = !reverse && cell.bg == defaultBgRgb
+                let hasBg = reverse || (!isDefaultBg && effectiveBgRgb != 0x000000)
 
                 // Determine the bg alpha for what we'll write into
                 // CellInstance:
