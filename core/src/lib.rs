@@ -2012,4 +2012,34 @@ mod tests {
             bb_term_free(term);
         }
     }
+
+    /// i32::MIN / MAX deltas must not panic the core. A misbehaving input
+    /// driver (or a future Swift caller that forgets to clamp) could hand us
+    /// those extremes; alacritty's scroll_display clamps internally, but the
+    /// FFI boundary needs to stay a no-panic zone regardless.
+    #[test]
+    fn scroll_extreme_deltas_dont_panic() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            // Build some scrollback first so both extremes have something to
+            // clamp against.
+            for _ in 0..50 {
+                bb_term_input(term, b"line\r\n".as_ptr(), 6);
+            }
+            bb_term_scroll(term, i32::MIN);
+            bb_term_scroll(term, i32::MAX);
+            bb_term_scroll(term, 0); // explicit no-op branch
+                                     // Reachable through either extreme — the viewport should still
+                                     // snap back to the live grid cleanly afterwards.
+            bb_term_scroll_to_bottom(term);
+            let snap = bb_term_take_snapshot(term);
+            assert_eq!(
+                (*snap).display_offset,
+                0,
+                "scroll_to_bottom should pin the viewport regardless of prior extreme deltas"
+            );
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
 }
