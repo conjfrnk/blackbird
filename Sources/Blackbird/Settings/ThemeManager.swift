@@ -51,6 +51,11 @@ public final class ThemeManager {
     }
 
     private func applyToAll() {
+        // Reap registrations whose window controller has been deallocated
+        // (both providers return nil), then apply to the survivors. Without
+        // the prune the array grows by one closure per opened-then-closed
+        // window for the life of the process.
+        registrations.removeAll { s, v in s() == nil && v() == nil }
         for (s, v) in registrations { apply(session: s(), view: v()) }
     }
 
