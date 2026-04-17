@@ -30,7 +30,12 @@ A macOS-only terminal emulator. Native AppKit + SwiftUI. Metal-rendered. NSWindo
 - **Tabs and windows.** Native `NSWindow` tab group, per-tab shell session, confirmation before closing a window with multiple tabs, content-size snap to whole cells, ⌘-drag anywhere to move the window, ⌘ + right-drag to resize from the nearest corner, auto-close on shell exit.
 - **Selection and clipboard.** Character / word / line / rectangular selection, ⌘C copies, ⌘V pastes (bracketed when the TUI requests it), ⌃C always sends `0x03` and never copies, right-click menu, OSC 52 remote clipboard writes with an opt-out toggle.
 - **Find.** ⌘F opens the bar, ⌘G / ⌘⇧G step through matches across visible buffer and scrollback.
-- **URLs.** ⌘-click on any `http`/`https`/`ftp`/`file` URL opens it in the default browser.
+- **URLs.** ⌘-click on any `http`/`https`/`ftp`/`file` URL opens it in the default browser. OSC 8 hyperlinks take precedence over regex detection — hover dwell shows a tooltip with the real target; underline highlights all cells sharing the link id.
+- **Input.** `NSTextInputClient` conformance: CJK/Korean/Japanese IME composes inline with a dotted underline at the cursor; Latin dead keys (Option+E → ´, then E → é) compose correctly in Native Option mode. Preedit never reaches the PTY until committed.
+- **Drag and drop.** Drop any file from Finder onto the view to paste its POSIX-quoted path. Multi-file drops join with single spaces.
+- **Tab titles.** Shell titles via OSC 0/2 by default; override per tab via `View → Rename Tab…` (⌥⌘R) or right-click the tab. OSC 0/2 is ignored while an override is set.
+- **CWD awareness.** ⌘T opens the new tab in the active session's last-known cwd via OSC 7; ⌘N always opens in `$HOME` (new window = fresh start).
+- **Accessibility.** VoiceOver reads the visible grid via `NSAccessibilityStaticText`.
 - **Themes.** Default, Gruvbox, Solarized, Catppuccin — each with light and dark palettes. Auto mode follows `NSApp.effectiveAppearance`; changes apply live to every open session.
 - **Settings.** SwiftUI window hosted through AppKit, backed by `@AppStorage` — Theme mode, Theme, Font family (monospace only), Font size, Translucency (combined opacity + blur, 1–10), Cursor blink, Bell (visual / off), Option key (Meta / Native), Confirm close, OSC 52 toggle, auto-update check.
 - **Fonts.** Hack Nerd Font Mono ships inside the bundle (Regular / Bold / Italic / Bold-Italic); any monospaced family installed on the system is selectable in Settings. ⌘+ / ⌘− / ⌘0 adjust size live.
@@ -47,6 +52,7 @@ A macOS-only terminal emulator. Native AppKit + SwiftUI. Metal-rendered. NSWindo
 | ⌘1 … ⌘9           | Select tab 1–9                   |
 | ⌘⇧[ / ⌘⇧]         | Previous / next tab              |
 | ⌘,                | Settings                         |
+| ⌥⌘R               | Rename active tab                |
 | ⌘C / ⌘V           | Copy / paste                     |
 | ⌘A                | Select visible grid              |
 | ⌘K                | Clear viewport + scrollback      |
