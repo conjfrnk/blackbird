@@ -54,7 +54,12 @@ public final class Preferences: ObservableObject {
     /// half (5..10) tapers out to the Ghost extreme so users who want it
     /// can still reach it without the default sitting too close to the wall.
     public var translucencyResolved: (opacity: Double, blurRadius: Int) {
-        let v = max(1.0, min(10.0, translucency))
+        // A hand-edited UserDefaults (or a bridging conversion) could leave
+        // translucency as NaN / ±Infinity. min/max pass NaN through, which
+        // would propagate into Int(round(...)) and crash. Normalise to the
+        // opaque end first.
+        let raw = translucency.isFinite ? translucency : 1.0
+        let v = max(1.0, min(10.0, raw))
         let opacity: Double
         let blurFloat: Double
         if v <= 5 {

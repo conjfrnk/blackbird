@@ -123,6 +123,32 @@ final class TranslucencyCurveTests: XCTestCase {
         XCTAssertEqual(rNeg.blurRadius, 0)
     }
 
+    func test_clamp_nanResolvesAsSolidOpaque() {
+        // A hand-edited UserDefaults (or a buggy bridging) could leave the
+        // raw translucency as NaN. The resolver must not propagate NaN into
+        // the integer cast — that would crash on Int(round(NaN)).
+        Preferences.shared.translucency = .nan
+        let r = Preferences.shared.translucencyResolved
+        XCTAssertEqual(r.opacity, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(r.blurRadius, 0)
+    }
+
+    func test_clamp_infinityResolvesAsSolidOpaque() {
+        Preferences.shared.translucency = .infinity
+        let rInf = Preferences.shared.translucencyResolved
+        // Either clamp: infinite → opaque (via the isFinite guard) OR the
+        // existing max/min path clamps to 10 (full transparent). The fix
+        // picks opaque because Infinity *came from corruption*, not user
+        // intent.
+        XCTAssertEqual(rInf.opacity, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(rInf.blurRadius, 0)
+
+        Preferences.shared.translucency = -.infinity
+        let rNegInf = Preferences.shared.translucencyResolved
+        XCTAssertEqual(rNegInf.opacity, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(rNegInf.blurRadius, 0)
+    }
+
     func test_clamp_aboveTen_resolvesAsTen() {
         Preferences.shared.translucency = 11.0
         let r11 = Preferences.shared.translucencyResolved
