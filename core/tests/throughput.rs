@@ -55,7 +55,10 @@ fn assert_floor(bps: f64, floor_mib: f64, label: &str) {
 // ---------------------------------------------------------------------------
 // Workload 1 — plain text (`yes`, `cat` a log file, tail -f).
 // Most common real workload: newline-separated UTF-8 with no control sequences.
-// Measured ~95 MiB/s on M2 Pro release build → floor 40 MiB/s.
+// Measured ~95 MiB/s on M2 Pro release build. macos-14 hosted runners observed
+// 40–60 MiB/s across back-to-back runs (noisy-neighbor variance on the Azure
+// VM), so floor sits at 25 MiB/s — well below CI worst case but still catches
+// any 2–3× regression in the parser fast path.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -69,7 +72,7 @@ fn throughput_plain_text() {
     payload.truncate(PAYLOAD_BYTES);
 
     let bps = unsafe { feed_and_time(&payload) };
-    assert_floor(bps, 40.0, "plain_text");
+    assert_floor(bps, 25.0, "plain_text");
 }
 
 // ---------------------------------------------------------------------------

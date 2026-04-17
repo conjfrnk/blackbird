@@ -167,9 +167,14 @@ mod macos {
             rss_end as f64 / (1024.0 * 1024.0)
         );
 
+        // 50k snapshot acquire/release. A real ref-count bug in bb_snap_release
+        // leaks ~96 KB per call (one 200x60 grid) → 4.8 GiB total, dwarfing any
+        // threshold. macos-14 runners observed up to ~16.5 MiB of allocator
+        // retention noise here, so the limit sits at 32 MiB — still 100×+ below
+        // the smallest interesting leak rate (1-in-100 calls leaking).
         let growth = rss_end.saturating_sub(rss_seed);
         assert!(
-            growth < 16 * 1024 * 1024,
+            growth < 32 * 1024 * 1024,
             "RSS grew by {:.1} MiB over 50k snapshots — suspect snapshot leak",
             growth as f64 / (1024.0 * 1024.0)
         );
