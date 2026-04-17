@@ -259,10 +259,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        // propagateResize is a no-op during live resize; content stretches via
-        // the renderer's in-drag viewport until viewDidEndLiveResize fires.
-        // Outside live resize (programmatic set, zoom button, window first
-        // appears), this is where the session learns the current size.
+        // Propagate to the session on every frame-size change. During live
+        // resize this fires many times per second; propagateResize's
+        // lastPropagatedSize dedup skips calls that didn't cross a cell
+        // boundary. Programmatic / zoom / first-appear paths also land
+        // here.
         propagateResize()
     }
 
