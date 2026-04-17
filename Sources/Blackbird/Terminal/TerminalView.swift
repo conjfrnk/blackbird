@@ -165,11 +165,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         self.metrics = newMetrics
         renderer.reconfigure(metrics: newMetrics, scale: scale)
-        // Window resize increments should follow the new cell size too.
-        window?.contentResizeIncrements = NSSize(
-            width: newMetrics.cellWidth,
-            height: newMetrics.cellHeight
-        )
+        if let window {
+            // Window resize increments should follow the new cell size too.
+            window.contentResizeIncrements = NSSize(
+                width: newMetrics.cellWidth,
+                height: newMetrics.cellHeight
+            )
+            // Keep contentMinSize in sync. Otherwise bumping the font up
+            // doesn't prevent the user from dragging the window below the
+            // new font's 20-col / 4-row minimum — they'd end up with a
+            // window too small to read comfortably.
+            window.contentMinSize = NSSize(
+                width: newMetrics.cellWidth * 20,
+                height: newMetrics.cellHeight * 4 + 28 + Self.bottomContentInsetPoints
+            )
+        }
         // Force a grid recomputation on the next layout — propagateResize
         // compares against lastPropagatedSize, so clear it.
         lastPropagatedSize = nil
