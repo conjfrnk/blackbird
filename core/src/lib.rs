@@ -2013,6 +2013,41 @@ mod tests {
         }
     }
 
+    /// clear_all must reset display_offset even when the user was scrolled
+    /// back. Otherwise `⌘K` inside scrollback leaves the viewport pointing at
+    /// a now-empty region and the terminal looks "blank" until the user
+    /// scrolls down — confusing and wrong, since the live grid is where the
+    /// fresh prompt is about to appear.
+    #[test]
+    fn clear_all_snaps_viewport_to_live_grid() {
+        unsafe {
+            let term = bb_term_new(5, 3, 1000);
+            // Push enough lines to build scrollback.
+            for _ in 0..50 {
+                bb_term_input(term, b"line\r\n".as_ptr(), 6);
+            }
+            // Scroll back into history.
+            bb_term_scroll(term, 20);
+            let mid = bb_term_take_snapshot(term);
+            assert!(
+                (*mid).display_offset > 0,
+                "precondition: viewport should be scrolled back before clear"
+            );
+            bb_snap_release(mid);
+
+            bb_term_clear_all(term);
+            let after = bb_term_take_snapshot(term);
+            assert_eq!(
+                (*after).display_offset,
+                0,
+                "clear_all must snap viewport to live grid (display_offset == 0)"
+            );
+            assert_eq!((*after).history_size, 0, "scrollback must be wiped too");
+            bb_snap_release(after);
+            bb_term_free(term);
+        }
+    }
+
     /// i32::MIN / MAX deltas must not panic the core. A misbehaving input
     /// driver (or a future Swift caller that forgets to clamp) could hand us
     /// those extremes; alacritty's scroll_display clamps internally, but the
