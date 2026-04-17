@@ -182,7 +182,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         let newFont = Self.resolveFont(name: wantName, size: wantSize)
         let newMetrics = CellMetrics(font: newFont)
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        // Rasterise at the window's current screen's scale — not the primary
+        // screen's. Otherwise a Blackbird window sitting on a 1x external
+        // display would re-atlas at 2x (from the Retina primary) and glyphs
+        // would be drawn oversampled, then downsampled in the compositor for
+        // a faintly blurry look. drawableSizeWillChange corrects this on
+        // display migration; doing it up front at the font-change path keeps
+        // the initial atlas sharp for users who never drag across displays.
+        let scale = window?.screen?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2.0
         // Only commit the new metrics if the renderer actually rebuilt its
         // atlas; otherwise grid math and glyph rasterisation would drift
         // apart (cells laid out at new size but drawn with an old-size
