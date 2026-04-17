@@ -354,6 +354,19 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
     }
 
+    // MARK: - TerminalMode helpers
+
+    func test_termModeFlag_focusInOutBit() {
+        // Pin the focus-in-out bit's stable position in BBTermMode. A
+        // future core refactor that re-orders the mode bits would flip
+        // which terminal mode TerminalView observes in render() for the
+        // initial-focus notification.
+        XCTAssertEqual(BBTermMode.focusInOut.rawValue, 1 << 8,
+                       "focusInOut bit must remain at position 8")
+    }
+
+    // MARK: - Paste composition
+
     func test_normalizePaste_composedWithSanitiser() {
         // Real paste flow: Windows-origin text that also happens to contain
         // an embedded bracketed-paste terminator. Normalisation runs first,
