@@ -72,7 +72,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private var prefsCancellable: AnyCancellable?
 
-    private var currentSnapshot: BBSnapshot?
+    /// Latest `BBSnapshot` published by the session. Read by the renderer
+    /// path, the accessibility cache, and the IME extension (which needs
+    /// the cursor coordinates for the candidate-window anchor). Internal
+    /// so the `TerminalView+IME.swift` extension can see it; no setter is
+    /// exposed — `render(snapshot:)` is the only writer.
+    var currentSnapshot: BBSnapshot?
     /// Optional test-only override that feeds the NSAccessibility value
     /// path without a real `BBTerm`. Production never sets this — the live
     /// render path uses `currentSnapshot`.
@@ -113,6 +118,34 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var hoverTrackingArea: NSTrackingArea?
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
+
+    /// Active IME composition buffer. Non-nil while the user is in a
+    /// `setMarkedText` → `insertText`/`unmarkText` cycle. The NSTextInputClient
+    /// conformance lives in `TerminalView+IME.swift`; this property is the
+    /// one piece of shared state keyDown and the IME path both inspect.
+    var composition: Composition?
+    /// Flag raised by `insertText(_:)` for the duration of a single
+    /// `keyDown(with:)` pass. Lets keyDown tell "the IME already committed
+    /// bytes for this event" apart from "no IME activity at all" after
+    /// `inputContext?.handleEvent` returns — in the former case we must
+    /// NOT fall through to the encoder path or the shell would see the
+    /// character twice. Cleared at the top of keyDown.
+    var didInsertTextViaIME: Bool = false
+    /// CALayer-backed subview that paints the in-flight preedit glyphs plus
+    /// a dotted underline. Created lazily when composition starts; removed
+    /// when the user commits or cancels so idle sessions keep a clean tree.
+    var preeditOverlay: PreeditOverlayView?
+
+    #if DEBUG
+    /// Optional PTY-byte recorder for tests. When set, `sendToSession(_:)`
+    /// appends here instead of calling through to the real PTY — lets the
+    /// IME tests assert exactly which commits reach the shell.
+    var ptyRecorderForTests: RecordingPTY?
+    /// Overrides the cursor coordinates that the IME path reads from the
+    /// snapshot. Lets `testFirstRectReturnsCursorCellRect` pin a specific
+    /// (row, col) without feeding the full BBTerm state machine.
+    var cursorOverrideForTests: (row: Int, col: Int)?
+    #endif
 
     private final class FlashView: NSView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -341,7 +374,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// styleMask:)` on the window's real style mask minus `.fullSizeContentView`
     /// — the delta between that and the window's content-view height is the
     /// pure titlebar offset.
-    private var titlebarOnlyTopInset: CGFloat {
+    var titlebarOnlyTopInset: CGFloat {
         guard let window else { return 28 }
         var maskWithoutFullSize = window.styleMask
         maskWithoutFullSize.remove(.fullSizeContentView)
@@ -736,6 +769,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             session.scrollToBottom()
         }
 
+        // Hand the event to the IME first. If macOS's input context is in
+        // the middle of a composition (Japanese kana → kanji, Korean
+        // combining jamo, Option-E dead key → ´) it'll call back into this
+        // view's NSTextInputClient methods (setMarkedText / insertText /
+        // unmarkText). Two outcomes we need to distinguish afterwards:
+        //
+        //   - Still composing (preedit visible): `hasMarkedText()` is true.
+        //     The keystroke has been absorbed; do NOT also encode it.
+        //
+        //   - Committed a grapheme during this event: `insertText` ran and
+        //     emitted bytes via `sendToSession`. `didInsertTextViaIME` is
+        //     the flag that records this. Falling through to the encoder
+        //     would double-write the character.
+        //
+        //   - IME did nothing: the flag stays false and `hasMarkedText`
+        //     stays false. Fall through to the existing encoder path.
+        didInsertTextViaIME = false
+        inputContext?.handleEvent(event)
+        if hasMarkedText() || didInsertTextViaIME { return }
+
         // Fast path for control characters: macOS translates Ctrl+letter into
         // the corresponding control byte (0x01-0x1A) in event.characters.
         // Send that byte directly to the PTY without round-tripping through
@@ -798,31 +851,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if let special = Self.specialKey(for: event) {
             let appCursor = termMode.contains(.appCursor)
             let bytes = encoder.encodeSpecial(special, modifiers: mods, applicationCursorKeys: appCursor)
-            if !bytes.isEmpty { session.send(bytes) }
+            if !bytes.isEmpty { sendToSession(bytes) }
             return
         }
 
-        // In Native Option mode, the user wants macOS's keyboard layout to
-        // decide what Option+<key> produces (e.g. Option+E → ´, Option+N →
-        // ˜, Option+A → å on US layout). `charactersIgnoringModifiers`
-        // strips Option and returns the base key, which would send plain
-        // "e"/"n"/"a" to the shell — defeating Native mode. `event.characters`
-        // reflects the Option-modified glyph macOS produced, which is what
-        // Native mode should deliver verbatim. In Meta mode we still want
-        // `charactersIgnoringModifiers` so Option+E → ESC+"e" (the classic
-        // readline metafied byte) and not ESC+"´".
-        let chars: String = {
-            if !encoder.optionIsMeta, event.modifierFlags.contains(.option) {
-                // Fall back through characters → charactersIgnoringModifiers
-                // so dead-key in-progress events (characters may be empty
-                // while the user is mid-composition) still yield something
-                // sensible.
-                return event.characters?.isEmpty == false
-                    ? (event.characters ?? "")
-                    : (event.charactersIgnoringModifiers ?? "")
-            }
-            return event.charactersIgnoringModifiers ?? event.characters ?? ""
-        }()
+        // NSTextInputClient now owns the dead-key + composition path. The
+        // previous `charactersIgnoringModifiers` / `characters` ternary for
+        // Native-Option dead keys (Option+E → ´) is dead code: the input
+        // context calls `setMarkedText("´")` before we ever reach this
+        // branch, and the follow-up keystroke commits through
+        // `insertText("é")`. `charactersIgnoringModifiers` is the right
+        // source here for every remaining non-special printable — Meta
+        // mode still wants the un-Option'd base letter so that Option+E
+        // encodes to ESC "e" rather than ESC "´".
+        let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
         let bytes = encoder.encode(chars: chars, modifiers: mods, mode: termMode)
         #if DEBUG
         if !bytes.isEmpty {
@@ -834,7 +876,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                   chars.debugDescription, mods.rawValue)
         }
         #endif
-        if !bytes.isEmpty { session.send(bytes) }
+        if !bytes.isEmpty { sendToSession(bytes) }
     }
 
     /// Resolve a font from the preferences value. `name` can be either:
@@ -1862,6 +1904,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if let url = resolveClickURL(screenRow: row, col: col) {
             urlOpener.open(url)
         }
+    }
+
+    /// Swap the encoder's Option-is-Meta setting without going through the
+    /// full `Preferences.shared` publisher chain. IME tests use this to pin
+    /// Native-Option mode before exercising dead-key composition.
+    func setOptionIsMetaForTests(_ flag: Bool) {
+        if encoder.optionIsMeta != flag {
+            encoder = KeyEncoder(optionIsMeta: flag)
+        }
+    }
+
+    /// Pin the cursor row/col that the IME path reads for
+    /// `firstRect(forCharacterRange:…)`. Lets tests assert the candidate-
+    /// window anchor without feeding the Rust term a full grid of input.
+    func installCursorForTests(row: Int, col: Int) {
+        cursorOverrideForTests = (row: row, col: col)
     }
     #endif
 
