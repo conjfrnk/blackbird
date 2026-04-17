@@ -102,3 +102,34 @@ fn osc7_survives_byte_fragmented_input() {
     );
     assert_eq!(&matches[0].1, b"/Users/foo/bar");
 }
+
+#[test]
+fn osc7_malformed_utf8_path_dropped() {
+    // Percent-encoded bytes that decode to invalid UTF-8 (bare continuation).
+    let seq = b"\x1b]7;file:///%ff\x1b\\";
+    let events = drive(seq);
+    assert!(events
+        .iter()
+        .all(|(k, _)| *k != BBEventKind::CwdChanged as u32));
+}
+
+#[test]
+fn osc7_percent_escapes_decoded() {
+    let seq = b"\x1b]7;file:///Users/foo%20bar\x1b\\";
+    let events = drive(seq);
+    let cwd = events
+        .iter()
+        .find(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+        .expect("expected CwdChanged event");
+    assert_eq!(&cwd.1, b"/Users/foo bar");
+}
+
+#[test]
+fn osc7_truncated_percent_escape_rejected() {
+    // "%2" at end of path — incomplete escape, whole event dropped.
+    let seq = b"\x1b]7;file:///foo%2\x1b\\";
+    let events = drive(seq);
+    assert!(events
+        .iter()
+        .all(|(k, _)| *k != BBEventKind::CwdChanged as u32));
+}

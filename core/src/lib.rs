@@ -258,6 +258,15 @@ impl Perform for Osc7Scanner<'_> {
         let Some(decoded) = percent_decode(path_bytes) else {
             return;
         };
+        // Spec (2026-04-17-blackbird-gaps-design.md §4.1): "Malformed UTF-8
+        // in the path is ignored." Percent-decoding can produce arbitrary
+        // byte sequences (e.g. `file:///%ff`), so validate before firing.
+        // The event's payload contract in `BBEventKind::CwdChanged` is
+        // UTF-8 bytes — Swift wraps the pointer in a Swift String which
+        // assumes UTF-8 validity.
+        if std::str::from_utf8(&decoded).is_err() {
+            return;
+        }
 
         let ev = BBEvent {
             kind: BBEventKind::CwdChanged,
@@ -494,9 +503,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             // begun in a prior chunk can be terminated by a BEL (0x07) in
             // this ESC-free chunk, so we cannot skip the parallel parser
             // even on the fast path.
-            let mut scanner = Osc7Scanner {
-                cell: &bb.callback,
-            };
+            let mut scanner = Osc7Scanner { cell: &bb.callback };
             bb.osc7_parser.advance(&mut scanner, slice);
             return;
         }
