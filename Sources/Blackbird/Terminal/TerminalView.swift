@@ -328,6 +328,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
     }
 
+    private var focusObservers: [NSObjectProtocol] = []
+
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         #if DEBUG
@@ -343,6 +345,51 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                   screen.localizedName, maxFPS)
         }
         #endif
+
+        // Tear down any stale focus observers (e.g. view moved between
+        // windows), then re-attach to the new window. Focus-event reporting
+        // requires us to notify the shell/TUI with CSI I / CSI O every time
+        // this tab becomes key or resigns key — but only while the app has
+        // enabled mode 1004.
+        for token in focusObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        focusObservers.removeAll()
+        guard let window else { return }
+        let center = NotificationCenter.default
+        focusObservers.append(center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.sendFocusEventIfNeeded(gained: true)
+        })
+        focusObservers.append(center.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.sendFocusEventIfNeeded(gained: false)
+        })
+    }
+
+    deinit {
+        for token in focusObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    /// xterm focus-in/out reports. Enabled by the running program via
+    /// DECSET 1004; tmux, neovim's `FocusGained/FocusLost` autocmds, and
+    /// some shells (zsh vi-mode helpers) lean on this to refresh state
+    /// exactly when the user's attention moves.
+    private func sendFocusEventIfNeeded(gained: Bool) {
+        guard let session,
+              currentSnapshot?.termMode.contains(.focusInOut) == true
+        else { return }
+        // CSI I on focus gain, CSI O on focus loss. Two bytes after ESC [.
+        let final: UInt8 = gained ? 0x49 : 0x4F    // 'I' / 'O'
+        session.send(Data([0x1B, 0x5B, final]))
     }
 
     // MARK: - MTKViewDelegate
