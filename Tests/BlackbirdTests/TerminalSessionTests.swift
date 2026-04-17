@@ -125,6 +125,37 @@ final class TerminalSessionTests: XCTestCase {
         session.terminate()
     }
 
+    func test_resize_degenerateSizeClampsToMinimum() throws {
+        // Caller passes a pathological 1×1. The Rust core clamps to 2×2 so
+        // reflow doesn't explode; Swift must clamp before calling PTY so the
+        // tty's TIOCSWINSZ matches what the grid will actually render into.
+        // The snapshot's final cols/rows reflect the clamp — anything below 2
+        // here would mean the PTY and grid disagree on dimensions.
+        let session = try TerminalSession.start(
+            shell: "/bin/cat",
+            arguments: [],
+            size: .init(cols: 80, rows: 24)
+        )
+
+        let exp = expectation(description: "snapshot at clamped size")
+        var gotExpected = false
+        var c: AnyCancellable?
+        c = session.$snapshot
+            .compactMap { $0 }
+            .sink { snap in
+                if snap.cols == 2, snap.rows == 2, !gotExpected {
+                    gotExpected = true
+                    c?.cancel()
+                    exp.fulfill()
+                }
+            }
+
+        session.resize(to: .init(cols: 1, rows: 1))
+
+        wait(for: [exp], timeout: 3.0)
+        session.terminate()
+    }
+
     func test_resizePropagatesToCoreAndPty() throws {
         let session = try TerminalSession.start(
             shell: "/bin/sh",
