@@ -99,7 +99,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// Link id under the pointer right now, or 0 when the hovered cell has
     /// no OSC 8 attribution. The renderer reads this each frame to draw
     /// the accent underline on every cell sharing the id.
-    var hoveredLinkID: UInt32 = 0
+    private var hoveredLinkID: UInt32 = 0
     /// Scheduled tooltip reveal. Cancelled on pointer movement, scroll,
     /// keydown, or view teardown.
     private var hoverTooltipItem: DispatchWorkItem?
@@ -237,6 +237,41 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                     self?.syncEncoderFromPreferences()
                 }
             }
+
+        // Push the system accent into the renderer immediately so the
+        // hyperlink hover underline matches whatever accent the user
+        // picked in System Settings — not the hardcoded macOS Blue that
+        // the renderer defaults to. The drop-target ring (`dropHighlightView`
+        // above) already follows `NSColor.controlAccentColor`; without
+        // this we'd paint two different "accents" in the same window.
+        pushSystemAccentToRenderer()
+        // Observe accent changes so Settings → Appearance → Accent swap
+        // reflects live. Registered on the shared system-colours
+        // notification; tokens go into `focusObservers` for the existing
+        // centralised removal in `deinit`.
+        focusObservers.append(NotificationCenter.default.addObserver(
+            forName: NSColor.systemColorsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.pushSystemAccentToRenderer()
+            self.needsDisplay = true
+        })
+    }
+
+    /// Read `NSColor.controlAccentColor`, convert to sRGB, and hand the
+    /// components to the renderer as the accent uniform. Falls back to
+    /// the macOS Blue sRGB values if the accent colour can't be
+    /// represented in sRGB for some reason — matches what the renderer
+    /// defaults to anyway.
+    private func pushSystemAccentToRenderer() {
+        let sRGB = NSColor.controlAccentColor.usingColorSpace(.sRGB)
+        let r = Float(sRGB?.redComponent ?? 0.0)
+        let g = Float(sRGB?.greenComponent ?? 0.48)
+        let b = Float(sRGB?.blueComponent ?? 1.0)
+        let a = Float(sRGB?.alphaComponent ?? 1.0)
+        renderer.setAccentColor(rgba: SIMD4<Float>(r, g, b, a))
     }
 
     /// Rebuild the KeyEncoder if the user flipped Option between Meta and
@@ -523,6 +558,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         for token in focusObservers {
             NotificationCenter.default.removeObserver(token)
         }
+        // Tear down any pending hover tooltip. The DispatchWorkItem
+        // captures self weakly so it won't crash on late fire, but the
+        // panel would otherwise linger briefly after the view is gone.
+        hoverTooltipItem?.cancel()
+        hoverTooltipPanel?.orderOut(nil)
     }
 
     /// xterm focus-in/out reports. Enabled by the running program via
@@ -658,6 +698,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - Input
 
     public override func keyDown(with event: NSEvent) {
+        // Typing dismisses any dwell-tooltip the pointer might be about
+        // to reveal — otherwise a hovered URL tooltip would obscure the
+        // user's own output as it scrolls past.
+        cancelHoverTooltip()
         #if DEBUG
         NSLog("[Blackbird] keyDown: keyCode=%d flags=0x%lx chars=%@ charsIgnoring=%@",
               event.keyCode,
@@ -1349,6 +1393,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var resizeContext: ResizeContext?
 
     public override func scrollWheel(with event: NSEvent) {
+        // Scrolling moves the grid beneath the pointer — the cell the
+        // user was dwelling on now has different content, so any pending
+        // tooltip would pop up with a stale URL. Cancel both the pending
+        // reveal and the accent underline; the next mouseMoved delivery
+        // will repaint them against the fresh cell if appropriate.
+        cancelHoverTooltip()
         guard let session else { super.scrollWheel(with: event); return }
         // ⌥-scroll bypasses mouse reporting so the user can always reach
         // scrollback locally, even inside a TUI that captured the wheel.
@@ -1568,13 +1618,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private func clearHover() {
         lastHoverCell = nil
-        if hoveredLinkID != 0 {
-            hoveredLinkID = 0
-            needsDisplay = true
-        }
+        cancelHoverTooltip()
+    }
+
+    /// Cancel any pending tooltip reveal, drop the tooltip panel if it's
+    /// up, and clear the accent underline. Called from mouseExited,
+    /// scrollWheel (grid moves underneath the pointer — the old cell
+    /// coordinates no longer map to the link the user was pointing at),
+    /// keyDown (typing dismisses the tooltip so it doesn't obscure the
+    /// user's own output), and deinit (teardown hygiene).
+    private func cancelHoverTooltip() {
         hoverTooltipItem?.cancel()
         hoverTooltipItem = nil
         dismissHoverTooltip()
+        if hoveredLinkID != 0 {
+            hoveredLinkID = 0
+            // Push the cleared id straight to the renderer so the next
+            // frame drops the underline even before the usual draw-path
+            // plumbing runs.
+            renderer.setHoveredLinkID(0)
+            needsDisplay = true
+        }
     }
 
     private func showHoverTooltip(urlString: String, anchor: NSPoint) {
