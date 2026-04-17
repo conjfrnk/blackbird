@@ -2,6 +2,13 @@ import AppKit
 import Combine
 import Metal
 
+extension Notification.Name {
+    /// Fired whenever any MainWindowController observes its own window's
+    /// title change, so sibling tab pills in the same group can redraw
+    /// their list of tabs to reflect the new title.
+    static let blackbirdTabTitleChanged = Notification.Name("dev.conjfrnk.blackbird.tabTitleChanged")
+}
+
 final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
 
     /// When AppDelegate.closeWindow batch-closes every tab, it already asked
@@ -16,6 +23,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var titlebarTabBar: TitlebarTabBarViewController?
     private var tabGroupObservers: [NSKeyValueObservation] = []
     private var titleObserver: NSKeyValueObservation?
+    private var titleBroadcastObserver: NSObjectProtocol?
 
     /// Called when the window is about to close. AppDelegate uses this to
     /// remove the controller from its tracking array.
@@ -259,11 +267,33 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // string into window.title — but the custom pill strip doesn't
         // auto-redraw from that (refreshTabBar is only invoked on
         // add/remove/select). Observe title so tab pills stay in sync with
-        // the shell's reported title.
+        // the shell's reported title, and broadcast so sibling tabs in the
+        // same group also re-read this window's new title when they repaint
+        // their own pill (each pill strip lists every tab).
         if let hostWindow = window {
             titleObserver = hostWindow.observe(\.title, options: [.new]) { [weak self] _, _ in
-                DispatchQueue.main.async { self?.refreshTabBar() }
+                DispatchQueue.main.async {
+                    self?.refreshTabBar()
+                    NotificationCenter.default.post(
+                        name: .blackbirdTabTitleChanged,
+                        object: nil
+                    )
+                }
             }
+            let tok = NotificationCenter.default.addObserver(
+                forName: .blackbirdTabTitleChanged,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.refreshTabBar()
+            }
+            titleBroadcastObserver = tok
+        }
+    }
+
+    deinit {
+        if let tok = titleBroadcastObserver {
+            NotificationCenter.default.removeObserver(tok)
         }
     }
 
