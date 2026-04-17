@@ -1441,6 +1441,44 @@ mod tests {
         }
     }
 
+    /// Regression: resize_changes_dimensions covers the nominal case, but the
+    /// interesting failure mode is resize + scrollback. Feeding enough lines
+    /// to build history and then shrinking should preserve the scrollback
+    /// count (alacritty reflows but retains history up to the configured
+    /// limit). This catches any future refactor that accidentally drops the
+    /// history buffer on resize.
+    #[test]
+    fn resize_preserves_scrollback_history() {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            assert!(!term.is_null());
+            // 8 line-feeds past the 3-row screen → 5 lines in history.
+            let input = b"aaa\nbbb\nccc\nddd\neee\nfff\nggg\nhhh";
+            bb_term_input(term, input.as_ptr(), input.len());
+
+            let before = bb_term_take_snapshot(term);
+            let before_hist = (*before).history_size;
+            assert!(
+                before_hist >= 5,
+                "history should have built to >=5 lines, got {}",
+                before_hist
+            );
+            bb_snap_release(before);
+
+            // Shrink vertically. alacritty reflows but keeps history.
+            bb_term_resize(term, 10, 2);
+            let after = bb_term_take_snapshot(term);
+            assert_eq!((*after).rows, 2);
+            assert!(
+                (*after).history_size >= before_hist,
+                "resize shrinking rows must not evict scrollback"
+            );
+            bb_snap_release(after);
+
+            bb_term_free(term);
+        }
+    }
+
     #[test]
     fn resize_null_term_is_noop() {
         unsafe {
