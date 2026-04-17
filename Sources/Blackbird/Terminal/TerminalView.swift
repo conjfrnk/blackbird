@@ -972,7 +972,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func scrollWheel(with event: NSEvent) {
         guard let session else { super.scrollWheel(with: event); return }
-        if mouseReportingEnabled() {
+        // ⌥-scroll bypasses mouse reporting so the user can always reach
+        // scrollback locally, even inside a TUI that captured the wheel.
+        // Matches the ⌥-click escape on mouseDown.
+        let optionHeld = event.modifierFlags.contains(.option)
+        if mouseReportingEnabled() && !optionHeld {
             // Mouse mode: forward as SGR/X10 scroll events.
             // Wheel up = button 64, wheel down = button 65.
             if event.scrollingDeltaY > 0 {
