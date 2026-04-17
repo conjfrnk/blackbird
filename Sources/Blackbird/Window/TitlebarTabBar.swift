@@ -253,7 +253,13 @@ final class TabStripView: NSView {
         }
         for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
             guard i < tabs.count else { return }
-            if NSPointInRect(p, closeHotspot(in: rect)) {
+            // Only honour a close click when the user is actually hovered
+            // on the × — otherwise a stationary click near the leading edge
+            // of a pill would quietly close it even though the × wasn't
+            // visible to the user yet. Selecting is the safe default; to
+            // close, the user has to hover the pill first (which paints
+            // the ×) and then click.
+            if hoveredPill == i, hoveredClose, NSPointInRect(p, closeHotspot(in: rect)) {
                 onCloseWindow?(tabs[i])
             } else {
                 onSelectWindow?(tabs[i])

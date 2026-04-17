@@ -1051,19 +1051,25 @@ pub unsafe extern "C" fn bb_term_text_range(
         let topmost = grid.topmost_line().0;
         let bottommost = grid.bottommost_line().0;
 
+        // Clamp to what actually exists in the grid before iterating. A
+        // caller that passes i32::MIN / i32::MAX (or the fuzzer in
+        // core/fuzz) would otherwise spin ~4 billion loop iterations that
+        // each do nothing but bounds-check and increment.
+        let iter_start = s_line.max(topmost);
+        let iter_end = e_line.min(bottommost);
+
         // Collect each line's emitted text, then join with '\n' at the end.
         let mut lines: Vec<String> = Vec::new();
 
         let rectangular = rect != 0;
         let single_line = s_line == e_line;
 
-        let mut line_i = s_line;
-        while line_i <= e_line {
-            if line_i < topmost || line_i > bottommost {
-                line_i += 1;
-                continue;
-            }
+        if iter_start > iter_end {
+            return bb_string_new(Vec::new());
+        }
 
+        let mut line_i = iter_start;
+        while line_i <= iter_end {
             let (col_lo, col_hi, trim) = if rectangular {
                 // Rectangular mode clips every row to the column span of
                 // the bounding box. Tuple-normalisation above only orders
@@ -1622,6 +1628,33 @@ mod tests {
             assert!(!s.is_null());
             let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
             assert_eq!(std::str::from_utf8(bytes).unwrap(), "aaa\nbbb\nccc");
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression: before the clamp, feeding i32::MIN / i32::MAX as the
+    /// line bounds caused the inner while loop to iterate ~4 billion times
+    /// doing nothing but increment. This test should return nearly-instantly
+    /// now; if someone removes the clamp it'll hang the test runner (which
+    /// is exactly the signal we want).
+    #[test]
+    fn text_range_clamps_huge_line_range() {
+        unsafe {
+            let term = bb_term_new(5, 3, 100);
+            bb_term_input(term, b"hi".as_ptr(), 2);
+            let start = std::time::Instant::now();
+            let s = bb_term_text_range(term, i32::MIN, 0, i32::MAX, 4, 0);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_secs() < 1,
+                "text_range with i32::MIN..i32::MAX must be clamped — took {:?}",
+                elapsed
+            );
+            // Only the grid's real lines contribute; "hi" is on line 0.
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            let out = std::str::from_utf8(bytes).unwrap();
+            assert!(out.contains("hi"), "expected 'hi' in output, got {out:?}");
             bb_string_release(s);
             bb_term_free(term);
         }
