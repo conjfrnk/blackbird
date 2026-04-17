@@ -411,11 +411,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - MTKViewDelegate
 
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        // Intentionally empty: setFrameSize + viewDidEndLiveResize already
-        // cover the points-based resize path. Adding a PTY resize here would
-        // double-fire SIGWINCH on every non-live resize (zoom button, etc).
-        // This hook remains for future per-pixel tracking (e.g., Retina
-        // scale-factor changes) but doesn't drive the grid geometry today.
+        // setFrameSize + viewDidEndLiveResize own the points-based resize
+        // path; we mustn't double-fire SIGWINCH from here (zoom button etc.).
+        // What this callback IS good for: detecting a backing-scale change,
+        // which happens when the window moves between displays of different
+        // densities (1x external, 2x Retina, 3x Liquid Retina XDR, etc.).
+        // Re-rasterise the atlas at the new pixel resolution so glyphs stay
+        // sharp on the new display. Do nothing if the scale hasn't moved.
+        guard bounds.width > 0 else { return }
+        let newScale = size.width / bounds.width
+        guard newScale > 0 else { return }
+        if abs(newScale - renderer.atlas.scale) > 0.01 {
+            renderer.reconfigure(metrics: metrics, scale: newScale)
+        }
     }
 
     public func draw(in view: MTKView) {
