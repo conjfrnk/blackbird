@@ -162,6 +162,12 @@ public final class MetalRenderer {
             ) {
                 instanceBuffer = newBuf
                 instanceCapacity = newCap
+            } else {
+                // Out-of-GPU-memory (or device tear-down) while trying to
+                // grow the instance buffer. Writing cells past the current
+                // capacity would be UB; skip this frame instead. The renderer
+                // retries on the next draw, so transient failures self-heal.
+                return 0
             }
         }
 
