@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import Blackbird
 
 final class PreferencesTests: XCTestCase {
@@ -233,6 +234,26 @@ final class PreferencesTests: XCTestCase {
 
         p.translucency = 0.42
         XCTAssertEqual(p.translucency, 0.42, accuracy: 0.0001)
+    }
+
+    // MARK: - objectWillChange — ThemeManager observes this to re-apply
+    //                           theme on any preference change.
+
+    func test_setter_firesObjectWillChange_forAppStorageProperties() {
+        let p = Preferences.shared
+        var fired = false
+        let c = p.objectWillChange.sink { fired = true }
+        defer { c.cancel() }
+
+        // Pick a value that will actually change; fontSize round-trips
+        // through a Double so the write always matters.
+        p.fontSize = p.fontSize == 13 ? 14 : 13
+
+        XCTAssertTrue(
+            fired,
+            "objectWillChange must fire on @AppStorage writes — ThemeManager " +
+            "and TerminalView rely on this to re-apply palette + font."
+        )
     }
 
     // MARK: - Font name migration (process-init-once)
