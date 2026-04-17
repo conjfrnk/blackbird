@@ -271,3 +271,16 @@ jobs:
       # as RSS growth scaling with iterations; this gate catches that.
       - name: Run long-session memory gate
         run: cargo test -p blackbird_core --test long_session_memory --release -- --ignored --nocapture
+
+  security-posture:
+    name: Security posture — entitlements + hardened runtime
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pins hardened runtime on, refuses any com.apple.security.cs.disable-*
+      # entitlement, and confirms the release pipeline still targets
+      # Developer ID + notarytool. Fast — pure static checks against
+      # project.yml / scripts / Sources.
+      - name: Check security posture
+        run: scripts/check-security-posture.sh
