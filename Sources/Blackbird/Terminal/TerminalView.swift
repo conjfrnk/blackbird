@@ -980,7 +980,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             )
             return
         }
-        guard mouseReportingEnabled(), let session else { super.rightMouseDown(with: event); return }
+        // ⌥+right-click escapes a TUI's mouse capture just like ⌥+left-click
+        // and ⌥+scroll do elsewhere. Without this, vim / tmux / htop eat
+        // every right-click and the Copy/Paste context menu is unreachable.
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session else {
+            super.rightMouseDown(with: event)
+            return
+        }
         sendMouseEvent(event, button: 2, press: true, session: session)
     }
 
@@ -1039,7 +1046,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             resizeContext = nil
             return
         }
-        guard mouseReportingEnabled(), let session else { super.rightMouseUp(with: event); return }
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session else {
+            super.rightMouseUp(with: event)
+            return
+        }
         sendMouseEvent(event, button: 2, press: false, session: session)
     }
 
