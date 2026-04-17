@@ -19,14 +19,20 @@ public struct CellMetrics {
         self.ascent = CTFontGetAscent(ct)
         self.descent = CTFontGetDescent(ct)
         self.leading = CTFontGetLeading(ct)
-        self.cellHeight = (ascent + descent + leading).rounded()
+        // Floor both metrics at 1pt so downstream grid math and atlas
+        // texture sizing never hit a division-by-zero or a zero-sized
+        // Metal texture. The settings picker only lists monospace families
+        // (for which both dimensions are real positive numbers), but an
+        // exotic font or a manually-edited UserDefault can still sneak
+        // through and we don't want to crash the app in response.
+        self.cellHeight = max(1, (ascent + descent + leading).rounded())
         // Measure the advance of 'M' — a reliable monospace cell width.
         var glyph = CGGlyph(0)
         var chars: [UniChar] = [UInt16(("M" as Character).asciiValue ?? 77)]
         CTFontGetGlyphsForCharacters(ct, &chars, &glyph, 1)
         var advance = CGSize.zero
         CTFontGetAdvancesForGlyphs(ct, .horizontal, &glyph, &advance, 1)
-        self.cellWidth = advance.width.rounded()
+        self.cellWidth = max(1, advance.width.rounded())
     }
 
     public func grid(forPixelSize size: CGSize) -> (cols: Int, rows: Int) {
