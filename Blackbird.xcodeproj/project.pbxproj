@@ -34,6 +34,7 @@
 		8E940FAAE63AB7BE99D79886 /* SelectionModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83BD7639AA0AD9A74DDB61B6 /* SelectionModeTests.swift */; };
 		903AE2C38D9B7F69973CC158 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 9EE9FF088456C53438AA86BE /* Sparkle */; };
 		91497F92ABED24A383320845 /* TerminalSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */; };
+		A1B2C3D4000000000000AE01 /* TabRenameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4000000000000AE02 /* TabRenameTests.swift */; };
 		92B08E10BCF3923F92AA994B /* PTYTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */; };
 		92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */; };
 		9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */; };
@@ -93,6 +94,7 @@
 		568D389F2829611D1FDC43FA /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		5995252272D652667DB2D2D9 /* PTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTY.swift; sourceTree = "<group>"; };
 		5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
+		A1B2C3D4000000000000AE02 /* TabRenameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRenameTests.swift; sourceTree = "<group>"; };
 		673FE2E71DCD08F9286D5C60 /* kitty.terminfo */ = {isa = PBXFileReference; path = kitty.terminfo; sourceTree = "<group>"; };
 		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
 		6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+Dragging.swift"; sourceTree = "<group>"; };
@@ -176,6 +178,7 @@
 				4EC02EBECC88454DC42A0233 /* PreferencesTests.swift */,
 				7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */,
 				83BD7639AA0AD9A74DDB61B6 /* SelectionModeTests.swift */,
+				A1B2C3D4000000000000AE02 /* TabRenameTests.swift */,
 				5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */,
 				75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */,
 				A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */,
@@ -485,6 +488,7 @@
 				92B08E10BCF3923F92AA994B /* PTYTests.swift in Sources */,
 				2C93251EFA04482D77211D2F /* PreferencesTests.swift in Sources */,
 				8E940FAAE63AB7BE99D79886 /* SelectionModeTests.swift in Sources */,
+				A1B2C3D4000000000000AE01 /* TabRenameTests.swift in Sources */,
 				91497F92ABED24A383320845 /* TerminalSessionTests.swift in Sources */,
 				92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */,
 				F8C99250E001E2D862D19244 /* TestHostTermination.swift in Sources */,

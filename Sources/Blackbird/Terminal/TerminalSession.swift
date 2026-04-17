@@ -2,6 +2,15 @@ import Foundation
 import Combine
 import AppKit
 
+extension Notification.Name {
+    /// Fired whenever a `TerminalSession`'s effective title changes (either
+    /// the shell emitted a new OSC 0/2, or the user set/cleared a manual
+    /// override). Observers read `session.displayTitle` to pick up the new
+    /// value. `object` is the session that changed.
+    public static let terminalSessionTitleDidChange =
+        Notification.Name("BlackbirdTerminalSessionTitleDidChange")
+}
+
 /// Owns a PTY and a BBTerm. Wires PTY output into the VT parser, publishes
 /// snapshots of the grid to observers.
 ///
@@ -15,6 +24,10 @@ public final class TerminalSession: ObservableObject {
     public typealias Size = PTY.Size
 
     @Published public private(set) var snapshot: BBSnapshot?
+    /// Effective, observable title for UI binding. Always equals `displayTitle`
+    /// — republished whenever the shell emits OSC 0/2 or the user changes
+    /// `titleOverride`, so Combine subscribers (e.g., `TerminalView` → `window.title`)
+    /// pick up both sources.
     @Published public private(set) var title: String?
     @Published public private(set) var bellCounter: UInt64 = 0
     /// Set once after the shell process has exited. The value is the child's
@@ -22,8 +35,73 @@ public final class TerminalSession: ObservableObject {
     /// controller) close the window in response.
     @Published public private(set) var exitCode: Int32?
 
+    // MARK: - Title state
+
+    /// Last title the shell emitted via OSC 0/2. Empty before any emit.
+    /// Mutated on main thread (see the `bbterm.onEvent` dispatch back to main).
+    private var oscTitle: String = ""
+
+    /// User-set manual override. When non-nil and non-empty, the UI shows
+    /// this instead of the shell's OSC title. Setting to nil or an empty
+    /// string reverts to auto (OSC) mode.
+    public var titleOverride: String? {
+        didSet {
+            // Treat empty string as "clear the override" — matches the
+            // Rename alert's empty-field behaviour (see MainWindowController.beginRenameActiveTab).
+            if titleOverride?.isEmpty == true {
+                // Guard against recursion: only reassign if not already nil.
+                if titleOverride != nil {
+                    titleOverride = nil
+                    return  // didSet will re-fire with nil and publish.
+                }
+            }
+            publishTitle()
+        }
+    }
+
+    /// The title to display in the window / tab bar. Override wins when set;
+    /// otherwise falls back to the shell-reported OSC title; otherwise a
+    /// generic default.
+    public var displayTitle: String {
+        if let override = titleOverride, !override.isEmpty { return override }
+        return oscTitle.isEmpty ? defaultTitle : oscTitle
+    }
+
+    /// Fallback title used when neither an override nor an OSC title is set.
+    /// Kept short; the window controller seeds a shell-basename title at
+    /// session start, so this only appears in tests / headless instances.
+    private var defaultTitle: String { "Terminal" }
+
+    /// Called by the event router when the shell emits OSC 0/2. Keeps
+    /// `oscTitle` and the published `title` in sync. Harmless to call with
+    /// the same string twice — the `@Published` will still fire, which is
+    /// fine; downstream is idempotent.
+    public func applyOscTitle(_ newValue: String) {
+        oscTitle = newValue
+        publishTitle()
+    }
+
+    /// Recompute `displayTitle` and republish on the published `title`
+    /// pipeline plus post the notification. Callers on any thread hop to
+    /// main if needed.
+    private func publishTitle() {
+        let value: String? = displayTitle
+        let fire = { [weak self] in
+            guard let self else { return }
+            self.title = value
+            NotificationCenter.default.post(
+                name: .terminalSessionTitleDidChange,
+                object: self
+            )
+        }
+        if Thread.isMainThread { fire() }
+        else { DispatchQueue.main.async(execute: fire) }
+    }
+
     private let bbterm: BBTerm
-    private let pty: PTY
+    /// Optional so tests can construct a title-only headless session without
+    /// spawning a child process. Production paths always have a PTY.
+    private let pty: PTY?
     private let coreQueue = DispatchQueue(label: "blackbird.core")
 
     public static func start(
@@ -55,6 +133,35 @@ public final class TerminalSession: ObservableObject {
         wire()
     }
 
+    #if DEBUG
+    /// Headless factory for title-logic tests. Creates a BBTerm at a trivial
+    /// size and skips the PTY spawn entirely — so no child process, no fd,
+    /// no background queues. Only `applyOscTitle`, `titleOverride`, and
+    /// `displayTitle` are useful on the returned instance; public methods
+    /// that touch the PTY are all no-ops via optional chaining.
+    static func makeHeadlessForTests() -> TerminalSession {
+        // BBTerm.init accepts anything ≥ 2; pick the minimum so we don't
+        // waste allocation for unit-test purposes.
+        guard let bb = BBTerm(size: .init(cols: 2, rows: 2)) else {
+            // BBTerm.init only fails if the Rust core refuses the args;
+            // our hardcoded 2×2 is well within the floor it enforces, so
+            // in practice this path is unreachable. fatalError is better
+            // than returning an unusable optional to the test.
+            fatalError("BBTerm.init(size:) returned nil for 2×2 headless test session")
+        }
+        return TerminalSession(headlessBBTerm: bb)
+    }
+
+    private init(headlessBBTerm bb: BBTerm) {
+        self.bbterm = bb
+        self.pty = nil
+        // Deliberately skip wire(): no PTY onBytes callback to attach, and
+        // registering bbterm.onEvent on a background coreQueue-free flow
+        // would require maintaining the snapshot/publish plumbing the
+        // tests don't exercise. Title tests poke applyOscTitle directly.
+    }
+    #endif
+
     deinit {
         terminate()
     }
@@ -62,26 +169,26 @@ public final class TerminalSession: ObservableObject {
     // MARK: - Public API
 
     public func send(_ data: Data) {
-        pty.write(data)
+        pty?.write(data)
     }
 
     /// Write bytes synchronously, bypassing the async write queue. Use for
     /// urgent control characters (Ctrl+C → 0x03, Ctrl+Z → 0x1A) where the
     /// user expects instant response.
     public func sendImmediate(_ data: Data) {
-        pty.writeImmediate(data)
+        pty?.writeImmediate(data)
     }
 
     /// Whether the shell currently has a foreground child process (anything
     /// other than the shell itself). Used to gate the confirm-close prompt.
     public func hasForegroundChild() -> Bool {
-        pty.hasForegroundChild()
+        pty?.hasForegroundChild() ?? false
     }
 
     /// Current working directory of the foreground process — inherited by
     /// new tabs / windows created via ⌘T / ⌘N.
     public func foregroundWorkingDirectory() -> String? {
-        pty.foregroundWorkingDirectory()
+        pty?.foregroundWorkingDirectory()
     }
 
     /// Send a POSIX signal directly to the terminal's foreground process group.
@@ -89,7 +196,7 @@ public final class TerminalSession: ObservableObject {
     /// line discipline — works even if the shell changed termios (ISIG off,
     /// VINTR remapped, etc.).
     public func sendSignalToForeground(_ sig: Int32) {
-        pty.sendSignalToForeground(sig)
+        pty?.sendSignalToForeground(sig)
     }
 
     public func resize(to size: Size) {
@@ -114,7 +221,7 @@ public final class TerminalSession: ObservableObject {
         let clamped = Size(cols: max(2, size.cols), rows: max(2, size.rows))
         var newSnap: BBSnapshot?
         coreQueue.sync {
-            self.pty.resize(to: clamped)
+            self.pty?.resize(to: clamped)
             self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows))
             newSnap = self.bbterm.snapshot()
         }
@@ -210,14 +317,15 @@ public final class TerminalSession: ObservableObject {
     }
 
     public func terminate() {
-        pty.terminate()
+        pty?.terminate()
     }
 
     // MARK: - Wiring
 
     private func wire() {
         // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
-        pty.onBytes = { [weak self] data in
+        // Guard because headless test instances don't own a PTY.
+        pty?.onBytes = { [weak self] data in
             guard let self else { return }
             self.coreQueue.async {
                 self.feed(data)
@@ -225,7 +333,7 @@ public final class TerminalSession: ObservableObject {
         }
 
         // When the child exits (natural or SIGHUP), publish the exit code.
-        pty.onExit = { [weak self] code in
+        pty?.onExit = { [weak self] code in
             self?.exitCode = code
         }
 
@@ -245,7 +353,10 @@ public final class TerminalSession: ObservableObject {
             DispatchQueue.main.async {
                 switch event {
                 case .title(let t):
-                    self.title = t
+                    // Route through applyOscTitle so a user-set override
+                    // isn't trampled by a late shell OSC 0/2, and so the
+                    // .terminalSessionTitleDidChange notification fires.
+                    self.applyOscTitle(t)
                 case .bell:
                     self.bellCounter &+= 1
                 case .ptyWrite:
@@ -279,7 +390,10 @@ public final class TerminalSession: ObservableObject {
                     break  // Plan 5/3 will surface cursor shape.
                 case .fatal(let msg):
                     // Surface as a title prefix for visibility; Plan 7 adds a
-                    // dedicated diagnostics channel.
+                    // dedicated diagnostics channel. Write directly to the
+                    // published `title` rather than through applyOscTitle —
+                    // a fatal panic should display regardless of override
+                    // state, and there's no "recompute" path after this.
                     self.title = "[fatal] core panic: \(msg)"
                 }
             }

@@ -365,6 +365,55 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         if menuItem.action == #selector(toggleTabBar(_:)) {
             return hasMultipleTabs
         }
+        if menuItem.action == #selector(renameActiveTab(_:)) {
+            // Only enabled when there's a live session to rename.
+            return activeSession != nil
+        }
+        if menuItem.action == #selector(resetActiveTabTitle(_:)) {
+            // "Reset to Auto" only makes sense when an override is active.
+            return activeSession?.titleOverride != nil
+        }
         return true
+    }
+
+    // MARK: - Tab rename
+
+    /// The session this window controller currently renders. The titlebar
+    /// tab bar right-click and the View > Rename Tab… menu both target
+    /// *this* window's session — AppKit's tab group routes ⌘R through the
+    /// responder chain to the key window, which already corresponds to the
+    /// focused pill. Alias for clarity at the call site.
+    var activeSession: TerminalSession? { session }
+
+    @objc func renameActiveTab(_ sender: Any?) {
+        beginRenameActiveTab()
+    }
+
+    /// Show a simple Rename alert targeting `activeSession`. Empty input
+    /// clears any existing override and reverts to the auto (OSC) title.
+    /// Cancel leaves the current state untouched.
+    func beginRenameActiveTab() {
+        guard let session = activeSession else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename tab"
+        alert.informativeText = "Enter a new title. Leave empty to keep the current auto title."
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        // Pre-fill with the current effective title so the user can
+        // lightly edit it rather than retyping from scratch.
+        field.stringValue = session.displayTitle
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        let new = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        session.titleOverride = new.isEmpty ? nil : new
+    }
+
+    @objc func resetActiveTabTitle(_ sender: Any?) {
+        activeSession?.titleOverride = nil
     }
 }

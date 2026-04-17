@@ -318,6 +318,66 @@ final class TabStripView: NSView {
             needsDisplay = true
         }
     }
+
+    // MARK: - Context menu (right-click to rename)
+
+    /// Build a per-pill context menu on right-click. The Rename / Reset
+    /// items dispatch via the responder chain (nil target) — AppKit routes
+    /// them to the key window's `MainWindowController`. To ensure the
+    /// controller that receives the action is the one for the right-clicked
+    /// pill (not whichever pill happens to currently be selected), we
+    /// pre-select the pill's window before returning the menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let p = convert(event.locationInWindow, from: nil)
+        // Hit-test against pillFrames. Falling outside a pill (e.g. over the
+        // `+` button or the gutter) yields no contextual menu — there's no
+        // tab to target.
+        guard
+            let idx = pillFrames.firstIndex(where: { NSPointInRect(p, $0) }),
+            idx < tabs.count
+        else { return nil }
+
+        let targetWindow = tabs[idx]
+        // Bring the right-clicked tab to the front before showing the menu.
+        // Without this, ⌘/responder-chain dispatch on the resulting items
+        // would go to the previously-selected pill's controller, which
+        // isn't what the user clicked on. Selecting also flips window.key
+        // in the same runloop tick so by the time the user picks Rename…,
+        // the correct controller is in the responder chain.
+        onSelectWindow?(targetWindow)
+
+        let menu = NSMenu()
+
+        let rename = NSMenuItem(
+            title: "Rename…",
+            action: #selector(MainWindowController.renameActiveTab(_:)),
+            keyEquivalent: ""
+        )
+        menu.addItem(rename)
+
+        let reset = NSMenuItem(
+            title: "Reset to Auto",
+            action: #selector(MainWindowController.resetActiveTabTitle(_:)),
+            keyEquivalent: ""
+        )
+        menu.addItem(reset)
+
+        menu.addItem(.separator())
+
+        // Close — dupes what the hover `×` does, but is useful on a
+        // context menu for discoverability and for users who never hover.
+        let close = NSMenuItem(
+            title: "Close Tab",
+            action: #selector(NSWindow.performClose(_:)),
+            keyEquivalent: ""
+        )
+        // performClose: must target the window directly; it isn't a
+        // responder-chain action like rename.
+        close.target = targetWindow
+        menu.addItem(close)
+
+        return menu
+    }
 }
 
 private extension NSBezierPath {

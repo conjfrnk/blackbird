@@ -473,6 +473,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         resetItem.keyEquivalentModifierMask = [.command]
         menu.addItem(resetItem)
+
+        menu.addItem(.separator())
+
+        // Rename Tab… — routes via the responder chain to the key window's
+        // MainWindowController. Uses ⌥⌘R because ⌘R is commonly a
+        // refresh/reload shortcut in other apps, and we want to leave it
+        // free for shells that bind it (zsh's history-incremental-search-
+        // backward, for instance, is sometimes mapped to Ctrl-R — but
+        // ⌘-R would still reach us first).
+        let rename = NSMenuItem(
+            title: "Rename Tab…",
+            action: #selector(MainWindowController.renameActiveTab(_:)),
+            keyEquivalent: "r"
+        )
+        rename.keyEquivalentModifierMask = [.command, .option]
+        menu.addItem(rename)
         return menu
     }
 
