@@ -1645,6 +1645,37 @@ mod tests {
         }
     }
 
+    /// text_range with rect=1 but s_col == e_col (degenerate rectangle).
+    /// Loop should still run; each line emits one character.
+    #[test]
+    fn text_range_rectangular_single_column() {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            bb_term_input(term, b"abcdefghij\r\nABCDEFGHIJ\r\n1234567890".as_ptr(), 32);
+            let s = bb_term_text_range(term, 0, 5, 2, 5, 1);
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            assert_eq!(std::str::from_utf8(bytes).unwrap(), "f\nF\n6");
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    /// Passing out-of-range u16 cols should clip to last_col (not overflow
+    /// through to a garbage row access).
+    #[test]
+    fn text_range_clips_huge_col_request() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            bb_term_input(term, b"abcde".as_ptr(), 5);
+            // Request cols 0..=u16::MAX — should clip to last_col = 4.
+            let s = bb_term_text_range(term, 0, 0, 0, u16::MAX, 0);
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            assert_eq!(std::str::from_utf8(bytes).unwrap(), "abcde");
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
     #[test]
     fn text_range_extracts_single_line() {
         unsafe {
