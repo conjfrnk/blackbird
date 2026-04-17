@@ -203,48 +203,34 @@ final class KeyEncoderExtendedTests: XCTestCase {
         }
     }
 
-    func test_optionArrow_optionIsMetaTrue_metafied() throws {
+    func test_optionArrow_optionIsMetaTrue_usesModernCsiModifier() {
         let encoder = KeyEncoder(optionIsMeta: true)
         let result = encoder.encodeSpecial(.up, modifiers: [.option])
-        // Metafied: ESC prefix in front of the whole sequence, yielding
-        // ESC ESC [ A.
-        let metafied = Data([0x1B, 0x1B, 0x5B, 0x41])
-        // Other plausible encodings:
-        let modified = csiOne(param: 3, letter: 0x41) // ESC [ 1 ; 3 A
-        let plain    = Data([0x1B, 0x5B, 0x41])       // ESC [ A (no modifier effect)
-        if result == metafied {
-            XCTAssertEqual(result, metafied)
-        } else if result == modified || result == plain {
-            throw XCTSkip("optionIsMeta=true + Option+Up produced \(Array(result)); task suggested metafied ESC ESC [ A. Verify intent.")
-        } else {
-            XCTFail("optionIsMeta=true + Option+Up produced unexpected bytes: \(Array(result))")
-        }
+        // We chose xterm's modern modifyCursorKeys convention across the
+        // encoder: Alt = modifier bit 2, so Alt+Up → ESC [ 1 ; 3 A.
+        // Legacy "metafied" encoding (ESC ESC [ A) belongs to older terms
+        // and is intentionally not emitted — it round-trips through a
+        // double-ESC which some shells treat as a literal Esc key press.
+        XCTAssertEqual(result, csiOne(param: 3, letter: 0x41))
     }
 
-    // MARK: - CSI u sanity (modifierParam encoding for printables)
+    // MARK: - ⌘-prefix events must never produce PTY bytes
 
-    // Contract example: Command alone -> modifierParam 9. Pick a key
-    // without a classic Ctrl encoding so CSI u is the expected path.
-    // We only assert if the encoder emits something in CSI u shape; if
-    // it passes the character through (because Command isn't meant to
-    // produce bytes on macOS), we skip.
-    func test_commandPlusPrintable_csiUOrSuppressed() throws {
+    // TerminalView filters ⌘ at the event boundary (⌘C / ⌘V / ⌘T etc. are
+    // app-level shortcuts). The encoder is defence-in-depth: if anyone ever
+    // calls it with a .command modifier, it returns empty Data so stray
+    // app-layer bytes can't leak through as PTY input. Also covers
+    // ⌘+arrow-like combinations reaching encodeSpecial implicitly — the
+    // printable path is where leaks would typically originate.
+    func test_commandPlusPrintable_isSuppressed() {
         let encoder = KeyEncoder()
-        let result = encoder.encode(chars: "a", modifiers: [.command])
-        // ESC [ 97 ; 9 u
-        let csiU = Data([0x1B, 0x5B, 0x39, 0x37, 0x3B, 0x39, 0x75])
-        // macOS terminals commonly suppress Cmd-bound keys at the view
-        // layer, so an empty Data is also reasonable.
-        let suppressed = Data()
-        // Plain literal (Command ignored at encoder level) is yet another
-        // plausible outcome:
-        let literal = Data([0x61])
-        if result == csiU {
-            XCTAssertEqual(result, csiU)
-        } else if result == suppressed || result == literal {
-            throw XCTSkip("Command+a produced \(Array(result)); encoder does not emit CSI u for Cmd — intentional suppression?")
-        } else {
-            XCTFail("Command+a produced unexpected bytes: \(Array(result))")
-        }
+        XCTAssertEqual(encoder.encode(chars: "a", modifiers: [.command]), Data(),
+                       "⌘+printable must never produce shell bytes")
+        XCTAssertEqual(encoder.encode(chars: "c", modifiers: [.command]), Data(),
+                       "⌘C must not reach the shell as 'c'")
+        // Combined modifiers where .command is set also suppress.
+        XCTAssertEqual(encoder.encode(chars: "c", modifiers: [.command, .shift]), Data())
+        XCTAssertEqual(encoder.encode(chars: "a", modifiers: [.command, .control]), Data(),
+                       "⌘ wins over ⌃ — the byte 0x01 must not leak from ⌘⌃A")
     }
 }

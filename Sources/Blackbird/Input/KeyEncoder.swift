@@ -36,6 +36,13 @@ public final class KeyEncoder {
     public func encode(chars: String, modifiers: Modifiers) -> Data {
         guard !chars.isEmpty else { return Data() }
 
+        // ⌘-prefixed keys belong to the app layer (menu shortcuts, window
+        // management) and must never turn into PTY bytes — otherwise ⌘C
+        // could end up sending a literal 'c' to the shell. TerminalView
+        // filters these at the event boundary; defence-in-depth here means
+        // a future caller exercising the encoder directly still won't leak.
+        if modifiers.contains(.command) { return Data() }
+
         // Ctrl+printable: only the first character is transformed.
         if modifiers.contains(.control), let scalar = chars.unicodeScalars.first {
             if let ctrlByte = controlByte(for: scalar) {
