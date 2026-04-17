@@ -195,12 +195,38 @@ public final class PTY {
             self.stateQueue.sync {
                 close(self.masterFD)
             }
-            // Blocking waitpid is safe here: the read loop exited because
-            // the child closed the slave end, so it has exited or is about to.
+            // Reap the child. Usually the slave close that made read()
+            // return 0 also means the child has exited; waitpid is just
+            // collecting the zombie. But a shell that `trap 'exit' HUP`
+            // ignored SIGHUP can linger — read() still returned 0 (slave
+            // fd closed by our ioctl/signal side), yet the process is
+            // alive and a blocking waitpid would wedge the read queue
+            // indefinitely. Poll with WNOHANG first; if the child is
+            // still alive, escalate to SIGKILL and wait the hard way.
+            // 200 ms of grace is plenty for a well-behaved shell to clean
+            // up while still giving the window a prompt teardown.
             var status: Int32 = 0
-            _ = waitpid(self.childPID, &status, 0)
+            let gracePeriod: useconds_t = 200_000  // 200 ms
+            var reaped = false
+            let waited = waitpid(self.childPID, &status, WNOHANG)
+            if waited == self.childPID {
+                reaped = true
+            } else {
+                usleep(gracePeriod)
+                let retry = waitpid(self.childPID, &status, WNOHANG)
+                if retry == self.childPID {
+                    reaped = true
+                } else {
+                    // Still here — SIGHUP was ignored. Force the exit.
+                    _ = kill(self.childPID, SIGKILL)
+                    _ = waitpid(self.childPID, &status, 0)
+                    reaped = true
+                }
+            }
             // Extract the exit code if the child exited normally; else -1.
-            let exitCode: Int32 = (status & 0x7f == 0) ? ((status >> 8) & 0xff) : -1
+            let exitCode: Int32 = reaped && (status & 0x7f == 0)
+                ? ((status >> 8) & 0xff)
+                : -1
             DispatchQueue.main.async { [weak self] in
                 self?.onExit?(exitCode)
             }
