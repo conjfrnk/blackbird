@@ -17,6 +17,7 @@
 		25F0BDE5FF93EEACCBE4DA8C /* MetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 472AADACAE02B9A6CB01750B /* MetalRenderer.swift */; };
 		26551D9D45C969B410CFE79C /* MainWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51A54ACD363A09E47E79F62 /* MainWindowController.swift */; };
 		2981BF48385C26CDAFC92476 /* URLDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC1D8A560291CE5E7A0CAD11 /* URLDetector.swift */; };
+		2B00CBAD39BA9D79D29F1CEE /* CwdResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */; };
 		2C93251EFA04482D77211D2F /* PreferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EC02EBECC88454DC42A0233 /* PreferencesTests.swift */; };
 		3B86A68789792CCB0FB4F990 /* WordRangeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35DF65A02FBCBD6EC7C6FB15 /* WordRangeTests.swift */; };
 		3C3768AC47652608F2DBE7BF /* ThemeResolutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */; };
@@ -86,6 +87,7 @@
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasTests.swift; sourceTree = "<group>"; };
 		157ABF0CFF0DDECE748E0149 /* HackNerdFontMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-Bold.ttf"; sourceTree = "<group>"; };
+		22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdResolver.swift; sourceTree = "<group>"; };
 		24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRendererTests.swift; sourceTree = "<group>"; };
 		35DF65A02FBCBD6EC7C6FB15 /* WordRangeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordRangeTests.swift; sourceTree = "<group>"; };
 		3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HyperlinkResolver.swift; sourceTree = "<group>"; };
@@ -245,6 +247,7 @@
 		5F1676B85FA25D96FF07A051 /* Terminal */ = {
 			isa = PBXGroup;
 			children = (
+				22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */,
 				F455C591EC38A7B3955CD5B8 /* FindBar.swift */,
 				3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */,
 				5995252272D652667DB2D2D9 /* PTY.swift */,
@@ -462,6 +465,7 @@
 				C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */,
 				B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */,
 				BF0ADDAAD252C3F8D7FD3F79 /* CellInstance.swift in Sources */,
+				2B00CBAD39BA9D79D29F1CEE /* CwdResolver.swift in Sources */,
 				75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */,
 				9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */,
 				1DFA371FD2502A8FA6AB320B /* HyperlinkResolver.swift in Sources */,

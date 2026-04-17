@@ -101,15 +101,6 @@ public final class TerminalSession: ObservableObject {
     private let pty: PTY?
     private let coreQueue = DispatchQueue(label: "blackbird.core")
 
-    #if DEBUG
-    /// Cwd this session was *spawned* with — recorded by the test-only
-    /// headless tab-creation helpers so `CwdTests` can assert on what got
-    /// forwarded to `PTY.spawn(initialWorkingDirectory:)` without actually
-    /// spawning a child process. Nil in production paths; never read by
-    /// them.
-    var spawnedCwd: String?
-    #endif
-
     public static func start(
         shell: String,
         arguments: [String],
@@ -170,24 +161,16 @@ public final class TerminalSession: ObservableObject {
         wire()
     }
 
-    /// Synchronously drive raw bytes into the VT parser. Blocks until the
-    /// bytes have been consumed *and* any resulting bbterm events have
-    /// landed on main, so a caller can assert on `lastKnownCwd` / `title`
-    /// on the next line without polling. Only available in DEBUG builds —
-    /// the headless harness is test-only.
+    /// Feed raw bytes into the VT parser on the core queue. Does **not**
+    /// pump the main runloop — resulting events (`.cwdChanged`, `.title`,
+    /// `.bell`, …) hop to main via `DispatchQueue.main.async` inside
+    /// `wire()`, so tests should drive settlement with an
+    /// `XCTestExpectation` on the relevant `@Published` property (see
+    /// `CwdTests`). A helper that polled the runloop was previously here
+    /// and proved flaky under CI contention.
     func feedBytesForTests(_ bytes: Data) {
         coreQueue.sync {
             self.feed(bytes)
-        }
-        // Drain main-queue hops scheduled by the event dispatch in wire()
-        // (cwdChanged / title publish back to main). A single main-sync
-        // is enough because the dispatch is a one-level DispatchQueue.main.async.
-        if Thread.isMainThread {
-            // We're already on main — the async blocks sit behind us on
-            // the queue. Pumping the runloop once lets them run.
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        } else {
-            DispatchQueue.main.sync { }
         }
     }
     #endif
@@ -353,8 +336,14 @@ public final class TerminalSession: ObservableObject {
     // MARK: - Wiring
 
     private func wire() {
+        // INVARIANT: every `pty` hookup in this method MUST use optional
+        // chaining (`pty?.onBytes = …`). Headless test sessions run with
+        // `pty == nil` and call `wire()` to get bbterm event dispatch; a
+        // forced unwrap here will crash those tests. If you need eager
+        // PTY setup, gate it with `if let pty { … }` and state why in a
+        // comment — don't drop the guard.
+        //
         // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
-        // Guard because headless test instances don't own a PTY.
         pty?.onBytes = { [weak self] data in
             guard let self else { return }
             self.coreQueue.async {

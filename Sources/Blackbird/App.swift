@@ -125,7 +125,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         = Preferences.shared.autoUpdateChecks
                 }
             }
-        let controller = createTerminalController()
+        // First-launch window has no source session to inherit from, so
+        // pass the ⌘N "fresh start" cwd (nil → $HOME). Same policy.
+        let controller = createTerminalController(cwd: CwdResolver.forNewWindow())
         controller.showWindow(nil)
     }
 
@@ -169,17 +171,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @discardableResult
     private func createTerminalController(
-        inheritingCwdFrom source: MainWindowController? = nil,
+        cwd: String?,
         autosaveFrame: Bool = true
     ) -> MainWindowController {
-        // Prefer the shell-reported OSC 7 cwd when present (spec §4.4) —
-        // it's the only source that survives `cd` across subshells and
-        // doesn't require a proc_pidinfo roundtrip. Fall back to the
-        // proc-based lookup (fg pgroup's cwd) so shells that don't emit
-        // OSC 7 still inherit usefully, then to nil (→ $HOME inside
-        // PTY.spawn's default).
-        let cwd = source?.session?.lastKnownCwd
-            ?? source?.session?.foregroundWorkingDirectory()
         let controller = MainWindowController(
             initialWorkingDirectory: cwd,
             autosaveFrame: autosaveFrame
@@ -223,7 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func newWindowForTab(_ sender: Any?) {
         let source = activeTerminalController
         let controller = createTerminalController(
-            inheritingCwdFrom: source,
+            cwd: CwdResolver.forNewTab(source: source?.session),
             autosaveFrame: false   // tabs use the group's position
         )
         guard let newWindow = controller.window else { return }
@@ -259,7 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Never merges into a tab group either.
     @objc func newWindow(_ sender: Any?) {
         let controller = createTerminalController(
-            inheritingCwdFrom: nil,
+            cwd: CwdResolver.forNewWindow(),
             autosaveFrame: false
         )
         // Default `tabbingMode = .preferred` would let macOS auto-merge this
