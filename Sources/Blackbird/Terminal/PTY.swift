@@ -156,6 +156,13 @@ public final class PTY {
                 let data = Data(buffer[0..<n])
                 self.onBytes?(data)
             }
+            // Drain any pending writes before close so they don't land on a
+            // closed-and-reused fd belonging to some unrelated part of the
+            // process. The write-queue block checks shouldKeepRunning() at
+            // entry — markStopped above guarantees every NOT-yet-started
+            // write will short-circuit, so this sync just waits for an
+            // in-flight Darwin.write (if any) to return.
+            self.writeQueue.sync { }
             // The read queue is the sole owner of masterFD's close. Doing it
             // here avoids a double-close / fd-reuse race against terminate()
             // calling close() on another thread.
@@ -175,13 +182,15 @@ public final class PTY {
     // MARK: - Writing
 
     public func write(_ data: Data) {
-        writeQueue.async { [masterFD] in
+        writeQueue.async { [weak self] in
+            guard let self, self.shouldKeepRunning() else { return }
+            let fd = self.masterFD
             data.withUnsafeBytes { rawBuf -> Void in
                 guard let base = rawBuf.baseAddress else { return }
                 var remaining = rawBuf.count
                 var offset = 0
                 while remaining > 0 {
-                    let written = Darwin.write(masterFD, base.advanced(by: offset), remaining)
+                    let written = Darwin.write(fd, base.advanced(by: offset), remaining)
                     if written > 0 {
                         remaining -= written
                         offset += written
@@ -195,7 +204,7 @@ public final class PTY {
                     if errno == EINTR || errno == EAGAIN { continue }
                     #if DEBUG
                     NSLog("[Blackbird] PTY.write FAILED after %d/%d bytes errno=%d fd=%d",
-                          offset, rawBuf.count, errno, masterFD)
+                          offset, rawBuf.count, errno, fd)
                     #endif
                     break
                 }
@@ -208,6 +217,11 @@ public final class PTY {
     /// latency is perceptible. Safe for single-byte writes — the kernel write
     /// is atomic at that size.
     public func writeImmediate(_ data: Data) {
+        // Skip once terminate() has set us stopped: after markStopped the
+        // read queue's tail is going to close masterFD, and a concurrent
+        // Darwin.write from here would race into either a closed fd (harmless,
+        // just EBADF) or — worse — a reused fd owned by something else.
+        guard shouldKeepRunning() else { return }
         data.withUnsafeBytes { rawBuf in
             guard let base = rawBuf.baseAddress else { return }
             let n = Darwin.write(masterFD, base, rawBuf.count)
