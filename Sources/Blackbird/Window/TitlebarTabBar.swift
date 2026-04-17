@@ -329,9 +329,18 @@ private extension NSBezierPath {
             switch type {
             case .moveTo:    path.move(to: points[0])
             case .lineTo:    path.addLine(to: points[0])
+            // `.curveTo` and `.cubicCurveTo` share the same raw value in
+            // macOS 14+; either name reaches this case. Swift's Element
+            // import keeps both names distinct, so we can only list one —
+            // `.curveTo` is the deprecated alias that still matches.
             case .curveTo:   path.addCurve(to: points[2], control1: points[0], control2: points[1])
+            case .quadraticCurveTo:
+                // New in macOS 14. Our current paths (roundedRect, ovalIn)
+                // don't emit quadratics, but if a future path source does
+                // we want to draw it rather than silently skip the segment.
+                path.addQuadCurve(to: points[1], control: points[0])
             case .closePath: path.closeSubpath()
-            default: break
+            @unknown default: break
             }
         }
         return path
