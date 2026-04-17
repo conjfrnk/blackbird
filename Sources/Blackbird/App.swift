@@ -373,6 +373,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         menu.addItem(.separator())
+        // Find submenu. Without an explicit menu entry, AppKit won't map
+        // ⌘F / ⌘G / ⌘⇧G to TerminalView's performFind*Action selectors —
+        // the custom first responder only receives menu-dispatched actions,
+        // not raw key events (those are filtered as ⌘-prefixed at keyDown
+        // and handed to super).
+        let findSubmenu = NSMenu(title: "Find")
+        findSubmenu.addItem(
+            withTitle: "Find…",
+            action: #selector(TerminalView.performFindPanelAction(_:)),
+            keyEquivalent: "f"
+        )
+        let findNext = NSMenuItem(
+            title: "Find Next",
+            action: #selector(TerminalView.performFindNextAction(_:)),
+            keyEquivalent: "g"
+        )
+        findSubmenu.addItem(findNext)
+        let findPrev = NSMenuItem(
+            title: "Find Previous",
+            action: #selector(TerminalView.performFindPreviousAction(_:)),
+            keyEquivalent: "G"
+        )
+        findPrev.keyEquivalentModifierMask = [.command, .shift]
+        findSubmenu.addItem(findPrev)
+        let findParent = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
+        findParent.submenu = findSubmenu
+        menu.addItem(findParent)
+        menu.addItem(.separator())
         // ⌘K clears viewport + scrollback. Action is dispatched via the
         // responder chain (target = nil) so the focused TerminalView handles it.
         menu.addItem(
