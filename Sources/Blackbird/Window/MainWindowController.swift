@@ -409,4 +409,73 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     @objc func resetActiveTabTitle(_ sender: Any?) {
         session?.titleOverride = nil
     }
+
+    #if DEBUG
+    // MARK: - Test hooks
+
+    /// Build a MainWindowController for `CwdTests` without touching Metal
+    /// or spawning a real PTY. The returned controller has:
+    ///   • a live `session` constructed via `TerminalSession.makeHeadlessForTests`
+    ///     so `lastKnownCwd` and OSC-7 round-trips work,
+    ///   • an `initialWorkingDirectory` left at nil (matches the first-window
+    ///     production path where `$HOME` is picked inside PTY.spawn),
+    ///   • no NSWindow, no TerminalView — this object exists purely so the
+    ///     test can call `newTabForTests()` / `app.newWindowForTests()` on it.
+    ///
+    /// Shares no state with AppDelegate's controllers array — the test owns
+    /// the returned instance.
+    static func makeHeadlessForTests() -> MainWindowController {
+        MainWindowController(headlessTestCwd: nil)
+    }
+
+    /// ⌘T test path: mirror the production `AppDelegate.newWindowForTab` cwd
+    /// selection (OSC 7 → proc_pidinfo → $HOME) without spawning a child.
+    /// Returns the new session with its `spawnedCwd` populated so the test
+    /// can assert on what would have been passed to `PTY.spawn`.
+    func newTabForTests() -> TerminalSession {
+        // Match the production priority used by `createTerminalController`
+        // (App.swift): OSC 7 first, proc cwd fallback, else $HOME. Headless
+        // sessions have no PTY so the proc cwd step is necessarily nil.
+        let cwd = session?.lastKnownCwd
+            ?? session?.foregroundWorkingDirectory()
+            ?? ProcessInfo.processInfo.environment["HOME"]
+        let s = TerminalSession.makeHeadlessForTests()
+        s.spawnedCwd = cwd
+        return s
+    }
+
+    /// Test-side stand-in for the parts of AppDelegate that CwdTests exercises.
+    /// Scoped here (and only here) because AppDelegate depends on Sparkle +
+    /// NSApplication wiring we don't want to spin up in a unit test.
+    struct TestAppFacade {
+        weak var controller: MainWindowController?
+
+        /// ⌘N test path: new window *never* inherits cwd — always $HOME.
+        /// See spec §3.
+        func newWindowForTests() -> MainWindowController {
+            let home = ProcessInfo.processInfo.environment["HOME"]
+            return MainWindowController(headlessTestCwd: home)
+        }
+    }
+
+    var app: TestAppFacade { TestAppFacade(controller: self) }
+
+    private convenience init(headlessTestCwd cwd: String?) {
+        // Call through NSWindowController's nib-less init so we don't create
+        // any AppKit window. Metal / TerminalView setup stays untouched.
+        self.init(window: nil, headlessCwd: cwd)
+        // Populate a headless session so tests can set lastKnownCwd / read
+        // spawnedCwd. Seeding `spawnedCwd` with the passed cwd lets the
+        // `newWindow always HOME` test assert directly on `session.spawnedCwd`.
+        let s = TerminalSession.makeHeadlessForTests()
+        s.spawnedCwd = cwd
+        self.session = s
+    }
+
+    private init(window: NSWindow?, headlessCwd: String?) {
+        self.initialWorkingDirectory = headlessCwd
+        self.shouldAutosaveFrame = false
+        super.init(window: window)
+    }
+    #endif
 }

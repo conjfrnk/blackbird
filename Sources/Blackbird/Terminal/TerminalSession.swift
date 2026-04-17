@@ -26,6 +26,14 @@ public final class TerminalSession: ObservableObject {
     /// controller) close the window in response.
     @Published public private(set) var exitCode: Int32?
 
+    /// Last working directory reported by the shell via OSC 7. Consumed by
+    /// `AppDelegate.newWindowForTab` (⌘T) to inherit the current tab's cwd —
+    /// see spec §4.4. Nil until the shell has emitted at least one valid
+    /// OSC 7 sequence; callers should fall back to `foregroundWorkingDirectory()`
+    /// (procinfo-based) when nil. Tests (@testable import) can set this
+    /// directly to exercise the tab-creation path without driving the shell.
+    @Published public internal(set) var lastKnownCwd: String?
+
     // MARK: - Title state
 
     /// Last title the shell emitted via OSC 0/2. Empty before any emit.
@@ -93,6 +101,15 @@ public final class TerminalSession: ObservableObject {
     private let pty: PTY?
     private let coreQueue = DispatchQueue(label: "blackbird.core")
 
+    #if DEBUG
+    /// Cwd this session was *spawned* with — recorded by the test-only
+    /// headless tab-creation helpers so `CwdTests` can assert on what got
+    /// forwarded to `PTY.spawn(initialWorkingDirectory:)` without actually
+    /// spawning a child process. Nil in production paths; never read by
+    /// them.
+    var spawnedCwd: String?
+    #endif
+
     public static func start(
         shell: String,
         arguments: [String],
@@ -144,10 +161,34 @@ public final class TerminalSession: ObservableObject {
     private init(headlessBBTerm bb: BBTerm) {
         self.bbterm = bb
         self.pty = nil
-        // Deliberately skip wire(): no PTY onBytes callback to attach, and
-        // registering bbterm.onEvent on a background coreQueue-free flow
-        // would require maintaining the snapshot/publish plumbing the
-        // tests don't exercise. Title tests poke applyOscTitle directly.
+        // `wire()` is safe in headless mode: every PTY hookup uses optional
+        // chaining, so with `pty == nil` only the bbterm.onEvent handler is
+        // installed. That's exactly what the OSC 7 / cwd tests need — feed
+        // bytes in, observe `lastKnownCwd` / `title` land. Title tests that
+        // poke `applyOscTitle` directly still work because that path runs
+        // synchronously on the caller.
+        wire()
+    }
+
+    /// Synchronously drive raw bytes into the VT parser. Blocks until the
+    /// bytes have been consumed *and* any resulting bbterm events have
+    /// landed on main, so a caller can assert on `lastKnownCwd` / `title`
+    /// on the next line without polling. Only available in DEBUG builds —
+    /// the headless harness is test-only.
+    func feedBytesForTests(_ bytes: Data) {
+        coreQueue.sync {
+            self.feed(bytes)
+        }
+        // Drain main-queue hops scheduled by the event dispatch in wire()
+        // (cwdChanged / title publish back to main). A single main-sync
+        // is enough because the dispatch is a one-level DispatchQueue.main.async.
+        if Thread.isMainThread {
+            // We're already on main — the async blocks sit behind us on
+            // the queue. Pumping the runloop once lets them run.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        } else {
+            DispatchQueue.main.sync { }
+        }
     }
     #endif
 
@@ -377,6 +418,12 @@ public final class TerminalSession: ObservableObject {
                     }
                 case .cursorShape:
                     break  // Plan 5/3 will surface cursor shape.
+                case .cwdChanged(let path):
+                    // Rust core already gates on scheme=file and validates
+                    // UTF-8; the payload is a ready-to-use filesystem path.
+                    // Store on the main thread so reads from ⌘T / ⌘N stay
+                    // trivially race-free (those actions also run on main).
+                    self.lastKnownCwd = path
                 case .fatal(let msg):
                     // Surface as a title prefix for visibility; Plan 7 adds a
                     // dedicated diagnostics channel. Fatal should display

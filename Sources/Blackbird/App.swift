@@ -172,7 +172,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inheritingCwdFrom source: MainWindowController? = nil,
         autosaveFrame: Bool = true
     ) -> MainWindowController {
-        let cwd = source?.session?.foregroundWorkingDirectory()
+        // Prefer the shell-reported OSC 7 cwd when present (spec §4.4) —
+        // it's the only source that survives `cd` across subshells and
+        // doesn't require a proc_pidinfo roundtrip. Fall back to the
+        // proc-based lookup (fg pgroup's cwd) so shells that don't emit
+        // OSC 7 still inherit usefully, then to nil (→ $HOME inside
+        // PTY.spawn's default).
+        let cwd = source?.session?.lastKnownCwd
+            ?? source?.session?.foregroundWorkingDirectory()
         let controller = MainWindowController(
             initialWorkingDirectory: cwd,
             autosaveFrame: autosaveFrame
@@ -246,12 +253,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for c in controllers { c.refreshTabBar() }
     }
 
-    /// Opens a new independent window (⌘N). Inherits cwd from the currently
-    /// active tab, same as ⌘T, but never merges into a tab group.
+    /// Opens a new independent window (⌘N). Per spec §3, ⌘N is a *fresh
+    /// start* — always spawns at `$HOME`, never inherits the active tab's
+    /// cwd. That's the behavioural contrast with ⌘T (which does inherit).
+    /// Never merges into a tab group either.
     @objc func newWindow(_ sender: Any?) {
-        let source = activeTerminalController
         let controller = createTerminalController(
-            inheritingCwdFrom: source,
+            inheritingCwdFrom: nil,
             autosaveFrame: false
         )
         // Default `tabbingMode = .preferred` would let macOS auto-merge this
