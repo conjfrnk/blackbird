@@ -1063,29 +1063,51 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Text grid starts at `titlebarOnlyTopInset` (the titlebar), so subtract
         // that before converting to row.
         let row = max(0, Int((bounds.height - titlebarOnlyTopInset - loc.y) / metrics.cellHeight))
-        if sgrMouseEnabled() {
-            // SGR 1006: ESC [ < button ; col+1 ; row+1 M/m. Button number is
-            // carried verbatim; the final char (M press / m release) is what
-            // distinguishes press from release.
+        guard let bytes = Self.encodeMouseReport(
+            sgr: sgrMouseEnabled(),
+            button: button,
+            press: press,
+            col: col,
+            row: row
+        ) else { return }
+        session.send(bytes)
+    }
+
+    /// Pure encoder for xterm mouse reports — extracted so the branches that
+    /// matter for correctness (SGR 1006 vs X10 fallback, press/release,
+    /// wheel/motion) can be unit-tested without synthesizing NSEvents.
+    ///
+    /// - `sgr`: true when the app enabled SGR extended mouse reporting
+    ///   (mode 1006). The final byte `M`/`m` distinguishes press from
+    ///   release and the button number is carried verbatim.
+    /// - `button`: the xterm button number — 0/1/2 for left/middle/right,
+    ///   32 for motion-with-button, 64/65 for wheel up/down.
+    /// - `press`: false for release events. In the X10 fallback (modes
+    ///   1000/1002/1003), release always reports button bits = 3 regardless
+    ///   of which button was released.
+    ///
+    /// Returns `nil` when X10 can't represent the position (cols/rows
+    /// beyond 223). SGR has no such limit.
+    static func encodeMouseReport(
+        sgr: Bool,
+        button: Int,
+        press: Bool,
+        col: Int,
+        row: Int
+    ) -> Data? {
+        if sgr {
+            // SGR 1006: ESC [ < button ; col+1 ; row+1 M/m
             let finalChar: Character = press ? "M" : "m"
             let seq = "\u{1B}[<\(button);\(col + 1);\(row + 1)\(finalChar)"
-            session.send(Data(seq.utf8))
-        } else {
-            // X10/normal (modes 1000/1002/1003): ESC [ M cb cx cy. cb = 32 +
-            // buttonBits. For *release* events every terminal emits button
-            // bits = 3 regardless of which button was released. Sending
-            // `button + 32` for release (e.g. 32 for left-release) produces
-            // cb=32 which receivers would interpret as "button 1 press" —
-            // the opposite of what we meant. Only button presses, wheel
-            // events, and motion reports carry their own button number.
-            // Limit to 223 cols/rows since cx/cy max at 32+223=255.
-            guard col < 223, row < 223 else { return }
-            let cbButton = press ? button : 3
-            let cb = UInt8(cbButton + 32)
-            let cx = UInt8(col + 33)
-            let cy = UInt8(row + 33)
-            session.send(Data([0x1B, 0x5B, 0x4D, cb, cx, cy]))
+            return Data(seq.utf8)
         }
+        // X10/normal: ESC [ M cb cx cy (6-byte, cx/cy capped at 223).
+        guard col < 223, row < 223 else { return nil }
+        let cbButton = press ? button : 3
+        let cb = UInt8(cbButton + 32)
+        let cx = UInt8(col + 33)
+        let cy = UInt8(row + 33)
+        return Data([0x1B, 0x5B, 0x4D, cb, cx, cy])
     }
 }
 

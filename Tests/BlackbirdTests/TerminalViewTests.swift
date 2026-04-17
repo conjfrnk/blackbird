@@ -237,6 +237,73 @@ final class TerminalViewTests: XCTestCase {
         view.session?.terminate()
     }
 
+    // MARK: - Mouse-report encoding (pure path)
+
+    func test_mouseReport_sgr_leftPress_final_M() {
+        let bytes = TerminalView.encodeMouseReport(
+            sgr: true, button: 0, press: true, col: 10, row: 5
+        )
+        // ESC [ < 0 ; 11 ; 6 M
+        XCTAssertEqual(String(data: bytes!, encoding: .utf8), "\u{1B}[<0;11;6M")
+    }
+
+    func test_mouseReport_sgr_leftRelease_final_m() {
+        let bytes = TerminalView.encodeMouseReport(
+            sgr: true, button: 0, press: false, col: 10, row: 5
+        )
+        // SGR preserves the button number; lowercase m indicates release.
+        XCTAssertEqual(String(data: bytes!, encoding: .utf8), "\u{1B}[<0;11;6m")
+    }
+
+    func test_mouseReport_sgr_wheelUp() {
+        let bytes = TerminalView.encodeMouseReport(
+            sgr: true, button: 64, press: true, col: 0, row: 0
+        )
+        XCTAssertEqual(String(data: bytes!, encoding: .utf8), "\u{1B}[<64;1;1M")
+    }
+
+    func test_mouseReport_x10_leftPress_hasCbButton() {
+        let bytes = TerminalView.encodeMouseReport(
+            sgr: false, button: 0, press: true, col: 0, row: 0
+        )
+        XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 32, 33, 33]))
+    }
+
+    func test_mouseReport_x10_leftRelease_cbForcesButton3() {
+        // Regression: previously emitted cb=32 (indistinguishable from
+        // left-press). The fix sets the low bits to 3 for releases.
+        let bytes = TerminalView.encodeMouseReport(
+            sgr: false, button: 0, press: false, col: 0, row: 0
+        )
+        XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 35, 33, 33]),
+                       "X10 release must report cb = 32+3 = 35")
+    }
+
+    func test_mouseReport_x10_rightRelease_alsoCb35() {
+        let bytes = TerminalView.encodeMouseReport(
+            sgr: false, button: 2, press: false, col: 0, row: 0
+        )
+        XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 35, 33, 33]),
+                       "Any X10 release reports cb=35 regardless of button")
+    }
+
+    func test_mouseReport_x10_outsideRange_returnsNil() {
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: false, button: 0, press: true, col: 500, row: 0
+        ), "X10 can't address cols >= 223")
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: false, button: 0, press: true, col: 0, row: 500
+        ), "X10 can't address rows >= 223")
+    }
+
+    func test_mouseReport_x10_motion() {
+        // Motion with button held: button=32 (bit 5). cb = 32+32 = 64.
+        let bytes = TerminalView.encodeMouseReport(
+            sgr: false, button: 32, press: true, col: 3, row: 7
+        )
+        XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 64, 36, 40]))
+    }
+
     func test_oscTitleReachesWindowTitle() throws {
         let window = NSWindow(
             contentRect: .zero,
