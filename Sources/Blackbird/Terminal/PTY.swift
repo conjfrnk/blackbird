@@ -64,6 +64,12 @@ public final class PTY {
             ws_row: size.rows, ws_col: size.cols,
             ws_xpixel: 0, ws_ypixel: 0
         )
+        // Read the bundle version BEFORE fork — after fork we're in a
+        // post-fork-pre-exec no-man's-land where complex Foundation calls
+        // aren't async-signal-safe. setenv / getenv / chdir are fine.
+        let versionStr = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
+        let versionCStr = strdup(versionStr)
+        defer { free(versionCStr) }
         // Pass nil for termios so forkpty uses the kernel's TTYDEF_* defaults
         // from <sys/ttydefaults.h>. That gives us correct c_cc values:
         // VINTR=3, VQUIT=28, VSUSP=26, VEOF=4, VERASE=0x7F, VKILL=21, plus
@@ -93,7 +99,11 @@ public final class PTY {
             setenv("TERM", "xterm-256color", 1)
             setenv("COLORTERM", "truecolor", 1)   // tells modern TUIs (nvim, tmux, claude-code) 24-bit color is safe
             setenv("TERM_PROGRAM", "Blackbird", 1)
-            setenv("TERM_PROGRAM_VERSION", "0.1.0", 1)
+            if let v = versionCStr {
+                setenv("TERM_PROGRAM_VERSION", v, 1)
+            } else {
+                setenv("TERM_PROGRAM_VERSION", "0.0.0", 1)
+            }
             // Pick the child's starting directory:
             //  1. Explicit `initialWorkingDirectory` (from ⌘T / ⌘N inherit)
             //     if it still resolves to a real directory.
