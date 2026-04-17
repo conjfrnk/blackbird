@@ -366,6 +366,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public func render(snapshot: BBSnapshot) {
+        let wasFocusMode = currentSnapshot?.termMode.contains(.focusInOut) ?? false
+        let nowFocusMode = snapshot.termMode.contains(.focusInOut)
         self.currentSnapshot = snapshot
         // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.
         // Scroll indicator consumes the same snapshot — keep it in lockstep
@@ -376,6 +378,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             historySize: snapshot.historySize,
             rows: snapshot.rows
         )
+        // Shell just enabled DECSET 1004 (focus events). If the window is
+        // already key — typical: vim's init.vim or tmux's .conf flips this
+        // on before the user interacts — notify the app of current focus
+        // state. Without this, the "first" focus event the app sees is the
+        // next NSWindow.didResignKey, which misregisters the initial state.
+        if !wasFocusMode, nowFocusMode, window?.isKeyWindow == true {
+            sendFocusEventIfNeeded(gained: true)
+        }
     }
 
     private var focusObservers: [NSObjectProtocol] = []
