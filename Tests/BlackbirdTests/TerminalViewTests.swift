@@ -94,6 +94,31 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(encoder.encode(chars: "c", modifiers: [.control]), Data([0x03]))
     }
 
+    func test_optionKeyPreference_drivesEncoderOptionIsMeta() throws {
+        // Regression: the Settings picker for Option Key was wired to
+        // Preferences but TerminalView was always instantiating a default
+        // KeyEncoder(optionIsMeta: true). The user's "Native" choice had
+        // no effect on the encoder.
+        let saved = Preferences.shared.optionKeyRaw
+        defer { Preferences.shared.optionKeyRaw = saved }
+
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+
+        Preferences.shared.optionKeyRaw = Preferences.OptionKey.native.rawValue
+        let v1 = TerminalView(frame: .init(x: 0, y: 0, width: 800, height: 480),
+                              device: device)
+        XCTAssertFalse(v1.encoder.optionIsMeta,
+                       "Native mode should construct KeyEncoder(optionIsMeta: false)")
+
+        Preferences.shared.optionKeyRaw = Preferences.OptionKey.meta.rawValue
+        // Give the objectWillChange -> sync hop a runloop turn.
+        let exp = expectation(description: "encoder refresh")
+        DispatchQueue.main.async { exp.fulfill() }
+        wait(for: [exp], timeout: 1.0)
+        XCTAssertTrue(v1.encoder.optionIsMeta,
+                      "Flipping Option Key to Meta must rebuild the encoder with optionIsMeta=true")
+    }
+
     func test_commandKeyDoesNotSendToPty() throws {
         // Simulate ⌘C on the TerminalView and verify the session received no bytes.
         // We use a cat-backed session because /bin/cat echoes only what it receives

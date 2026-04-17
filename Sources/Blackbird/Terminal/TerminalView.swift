@@ -55,7 +55,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public let renderer: MetalRenderer
     public private(set) var metrics: CellMetrics
-    public let encoder = KeyEncoder()
+    public private(set) var encoder: KeyEncoder = {
+        // Match the user's current Option-key preference on construction so
+        // the first keystroke respects it. syncEncoderFromPreferences
+        // refreshes this on subsequent changes.
+        let isMeta = Preferences.shared.optionKey == .meta
+        return KeyEncoder(optionIsMeta: isMeta)
+    }()
 
     private var prefsCancellable: AnyCancellable?
 
@@ -146,8 +152,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
         prefsCancellable = Preferences.shared.objectWillChange
             .sink { [weak self] _ in
-                DispatchQueue.main.async { self?.syncFontFromPreferences() }
+                DispatchQueue.main.async {
+                    self?.syncFontFromPreferences()
+                    self?.syncEncoderFromPreferences()
+                }
             }
+    }
+
+    /// Rebuild the KeyEncoder if the user flipped Option between Meta and
+    /// Native. Cheap (one ref + Bool) so we call it on every preference
+    /// emission; the actual rebuild only happens when optionIsMeta differs
+    /// from the current encoder's setting.
+    private func syncEncoderFromPreferences() {
+        let wantMeta = Preferences.shared.optionKey == .meta
+        if encoder.optionIsMeta != wantMeta {
+            encoder = KeyEncoder(optionIsMeta: wantMeta)
+        }
     }
 
     /// Rebuild metrics/atlas when Preferences.fontName or fontSize changes.
