@@ -129,8 +129,20 @@ public final class MetalRenderer {
 
     /// Write cell instance data into `instanceBuffer`. Returns the count
     /// of instances actually written (= non-empty cells).
+    ///
+    /// `blockCursorCell`, when non-nil, identifies a single (row, col) whose
+    /// cell should render *inverted* so it doubles as the block cursor: the
+    /// glyph appears in the cell's current bg colour on top of a solid
+    /// cursor-colour background. Callers use this for focused-block cursors
+    /// so the character under the cursor stays visible (matches iTerm2 /
+    /// Terminal.app). Other shapes (bar, underline, unfocused outline)
+    /// continue to go through `cursorPipelineState`.
     @discardableResult
-    private func buildInstances(snapshot: BBSnapshot, isSelected: (Int32, Int) -> Bool = { _, _ in false }) -> Int {
+    private func buildInstances(
+        snapshot: BBSnapshot,
+        isSelected: (Int32, Int) -> Bool = { _, _ in false },
+        blockCursorCell: (row: Int, col: Int)? = nil
+    ) -> Int {
         let selectionTint = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)  // AppKit accent-ish blue
         let needed = snapshot.cols * snapshot.rows
         if needed > instanceCapacity {
@@ -155,7 +167,7 @@ public final class MetalRenderer {
                 let idx = row * snapshot.cols + col
                 let cell = cellsPtr[idx]
                 let scalar = cell.ch
-                let fg = Self.rgbToSIMD(cell.fg)
+                var fg = Self.rgbToSIMD(cell.fg)
                 var bg = Self.rgbToSIMD(cell.bg)
                 // Treat the theme's default bg as "no bg" so the transparent
                 // clearColor can show through. Cells with explicit colors
@@ -184,8 +196,26 @@ public final class MetalRenderer {
 
                 let bufferLine = Int32(row) - Int32(snapshot.displayOffset)
                 let selected = isSelected(bufferLine, col)
-                let effectiveBg = selected ? selectionTint : bg
-                let effectiveHasBg = selected ? true : hasBg
+                var effectiveBg = selected ? selectionTint : bg
+                var effectiveHasBg = selected ? true : hasBg
+
+                // Invert at the cursor cell so the block cursor shows the
+                // underlying glyph in reverse-video. Selection wins over
+                // the cursor (matches iTerm2: selection highlight spans a
+                // cell even if the cursor is on it).
+                if !selected,
+                   let bc = blockCursorCell,
+                   bc.row == row,
+                   bc.col == col {
+                    // Use whatever the cell's bg *would* have been (explicit
+                    // or theme-default) as the glyph colour, so the
+                    // character reads against the cursor's body.
+                    let resolvedBg: UInt32 = hasBg ? cell.bg : defaultBgRgb
+                    fg = Self.rgbToSIMD(resolvedBg)
+                    effectiveBg = cursorColor
+                    effectiveBg.w = 1.0
+                    effectiveHasBg = true
+                }
 
                 let xPx = Float(col) * cellW
                 let yPx = Float(row) * cellH + topInsetPoints
@@ -268,28 +298,10 @@ public final class MetalRenderer {
                 Float(view.bounds.size.width),
                 Float(view.bounds.size.height)
             )
-            _ = snap
             let cellSizePoints = SIMD2<Float>(
                 Float(metrics.cellWidth),
                 Float(metrics.cellHeight)
             )
-            let instanceCount = buildInstances(snapshot: snap, isSelected: isSelected)
-            if instanceCount > 0 {
-                var uniforms = FrameUniforms(
-                    viewportPx: viewportPoints,
-                    cellSizePx: cellSizePoints
-                )
-                encoder.setRenderPipelineState(pipelineState)
-                encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
-                encoder.setFragmentTexture(atlas.texture, index: 0)
-                encoder.drawPrimitives(
-                    type: .triangle,
-                    vertexStart: 0,
-                    vertexCount: 6,
-                    instanceCount: instanceCount
-                )
-            }
             // Cursor position in viewport rows. When the user is scrolled back
             // into history (displayOffset > 0), the live cursor_row is offset
             // downward on-screen by that amount: rows 0..displayOffset-1 show
@@ -319,11 +331,42 @@ public final class MetalRenderer {
                 let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
                 return phase >= 0.53
             }()
-            if snap.cursorVisible,
-               shape != 3,                 // DECSCUSR hidden — skip entirely
-               snap.cursorCol < snap.cols,
-               screenCursorRow < snap.rows,
-               !blinkSkip {
+            let cursorOnScreen =
+                snap.cursorVisible &&
+                shape != 3 &&                 // DECSCUSR hidden — skip entirely
+                snap.cursorCol < snap.cols &&
+                screenCursorRow < snap.rows &&
+                !blinkSkip
+            // Focused block cursor renders via cell inversion (so the glyph
+            // stays visible). Bar / underline / unfocused-outline go through
+            // the cursor pipeline below. This mirrors iTerm2 behaviour and
+            // keeps reverse-video cells intact when the cursor crosses them.
+            let useCellInvertedCursor = cursorOnScreen && focused && shape == 0
+            let blockCursorCell: (row: Int, col: Int)? = useCellInvertedCursor
+                ? (row: screenCursorRow, col: snap.cursorCol)
+                : nil
+            let instanceCount = buildInstances(
+                snapshot: snap,
+                isSelected: isSelected,
+                blockCursorCell: blockCursorCell
+            )
+            if instanceCount > 0 {
+                var uniforms = FrameUniforms(
+                    viewportPx: viewportPoints,
+                    cellSizePx: cellSizePoints
+                )
+                encoder.setRenderPipelineState(pipelineState)
+                encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
+                encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
+                encoder.setFragmentTexture(atlas.texture, index: 0)
+                encoder.drawPrimitives(
+                    type: .triangle,
+                    vertexStart: 0,
+                    vertexCount: 6,
+                    instanceCount: instanceCount
+                )
+            }
+            if cursorOnScreen && !useCellInvertedCursor {
                 var cu = CursorUniforms(
                     viewportPx: viewportPoints,
                     cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth),
