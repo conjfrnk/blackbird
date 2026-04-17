@@ -5,6 +5,14 @@ import BBCore
 
 public final class MetalRenderer {
 
+    /// Glyph atlas slots. 4096 covers ASCII + Latin supplements + common CJK
+    /// + box-drawing + emoji-presentation for typical workloads without
+    /// hitting the "atlas full → new glyphs render as blanks" cliff that a
+    /// smaller cap (prior 1024) would reach on a day of mixed-locale output.
+    /// R8Unorm texture at default cell size ≈ 9 MB, trivial on any Mac we
+    /// support.
+    static let atlasCapacity = 4096
+
     public let device: MTLDevice
     public let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
@@ -97,7 +105,7 @@ public final class MetalRenderer {
         // Cursor is opaque white — no blending.
         guard let cursorPSO = try? device.makeRenderPipelineState(descriptor: cursorDesc) else { return nil }
 
-        guard let atlas = GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 1024, scale: scale) else {
+        guard let atlas = GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: Self.atlasCapacity, scale: scale) else {
             return nil
         }
 
@@ -123,7 +131,7 @@ public final class MetalRenderer {
     /// picks up the new atlas immediately.
     public func reconfigure(metrics newMetrics: CellMetrics, scale: CGFloat) {
         self.metrics = newMetrics
-        if let a = GlyphAtlas(device: device, metrics: newMetrics, capacityGlyphs: 1024, scale: scale) {
+        if let a = GlyphAtlas(device: device, metrics: newMetrics, capacityGlyphs: Self.atlasCapacity, scale: scale) {
             self.atlas = a
         }
     }
