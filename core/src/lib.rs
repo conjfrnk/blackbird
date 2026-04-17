@@ -1851,6 +1851,30 @@ mod tests {
         }
     }
 
+    /// Out-of-range slot indices shouldn't panic through the FFI guard —
+    /// alacritty's Colors indexer returns Option, and we use its setter
+    /// (which ignores unknown slots gracefully). Belt-and-braces: exercise
+    /// u16::MAX so no future refactor silently introduces a panic path.
+    #[test]
+    fn set_named_color_out_of_range_slot_is_noop() {
+        unsafe {
+            let term = bb_term_new(5, 2, 100);
+            // Should neither crash nor panic.
+            bb_term_set_named_color(term, u16::MAX, 0x123456);
+            bb_term_set_named_color(term, 9999, 0x987654);
+            // Sanity: a legit slot still works.
+            bb_term_set_named_color(term, 257, 0xAABBCC);
+            let snap = bb_term_take_snapshot(term);
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+            assert_eq!(
+                cells[0].bg, 0xAABBCC,
+                "slot 257 (Background) must still take effect"
+            );
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
     #[test]
     fn set_named_color_null_term_is_noop() {
         unsafe {
