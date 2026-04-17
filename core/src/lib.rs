@@ -550,10 +550,21 @@ pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16)
         if term.is_null() || cols == 0 || rows == 0 {
             return;
         }
+        // Don't let callers reshape the grid into an absurdly narrow or
+        // short shape: alacritty's grid.resize reflows existing scrollback
+        // into the new geometry, and shrinking to 1 column with thousands
+        // of history lines blows up into millions of 1-cell rows
+        // (hundreds of MB). The Swift side's contentMinSize already
+        // enforces 20×4, but any future caller exercising this API
+        // directly — or a fuzzer — could land here. Floor at 2×2 so
+        // there's always at least one non-degenerate row/column after
+        // the reflow. Zero dimensions remain a no-op (treated as "not
+        // specified" by callers).
+        const MIN_DIM: u16 = 2;
         let bb = &mut *term;
         let size = TermSize {
-            cols: cols as usize,
-            rows: rows as usize,
+            cols: cols.max(MIN_DIM) as usize,
+            rows: rows.max(MIN_DIM) as usize,
         };
         bb.term.resize(size);
     })
@@ -1457,6 +1468,29 @@ mod tests {
             let snap = bb_term_take_snapshot(term);
             assert_eq!((*snap).cols, 80);
             assert_eq!((*snap).rows, 24);
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression: fuzzing found that shrinking from 80×24 with 1 000 lines
+    /// of scrollback down to 1×1 made alacritty's grid.resize allocate
+    /// hundreds of megabytes while reflowing history into millions of
+    /// one-cell rows. bb_term_resize now floors the target dimensions at
+    /// 2×2 (without touching the zero-is-noop contract).
+    #[test]
+    fn resize_clamps_degenerate_dimensions() {
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            // Push enough history that reflow matters.
+            for _ in 0..100 {
+                bb_term_input(term, b"x\r\n".as_ptr(), 3);
+            }
+            // Request 1×1 — clamped to 2×2. Previously OOM.
+            bb_term_resize(term, 1, 1);
+            let snap = bb_term_take_snapshot(term);
+            assert_eq!((*snap).cols, 2, "cols should clamp to min 2");
+            assert_eq!((*snap).rows, 2, "rows should clamp to min 2");
             bb_snap_release(snap);
             bb_term_free(term);
         }
