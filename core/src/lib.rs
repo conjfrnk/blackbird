@@ -796,7 +796,13 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // visible viewport — and may be below it entirely.
         let display_offset = grid.display_offset().min(u16::MAX as usize) as u16;
         let history_size = grid.history_size().min(u32::MAX as usize) as u32;
-        let mode = extract_mode(bb.term.mode());
+        let term_mode = bb.term.mode();
+        let mode = extract_mode(term_mode);
+        // DECTCEM (ESC [ ? 25 h/l) toggles SHOW_CURSOR. Previously we
+        // hardcoded true, so a TUI asking for a hidden cursor (less in
+        // page view, fzf, nvim during paint) would still get drawn by
+        // the Metal renderer.
+        let cursor_visible = term_mode.contains(TermMode::SHOW_CURSOR);
         // Read current DECSCUSR cursor shape. alacritty_terminal 0.26 exposes
         // `Term::cursor_style() -> CursorStyle` whose `.shape` is one of
         // Block/Underline/Beam/HollowBlock/Hidden. We pack to a stable u8:
@@ -815,7 +821,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let owned = BBSnapOwned::new(
             cols,
             rows,
-            (cursor_col, cursor_row, true),
+            (cursor_col, cursor_row, cursor_visible),
             display_offset,
             history_size,
             mode,
@@ -1784,6 +1790,34 @@ mod tests {
     fn set_named_color_null_term_is_noop() {
         unsafe {
             bb_term_set_named_color(std::ptr::null_mut(), 0, 0xFFFFFF);
+        }
+    }
+
+    /// DECTCEM: ESC [ ? 25 l hides the cursor; h shows it. Previously we
+    /// hard-coded cursor_visible = 1, so TUIs (less in page view, fzf,
+    /// nvim during paint) that disabled the cursor still rendered it.
+    #[test]
+    fn dectcem_toggles_cursor_visible() {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            let snap = bb_term_take_snapshot(term);
+            assert_eq!(
+                (*snap).cursor_visible,
+                1,
+                "cursor should default to visible on a fresh term"
+            );
+            bb_snap_release(snap);
+
+            bb_term_input(term, b"\x1b[?25l".as_ptr(), 6);
+            let hidden = bb_term_take_snapshot(term);
+            assert_eq!((*hidden).cursor_visible, 0, "DECTCEM ?25l should hide");
+            bb_snap_release(hidden);
+
+            bb_term_input(term, b"\x1b[?25h".as_ptr(), 6);
+            let shown = bb_term_take_snapshot(term);
+            assert_eq!((*shown).cursor_visible, 1, "DECTCEM ?25h should re-show");
+            bb_snap_release(shown);
+            bb_term_free(term);
         }
     }
 
