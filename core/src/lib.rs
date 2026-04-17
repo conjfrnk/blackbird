@@ -1733,6 +1733,19 @@ mod tests {
             0,
             "snap must be at offset 0 in BBSnapOwned"
         );
+        // BBCell ABI: 16 bytes, with link_id at offset 14 (replacing the
+        // former _reserved field). Swift and any other C ABI consumer reads
+        // cells directly from BBSnap.cells via these exact offsets.
+        assert_eq!(
+            std::mem::size_of::<BBCell>(),
+            16,
+            "BBCell ABI size must remain 16 bytes"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BBCell, link_id),
+            14,
+            "link_id must stay at offset 14 (replacing _reserved)"
+        );
     }
 
     #[test]

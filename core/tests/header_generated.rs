@@ -13,6 +13,8 @@ fn header_file_exists_and_has_symbols() {
         "bb_term_take_snapshot",
         "bb_snap_retain",
         "bb_snap_release",
+        "bb_snap_link_id_at",
+        "bb_snap_link_url",
         "bb_term_set_event_cb",
         "BBEvent",
         "BBSnap",
