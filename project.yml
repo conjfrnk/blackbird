@@ -52,8 +52,12 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "Copyright © 2026 Connor Frank. MIT License."
-        NSSupportsAutomaticTermination: true
-        NSSupportsSuddenTermination: true
+        # Shells keep state (cwd, env, scrollback, in-flight writes). Opting
+        # into automatic/sudden termination lets macOS kill Blackbird without
+        # delivering a close event, leaving child processes to die mid-write.
+        # Matches Terminal.app / iTerm2 for this reason.
+        NSSupportsAutomaticTermination: false
+        NSSupportsSuddenTermination: false
         LSApplicationCategoryType: public.app-category.developer-tools
         # macOS auto-registers every font under Contents/Resources/Fonts at
         # app launch — no runtime CTFontManagerRegister* calls needed. Pair
