@@ -3,10 +3,14 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    if data.is_empty() { return; }
+    if data.is_empty() {
+        return;
+    }
     unsafe {
         let term = blackbird_core::bb_term_new(80, 24, 1_000);
-        if term.is_null() { return; }
+        if term.is_null() {
+            return;
+        }
         blackbird_core::bb_term_input(term, data.as_ptr(), data.len());
 
         // Snapshot path.
@@ -53,12 +57,8 @@ fuzz_target!(|data: &[u8]| {
         // no-panic zone regardless.
         if data.len() >= 4 {
             let slot = u16::from_le_bytes([data[0], data[1]]);
-            let rgb = u32::from_le_bytes([
-                data[0],
-                data[1],
-                data[2],
-                data.get(3).copied().unwrap_or(0),
-            ]);
+            let rgb =
+                u32::from_le_bytes([data[0], data[1], data[2], data.get(3).copied().unwrap_or(0)]);
             blackbird_core::bb_term_set_named_color(term, slot, rgb);
         }
 
