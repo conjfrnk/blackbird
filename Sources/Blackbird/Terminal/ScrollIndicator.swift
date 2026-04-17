@@ -70,10 +70,16 @@ final class ScrollIndicator: NSView {
         CATransaction.commit()
 
         if displayOffset > 0 {
+            // In scrollback — keep the thumb visible and cancel any
+            // pending fade so rapid output doesn't cause a fade blink.
+            fadeOutWorkItem?.cancel()
+            fadeOutWorkItem = nil
             setVisible(true, animated: false)
-            scheduleAutoHide()
-        } else {
-            // At the bottom — fade out after a short delay.
+        } else if thumbLayer.opacity > 0, fadeOutWorkItem == nil {
+            // Just returned to the live grid while still visible — start a
+            // fade. Don't reschedule if one's already pending, otherwise
+            // every new snapshot pushes the hide further out and the thumb
+            // never disappears during active output.
             scheduleAutoHide()
         }
     }
@@ -97,6 +103,7 @@ final class ScrollIndicator: NSView {
         fadeOutWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             self?.setVisible(false, animated: true)
+            self?.fadeOutWorkItem = nil
         }
         fadeOutWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: item)
