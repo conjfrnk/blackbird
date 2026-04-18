@@ -365,6 +365,48 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         if menuItem.action == #selector(toggleTabBar(_:)) {
             return hasMultipleTabs
         }
+        if menuItem.action == #selector(renameActiveTab(_:)) {
+            // Only enabled when there's a live session to rename.
+            return session != nil
+        }
+        if menuItem.action == #selector(resetActiveTabTitle(_:)) {
+            // "Reset to Auto" only makes sense when an override is active.
+            return session?.titleOverride != nil
+        }
         return true
+    }
+
+    // MARK: - Tab rename
+
+    @objc func renameActiveTab(_ sender: Any?) {
+        beginRenameActiveTab()
+    }
+
+    /// Show a simple Rename alert targeting this window's `session`. Empty
+    /// input clears any existing override and reverts to the auto (OSC)
+    /// title. Cancel leaves the current state untouched.
+    func beginRenameActiveTab() {
+        guard let session else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename tab"
+        alert.informativeText = "Enter a new title. Leave empty to keep the current auto title."
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        // Pre-fill with the current effective title so the user can
+        // lightly edit it rather than retyping from scratch.
+        field.stringValue = session.displayTitle
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        let new = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        session.titleOverride = new.isEmpty ? nil : new
+    }
+
+    @objc func resetActiveTabTitle(_ sender: Any?) {
+        session?.titleOverride = nil
     }
 }

@@ -25,6 +25,16 @@ public final class MetalRenderer {
     private var instanceCapacity: Int
 
     private var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
+    /// Accent colour applied by the fragment shader whenever a cell's
+    /// `linkHover` attribute bit is set. Defaults to an sRGB approximation
+    /// of macOS's `controlAccentColor` so the underline looks right even
+    /// without a theme-provided override.
+    private var accentColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.48, 1.0, 1.0)
+    /// OSC 8 link id currently under the pointer. Cells with matching
+    /// `link_id` receive the accent underline via the `linkHover`
+    /// attribute bit. Zero means "no hovered link" — the renderer skips
+    /// the underline branch entirely.
+    private var hoveredLinkID: UInt16 = 0
     /// When a cell's resolved bg equals this value, we treat it as "default
     /// background" and skip drawing a bg quad. That lets the transparent
     /// clearColor show through — the window-level transparency effect.
@@ -74,6 +84,20 @@ public final class MetalRenderer {
         let g = Float((rgb >> 8)  & 0xFF) / 255.0
         let b = Float(rgb & 0xFF) / 255.0
         cursorColor = SIMD4<Float>(r, g, b, 1.0)
+    }
+
+    /// Replace the accent colour used for link-hover underlines. Themes
+    /// that ship an accent override can plumb it through here; otherwise
+    /// the default (controlAccentColor-equivalent sRGB blue) applies.
+    public func setAccentColor(rgba: SIMD4<Float>) {
+        accentColor = rgba
+    }
+
+    /// Set the OSC 8 link id currently under the pointer. The next frame
+    /// highlights every cell whose `link_id` matches. Passing 0 clears the
+    /// highlight.
+    public func setHoveredLinkID(_ id: UInt16) {
+        hoveredLinkID = id
     }
 
     public init?(device: MTLDevice, metrics: CellMetrics, scale: CGFloat = 2.0) {
@@ -193,6 +217,12 @@ public final class MetalRenderer {
         let cellH = Float(metrics.cellHeight)
         let cellsPtr = snapshot.cellsPointer
 
+        // Non-zero only when the mouse is hovering a cell with an OSC 8
+        // link. Cells whose `link_id` matches this value get the
+        // `linkHover` attribute bit so the shader draws an accent-coloured
+        // underline across the entire link span, not just the cell under
+        // the pointer.
+        let hoveredID = hoveredLinkID
         for row in 0..<snapshot.rows {
             for col in 0..<snapshot.cols {
                 let idx = row * snapshot.cols + col
@@ -200,6 +230,13 @@ public final class MetalRenderer {
                 let scalar = cell.ch
                 var fg = Self.rgbToSIMD(cell.fg)
                 var bg = Self.rgbToSIMD(cell.bg)
+                let attrs: SIMD4<UInt32> = {
+                    var flags: UInt32 = 0
+                    if hoveredID != 0 && cell.link_id == hoveredID {
+                        flags |= CellAttributeMask.linkHover.rawValue
+                    }
+                    return SIMD4<UInt32>(flags, 0, 0, 0)
+                }()
                 // Reverse video (SGR 7): swap the cell's fg and bg so the
                 // glyph reads against the inverted highlight. Forces a bg
                 // quad (we can't skip drawing into the clearColor because
@@ -282,14 +319,15 @@ public final class MetalRenderer {
                 let isSpacer = (cell.flags &
                     (UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER))) != 0
                 if isSpacer {
-                    if selected || effectiveHasBg {
+                    if selected || effectiveHasBg || attrs.x != 0 {
                         ptr[count] = CellInstance(
                             cellPosPx: SIMD2<Float>(xPx, yPx),
                             quadSizePx: SIMD2<Float>(cellW, cellH),
                             uvOrigin: .zero,
                             uvSize: .zero,
                             fgColor: fg,
-                            bgColor: effectiveBg
+                            bgColor: effectiveBg,
+                            attrs: attrs
                         )
                         count += 1
                     }
@@ -314,21 +352,24 @@ public final class MetalRenderer {
                             uvOrigin: entry.uvOrigin,
                             uvSize: entry.uvSize,
                             fgColor: fg,
-                            bgColor: effectiveBg
+                            bgColor: effectiveBg,
+                            attrs: attrs
                         )
                         count += 1
                     }
-                } else if effectiveHasBg {
-                    // Space with colored background (status lines, vim highlights)
-                    // or inside an active selection. Draw a full-cell quad with
-                    // zero coverage → pure bg fill.
+                } else if effectiveHasBg || attrs.x != 0 {
+                    // Space with colored background (status lines, vim highlights),
+                    // inside an active selection, or carrying an accent
+                    // attribute (link hover). Draw a full-cell quad with
+                    // zero coverage so the shader's bg/accent paths still fire.
                     ptr[count] = CellInstance(
                         cellPosPx: SIMD2<Float>(xPx, yPx),
                         quadSizePx: quadSize,
                         uvOrigin: .zero,
                         uvSize: .zero,
                         fgColor: fg,
-                        bgColor: effectiveBg
+                        bgColor: effectiveBg,
+                        attrs: attrs
                     )
                     count += 1
                 }
@@ -446,7 +487,8 @@ public final class MetalRenderer {
             if instanceCount > 0 {
                 var uniforms = FrameUniforms(
                     viewportPx: viewportPoints,
-                    cellSizePx: cellSizePoints
+                    cellSizePx: cellSizePoints,
+                    accentColor: accentColor
                 )
                 encoder.setRenderPipelineState(pipelineState)
                 encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
@@ -487,6 +529,12 @@ public final class MetalRenderer {
 struct FrameUniforms {
     var viewportPx: SIMD2<Float>
     var cellSizePx: SIMD2<Float>
+    /// sRGB RGBA colour used by the cell fragment shader for accent-
+    /// attribute underlines. Task 7 uses this for OSC 8 hover highlight.
+    /// Plumbed from the theme accent; defaults to a controlAccentColor-like
+    /// blue so the renderer has something usable even before the theme
+    /// installs one.
+    var accentColor: SIMD4<Float>
 }
 
 struct CursorUniforms {

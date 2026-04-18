@@ -125,7 +125,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         = Preferences.shared.autoUpdateChecks
                 }
             }
-        let controller = createTerminalController()
+        // First-launch window has no source session to inherit from, so
+        // pass the ⌘N "fresh start" cwd (nil → $HOME). Same policy.
+        let controller = createTerminalController(cwd: CwdResolver.forNewWindow())
         controller.showWindow(nil)
     }
 
@@ -169,10 +171,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @discardableResult
     private func createTerminalController(
-        inheritingCwdFrom source: MainWindowController? = nil,
+        cwd: String?,
         autosaveFrame: Bool = true
     ) -> MainWindowController {
-        let cwd = source?.session?.foregroundWorkingDirectory()
         let controller = MainWindowController(
             initialWorkingDirectory: cwd,
             autosaveFrame: autosaveFrame
@@ -216,7 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func newWindowForTab(_ sender: Any?) {
         let source = activeTerminalController
         let controller = createTerminalController(
-            inheritingCwdFrom: source,
+            cwd: CwdResolver.forNewTab(source: source?.session),
             autosaveFrame: false   // tabs use the group's position
         )
         guard let newWindow = controller.window else { return }
@@ -246,12 +247,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for c in controllers { c.refreshTabBar() }
     }
 
-    /// Opens a new independent window (⌘N). Inherits cwd from the currently
-    /// active tab, same as ⌘T, but never merges into a tab group.
+    /// Opens a new independent window (⌘N). Per spec §3, ⌘N is a *fresh
+    /// start* — always spawns at `$HOME`, never inherits the active tab's
+    /// cwd. That's the behavioural contrast with ⌘T (which does inherit).
+    /// Never merges into a tab group either.
     @objc func newWindow(_ sender: Any?) {
-        let source = activeTerminalController
         let controller = createTerminalController(
-            inheritingCwdFrom: source,
+            cwd: CwdResolver.forNewWindow(),
             autosaveFrame: false
         )
         // Default `tabbingMode = .preferred` would let macOS auto-merge this
@@ -473,6 +475,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         resetItem.keyEquivalentModifierMask = [.command]
         menu.addItem(resetItem)
+
+        menu.addItem(.separator())
+
+        // Rename Tab… — routes via the responder chain to the key window's
+        // MainWindowController. Uses ⌥⌘R because ⌘R is commonly a
+        // refresh/reload shortcut in other apps, and we want to leave it
+        // free for shells that bind it (zsh's history-incremental-search-
+        // backward, for instance, is sometimes mapped to Ctrl-R — but
+        // ⌘-R would still reach us first).
+        let rename = NSMenuItem(
+            title: "Rename Tab…",
+            action: #selector(MainWindowController.renameActiveTab(_:)),
+            keyEquivalent: "r"
+        )
+        rename.keyEquivalentModifierMask = [.command, .option]
+        menu.addItem(rename)
         return menu
     }
 

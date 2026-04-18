@@ -72,9 +72,80 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private var prefsCancellable: AnyCancellable?
 
-    private var currentSnapshot: BBSnapshot?
+    /// Latest `BBSnapshot` published by the session. Read by the renderer
+    /// path, the accessibility cache, and the IME extension (which needs
+    /// the cursor coordinates for the candidate-window anchor). Internal
+    /// so the `TerminalView+IME.swift` extension can see it; no setter is
+    /// exposed — `render(snapshot:)` is the only writer.
+    var currentSnapshot: BBSnapshot?
+    /// Optional test-only override that feeds the NSAccessibility value
+    /// path without a real `BBTerm`. Production never sets this — the live
+    /// render path uses `currentSnapshot`.
+    #if DEBUG
+    private var a11ySnapshotOverride: A11ySnapshotSource?
+    /// Test-only override for the ⌘-click URL resolver. When set, the click
+    /// path goes through this fake instead of building a
+    /// `SnapshotHyperlinkResolver` from `currentSnapshot`. Production leaves
+    /// it nil.
+    private var hyperlinkResolverOverride: HyperlinkResolver?
+    #endif
+
+    /// Hook for opening a URL on ⌘-click. Production hands the URL to
+    /// `NSWorkspace`; tests inject a recording fake so assertions can
+    /// match what the click path actually dispatched.
+    var urlOpener: URLOpener = DefaultURLOpener()
+
+    // MARK: - Hover state (OSC 8 dwell tooltip + hover underline)
+
+    /// Buffer row under the cursor on the last `mouseMoved` delivery, used
+    /// to cancel the dwell timer as soon as the pointer leaves the current
+    /// cell. `nil` means the pointer is outside the grid.
+    private var lastHoverCell: (row: Int, col: Int)?
+    /// Link id under the pointer right now, or 0 when the hovered cell has
+    /// no OSC 8 attribution. The renderer reads this each frame to draw
+    /// the accent underline on every cell sharing the id.
+    private var hoveredLinkID: UInt32 = 0
+    /// Scheduled tooltip reveal. Cancelled on pointer movement, scroll,
+    /// keydown, or view teardown.
+    private var hoverTooltipItem: DispatchWorkItem?
+    /// Lightweight panel that shows the resolved URL after the 500 ms dwell.
+    /// Kept around between shows so repeated hovers don't thrash NSPanel
+    /// allocation; hidden when not in use.
+    private var hoverTooltipPanel: NSPanel?
+    private var hoverTooltipLabel: NSTextField?
+    /// Tracking area that delivers `mouseMoved` / `mouseExited`. Rebuilt on
+    /// bounds changes via `updateTrackingAreas`.
+    private var hoverTrackingArea: NSTrackingArea?
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
+
+    /// Active IME composition buffer. Non-nil while the user is in a
+    /// `setMarkedText` → `insertText`/`unmarkText` cycle. The NSTextInputClient
+    /// conformance lives in `TerminalView+IME.swift`; this property is the
+    /// one piece of shared state keyDown and the IME path both inspect.
+    var composition: TerminalView.Composition?
+    /// Flag raised by `insertText(_:)` for the duration of a single
+    /// `keyDown(with:)` pass. Lets keyDown tell "the IME already committed
+    /// bytes for this event" apart from "no IME activity at all" after
+    /// `inputContext?.handleEvent` returns — in the former case we must
+    /// NOT fall through to the encoder path or the shell would see the
+    /// character twice. Cleared at the top of keyDown.
+    var didInsertTextViaIME: Bool = false
+    /// CALayer-backed subview that paints the in-flight preedit glyphs plus
+    /// a dotted underline. Created lazily when composition starts; removed
+    /// when the user commits or cancels so idle sessions keep a clean tree.
+    var preeditOverlay: PreeditOverlayView?
+
+    #if DEBUG
+    /// Optional PTY-byte recorder for tests. When set, `sendToSession(_:)`
+    /// appends here instead of calling through to the real PTY — lets the
+    /// IME tests assert exactly which commits reach the shell.
+    var ptyRecorderForTests: RecordingPTY?
+    /// Overrides the cursor coordinates that the IME path reads from the
+    /// snapshot. Lets `testFirstRectReturnsCursorCellRect` pin a specific
+    /// (row, col) without feeding the full BBTerm state machine.
+    var cursorOverrideForTests: (row: Int, col: Int)?
+    #endif
 
     private final class FlashView: NSView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -99,6 +170,34 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var findMatches: [(line: Int32, startCol: Int, endCol: Int)] = []
     private var findCurrentIndex: Int = 0
     private var findQuery: String = ""
+
+    /// True while an active drag with file URLs is hovering the view. Drives
+    /// the accent-coloured drop-target ring. Set by the NSDraggingDestination
+    /// callbacks in TerminalView+Dragging.swift.
+    var isDropTargeted: Bool = false {
+        didSet {
+            guard oldValue != isDropTargeted else { return }
+            dropHighlightView.isHidden = !isDropTargeted
+        }
+    }
+
+    /// Accent-coloured border overlay shown while a file drag is hovering.
+    /// Implemented as an NSBox rather than a Metal draw because the view is
+    /// an MTKView — compositing an AppKit child over the Metal layer is
+    /// simpler, hit-transparent, and cheap to show/hide on a dragging
+    /// enter/exit event. Sized in `layout()`; initially hidden.
+    private let dropHighlightView: NSBox = {
+        let b = NSBox(frame: .zero)
+        b.boxType = .custom
+        b.borderType = .lineBorder
+        b.borderColor = .controlAccentColor
+        b.borderWidth = 2
+        b.cornerRadius = 4
+        b.fillColor = .clear
+        b.titlePosition = .noTitle
+        b.isHidden = true
+        return b
+    }()
 
     #if DEBUG
     private var frameCount = 0
@@ -157,6 +256,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         bellFlashView.autoresizingMask = [.width, .height]
         addSubview(bellFlashView)
 
+        // Drop-target ring sits on top of the bell flash so a dropped file
+        // feedback never gets visually swamped by a simultaneous ^G bell.
+        // Autoresizes with the view so layout() only adjusts explicit frames.
+        dropHighlightView.frame = bounds
+        dropHighlightView.autoresizingMask = [.width, .height]
+        addSubview(dropHighlightView)
+
         prefsCancellable = Preferences.shared.objectWillChange
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
@@ -164,6 +270,41 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                     self?.syncEncoderFromPreferences()
                 }
             }
+
+        // Push the system accent into the renderer immediately so the
+        // hyperlink hover underline matches whatever accent the user
+        // picked in System Settings — not the hardcoded macOS Blue that
+        // the renderer defaults to. The drop-target ring (`dropHighlightView`
+        // above) already follows `NSColor.controlAccentColor`; without
+        // this we'd paint two different "accents" in the same window.
+        pushSystemAccentToRenderer()
+        // Observe accent changes so Settings → Appearance → Accent swap
+        // reflects live. Registered on the shared system-colours
+        // notification; tokens go into `focusObservers` for the existing
+        // centralised removal in `deinit`.
+        focusObservers.append(NotificationCenter.default.addObserver(
+            forName: NSColor.systemColorsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.pushSystemAccentToRenderer()
+            self.needsDisplay = true
+        })
+    }
+
+    /// Read `NSColor.controlAccentColor`, convert to sRGB, and hand the
+    /// components to the renderer as the accent uniform. Falls back to
+    /// the macOS Blue sRGB values if the accent colour can't be
+    /// represented in sRGB for some reason — matches what the renderer
+    /// defaults to anyway.
+    private func pushSystemAccentToRenderer() {
+        let sRGB = NSColor.controlAccentColor.usingColorSpace(.sRGB)
+        let r = Float(sRGB?.redComponent ?? 0.0)
+        let g = Float(sRGB?.greenComponent ?? 0.48)
+        let b = Float(sRGB?.blueComponent ?? 1.0)
+        let a = Float(sRGB?.alphaComponent ?? 1.0)
+        renderer.setAccentColor(rgba: SIMD4<Float>(r, g, b, a))
     }
 
     /// Rebuild the KeyEncoder if the user flipped Option between Meta and
@@ -233,7 +374,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// styleMask:)` on the window's real style mask minus `.fullSizeContentView`
     /// — the delta between that and the window's content-view height is the
     /// pure titlebar offset.
-    private var titlebarOnlyTopInset: CGFloat {
+    var titlebarOnlyTopInset: CGFloat {
         guard let window else { return 28 }
         var maskWithoutFullSize = window.styleMask
         maskWithoutFullSize.remove(.fullSizeContentView)
@@ -257,6 +398,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             width: width,
             height: max(0, bounds.height - bottom - top)
         )
+        // Re-anchor the IME preedit overlay to the current cursor cell
+        // whenever our bounds change — a window resize mid-composition
+        // would otherwise leave the overlay stranded at stale pixel
+        // coordinates until the user committed or cancelled.
+        if composition != nil {
+            refreshPreeditOverlay()
+        }
     }
 
 
@@ -324,6 +472,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // where the desktop bleed-through happens.
         clearColor = MTLClearColor(red: bgR, green: bgG, blue: bgB, alpha: opacity)
         themeDefaultBgRgb = palette.background
+        themeDefaultFgRgb = palette.foreground
         renderer.setDefaultBgRgb(palette.background)
         renderer.setCursorColor(rgb: palette.cursor)
         // Single slider — explicit colors (status lines, highlights) fade
@@ -333,12 +482,29 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         renderer.setCursorBlinkEnabled(Preferences.shared.cursorBlink)
         setWindowAppearance(opacity: opacity, themeBg: (bgR, bgG, bgB))
         window?.setBackgroundBlurRadius(blurRadius)
+        // If an IME composition is in flight when the theme changes, repaint
+        // the preedit overlay so its fg/bg track the new palette. Without
+        // this the overlay holds its pre-change colours until the next
+        // setMarkedText/insertText callback — visible to anyone mid-kana
+        // composition at the moment they toggle light/dark.
+        if composition != nil {
+            refreshPreeditOverlay()
+        }
     }
 
     /// Theme's default background RGB, captured so the renderer can skip
     /// drawing a bg quad for cells at the default bg (they inherit the
-    /// transparent clearColor).
-    private var themeDefaultBgRgb: UInt32 = 0x000000
+    /// transparent clearColor). Internal so `TerminalView+IME.swift`'s
+    /// preedit-overlay path can render against the same theme bg that
+    /// committed text will land on.
+    var themeDefaultBgRgb: UInt32 = 0x000000
+
+    /// Theme's default foreground RGB. Cached so the IME preedit overlay
+    /// can render composing glyphs in the same colour committed text will
+    /// land in, rather than AppKit's `.labelColor` (which ignores the
+    /// Blackbird theme and flips to white on dark system appearance even
+    /// under a light theme).
+    var themeDefaultFgRgb: UInt32 = 0xFFFFFF
 
     private func setWindowAppearance(opacity: Double, themeBg: (r: Double, g: Double, b: Double)) {
         let transparent = opacity < 0.999
@@ -399,6 +565,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // Register every time the view attaches to a new window — AppKit
+        // doesn't carry dragging-destination registration across window
+        // moves reliably, and this is idempotent so repeated calls are safe.
+        // The NSDraggingDestination conformance lives in
+        // TerminalView+Dragging.swift.
+        registerForDraggedTypes([.fileURL])
         #if DEBUG
         if let screen = window?.screen {
             // On macOS, `maximumFramesPerSecond` reflects the screen's native
@@ -444,6 +616,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         for token in focusObservers {
             NotificationCenter.default.removeObserver(token)
         }
+        // Tear down any pending hover tooltip. The DispatchWorkItem
+        // captures self weakly so it won't crash on late fire, but the
+        // panel would otherwise linger briefly after the view is gone.
+        hoverTooltipItem?.cancel()
+        hoverTooltipPanel?.orderOut(nil)
     }
 
     /// xterm focus-in/out reports. Enabled by the running program via
@@ -503,6 +680,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             propagateResize()
         }
         let focused = window?.isKeyWindow ?? false
+        // Hovered OSC 8 link id is set by `mouseMoved`; the renderer reads
+        // it here so cells with a matching `link_id` get the accent-
+        // underline attribute bit this frame. UInt32 → UInt16 is lossy
+        // in principle (link ids are stored as u16 in BBCell), but the
+        // snapshot API returns u32 to leave room for future expansion —
+        // truncation here is safe because the FFI only ever returns ids
+        // that originated as u16.
+        renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         #if DEBUG
         frameCount += 1
@@ -571,6 +756,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - Input
 
     public override func keyDown(with event: NSEvent) {
+        // Typing dismisses any dwell-tooltip the pointer might be about
+        // to reveal — otherwise a hovered URL tooltip would obscure the
+        // user's own output as it scrolls past.
+        cancelHoverTooltip()
         #if DEBUG
         NSLog("[Blackbird] keyDown: keyCode=%d flags=0x%lx chars=%@ charsIgnoring=%@",
               event.keyCode,
@@ -604,6 +793,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if (currentSnapshot?.displayOffset ?? 0) > 0 {
             session.scrollToBottom()
         }
+
+        // Hand the event to the IME first. If macOS's input context is in
+        // the middle of a composition (Japanese kana → kanji, Korean
+        // combining jamo, Option-E dead key → ´) it'll call back into this
+        // view's NSTextInputClient methods (setMarkedText / insertText /
+        // unmarkText). Two outcomes we need to distinguish afterwards:
+        //
+        //   - Still composing (preedit visible): `hasMarkedText()` is true.
+        //     The keystroke has been absorbed; do NOT also encode it.
+        //
+        //   - Committed a grapheme during this event: `insertText` ran and
+        //     emitted bytes via `sendToSession`. `didInsertTextViaIME` is
+        //     the flag that records this. Falling through to the encoder
+        //     would double-write the character.
+        //
+        //   - IME did nothing: the flag stays false and `hasMarkedText`
+        //     stays false. Fall through to the existing encoder path.
+        didInsertTextViaIME = false
+        inputContext?.handleEvent(event)
+        if hasMarkedText() || didInsertTextViaIME { return }
 
         // Fast path for control characters: macOS translates Ctrl+letter into
         // the corresponding control byte (0x01-0x1A) in event.characters.
@@ -667,31 +876,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if let special = Self.specialKey(for: event) {
             let appCursor = termMode.contains(.appCursor)
             let bytes = encoder.encodeSpecial(special, modifiers: mods, applicationCursorKeys: appCursor)
-            if !bytes.isEmpty { session.send(bytes) }
+            if !bytes.isEmpty { sendToSession(bytes) }
             return
         }
 
-        // In Native Option mode, the user wants macOS's keyboard layout to
-        // decide what Option+<key> produces (e.g. Option+E → ´, Option+N →
-        // ˜, Option+A → å on US layout). `charactersIgnoringModifiers`
-        // strips Option and returns the base key, which would send plain
-        // "e"/"n"/"a" to the shell — defeating Native mode. `event.characters`
-        // reflects the Option-modified glyph macOS produced, which is what
-        // Native mode should deliver verbatim. In Meta mode we still want
-        // `charactersIgnoringModifiers` so Option+E → ESC+"e" (the classic
-        // readline metafied byte) and not ESC+"´".
-        let chars: String = {
-            if !encoder.optionIsMeta, event.modifierFlags.contains(.option) {
-                // Fall back through characters → charactersIgnoringModifiers
-                // so dead-key in-progress events (characters may be empty
-                // while the user is mid-composition) still yield something
-                // sensible.
-                return event.characters?.isEmpty == false
-                    ? (event.characters ?? "")
-                    : (event.charactersIgnoringModifiers ?? "")
-            }
-            return event.charactersIgnoringModifiers ?? event.characters ?? ""
-        }()
+        // NSTextInputClient now owns the dead-key + composition path. The
+        // previous `charactersIgnoringModifiers` / `characters` ternary for
+        // Native-Option dead keys (Option+E → ´) is dead code: the input
+        // context calls `setMarkedText("´")` before we ever reach this
+        // branch, and the follow-up keystroke commits through
+        // `insertText("é")`. `charactersIgnoringModifiers` is the right
+        // source here for every remaining non-special printable — Meta
+        // mode still wants the un-Option'd base letter so that Option+E
+        // encodes to ESC "e" rather than ESC "´".
+        let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
         let bytes = encoder.encode(chars: chars, modifiers: mods, mode: termMode)
         #if DEBUG
         if !bytes.isEmpty {
@@ -703,7 +901,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                   chars.debugDescription, mods.rawValue)
         }
         #endif
-        if !bytes.isEmpty { session.send(bytes) }
+        if !bytes.isEmpty { sendToSession(bytes) }
     }
 
     /// Resolve a font from the preferences value. `name` can be either:
@@ -763,12 +961,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - Paste
 
     @objc public func paste(_ sender: Any?) {
-        guard let session else { return }
         guard let str = NSPasteboard.general.string(forType: .string) else { return }
+        pasteText(str)
+    }
+
+    /// Shared paste implementation: applies CRLF normalisation, wraps in
+    /// bracketed-paste markers when the app has enabled mode 2004, and sends
+    /// to the session. Used by both the menu/keyboard paste action and the
+    /// drag-and-drop code path (file URLs are shell-quoted into a single
+    /// string which is then fed through here).
+    func pasteText(_ text: String) {
+        guard let session else { return }
         if (currentSnapshot?.displayOffset ?? 0) > 0 {
             session.scrollToBottom()
         }
-        let bytes = Self.normalizePasteLineEndings(Data(str.utf8))
+        let bytes = Self.normalizePasteLineEndings(Data(text.utf8))
         let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
         if bracketedPaste {
             var wrapped = Data([0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])  // ESC[200~
@@ -838,6 +1045,53 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             i = input.index(after: i)
         }
         return out
+    }
+
+    // MARK: - Drag and drop
+
+    // The `NSDraggingDestination` overrides live on the main class so they
+    // sit next to the `isDropTargeted` stored state they mutate. The pure
+    // formatters (`shellQuote`, `joinedDroppedPaths`) stay in
+    // TerminalView+Dragging.swift so they can be unit-tested without
+    // constructing a drag fake.
+
+    public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard draggingPasteboardHasFileURLs(sender) else { return [] }
+        isDropTargeted = true
+        return .copy
+    }
+
+    public override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        // Re-answer the accepted operation on each move so the OS keeps the
+        // copy-cursor badge for the whole hover, not just the initial enter.
+        guard draggingPasteboardHasFileURLs(sender) else { return [] }
+        return .copy
+    }
+
+    public override func draggingExited(_ sender: NSDraggingInfo?) {
+        isDropTargeted = false
+    }
+
+    public override func draggingEnded(_ sender: NSDraggingInfo) {
+        isDropTargeted = false
+    }
+
+    public override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        // Always clear the ring before returning — whether we accept the
+        // drop or not, the drag is over.
+        defer { isDropTargeted = false }
+        let pb = sender.draggingPasteboard
+        let items = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] ?? []
+        // Keep only file-scheme URLs. `readObjects(forClasses: [NSURL.self])`
+        // can also return https: URLs from a web-browser drag; those would
+        // turn into garbage arguments if we blindly `path`-stringified them.
+        let paths = items.compactMap { url -> String? in
+            guard url.isFileURL else { return nil }
+            return url.path
+        }
+        guard !paths.isEmpty else { return false }
+        pasteText(Self.joinedDroppedPaths(paths))
+        return true
     }
 
     @objc public func copy(_ sender: Any?) {
@@ -1038,14 +1292,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // without triggering the selection path below.
         if event.modifierFlags.contains(.command) {
             let underlyingOption = event.modifierFlags.contains(.option)
-            if !mouseReportingEnabled() || underlyingOption,
-               let snap = currentSnapshot {
+            if !mouseReportingEnabled() || underlyingOption {
                 let p = bufferPointFromEvent(event)
-                if let m = URLDetector.match(
-                    at: p,
-                    in: URLDetector.scan(snapshot: snap)
-                ) {
-                    NSWorkspace.shared.open(m.url)
+                // Buffer-relative line → screen row. OSC 8 attribution is
+                // keyed on screen-space cells since the snapshot only carries
+                // the visible viewport. When the user is scrolled back into
+                // history the regex path still honours buffer coordinates
+                // (URLDetector output uses buffer lines).
+                let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
+                if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
+                    urlOpener.open(url)
                     return
                 }
             }
@@ -1204,6 +1460,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var resizeContext: ResizeContext?
 
     public override func scrollWheel(with event: NSEvent) {
+        // Scrolling moves the grid beneath the pointer — the cell the
+        // user was dwelling on now has different content, so any pending
+        // tooltip would pop up with a stale URL. Cancel both the pending
+        // reveal and the accent underline; the next mouseMoved delivery
+        // will repaint them against the fresh cell if appropriate.
+        cancelHoverTooltip()
         guard let session else { super.scrollWheel(with: event); return }
         // ⌥-scroll bypasses mouse reporting so the user can always reach
         // scrollback locally, even inside a TUI that captured the wheel.
@@ -1298,6 +1560,231 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
     }
 
+    // MARK: - ⌘-click URL resolution (OSC 8 first, regex fallback)
+
+    /// Resolve a click to a URL. OSC 8 attribution on the cell wins; only
+    /// when the cell has no OSC 8 href do we fall back to regex URL
+    /// detection (matching pre-Task-7 behaviour for tools that don't emit
+    /// OSC 8 hyperlinks). Returns nil when neither path produces a URL.
+    ///
+    /// `screenRow` is 0-based from the top of the visible viewport — OSC 8
+    /// attribution is stored keyed to screen cells, not buffer lines.
+    private func resolveClickURL(screenRow: Int, col: Int) -> URL? {
+        #if DEBUG
+        if let override = hyperlinkResolverOverride {
+            if let u = override.osc8URL(row: screenRow, col: col) { return u }
+            return override.regexURL(row: screenRow, col: col)
+        }
+        #endif
+        guard let snap = currentSnapshot else { return nil }
+        let resolver = SnapshotHyperlinkResolver(snapshot: snap)
+        if let u = resolver.osc8URL(row: screenRow, col: col) { return u }
+        return resolver.regexURL(row: screenRow, col: col)
+    }
+
+    // MARK: - Hover dwell tooltip + accent underline
+
+    /// Install a full-bounds tracking area that delivers `mouseMoved` even
+    /// when no buttons are down. Recreated on every bounds change; the
+    /// `.inVisibleRect` option makes AppKit re-resolve the rect on each
+    /// delivery so tab splits / window resizes don't leave a stale region.
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = hoverTrackingArea {
+            removeTrackingArea(existing)
+            hoverTrackingArea = nil
+        }
+        let ta = NSTrackingArea(
+            rect: .zero,
+            options: [
+                .mouseMoved,
+                .mouseEnteredAndExited,
+                .activeInKeyWindow,
+                .inVisibleRect,
+            ],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(ta)
+        hoverTrackingArea = ta
+    }
+
+    public override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        let point = bufferPointFromEvent(event)
+        let screenRow = Int(point.line) + (currentSnapshot?.displayOffset ?? 0)
+        let col = point.col
+        updateHover(screenRow: screenRow, col: col, locationInWindow: event.locationInWindow)
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        clearHover()
+    }
+
+    private func updateHover(screenRow: Int, col: Int, locationInWindow: NSPoint) {
+        // Resolve the OSC 8 link id for the cell under the pointer. A
+        // test-supplied fake may override; otherwise consult the live
+        // snapshot directly. `linkID` bounds-checks internally, so an
+        // out-of-grid coordinate just returns 0 (which clears the hover).
+        let newLinkID: UInt32 = {
+            #if DEBUG
+            if let override = hyperlinkResolverOverride {
+                // Fakes answer via osc8URL — collapse URL presence into a
+                // stable non-zero id so the renderer underline path still
+                // fires without us needing a real link-id table in tests.
+                return override.osc8URL(row: screenRow, col: col) != nil ? UInt32(bitPattern: Int32(-1)) : 0
+            }
+            #endif
+            return currentSnapshot?.linkID(row: screenRow, col: col) ?? 0
+        }()
+
+        // Same cell as last move → nothing to update except the tooltip
+        // position is already correct. Bail to avoid timer churn.
+        if let last = lastHoverCell, last.row == screenRow, last.col == col {
+            return
+        }
+        lastHoverCell = (row: screenRow, col: col)
+
+        if newLinkID != hoveredLinkID {
+            hoveredLinkID = newLinkID
+            // Redraw so the accent underline picks up / drops off the cells
+            // sharing the new hovered id.
+            needsDisplay = true
+        }
+
+        // Reset any pending tooltip when the pointer moves to a different
+        // cell. Production matches VS Code / iTerm2 feel: tooltip appears
+        // only after a steady dwell.
+        hoverTooltipItem?.cancel()
+        hoverTooltipItem = nil
+        dismissHoverTooltip()
+
+        guard newLinkID != 0 else { return }
+
+        // Resolve the URL so the tooltip shows the href, not just "there is
+        // a link here". For the test fake this goes through osc8URL; for
+        // production it's the snapshot's link table.
+        let resolvedURLString: String? = {
+            #if DEBUG
+            if let override = hyperlinkResolverOverride {
+                return override.osc8URL(row: screenRow, col: col)?.absoluteString
+            }
+            #endif
+            return currentSnapshot?.linkURL(id: newLinkID)
+        }()
+        guard let urlString = resolvedURLString else { return }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.showHoverTooltip(urlString: urlString, anchor: locationInWindow)
+        }
+        hoverTooltipItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private func clearHover() {
+        lastHoverCell = nil
+        cancelHoverTooltip()
+    }
+
+    /// Cancel any pending tooltip reveal, drop the tooltip panel if it's
+    /// up, and clear the accent underline. Called from mouseExited,
+    /// scrollWheel (grid moves underneath the pointer — the old cell
+    /// coordinates no longer map to the link the user was pointing at),
+    /// keyDown (typing dismisses the tooltip so it doesn't obscure the
+    /// user's own output), and deinit (teardown hygiene).
+    private func cancelHoverTooltip() {
+        hoverTooltipItem?.cancel()
+        hoverTooltipItem = nil
+        dismissHoverTooltip()
+        if hoveredLinkID != 0 {
+            hoveredLinkID = 0
+            // Push the cleared id straight to the renderer so the next
+            // frame drops the underline even before the usual draw-path
+            // plumbing runs.
+            renderer.setHoveredLinkID(0)
+            needsDisplay = true
+        }
+    }
+
+    private func showHoverTooltip(urlString: String, anchor: NSPoint) {
+        guard let window else { return }
+        let panel: NSPanel
+        let label: NSTextField
+        if let existingPanel = hoverTooltipPanel, let existingLabel = hoverTooltipLabel {
+            panel = existingPanel
+            label = existingLabel
+        } else {
+            // .nonactivatingPanel keeps the terminal's key-window / first-
+            // responder state intact while the tooltip is visible, so a
+            // hover-peek doesn't disrupt typing.
+            panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 200, height: 20),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: true
+            )
+            panel.isFloatingPanel = true
+            panel.hidesOnDeactivate = true
+            panel.hasShadow = true
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.ignoresMouseEvents = true
+
+            let container = NSView(frame: .zero)
+            container.wantsLayer = true
+            container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            container.layer?.cornerRadius = 4
+            container.layer?.borderWidth = 0.5
+            container.layer?.borderColor = NSColor.separatorColor.cgColor
+
+            let lbl = NSTextField(labelWithString: "")
+            lbl.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            lbl.textColor = .labelColor
+            lbl.lineBreakMode = .byTruncatingMiddle
+            lbl.maximumNumberOfLines = 1
+            container.addSubview(lbl)
+            panel.contentView = container
+
+            hoverTooltipPanel = panel
+            hoverTooltipLabel = lbl
+            label = lbl
+        }
+        label.stringValue = urlString
+        label.sizeToFit()
+        let padX: CGFloat = 8, padY: CGFloat = 4
+        let labelFrame = NSRect(
+            x: padX, y: padY,
+            width: min(label.frame.width, 600),
+            height: label.frame.height
+        )
+        label.frame = labelFrame
+        let panelSize = NSSize(
+            width: labelFrame.width + padX * 2,
+            height: labelFrame.height + padY * 2
+        )
+        panel.contentView?.frame = NSRect(origin: .zero, size: panelSize)
+
+        // Anchor just below the pointer. Convert the view-local anchor to
+        // screen space via the window's coordinate system.
+        let windowPoint = anchor
+        let screenPoint = window.convertPoint(toScreen: windowPoint)
+        let origin = NSPoint(
+            x: screenPoint.x + 12,
+            y: screenPoint.y - panelSize.height - 12
+        )
+        panel.setFrame(
+            NSRect(origin: origin, size: panelSize),
+            display: true
+        )
+        panel.orderFront(nil)
+    }
+
+    private func dismissHoverTooltip() {
+        hoverTooltipPanel?.orderOut(nil)
+    }
+
     /// Grow the current `.word` or `.line` selection outward from `anchor`.
     /// `.word` uses the shared `wordRange(around:in:displayOffset:)` helper;
     /// `.line` selects the entire grid line.
@@ -1334,6 +1821,132 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         ) else { return }
         session.send(bytes)
     }
+
+    // MARK: - NSAccessibility -------------------------------------------
+
+    /// Cached accessibility value keyed by snapshot identity. Building the
+    /// string walks the entire grid (rows × cols) and allocates a fresh
+    /// `String` per row, so VoiceOver's habit of polling `accessibilityValue`
+    /// many times per snapshot would otherwise turn into a per-frame tax on
+    /// the main thread. Identity-via-raw-pointer works because BBSnapshot
+    /// instances are immutable + ref-counted: equal address ⇒ equal content.
+    private struct A11yCache {
+        var snapshotIdentity: UnsafeRawPointer? = nil
+        var value: String = ""
+        /// Number of times `accessibilityValue()` walked the grid. Used by
+        /// tests to assert the cache short-circuits repeat reads.
+        var computations: Int = 0
+    }
+
+    private var a11yCache = A11yCache()
+
+    public override func isAccessibilityElement() -> Bool { true }
+
+    public override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
+
+    public override func accessibilityLabel() -> String? { "Terminal" }
+
+    public override func accessibilityHelp() -> String? {
+        "Terminal output. Scroll back to read earlier content."
+    }
+
+    public override func accessibilityValue() -> Any? {
+        // Test overrides take precedence so headless tests can inject a
+        // deterministic grid without a running BBTerm. Under production
+        // builds the #if DEBUG branch compiles out entirely.
+        #if DEBUG
+        let source: A11ySnapshotSource? = a11ySnapshotOverride ?? currentSnapshot
+        #else
+        let source: A11ySnapshotSource? = currentSnapshot
+        #endif
+        guard let source else { return "" }
+        let identity = source.a11yIdentity
+        if a11yCache.snapshotIdentity == identity {
+            return a11yCache.value
+        }
+        let computed = source.visibleRowsAsText()
+            .map { $0.trimmingTrailingWhitespace() }
+            .joined(separator: "\n")
+        a11yCache.snapshotIdentity = identity
+        a11yCache.value = computed
+        a11yCache.computations += 1
+        return computed
+    }
+
+    #if DEBUG
+    /// Test introspection for the a11y cache. Lets `AccessibilityTests`
+    /// assert that `accessibilityValue()` short-circuits when the snapshot
+    /// hasn't changed.
+    var accessibilityCacheStatsForTests: (computations: Int, snapshotIdentity: UnsafeRawPointer?) {
+        (a11yCache.computations, a11yCache.snapshotIdentity)
+    }
+
+    /// Headless constructor for tests. Uses the system Metal device so the
+    /// renderer's command-queue requirement is satisfied; tests never call
+    /// `draw(in:)` so no frames are rendered. Skips the test entirely on
+    /// hosts without a Metal device (CI runners sometimes don't have one).
+    static func makeHeadlessForTests() -> TerminalView? {
+        guard let device = MTLCreateSystemDefaultDevice() else { return nil }
+        return TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 100, height: 100),
+            device: device
+        )
+    }
+
+    /// Install a fake snapshot that the a11y value path will consume.
+    /// Assigns a fresh identity each call so cache invalidation is exercised.
+    func installSnapshotForTests(rows: [String]) {
+        a11ySnapshotOverride = A11yFakeSnapshot(rows: rows)
+        // New identity ⇒ next accessibilityValue() must recompute.
+        a11yCache.snapshotIdentity = nil
+    }
+
+    /// Test mutator for `urlOpener`. Kept as a DEBUG property so production
+    /// code can't accidentally repoint it — the click path uses the
+    /// internal `urlOpener` directly.
+    var urlOpenerForTests: URLOpener {
+        get { urlOpener }
+        set { urlOpener = newValue }
+    }
+
+    /// Install a fake hyperlink resolver that answers both OSC 8 and regex
+    /// queries without needing a live `BBTerm`. `rows` is the visible grid
+    /// as strings (one per row) and `spans` describes every OSC 8 region.
+    /// Any cell inside a span resolves its `osc8URL`; everything else
+    /// falls through to regex detection against the row text.
+    func installHyperlinkSnapshotForTests(
+        rows: [String],
+        linkAt spans: [(row: Int, cols: Range<Int>, url: String)]
+    ) {
+        hyperlinkResolverOverride = FakeHyperlinkSnapshot(rows: rows, spans: spans)
+    }
+
+    /// Exercise the production ⌘-click resolution against the current
+    /// snapshot (real or fake). Tests call this instead of synthesising
+    /// NSEvents so the mouse-reporting / option-modifier gating above
+    /// doesn't need a full windowed host.
+    func performCmdClickForTests(row: Int, col: Int) {
+        if let url = resolveClickURL(screenRow: row, col: col) {
+            urlOpener.open(url)
+        }
+    }
+
+    /// Swap the encoder's Option-is-Meta setting without going through the
+    /// full `Preferences.shared` publisher chain. IME tests use this to pin
+    /// Native-Option mode before exercising dead-key composition.
+    func setOptionIsMetaForTests(_ flag: Bool) {
+        if encoder.optionIsMeta != flag {
+            encoder = KeyEncoder(optionIsMeta: flag)
+        }
+    }
+
+    /// Pin the cursor row/col that the IME path reads for
+    /// `firstRect(forCharacterRange:…)`. Lets tests assert the candidate-
+    /// window anchor without feeding the Rust term a full grid of input.
+    func installCursorForTests(row: Int, col: Int) {
+        cursorOverrideForTests = (row: row, col: col)
+    }
+    #endif
 
     /// Pure encoder for xterm mouse reports — extracted so the branches that
     /// matter for correctness (SGR 1006 vs X10 fallback, press/release,
@@ -1386,6 +1999,87 @@ extension KeyEncoder.Modifiers {
         self = mods
     }
 }
+
+#if DEBUG
+/// Test-only snapshot source. Emits the rows it was constructed with
+/// verbatim, and uses its own `ObjectIdentifier` as a stable-but-unique
+/// raw-pointer identity. Living in the Blackbird module (not BBCore) keeps
+/// it out of shipping binaries via the #if DEBUG guard around the whole
+/// file scope.
+final class A11yFakeSnapshot: A11ySnapshotSource {
+    private let rows: [String]
+    init(rows: [String]) { self.rows = rows }
+
+    func visibleRowsAsText() -> [String] { rows }
+
+    var a11yIdentity: UnsafeRawPointer {
+        // ObjectIdentifier wraps the class-instance address; unwrapping
+        // guarantees a non-null pointer unique for the life of this
+        // instance, which is exactly the cache-key contract we need.
+        UnsafeRawPointer(Unmanaged.passUnretained(self).toOpaque())
+    }
+}
+
+/// Test-only hyperlink resolver. Production goes through
+/// `SnapshotHyperlinkResolver`, which needs a real `BBSnapshot`; this fake
+/// answers both OSC 8 and regex queries from plain strings so tests can
+/// exercise the ⌘-click path without starting a PTY.
+final class FakeHyperlinkSnapshot: HyperlinkResolver {
+    struct Span {
+        let row: Int
+        let cols: Range<Int>
+        let url: URL?
+    }
+
+    private let rows: [String]
+    private let spans: [Span]
+
+    init(rows: [String], spans: [(row: Int, cols: Range<Int>, url: String)]) {
+        self.rows = rows
+        self.spans = spans.map {
+            Span(row: $0.row, cols: $0.cols, url: URL(string: $0.url))
+        }
+    }
+
+    func osc8URL(row: Int, col: Int) -> URL? {
+        for span in spans where span.row == row && span.cols.contains(col) {
+            return span.url
+        }
+        return nil
+    }
+
+    func regexURL(row: Int, col: Int) -> URL? {
+        guard row >= 0, row < rows.count else { return nil }
+        let line = rows[row]
+        let nsLine = line as NSString
+        // Same pattern the production `URLDetector` uses so fallback
+        // semantics match. The regex is rebuilt per call — fine for tests,
+        // the grid is tiny.
+        let pattern = #"(?i)(?:https?|ftp|file)://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(location: 0, length: nsLine.length)
+        var found: URL?
+        regex.enumerateMatches(in: line, range: range) { result, _, stop in
+            guard var r = result?.range else { return }
+            // Trim trailing punctuation that production trims too, so the
+            // fallback URL matches what the real URLDetector would return.
+            while r.length > 0 {
+                let last = nsLine.character(at: r.location + r.length - 1)
+                if ".,);:]}>'\"".utf16.contains(last) { r.length -= 1 } else { break }
+            }
+            guard r.length > 0 else { return }
+            if col >= r.location && col < r.location + r.length {
+                let sub = nsLine.substring(with: r)
+                if let url = URL(string: sub) {
+                    found = url
+                    stop.pointee = true
+                }
+            }
+        }
+        return found
+    }
+}
+#endif
 
 extension TerminalView: FindBarDelegate {
     public func findBar(_ bar: FindBar, didChangeQuery query: String) {

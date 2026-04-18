@@ -1,4 +1,7 @@
 target
-corpus
+corpus/*
+!corpus/fuzz_term_input/
+corpus/fuzz_term_input/*
+!corpus/fuzz_term_input/*.bin
 artifacts
 coverage

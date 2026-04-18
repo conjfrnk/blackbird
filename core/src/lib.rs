@@ -10,6 +10,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use alacritty_terminal::vte::{Parser, Perform};
 
 /// Dimensions struct required by `Term::new`.
 ///
@@ -62,6 +63,16 @@ pub enum BBEventKind {
     /// host ignores these, apps like nvim that probe terminal capabilities
     /// will time out waiting for a response.
     PtyWrite = 5,
+    /// New in 2026-04-17 gaps plan. Payload: UTF-8 bytes of the local
+    /// filesystem path decoded from an OSC 7 `file://` URL. Only emitted
+    /// when scheme is `file` and authority is empty or `localhost`.
+    ///
+    /// OSC 7 is not parsed by `alacritty_terminal` 0.26 / `vte` 0.15 —
+    /// the sequence falls through vte's `osc_dispatch` unhandled branch.
+    /// We run a parallel `vte::Parser` in `bb_term_input` against an
+    /// `Osc7Scanner` that fires only on this one sequence. See the
+    /// scanner impl and the fragmentation test for details.
+    CwdChanged = 6,
     Fatal = 99,
 }
 
@@ -203,6 +214,105 @@ impl EventListener for RoutingListener {
 }
 
 // ---------------------------------------------------------------------------
+// Osc7Scanner — parallel vte::Parser tap for OSC 7 current-directory reports
+// ---------------------------------------------------------------------------
+
+/// Minimal `vte::Perform` impl that fires on OSC 7 payloads only.
+///
+/// `alacritty_terminal` 0.26 / `vte` 0.15 do not handle OSC 7 themselves —
+/// the sequence falls through vte's `osc_dispatch` to the unhandled branch.
+/// Rather than wrap alacritty's `Handler` (which has a ~90-method surface
+/// we'd have to forward perfectly), we run a second, stateful `vte::Parser`
+/// owned by `BBTerm` and driven from `bb_term_input` with exactly the same
+/// byte stream. That parser drives this scanner, which only acts on OSC 7
+/// and no-ops every other Perform method. The parallel parser is stateful
+/// across input chunks, so byte-fragmented OSC 7 sequences (e.g. arriving
+/// one byte per PTY read) still resolve to a single event.
+struct Osc7Scanner<'a> {
+    cell: &'a CallbackCell,
+}
+
+impl Perform for Osc7Scanner<'_> {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 7: first param == b"7", second == URL bytes.
+        if params.first().copied() != Some(b"7".as_slice()) {
+            return;
+        }
+        let Some(url) = params.get(1) else { return };
+
+        // Accept only `file://` with an empty or `localhost` authority.
+        let Some(rest) = url.strip_prefix(b"file://") else {
+            return;
+        };
+        let path_bytes: &[u8] = if rest.starts_with(b"/") {
+            rest // "file:///path" → "/path"
+        } else if let Some(r) = rest.strip_prefix(b"localhost") {
+            if !r.starts_with(b"/") {
+                return;
+            }
+            r // "file://localhost/path" → "/path"
+        } else {
+            return; // non-local host
+        };
+
+        let Some(decoded) = percent_decode(path_bytes) else {
+            return;
+        };
+        // Spec (2026-04-17-blackbird-gaps-design.md §4.1): "Malformed UTF-8
+        // in the path is ignored." Percent-decoding can produce arbitrary
+        // byte sequences (e.g. `file:///%ff`), so validate before firing.
+        // The event's payload contract in `BBEventKind::CwdChanged` is
+        // UTF-8 bytes — Swift wraps the pointer in a Swift String which
+        // assumes UTF-8 validity.
+        if std::str::from_utf8(&decoded).is_err() {
+            return;
+        }
+
+        let ev = BBEvent {
+            kind: BBEventKind::CwdChanged,
+            payload: decoded.as_ptr(),
+            len: decoded.len(),
+            i32_arg: 0,
+        };
+        // SAFETY: `cell` is a live reference for the duration of this call;
+        // `fire` invokes the C callback synchronously, so `decoded` (owned
+        // by this stack frame) outlives the borrow the callback receives.
+        // `decoded` drops at the end of this scope, after `fire` returns.
+        unsafe { self.cell.fire(ev) };
+    }
+    // Every other Perform method is a no-op — the default trait impls.
+}
+
+/// RFC 3986 percent-decode. Returns `None` only on truncated escapes
+/// (`%` with fewer than two hex digits remaining) or non-hex digits.
+/// Raw bytes pass through unchanged.
+fn percent_decode(bytes: &[u8]) -> Option<Vec<u8>> {
+    fn hex(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            out.push((hex(bytes[i + 1])? << 4) | hex(bytes[i + 2])?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------------
 // BBTerm
 // ---------------------------------------------------------------------------
 
@@ -217,6 +327,11 @@ impl EventListener for RoutingListener {
 pub struct BBTerm {
     term: Term<RoutingListener>,
     processor: Processor,
+    /// Parallel `vte::Parser` that drives `Osc7Scanner`. Stateful across
+    /// `bb_term_input` calls so fragmented OSC 7 sequences resolve to a
+    /// single event. Kept separate from alacritty's internal parser so we
+    /// never perturb the grid-mutation path.
+    osc7_parser: Parser,
     callback: Box<CallbackCell>,
 }
 
@@ -320,6 +435,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         let bb = Box::new(BBTerm {
             term,
             processor: Processor::new(),
+            osc7_parser: Parser::new(),
             callback,
         });
         Box::into_raw(bb)
@@ -383,6 +499,12 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // and skips ~linear time scanning for the 4-byte needle.
         if memchr::memchr(0x1B, slice).is_none() {
             bb.processor.advance(&mut bb.term, slice);
+            // Still drive the parallel OSC 7 parser: an OSC 7 sequence
+            // begun in a prior chunk can be terminated by a BEL (0x07) in
+            // this ESC-free chunk, so we cannot skip the parallel parser
+            // even on the fast path.
+            let mut scanner = Osc7Scanner { cell: &bb.callback };
+            bb.osc7_parser.advance(&mut scanner, slice);
             return;
         }
         let needle = b"\x1B[2J";
@@ -397,6 +519,13 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         if cursor < slice.len() {
             bb.processor.advance(&mut bb.term, &slice[cursor..]);
         }
+        // Drive the parallel OSC 7 parser across the whole chunk. It is
+        // stateful across `bb_term_input` calls so fragmented OSC 7
+        // sequences (e.g. one byte per PTY read) still resolve to a
+        // single event. No need to replicate the 2J-augmentation above:
+        // OSC 7 doesn't care about ED sequences.
+        let mut scanner = Osc7Scanner { cell: &bb.callback };
+        bb.osc7_parser.advance(&mut scanner, slice);
     })
 }
 
@@ -408,7 +537,9 @@ pub struct BBCell {
     pub fg: u32, // 0xRRGGBB
     pub bg: u32,
     pub flags: u16, // See cell_flags
-    pub _reserved: u16,
+    /// Index into `BBSnap::links` (0 means no OSC 8 attribution on this cell).
+    /// Resolve via `bb_snap_link_url(snap, link_id)`.
+    pub link_id: u16,
 }
 
 pub mod cell_flags {
@@ -510,6 +641,10 @@ struct BBSnapOwned {
     snap: BBSnap,
     rc: AtomicUsize,
     cells_owned: Vec<BBCell>,
+    /// Index 0 reserved as a sentinel "no link"; index N matches `BBCell.link_id`.
+    /// CStrings live for the snapshot's lifetime so `bb_snap_link_url` can hand
+    /// out raw pointers without copying.
+    links: Vec<std::ffi::CString>,
 }
 
 // SAFETY: see BBSnap's unsafe impl Send above; same reasoning applies.
@@ -531,6 +666,7 @@ impl BBSnapOwned {
         mode: u32,
         cursor_shape: u8,
         cells: Vec<BBCell>,
+        links: Vec<std::ffi::CString>,
     ) -> Box<BBSnapOwned> {
         let mut owned = Box::new(BBSnapOwned {
             snap: BBSnap {
@@ -550,6 +686,7 @@ impl BBSnapOwned {
             },
             rc: AtomicUsize::new(1),
             cells_owned: cells,
+            links,
         });
         // Capture the stable heap pointer into the public field.
         owned.snap.cells = owned.cells_owned.as_ptr();
@@ -848,13 +985,50 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let cols = grid.columns() as u16;
         let mut cells: Vec<BBCell> = Vec::with_capacity(rows as usize * cols as usize);
 
+        // OSC 8 hyperlink interning. `links[0]` is a placeholder so cell
+        // `link_id == 0` always means "no OSC 8 attribution". Subsequent URIs
+        // get 1-based indices. Cap at u16::MAX - 1 distinct links per snapshot;
+        // on overflow we silently drop the attribution (cell stays at 0).
+        let mut links: Vec<std::ffi::CString> = Vec::new();
+        links.push(std::ffi::CString::new("").expect("empty CString is infallible"));
+        let mut link_ids: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+
         for indexed in grid.display_iter() {
+            let link_id: u16 = match indexed.cell.hyperlink() {
+                Some(h) => {
+                    let uri = h.uri();
+                    // alacritty's OSC 8 parser rejects empty URIs upstream, but
+                    // we defensively treat an empty uri as "no link".
+                    if uri.is_empty() {
+                        0
+                    } else if let Some(&id) = link_ids.get(uri) {
+                        id
+                    } else if links.len() >= u16::MAX as usize {
+                        // Out of ids — drop attribution silently. 65 534 links
+                        // per snapshot is already well past any realistic TUI.
+                        0
+                    } else {
+                        // Skip if the URI contains an interior NUL (can't be a
+                        // CString); fall back to "no link" rather than panic.
+                        match std::ffi::CString::new(uri) {
+                            Ok(cs) => {
+                                let id = links.len() as u16;
+                                links.push(cs);
+                                link_ids.insert(uri.to_owned(), id);
+                                id
+                            }
+                            Err(_) => 0,
+                        }
+                    }
+                }
+                None => 0,
+            };
             cells.push(BBCell {
                 ch: indexed.c as u32,
                 fg: color_to_rgb(&indexed.fg, palette),
                 bg: color_to_rgb(&indexed.bg, palette),
                 flags: extract_cell_flags(indexed.flags),
-                _reserved: 0,
+                link_id,
             });
         }
 
@@ -900,6 +1074,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             mode,
             cursor_shape,
             cells,
+            links,
         );
         // Expose the public `snap` field (first field at offset 0).
         let owned_ptr = Box::into_raw(owned);
@@ -950,6 +1125,61 @@ pub unsafe extern "C" fn bb_snap_release(snap: *const BBSnap) {
         if prev == 1 {
             std::sync::atomic::fence(Ordering::Acquire);
             drop(Box::from_raw(owned));
+        }
+    })
+}
+
+/// Look up the OSC 8 link id at a snapshot cell. Returns 0 when `snap` is
+/// null, `(row, col)` is outside the grid, or the cell has no OSC 8
+/// attribution.
+///
+/// Pass the returned non-zero id to `bb_snap_link_url` to get the URL.
+///
+/// # Safety
+/// `snap` must be non-null and returned by `bb_term_take_snapshot` /
+/// `bb_snap_retain`, not yet released to zero.
+#[no_mangle]
+pub unsafe extern "C" fn bb_snap_link_id_at(snap: *const BBSnap, row: u16, col: u16) -> u32 {
+    guard_no_term(0u32, || {
+        if snap.is_null() {
+            return 0;
+        }
+        let s = &*snap;
+        if (row as usize) >= (s.rows as usize) || (col as usize) >= (s.cols as usize) {
+            return 0;
+        }
+        let idx = (row as usize) * (s.cols as usize) + (col as usize);
+        if idx >= s.cells_len {
+            return 0;
+        }
+        let cell = &*s.cells.add(idx);
+        cell.link_id as u32
+    })
+}
+
+/// Resolve an OSC 8 link id to its UTF-8 URL. Returns null when `snap` is
+/// null, `link_id == 0`, or the id is unknown. The returned pointer is
+/// valid for the snapshot's lifetime (until the matching `bb_snap_release`
+/// drops the refcount to zero).
+///
+/// # Safety
+/// `snap` must be non-null and returned by `bb_term_take_snapshot` /
+/// `bb_snap_retain`, not yet released to zero.
+#[no_mangle]
+pub unsafe extern "C" fn bb_snap_link_url(
+    snap: *const BBSnap,
+    link_id: u32,
+) -> *const std::os::raw::c_char {
+    guard_no_term(std::ptr::null(), || {
+        if snap.is_null() || link_id == 0 {
+            return std::ptr::null();
+        }
+        let owned = BBSnapOwned::from_snap_ptr(snap);
+        let links = &(*owned).links;
+        match links.get(link_id as usize) {
+            // Index 0 is the empty-string sentinel, already filtered above.
+            Some(cstr) => cstr.as_ptr(),
+            None => std::ptr::null(),
         }
     })
 }
@@ -1502,6 +1732,19 @@ mod tests {
             std::mem::offset_of!(BBSnapOwned, snap),
             0,
             "snap must be at offset 0 in BBSnapOwned"
+        );
+        // BBCell ABI: 16 bytes, with link_id at offset 14 (replacing the
+        // former _reserved field). Swift and any other C ABI consumer reads
+        // cells directly from BBSnap.cells via these exact offsets.
+        assert_eq!(
+            std::mem::size_of::<BBCell>(),
+            16,
+            "BBCell ABI size must remain 16 bytes"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BBCell, link_id),
+            14,
+            "link_id must stay at offset 14 (replacing _reserved)"
         );
     }
 
