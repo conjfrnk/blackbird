@@ -33,7 +33,7 @@ targets:
         optional: false
       - path: Sources/Blackbird/Resources/Terminfo/kitty.terminfo
         buildPhase: resources
-      - path: Sources/Blackbird/Resources/Assets.xcassets
+      - path: Sources/Blackbird/Resources/AppIcon.icns
         buildPhase: resources
     preBuildScripts:
       - name: Build Rust core
@@ -68,7 +68,11 @@ targets:
         # this with the Fonts folder listed under `sources` so xcodegen
         # copies them into Resources during the build.
         ATSApplicationFontsPath: Fonts/
-        CFBundleIconName: AppIcon
+        # Classic .icns ships all 10 sizes (16–1024). We tried the modern
+        # xcassets pathway; Xcode's actool compiled Assets.car fine but also
+        # wrote a stripped Contents/Resources/AppIcon.icns with only sizes up
+        # to 256, which Stage Manager resolved over the catalog and rendered
+        # as a generic tile when asking for 512+. A prebuilt full .icns sidesteps it.
         CFBundleIconFile: AppIcon
         SUFeedURL: https://example.com/appcast.xml
         SUPublicEDKey: ""
@@ -78,7 +82,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.conjfrnk.blackbird
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_INCLUDE_PATHS:
           - $(SRCROOT)/Sources/BBCore
         HEADER_SEARCH_PATHS:

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="design/icon/Blackbird-1024.png" alt="Blackbird" width="160" height="160">
+</p>
+
 # Blackbird
 
 A macOS-only terminal emulator. Native AppKit + SwiftUI. Metal-rendered. NSWindow-native tabs. No config files.
