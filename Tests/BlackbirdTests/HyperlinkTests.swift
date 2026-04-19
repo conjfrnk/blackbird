@@ -76,6 +76,31 @@ final class HyperlinkTests: XCTestCase {
         }
     }
 
+    func testOsc8UrlAllowlistAcceptsLegitimateVariants() {
+        // URL(string:) accepts plenty of shapes — ports, query strings,
+        // auth components, IPv6 literals. All should pass the scheme
+        // gate; none should surface unsafe behaviour because NSWorkspace
+        // still dispatches via the registered http/https/ftp/file/mailto
+        // handler which is the user's browser / Finder / Mail.app.
+        let ok = [
+            "https://example.com:8443/path?q=1&x=2#frag",
+            "http://[2001:db8::1]/",
+            "mailto:root@example.com?subject=hi",
+            "file:///Users/me/readme.md",
+            "ftp://ftp.example.com/pub/file.tgz",
+        ]
+        for raw in ok {
+            guard let u = URL(string: raw) else {
+                XCTFail("URL init failed for \(raw)")
+                continue
+            }
+            XCTAssertTrue(
+                OSC8URLPolicy.isAllowed(u),
+                "URL with legitimate shape must pass allowlist: \(raw)"
+            )
+        }
+    }
+
     func testOsc8UrlSchemeAllowlistRejectsDangerous() {
         // Classic OSC 8 injection vectors: a shell on a compromised host
         // can emit a hyperlink with any scheme; without the allowlist,
