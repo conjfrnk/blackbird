@@ -421,14 +421,16 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             cols: cols.min(MAX_DIM) as usize,
             rows: rows.min(MAX_DIM) as usize,
         };
-        // Cap scrollback at 200 000 lines. Alacritty allocates a Cell
-        // per (col, line) in scrollback; a legitimate 10 000 × 500 cols
-        // × 32-byte cells is already ~160 MiB. A caller passing u32::MAX
-        // through the FFI would tell alacritty to grow unbounded.
-        // 200k × 500 cols × 32B ≈ 3.2 GB — still a generous ceiling
-        // that covers every realistic workflow and exits gracefully
-        // before exhausting RAM.
-        const SCROLLBACK_MAX: u32 = 200_000;
+        // Cap scrollback. Alacritty allocates a Cell per (col, line)
+        // in scrollback lazily; paired with the 1000-col ceiling above,
+        // worst-case allocation is cols × scrollback × ~32B. A realistic
+        // Blackbird session sets scrollback = 10 000 (the BBTerm default
+        // in BBTerm.swift), so a 5× headroom at 50 000 covers everyone
+        // legitimate. Larger values would trade ~1.5 GB of allocation
+        // headroom for no real UX benefit — 50k lines is already days
+        // of typical terminal output — so we cap here for memory
+        // predictability.
+        const SCROLLBACK_MAX: u32 = 50_000;
         let scrollback = scrollback.min(SCROLLBACK_MAX);
         let config = Config {
             scrolling_history: scrollback as usize,

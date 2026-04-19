@@ -98,7 +98,9 @@ tests in `core/tests/terminal_replies.rs`.
   request would allocate `rows × (cols + scrollback) × cell_size`
   bytes — 100+ GB, enough to lock up the host.
 - OSC 8 URI capped at 4 KiB per link (Rust, `bb_term_take_snapshot`).
-- Scrollback capped at 200 000 lines (Rust, `bb_term_new`).
+- Scrollback capped at 50 000 lines (Rust, `bb_term_new`) — 5× the
+  default Blackbird value (10 000). Paired with the 1000-col grid
+  ceiling, bounds per-terminal worst-case allocation at ~1.5 GB.
 - OSC 52 payload capped at 1 MiB (Swift,
   `TerminalSession.osc52MaxBytes`).
 - Copy-to-clipboard capped at 16 MiB.
