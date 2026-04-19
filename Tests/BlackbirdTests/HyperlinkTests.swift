@@ -96,6 +96,20 @@ final class HyperlinkTests: XCTestCase {
         }
     }
 
+    func testOsc8UrlAllowlistRejectsSchemelessURLs() {
+        // URL(string: "/relative") succeeds but has no scheme. Must be
+        // rejected — there's nothing NSWorkspace can meaningfully dispatch.
+        // A similar failure mode: `URL(string: "bare-host")` produces a
+        // relative reference with a nil scheme.
+        for raw in ["/usr/local/bin/less", "relative-path", "just-text"] {
+            guard let u = URL(string: raw) else { continue }
+            XCTAssertFalse(
+                OSC8URLPolicy.isAllowed(u),
+                "URL without a scheme must be rejected: \(raw)"
+            )
+        }
+    }
+
     func testOsc8UrlAllowlistAcceptsLegitimateVariants() {
         // URL(string:) accepts plenty of shapes — ports, query strings,
         // auth components, IPv6 literals. All should pass the scheme
