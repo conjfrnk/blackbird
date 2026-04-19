@@ -110,6 +110,23 @@ final class BufferPointTests: XCTestCase {
 
     // MARK: - 6a. Non-finite coords clamp without trapping Int(Double)
 
+    func test_nonFiniteViewportHeight_doesNotTrap() {
+        // Extra guard case added in fd9f452: viewportHeight NaN would
+        // poison `viewportHeight - safeY` before the Int cast.
+        let nan = Double.nan
+        let p = bufferPoint(
+            forView: CGPoint(x: 0, y: 0),
+            cellWidth: cellW,
+            cellHeight: cellH,
+            viewportHeight: nan,   // the guard under test
+            displayOffset: 0,
+            cols: cols,
+            rows: rows
+        )
+        XCTAssertGreaterThanOrEqual(p.col, 0, "NaN viewportHeight must not trap")
+        XCTAssertGreaterThanOrEqual(p.line, 0, "NaN viewportHeight must not trap")
+    }
+
     func test_nonFiniteCoords_doNotTrap() {
         // NaN / ±Infinity on CGPoint components would trap `Int(Double)`
         // before the max/min clamp fires. The function's guards must
