@@ -330,6 +330,35 @@ public final class BBSnapshot {
         Int(handle.pointee.cells_len)
     }
 
+    // MARK: - Damage tracking
+
+    /// True when alacritty reported full damage (scroll, insert-mode,
+    /// display-offset change — anything that shifts every row's content).
+    /// Callers treating this as "repaint everything" are always correct;
+    /// the partial `damagedRows` list is a hint for the fast path.
+    public var damageIsFull: Bool {
+        bb_snap_damage_is_full(handle) != 0
+    }
+
+    /// The specific row indices (0..<rows) that changed between this
+    /// snapshot and the previous. Empty when `damageIsFull` is true, or
+    /// when nothing actually changed. Meaningful only when
+    /// `damageIsFull == false`.
+    ///
+    /// Not cached — calls `bb_snap_damage_rows` each read. Renderers
+    /// that consume this should store the result themselves (typical
+    /// access pattern: read once per frame in `buildInstances`).
+    public var damagedRows: [Int] {
+        guard !damageIsFull else { return [] }
+        let cap = Int(handle.pointee.rows)
+        var out = [UInt16](repeating: 0, count: cap)
+        let n = out.withUnsafeMutableBufferPointer { buf -> Int in
+            guard let base = buf.baseAddress else { return 0 }
+            return Int(bb_snap_damage_rows(handle, base, UInt(cap)))
+        }
+        return out[0..<n].map { Int($0) }
+    }
+
     // MARK: - OSC 8 hyperlink attribution
 
     /// Non-zero OSC 8 link id associated with the cell at (row, col), or 0
