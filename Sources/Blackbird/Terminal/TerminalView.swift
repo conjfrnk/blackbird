@@ -1139,83 +1139,139 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return out
     }
 
-    /// Replace C0 control bytes (other than TAB / LF / CR) and DEL with a
-    /// space. Applied before *every* paste, whether bracketed or not.
+    /// Replace C0 + C1 control bytes (other than TAB / LF / CR) and DEL
+    /// with a space. Applied before *every* paste, whether bracketed or
+    /// not.
     ///
     /// Rationale: a pasted payload can carry `0x03` (Ctrl+C), `0x1A`
-    /// (Ctrl+Z), `0x1B` (ESC), or `0x7F` (DEL). Each of those, delivered
-    /// raw to the shell, either interrupts the current line and runs the
-    /// bytes that follow (the iTerm2 / Ghostty CVE-2026-26982 class) or
-    /// drives the remote into an unexpected mode via escape sequences
-    /// embedded in ostensibly benign text. The mitigation — drop every
-    /// non-printing byte outside TAB/LF/CR — matches Ghostty ≥1.3.0's fix
-    /// and xterm's default paste sanitizer. Replacing with space keeps
-    /// byte offsets stable so column-formatted output pastes cleanly.
+    /// (Ctrl+Z), `0x1B` (ESC), or `0x7F` (DEL) in the C0 set, each of
+    /// which — delivered raw to the shell — either interrupts the
+    /// current line and runs the bytes that follow (the iTerm2 /
+    /// Ghostty CVE-2026-26982 class) or drives the remote into an
+    /// unexpected mode via escape sequences embedded in plain text.
+    ///
+    /// The same applies to the **C1 set** (0x80–0x9F), which xterm's
+    /// `allowC1Printable` default treats as control bytes. Encoded in
+    /// UTF-8 as `0xC2 0x80 … 0xC2 0x9F`, these include 0x9B (CSI),
+    /// 0x9D (OSC), 0x90 (DCS) — ESC-free alternate forms of the same
+    /// attack surface. A sanitizer that only strips ESC leaves the
+    /// door open; we strip both lead bytes of the C1 UTF-8 sequence
+    /// so the decoded scalar never reaches the parser.
+    ///
+    /// Replacing with space keeps byte offsets stable so column-
+    /// formatted paste still lines up. Matches Ghostty ≥1.3.0 and
+    /// xterm's default paste sanitizer.
     static func sanitizePasteControls(_ input: Data) -> Data {
         var out = Data()
         out.reserveCapacity(input.count)
-        for b in input {
+        var i = input.startIndex
+        while i < input.endIndex {
+            let b = input[i]
             // TAB / LF / CR pass through — legitimate whitespace in paste.
             // (CR is normalised to LF upstream, but a lone CR arriving
             // from an old-Mac-encoded file is still valid input.)
             if b == 0x09 || b == 0x0A || b == 0x0D {
                 out.append(b)
+                i = input.index(after: i)
                 continue
             }
-            // Every other C0 control (0x00–0x08, 0x0B, 0x0C, 0x0E–0x1F) and
-            // DEL become a space. Same policy whether bracketed paste is
-            // on or off — a dangerous byte doesn't become safer because
-            // a wrapping ESC[200~ / ESC[201~ surrounds it.
+            // C0 (0x00–0x1F excluding TAB/LF/CR) and DEL (0x7F) → space.
             if b < 0x20 || b == 0x7F {
                 out.append(0x20)
+                i = input.index(after: i)
                 continue
             }
+            // C1 controls encoded as UTF-8: lead 0xC2 followed by a byte
+            // in 0x80–0x9F. Replace the whole two-byte scalar with a
+            // single space so the parser never sees 0x9B / 0x9D / 0x90.
+            // This doesn't strip lone continuation bytes (those are
+            // invalid UTF-8 and handled by the parser's UTF-8 state
+            // machine); we only match the valid C1 encoding pattern.
+            if b == 0xC2,
+               input.index(after: i) < input.endIndex {
+                let next = input[input.index(after: i)]
+                if (0x80...0x9F).contains(next) {
+                    out.append(0x20)
+                    i = input.index(i, offsetBy: 2)
+                    continue
+                }
+            }
             out.append(b)
+            i = input.index(after: i)
         }
         return out
     }
 
-    /// Drop every explicit Unicode bidi override / isolate control from a
-    /// paste payload. Targets exactly nine codepoints, each encoded as a
-    /// fixed 3-byte UTF-8 sequence:
+    /// Drop every Unicode bidi formatting / isolate / mark control from
+    /// a paste payload. Targets a dozen codepoints across three UTF-8
+    /// length classes:
     ///
-    ///   U+202A  LRE   E2 80 AA    left-to-right embedding
-    ///   U+202B  RLE   E2 80 AB    right-to-left embedding
-    ///   U+202C  PDF   E2 80 AC    pop directional formatting
-    ///   U+202D  LRO   E2 80 AD    left-to-right override  ← Trojan Source
-    ///   U+202E  RLO   E2 80 AE    right-to-left override  ← Trojan Source
-    ///   U+2066  LRI   E2 81 A6    left-to-right isolate
-    ///   U+2067  RLI   E2 81 A7    right-to-left isolate
-    ///   U+2068  FSI   E2 81 A8    first strong isolate
-    ///   U+2069  PDI   E2 81 A9    pop directional isolate
+    ///   U+061C  ALM   D8 9C         Arabic letter mark (2-byte)
+    ///   U+180E  MVS   E1 A0 8E      Mongolian vowel separator (3-byte)
+    ///   U+200E  LRM   E2 80 8E      left-to-right mark
+    ///   U+200F  RLM   E2 80 8F      right-to-left mark
+    ///   U+202A  LRE   E2 80 AA      left-to-right embedding
+    ///   U+202B  RLE   E2 80 AB      right-to-left embedding
+    ///   U+202C  PDF   E2 80 AC      pop directional formatting
+    ///   U+202D  LRO   E2 80 AD      left-to-right override  ← Trojan Source
+    ///   U+202E  RLO   E2 80 AE      right-to-left override  ← Trojan Source
+    ///   U+2066  LRI   E2 81 A6      left-to-right isolate
+    ///   U+2067  RLI   E2 81 A7      right-to-left isolate
+    ///   U+2068  FSI   E2 81 A8      first strong isolate
+    ///   U+2069  PDI   E2 81 A9      pop directional isolate
     ///
     /// These are rare in legitimate text — Unicode's bidirectional
-    /// algorithm handles Arabic / Hebrew automatically; explicit overrides
-    /// are a spoofing hammer. iTerm2's "Filter control sequences on paste"
-    /// option applies the same policy.
+    /// algorithm handles Arabic / Hebrew automatically; explicit
+    /// formatting is a spoofing hammer. iTerm2's "Filter control
+    /// sequences on paste" option applies the same policy; the extra
+    /// codepoints here match CVE-2021-42574 follow-up advisories that
+    /// broadened the list beyond the original nine overrides.
     static func stripBidiOverrides(_ input: Data) -> Data {
-        // Fast path: no 0xE2 byte means no U+20xx-range 3-byte sequences.
-        // Saves one allocation + pass on the common case of ASCII paste.
-        guard input.contains(0xE2) else { return input }
+        // Fast path: no 0xD8 / 0xE1 / 0xE2 byte means no match at all.
+        guard input.contains(where: { $0 == 0xD8 || $0 == 0xE1 || $0 == 0xE2 })
+        else { return input }
         var out = Data()
         out.reserveCapacity(input.count)
         var i = input.startIndex
         while i < input.endIndex {
+            let b0 = input[i]
             let remaining = input.distance(from: i, to: input.endIndex)
-            if remaining >= 3,
-               input[i] == 0xE2 {
+
+            // 2-byte: U+061C  (D8 9C)
+            if b0 == 0xD8, remaining >= 2,
+               input[input.index(after: i)] == 0x9C {
+                i = input.index(i, offsetBy: 2)
+                continue
+            }
+
+            // 3-byte sequences: E1 A0 8E (U+180E); E2 8x xx for several.
+            if remaining >= 3 {
                 let b1 = input[input.index(i, offsetBy: 1)]
                 let b2 = input[input.index(i, offsetBy: 2)]
-                if b1 == 0x80 && (0xAA...0xAE).contains(b2) {
+                if b0 == 0xE1, b1 == 0xA0, b2 == 0x8E {
                     i = input.index(i, offsetBy: 3)
                     continue
                 }
-                if b1 == 0x81 && (0xA6...0xA9).contains(b2) {
-                    i = input.index(i, offsetBy: 3)
-                    continue
+                if b0 == 0xE2 {
+                    // U+200E / U+200F: E2 80 8E / 8F
+                    if b1 == 0x80 && (b2 == 0x8E || b2 == 0x8F) {
+                        i = input.index(i, offsetBy: 3)
+                        continue
+                    }
+                    // U+202A..U+202E: E2 80 AA..AE
+                    if b1 == 0x80 && (0xAA...0xAE).contains(b2) {
+                        i = input.index(i, offsetBy: 3)
+                        continue
+                    }
+                    // U+2066..U+2069: E2 81 A6..A9
+                    if b1 == 0x81 && (0xA6...0xA9).contains(b2) {
+                        i = input.index(i, offsetBy: 3)
+                        continue
+                    }
                 }
             }
-            out.append(input[i])
+
+            out.append(b0)
             i = input.index(after: i)
         }
         return out

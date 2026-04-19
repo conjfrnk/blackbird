@@ -376,6 +376,36 @@ final class TerminalViewTests: XCTestCase {
         )
     }
 
+    func test_sanitizePasteControls_stripsC1TwoByteUTF8() {
+        // C1 controls encoded as UTF-8 are `0xC2 0x80..0x9F`. 0x9B (CSI),
+        // 0x9D (OSC), 0x90 (DCS) are ESC-free alternates — xterm's
+        // allowC1Printable=false default disables them, and our paste
+        // sanitizer must match so a carefully crafted non-ESC payload
+        // can't drive the parser into OSC / CSI state from paste.
+        let c1Bytes: [UInt8] = [0x80, 0x8F, 0x90, 0x9B, 0x9D, 0x9F]
+        for c1 in c1Bytes {
+            var input = Data("a".utf8)
+            input.append(contentsOf: [0xC2, c1])
+            input.append(Data("b".utf8))
+            let out = TerminalView.sanitizePasteControls(input)
+            XCTAssertEqual(
+                out, Data([0x61, 0x20, 0x62]),
+                "UTF-8-encoded C1 control 0xC2 0x\(String(c1, radix: 16)) must be replaced with a space"
+            )
+        }
+    }
+
+    func test_sanitizePasteControls_preservesValidHighUTF8() {
+        // 0xC2 alone is not C1; it can also start legitimate codepoints
+        // like U+00A0..U+00BF (latin-1 supplement). Make sure we don't
+        // eat `0xC2 0xA0` (non-breaking space). Also make sure a 0xC2
+        // without a valid continuation passes through untouched.
+        let nbsp = Data([0xC2, 0xA0])
+        XCTAssertEqual(TerminalView.sanitizePasteControls(nbsp), nbsp)
+        let trailing = Data([0x61, 0xC2])
+        XCTAssertEqual(TerminalView.sanitizePasteControls(trailing), trailing)
+    }
+
     func test_sanitizePasteControls_passesThroughHighBytes() {
         // UTF-8 continuation bytes are ≥0x80 and must pass unchanged so
         // multi-byte characters (CJK, emoji) paste intact.
@@ -400,6 +430,29 @@ final class TerminalViewTests: XCTestCase {
             out.contains(0xE2), "bidi-override codepoint must be stripped wholesale"
         )
         XCTAssertEqual(out, Data("rm -rf ~\n".utf8))
+    }
+
+    func test_stripBidiOverrides_removesLRMandRLM() {
+        // U+200E LRM and U+200F RLM — weaker than overrides but called
+        // out in CVE-2021-42574 follow-up advisories. Verify they're
+        // stripped alongside the stronger overrides.
+        let lrm = Data([0x61] + [0xE2, 0x80, 0x8E] + [0x62])
+        let rlm = Data([0x61] + [0xE2, 0x80, 0x8F] + [0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(lrm), Data("ab".utf8))
+        XCTAssertEqual(TerminalView.stripBidiOverrides(rlm), Data("ab".utf8))
+    }
+
+    func test_stripBidiOverrides_removesArabicLetterMark() {
+        // U+061C ALM is 2-byte UTF-8 (D8 9C). Often overlooked in bidi
+        // scrubbers because it's the only 2-byte format control.
+        let alm = Data([0x61, 0xD8, 0x9C, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(alm), Data("ab".utf8))
+    }
+
+    func test_stripBidiOverrides_removesMongolianVowelSeparator() {
+        // U+180E (E1 A0 8E) — deprecated but still Format category.
+        let mvs = Data([0x61, 0xE1, 0xA0, 0x8E, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(mvs), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_coversAllNineCodepoints() {
