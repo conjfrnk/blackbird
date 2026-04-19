@@ -91,4 +91,47 @@ else
   fail "release.sh missing notarytool step"
 fi
 
+# ---------------------------------------------------------------------------
+# 6. Sparkle ≥ 2.6.4 — the release that fixed a signed-feed bypass letting
+#    a MITM swap the signed installer for alternate payload. The package
+#    requirement in `project.yml` is `from: 2.6.0`, which lets SPM resolve
+#    any 2.x including vulnerable 2.6.{0..3}. Read the actually-resolved
+#    version from Package.resolved and fail if it's below cutoff.
+# ---------------------------------------------------------------------------
+PKG_RESOLVED="$(
+  find . -name 'Package.resolved' \
+    -not -path '*/.build/*' -not -path '*/DerivedData/*' -not -path '*/.swiftpm/*' \
+    2>/dev/null | head -1
+)"
+if [[ -z "$PKG_RESOLVED" ]]; then
+  fail "no Package.resolved found — run 'xcodebuild -resolvePackageDependencies' and rerun"
+fi
+SPARKLE_VER="$(
+  awk '
+    /"identity" : "sparkle"/ { found = 1; next }
+    found && /"version" : / { gsub(/[",]/, "", $NF); print $NF; exit }
+  ' "$PKG_RESOLVED"
+)"
+if [[ -z "$SPARKLE_VER" ]]; then
+  fail "could not parse Sparkle version from $PKG_RESOLVED"
+fi
+IFS='.' read -r SP_MAJ SP_MIN SP_PATCH <<<"$SPARKLE_VER"
+if (( SP_MAJ < 2 )) \
+   || { (( SP_MAJ == 2 )) && (( SP_MIN < 6 )); } \
+   || { (( SP_MAJ == 2 )) && (( SP_MIN == 6 )) && (( SP_PATCH < 4 )); }; then
+  fail "Sparkle $SPARKLE_VER is below the 2.6.4 security cutoff (signed-feed bypass); bump the package requirement"
+fi
+pass "Sparkle $SPARKLE_VER ≥ 2.6.4 security cutoff"
+
+# ---------------------------------------------------------------------------
+# 7. App Sandbox must NOT be enabled. A terminal with App Sandbox on can't
+#    fork arbitrary shells or open files outside its container — the entire
+#    product collapses. Keep this posture explicit so a drive-by "enable
+#    sandbox for security" PR gets caught here rather than at runtime.
+# ---------------------------------------------------------------------------
+if grep -rn "com.apple.security.app-sandbox" "${SEARCH_PATHS[@]}" 2>/dev/null; then
+  fail "com.apple.security.app-sandbox detected; Blackbird must stay un-sandboxed to fork shells"
+fi
+pass "no App Sandbox entitlement (intentional — terminals need arbitrary-fork capability)"
+
 echo "check-security-posture: all checks passed"
