@@ -128,6 +128,51 @@ fn cursor_save_restore_around_popup() {
     }
 }
 
+/// Multi-row popup repaint: Claude Code-style `/btw` modal covers 5
+/// rows. Dismissal repaints each row over the popup frame. Verify
+/// every restored row matches the original content — this is the
+/// shape of repaint the `/btw` bug report hinges on.
+#[test]
+fn multi_row_popup_dismissal_restores_all_rows() {
+    unsafe {
+        let term = blackbird_core::bb_term_new(40, 10, 100);
+        // Prime 10 rows of distinct content.
+        let bases: Vec<String> = (0..10).map(|i| format!("row {} base content", i)).collect();
+        for (i, line) in bases.iter().enumerate() {
+            let seq = format!("\x1b[{};1H{}", i + 1, line);
+            blackbird_core::bb_term_input(term, seq.as_ptr(), seq.len());
+        }
+        // Draw a 5-row popup over rows 3–7 with varying widths.
+        for (i, bar) in [
+            "╭──────────── /btw ────────────╮",
+            "│  Q: how do I paginate in ls? │",
+            "│  A: use less                 │",
+            "│  [Enter] dismiss             │",
+            "╰──────────────────────────────╯",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let seq = format!("\x1b[{};1H{}\x1b[K", 3 + i, bar);
+            blackbird_core::bb_term_input(term, seq.as_ptr(), seq.len());
+        }
+        // Dismiss by repainting each original row with a trailing EL.
+        for i in 2..7 {
+            let seq = format!("\x1b[{};1H{}\x1b[K", i + 1, bases[i]);
+            blackbird_core::bb_term_input(term, seq.as_ptr(), seq.len());
+        }
+        let out = render_grid(term);
+        for (i, expected) in bases.iter().enumerate() {
+            let line = out.lines().nth(i).unwrap_or("");
+            assert_eq!(
+                line, expected,
+                "row {i} must fully restore after multi-row popup dismissal; got {line:?}"
+            );
+        }
+        blackbird_core::bb_term_free(term);
+    }
+}
+
 /// Reproduce a Claude Code-style inline popup open / close cycle:
 /// draw base text, overwrite a middle row with a "popup" bar using
 /// cursor positioning + EL, then dismiss by re-emitting the original
