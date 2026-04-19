@@ -108,6 +108,36 @@ final class BufferPointTests: XCTestCase {
         XCTAssertEqual(p.col, 0)
     }
 
+    // MARK: - 6a. Non-finite coords clamp without trapping Int(Double)
+
+    func test_nonFiniteCoords_doNotTrap() {
+        // NaN / ±Infinity on CGPoint components would trap `Int(Double)`
+        // before the max/min clamp fires. The function's guards must
+        // treat them as "origin" rather than crash.
+        let nan = Double.nan
+        let inf = Double.infinity
+        let tests: [(x: Double, y: Double)] = [
+            (nan, viewportH - 0.5),
+            (0, nan),
+            (inf, viewportH - 0.5),
+            (0, -inf),
+            (nan, nan),
+        ]
+        for t in tests {
+            let p = bufferPoint(
+                forView: CGPoint(x: t.x, y: t.y),
+                cellWidth: cellW,
+                cellHeight: cellH,
+                viewportHeight: viewportH,
+                displayOffset: 0,
+                cols: cols,
+                rows: rows
+            )
+            XCTAssertGreaterThanOrEqual(p.col, 0, "\(t) must not trap")
+            XCTAssertGreaterThanOrEqual(p.line, 0, "\(t) must not trap")
+        }
+    }
+
     // MARK: - 6. Column < 0 clamps to 0 for x < 0
 
     func test_negativeX_clampsColToZero() {
