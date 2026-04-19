@@ -220,6 +220,25 @@ public final class TerminalSession: ObservableObject {
         pty?.sendSignalToForeground(sig)
     }
 
+    /// Forward a window-focus change to the TUI as a `CSI I` / `CSI O`
+    /// escape, gated on mode 1004 (`\e[?1004h`). No-op when the TUI
+    /// hasn't requested focus events — Vim's `:checktime`, tmux's
+    /// `focus-events on`, and similar features depend on this.
+    ///
+    /// Runs on the core queue so the mode read + PTY write are serialized
+    /// with any in-flight `bb_term_input` call. Immediate rather than
+    /// queued because the byte must land before the next keystroke or
+    /// repaint to be causally correct with the focus change the user just
+    /// made.
+    public func focusChanged(_ focused: Bool) {
+        coreQueue.async { [weak self] in
+            guard let self, let bytes = self.bbterm.focusChangeBytes(focused: focused) else {
+                return
+            }
+            self.pty?.writeImmediate(bytes)
+        }
+    }
+
     public func resize(to size: Size) {
         // Synchronous on the caller's thread. coreQueue serializes PTY +
         // BBTerm resize (same guarantee as before) but we block the caller

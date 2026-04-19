@@ -206,6 +206,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         onClose?()
     }
 
+    /// Forward window-focus gains to the TUI as a `CSI I` escape when it
+    /// has enabled mode 1004 (`\e[?1004h`). TUIs like Vim use this to
+    /// trigger `:checktime` so external file changes are picked up when
+    /// the user Cmd-Tabs back to the terminal; tmux uses it to propagate
+    /// focus to its inner panes so clients can update title / status.
+    /// The session gates internally so no bytes emit when the mode is off.
+    func windowDidBecomeKey(_ notification: Notification) {
+        session?.focusChanged(true)
+    }
+
+    /// Forward window-focus loss. Paired with `windowDidBecomeKey` above.
+    /// Only fires when the key-window transition is between Blackbird
+    /// windows or between Blackbird and another app — spaces / dock
+    /// changes that don't take key away leave the mode state alone.
+    func windowDidResignKey(_ notification: Notification) {
+        session?.focusChanged(false)
+    }
+
     // MARK: - Titlebar-integrated tab bar
 
     /// Attach the custom tab pill strip as a titlebar accessory, and hide

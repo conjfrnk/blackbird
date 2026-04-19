@@ -410,6 +410,24 @@ uint32_t bb_snap_link_id_at(const struct BBSnap *snap, uint16_t row, uint16_t co
 const char *bb_snap_link_url(const struct BBSnap *snap, uint32_t link_id);
 
 /**
+ * Read the current terminal mode bitfield as a `bb_mode::*` union.
+ * O(1) — no snapshot allocation. Use when a caller needs to branch on
+ * a single mode bit (e.g., focus-event emission must check
+ * `FOCUS_IN_OUT` before writing `\x1b[I` / `\x1b[O` to the PTY, since
+ * emitting those bytes when the TUI hasn't enabled mode 1004 would be
+ * interpreted as `HPA` / a cursor move).
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null returns 0 (no bits set),
+ * which is the correct default for "don't emit".
+ *
+ * Panics inside this function are caught by `catch_unwind` and delivered as a
+ * `BBEventKind::Fatal` event to the registered callback. The function returns
+ * 0 as the fallback value.
+ */
+uint32_t bb_term_current_mode(struct BBTerm *term);
+
+/**
  * Scroll the display by `delta` lines. Positive = scroll up (show older
  * content), negative = scroll down (show newer content, towards bottom).
  *

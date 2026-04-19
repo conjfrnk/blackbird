@@ -1231,6 +1231,31 @@ pub unsafe extern "C" fn bb_snap_link_url(
     })
 }
 
+/// Read the current terminal mode bitfield as a `bb_mode::*` union.
+/// O(1) — no snapshot allocation. Use when a caller needs to branch on
+/// a single mode bit (e.g., focus-event emission must check
+/// `FOCUS_IN_OUT` before writing `\x1b[I` / `\x1b[O` to the PTY, since
+/// emitting those bytes when the TUI hasn't enabled mode 1004 would be
+/// interpreted as `HPA` / a cursor move).
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null returns 0 (no bits set),
+/// which is the correct default for "don't emit".
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// 0 as the fallback value.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_current_mode(term: *mut BBTerm) -> u32 {
+    guard_with_term(term, 0u32, || {
+        if term.is_null() {
+            return 0;
+        }
+        let bb = &*term;
+        extract_mode(bb.term.mode())
+    })
+}
+
 /// Scroll the display by `delta` lines. Positive = scroll up (show older
 /// content), negative = scroll down (show newer content, towards bottom).
 ///

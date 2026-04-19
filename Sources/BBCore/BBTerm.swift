@@ -89,6 +89,28 @@ public final class BBTerm {
         bb_term_scroll(h, delta)
     }
 
+    /// Current terminal mode bitfield. Lightweight — no snapshot allocation.
+    /// Use when a caller needs to branch on a single bit between snapshot
+    /// cycles (the focus-event path is the motivating case: we must check
+    /// `FOCUS_IN_OUT` at the moment the window's focus changes, not whatever
+    /// mode the last-rendered snapshot captured).
+    public var currentMode: BBTermMode {
+        guard let h = handle else { return [] }
+        return BBTermMode(rawValue: bb_term_current_mode(h))
+    }
+
+    /// Compute the focus-event escape for the given focus state, gated on
+    /// mode 1004 being active. Returns `nil` when the TUI hasn't requested
+    /// focus events — sending those bytes unconditionally would be
+    /// interpreted as `HPA` and move the cursor.
+    ///
+    /// Per xterm focus-events doc: `\x1b[I` on gain, `\x1b[O` on loss. The
+    /// caller is responsible for routing the returned bytes to the PTY.
+    public func focusChangeBytes(focused: Bool) -> Data? {
+        guard currentMode.contains(.focusInOut) else { return nil }
+        return focused ? Data([0x1b, 0x5b, 0x49]) : Data([0x1b, 0x5b, 0x4f])
+    }
+
     /// Snap the viewport back to the live grid. Called after any keystroke so
     /// typing always brings the user out of scrollback.
     public func scrollToBottom() {
