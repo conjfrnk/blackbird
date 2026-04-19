@@ -394,19 +394,16 @@ public final class PTY {
     /// async dispatch latency is perceptible. Safe for single-byte
     /// writes — the kernel write is atomic at that size.
     ///
-    /// Ordering: serialised under stateQueue (for teardown safety — close
-    /// also grabs stateQueue, so our write can't land on a freshly-closed
-    /// fd) AND writeQueue (for paste-interleave safety — a mid-paste
-    /// Ctrl+C would otherwise split the paste's bracketed-paste frame).
-    /// Both queues are serial; nesting is safe because the read-queue
-    /// teardown path releases stateQueue before taking writeQueue and
-    /// vice-versa, so there's no circular wait.
+    /// Ordering: enters writeQueue under `.sync` so a pending paste can't
+    /// interleave our bytes into its bracketed-paste frame. Then checks
+    /// shouldKeepRunning (via stateQueue) to bail safely if teardown
+    /// has already marked us stopped. Lock order is `writeQueue →
+    /// stateQueue` — same as `write()` — so no circular wait with
+    /// teardown's `markStopped; writeQueue.sync {}; close(fd)` sequence.
     public func writeImmediate(_ data: Data) {
-        stateQueue.sync {
-            guard _isRunning else { return }
-            writeQueue.sync {
-                _ = self.writeRawLocked(data)
-            }
+        writeQueue.sync {
+            guard self.shouldKeepRunning() else { return }
+            _ = self.writeRawLocked(data)
         }
     }
 
