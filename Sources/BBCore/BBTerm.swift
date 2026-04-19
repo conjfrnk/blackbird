@@ -261,7 +261,13 @@ public final class BBSnapshot {
     public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 
     public func character(at col: Int, row: Int) -> Character? {
-        guard col < cols, row < rows else { return nil }
+        // Full four-sided bounds check. Prior code only guarded the
+        // upper bound, which left a trap: `cells[negIdx]` on a
+        // negative-index access (easy to construct via a caller that
+        // passes unclamped coordinates from a scroll-offset calculation)
+        // would panic out of Swift's array bounds assertion. Match
+        // `linkID(row:col:)`'s pattern of rejecting both ends.
+        guard col >= 0, row >= 0, col < cols, row < rows else { return nil }
         let idx = row * cols + col
         let scalar = handle.pointee.cells[idx].ch
         guard scalar != 0, let us = Unicode.Scalar(scalar) else { return nil }
