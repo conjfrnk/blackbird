@@ -39,6 +39,18 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(zero.rows, 1)
     }
 
+    func test_cellMetrics_gridHandlesFiniteButAbsurdPixelSize() {
+        // Finite-but-huge values (1e20) also trap Int(Double) because
+        // Int can't hold the magnitude. Upper clamp should cap at
+        // the 1 000 000 sanity limit.
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let big: Double = 1e20
+        let g = metrics.grid(forPixelSize: CGSize(width: big, height: big))
+        XCTAssertGreaterThan(g.cols, 1)
+        XCTAssertGreaterThan(g.rows, 1)
+        XCTAssertLessThan(g.cols, 200_000, "cols must be clamped well below sanePx / cellWidth")
+    }
+
     func test_cellMetrics_gridHandlesNonFinitePixelSize() {
         // `Int(Double)` traps on NaN / ±Infinity before any max(1, ...)
         // rescue. CGSize from AppKit is always finite in practice, but
