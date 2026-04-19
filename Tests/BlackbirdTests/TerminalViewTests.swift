@@ -484,6 +484,28 @@ final class TerminalViewTests: XCTestCase {
         )
     }
 
+    func test_pasteSanitizer_preservesInvalidUtf8Shape_withoutCrash() {
+        // Pasted content can contain sequences that aren't valid UTF-8 —
+        // some clipboard providers emit them. The sanitizer must not
+        // crash or infinite-loop on these. Downstream String(decoding:,
+        // as: UTF8.self) will substitute U+FFFD; that's acceptable.
+        let payloads: [Data] = [
+            Data([0x80]),                                  // lone continuation
+            Data([0xC2]),                                  // truncated 2-byte lead
+            Data([0xE2, 0x80]),                            // truncated 3-byte lead
+            Data([0xF4, 0x90, 0x80, 0x80]),                // > U+10FFFF
+            Data([0x61, 0xED, 0xA0, 0x80, 0x62]),          // surrogate encoded as UTF-8
+            Data(repeating: 0xFF, count: 64),              // all-0xFF
+        ]
+        for p in payloads {
+            let cleaned = TerminalView.sanitizePasteControls(p)
+            let bidiStripped = TerminalView.stripBidiOverrides(cleaned)
+            let final = TerminalView.sanitizeBracketedPaste(bidiStripped)
+            // Invariant: no crash, output length ≤ input length.
+            XCTAssertLessThanOrEqual(final.count, p.count)
+        }
+    }
+
     func test_pasteSanitizerPipeline_fuzzInvariants() {
         // Property-based style: generate 500 random byte sequences up to
         // 4 KiB, run them through the full paste sanitizer chain, verify
