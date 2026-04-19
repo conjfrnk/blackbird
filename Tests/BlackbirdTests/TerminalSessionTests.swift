@@ -13,25 +13,31 @@ final class TerminalSessionTests: XCTestCase {
         // Paired with the Rust-side tests bb_term_resize_clamps_oversized_
         // dimensions and bb_term_new_clamps_oversized_dimensions. Swift's
         // TerminalSession.resize mirrors the core clamp at [2, 1000].
-        // A caller passing UInt16.max must NOT crash and must land on a
-        // sane snapshot size.
+        // A caller passing UInt16.max must NOT crash and must land on
+        // exactly the clamp ceiling.
+        //
+        // Memory budget: 1000 × max(1000, 10 000 scrollback) × 32B ≈
+        // 320 MB allocation under alacritty reflow — well within a dev
+        // machine's RAM. The test's pre-flight check: sanity on this.
         let session = try TerminalSession.start(
             shell: "/bin/cat",
             arguments: [],
             size: .init(cols: 80, rows: 24)
         )
-        let exp = expectation(description: "snapshot at clamped size")
+        // Exactly 1000×1000 — the clamp ceiling. Waiting for the
+        // SPECIFIC post-resize dimensions, not just "any sane value",
+        // because the initial 80×24 snapshot already satisfies the
+        // latter and would fulfil the expectation vacuously.
+        let exp = expectation(description: "snapshot at clamped size 1000×1000")
         var gotExpected = false
         var c: AnyCancellable?
         c = session.$snapshot.compactMap { $0 }.sink { snap in
-            if !gotExpected, snap.cols <= 1000, snap.rows <= 1000,
-               snap.cols >= 2, snap.rows >= 2 {
+            if !gotExpected, snap.cols == 1000, snap.rows == 1000 {
                 gotExpected = true
                 c?.cancel()
                 exp.fulfill()
             }
         }
-        // Request an absurd size. Clamp must engage at both layers.
         session.resize(to: .init(cols: UInt16.max, rows: UInt16.max))
         wait(for: [exp], timeout: 3.0)
         session.terminate()
