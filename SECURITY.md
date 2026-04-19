@@ -105,7 +105,10 @@ tests in `core/tests/terminal_replies.rs`.
   `TerminalSession.osc52MaxBytes`).
 - Copy-to-clipboard capped at 16 MiB.
 - Find results capped at 10 000 matches.
-- Mouse coordinates clamped / `isFinite`-checked before encoding.
+- CGFloat coordinates `isFinite`-checked before any `Int(Double)`
+  cast (mouse reporting, grid sizing, buffer-point conversion). A
+  NaN / ±Infinity from a misbehaving input device or a stray Core
+  Animation value would otherwise SIGILL the process at the cast.
 - `encodeMouseReport` rejects button outside [0, 224) and negative
   coords.
 - Preferences `fontSize` and `translucency` clamped at set time —
