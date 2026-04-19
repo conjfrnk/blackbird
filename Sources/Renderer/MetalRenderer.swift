@@ -108,8 +108,8 @@ public final class MetalRenderer {
         let defaultBgRgb: UInt32
         let backgroundOpacity: Float
         let keepBgOpaque: Bool
-        let accentColorBits: UInt64       // SIMD4<Float> packed to deterministic bits
-        let cursorColorBits: UInt64
+        let accentColor: SIMD4<Float>     // Equatable; avoids collision risk
+        let cursorColor: SIMD4<Float>
         let blinkSkip: Bool
     }
     private var lastFrameKey: FrameKey?
@@ -486,21 +486,6 @@ public final class MetalRenderer {
         )
     }
 
-    /// Bitwise-packed SIMD4<Float> for FrameKey. `bitPattern` gives a
-    /// deterministic comparable value; two colours that differ in the last
-    /// float bit render differently, so "close but not equal" must miss
-    /// the cache.
-    private static func packSIMD4(_ v: SIMD4<Float>) -> UInt64 {
-        let x = UInt64(v.x.bitPattern)
-        let y = UInt64(v.y.bitPattern)
-        // Alpha is always 1.0 in practice; mix x/y/z into a single 64-bit
-        // value. Four 32-bit floats collapse to 64 bits with a mixer —
-        // pragma: we accept trivial hash-like collisions on SIMD values
-        // because the alpha slot is constant.
-        let z = UInt64(v.z.bitPattern)
-        return (x << 32) ^ (y << 16) ^ z
-    }
-
     private static func rgbToSIMD(_ rgb: UInt32) -> SIMD4<Float> {
         let r = Float((rgb >> 16) & 0xFF) / 255.0
         let g = Float((rgb >> 8) & 0xFF) / 255.0
@@ -541,8 +526,8 @@ public final class MetalRenderer {
             defaultBgRgb: defaultBgRgb,
             backgroundOpacity: backgroundOpacity,
             keepBgOpaque: keepBgOpaque,
-            accentColorBits: Self.packSIMD4(accentColor),
-            cursorColorBits: Self.packSIMD4(cursorColor),
+            accentColor: accentColor,
+            cursorColor: cursorColor,
             blinkSkip: blinkSkipNow
         )
         if !frameSkipDisabled, frameKey == lastFrameKey {
