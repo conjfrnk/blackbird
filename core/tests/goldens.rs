@@ -95,6 +95,38 @@ fn golden_csi_box() {
     }
 }
 
+/// Cursor save / restore (DECSC / DECRC, ESC 7 / ESC 8) around a popup
+/// must land the cursor back where it started. A common TUI pattern:
+/// 1. ESC 7 (save cursor position)
+/// 2. reposition + draw popup
+/// 3. ESC 8 (restore) — user keeps typing at the original column
+/// If alacritty ever drifts on this, the user's next keystroke would
+/// echo in the wrong column.
+#[test]
+fn cursor_save_restore_around_popup() {
+    unsafe {
+        let term = blackbird_core::bb_term_new(40, 5, 100);
+        // Type some text ending at col 6.
+        let prefix = "hello ";
+        blackbird_core::bb_term_input(term, prefix.as_ptr(), prefix.len());
+        // Save cursor (ESC 7), draw popup elsewhere, restore (ESC 8).
+        let popup = "\x1b7\x1b[3;1H[popup]\x1b[K\x1b8";
+        blackbird_core::bb_term_input(term, popup.as_ptr(), popup.len());
+        // Type "world" where the cursor should now be.
+        let suffix = "world";
+        blackbird_core::bb_term_input(term, suffix.as_ptr(), suffix.len());
+
+        let out = render_grid(term);
+        // Row 0 should read "hello world" — cursor was correctly restored.
+        assert_eq!(
+            out.lines().next().unwrap_or(""),
+            "hello world",
+            "cursor restored to saved position so suffix lands correctly"
+        );
+        blackbird_core::bb_term_free(term);
+    }
+}
+
 /// Reproduce a Claude Code-style inline popup open / close cycle:
 /// draw base text, overwrite a middle row with a "popup" bar using
 /// cursor positioning + EL, then dismiss by re-emitting the original
