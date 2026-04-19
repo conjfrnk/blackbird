@@ -115,6 +115,25 @@ fn bb_term_resize_clamps_oversized_dimensions() {
 }
 
 #[test]
+fn bb_term_new_clamp_ceiling_is_exactly_1000() {
+    // Regression guard: the clamp is 1000 × 1000. A future refactor
+    // that silently bumped it to, say, 10 000 would multiply the
+    // worst-case allocation by 100. Verify via the observable snapshot
+    // that the ceiling lands exactly where SECURITY.md documents.
+    unsafe {
+        let term = bb_term_new(u16::MAX, u16::MAX, 10);
+        assert!(!term.is_null());
+        let snap = bb_term_take_snapshot(term);
+        let cols = (*snap).cols as usize;
+        let rows = (*snap).rows as usize;
+        assert_eq!(cols, 1000, "clamp ceiling on cols must stay 1000");
+        assert_eq!(rows, 1000, "clamp ceiling on rows must stay 1000");
+        bb_snap_release(snap);
+        bb_term_free(term);
+    }
+}
+
+#[test]
 fn bb_term_new_clamps_oversized_scrollback() {
     // u32::MAX would tell alacritty to allocate unbounded history.
     // Construction must still succeed (clamped silently to a sane cap)
