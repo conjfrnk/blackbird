@@ -135,6 +135,17 @@ fi
 pass "no App Sandbox entitlement (intentional — terminals need arbitrary-fork capability)"
 
 # ---------------------------------------------------------------------------
+# 9. Sparkle's privileged InstallerLauncher XPC service must be OFF until
+#    a real signed appcast ships. With a placeholder feed the updater
+#    can't run anyway, and leaving a root-capable XPC helper registered
+#    widens the attack surface for no benefit.
+# ---------------------------------------------------------------------------
+if grep -E "^[[:space:]]*SUEnableInstallerLauncherService:[[:space:]]*true[[:space:]]*$" project.yml; then
+  fail "SUEnableInstallerLauncherService is true with a placeholder appcast — turn off until first real release"
+fi
+pass "SUEnableInstallerLauncherService is off / unset"
+
+# ---------------------------------------------------------------------------
 # 8. Sparkle consistency: if SUFeedURL is a real URL (not empty, not the
 #    example.com placeholder) then SUPublicEDKey must also be set. Without
 #    the EdDSA public key Sparkle accepts unsigned update payloads — a
