@@ -150,4 +150,47 @@ final class HostileInputIntegrationTests: XCTestCase {
         // No CR (CRLF normalized, lone CR absent here).
         XCTAssertFalse(step4.contains(0x0D), "CR must be gone after normalization")
     }
+
+    /// OSC 52 clipboard writes (shell → system clipboard) run through a
+    /// 2-step scrub chain before reaching NSPasteboard:
+    /// `stripBidiOverrides(sanitizePasteControls(data))`.
+    ///
+    /// The paste-direction pipeline adds normalizePasteLineEndings +
+    /// sanitizeBracketedPaste on top, but those aren't applied on the
+    /// *write-out* side (the user is being handed bytes to paste, not the
+    /// shell). This test pins that the narrower write-direction pipeline
+    /// still catches the two threat classes we care about on a write:
+    ///   - C0/C1 controls (ESC sequences, DEL, Ctrl-chars) that a later
+    ///     paste into another terminal would re-execute.
+    ///   - Bidi overrides (Trojan Source) that rewrite visible direction
+    ///     once the text is pasted into a code editor or chat box.
+    func test_osc52WriteScrubStripsControlsAndBidi() {
+        // Mirror of the production path in TerminalSession.wire() —
+        // `case .osc52Clipboard(let text): ... stripBidiOverrides(
+        // sanitizePasteControls(data))`.
+        var payload = Data("user@host:~$ secret-token-123".utf8)
+        payload.insert(0x1B, at: 12)                               // ESC hidden after "user"
+        payload.append(0x07)                                       // BEL
+        payload.append(contentsOf: [0xE2, 0x80, 0xAE])             // U+202E RLO
+        payload.append(Data("tail-bytes".utf8))
+
+        let step1 = TerminalView.sanitizePasteControls(payload)
+        let step2 = TerminalView.stripBidiOverrides(step1)
+
+        XCTAssertFalse(step2.contains(0x1B),
+                       "ESC must be stripped before OSC 52 write")
+        XCTAssertFalse(step2.contains(0x07),
+                       "BEL must be stripped before OSC 52 write")
+        XCTAssertFalse(step2.contains(Data([0xE2, 0x80, 0xAE])),
+                       "U+202E RLO must be stripped before OSC 52 write")
+
+        // Counter-check: legitimate content survives. Otherwise the
+        // scrub would make OSC 52 useless for its intended use case
+        // (copy-out from remote session).
+        let decoded = String(decoding: step2, as: UTF8.self)
+        XCTAssertTrue(decoded.contains("secret-token-123"),
+                      "legitimate payload must pass through: got \(decoded)")
+        XCTAssertTrue(decoded.contains("tail-bytes"),
+                      "content after a bidi override must still arrive: got \(decoded)")
+    }
 }
