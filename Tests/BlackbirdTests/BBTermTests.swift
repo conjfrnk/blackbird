@@ -35,6 +35,20 @@ final class BBTermTests: XCTestCase {
         XCTAssertEqual(snap.rows, 40)
     }
 
+    func test_character_atRowColumn_rejectsNegativeIndices() throws {
+        // Regression guard for e66f383: character(at:row:) previously
+        // only bounded the upper end. A caller passing negative coords
+        // (easy to hit via an unclamped `screenRow - displayOffset`)
+        // would produce `row * cols + col < 0`, trapping on the cells
+        // array's bounds assertion. Must return nil instead.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 5)))
+        term.input("hello")
+        let snap = try XCTUnwrap(term.snapshot())
+        XCTAssertNil(snap.character(at: -1, row: 0), "negative col must return nil")
+        XCTAssertNil(snap.character(at: 0, row: -1), "negative row must return nil")
+        XCTAssertNil(snap.character(at: -5, row: -5), "both negative must return nil")
+    }
+
     func test_snapshot_sequenceIDIsMonotonic() throws {
         // Frame-skip in MetalRenderer uses `BBSnapshot.sequenceID` as a
         // content-change token. If two snapshots ever shared an id — via
