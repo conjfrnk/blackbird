@@ -400,6 +400,22 @@ public final class TerminalSession: ObservableObject {
                     // bytes into the user's clipboard or crash the
                     // session.
                     guard Preferences.shared.osc52Enabled else { break }
+                    // Cap the OSC 52 payload so a misbehaving / malicious
+                    // remote can't pin hundreds of MB into the user's
+                    // pasteboard with a single crafted sequence. 1 MiB
+                    // accommodates every realistic workflow — log paste,
+                    // code paste — and matches Ghostty's default. Oversize
+                    // payloads are dropped entirely rather than truncated:
+                    // a silently-truncated paste is worse than no paste
+                    // (user thinks they have the full content).
+                    let osc52MaxBytes = 1 * 1024 * 1024
+                    if text.utf8.count > osc52MaxBytes {
+                        #if DEBUG
+                        NSLog("[Blackbird] OSC 52 payload %d bytes exceeds %d cap — dropping",
+                              text.utf8.count, osc52MaxBytes)
+                        #endif
+                        break
+                    }
                     let pb = NSPasteboard.general
                     pb.clearContents()
                     if !text.isEmpty {
