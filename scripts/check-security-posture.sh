@@ -134,4 +134,26 @@ if grep -rn "com.apple.security.app-sandbox" "${SEARCH_PATHS[@]}" 2>/dev/null; t
 fi
 pass "no App Sandbox entitlement (intentional — terminals need arbitrary-fork capability)"
 
+# ---------------------------------------------------------------------------
+# 8. Sparkle consistency: if SUFeedURL is a real URL (not empty, not the
+#    example.com placeholder) then SUPublicEDKey must also be set. Without
+#    the EdDSA public key Sparkle accepts unsigned update payloads — a
+#    trivial supply-chain compromise if the feed URL ever becomes real.
+#    The runtime `isUpdaterConfigured` gate (App.swift) already refuses
+#    to start Sparkle in that case, but we want the posture pinned at
+#    build time too so a future "simplification" PR can't drop the gate.
+# ---------------------------------------------------------------------------
+FEED_LINE="$(awk '/CFBundleExecutable/{exit} /SUFeedURL:/{print $2; exit}' project.yml || true)"
+KEY_LINE="$(awk '/CFBundleExecutable/{exit} /SUPublicEDKey:/{print substr($0, index($0,$2)); exit}' project.yml || true)"
+# Strip trailing comment / whitespace artefacts.
+FEED_URL="$(printf '%s' "$FEED_LINE" | awk '{print $1}')"
+if [[ -z "$FEED_URL" || "$FEED_URL" == *example.com* ]]; then
+  pass "SUFeedURL is unset or placeholder — Sparkle is correctly gated off"
+else
+  if [[ -z "$KEY_LINE" || "$KEY_LINE" == '""' || "$KEY_LINE" == "''" ]]; then
+    fail "SUFeedURL ($FEED_URL) is real but SUPublicEDKey is empty — updates would ship unsigned"
+  fi
+  pass "SUFeedURL set with a non-empty SUPublicEDKey"
+fi
+
 echo "check-security-posture: all checks passed"
