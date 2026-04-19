@@ -1480,7 +1480,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let topLine: Int32 = -Int32(snap.historySize)
         let bottomLine = Int32(snap.rows - 1)
         if topLine > bottomLine { return }
-        for ln in topLine...bottomLine {
+        // Cap total matches. A remote-controlled scrollback full of the
+        // query string (user searches "e", scrollback is 10 000 × 500
+        // cols of 'e') would build ~2 M match tuples in main memory —
+        // main-thread freeze + OOM. 10 000 matches covers every
+        // realistic search; past that the UI's "N / M" counter stops
+        // being useful anyway.
+        let findMatchLimit = 10_000
+        outer: for ln in topLine...bottomLine {
             let hay = session.textRange(
                 from: BufferPoint(line: ln, col: 0),
                 to:   BufferPoint(line: ln, col: snap.cols - 1),
@@ -1493,6 +1500,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 let endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
                 findMatches.append((line: ln, startCol: startCol, endCol: endCol))
                 cursor = r.upperBound
+                if findMatches.count >= findMatchLimit { break outer }
             }
         }
         findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)

@@ -84,13 +84,18 @@ public final class PTY {
     /// fall back to `xterm-256color` — legacy but universally understood.
     private static let kittyTerminfoAvailable: Bool = installKittyTerminfoIfNeeded()
 
-    /// Install the bundled kitty terminfo to `~/.terminfo/x/xterm-kitty` if
-    /// it isn't already reachable. Idempotent. Returns true iff ncurses can
-    /// resolve `xterm-kitty` afterwards — which is what the child really
-    /// needs before we hand it `TERM=xterm-kitty`.
+    /// Install the bundled kitty terminfo to `~/.terminfo/x/xterm-kitty`.
+    /// Runs *every* launch — an opportunistic `tic -x` overwrites the
+    /// target, which is what we want: the bundled source is authoritative.
+    /// If an attacker pre-planted a malicious `xterm-kitty` entry (with a
+    /// hostile `reset=` capability that runs arbitrary bytes on shell
+    /// `reset`/`clear`), the re-install wipes it. Prior behaviour only
+    /// installed when `infocmp xterm-kitty` failed, which meant a planted
+    /// entry survived because the probe succeeded against it.
+    /// Returns true iff ncurses can resolve `xterm-kitty` afterwards —
+    /// which is what the child really needs before we hand it
+    /// `TERM=xterm-kitty`.
     private static func installKittyTerminfoIfNeeded() -> Bool {
-        if infocmpSucceeds(term: "xterm-kitty") { return true }
-
         guard
             let src = Bundle.main.url(forResource: "kitty", withExtension: "terminfo"),
             FileManager.default.fileExists(atPath: src.path)
