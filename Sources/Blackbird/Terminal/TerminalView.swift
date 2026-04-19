@@ -2147,9 +2147,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Clamp to a sane cell range so oversized coordinates (user
         // scrolled the window off the right edge of a 200k-col display)
         // don't overflow Int32 when encodeMouseReport stringifies them.
+        // Division of a finite by a positive cellWidth/Height is finite,
+        // so no second isFinite check is needed.
         let maxCol = 10_000, maxRow = 10_000
-        let col = max(0, min(maxCol, rowY.isFinite ? Int(colX) : 0))
-        let row = max(0, min(maxRow, rowY.isFinite ? Int(rowY) : 0))
+        let col = max(0, min(maxCol, Int(colX)))
+        let row = max(0, min(maxRow, Int(rowY)))
         guard let bytes = Self.encodeMouseReport(
             sgr: sgrMouseEnabled(),
             button: button,
