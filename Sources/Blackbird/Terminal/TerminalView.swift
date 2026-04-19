@@ -2292,6 +2292,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         col: Int,
         row: Int
     ) -> Data? {
+        // Defensive guards — callers today pass 0…65 for button and
+        // clamp col/row to 10 000, but a future caller outside the
+        // TerminalView flow could exceed those bounds. X10's 6-byte
+        // encoding traps on `UInt8(cbButton + 32)` when `cbButton >
+        // 223`, and SGR's `\(button)` stringifies every value
+        // including pathological ones. Reject up-front so the trap
+        // surface stays bounded to this function, not the caller.
+        guard (0..<224).contains(button), col >= 0, row >= 0 else { return nil }
         if sgr {
             // SGR 1006: ESC [ < button ; col+1 ; row+1 M/m
             let finalChar: Character = press ? "M" : "m"

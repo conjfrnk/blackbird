@@ -27,7 +27,18 @@ public final class Preferences: ObservableObject {
     @AppStorage("theme")          public var themeRaw: String  = Theme.gruvbox.rawValue
     @AppStorage("themeMode")      public var themeModeRaw: String = ThemeMode.dark.rawValue
     @AppStorage("fontName")       public var fontName: String = "Hack Nerd Font Mono"
-    @AppStorage("fontSize")       public var fontSize: Double = 13
+    @AppStorage("fontSize")       public var fontSize: Double = 13 {
+        didSet {
+            // A tampered plist or a stale UserDefaults key can surface
+            // NaN, ±Infinity, negative, or absurdly large sizes.
+            // Settings UI clamps to 9…32 at the bump actions; mirror the
+            // same bound on every set so direct writes (migrations,
+            // scripting, tests) can't poison readers downstream.
+            let normalised = fontSize.isFinite ? fontSize : 13
+            let clamped = max(9, min(64, normalised))
+            if clamped != fontSize { fontSize = clamped }
+        }
+    }
     @AppStorage("cursorBlink")    public var cursorBlink: Bool = false
     @AppStorage("bell")           public var bellRaw: String = BellStyle.visual.rawValue
     @AppStorage("optionKey")      public var optionKeyRaw: String = OptionKey.meta.rawValue
@@ -38,7 +49,21 @@ public final class Preferences: ObservableObject {
     /// opaque, 10 = maximum transparency with heavy blur. 5 is the
     /// daily-driver default — the lift Connor ended up preferring after
     /// A/B'ing the curve. See `translucencyResolved` for the anchor points.
-    @AppStorage("translucency") public var translucency: Double = 5
+    @AppStorage("translucency") public var translucency: Double = 5 {
+        didSet {
+            // Same NaN / range hygiene as fontSize. `translucencyResolved`
+            // below already normalises at read time, but any other caller
+            // that inspects `translucency` directly (e.g. SettingsView
+            // binding readout) would see the raw value. Clamp on set.
+            //
+            // NaN / ±Infinity fall to the opaque end (1) rather than the
+            // middle — a tampered plist shouldn't surprise the user with
+            // see-through windows out of nowhere.
+            let normalised = translucency.isFinite ? translucency : 1
+            let clamped = max(1, min(10, normalised))
+            if clamped != translucency { translucency = clamped }
+        }
+    }
 
     public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }

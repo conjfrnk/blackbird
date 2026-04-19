@@ -232,8 +232,26 @@ final class PreferencesTests: XCTestCase {
         p.osc52Enabled = true
         XCTAssertTrue(p.osc52Enabled)
 
+        // translucency is clamped to 1...10 on set — a tampered plist or
+        // stale UserDefaults write should never surface a value outside
+        // the slider's range.
         p.translucency = 0.42
-        XCTAssertEqual(p.translucency, 0.42, accuracy: 0.0001)
+        XCTAssertEqual(
+            p.translucency, 1.0, accuracy: 0.0001,
+            "out-of-range translucency must clamp to 1 (opaque)"
+        )
+        p.translucency = 7.25
+        XCTAssertEqual(p.translucency, 7.25, accuracy: 0.0001)
+        p.translucency = 99
+        XCTAssertEqual(
+            p.translucency, 10.0, accuracy: 0.0001,
+            "out-of-range translucency must clamp to 10 (max ghost)"
+        )
+        p.translucency = .nan
+        XCTAssertEqual(
+            p.translucency, 1.0, accuracy: 0.0001,
+            "NaN translucency must fall to the opaque end"
+        )
     }
 
     // MARK: - objectWillChange — ThemeManager observes this to re-apply
