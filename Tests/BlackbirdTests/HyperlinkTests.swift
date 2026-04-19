@@ -66,6 +66,53 @@ final class HyperlinkTests: XCTestCase {
         )
     }
 
+    func testOsc8UrlSchemeAllowlistAccepts() {
+        for scheme in ["http", "https", "ftp", "mailto", "file", "HTTPS", "Mailto"] {
+            let u = URL(string: "\(scheme):example")!
+            XCTAssertTrue(
+                OSC8URLPolicy.isAllowed(u),
+                "allowlist must accept the canonical safe scheme \(scheme)"
+            )
+        }
+    }
+
+    func testOsc8UrlSchemeAllowlistRejectsDangerous() {
+        // Classic OSC 8 injection vectors: a shell on a compromised host
+        // can emit a hyperlink with any scheme; without the allowlist,
+        // NSWorkspace.open would dispatch to the registered handler for
+        // javascript: / data: / shell: / jar: — any of which can execute.
+        let attacks = [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "jar:file:///etc/passwd",
+            "shell:Startup",
+            "vbscript:msgbox",
+            "x-apple-launch://local/App.app",
+            "file\0://trick",   // URL parses, scheme "file\0" — belt and braces
+        ]
+        for raw in attacks {
+            guard let u = URL(string: raw) else { continue }
+            XCTAssertFalse(
+                OSC8URLPolicy.isAllowed(u),
+                "scheme from attack string \(raw) must be rejected"
+            )
+        }
+    }
+
+    func testCmdClickBlocksJavascriptOsc8() throws {
+        // An OSC 8 payload can contain any URI scheme. Without the
+        // scheme allowlist, NSWorkspace would dispatch to whatever
+        // app registered the `javascript:` or custom-scheme handler.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        term.input("\u{1B}]8;;javascript:alert(1)\u{1B}\\hi\u{1B}]8;;\u{1B}\\")
+        let snap = try XCTUnwrap(term.snapshot())
+        let resolver = SnapshotHyperlinkResolver(snapshot: snap)
+        XCTAssertNil(
+            resolver.osc8URL(row: 0, col: 0),
+            "javascript: OSC 8 URLs must not surface through the click resolver"
+        )
+    }
+
     func testCmdClickFallsBackToRegexWhenNoOsc8() throws {
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         let opener = RecordingURLOpener()

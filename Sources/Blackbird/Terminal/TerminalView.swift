@@ -1695,6 +1695,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // test-supplied fake may override; otherwise consult the live
         // snapshot directly. `linkID` bounds-checks internally, so an
         // out-of-grid coordinate just returns 0 (which clears the hover).
+        //
+        // Gate on `OSC8URLPolicy` so cells whose OSC 8 target fails the
+        // scheme allowlist (javascript:, data:, custom handlers) don't
+        // paint a hover underline or fire a tooltip. The click path is
+        // already blocked upstream — showing an affordance for a no-op
+        // click would be misleading.
         let newLinkID: UInt32 = {
             #if DEBUG
             if let override = hyperlinkResolverOverride {
@@ -1704,7 +1710,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 return override.osc8URL(row: screenRow, col: col) != nil ? UInt32(bitPattern: Int32(-1)) : 0
             }
             #endif
-            return currentSnapshot?.linkID(row: screenRow, col: col) ?? 0
+            guard let snap = currentSnapshot else { return 0 }
+            let id = snap.linkID(row: screenRow, col: col)
+            guard id != 0,
+                  let raw = snap.linkURL(id: id),
+                  let url = URL(string: raw),
+                  OSC8URLPolicy.isAllowed(url)
+            else { return 0 }
+            return id
         }()
 
         // Same cell as last move → nothing to update except the tooltip
