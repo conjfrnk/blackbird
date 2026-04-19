@@ -232,14 +232,16 @@ public final class TerminalSession: ObservableObject {
         // under a millisecond in practice. Safe from deadlock: coreQueue
         // never syncs back to the caller's queue.
         //
-        // Clamp cols/rows to the same 2×2 floor the Rust core enforces, so
-        // the PTY's TIOCSWINSZ gets dimensions matching what alacritty will
-        // actually reflow into. Without this, a 1×1 request sizes the PTY
-        // to 1×1 but leaves the grid at 2×2 — the shell would receive a
-        // SIGWINCH for a 1×1 tty while our grid renders 2×2, and the mismatch
-        // shows up as off-by-one cursor or wrap behaviour until the next
-        // legit resize.
-        let clamped = Size(cols: max(2, size.cols), rows: max(2, size.rows))
+        // Clamp cols/rows to the same 2×2 floor and 1000×1000 ceiling the
+        // Rust core enforces, so the PTY's TIOCSWINSZ gets dimensions
+        // matching what alacritty will actually reflow into. Without
+        // this, a 1×1 request sizes the PTY to 1×1 but leaves the grid
+        // at 2×2; a UInt16.max request allocates hundreds of GB in the
+        // grid. Keeping PTY + grid in lockstep avoids off-by-one cursor
+        // / wrap bugs after the mismatch.
+        let cols = min(1000, max(2, size.cols))
+        let rows = min(1000, max(2, size.rows))
+        let clamped = Size(cols: cols, rows: rows)
         var newSnap: BBSnapshot?
         coreQueue.sync {
             self.pty?.resize(to: clamped)

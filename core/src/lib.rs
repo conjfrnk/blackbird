@@ -412,9 +412,14 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         if cols == 0 || rows == 0 {
             return std::ptr::null_mut();
         }
+        // Same bounds as bb_term_resize — a caller passing UInt16.max
+        // would try to allocate cols×rows×cell_size + scrollback ×
+        // cols × cell_size, tens or hundreds of GB. Clamp up front so
+        // bb_term_new is safe to call with any input.
+        const MAX_DIM: u16 = 1000;
         let size = TermSize {
-            cols: cols as usize,
-            rows: rows as usize,
+            cols: cols.min(MAX_DIM) as usize,
+            rows: rows.min(MAX_DIM) as usize,
         };
         // Cap scrollback at 200 000 lines. Alacritty allocates a Cell
         // per (col, line) in scrollback; a legitimate 10 000 × 500 cols
@@ -729,21 +734,20 @@ pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16)
         if term.is_null() || cols == 0 || rows == 0 {
             return;
         }
-        // Don't let callers reshape the grid into an absurdly narrow or
-        // short shape: alacritty's grid.resize reflows existing scrollback
-        // into the new geometry, and shrinking to 1 column with thousands
-        // of history lines blows up into millions of 1-cell rows
-        // (hundreds of MB). The Swift side's contentMinSize already
-        // enforces 20×4, but any future caller exercising this API
-        // directly — or a fuzzer — could land here. Floor at 2×2 so
-        // there's always at least one non-degenerate row/column after
-        // the reflow. Zero dimensions remain a no-op (treated as "not
-        // specified" by callers).
+        // Floor + ceiling on dimensions. The floor (2) prevents reflow
+        // explosion on shrink (1-col scrollback = millions of 1-cell
+        // rows). The ceiling (1000) prevents a caller passing a huge
+        // value (UInt16.max = 65535) from allocating
+        // rows × (cols + scrollback) × cell_size bytes — at 65535 ×
+        // (65535 + 200000) × 32B that's ~520 GB, enough to freeze any
+        // machine. 1000 × 1000 × 32B ≈ 32 MB grid, comfortable.
         const MIN_DIM: u16 = 2;
+        const MAX_DIM: u16 = 1000;
+        let clamp = |v: u16| v.max(MIN_DIM).min(MAX_DIM);
         let bb = &mut *term;
         let size = TermSize {
-            cols: cols.max(MIN_DIM) as usize,
-            rows: rows.max(MIN_DIM) as usize,
+            cols: clamp(cols) as usize,
+            rows: clamp(rows) as usize,
         };
         bb.term.resize(size);
     })

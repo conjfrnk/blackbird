@@ -75,6 +75,46 @@ fn osc8_accepts_uri_at_cap_boundary() {
 }
 
 #[test]
+fn bb_term_new_clamps_oversized_dimensions() {
+    // Verifies that a caller passing UInt16.max for cols / rows can't
+    // accidentally request hundreds of GB of cell allocation. Construction
+    // must still succeed (clamped to the internal MAX_DIM), not block or
+    // allocate more than a few tens of MB. If this test ever takes more
+    // than a second, the clamp was removed.
+    unsafe {
+        let term = bb_term_new(u16::MAX, u16::MAX, 1000);
+        assert!(!term.is_null(), "huge cols/rows must clamp, not fail");
+        // Verify the snapshot reflects a sane clamped grid — cells_len
+        // capped at something well under 65535 × 65535.
+        let snap = bb_term_take_snapshot(term);
+        assert!(!snap.is_null());
+        let len = (*snap).cells_len;
+        assert!(len <= 1_000 * 1_000, "cells_len {} must be clamped", len);
+        bb_snap_release(snap);
+        bb_term_free(term);
+    }
+}
+
+#[test]
+fn bb_term_resize_clamps_oversized_dimensions() {
+    // Same class of bug via resize. UInt16.max was documented to crash
+    // a developer's machine by requesting ~68 GB of cell allocation —
+    // the clamp here makes that impossible regardless of what a future
+    // caller passes through the FFI.
+    unsafe {
+        let term = bb_term_new(80, 24, 100);
+        assert!(!term.is_null());
+        // Massive resize — must land on the clamped ceiling, not OOM.
+        bb_term_resize(term, u16::MAX, u16::MAX);
+        let snap = bb_term_take_snapshot(term);
+        let len = (*snap).cells_len;
+        assert!(len <= 1_000 * 1_000, "resize cells_len {} must clamp", len);
+        bb_snap_release(snap);
+        bb_term_free(term);
+    }
+}
+
+#[test]
 fn bb_term_new_clamps_oversized_scrollback() {
     // u32::MAX would tell alacritty to allocate unbounded history.
     // Construction must still succeed (clamped silently to a sane cap)
