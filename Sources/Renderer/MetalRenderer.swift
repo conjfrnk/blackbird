@@ -313,6 +313,30 @@ public final class MetalRenderer {
                     if hoveredID != 0 && cell.link_id == hoveredID {
                         flags |= CellAttributeMask.linkHover.rawValue
                     }
+                    // Translate cell_flags bits that the shader needs to
+                    // render into our flat renderer-side bitset. Cell flags
+                    // live in Rust-stable constants (BBCore bridging header);
+                    // mapping here keeps the shader ignorant of the Rust
+                    // layout so a future cell_flags reshuffle stays local.
+                    let cf = cell.flags
+                    if (cf & UInt16(STRIKE)) != 0 {
+                        flags |= CellAttributeMask.strike.rawValue
+                    }
+                    if (cf & UInt16(UNDERLINE)) != 0 {
+                        flags |= CellAttributeMask.underline.rawValue
+                    }
+                    if (cf & UInt16(UNDERLINE_DOUBLE)) != 0 {
+                        flags |= CellAttributeMask.underlineDouble.rawValue
+                    }
+                    if (cf & UInt16(UNDERCURL)) != 0 {
+                        flags |= CellAttributeMask.undercurl.rawValue
+                    }
+                    if (cf & UInt16(UNDERLINE_DOTTED)) != 0 {
+                        flags |= CellAttributeMask.underlineDotted.rawValue
+                    }
+                    if (cf & UInt16(UNDERLINE_DASHED)) != 0 {
+                        flags |= CellAttributeMask.underlineDashed.rawValue
+                    }
                     return SIMD4<UInt32>(flags, 0, 0, 0)
                 }()
                 // Reverse video (SGR 7): swap the cell's fg and bg so the

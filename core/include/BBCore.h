@@ -42,6 +42,29 @@
  */
 #define LEADING_WIDE_CHAR_SPACER (1 << 8)
 
+/**
+ * CSI 21 m — double underline. Mutually exclusive with the other four
+ * underline style bits at the alacritty level (`ALL_UNDERLINES` mask).
+ */
+#define UNDERLINE_DOUBLE (1 << 9)
+
+/**
+ * CSI 4:3 m — wavy / undercurl. Neovim/Helix LSP diagnostics emit this
+ * for warnings/errors; having it rendered correctly matters for the
+ * agentic-CLI correctness wedge.
+ */
+#define UNDERCURL (1 << 10)
+
+/**
+ * CSI 4:4 m — dotted underline.
+ */
+#define UNDERLINE_DOTTED (1 << 11)
+
+/**
+ * CSI 4:5 m — dashed underline.
+ */
+#define UNDERLINE_DASHED (1 << 12)
+
 #define ALT_SCREEN (1 << 0)
 
 #define APP_CURSOR (1 << 1)

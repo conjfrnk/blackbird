@@ -1,16 +1,42 @@
 import simd
 
-/// Per-cell attribute bits carried to the GPU. Room for future glyph-level
-/// flags (bold/italic already live in the Rust cell bits; those resolve
-/// into texture lookups, not render toggles, so they stay out of this mask).
+/// Per-cell attribute bits carried to the GPU. Distinct from `cell_flags`
+/// on the Rust side because a few of these are renderer-computed (link
+/// hover is injected by the mouse-tracking path, not by the VT parser)
+/// and because the shader wants a flat bitset it can branch on cheaply
+/// without knowing the BBCell layout. The renderer translates cell_flags
+/// → CellAttributeMask in buildInstances.
+///
+/// Bit-budget reservation: bits 0-7 are render-state toggles; bits 8-31
+/// are reserved for future per-cell data (e.g., an underline-color index
+/// once colored underlines land in Task 2.5).
 struct CellAttributeMask: OptionSet {
     let rawValue: UInt32
     init(rawValue: UInt32) { self.rawValue = rawValue }
 
-    /// Bit 0: accent-coloured underline for the cell. Task 7 uses this for
-    /// OSC 8 hover highlighting, but the plumbing is generic — any future
-    /// "draw an accent underline here" attribute can reuse the same bit.
+    /// Bit 0: accent-coloured underline for the cell. Originally for OSC 8
+    /// hover highlighting, but the plumbing is generic — any future "draw
+    /// an accent underline here" attribute can reuse it.
     static let linkHover = CellAttributeMask(rawValue: 1 << 0)
+    /// Bit 1: SGR 9 strikethrough. Drawn as a 1-2 pt band at cell mid-height
+    /// in the cell's fg colour.
+    static let strike = CellAttributeMask(rawValue: 1 << 1)
+    /// Bit 2: SGR 4 plain single underline.
+    static let underline = CellAttributeMask(rawValue: 1 << 2)
+    /// Bit 3: SGR 4:2 / legacy style double underline.
+    static let underlineDouble = CellAttributeMask(rawValue: 1 << 3)
+    /// Bit 4: SGR 4:3 undercurl (wavy). LSP diagnostic squigglies.
+    static let undercurl = CellAttributeMask(rawValue: 1 << 4)
+    /// Bit 5: SGR 4:4 dotted underline.
+    static let underlineDotted = CellAttributeMask(rawValue: 1 << 5)
+    /// Bit 6: SGR 4:5 dashed underline.
+    static let underlineDashed = CellAttributeMask(rawValue: 1 << 6)
+
+    /// Mask covering every "paint a line under the glyph" bit. Shader uses
+    /// this to short-circuit the underline composite when none is set.
+    static let anyUnderline: CellAttributeMask = [
+        .underline, .underlineDouble, .undercurl, .underlineDotted, .underlineDashed,
+    ]
 }
 
 /// Per-cell instance data uploaded to the GPU each frame. 80-byte stride

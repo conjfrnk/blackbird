@@ -64,6 +64,21 @@ vertex VertexOut vertex_cell(
     return out;
 }
 
+// CellAttributeMask bits — must stay in lockstep with Sources/Renderer/CellInstance.swift.
+// Lifted to named constants so the shader branches read like the Swift side.
+constant uint BB_ATTR_LINK_HOVER         = 1u << 0;
+constant uint BB_ATTR_STRIKE             = 1u << 1;
+constant uint BB_ATTR_UNDERLINE          = 1u << 2;
+constant uint BB_ATTR_UNDERLINE_DOUBLE   = 1u << 3;
+constant uint BB_ATTR_UNDERCURL          = 1u << 4;
+constant uint BB_ATTR_UNDERLINE_DOTTED   = 1u << 5;
+constant uint BB_ATTR_UNDERLINE_DASHED   = 1u << 6;
+constant uint BB_ATTR_ANY_UNDERLINE      = BB_ATTR_UNDERLINE
+                                         | BB_ATTR_UNDERLINE_DOUBLE
+                                         | BB_ATTR_UNDERCURL
+                                         | BB_ATTR_UNDERLINE_DOTTED
+                                         | BB_ATTR_UNDERLINE_DASHED;
+
 fragment float4 fragment_cell(
     VertexOut in [[stage_in]],
     texture2d<float> atlas [[texture(0)]]
@@ -73,15 +88,63 @@ fragment float4 fragment_cell(
     // Blend fg glyph over bg. coverage = 0 → pure bg, coverage = 1 → pure fg.
     float4 base = mix(in.bgColor, in.fgColor, coverage);
 
-    // Accent-coloured underline for attribute bit 0 (currently the OSC 8
-    // hover highlight). Drawn as a 2-point band along the bottom of the
-    // cell, fully opaque accent — sits over whatever glyph/bg came before.
-    if ((in.flags & 1u) != 0u) {
-        float distFromBottom = in.quadSizePx.y - in.localPx.y;
-        if (distFromBottom <= 2.0) {
-            return in.accentColor;
+    uint flags = in.flags;
+    float distFromBottom = in.quadSizePx.y - in.localPx.y;
+    float x = in.localPx.x;
+
+    // Strike: a single 1.5 pt band slightly above the glyph mid-line so it
+    // reads as a strike-through whether the glyph is tall (capital) or short
+    // (lowercase). Uses fg colour so it matches the text being crossed out.
+    if ((flags & BB_ATTR_STRIKE) != 0u) {
+        float strikeY = in.quadSizePx.y * 0.55;
+        if (in.localPx.y >= strikeY && in.localPx.y <= strikeY + 1.5) {
+            return in.fgColor;
         }
     }
+
+    // Link-hover wins the underline colour: an OSC-8 hover highlight should
+    // be visibly distinct even when the cell also carries a plain underline.
+    // 2 pt band at the very bottom, in the theme accent.
+    if ((flags & BB_ATTR_LINK_HOVER) != 0u && distFromBottom <= 2.0) {
+        return in.accentColor;
+    }
+
+    // Underline family. All variants sit at the bottom 3 pt of the cell and
+    // draw in the glyph's fg colour. Only one "style" bit is expected at a
+    // time (alacritty's ALL_UNDERLINES is mutually-exclusive at the parser
+    // level) but the checks are independent so a hypothetical future
+    // per-bit override still does the right thing.
+    if ((flags & BB_ATTR_ANY_UNDERLINE) != 0u) {
+        // Plain single underline — 1.5 pt band along the baseline.
+        if ((flags & BB_ATTR_UNDERLINE) != 0u && distFromBottom <= 1.5) {
+            return in.fgColor;
+        }
+        // Double underline — two 1 pt bands with a 1 pt gap between.
+        if ((flags & BB_ATTR_UNDERLINE_DOUBLE) != 0u) {
+            if (distFromBottom <= 1.0) return in.fgColor;
+            if (distFromBottom >= 2.0 && distFromBottom <= 3.0) return in.fgColor;
+        }
+        // Undercurl — sine wave baseline ±1 pt. Tuned so a single cycle is
+        // about 3 cells wide; fast enough to read as "wavy" at terminal
+        // sizes but not so fast it aliases at normal zoom.
+        if ((flags & BB_ATTR_UNDERCURL) != 0u) {
+            float baseline = in.quadSizePx.y - 2.5;
+            float wave = sin(x * 1.4) * 1.2;
+            if (abs(in.localPx.y - (baseline + wave)) <= 0.7) {
+                return in.fgColor;
+            }
+        }
+        // Dotted — every other pixel at the baseline, so the band reads
+        // as 1/2-duty dots regardless of cell width.
+        if ((flags & BB_ATTR_UNDERLINE_DOTTED) != 0u && distFromBottom <= 1.5) {
+            if (((uint)x & 1u) == 0u) return in.fgColor;
+        }
+        // Dashed — 2-pixel on, 2-pixel off.
+        if ((flags & BB_ATTR_UNDERLINE_DASHED) != 0u && distFromBottom <= 1.5) {
+            if (((uint)x % 4u) < 2u) return in.fgColor;
+        }
+    }
+
     return base;
 }
 

@@ -577,6 +577,17 @@ pub mod cell_flags {
     /// because only one column remained on the prior row. Same rule as
     /// WIDE_CHAR_SPACER — don't draw.
     pub const LEADING_WIDE_CHAR_SPACER: u16 = 1 << 8;
+    /// CSI 21 m — double underline. Mutually exclusive with the other four
+    /// underline style bits at the alacritty level (`ALL_UNDERLINES` mask).
+    pub const UNDERLINE_DOUBLE: u16 = 1 << 9;
+    /// CSI 4:3 m — wavy / undercurl. Neovim/Helix LSP diagnostics emit this
+    /// for warnings/errors; having it rendered correctly matters for the
+    /// agentic-CLI correctness wedge.
+    pub const UNDERCURL: u16 = 1 << 10;
+    /// CSI 4:4 m — dotted underline.
+    pub const UNDERLINE_DOTTED: u16 = 1 << 11;
+    /// CSI 4:5 m — dashed underline.
+    pub const UNDERLINE_DASHED: u16 = 1 << 12;
 }
 
 /// Terminal mode bitflags mirrored from `alacritty_terminal::term::TermMode`.
@@ -912,6 +923,21 @@ fn extract_cell_flags(f: CellFlags) -> u16 {
     }
     if f.contains(CellFlags::LEADING_WIDE_CHAR_SPACER) {
         out |= cell_flags::LEADING_WIDE_CHAR_SPACER;
+    }
+    // Underline-style dimension (mutually exclusive at the alacritty level):
+    // double / curly / dotted / dashed. The plain UNDERLINE bit above covers
+    // CSI 4 m; these four are CSI 21 m and CSI 4:3/4:4/4:5 m respectively.
+    if f.contains(CellFlags::DOUBLE_UNDERLINE) {
+        out |= cell_flags::UNDERLINE_DOUBLE;
+    }
+    if f.contains(CellFlags::UNDERCURL) {
+        out |= cell_flags::UNDERCURL;
+    }
+    if f.contains(CellFlags::DOTTED_UNDERLINE) {
+        out |= cell_flags::UNDERLINE_DOTTED;
+    }
+    if f.contains(CellFlags::DASHED_UNDERLINE) {
+        out |= cell_flags::UNDERLINE_DASHED;
     }
     out
 }
