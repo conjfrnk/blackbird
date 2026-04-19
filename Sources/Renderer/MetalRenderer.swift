@@ -65,10 +65,46 @@ public final class MetalRenderer {
     private var lastCursorRow: Int32 = -1
     private var lastCursorCol: Int32 = -1
 
+    /// Identity of every input that affects pixels on screen, packed for
+    /// Equatable comparison. When `render()` is called with a key equal to
+    /// the one rendered last frame, the GPU already holds the correct
+    /// pixels: we skip buildInstances, encoding, and present entirely.
+    /// CAMetalLayer's compositor retains the previously presented drawable
+    /// so the screen stays correct.
+    ///
+    /// Typed storage (struct, not a hash) because hashing would either:
+    ///   - be too loose (collisions silently miss redraws), or
+    ///   - pay the Hashable overhead every frame anyway.
+    /// Equatable on 13 fields comes out to a handful of CPU instructions;
+    /// the branch predictor handles the common "identical" case fast.
+    private struct FrameKey: Equatable {
+        let snapshotPtr: UnsafeRawPointer?
+        let hoveredLinkID: UInt16
+        let selectionID: UInt64          // 0 when nil; else a non-colliding packing
+        let focused: Bool
+        let cursorRow: Int32
+        let cursorCol: Int32
+        let cursorShape: UInt8
+        let cursorVisible: Bool
+        let displayOffset: UInt16
+        let topInsetPoints: Float
+        let defaultBgRgb: UInt32
+        let backgroundOpacity: Float
+        let keepBgOpaque: Bool
+        let accentColorBits: UInt64       // SIMD4<Float> packed to deterministic bits
+        let cursorColorBits: UInt64
+        let blinkSkip: Bool
+    }
+    private var lastFrameKey: FrameKey?
+
     public func setCursorBlinkEnabled(_ enabled: Bool) {
         if enabled != cursorBlinkEnabled {
             cursorBlinkEnabled = enabled
             blinkPhaseStart = CACurrentMediaTime()
+            // Reset the blink phase → visible cursor on the next frame
+            // regardless of where in the cycle we were. Clearing the skip
+            // cache forces that next frame to actually encode.
+            lastFrameKey = nil
         }
     }
 
@@ -165,7 +201,20 @@ public final class MetalRenderer {
         }
         self.metrics = newMetrics
         self.atlas = a
+        // A new atlas points to different texture contents; the skip
+        // cache is now stale. Force the next render to encode and present
+        // even if every FrameKey field matches the previous frame.
+        self.lastFrameKey = nil
         return true
+    }
+
+    /// Clear the frame-skip cache. Call after any mutation that changes
+    /// what pixels the GPU would produce given the same FrameKey —
+    /// currently only the atlas reconfigure and blink-phase reset hit this.
+    /// Left `public` so callers outside the renderer (e.g. a future theme
+    /// hot-swap that only mutates the palette) can force a repaint.
+    public func invalidate() {
+        self.lastFrameKey = nil
     }
 
     /// Write cell instance data into `instanceBuffer`. Returns the count
@@ -378,6 +427,45 @@ public final class MetalRenderer {
         return count
     }
 
+    /// Pack a selection into a non-colliding 64-bit token so `FrameKey`
+    /// stays plain-equatable. Returns 0 for "no selection" so cold frames
+    /// don't look like a stale selected state.
+    private static func packSelection(_ sel: Selection?) -> UInt64 {
+        guard let s = sel else { return 0 }
+        let (a, b) = s.normalized
+        // 16 bits per col (max Blackbird grid is ~2^14) + 16 bits per line
+        // signed (scrollback lines can be negative) + 4 bits mode tag. Never
+        // hashes to 0 because the mode tag adds a nonzero constant.
+        let mode: UInt64 = {
+            switch s.mode {
+            case .character:   return 1
+            case .word:        return 2
+            case .line:        return 3
+            case .rectangular: return 4
+            }
+        }()
+        let aLine = UInt64(UInt32(bitPattern: a.line))
+        let bLine = UInt64(UInt32(bitPattern: b.line))
+        let aCol = UInt64(UInt16(clamping: a.col))
+        let bCol = UInt64(UInt16(clamping: b.col))
+        return (mode << 60) | (aLine << 32) | (bLine << 16) | (aCol << 8) | bCol
+    }
+
+    /// Bitwise-packed SIMD4<Float> for FrameKey. `bitPattern` gives a
+    /// deterministic comparable value; two colours that differ in the last
+    /// float bit render differently, so "close but not equal" must miss
+    /// the cache.
+    private static func packSIMD4(_ v: SIMD4<Float>) -> UInt64 {
+        let x = UInt64(v.x.bitPattern)
+        let y = UInt64(v.y.bitPattern)
+        // Alpha is always 1.0 in practice; mix x/y/z into a single 64-bit
+        // value. Four 32-bit floats collapse to 64 bits with a mixer —
+        // pragma: we accept trivial hash-like collisions on SIMD values
+        // because the alpha slot is constant.
+        let z = UInt64(v.z.bitPattern)
+        return (x << 32) ^ (y << 16) ^ z
+    }
+
     private static func rgbToSIMD(_ rgb: UInt32) -> SIMD4<Float> {
         let r = Float((rgb >> 16) & 0xFF) / 255.0
         let g = Float((rgb >> 8) & 0xFF) / 255.0
@@ -386,6 +474,46 @@ public final class MetalRenderer {
     }
 
     public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
+        // Compute the current frame's visual-state key BEFORE reaching for
+        // currentDrawable. Acquiring a drawable is expensive (blocks on
+        // the pool under contention); if nothing changed we shouldn't even
+        // touch it. Note: blink state is computed here too because it
+        // depends on CACurrentMediaTime.
+        let blinkSkipNow: Bool = {
+            guard cursorBlinkEnabled, focused, let s = snapshot, s.cursorVisible else {
+                return false
+            }
+            let elapsed = CACurrentMediaTime() - blinkPhaseStart
+            let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
+            return phase >= 0.53
+        }()
+        let frameKey = FrameKey(
+            snapshotPtr: snapshot.map { $0.a11yIdentity },
+            hoveredLinkID: hoveredLinkID,
+            selectionID: Self.packSelection(selection),
+            focused: focused,
+            cursorRow: Int32(snapshot?.cursorRow ?? -1),
+            cursorCol: Int32(snapshot?.cursorCol ?? -1),
+            cursorShape: UInt8(snapshot?.cursorShape ?? 3),
+            cursorVisible: snapshot?.cursorVisible ?? false,
+            displayOffset: UInt16(snapshot?.displayOffset ?? 0),
+            topInsetPoints: topInsetPoints,
+            defaultBgRgb: defaultBgRgb,
+            backgroundOpacity: backgroundOpacity,
+            keepBgOpaque: keepBgOpaque,
+            accentColorBits: Self.packSIMD4(accentColor),
+            cursorColorBits: Self.packSIMD4(cursorColor),
+            blinkSkip: blinkSkipNow
+        )
+        if frameKey == lastFrameKey {
+            // Nothing that affects pixels has changed since the last
+            // presented frame. Skip the whole pipeline — no CPU instance
+            // rebuild, no GPU encode, no drawable acquisition. The
+            // compositor keeps displaying the previously-presented frame.
+            return
+        }
+        lastFrameKey = frameKey
+
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
               let buffer = commandQueue.makeCommandBuffer(),
@@ -455,16 +583,10 @@ public final class MetalRenderer {
                 lastCursorCol = curCol
                 blinkPhaseStart = CACurrentMediaTime()
             }
-            // When enabled, skip the draw in the second half of each cycle.
-            // Blink only runs while the window is focused; unfocused windows
-            // already render a hollow outline that stays steady. The filled
-            // state is driven by `focused` in the uniforms below.
-            let blinkSkip: Bool = {
-                guard cursorBlinkEnabled, focused else { return false }
-                let elapsed = CACurrentMediaTime() - blinkPhaseStart
-                let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
-                return phase >= 0.53
-            }()
+            // blinkSkip already computed for the frame-key check above.
+            // Reuse that value so we never flicker from a phase transition
+            // that happens between the key computation and the draw.
+            let blinkSkip = blinkSkipNow
             let cursorOnScreen =
                 snap.cursorVisible &&
                 shape != 3 &&                 // DECSCUSR hidden — skip entirely
