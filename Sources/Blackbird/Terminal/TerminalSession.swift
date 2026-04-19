@@ -14,6 +14,14 @@ public final class TerminalSession: ObservableObject {
 
     public typealias Size = PTY.Size
 
+    /// Maximum bytes we'll accept from an OSC 52 clipboard-write before
+    /// dropping the payload. A misbehaving / malicious remote can emit
+    /// unbounded base64 content; pinning the cap at the session layer
+    /// prevents NSPasteboard DoS and caps the privacy blast radius.
+    /// 1 MiB matches Ghostty's default and comfortably accommodates log-
+    /// and code-paste workflows.
+    public static let osc52MaxBytes: Int = 1 * 1024 * 1024
+
     @Published public private(set) var snapshot: BBSnapshot?
     /// Effective, observable title for UI binding. Always equals `displayTitle`
     /// — republished whenever the shell emits OSC 0/2 or the user changes
@@ -400,19 +408,10 @@ public final class TerminalSession: ObservableObject {
                     // bytes into the user's clipboard or crash the
                     // session.
                     guard Preferences.shared.osc52Enabled else { break }
-                    // Cap the OSC 52 payload so a misbehaving / malicious
-                    // remote can't pin hundreds of MB into the user's
-                    // pasteboard with a single crafted sequence. 1 MiB
-                    // accommodates every realistic workflow — log paste,
-                    // code paste — and matches Ghostty's default. Oversize
-                    // payloads are dropped entirely rather than truncated:
-                    // a silently-truncated paste is worse than no paste
-                    // (user thinks they have the full content).
-                    let osc52MaxBytes = 1 * 1024 * 1024
-                    if text.utf8.count > osc52MaxBytes {
+                    if text.utf8.count > Self.osc52MaxBytes {
                         #if DEBUG
                         NSLog("[Blackbird] OSC 52 payload %d bytes exceeds %d cap — dropping",
-                              text.utf8.count, osc52MaxBytes)
+                              text.utf8.count, Self.osc52MaxBytes)
                         #endif
                         break
                     }

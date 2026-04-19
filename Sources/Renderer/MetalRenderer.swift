@@ -78,7 +78,14 @@ public final class MetalRenderer {
     /// Equatable on 13 fields comes out to a handful of CPU instructions;
     /// the branch predictor handles the common "identical" case fast.
     private struct FrameKey: Equatable {
-        let snapshotPtr: UnsafeRawPointer?
+        /// Monotonic sequence id from BBSnapshot (0 when snapshot is nil).
+        /// Intentionally NOT the handle pointer: the allocator can reuse an
+        /// address after a snapshot is released, which would make two
+        /// distinct snapshots look identical to pointer-equality and cause
+        /// a popup-close or cursor-move repaint to be silently dropped.
+        /// The sequence counter is assigned once at BBSnapshot init and
+        /// never repeats within a process lifetime.
+        let snapshotSeq: UInt64
         let hoveredLinkID: UInt16
         let selectionID: UInt64          // 0 when nil; else a non-colliding packing
         let focused: Bool
@@ -488,7 +495,7 @@ public final class MetalRenderer {
             return phase >= 0.53
         }()
         let frameKey = FrameKey(
-            snapshotPtr: snapshot.map { $0.a11yIdentity },
+            snapshotSeq: snapshot?.sequenceID ?? 0,
             hoveredLinkID: hoveredLinkID,
             selectionID: Self.packSelection(selection),
             focused: focused,

@@ -35,6 +35,34 @@ final class BBTermTests: XCTestCase {
         XCTAssertEqual(snap.rows, 40)
     }
 
+    func test_snapshot_sequenceIDIsMonotonic() throws {
+        // Frame-skip in MetalRenderer uses `BBSnapshot.sequenceID` as a
+        // content-change token. If two snapshots ever shared an id — via
+        // wraparound, reset, or a re-used counter — the renderer would
+        // silently skip a repaint. Pin that the counter only moves up.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        let a = try XCTUnwrap(term.snapshot())
+        let b = try XCTUnwrap(term.snapshot())
+        let c = try XCTUnwrap(term.snapshot())
+        XCTAssertLessThan(a.sequenceID, b.sequenceID)
+        XCTAssertLessThan(b.sequenceID, c.sequenceID)
+    }
+
+    func test_snapshot_sequenceIDsUniqueAcrossTerms() throws {
+        // The counter is process-global, not per-BBTerm. Two independent
+        // terminals share the monotonic sequence. Confirm the ids still
+        // interleave strictly — two terminals each taking a snapshot must
+        // not collide on id.
+        let t1 = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        let t2 = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        let s1 = try XCTUnwrap(t1.snapshot())
+        let s2 = try XCTUnwrap(t2.snapshot())
+        let s1Again = try XCTUnwrap(t1.snapshot())
+        XCTAssertNotEqual(s1.sequenceID, s2.sequenceID)
+        XCTAssertNotEqual(s2.sequenceID, s1Again.sequenceID)
+        XCTAssertNotEqual(s1.sequenceID, s1Again.sequenceID)
+    }
+
     func test_bellEventFires() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 5)))
         let exp = expectation(description: "bell")

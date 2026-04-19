@@ -215,8 +215,31 @@ public struct BBTermMode: OptionSet {
 public final class BBSnapshot {
     private let handle: UnsafePointer<BBSnap>
 
+    /// Monotonic sequence id assigned once at init. Every new `BBSnapshot`
+    /// gets a strictly larger number than any previously-allocated one.
+    /// Used by `MetalRenderer.FrameKey` as a dedup token that — unlike the
+    /// raw handle pointer — survives allocator address reuse: an old
+    /// snapshot's handle can be freed and a new snapshot's handle can
+    /// land at the same address, which would make a pointer-equality
+    /// cache skip a legitimate repaint (see comments there).
+    public let sequenceID: UInt64
+    /// Private atomic counter. Using a static OSAtomic-style increment
+    /// via `OSAtomicIncrement64` was considered, but a lock-guarded
+    /// UInt64 is plenty given BBSnapshot init happens a few hundred
+    /// times per second at most.
+    private static let sequenceLock = NSLock()
+    private static var nextSequenceID: UInt64 = 0
+    private static func allocateSequence() -> UInt64 {
+        sequenceLock.lock()
+        nextSequenceID &+= 1
+        let id = nextSequenceID
+        sequenceLock.unlock()
+        return id
+    }
+
     init(retaining raw: UnsafePointer<BBSnap>) {
         self.handle = raw
+        self.sequenceID = Self.allocateSequence()
     }
 
     deinit {
