@@ -62,6 +62,62 @@ final class PTYTests: XCTestCase {
         pty.terminate()
     }
 
+    func test_scrubbedParentEnvVars_coversKnownLeaks() {
+        // Pin the env-scrub list. These launchd / XPC / CoreFoundation
+        // variables leak from the GUI app's context into the child shell
+        // if the post-fork path drops them. A "simplify this env
+        // cleanup" refactor that silently shrinks the list would
+        // re-open the leak; this test surfaces that at CI time.
+        let expected: Set<String> = [
+            "XPC_SERVICE_NAME",
+            "XPC_FLAGS",
+            "__CF_USER_TEXT_ENCODING",
+            "OS_ACTIVITY_DT_MODE",
+            "__XCODE_BUILT_PRODUCTS_DIR_PATHS",
+            "__XPC_DYLD_LIBRARY_PATH",
+            "LaunchInstanceID",
+            "SECURITYSESSIONID",
+        ]
+        let actual = Set(PTY.scrubbedParentEnvVars)
+        XCTAssertTrue(
+            expected.isSubset(of: actual),
+            "env scrub list missing required keys: \(expected.subtracting(actual))"
+        )
+    }
+
+    func test_childShellSeesNoXpcServiceName() throws {
+        // End-to-end check: spawn /bin/sh, have it echo $XPC_SERVICE_NAME.
+        // After the post-fork scrub the value must be empty regardless
+        // of whether the XCTest host itself inherited one. Belt-and-
+        // braces on top of test_scrubbedParentEnvVars_coversKnownLeaks —
+        // that one pins the list; this one verifies the list is
+        // actually applied in the child.
+        let pty = try PTY.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "printf '[%s]' \"$XPC_SERVICE_NAME\""],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        let exp = expectation(description: "child env")
+        var out = Data()
+        var fulfilled = false
+        pty.onBytes = { [weak pty] chunk in
+            out.append(chunk)
+            if out.contains(Data("]".utf8)), !fulfilled {
+                fulfilled = true
+                pty?.onBytes = nil
+                exp.fulfill()
+            }
+        }
+        wait(for: [exp], timeout: 3.0)
+        let line = String(data: out, encoding: .utf8) ?? ""
+        XCTAssertTrue(
+            line.contains("[]"),
+            "child shell saw XPC_SERVICE_NAME='\(line)' — scrub must have dropped it"
+        )
+        pty.terminate()
+    }
+
     func test_resizePropagatesSIGWINCH() throws {
         // Use stty inside the shell to confirm the PTY knows the new size.
         let pty = try PTY.spawn(

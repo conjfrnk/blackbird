@@ -32,6 +32,23 @@ public final class PTY {
     /// once. Nil by default; callers opt in to observe.
     public var onExit: ((Int32) -> Void)?
 
+    /// Environment variables the GUI app inherits from launchd / XPC that
+    /// we scrub before exec'ing the user's shell. Exposed as a static so
+    /// a unit test can pin the list — shrinking it silently (a refactor
+    /// that drops the fork-hygiene call altogether, or a "let's simplify
+    /// this env cleanup" PR) would re-leak parent-process plumbing into
+    /// child processes. iTerm2 and Terminal.app scrub the same set.
+    public static let scrubbedParentEnvVars: [String] = [
+        "XPC_SERVICE_NAME",
+        "XPC_FLAGS",
+        "__CF_USER_TEXT_ENCODING",
+        "OS_ACTIVITY_DT_MODE",
+        "__XCODE_BUILT_PRODUCTS_DIR_PATHS",
+        "__XPC_DYLD_LIBRARY_PATH",
+        "LaunchInstanceID",
+        "SECURITYSESSIONID",
+    ]
+
     private let masterFD: Int32
     private let childPID: pid_t
     private let readQueue = DispatchQueue(label: "blackbird.pty.read", qos: .userInitiated)
@@ -189,16 +206,7 @@ public final class PTY {
             // and occasionally trigger debugging modes in downstream tools
             // (OS_ACTIVITY_DT_MODE). iTerm2 and Terminal.app strip the
             // same set. unsetenv is async-signal-safe on Darwin.
-            for key in [
-                "XPC_SERVICE_NAME",
-                "XPC_FLAGS",
-                "__CF_USER_TEXT_ENCODING",
-                "OS_ACTIVITY_DT_MODE",
-                "__XCODE_BUILT_PRODUCTS_DIR_PATHS",
-                "__XPC_DYLD_LIBRARY_PATH",
-                "LaunchInstanceID",
-                "SECURITYSESSIONID",
-            ] {
+            for key in Self.scrubbedParentEnvVars {
                 unsetenv(key)
             }
             // Reset signal disposition. The GUI app can install handlers
