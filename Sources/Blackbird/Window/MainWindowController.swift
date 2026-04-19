@@ -147,10 +147,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let metrics = view.metrics
         let grid = metrics.grid(forPixelSize: view.bounds.size)
         do {
+            // `clamping:` avoids a trap on pathological bounds. See the
+            // equivalent fix in `TerminalView.applyResizeIfNeeded` — with
+            // CellMetrics.sanePx = 1M px, a degenerate 1×1 cell can push
+            // grid.cols above UInt16.max. TerminalSession.resize clamps
+            // again to ≤1000 so the downstream grid is always sensible.
             let s = try TerminalSession.start(
                 shell: shell,
                 arguments: ["-il"],  // interactive login shell
-                size: .init(cols: UInt16(grid.cols), rows: UInt16(grid.rows)),
+                size: .init(
+                    cols: UInt16(clamping: grid.cols),
+                    rows: UInt16(clamping: grid.rows)
+                ),
                 initialWorkingDirectory: initialWorkingDirectory
             )
             view.session = s

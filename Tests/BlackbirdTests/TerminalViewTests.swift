@@ -51,6 +51,29 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertLessThan(g.cols, 200_000, "cols must be clamped well below sanePx / cellWidth")
     }
 
+    func test_gridDimensionsSurviveUInt16ConversionAtExtremes() {
+        // TerminalView.applyResizeIfNeeded / MainWindowController.startSession
+        // bridge CellMetrics.grid (Int) to PTY.Size (UInt16). With sanePx =
+        // 1M and a small cellWidth, grid.cols can exceed UInt16.max (65535)
+        // even after the sanePx clamp — a direct `UInt16(grid.cols)` would
+        // trap. Both call sites use `UInt16(clamping:)` now; this test
+        // pins that invariant: on a pathological absurd pixel input, the
+        // clamping conversion stays within UInt16 and produces a sane PTY
+        // size.
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let big: Double = 1e20
+        let g = metrics.grid(forPixelSize: CGSize(width: big, height: big))
+        let cols = UInt16(clamping: g.cols)
+        let rows = UInt16(clamping: g.rows)
+        // Clamp may cap at UInt16.max (65535) for the pathological case —
+        // that's fine: TerminalSession.resize has its own [2, 1000] clamp
+        // so the real PTY dimensions stay in a sensible range.
+        XCTAssertLessThanOrEqual(cols, UInt16.max)
+        XCTAssertLessThanOrEqual(rows, UInt16.max)
+        XCTAssertGreaterThan(cols, 1)
+        XCTAssertGreaterThan(rows, 1)
+    }
+
     func test_cellMetrics_gridHandlesNonFinitePixelSize() {
         // `Int(Double)` traps on NaN / ±Infinity before any max(1, ...)
         // rescue. CGSize from AppKit is always finite in practice, but

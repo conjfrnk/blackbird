@@ -487,7 +487,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
         let grid = metrics.grid(forPixelSize: CGSize(width: bounds.width, height: usableHeight))
         guard grid.cols > 0, grid.rows > 0 else { return }
-        let size = PTY.Size(cols: UInt16(grid.cols), rows: UInt16(grid.rows))
+        // `grid` is bounded by CellMetrics.sanePx (1M px / min cell size),
+        // so in theory cols/rows can exceed UInt16.max on a degenerate
+        // combination (1×1 cell on a 1 Mpx viewport). `clamping:` avoids
+        // the trap; TerminalSession.resize clamps again to ≤1000 so the
+        // real dimensions never go past the grid allocator's ceiling.
+        let size = PTY.Size(
+            cols: UInt16(clamping: grid.cols),
+            rows: UInt16(clamping: grid.rows)
+        )
         guard size != lastPropagatedSize else { return }
         lastPropagatedSize = size
         // TerminalSession.resize is synchronous — returns after the snapshot
