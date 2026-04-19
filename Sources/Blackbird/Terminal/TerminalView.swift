@@ -598,6 +598,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private var focusObservers: [NSObjectProtocol] = []
 
+    /// Observers for OS-level state that affects the target frame rate:
+    /// `isLowPowerModeEnabled`, thermal state, and window occlusion.
+    /// Kept separate from `focusObservers` so the two reset cycles in
+    /// `viewDidMoveToWindow` don't cross-contaminate (power/thermal
+    /// observers are process-global and don't re-register on window
+    /// swap; occlusion observers bind to the current window and do).
+    private var powerObservers: [NSObjectProtocol] = []
+    private var occlusionObservers: [NSObjectProtocol] = []
+
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         // Register every time the view attaches to a new window — AppKit
@@ -660,10 +669,92 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             Self.fpsLogger.log("window moved to screen '\(screen.localizedName, privacy: .public)' @ \(screen.maximumFramesPerSecond, privacy: .public) Hz max")
         })
         #endif
+
+        // Rebuild every frame-rate-related observer from scratch. Each
+        // viewDidMoveToWindow may cross a screen boundary (different
+        // nativeMaxFPS), a window change (different occlusionState
+        // source), or a re-attach after some other view moved between
+        // windows. Simplest correct behavior: tear down, rebuild.
+        for token in powerObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        powerObservers.removeAll()
+        for token in occlusionObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        occlusionObservers.removeAll()
+
+        // Window-bound: occlusion + screen-change both affect the
+        // target rate via `applyPowerAwareFrameRate`.
+        occlusionObservers.append(center.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applyPowerAwareFrameRate()
+        })
+        occlusionObservers.append(center.addObserver(
+            forName: NSWindow.didChangeScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applyPowerAwareFrameRate()
+        })
+
+        // Process-global: low-power mode + thermal state.
+        powerObservers.append(center.addObserver(
+            forName: Notification.Name.NSProcessInfoPowerStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applyPowerAwareFrameRate()
+        })
+        powerObservers.append(center.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.applyPowerAwareFrameRate()
+        })
+
+        // Seed the rate from current state rather than waiting for a
+        // first notification that may never fire in a short session.
+        applyPowerAwareFrameRate()
+    }
+
+    /// Read current NSProcessInfo + occlusion state, compute the
+    /// target frame rate via `preferredFrameRate(...)`, and apply it
+    /// to this MTKView. Safe to call from any notification handler.
+    private func applyPowerAwareFrameRate() {
+        let info = ProcessInfo.processInfo
+        let isOccluded: Bool = {
+            guard let window else { return false }
+            return !window.occlusionState.contains(.visible)
+        }()
+        let nativeMax = window?.screen?.maximumFramesPerSecond ?? 60
+        let target = preferredFrameRate(
+            isOccluded: isOccluded,
+            isLowPowerMode: info.isLowPowerModeEnabled,
+            thermalState: info.thermalState,
+            nativeMaxFPS: nativeMax
+        )
+        switch target {
+        case .paused:
+            self.isPaused = true
+        case .fps(let n):
+            self.preferredFramesPerSecond = n
+            self.isPaused = false
+        }
     }
 
     deinit {
         for token in focusObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        for token in powerObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        for token in occlusionObservers {
             NotificationCenter.default.removeObserver(token)
         }
         // Tear down any pending hover tooltip. The DispatchWorkItem
