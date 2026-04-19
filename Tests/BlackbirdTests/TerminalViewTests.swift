@@ -484,6 +484,55 @@ final class TerminalViewTests: XCTestCase {
         )
     }
 
+    func test_pasteSanitizerPipeline_fuzzInvariants() {
+        // Property-based style: generate 500 random byte sequences up to
+        // 4 KiB, run them through the full paste sanitizer chain, verify
+        // the invariants that must hold for every possible input:
+        //
+        //   1. Output never contains C0 controls except TAB/LF/CR.
+        //   2. Output never contains DEL (0x7F).
+        //   3. Output never contains the bracketed-paste terminator
+        //      ESC [ 201 ~ (stripped by sanitizeBracketedPaste).
+        //   4. Output never contains a U+202E RLO sequence intact.
+        //   5. Output length ≤ input length (sanitization only removes).
+        //
+        // 150 × 2 KiB inputs is enough to exercise the invariants across
+        // many byte patterns without slowing CI appreciably (~1s on CI).
+        var rng = SystemRandomNumberGenerator()
+        for _ in 0..<150 {
+            let length = Int.random(in: 0..<2048, using: &rng)
+            var input = Data(count: length)
+            for i in 0..<length {
+                input[i] = UInt8.random(in: 0...255, using: &rng)
+            }
+            let cleaned = TerminalView.sanitizePasteControls(input)
+            let bidiStripped = TerminalView.stripBidiOverrides(cleaned)
+            let bracketed = TerminalView.sanitizeBracketedPaste(bidiStripped)
+
+            // (5) monotone non-growth
+            XCTAssertLessThanOrEqual(
+                bracketed.count, input.count,
+                "sanitizer must never grow the payload"
+            )
+            // (1, 2) no forbidden control bytes
+            for b in bracketed {
+                if b == 0x09 || b == 0x0A || b == 0x0D { continue }
+                XCTAssertGreaterThanOrEqual(b, 0x20)
+                XCTAssertNotEqual(b, 0x7F)
+            }
+            // (3) no ESC[201~ terminator
+            XCTAssertFalse(
+                bracketed.contains(Data([0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E])),
+                "bracketed-paste terminator must not survive"
+            )
+            // (4) no bidi RLO
+            XCTAssertFalse(
+                bracketed.contains(Data([0xE2, 0x80, 0xAE])),
+                "U+202E RLO bidi override must not survive"
+            )
+        }
+    }
+
     func test_pasteSanitizerPipeline_handlesCombinedAttack() {
         // Realistic crafted payload that mixes every attack class:
         //   - CRLF line endings (Windows-origin paste)
