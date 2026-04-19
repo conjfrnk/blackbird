@@ -138,6 +138,68 @@ fn kitty_report_active_mode_after_push() {
 // Ordering — a query stream produces replies in order
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Window-query blackout — never echo title / icon / size back to the PTY
+// ---------------------------------------------------------------------------
+//
+// CSI 20t / 21t / 14t / 18t are window-query variants. Responding to any of
+// them feeds shell-controlled bytes back to the shell: an attacker can set
+// the title via OSC 2 to a command, then use CSI 21t to read it back *as
+// if the user typed it*. This is the HD Moore 2003 attack (recent
+// reincarnations: CVE-2022-46387 / CVE-2023-39150 ConEmu, dgl.cx 2024
+// Ghostty title-bell variant). The correct posture is not to implement
+// the reply at all — which is what alacritty_terminal 0.26 does and
+// what our RoutingListener preserves (we ignore ColorRequest and
+// TextAreaSizeRequest). Pin that with explicit tests so a future alacritty
+// upgrade or a misconfigured EventListener refactor can't silently
+// re-enable the attack.
+
+#[test]
+fn csi_21t_report_window_title_is_silent() {
+    // Set a title via OSC 2, then query it via CSI 21t. The terminal must
+    // not emit any PtyWrite — otherwise "ESC]2;$(rm -rf ~)BEL" followed
+    // by CSI 21t would round-trip the payload back into the shell line.
+    let writes = run(b"\x1b]2;totally-benign-title\x07\x1b[21t");
+    assert!(
+        writes.is_empty(),
+        "CSI 21t must never produce a reply; got {:?}",
+        writes
+    );
+}
+
+#[test]
+fn csi_20t_report_icon_label_is_silent() {
+    // Icon label reporting is the same attack surface via OSC 1.
+    let writes = run(b"\x1b]1;icon-label\x07\x1b[20t");
+    assert!(writes.is_empty(), "CSI 20t must not reply; got {:?}", writes);
+}
+
+#[test]
+fn csi_18t_reports_text_area_in_cells() {
+    // Text-area size in rows × cols is the ONE window-query where the
+    // reply is a useful TUI probe and the payload is numeric-only — no
+    // shell-controllable content. vim / tmux / ncurses use this when
+    // COLUMNS / LINES are unavailable. Pin the exact form.
+    //
+    // Reply: ESC[8;{rows};{cols}t for the 80×24 default in run().
+    let writes = run(b"\x1b[18t");
+    assert_eq!(writes, vec![b"\x1b[8;24;80t".to_vec()]);
+}
+
+#[test]
+fn osc_10_11_color_queries_are_silent() {
+    // OSC 10 / 11 `?` is the "query fg / bg colour" form. Responding would
+    // leak the configured palette back into the PTY; older terminals were
+    // exploited to round-trip the colour as commands via zsh vi-mode.
+    // RoutingListener drops ColorRequest so the reply never ships.
+    let writes = run(b"\x1b]10;?\x07\x1b]11;?\x07");
+    assert!(
+        writes.is_empty(),
+        "OSC 10 / 11 colour queries must not reply; got {:?}",
+        writes
+    );
+}
+
 #[test]
 fn multiple_queries_reply_in_order() {
     // A startup probe stream: DA1, DSR 5, DSR 6 — each in sequence.

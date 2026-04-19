@@ -1050,7 +1050,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // <1.3.0) and execute arbitrary bytes as shell input. The sanitizer
         // replaces blocked bytes with space so column-formatted paste still
         // lines up.
-        let bytes = Self.sanitizePasteControls(normalized)
+        let cleaned = Self.sanitizePasteControls(normalized)
+        // Drop explicit bidi control characters — Trojan Source (Boucher &
+        // Anderson 2021). An adversarial webpage / remote can render as
+        // `rm -rf harmless` while the copied bytes are `rm -rf ~`, exploiting
+        // LRO / RLO overrides to hide the real command. Legitimate RTL
+        // (Arabic / Hebrew) text never needs explicit overrides; Unicode
+        // bidi algorithm handles it implicitly. Stripping is safe.
+        let bytes = Self.stripBidiOverrides(cleaned)
         let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
         if bracketedPaste {
             var wrapped = Data([0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])  // ESC[200~
@@ -1120,6 +1127,52 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 continue
             }
             out.append(b)
+        }
+        return out
+    }
+
+    /// Drop every explicit Unicode bidi override / isolate control from a
+    /// paste payload. Targets exactly nine codepoints, each encoded as a
+    /// fixed 3-byte UTF-8 sequence:
+    ///
+    ///   U+202A  LRE   E2 80 AA    left-to-right embedding
+    ///   U+202B  RLE   E2 80 AB    right-to-left embedding
+    ///   U+202C  PDF   E2 80 AC    pop directional formatting
+    ///   U+202D  LRO   E2 80 AD    left-to-right override  ← Trojan Source
+    ///   U+202E  RLO   E2 80 AE    right-to-left override  ← Trojan Source
+    ///   U+2066  LRI   E2 81 A6    left-to-right isolate
+    ///   U+2067  RLI   E2 81 A7    right-to-left isolate
+    ///   U+2068  FSI   E2 81 A8    first strong isolate
+    ///   U+2069  PDI   E2 81 A9    pop directional isolate
+    ///
+    /// These are rare in legitimate text — Unicode's bidirectional
+    /// algorithm handles Arabic / Hebrew automatically; explicit overrides
+    /// are a spoofing hammer. iTerm2's "Filter control sequences on paste"
+    /// option applies the same policy.
+    static func stripBidiOverrides(_ input: Data) -> Data {
+        // Fast path: no 0xE2 byte means no U+20xx-range 3-byte sequences.
+        // Saves one allocation + pass on the common case of ASCII paste.
+        guard input.contains(0xE2) else { return input }
+        var out = Data()
+        out.reserveCapacity(input.count)
+        var i = input.startIndex
+        while i < input.endIndex {
+            let remaining = input.distance(from: i, to: input.endIndex)
+            if remaining >= 3,
+               input[i] == 0xE2 {
+                let b1 = input[input.index(i, offsetBy: 1)]
+                let b2 = input[input.index(i, offsetBy: 2)]
+                if b1 == 0x80 && (0xAA...0xAE).contains(b2) {
+                    i = input.index(i, offsetBy: 3)
+                    continue
+                }
+                if b1 == 0x81 && (0xA6...0xA9).contains(b2) {
+                    i = input.index(i, offsetBy: 3)
+                    continue
+                }
+            }
+            out.append(input[i])
+            i = input.index(after: i)
         }
         return out
     }

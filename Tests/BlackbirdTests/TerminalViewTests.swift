@@ -386,6 +386,57 @@ final class TerminalViewTests: XCTestCase {
         )
     }
 
+    // MARK: - Bidi override scrubber (Trojan Source defence)
+
+    func test_stripBidiOverrides_removesRLO() {
+        // Attack payload: literal bytes for "rm -rf " + U+202E (RLO) +
+        // "\\harmless\n". Displays as `rm -rf harmless\n`; executed as
+        // `rm -rf ~`. The scrubbed copy must carry no bidi control byte.
+        var input = Data("rm -rf ".utf8)
+        input.append(contentsOf: [0xE2, 0x80, 0xAE])  // U+202E RLO
+        input.append(Data("~\n".utf8))
+        let out = TerminalView.stripBidiOverrides(input)
+        XCTAssertFalse(
+            out.contains(0xE2), "bidi-override codepoint must be stripped wholesale"
+        )
+        XCTAssertEqual(out, Data("rm -rf ~\n".utf8))
+    }
+
+    func test_stripBidiOverrides_coversAllNineCodepoints() {
+        // U+202A..U+202E (E2 80 AA..AE) and U+2066..U+2069 (E2 81 A6..A9).
+        var input = Data("start".utf8)
+        let codepoints: [[UInt8]] = [
+            [0xE2, 0x80, 0xAA], [0xE2, 0x80, 0xAB], [0xE2, 0x80, 0xAC],
+            [0xE2, 0x80, 0xAD], [0xE2, 0x80, 0xAE],
+            [0xE2, 0x81, 0xA6], [0xE2, 0x81, 0xA7], [0xE2, 0x81, 0xA8],
+            [0xE2, 0x81, 0xA9],
+        ]
+        for cp in codepoints { input.append(contentsOf: cp) }
+        input.append(Data("end".utf8))
+        XCTAssertEqual(
+            TerminalView.stripBidiOverrides(input), Data("startend".utf8),
+            "All nine explicit bidi controls must be removed"
+        )
+    }
+
+    func test_stripBidiOverrides_preservesLegitimateUtf8() {
+        // Hebrew, Arabic, CJK, emoji — no explicit bidi controls. Must
+        // round-trip byte-for-byte. The E2 prefix byte appears inside
+        // e.g. U+2014 (em dash, E2 80 94) — checks that we don't over-
+        // match on the prefix alone.
+        let input = Data("שלום 安全 — 日本語 🇺🇸 tree".utf8)
+        XCTAssertEqual(
+            TerminalView.stripBidiOverrides(input), input,
+            "Non-override UTF-8 passes through unchanged (em dash contains E2 prefix)"
+        )
+    }
+
+    func test_stripBidiOverrides_fastPathWhenNoE2Byte() {
+        // Pure ASCII hits the early-return; the assertion is identity.
+        let input = Data("pure ascii payload, no bidi".utf8)
+        XCTAssertEqual(TerminalView.stripBidiOverrides(input), input)
+    }
+
     // MARK: - Paste line-ending normalisation
 
     func test_normalizePaste_collapsesCRLF() {
