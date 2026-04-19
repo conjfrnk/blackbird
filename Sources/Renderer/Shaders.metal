@@ -24,6 +24,7 @@ struct VertexOut {
     float4 bgColor;
     float4 accentColor;   // plumbed in via uniform, stamped per-vertex for the fragment
     uint   flags;
+    uint   underlineColorPacked;  // 0x00RRGGBB or 0xFFFFFFFF sentinel (use fg)
     float2 localPx;       // position within the cell's quad, in points
     float2 quadSizePx;    // cell quad size (same for all 6 verts per instance)
 };
@@ -59,6 +60,7 @@ vertex VertexOut vertex_cell(
     out.bgColor = inst.bgColor;
     out.accentColor = u.accentColor;
     out.flags = inst.attrs.x;
+    out.underlineColorPacked = inst.attrs.z;
     out.localPx = corners[vid] * inst.quadSizePx;
     out.quadSizePx = inst.quadSizePx;
     return out;
@@ -92,6 +94,17 @@ fragment float4 fragment_cell(
     float distFromBottom = in.quadSizePx.y - in.localPx.y;
     float x = in.localPx.x;
 
+    // Unpack CSI 58 underline colour. 0xFFFFFFFF sentinel → use fg; any
+    // other value is 0x00RRGGBB. Keeping this in a local avoids five
+    // duplicate unpacks in the underline branches below.
+    float4 ulColor = in.fgColor;
+    if (in.underlineColorPacked != 0xFFFFFFFFu) {
+        float r = float((in.underlineColorPacked >> 16) & 0xFFu) / 255.0;
+        float g = float((in.underlineColorPacked >> 8) & 0xFFu) / 255.0;
+        float b = float(in.underlineColorPacked & 0xFFu) / 255.0;
+        ulColor = float4(r, g, b, 1.0);
+    }
+
     // Strike: a single 1.5 pt band slightly above the glyph mid-line so it
     // reads as a strike-through whether the glyph is tall (capital) or short
     // (lowercase). Uses fg colour so it matches the text being crossed out.
@@ -117,12 +130,12 @@ fragment float4 fragment_cell(
     if ((flags & BB_ATTR_ANY_UNDERLINE) != 0u) {
         // Plain single underline — 1.5 pt band along the baseline.
         if ((flags & BB_ATTR_UNDERLINE) != 0u && distFromBottom <= 1.5) {
-            return in.fgColor;
+            return ulColor;
         }
         // Double underline — two 1 pt bands with a 1 pt gap between.
         if ((flags & BB_ATTR_UNDERLINE_DOUBLE) != 0u) {
-            if (distFromBottom <= 1.0) return in.fgColor;
-            if (distFromBottom >= 2.0 && distFromBottom <= 3.0) return in.fgColor;
+            if (distFromBottom <= 1.0) return ulColor;
+            if (distFromBottom >= 2.0 && distFromBottom <= 3.0) return ulColor;
         }
         // Undercurl — sine wave baseline ±1 pt. Tuned so a single cycle is
         // about 3 cells wide; fast enough to read as "wavy" at terminal
@@ -131,17 +144,17 @@ fragment float4 fragment_cell(
             float baseline = in.quadSizePx.y - 2.5;
             float wave = sin(x * 1.4) * 1.2;
             if (abs(in.localPx.y - (baseline + wave)) <= 0.7) {
-                return in.fgColor;
+                return ulColor;
             }
         }
         // Dotted — every other pixel at the baseline, so the band reads
         // as 1/2-duty dots regardless of cell width.
         if ((flags & BB_ATTR_UNDERLINE_DOTTED) != 0u && distFromBottom <= 1.5) {
-            if (((uint)x & 1u) == 0u) return in.fgColor;
+            if (((uint)x & 1u) == 0u) return ulColor;
         }
         // Dashed — 2-pixel on, 2-pixel off.
         if ((flags & BB_ATTR_UNDERLINE_DASHED) != 0u && distFromBottom <= 1.5) {
-            if (((uint)x % 4u) < 2u) return in.fgColor;
+            if (((uint)x % 4u) < 2u) return ulColor;
         }
     }
 

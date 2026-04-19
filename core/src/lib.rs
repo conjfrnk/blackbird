@@ -556,7 +556,24 @@ pub struct BBCell {
     /// Index into `BBSnap::links` (0 means no OSC 8 attribution on this cell).
     /// Resolve via `bb_snap_link_url(snap, link_id)`.
     pub link_id: u16,
+    /// CSI 58 colored-underline — the user may explicitly set the underline's
+    /// colour independent of the glyph fg. alacritty 0.26 stores this as
+    /// `Option<Color>` on the cell's extra; we flatten to a u32 with a magic
+    /// sentinel: `UNDERLINE_COLOR_UNSET` (0xFFFF_FFFF) means "follow fg".
+    /// Any other value is `0x00RRGGBB`.
+    ///
+    /// Ignored unless at least one underline-style bit is set in `flags`.
+    /// Widens BBCell from 16 to 20 bytes — still 4-aligned, still fast to
+    /// iterate over 16k cells.
+    pub underline_color: u32,
 }
+
+/// Sentinel for `BBCell::underline_color` meaning "no explicit underline
+/// colour set; use the cell's fg". Chosen as u32::MAX because alacritty's
+/// RGB representation tops out at 0x00FF_FFFF and 0xFF000000 bits are
+/// otherwise unused — picking a sentinel outside the valid RGB range avoids
+/// a flag bit.
+pub const UNDERLINE_COLOR_UNSET: u32 = 0xFFFF_FFFF;
 
 pub mod cell_flags {
     pub const BOLD: u16 = 1 << 0;
@@ -1070,12 +1087,21 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                 }
                 None => 0,
             };
+            // Underline colour (CSI 58): alacritty stores as Option<Color>.
+            // None → sentinel (shader falls back to fg). Some(c) → resolve
+            // through the palette, same as fg/bg so indexed colours route
+            // correctly.
+            let underline_color = match indexed.cell.underline_color() {
+                Some(c) => color_to_rgb(&c, palette),
+                None => UNDERLINE_COLOR_UNSET,
+            };
             cells.push(BBCell {
                 ch: indexed.c as u32,
                 fg: color_to_rgb(&indexed.fg, palette),
                 bg: color_to_rgb(&indexed.bg, palette),
                 flags: extract_cell_flags(indexed.flags),
                 link_id,
+                underline_color,
             });
         }
 

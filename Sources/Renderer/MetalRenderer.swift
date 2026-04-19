@@ -374,7 +374,10 @@ public final class MetalRenderer {
                     if (cf & UInt16(UNDERLINE_DASHED)) != 0 {
                         flags |= CellAttributeMask.underlineDashed.rawValue
                     }
-                    return SIMD4<UInt32>(flags, 0, 0, 0)
+                    // Pack CSI 58 underline colour into attrs.z. The shader
+                    // treats UNDERLINE_COLOR_UNSET as "fall back to fg",
+                    // so the cheapest path is to forward the u32 as-is.
+                    return SIMD4<UInt32>(flags, 0, cell.underline_color, 0)
                 }()
                 // Reverse video (SGR 7): swap the cell's fg and bg so the
                 // glyph reads against the inverted highlight. Forces a bg

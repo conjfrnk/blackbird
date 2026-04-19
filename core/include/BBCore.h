@@ -9,6 +9,15 @@
 #include <stdlib.h>
 #include <stddef.h>
 
+/**
+ * Sentinel for `BBCell::underline_color` meaning "no explicit underline
+ * colour set; use the cell's fg". Chosen as u32::MAX because alacritty's
+ * RGB representation tops out at 0x00FF_FFFF and 0xFF000000 bits are
+ * otherwise unused — picking a sentinel outside the valid RGB range avoids
+ * a flag bit.
+ */
+#define UNDERLINE_COLOR_UNSET 4294967295
+
 #define BOLD (1 << 0)
 
 #define ITALIC (1 << 1)
@@ -184,6 +193,18 @@ struct BBCell {
    * Resolve via `bb_snap_link_url(snap, link_id)`.
    */
   uint16_t link_id;
+  /**
+   * CSI 58 colored-underline — the user may explicitly set the underline's
+   * colour independent of the glyph fg. alacritty 0.26 stores this as
+   * `Option<Color>` on the cell's extra; we flatten to a u32 with a magic
+   * sentinel: `UNDERLINE_COLOR_UNSET` (0xFFFF_FFFF) means "follow fg".
+   * Any other value is `0x00RRGGBB`.
+   *
+   * Ignored unless at least one underline-style bit is set in `flags`.
+   * Widens BBCell from 16 to 20 bytes — still 4-aligned, still fast to
+   * iterate over 16k cells.
+   */
+  uint32_t underline_color;
 };
 
 /**

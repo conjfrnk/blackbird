@@ -41,9 +41,17 @@ struct CellAttributeMask: OptionSet {
 
 /// Per-cell instance data uploaded to the GPU each frame. 80-byte stride
 /// (4x SIMD2 floats + 2x SIMD4 floats + SIMD4 uint). Field order + layout
-/// must match the `CellInstance` struct in Shaders.metal exactly —
-/// `SIMD4<UInt32>` carries the 4-byte flags plus 12 bytes of padding so
-/// the shader-side `uint4` alignment stays sane on every Metal target.
+/// must match the `CellInstance` struct in Shaders.metal exactly.
+///
+/// `attrs` layout:
+///   - `.x`: CellAttributeMask bitmask (linkHover, strike, underline styles)
+///   - `.y`: reserved (0)
+///   - `.z`: CSI 58 underline-color, 0x00RRGGBB or 0xFFFFFFFF sentinel
+///           meaning "fall back to fg". Shader unpacks to RGBA on demand —
+///           keeping it as a packed u32 saves 12 bytes per cell vs a
+///           dedicated SIMD4<Float>, which at 16k cells (200×80 grid) is
+///           ~192 KiB per frame off the CPU→GPU bus.
+///   - `.w`: reserved (0)
 struct CellInstance {
     var cellPosPx: SIMD2<Float>   //  8 bytes — cell position in points
     /// Quad size in points. Same as the uniform `cellSizePx` for narrow cells;
@@ -54,8 +62,6 @@ struct CellInstance {
     var uvSize: SIMD2<Float>      //  8 bytes
     var fgColor: SIMD4<Float>     // 16 bytes — RGBA foreground
     var bgColor: SIMD4<Float>     // 16 bytes — RGBA background
-    /// Attribute bitmask (CellAttributeMask). Only `.x` is read; the rest
-    /// of the lane is padding so the struct honours Metal's 16-byte
-    /// alignment for uint4.
-    var attrs: SIMD4<UInt32>      // 16 bytes (x = flags, yzw = _pad)
+    /// Attribute bitmask + packed underline-color. See struct header.
+    var attrs: SIMD4<UInt32>      // 16 bytes
 }
