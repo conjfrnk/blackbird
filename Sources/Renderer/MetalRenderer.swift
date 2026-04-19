@@ -87,7 +87,17 @@ public final class MetalRenderer {
         /// never repeats within a process lifetime.
         let snapshotSeq: UInt64
         let hoveredLinkID: UInt16
-        let selectionID: UInt64          // 0 when nil; else a non-colliding packing
+        /// Flattened selection identity. 0 mode tag means "no selection"; 1-4
+        /// are the four Selection.Mode variants. Separate fields for
+        /// anchor/cursor line/col avoid the bit-packing collision risk of
+        /// squeezing four values into a single UInt64 with overlapping bit
+        /// ranges (two different selections could coincide on the packed
+        /// result, which would silently drop a selection-change repaint).
+        let selMode: UInt8
+        let selALine: Int32
+        let selBLine: Int32
+        let selACol: Int32
+        let selBCol: Int32
         let focused: Bool
         let cursorRow: Int32
         let cursorCol: Int32
@@ -446,16 +456,20 @@ public final class MetalRenderer {
         return count
     }
 
-    /// Pack a selection into a non-colliding 64-bit token so `FrameKey`
-    /// stays plain-equatable. Returns 0 for "no selection" so cold frames
-    /// don't look like a stale selected state.
-    private static func packSelection(_ sel: Selection?) -> UInt64 {
-        guard let s = sel else { return 0 }
+    /// Extract selection endpoints into fields that feed `FrameKey`
+    /// directly. Previously a `packSelection -> UInt64` helper was used,
+    /// but its bit ranges overlapped (`aLine << 32` and `bLine << 16`
+    /// shared bits 32-47; `aCol << 8` and `bCol` shared bits 8-15),
+    /// which let two different selections produce the same packed token
+    /// and get silently coalesced by frame-skip. Use five separate
+    /// fields — zero-filled for the "no selection" case — so FrameKey's
+    /// synthesised Equatable gives an exact match.
+    private static func selectionFields(
+        _ sel: Selection?
+    ) -> (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32) {
+        guard let s = sel else { return (0, 0, 0, 0, 0) }
         let (a, b) = s.normalized
-        // 16 bits per col (max Blackbird grid is ~2^14) + 16 bits per line
-        // signed (scrollback lines can be negative) + 4 bits mode tag. Never
-        // hashes to 0 because the mode tag adds a nonzero constant.
-        let mode: UInt64 = {
+        let modeTag: UInt8 = {
             switch s.mode {
             case .character:   return 1
             case .word:        return 2
@@ -463,11 +477,13 @@ public final class MetalRenderer {
             case .rectangular: return 4
             }
         }()
-        let aLine = UInt64(UInt32(bitPattern: a.line))
-        let bLine = UInt64(UInt32(bitPattern: b.line))
-        let aCol = UInt64(UInt16(clamping: a.col))
-        let bCol = UInt64(UInt16(clamping: b.col))
-        return (mode << 60) | (aLine << 32) | (bLine << 16) | (aCol << 8) | bCol
+        return (
+            mode: modeTag,
+            aLine: a.line,
+            bLine: b.line,
+            aCol: Int32(clamping: a.col),
+            bCol: Int32(clamping: b.col)
+        )
     }
 
     /// Bitwise-packed SIMD4<Float> for FrameKey. `bitPattern` gives a
@@ -506,10 +522,15 @@ public final class MetalRenderer {
             let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
             return phase >= 0.53
         }()
+        let selFields = Self.selectionFields(selection)
         let frameKey = FrameKey(
             snapshotSeq: snapshot?.sequenceID ?? 0,
             hoveredLinkID: hoveredLinkID,
-            selectionID: Self.packSelection(selection),
+            selMode: selFields.mode,
+            selALine: selFields.aLine,
+            selBLine: selFields.bLine,
+            selACol: selFields.aCol,
+            selBCol: selFields.bCol,
             focused: focused,
             cursorRow: Int32(snapshot?.cursorRow ?? -1),
             cursorCol: Int32(snapshot?.cursorCol ?? -1),
