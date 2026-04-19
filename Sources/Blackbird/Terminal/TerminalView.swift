@@ -121,6 +121,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// no OSC 8 attribution. The renderer reads this each frame to draw
     /// the accent underline on every cell sharing the id.
     private var hoveredLinkID: UInt32 = 0
+    /// Trackpad pinch gesture accumulator. Magnification events deliver
+    /// fractional deltas; we wait until the running sum crosses ±0.15
+    /// before bumping `Preferences.shared.fontSize`. Without the accumulator
+    /// a single flick would fire dozens of font-size changes and fly past
+    /// the intended zoom level.
+    private var pinchAccumulator: CGFloat = 0
     /// Scheduled tooltip reveal. Cancelled on pointer movement, scroll,
     /// keydown, or view teardown.
     private var hoverTooltipItem: DispatchWorkItem?
@@ -1572,6 +1578,73 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public func resetFontSize(_ sender: Any?) {
         Preferences.shared.fontSize = 13
+    }
+
+    /// Trackpad pinch-to-zoom → font-size step. Accumulate the continuous
+    /// magnification delta and trigger one step per threshold crossing.
+    /// 0.15 is the same threshold Safari / Xcode use for "gesture felt a
+    /// click worth"; finer values fire too aggressively on a single finger
+    /// slip, coarser miss small deliberate zooms.
+    public override func magnify(with event: NSEvent) {
+        pinchAccumulator += event.magnification
+        while pinchAccumulator >= 0.15 {
+            increaseFontSize(nil)
+            pinchAccumulator -= 0.15
+        }
+        while pinchAccumulator <= -0.15 {
+            decreaseFontSize(nil)
+            pinchAccumulator += 0.15
+        }
+    }
+
+    // MARK: - macOS Services + Look Up
+
+    /// Expose the current selection to the Services menu and Look Up
+    /// (three-finger tap, Ctrl-⌘-D). Without this override, NSResponder's
+    /// default returns nil for our view and macOS hides the Services
+    /// submenu entirely. Accepts string-type sends; we never accept
+    /// pasteboard-originated changes here (paste still routes through
+    /// `paste(_:)` so the TUI's bracketed-paste / sanitizer stays in play).
+    public override func validRequestor(
+        forSendType sendType: NSPasteboard.PasteboardType?,
+        returnType: NSPasteboard.PasteboardType?
+    ) -> Any? {
+        if sendType == .string, returnType == nil, selectedStringForServices() != nil {
+            return self
+        }
+        return super.validRequestor(forSendType: sendType, returnType: returnType)
+    }
+
+    /// Called by the Services infrastructure when the user picks
+    /// "Services → …" on a selection; writes the selection text onto the
+    /// supplied pasteboard so the chosen service can read it.
+    /// Part of the informal `NSServicesMenuRequestor` protocol — not an
+    /// `NSResponder` override, so no `override` keyword.
+    @objc public func writeSelection(
+        to pboard: NSPasteboard,
+        types: [NSPasteboard.PasteboardType]
+    ) -> Bool {
+        guard types.contains(.string), let text = selectedStringForServices() else {
+            return false
+        }
+        pboard.clearContents()
+        pboard.setString(text, forType: .string)
+        return true
+    }
+
+    /// Selection → String without the clipboard scrubbing step. Services
+    /// and Look Up get the raw text: the downstream app may legitimately
+    /// want formatting characters the clipboard-sanitizer would strip,
+    /// and any bidi overrides won't reach Safari/Mail via this path (it
+    /// goes through an NSPasteboard the service owns, then a UI chosen
+    /// by the user — we never copy onto the general pasteboard here).
+    private func selectedStringForServices() -> String? {
+        guard let sel = selection, let session, let snap = currentSnapshot else {
+            return nil
+        }
+        let (start, end) = Self.copyRange(for: sel, cols: snap.cols)
+        let text = session.textRange(from: start, to: end, rectangular: sel.mode == .rectangular)
+        return text.isEmpty ? nil : text
     }
 
     private func installFindBar() {
