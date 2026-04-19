@@ -2,6 +2,9 @@ import Metal
 import CoreText
 import CoreGraphics
 import AppKit
+#if DEBUG
+import os
+#endif
 
 /// A fixed-capacity texture atlas of monochrome glyphs. Narrow glyphs occupy
 /// one cell-sized slot; wide glyphs (CJK, emoji) occupy two horizontally-
@@ -34,6 +37,18 @@ public final class GlyphAtlas {
 
     private var byScalar: [UInt32: Entry] = [:]
     private var nextSlot: Int = 0
+    #if DEBUG
+    /// Counter for lookup-or-insert calls that found a full atlas and had
+    /// to return nil (cell ends up blank on screen). Logged via `logger`
+    /// the first time saturation bites and every 1000th event thereafter
+    /// so a future font-mix stretching past the 4096-glyph cap surfaces
+    /// before users notice missing glyphs. Cleared never — atlas lifetime
+    /// matches the window.
+    private var saturationHits: Int = 0
+    private static let logger = Logger(
+        subsystem: "dev.conjfrnk.blackbird", category: "atlas"
+    )
+    #endif
 
     public init?(device: MTLDevice, metrics: CellMetrics, capacityGlyphs: Int, scale: CGFloat = 1.0) {
         // Guard against nonsensical inputs up front: zero capacity would
@@ -107,7 +122,17 @@ public final class GlyphAtlas {
                 slot = (slot / slotCols + 1) * slotCols
             }
         }
-        guard slot + slotsNeeded <= capacityGlyphs else { return nil }
+        guard slot + slotsNeeded <= capacityGlyphs else {
+            #if DEBUG
+            saturationHits += 1
+            if saturationHits == 1 || saturationHits % 1000 == 0 {
+                Self.logger.log(
+                    "atlas saturated at \(self.capacityGlyphs, privacy: .public) glyphs; dropped scalar U+\(String(scalar.value, radix: 16), privacy: .public) (hit #\(self.saturationHits, privacy: .public))"
+                )
+            }
+            #endif
+            return nil
+        }
 
         let col = slot % slotCols
         let row = slot / slotCols
