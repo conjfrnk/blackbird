@@ -384,70 +384,63 @@ public final class PTY {
     public func write(_ data: Data) {
         writeQueue.async { [weak self] in
             guard let self, self.shouldKeepRunning() else { return }
-            let fd = self.masterFD
-            data.withUnsafeBytes { rawBuf -> Void in
-                guard let base = rawBuf.baseAddress else { return }
-                var remaining = rawBuf.count
-                var offset = 0
-                while remaining > 0 {
-                    let written = Darwin.write(fd, base.advanced(by: offset), remaining)
-                    if written > 0 {
-                        remaining -= written
-                        offset += written
-                        continue
-                    }
-                    // EINTR / EAGAIN: retry. The master-side pipe can
-                    // legitimately report "try again" under back-pressure
-                    // (slow consumer). Previously we swallowed the whole
-                    // remaining payload on any non-positive return — silent
-                    // data loss on paste.
-                    if errno == EINTR || errno == EAGAIN { continue }
-                    #if DEBUG
-                    NSLog("[Blackbird] PTY.write FAILED after %d/%d bytes errno=%d fd=%d",
-                          offset, rawBuf.count, errno, fd)
-                    #endif
-                    break
-                }
+            // Retry loop on EINTR / EAGAIN is shared with writeImmediate.
+            _ = self.writeRawLocked(data)
+        }
+    }
+
+    /// Write bytes synchronously on the caller's thread with low-latency
+    /// delivery. Use for urgent control bytes (SIGINT, SIGTSTP) where
+    /// async dispatch latency is perceptible. Safe for single-byte
+    /// writes — the kernel write is atomic at that size.
+    ///
+    /// Ordering: serialised under stateQueue (for teardown safety — close
+    /// also grabs stateQueue, so our write can't land on a freshly-closed
+    /// fd) AND writeQueue (for paste-interleave safety — a mid-paste
+    /// Ctrl+C would otherwise split the paste's bracketed-paste frame).
+    /// Both queues are serial; nesting is safe because the read-queue
+    /// teardown path releases stateQueue before taking writeQueue and
+    /// vice-versa, so there's no circular wait.
+    public func writeImmediate(_ data: Data) {
+        stateQueue.sync {
+            guard _isRunning else { return }
+            writeQueue.sync {
+                _ = self.writeRawLocked(data)
             }
         }
     }
 
-    /// Write bytes synchronously on the caller's thread, bypassing writeQueue.
-    /// Use for urgent control bytes (SIGINT, SIGTSTP) where async dispatch
-    /// latency is perceptible. Safe for single-byte writes — the kernel write
-    /// is atomic at that size.
-    public func writeImmediate(_ data: Data) {
-        // Hold stateQueue across the running check AND the Darwin.write. The
-        // read queue's cleanup path (markStopped → writeQueue.sync drain →
-        // close(masterFD)) also acquires stateQueue for the close, so one of
-        // two things happens:
-        //
-        //   1. We run first: markStopped / close wait for our sync block to
-        //      finish before touching _isRunning or closing the fd.
-        //   2. They run first: our guard sees _isRunning=false and bails — we
-        //      never touch a closed (possibly reused) fd.
-        //
-        // Previously the guard-then-write pair wasn't atomic, so a Ctrl+C
-        // arriving concurrently with session teardown could land on a reused
-        // fd owned by an unrelated subsystem. Single-byte writes to a PTY
-        // master aren't going to block meaningfully, so serialising with
-        // teardown is cheap.
-        stateQueue.sync {
-            guard _isRunning else { return }
-            data.withUnsafeBytes { rawBuf in
-                guard let base = rawBuf.baseAddress else { return }
-                let n = Darwin.write(masterFD, base, rawBuf.count)
-                #if DEBUG
-                if n != rawBuf.count {
-                    NSLog("[Blackbird] writeImmediate FAILED: wanted %d, got %d, errno=%d fd=%d",
-                          rawBuf.count, n, errno, masterFD)
-                } else {
-                    NSLog("[Blackbird] writeImmediate OK: %d bytes to fd %d", n, masterFD)
+    /// Private helper that performs the actual Darwin.write retry loop on
+    /// the caller's current queue. Caller MUST hold writeQueue (either via
+    /// `.async` in `write` or `.sync` in `writeImmediate`). Returns true
+    /// when the whole payload was delivered.
+    @discardableResult
+    private func writeRawLocked(_ data: Data) -> Bool {
+        let fd = self.masterFD
+        var delivered = true
+        data.withUnsafeBytes { rawBuf -> Void in
+            guard let base = rawBuf.baseAddress else { delivered = false; return }
+            var remaining = rawBuf.count
+            var offset = 0
+            while remaining > 0 {
+                let written = Darwin.write(fd, base.advanced(by: offset), remaining)
+                if written > 0 {
+                    remaining -= written
+                    offset += written
+                    continue
                 }
+                if errno == EINTR || errno == EAGAIN { continue }
+                #if DEBUG
+                NSLog("[Blackbird] PTY.write FAILED after %d/%d bytes errno=%d fd=%d",
+                      offset, rawBuf.count, errno, fd)
                 #endif
+                delivered = false
+                break
             }
         }
+        return delivered
     }
+
 
     /// True when the tty has a foreground process group distinct from our
     /// child (the shell). This means `command-running` — useful for the
