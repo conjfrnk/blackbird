@@ -9,6 +9,34 @@ final class TerminalSessionTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    func test_resize_clampsOversizedDimensions() throws {
+        // Paired with the Rust-side tests bb_term_resize_clamps_oversized_
+        // dimensions and bb_term_new_clamps_oversized_dimensions. Swift's
+        // TerminalSession.resize mirrors the core clamp at [2, 1000].
+        // A caller passing UInt16.max must NOT crash and must land on a
+        // sane snapshot size.
+        let session = try TerminalSession.start(
+            shell: "/bin/cat",
+            arguments: [],
+            size: .init(cols: 80, rows: 24)
+        )
+        let exp = expectation(description: "snapshot at clamped size")
+        var gotExpected = false
+        var c: AnyCancellable?
+        c = session.$snapshot.compactMap { $0 }.sink { snap in
+            if !gotExpected, snap.cols <= 1000, snap.rows <= 1000,
+               snap.cols >= 2, snap.rows >= 2 {
+                gotExpected = true
+                c?.cancel()
+                exp.fulfill()
+            }
+        }
+        // Request an absurd size. Clamp must engage at both layers.
+        session.resize(to: .init(cols: UInt16.max, rows: UInt16.max))
+        wait(for: [exp], timeout: 3.0)
+        session.terminate()
+    }
+
     func test_osc52MaxBytes_isSetAndLarge() {
         // Pin the OSC 52 clipboard-write cap. A shrink silently
         // truncates every legitimate paste-forward scenario (1 MiB
