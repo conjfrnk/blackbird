@@ -82,7 +82,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         window.delegate = self
         installTitlebarTabBar()
 
-        guard let device = MTLCreateSystemDefaultDevice() else {
+        // `preferredMetalDevice` falls back to the system default when
+        // no integrated GPU is available (Apple Silicon, Mac Pro with
+        // dual-discrete configs). On Intel laptops it picks the Iris /
+        // UHD over the Radeon Pro — matches Ghostty, avoids Alacritty's
+        // known behavior of always using the dGPU.
+        guard let device = preferredMetalDevice() else {
             window.title = "Blackbird — no Metal device available"
             return
         }
