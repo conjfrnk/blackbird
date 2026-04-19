@@ -143,5 +143,7 @@ legitimate repaint.
 
 ## Reporting
 
-Security reports: open a GitHub issue marked `security` or email the
-address in `LICENSE`.
+Security reports: open a GitHub issue at
+https://github.com/conjfrnk/blackbird with the `security` label.
+For coordinated disclosure, contact the maintainer via the email on
+their GitHub profile.
