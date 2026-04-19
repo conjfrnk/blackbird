@@ -119,10 +119,15 @@ public final class BBTerm {
         rectangular: Bool
     ) -> String? {
         guard let h = handle else { return nil }
+        // `UInt16(col)` traps on negative or > 65535. Selection cols
+        // ought to stay in [0, grid.cols-1] ≤ 999, but a scrollback-
+        // based selection with `col = -1` (or a caller passing
+        // unclamped BufferPoint.col) would otherwise abort. Saturate
+        // at the cast; Rust side clamps again against the grid edge.
         guard let raw = bb_term_text_range(
             h,
-            startLine, UInt16(startCol),
-            endLine,   UInt16(endCol),
+            startLine, UInt16(clamping: startCol),
+            endLine,   UInt16(clamping: endCol),
             rectangular ? 1 : 0
         ) else {
             return nil
