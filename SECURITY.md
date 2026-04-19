@@ -92,6 +92,11 @@ tests in `core/tests/terminal_replies.rs`.
 
 ### Memory and CPU bounds
 
+- Grid dimensions clamped `[2, 1000]` at `bb_term_new` and
+  `bb_term_resize` (Rust) and mirrored in Swift
+  `TerminalSession.resize`. An unclamped `UInt16.max × UInt16.max`
+  request would allocate `rows × (cols + scrollback) × cell_size`
+  bytes — 100+ GB, enough to lock up the host.
 - OSC 8 URI capped at 4 KiB per link (Rust, `bb_term_take_snapshot`).
 - Scrollback capped at 200 000 lines (Rust, `bb_term_new`).
 - OSC 52 payload capped at 1 MiB (Swift,
