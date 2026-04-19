@@ -10,6 +10,51 @@ final class GlyphAtlasTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    // MARK: - Saturation behavior (new)
+
+    func test_saturation_returnsNilForOverflow() throws {
+        // Tiny capacity so saturation hits fast. Insert until full, then
+        // verify the next lookup returns nil — never a garbage Entry.
+        // Protects downstream callers (MetalRenderer.buildInstances) that
+        // assume nil means "skip glyph", not "use uninitialized data".
+        let font = NSFont(name: "Menlo", size: 13) ?? .systemFont(ofSize: 13)
+        let metrics = CellMetrics(font: font)
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let atlas = try XCTUnwrap(GlyphAtlas(
+            device: device, metrics: metrics, capacityGlyphs: 4, scale: 1
+        ))
+        // Insert 4 distinct narrow glyphs.
+        for cp: UInt32 in 0x41...0x44 {
+            let s = try XCTUnwrap(UnicodeScalar(cp))
+            XCTAssertNotNil(atlas.lookupOrInsert(scalar: s))
+        }
+        // 5th must overflow → nil.
+        let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
+        XCTAssertNil(
+            atlas.lookupOrInsert(scalar: overflow),
+            "atlas at capacity must return nil, not a stale Entry"
+        )
+        // Previously-inserted glyphs still resolve.
+        let alive = try XCTUnwrap(UnicodeScalar(0x41 as UInt32))
+        XCTAssertNotNil(atlas.lookupOrInsert(scalar: alive))
+    }
+
+    func test_initRejectsZeroCapacity() {
+        // Guard: zero capacity would divide by zero picking grid rows.
+        let font = NSFont.systemFont(ofSize: 13)
+        let metrics = CellMetrics(font: font)
+        let device = MTLCreateSystemDefaultDevice()!
+        XCTAssertNil(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 0, scale: 1))
+    }
+
+    func test_initRejectsNonPositiveScale() {
+        let font = NSFont.systemFont(ofSize: 13)
+        let metrics = CellMetrics(font: font)
+        let device = MTLCreateSystemDefaultDevice()!
+        XCTAssertNil(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 256, scale: 0))
+        XCTAssertNil(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 256, scale: -1))
+    }
+
     // MARK: - Wide (CJK / emoji) glyphs rasterise at 2x cell width
 
     func test_wideGlyphConsumesTwoAtlasSlots() throws {
