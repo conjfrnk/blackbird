@@ -315,6 +315,77 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), input)
     }
 
+    // MARK: - C0 paste sanitiser (CVE-2026-26982 class)
+
+    func test_sanitizePasteControls_keepsTabLfCr() {
+        let input = Data("a\tb\nc\rd".utf8)
+        XCTAssertEqual(
+            TerminalView.sanitizePasteControls(input), input,
+            "TAB / LF / CR are legitimate whitespace in pasted payload"
+        )
+    }
+
+    func test_sanitizePasteControls_stripsCtrlCAndCtrlZ() {
+        // Attack: pasted prompt + 0x03 (Ctrl+C) + additional commands.
+        // Without sanitisation the 0x03 interrupts the current shell line
+        // and the rest runs as a fresh command — the Ghostty CVE class.
+        var input = Data("echo hi".utf8)
+        input.append(0x03)
+        input.append(Data("rm -rf ~\n".utf8))
+        let out = TerminalView.sanitizePasteControls(input)
+        XCTAssertFalse(out.contains(0x03), "Ctrl+C must be scrubbed")
+        XCTAssertEqual(
+            out, Data("echo hi rm -rf ~\n".utf8),
+            "Blocked byte replaced with space, length preserved"
+        )
+    }
+
+    func test_sanitizePasteControls_stripsEscape() {
+        // ESC is the gateway to every CSI/OSC sequence. Pasting a payload
+        // with ESC embedded could drive the remote into an alt-screen, set
+        // a window title, or — with bracketed paste off — execute bytes
+        // as if typed. Strip unconditionally.
+        let input = Data([0x1B, 0x5B, 0x32, 0x4A])  // ESC [ 2 J (clear screen)
+        XCTAssertEqual(
+            TerminalView.sanitizePasteControls(input),
+            Data([0x20, 0x5B, 0x32, 0x4A]),
+            "ESC → space; remaining printable bytes untouched"
+        )
+    }
+
+    func test_sanitizePasteControls_stripsDel() {
+        let input = Data([0x61, 0x7F, 0x62])  // a DEL b
+        XCTAssertEqual(
+            TerminalView.sanitizePasteControls(input),
+            Data([0x61, 0x20, 0x62]),
+            "0x7F (DEL) is replaced with space"
+        )
+    }
+
+    func test_sanitizePasteControls_stripsEveryC0Except09_0A_0D() {
+        // Sweep: build a payload containing every byte 0x00..0x1F plus
+        // 0x7F. Expect only 0x09 / 0x0A / 0x0D to survive.
+        var input = Data()
+        for b in UInt8(0x00)...UInt8(0x1F) { input.append(b) }
+        input.append(0x7F)
+        let out = TerminalView.sanitizePasteControls(input)
+        let survivors = out.filter { $0 != 0x20 }
+        XCTAssertEqual(
+            Array(survivors), [0x09, 0x0A, 0x0D],
+            "Exactly TAB / LF / CR pass through; every other C0+DEL becomes space"
+        )
+    }
+
+    func test_sanitizePasteControls_passesThroughHighBytes() {
+        // UTF-8 continuation bytes are ≥0x80 and must pass unchanged so
+        // multi-byte characters (CJK, emoji) paste intact.
+        let input = Data("héllo — 日本語".utf8)
+        XCTAssertEqual(
+            TerminalView.sanitizePasteControls(input), input,
+            "Only C0 + DEL are scrubbed; UTF-8 stays intact"
+        )
+    }
+
     // MARK: - Paste line-ending normalisation
 
     func test_normalizePaste_collapsesCRLF() {

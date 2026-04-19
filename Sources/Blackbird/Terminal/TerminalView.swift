@@ -1043,7 +1043,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if (currentSnapshot?.displayOffset ?? 0) > 0 {
             session.scrollToBottom()
         }
-        let bytes = Self.normalizePasteLineEndings(Data(text.utf8))
+        let normalized = Self.normalizePasteLineEndings(Data(text.utf8))
+        // Strip C0 controls (except TAB/LF) and DEL unconditionally. Pasted
+        // payload is "user typing" — Ctrl+C, Ctrl+Z, ESC inside the content
+        // can break out of bracketed paste (CVE-2026-26982 class in Ghostty
+        // <1.3.0) and execute arbitrary bytes as shell input. The sanitizer
+        // replaces blocked bytes with space so column-formatted paste still
+        // lines up.
+        let bytes = Self.sanitizePasteControls(normalized)
         let bracketedPaste = currentSnapshot?.termMode.contains(.bracketedPaste) ?? false
         if bracketedPaste {
             var wrapped = Data([0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])  // ESC[200~
@@ -1081,6 +1088,42 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return out
     }
 
+    /// Replace C0 control bytes (other than TAB / LF / CR) and DEL with a
+    /// space. Applied before *every* paste, whether bracketed or not.
+    ///
+    /// Rationale: a pasted payload can carry `0x03` (Ctrl+C), `0x1A`
+    /// (Ctrl+Z), `0x1B` (ESC), or `0x7F` (DEL). Each of those, delivered
+    /// raw to the shell, either interrupts the current line and runs the
+    /// bytes that follow (the iTerm2 / Ghostty CVE-2026-26982 class) or
+    /// drives the remote into an unexpected mode via escape sequences
+    /// embedded in ostensibly benign text. The mitigation — drop every
+    /// non-printing byte outside TAB/LF/CR — matches Ghostty ≥1.3.0's fix
+    /// and xterm's default paste sanitizer. Replacing with space keeps
+    /// byte offsets stable so column-formatted output pastes cleanly.
+    static func sanitizePasteControls(_ input: Data) -> Data {
+        var out = Data()
+        out.reserveCapacity(input.count)
+        for b in input {
+            // TAB / LF / CR pass through — legitimate whitespace in paste.
+            // (CR is normalised to LF upstream, but a lone CR arriving
+            // from an old-Mac-encoded file is still valid input.)
+            if b == 0x09 || b == 0x0A || b == 0x0D {
+                out.append(b)
+                continue
+            }
+            // Every other C0 control (0x00–0x08, 0x0B, 0x0C, 0x0E–0x1F) and
+            // DEL become a space. Same policy whether bracketed paste is
+            // on or off — a dangerous byte doesn't become safer because
+            // a wrapping ESC[200~ / ESC[201~ surrounds it.
+            if b < 0x20 || b == 0x7F {
+                out.append(0x20)
+                continue
+            }
+            out.append(b)
+        }
+        return out
+    }
+
     /// Strip any literal `ESC [ 2 0 1 ~` terminators from a bracketed-paste
     /// payload so they can't prematurely close the paste window and let
     /// subsequent bytes execute as shell input — the classic paste-injection
@@ -1088,6 +1131,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// that exact sequence is the realistic trigger. We only redact the
     /// closing marker (ESC[200~ inside a paste is harmless — bracketed paste
     /// doesn't nest).
+    ///
+    /// Post-`sanitizePasteControls` this is largely redundant (ESC is
+    /// already stripped), but we keep the second-stage defence so a future
+    /// refactor that loosens the controls pass doesn't silently re-open the
+    /// nested-paste attack surface.
     static func sanitizeBracketedPaste(_ input: Data) -> Data {
         let terminator: [UInt8] = [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]
         guard input.count >= terminator.count else { return input }
