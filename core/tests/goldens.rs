@@ -100,6 +100,7 @@ fn golden_csi_box() {
 /// 1. ESC 7 (save cursor position)
 /// 2. reposition + draw popup
 /// 3. ESC 8 (restore) — user keeps typing at the original column
+///
 /// If alacritty ever drifts on this, the user's next keystroke would
 /// echo in the wrong column.
 #[test]
