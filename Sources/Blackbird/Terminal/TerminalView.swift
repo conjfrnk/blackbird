@@ -269,16 +269,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // if a future macOS or a config change ever does promote us, we'll
         // see mean interval drop to ~8.3 ms without code changes here.
         self.preferredFramesPerSecond = 120
-        // Double-buffered presentation + vsync. Apple's default is 3;
-        // terminals are GPU-cheap (≤2000 instanced quads at 60 Hz), so
-        // the headroom from triple buffering is wasted and costs one
-        // extra frame of input-to-pixel latency — 16.67 ms we'd rather
-        // not pay on keystroke echo. 2 is what kitty / Ghostty target
-        // for the same reason. displaySyncEnabled stays on so we don't
-        // tear; under throughput bursts a future optimization can flip
-        // it off for the duration of a cat / log-tail workload.
+        // Drawable-pool sizing. Apple's default is 3. An earlier iteration
+        // set this to 2 on the theory that fewer drawables = lower latency,
+        // but in practice macOS's display-coalescer appears to read the
+        // 2-deep pool as "this app isn't keeping up" and never promotes
+        // the compositor to 120 Hz on ProMotion panels — the fps
+        // diagnostic (logged every second in DEBUG) stuck at 60 regardless
+        // of which display-link API we used to request 120. Ghostty uses
+        // 3 and gets 120; trying that here. The third drawable is one
+        // frame of headroom for the ring in `MetalRenderer`; with
+        // `presentsWithTransaction = false` it does NOT add input-to-
+        // pixel latency (CAMetalLayer only queues the most recent pending
+        // present when the display-link fires). Keep `displaySyncEnabled`
+        // on so we never tear; a future path can flip it off for the
+        // duration of a cat / log-tail burst if it proves worth it.
         if let metalLayer = self.layer as? CAMetalLayer {
-            metalLayer.maximumDrawableCount = 2
+            metalLayer.maximumDrawableCount = 3
             metalLayer.displaySyncEnabled = true
         }
 
