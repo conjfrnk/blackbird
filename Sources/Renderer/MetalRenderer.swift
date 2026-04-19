@@ -20,9 +20,32 @@ public final class MetalRenderer {
     public var atlas: GlyphAtlas
     public var metrics: CellMetrics
 
-    // Preallocated instance buffer. Growable via reallocateInstanceBuffer.
-    private var instanceBuffer: MTLBuffer
-    private var instanceCapacity: Int
+    /// Triple-buffered instance-data ring. Each `render(in:)` call writes to
+    /// the buffer at `frameIndex` and advances the index; the command buffer
+    /// holds a reference to that specific buffer until the GPU is done
+    /// reading. Without triple-buffering, `.storageModeShared` lets the CPU
+    /// start writing the next frame while the GPU is still sampling the
+    /// previous one — a data race that shows up as flicker/tearing under
+    /// fast typing on loaded systems. Three buffers + a 3-slot semaphore
+    /// match Apple's canonical "MTKView drawable pool" sizing.
+    ///
+    /// Each buffer grows independently — capacity is tracked per-slot so
+    /// a ring reallocation only rebuilds the slot that overflowed, not
+    /// all three.
+    private var instanceBuffers: [MTLBuffer]
+    private var instanceCapacities: [Int]
+    private var frameIndex: Int = 0
+    /// The slot the current `render(in:)` call has locked. Set after
+    /// `inflightSemaphore.wait()`, read by `buildInstances` and the encoder,
+    /// cleared on completion. Not thread-safe on its own — `render(in:)`
+    /// always runs on the main thread.
+    private var currentSlot: Int = 0
+    /// Three tokens match three buffers. Every `render(in:)` waits on one
+    /// before touching its slot; the command buffer's completion handler
+    /// signals. The GPU can run up to three frames ahead of the CPU;
+    /// beyond that, the CPU blocks, which is the correct backpressure
+    /// shape for a latency-sensitive text renderer.
+    private let inflightSemaphore = DispatchSemaphore(value: 3)
 
     private var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
     /// Accent colour applied by the fragment shader whenever a cell's
@@ -200,10 +223,15 @@ public final class MetalRenderer {
 
         // Start with space for a full 200x80 grid; grow as needed.
         let startCap = 200 * 80
-        guard let buf = device.makeBuffer(
-            length: startCap * MemoryLayout<CellInstance>.stride,
-            options: [.storageModeShared]
-        ) else { return nil }
+        let bytes = startCap * MemoryLayout<CellInstance>.stride
+        var buffers: [MTLBuffer] = []
+        buffers.reserveCapacity(3)
+        for _ in 0..<3 {
+            guard let b = device.makeBuffer(length: bytes, options: [.storageModeShared]) else {
+                return nil
+            }
+            buffers.append(b)
+        }
 
         self.device = device
         self.commandQueue = queue
@@ -211,8 +239,8 @@ public final class MetalRenderer {
         self.cursorPipelineState = cursorPSO
         self.atlas = atlas
         self.metrics = metrics
-        self.instanceBuffer = buf
-        self.instanceCapacity = startCap
+        self.instanceBuffers = buffers
+        self.instanceCapacities = [startCap, startCap, startCap]
     }
 
     /// Rebuild metrics + atlas for a new font size. Safe to call from the
@@ -246,8 +274,8 @@ public final class MetalRenderer {
         self.lastFrameKey = nil
     }
 
-    /// Write cell instance data into `instanceBuffer`. Returns the count
-    /// of instances actually written (= non-empty cells).
+    /// Write cell instance data into the ring slot at `frameIndex`. Returns
+    /// the count of instances actually written (= non-empty cells).
     ///
     /// `blockCursorCell`, when non-nil, identifies a single (row, col) whose
     /// cell should render *inverted* so it doubles as the block cursor: the
@@ -272,14 +300,15 @@ public final class MetalRenderer {
         // assumingMemoryBound pointer arithmetic. Bail on the frame rather
         // than emit UB into the GPU's instance buffer.
         guard snapshot.cellCount >= needed else { return 0 }
-        if needed > instanceCapacity {
-            let newCap = max(needed, instanceCapacity * 2)
+        let slot = currentSlot
+        if needed > instanceCapacities[slot] {
+            let newCap = max(needed, instanceCapacities[slot] * 2)
             if let newBuf = device.makeBuffer(
                 length: newCap * MemoryLayout<CellInstance>.stride,
                 options: [.storageModeShared]
             ) {
-                instanceBuffer = newBuf
-                instanceCapacity = newCap
+                instanceBuffers[slot] = newBuf
+                instanceCapacities[slot] = newCap
             } else {
                 // Out-of-GPU-memory (or device tear-down) while trying to
                 // grow the instance buffer. Writing cells past the current
@@ -289,7 +318,7 @@ public final class MetalRenderer {
             }
         }
 
-        let ptr = instanceBuffer.contents().assumingMemoryBound(to: CellInstance.self)
+        let ptr = instanceBuffers[slot].contents().assumingMemoryBound(to: CellInstance.self)
         var count = 0
         let cellW = Float(metrics.cellWidth)
         let cellH = Float(metrics.cellHeight)
@@ -559,15 +588,38 @@ public final class MetalRenderer {
             // presented frame. Skip the whole pipeline — no CPU instance
             // rebuild, no GPU encode, no drawable acquisition. The
             // compositor keeps displaying the previously-presented frame.
+            // Semaphore NOT touched on the skip path: we never claimed
+            // a slot, so we don't signal back.
             return
         }
         lastFrameKey = frameKey
+
+        // Lock a slot before we write to its instance buffer. If all three
+        // slots are in flight on the GPU, wait — the CPU-side write below
+        // would otherwise race the GPU's vertex-fetch on a .storageModeShared
+        // buffer. Advance frameIndex so the next frame picks the next slot.
+        inflightSemaphore.wait()
+        currentSlot = frameIndex
+        frameIndex = (frameIndex + 1) % 3
+        let slot = currentSlot
 
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
               let buffer = commandQueue.makeCommandBuffer(),
               let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
-        else { return }
+        else {
+            // Release the slot we just claimed — we're abandoning this frame
+            // without encoding, so the GPU never reads the buffer.
+            inflightSemaphore.signal()
+            return
+        }
+
+        // Signal the slot free when the GPU finishes reading it. Must be
+        // registered before `commit()` so there's no race with an immediate
+        // GPU-side completion.
+        buffer.addCompletedHandler { [weak self] _ in
+            self?.inflightSemaphore.signal()
+        }
 
         // Build a cheap closure that answers "is buffer-(line, col) inside
         // the current selection?". Called once per cell while building the
@@ -662,7 +714,7 @@ public final class MetalRenderer {
                     accentColor: accentColor
                 )
                 encoder.setRenderPipelineState(pipelineState)
-                encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
+                encoder.setVertexBuffer(instanceBuffers[slot], offset: 0, index: 0)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
                 encoder.setFragmentTexture(atlas.texture, index: 0)
                 encoder.drawPrimitives(
