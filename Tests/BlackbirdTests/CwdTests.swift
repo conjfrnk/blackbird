@@ -68,4 +68,51 @@ final class CwdTests: XCTestCase {
     func testNewWindowAlwaysHome() {
         XCTAssertNil(CwdResolver.forNewWindow())
     }
+
+    /// Percent-encoded path components decode correctly through OSC 7.
+    /// A shell that escaped the CWD via e.g. `$(pwd | sed 's/ /%20/g')`
+    /// should land on the decoded filesystem path — `/Users/foo/my proj`,
+    /// not the literal `%20` string.
+    func testOscCwdPercentDecodesSpaces() {
+        let s = TerminalSession.makeHeadlessForTests()
+        let exp = expectation(description: "cwd lands")
+        let cancellable = s.$lastKnownCwd.dropFirst().sink { value in
+            if value != nil { exp.fulfill() }
+        }
+        s.feedBytesForTests(Data("\u{1b}]7;file:///Users/foo/my%20proj\u{1b}\\".utf8))
+        wait(for: [exp], timeout: 1.0)
+        cancellable.cancel()
+        XCTAssertEqual(s.lastKnownCwd, "/Users/foo/my proj")
+    }
+
+    /// Non-local authority rejected.
+    func testOscCwdRejectsNonLocalAuthority() {
+        let s = TerminalSession.makeHeadlessForTests()
+        s.feedBytesForTests(Data("\u{1b}]7;file://remote.host/Users/foo\u{1b}\\".utf8))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertNil(s.lastKnownCwd, "remote authority must not update cwd")
+    }
+
+    /// Malformed UTF-8 in percent-decoded path rejected.
+    func testOscCwdRejectsInvalidUtf8() {
+        let s = TerminalSession.makeHeadlessForTests()
+        // %FF is valid percent-encoding but 0xFF is not a valid UTF-8 byte.
+        // The Rust gate must drop this.
+        s.feedBytesForTests(Data("\u{1b}]7;file:///bad/%FF/path\u{1b}\\".utf8))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertNil(s.lastKnownCwd, "non-UTF-8 path must not surface")
+    }
+
+    /// `localhost` authority accepted as a local alias.
+    func testOscCwdAcceptsLocalhostAuthority() {
+        let s = TerminalSession.makeHeadlessForTests()
+        let exp = expectation(description: "cwd lands")
+        let cancellable = s.$lastKnownCwd.dropFirst().sink { value in
+            if value != nil { exp.fulfill() }
+        }
+        s.feedBytesForTests(Data("\u{1b}]7;file://localhost/Users/foo/proj\u{1b}\\".utf8))
+        wait(for: [exp], timeout: 1.0)
+        cancellable.cancel()
+        XCTAssertEqual(s.lastKnownCwd, "/Users/foo/proj")
+    }
 }
