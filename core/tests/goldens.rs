@@ -128,6 +128,42 @@ fn cursor_save_restore_around_popup() {
     }
 }
 
+/// Alt-screen enter / exit cycle: DECSET 1049 saves main-buffer +
+/// switches to the alt screen; DECRST 1049 swaps back and restores
+/// the saved cursor. Apps like `less`, `man`, `vim` use this pattern.
+/// After exit, main-buffer content must be exactly as it was —
+/// nothing leaked from the alt screen, scrollback intact.
+#[test]
+fn alt_screen_enter_exit_restores_main_buffer() {
+    unsafe {
+        let term = blackbird_core::bb_term_new(40, 5, 100);
+        // Prime main buffer.
+        let prime = b"\x1b[1;1HMAIN hello";
+        blackbird_core::bb_term_input(term, prime.as_ptr(), prime.len());
+        // DECSET 1049 — switch to alt screen.
+        let enter = b"\x1b[?1049h";
+        blackbird_core::bb_term_input(term, enter.as_ptr(), enter.len());
+        // Draw junk on the alt screen.
+        let alt = b"\x1b[1;1HALT garbage";
+        blackbird_core::bb_term_input(term, alt.as_ptr(), alt.len());
+        // DECRST 1049 — switch back. Main content should reappear.
+        let exit = b"\x1b[?1049l";
+        blackbird_core::bb_term_input(term, exit.as_ptr(), exit.len());
+
+        let out = render_grid(term);
+        let row0 = out.lines().next().unwrap_or("");
+        assert_eq!(
+            row0, "MAIN hello",
+            "main buffer row 0 must restore after alt-screen exit; got {row0:?}"
+        );
+        assert!(
+            !out.contains("ALT"),
+            "alt-screen garbage must not leak into the main buffer"
+        );
+        blackbird_core::bb_term_free(term);
+    }
+}
+
 /// Multi-row popup repaint: Claude Code-style `/btw` modal covers 5
 /// rows. Dismissal repaints each row over the popup frame. Verify
 /// every restored row matches the original content — this is the
