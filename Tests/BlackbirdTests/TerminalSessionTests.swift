@@ -9,6 +9,16 @@ final class TerminalSessionTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    func test_osc52MaxBytes_isSetAndLarge() {
+        // Pin the OSC 52 clipboard-write cap. A shrink silently
+        // truncates every legitimate paste-forward scenario (1 MiB
+        // covers log paste, code paste). A grow re-opens DoS.
+        XCTAssertEqual(
+            TerminalSession.osc52MaxBytes, 1 * 1024 * 1024,
+            "OSC 52 payload cap must remain 1 MiB — Ghostty's default"
+        )
+    }
+
     func test_shellOutputAppearsInSnapshot() throws {
         let session = try TerminalSession.start(
             shell: "/bin/sh",

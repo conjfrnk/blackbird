@@ -686,6 +686,48 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 64, 36, 40]))
     }
 
+    func test_mouseReport_rejectsNegativeCoord() {
+        // Pre-guards before any encoding mode — negative col/row from a
+        // misbehaving input device would otherwise produce nonsense.
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: true, button: 0, press: true, col: -1, row: 0
+        ))
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: true, button: 0, press: true, col: 0, row: -1
+        ))
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: false, button: 0, press: true, col: -1, row: 0
+        ))
+    }
+
+    func test_mouseReport_rejectsOutOfRangeButton() {
+        // X10 encoding would trap on `UInt8(button + 32)` for button
+        // >= 224. SGR encoding doesn't trap but would stringify an
+        // absurd value. Reject both up front.
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: true, button: -1, press: true, col: 0, row: 0
+        ))
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: true, button: 224, press: true, col: 0, row: 0
+        ))
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: true, button: Int.max, press: true, col: 0, row: 0
+        ))
+        XCTAssertNil(TerminalView.encodeMouseReport(
+            sgr: false, button: 224, press: true, col: 0, row: 0
+        ))
+    }
+
+    func test_mouseReport_sgr_acceptsLargeColAndRow() {
+        // SGR encoding doesn't cap col/row (digits only, no byte truncation).
+        // Callers clamp to 10k upstream. Verify the encoder handles those
+        // values without drama.
+        let bytes = TerminalView.encodeMouseReport(
+            sgr: true, button: 0, press: true, col: 9999, row: 9999
+        )
+        XCTAssertEqual(bytes, Data("\u{1B}[<0;10000;10000M".utf8))
+    }
+
     func test_oscTitleReachesWindowTitle() throws {
         let window = NSWindow(
             contentRect: .zero,
