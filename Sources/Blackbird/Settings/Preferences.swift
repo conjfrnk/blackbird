@@ -123,5 +123,14 @@ public final class Preferences: ObservableObject {
         if ThemeMode(rawValue: themeModeRaw) == nil { themeModeRaw = ThemeMode.auto.rawValue }
         if BellStyle(rawValue: bellRaw) == nil { bellRaw = BellStyle.visual.rawValue }
         if OptionKey(rawValue: optionKeyRaw) == nil { optionKeyRaw = OptionKey.meta.rawValue }
+
+        // Force a through-didSet write on each numeric pref so values
+        // already on disk get sanitised. `@AppStorage`'s `didSet` runs
+        // only on in-session writes, not on first read from UserDefaults,
+        // so a tampered plist with NaN / out-of-range values would
+        // otherwise sneak past the clamp. Re-assigning the value triggers
+        // the didSet chain and normalises once at launch.
+        fontSize = fontSize
+        translucency = translucency
     }
 }
