@@ -415,10 +415,23 @@ public final class TerminalSession: ObservableObject {
                         #endif
                         break
                     }
+                    // Scrub C0/C1 controls + bidi overrides before handing
+                    // the payload to NSPasteboard. A compromised remote
+                    // would otherwise push a Trojan Source blob or raw ESC
+                    // sequences into the user's system clipboard —
+                    // invisible to Blackbird's own paste scrubber because
+                    // that runs on *inbound* paste, not on the write side.
+                    // Symmetric treatment: anything dirty enough to strip
+                    // on paste-in is dirty enough to strip on paste-out.
+                    let data = Data(text.utf8)
+                    let scrubbed = TerminalView.stripBidiOverrides(
+                        TerminalView.sanitizePasteControls(data)
+                    )
+                    let clean = String(decoding: scrubbed, as: UTF8.self)
                     let pb = NSPasteboard.general
                     pb.clearContents()
-                    if !text.isEmpty {
-                        pb.setString(text, forType: .string)
+                    if !clean.isEmpty {
+                        pb.setString(clean, forType: .string)
                     }
                 case .cursorShape:
                     break  // Plan 5/3 will surface cursor shape.

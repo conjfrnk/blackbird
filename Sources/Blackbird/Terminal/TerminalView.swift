@@ -1366,11 +1366,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     @objc public func copy(_ sender: Any?) {
         guard let sel = selection, let session, let snap = currentSnapshot else { return }
         let (start, end) = Self.copyRange(for: sel, cols: snap.cols)
-        let text = session.textRange(from: start, to: end, rectangular: sel.mode == .rectangular)
-        guard !text.isEmpty else { return }
+        let raw = session.textRange(from: start, to: end, rectangular: sel.mode == .rectangular)
+        guard !raw.isEmpty else { return }
+        // Cap + scrub before writing. A compromised remote can spam the
+        // scrollback with bidi-override + C0 payloads; if the user
+        // selects that span and copies, those bytes land on the system
+        // clipboard and poison every subsequent paste into Safari /
+        // Mail / Chat. 16 MiB covers every realistic "select the whole
+        // world" case. Same sanitizer as paste-inbound (symmetric).
+        let copyMax = 16 * 1024 * 1024
+        let data = Data(raw.utf8).prefix(copyMax)
+        let scrubbed = Self.stripBidiOverrides(
+            Self.sanitizePasteControls(Data(data))
+        )
+        let clean = String(decoding: scrubbed, as: UTF8.self)
+        guard !clean.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(text, forType: .string)
+        pb.setString(clean, forType: .string)
     }
 
     /// Compute the (start, end) buffer points to pass into
@@ -1839,16 +1852,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// `screenRow` is 0-based from the top of the visible viewport — OSC 8
     /// attribution is stored keyed to screen cells, not buffer lines.
     private func resolveClickURL(screenRow: Int, col: Int) -> URL? {
+        // Whatever the URL origin — OSC 8 attribution or regex detection —
+        // the final NSWorkspace.open surface is the same hostile one.
+        // Apply the allowlist on every exit path so a future loosening
+        // of the regex (e.g. to include `ssh://`) doesn't silently light
+        // up a new attack path. OSC8URLPolicy is intentionally named
+        // generically: it's the single URL-open policy for the app.
+        let allow: (URL?) -> URL? = { url in
+            guard let url, OSC8URLPolicy.isAllowed(url) else { return nil }
+            return url
+        }
         #if DEBUG
         if let override = hyperlinkResolverOverride {
-            if let u = override.osc8URL(row: screenRow, col: col) { return u }
-            return override.regexURL(row: screenRow, col: col)
+            if let u = allow(override.osc8URL(row: screenRow, col: col)) { return u }
+            return allow(override.regexURL(row: screenRow, col: col))
         }
         #endif
         guard let snap = currentSnapshot else { return nil }
         let resolver = SnapshotHyperlinkResolver(snapshot: snap)
-        if let u = resolver.osc8URL(row: screenRow, col: col) { return u }
-        return resolver.regexURL(row: screenRow, col: col)
+        if let u = allow(resolver.osc8URL(row: screenRow, col: col)) { return u }
+        return allow(resolver.regexURL(row: screenRow, col: col))
     }
 
     // MARK: - Hover dwell tooltip + accent underline
