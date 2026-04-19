@@ -29,12 +29,12 @@ A macOS-only terminal emulator. Native AppKit + SwiftUI. Metal-rendered. NSWindo
 
 ## Features
 
-- **Rendering.** Metal GPU renderer, fixed-capacity glyph atlas, 120 Hz opt-in on ProMotion via triple-buffered drawable, right-edge scroll indicator, visual bell flash.
+- **Rendering.** Metal GPU renderer, fixed-capacity glyph atlas, double-buffered drawable tuned for input-to-pixel latency, right-edge scroll indicator, visual bell flash. Idle frames short-circuit before the GPU pass when no visual state has changed.
 - **VT support.** Application cursor keys (DECCKM), bracketed paste, X10 and SGR mouse reporting including motion and drag, F1–F12, 24-bit color, DECSCUSR cursor shapes (block/bar/underline), Kitty keyboard protocol (advertised as `xterm-kitty` with a bundled terminfo that auto-installs on first launch; progressive enhancement via `CSI u`), 10,000-line scrollback.
 - **Tabs and windows.** Native `NSWindow` tab group, per-tab shell session, confirmation before closing a window with multiple tabs, content-size snap to whole cells, ⌘-drag anywhere to move the window, ⌘ + right-drag to resize from the nearest corner, auto-close on shell exit.
-- **Selection and clipboard.** Character / word / line / rectangular selection, ⌘C copies, ⌘V pastes (bracketed when the TUI requests it), ⌃C always sends `0x03` and never copies, right-click menu, OSC 52 remote clipboard writes with an opt-out toggle.
+- **Selection and clipboard.** Character / word / line / rectangular selection, ⌘C copies, ⌘V pastes (bracketed when the TUI requests it; every paste is scrubbed of C0 controls / DEL / Unicode bidi overrides regardless), ⌃C always sends `0x03` and never copies, right-click menu, OSC 52 remote clipboard writes capped at 1 MiB with an opt-out toggle.
 - **Find.** ⌘F opens the bar, ⌘G / ⌘⇧G step through matches across visible buffer and scrollback.
-- **URLs.** ⌘-click on any `http`/`https`/`ftp`/`file` URL opens it in the default browser. OSC 8 hyperlinks take precedence over regex detection — hover dwell shows a tooltip with the real target; underline highlights all cells sharing the link id.
+- **URLs.** ⌘-click on any `http`/`https`/`ftp`/`file`/`mailto` URL opens it via `NSWorkspace`. OSC 8 hyperlinks take precedence over regex detection — hover dwell shows a tooltip with the real target; underline highlights all cells sharing the link id. Any other scheme (`javascript:`, `data:`, custom handlers) is blocked to prevent the OSC 8 argument-injection class (CVE-2023-46321).
 - **Input.** `NSTextInputClient` conformance: CJK/Korean/Japanese IME composes inline with a dotted underline at the cursor; Latin dead keys (Option+E → ´, then E → é) compose correctly in Native Option mode. Preedit never reaches the PTY until committed.
 - **Drag and drop.** Drop any file from Finder onto the view to paste its POSIX-quoted path. Multi-file drops join with single spaces.
 - **Tab titles.** Shell titles via OSC 0/2 by default; override per tab via `View → Rename Tab…` (⌥⌘R) or right-click the tab. OSC 0/2 is ignored while an override is set.
