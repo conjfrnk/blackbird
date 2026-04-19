@@ -42,6 +42,13 @@ public final class TerminalSession: ObservableObject {
     /// directly to exercise the tab-creation path without driving the shell.
     @Published public internal(set) var lastKnownCwd: String?
 
+    /// The most recent OSC 133 prompt/command mark observed from the shell,
+    /// paired with its payload (exit code for kind D, empty otherwise).
+    /// A future ⌘⇧↑/⌘⇧↓ "jump to previous prompt" feature will consume a
+    /// ring of these; for v1 we expose the latest only so shell
+    /// integration is observably working without locking in a UI surface.
+    @Published public internal(set) var lastPromptMark: (kind: BBTerm.PromptMarkKind, exitCode: String)?
+
     // MARK: - Title state
 
     /// Last title the shell emitted via OSC 0/2. Empty before any emit.
@@ -462,6 +469,15 @@ public final class TerminalSession: ObservableObject {
                     // Store on the main thread so reads from ⌘T / ⌘N stay
                     // trivially race-free (those actions also run on main).
                     self.lastKnownCwd = path
+                case .promptMark(let kind, let exitCode):
+                    // Shell integration: A = prompt start, B = command start,
+                    // C = output start, D = command end (with exit code).
+                    // Session just publishes; downstream (TerminalView, a
+                    // future prompt-jump feature) can observe. Not wired to
+                    // any UI action yet — the event plumbing lands first so
+                    // the shell-integration scripts don't desync with the
+                    // renderer-side consumption.
+                    self.lastPromptMark = (kind, exitCode)
                 case .fatal(let msg):
                     // Surface as a title prefix for visibility; Plan 7 adds a
                     // dedicated diagnostics channel. Fatal should display

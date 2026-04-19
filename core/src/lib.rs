@@ -73,6 +73,11 @@ pub enum BBEventKind {
     /// `Osc7Scanner` that fires only on this one sequence. See the
     /// scanner impl and the fragmentation test for details.
     CwdChanged = 6,
+    /// OSC 133 prompt/command mark emitted by a shell-integration snippet
+    /// (bash/zsh/fish). `i32_arg` carries the kind: 1=A (prompt start),
+    /// 2=B (command start), 3=C (command output start), 4=D (command end).
+    /// `payload` is the ASCII decimal exit code for kind D, empty otherwise.
+    PromptMark = 7,
     Fatal = 99,
 }
 
@@ -283,6 +288,91 @@ impl Perform for Osc7Scanner<'_> {
     // Every other Perform method is a no-op — the default trait impls.
 }
 
+// ---------------------------------------------------------------------------
+// Osc133Scanner — parallel vte::Parser tap for OSC 133 prompt/command marks
+// ---------------------------------------------------------------------------
+
+/// Shape of the OSC 133 prompt/command mark the shell emitted.
+///
+/// Values match the C enum layout — Swift casts these integers directly.
+/// A / B / C / D are the four standard kinds in the de-facto prompt-marks
+/// spec (Apple Terminal, iTerm2, kitty, Ghostty):
+///   A = prompt start     — "I'm about to draw my prompt"
+///   B = command start    — "prompt done, user is typing the command"
+///   C = command output   — "user pressed enter, command is running"
+///   D = command end      — "command finished, exit code follows"
+/// Numeric values start at 1 so 0 stays reserved for "no mark".
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub enum BBPromptMarkKind {
+    A = 1,
+    B = 2,
+    C = 3,
+    D = 4,
+}
+
+/// Minimal `vte::Perform` impl that fires on OSC 133 payloads only.
+/// Mirrors `Osc7Scanner` — see its docstring for the parallel-parser
+/// rationale. Payload for kind D is the ASCII decimal exit code (e.g.
+/// b"0", b"130", b"-1"); empty otherwise.
+struct Osc133Scanner<'a> {
+    cell: &'a CallbackCell,
+}
+
+impl Perform for Osc133Scanner<'_> {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.first().copied() != Some(b"133".as_slice()) {
+            return;
+        }
+        let Some(kind_param) = params.get(1) else {
+            return;
+        };
+        let kind_param = *kind_param;
+        // The common split: some shells emit `OSC 133 ; D ; <code> ST` →
+        // params = [b"133", b"D", b"0"]. Others combine: `OSC 133 ; D;0` →
+        // params = [b"133", b"D;0"]. Handle both so snippets from iTerm2,
+        // kitty, fish, starship, etc. all work.
+        let (kind_byte, exit_code_bytes): (u8, &[u8]) = if kind_param.len() == 1 {
+            (kind_param[0], params.get(2).copied().unwrap_or(b""))
+        } else if let Some(idx) = kind_param.iter().position(|&b| b == b';') {
+            // `D;<code>` — split on the first ';'.
+            (kind_param[0], &kind_param[idx + 1..])
+        } else {
+            // Longer than 1 byte without a ';' — unknown extension.
+            return;
+        };
+
+        let kind: u8 = match kind_byte {
+            b'A' => BBPromptMarkKind::A as u8,
+            b'B' => BBPromptMarkKind::B as u8,
+            b'C' => BBPromptMarkKind::C as u8,
+            b'D' => BBPromptMarkKind::D as u8,
+            _ => return, // unknown sub-kind — silently ignore rather than crash.
+        };
+
+        // Cap exit-code payload at 16 bytes. A well-behaved shell emits
+        // at most 3–4 digits; anything longer is either malicious spam or
+        // a bug and the hosting TUI wouldn't know what to do with it
+        // either.
+        let cap = exit_code_bytes.len().min(16);
+        let payload = &exit_code_bytes[..cap];
+
+        let ev = BBEvent {
+            kind: BBEventKind::PromptMark,
+            payload: payload.as_ptr(),
+            len: payload.len(),
+            // Pack kind (A/B/C/D as 1..=4) into i32_arg so Swift can
+            // branch without parsing the payload.
+            i32_arg: kind as i32,
+        };
+        // SAFETY: `payload` borrows `params` which the caller (vte parser)
+        // owns for the duration of this callback. `fire` delivers
+        // synchronously, so the borrow is alive for the full dispatch.
+        unsafe { self.cell.fire(ev) };
+    }
+    // Every other Perform method is a no-op — default trait impls.
+}
+
 /// RFC 3986 percent-decode. Returns `None` only on truncated escapes
 /// (`%` with fewer than two hex digits remaining) or non-hex digits.
 /// Raw bytes pass through unchanged.
@@ -332,6 +422,12 @@ pub struct BBTerm {
     /// single event. Kept separate from alacritty's internal parser so we
     /// never perturb the grid-mutation path.
     osc7_parser: Parser,
+    /// Separate parallel parser for OSC 133. Could be unified with
+    /// `osc7_parser` (one `Perform` impl handling both), but keeping them
+    /// independent means each scanner only looks at one OSC number and the
+    /// state machines never interact. At 64 KiB per feed the cost of two
+    /// parses is negligible (pure memchr + tiny state machine).
+    osc133_parser: Parser,
     callback: Box<CallbackCell>,
 }
 
@@ -452,6 +548,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             term,
             processor: Processor::new(),
             osc7_parser: Parser::new(),
+            osc133_parser: Parser::new(),
             callback,
         });
         Box::into_raw(bb)
@@ -515,12 +612,14 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // and skips ~linear time scanning for the 4-byte needle.
         if memchr::memchr(0x1B, slice).is_none() {
             bb.processor.advance(&mut bb.term, slice);
-            // Still drive the parallel OSC 7 parser: an OSC 7 sequence
-            // begun in a prior chunk can be terminated by a BEL (0x07) in
-            // this ESC-free chunk, so we cannot skip the parallel parser
-            // even on the fast path.
-            let mut scanner = Osc7Scanner { cell: &bb.callback };
-            bb.osc7_parser.advance(&mut scanner, slice);
+            // Still drive the parallel OSC parsers: sequences begun in a
+            // prior chunk can be terminated by a BEL (0x07) in this
+            // ESC-free chunk, so we cannot skip the parallel parsers even
+            // on the fast path.
+            let mut osc7 = Osc7Scanner { cell: &bb.callback };
+            bb.osc7_parser.advance(&mut osc7, slice);
+            let mut osc133 = Osc133Scanner { cell: &bb.callback };
+            bb.osc133_parser.advance(&mut osc133, slice);
             return;
         }
         let needle = b"\x1B[2J";
@@ -535,13 +634,15 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         if cursor < slice.len() {
             bb.processor.advance(&mut bb.term, &slice[cursor..]);
         }
-        // Drive the parallel OSC 7 parser across the whole chunk. It is
-        // stateful across `bb_term_input` calls so fragmented OSC 7
+        // Drive the parallel OSC parsers across the whole chunk. They are
+        // stateful across `bb_term_input` calls so fragmented OSC
         // sequences (e.g. one byte per PTY read) still resolve to a
         // single event. No need to replicate the 2J-augmentation above:
-        // OSC 7 doesn't care about ED sequences.
-        let mut scanner = Osc7Scanner { cell: &bb.callback };
-        bb.osc7_parser.advance(&mut scanner, slice);
+        // OSC sequences don't care about ED.
+        let mut osc7 = Osc7Scanner { cell: &bb.callback };
+        bb.osc7_parser.advance(&mut osc7, slice);
+        let mut osc133 = Osc133Scanner { cell: &bb.callback };
+        bb.osc133_parser.advance(&mut osc133, slice);
     })
 }
 

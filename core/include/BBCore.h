@@ -143,6 +143,13 @@ enum BBEventKind
    * scanner impl and the fragmentation test for details.
    */
   BB_EVENT_KIND_CWD_CHANGED = 6,
+  /**
+   * OSC 133 prompt/command mark emitted by a shell-integration snippet
+   * (bash/zsh/fish). `i32_arg` carries the kind: 1=A (prompt start),
+   * 2=B (command start), 3=C (command output start), 4=D (command end).
+   * `payload` is the ASCII decimal exit code for kind D, empty otherwise.
+   */
+  BB_EVENT_KIND_PROMPT_MARK = 7,
   BB_EVENT_KIND_FATAL = 99,
 };
 #ifndef __cplusplus
@@ -447,6 +454,33 @@ const char *bb_snap_link_url(const struct BBSnap *snap, uint32_t link_id);
  * 0 as the fallback value.
  */
 uint32_t bb_term_current_mode(struct BBTerm *term);
+
+/**
+ * Report whether the snapshot's damage set is "full" (all rows need a
+ * redraw — scroll, insert-mode, viewport scrollback change). When true,
+ * the renderer must treat every row as damaged regardless of
+ * `bb_snap_damage_rows`.
+ *
+ * # Safety
+ * `snap` must be a pointer from `bb_term_take_snapshot` or retained from
+ * one. Null returns 1 (the safe default: repaint everything).
+ */
+uint8_t bb_snap_damage_is_full(const struct BBSnap *snap);
+
+/**
+ * Copy the snapshot's damaged-row indices into the caller's buffer. Returns
+ * the number of rows written (capped at `out_cap`). If `out` is null or
+ * `out_cap` is zero, returns 0. If the damage is `Full`, returns 0 —
+ * callers must check `bb_snap_damage_is_full` first and treat "full" as
+ * "all rows need redraw".
+ *
+ * # Safety
+ * - `snap` must be a pointer from `bb_term_take_snapshot` or retained
+ * - `out` must either be null OR point to at least `out_cap` u16 slots
+ *   of writable memory with correct alignment for u16.
+ * - Safe to call from any thread.
+ */
+uintptr_t bb_snap_damage_rows(const struct BBSnap *snap, uint16_t *out, uintptr_t out_cap);
 
 /**
  * Scroll the display by `delta` lines. Positive = scroll up (show older

@@ -27,7 +27,20 @@ public final class BBTerm {
         /// when the Rust core validates scheme == file and host in {empty,
         /// localhost}; matches spec §4.1.
         case cwdChanged(String)
+        /// Shell-emitted OSC 133 prompt/command mark. `kind` is one of
+        /// A/B/C/D (prompt start / command start / command output /
+        /// command end). `exitCode` is populated only for kind D; empty
+        /// string otherwise.
+        case promptMark(kind: PromptMarkKind, exitCode: String)
         case fatal(String)
+    }
+
+    /// OSC 133 sub-kinds — see BBPromptMarkKind in core/src/lib.rs.
+    public enum PromptMarkKind: UInt8 {
+        case promptStart = 1
+        case commandStart = 2
+        case commandOutput = 3
+        case commandEnd = 4
     }
 
     public typealias EventHandler = (Event) -> Void
@@ -192,6 +205,10 @@ public final class BBTerm {
             handler(.ptyWrite(Self.data(from: ev)))
         case 6:   // BB_EVENT_KIND_CWD_CHANGED
             handler(.cwdChanged(Self.string(from: ev)))
+        case 7:   // BB_EVENT_KIND_PROMPT_MARK
+            if let kind = PromptMarkKind(rawValue: UInt8(clamping: ev.i32_arg)) {
+                handler(.promptMark(kind: kind, exitCode: Self.string(from: ev)))
+            }
         case 99:  // BB_EVENT_KIND_FATAL
             handler(.fatal(Self.string(from: ev)))
         default:
