@@ -4,6 +4,24 @@ import AppKit
 public struct SettingsView: View {
     @StateObject private var prefs = Preferences.shared
 
+    /// Cached list of monospaced font families on the system. Built once
+    /// per process launch and reused across SettingsView renders —
+    /// without this, SwiftUI re-enumerates NSFontManager on every body
+    /// re-eval (every slider drag, every toggle), turning the 100+
+    /// font lookup into ~120× per second of wasted work during drags.
+    /// Fonts rarely change at runtime; if a user installs a new one
+    /// they can restart Settings to see it.
+    private static let cachedMonospaceFamilies: [String] = {
+        NSFontManager.shared.availableFontFamilies
+            .filter { name in
+                if let font = NSFont(name: name, size: 12) {
+                    return font.isFixedPitch
+                }
+                return false
+            }
+            .sorted()
+    }()
+
     public init() {}
 
     public var body: some View {
@@ -29,7 +47,7 @@ public struct SettingsView: View {
                 }
             }
             Picker("Font", selection: $prefs.fontName) {
-                ForEach(monospaceFamilies(), id: \.self) { name in
+                ForEach(Self.cachedMonospaceFamilies, id: \.self) { name in
                     Text(name).tag(name)
                 }
             }
@@ -96,17 +114,4 @@ public struct SettingsView: View {
         .padding()
     }
 
-    /// Enumerate monospaced font families available on the system. A family
-    /// is "monospace" if its regular face reports `isFixedPitch`. Cached per
-    /// render; NSFontManager keeps its own internal cache.
-    private func monospaceFamilies() -> [String] {
-        NSFontManager.shared.availableFontFamilies
-            .filter { name in
-                if let font = NSFont(name: name, size: 12) {
-                    return font.isFixedPitch
-                }
-                return false
-            }
-            .sorted()
-    }
 }
