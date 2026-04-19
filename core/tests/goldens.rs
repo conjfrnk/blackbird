@@ -193,8 +193,8 @@ fn multi_row_popup_dismissal_restores_all_rows() {
             blackbird_core::bb_term_input(term, seq.as_ptr(), seq.len());
         }
         // Dismiss by repainting each original row with a trailing EL.
-        for i in 2..7 {
-            let seq = format!("\x1b[{};1H{}\x1b[K", i + 1, bases[i]);
+        for (i, base) in bases.iter().enumerate().take(7).skip(2) {
+            let seq = format!("\x1b[{};1H{}\x1b[K", i + 1, base);
             blackbird_core::bb_term_input(term, seq.as_ptr(), seq.len());
         }
         let out = render_grid(term);
