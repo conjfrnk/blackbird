@@ -261,14 +261,16 @@ public final class BBSnapshot {
     public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 
     public func character(at col: Int, row: Int) -> Character? {
-        // Full four-sided bounds check. Prior code only guarded the
-        // upper bound, which left a trap: `cells[negIdx]` on a
-        // negative-index access (easy to construct via a caller that
-        // passes unclamped coordinates from a scroll-offset calculation)
-        // would panic out of Swift's array bounds assertion. Match
-        // `linkID(row:col:)`'s pattern of rejecting both ends.
+        // Full four-sided bounds check plus explicit cells_len guard.
+        // `handle.pointee.cells` is an `UnsafePointer<BBCell>` — its
+        // subscript is raw pointer arithmetic with NO bounds
+        // assertion, so an out-of-range idx would read arbitrary
+        // memory (UB) rather than trap. Belt-and-braces: check idx
+        // against cellCount too so a snapshot with a corrupted
+        // rows/cols metadata can't turn into a UAF read.
         guard col >= 0, row >= 0, col < cols, row < rows else { return nil }
         let idx = row * cols + col
+        guard idx < cellCount else { return nil }
         let scalar = handle.pointee.cells[idx].ch
         guard scalar != 0, let us = Unicode.Scalar(scalar) else { return nil }
         return Character(us)
