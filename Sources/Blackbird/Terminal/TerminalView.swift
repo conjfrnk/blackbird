@@ -47,8 +47,16 @@ public struct CellMetrics {
     }
 
     public func grid(forPixelSize size: CGSize) -> (cols: Int, rows: Int) {
-        let cols = max(1, Int(size.width / cellWidth))
-        let rows = max(1, Int(size.height / cellHeight))
+        // Defensive: `size` is a CGSize from AppKit bounds in practice,
+        // so always finite. But a NaN / ±Infinity component would trap
+        // `Int(Double)` before any `max(1, ...)` rescues it — the same
+        // kind of trap-cast we clamp in `sendMouseEvent`. Mirror that
+        // posture here so a stray Core Animation value can't SIGTRAP the
+        // render pass.
+        let w = size.width.isFinite ? size.width : 0
+        let h = size.height.isFinite ? size.height : 0
+        let cols = max(1, Int(w / cellWidth))
+        let rows = max(1, Int(h / cellHeight))
         return (cols, rows)
     }
 }

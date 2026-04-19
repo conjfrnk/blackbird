@@ -39,6 +39,35 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(zero.rows, 1)
     }
 
+    func test_cellMetrics_gridHandlesNonFinitePixelSize() {
+        // `Int(Double)` traps on NaN / ±Infinity before any max(1, ...)
+        // rescue. CGSize from AppKit is always finite in practice, but
+        // a stray Core Animation value shouldn't SIGTRAP the render
+        // pass. Non-finite components clamp that axis to 1; finite
+        // components pass through to the normal cellWidth/Height math.
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let nan = Double.nan
+        let inf = Double.infinity
+        // Only-width-bad: cols clamp to 1, rows compute normally.
+        var g = metrics.grid(forPixelSize: CGSize(width: nan, height: 480))
+        XCTAssertEqual(g.cols, 1)
+        XCTAssertGreaterThan(g.rows, 1)
+        g = metrics.grid(forPixelSize: CGSize(width: inf, height: 480))
+        XCTAssertEqual(g.cols, 1)
+        XCTAssertGreaterThan(g.rows, 1)
+        // Only-height-bad: rows clamp to 1.
+        g = metrics.grid(forPixelSize: CGSize(width: 800, height: nan))
+        XCTAssertGreaterThan(g.cols, 1)
+        XCTAssertEqual(g.rows, 1)
+        g = metrics.grid(forPixelSize: CGSize(width: 800, height: -inf))
+        XCTAssertGreaterThan(g.cols, 1)
+        XCTAssertEqual(g.rows, 1)
+        // Both bad: 1×1 clamp.
+        g = metrics.grid(forPixelSize: CGSize(width: nan, height: nan))
+        XCTAssertEqual(g.cols, 1)
+        XCTAssertEqual(g.rows, 1)
+    }
+
     func test_resizeForwardsToSession() throws {
         let session = try TerminalSession.start(
             shell: "/bin/cat",
