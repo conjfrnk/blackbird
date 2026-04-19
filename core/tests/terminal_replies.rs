@@ -135,10 +135,6 @@ fn kitty_report_active_mode_after_push() {
 }
 
 // ---------------------------------------------------------------------------
-// Ordering — a query stream produces replies in order
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Window-query blackout — never echo title / icon / size back to the PTY
 // ---------------------------------------------------------------------------
 //
@@ -171,7 +167,11 @@ fn csi_21t_report_window_title_is_silent() {
 fn csi_20t_report_icon_label_is_silent() {
     // Icon label reporting is the same attack surface via OSC 1.
     let writes = run(b"\x1b]1;icon-label\x07\x1b[20t");
-    assert!(writes.is_empty(), "CSI 20t must not reply; got {:?}", writes);
+    assert!(
+        writes.is_empty(),
+        "CSI 20t must not reply; got {:?}",
+        writes
+    );
 }
 
 #[test]
@@ -199,6 +199,10 @@ fn osc_10_11_color_queries_are_silent() {
         writes
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ordering — a query stream produces replies in order
+// ---------------------------------------------------------------------------
 
 #[test]
 fn multiple_queries_reply_in_order() {
