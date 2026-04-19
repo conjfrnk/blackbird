@@ -689,6 +689,16 @@ struct BBSnapOwned {
     /// CStrings live for the snapshot's lifetime so `bb_snap_link_url` can hand
     /// out raw pointers without copying.
     links: Vec<std::ffi::CString>,
+    /// Rows whose content changed between this snapshot and the previous.
+    /// Extracted from alacritty's `Term::damage()` before the grid read, then
+    /// the term's damage is reset so each snapshot reports deltas.
+    /// Empty when `damage_full == true` OR when nothing changed; readers
+    /// disambiguate via `damage_full`.
+    damaged_rows: Vec<u16>,
+    /// True when alacritty reports full damage (scroll, insert-mode, or a
+    /// similar wholesale change). A `true` value means the renderer must
+    /// redraw everything and `damaged_rows` is irrelevant.
+    damage_full: bool,
 }
 
 // SAFETY: see BBSnap's unsafe impl Send above; same reasoning applies.
@@ -697,7 +707,7 @@ unsafe impl Send for BBSnapOwned {}
 unsafe impl Sync for BBSnapOwned {}
 
 impl BBSnapOwned {
-    // Passing 8 args is deliberate — collapsing into a struct just to appease
+    // Passing 10 args is deliberate — collapsing into a struct just to appease
     // the lint would obscure the call site, which is a single private caller
     // inside `bb_term_take_snapshot`.
     #[allow(clippy::too_many_arguments)]
@@ -711,6 +721,8 @@ impl BBSnapOwned {
         cursor_shape: u8,
         cells: Vec<BBCell>,
         links: Vec<std::ffi::CString>,
+        damaged_rows: Vec<u16>,
+        damage_full: bool,
     ) -> Box<BBSnapOwned> {
         let mut owned = Box::new(BBSnapOwned {
             snap: BBSnap {
@@ -731,6 +743,8 @@ impl BBSnapOwned {
             rc: AtomicUsize::new(1),
             cells_owned: cells,
             links,
+            damaged_rows,
+            damage_full,
         });
         // Capture the stable heap pointer into the public field.
         owned.snap.cells = owned.cells_owned.as_ptr();
@@ -1034,7 +1048,21 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         if term.is_null() {
             return std::ptr::null();
         }
-        let bb = &*term;
+        let bb = &mut *term;
+
+        // Drain the damage set BEFORE reading the grid. `Term::damage` takes
+        // `&mut self`; the grid borrow below is immutable, so the two can't
+        // coexist. Capturing damage first lets us hold it in a plain Vec<u16>
+        // that outlives the grid borrow. After reading, reset damage so the
+        // next `bb_term_input` cycle starts with a clean slate — the renderer
+        // gets one set of damaged rows per snapshot, not a growing union.
+        use alacritty_terminal::term::TermDamage;
+        let (damaged_rows, damage_full): (Vec<u16>, bool) = match bb.term.damage() {
+            TermDamage::Full => (Vec::new(), true),
+            TermDamage::Partial(iter) => (iter.map(|b| b.line as u16).collect(), false),
+        };
+        bb.term.reset_damage();
+
         let palette = bb.term.colors();
         let grid = bb.term.grid();
 
@@ -1148,6 +1176,8 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             cursor_shape,
             cells,
             links,
+            damaged_rows,
+            damage_full,
         );
         // Expose the public `snap` field (first field at offset 0).
         let owned_ptr = Box::into_raw(owned);
@@ -1279,6 +1309,61 @@ pub unsafe extern "C" fn bb_term_current_mode(term: *mut BBTerm) -> u32 {
         }
         let bb = &*term;
         extract_mode(bb.term.mode())
+    })
+}
+
+/// Report whether the snapshot's damage set is "full" (all rows need a
+/// redraw — scroll, insert-mode, viewport scrollback change). When true,
+/// the renderer must treat every row as damaged regardless of
+/// `bb_snap_damage_rows`.
+///
+/// # Safety
+/// `snap` must be a pointer from `bb_term_take_snapshot` or retained from
+/// one. Null returns 1 (the safe default: repaint everything).
+#[no_mangle]
+pub unsafe extern "C" fn bb_snap_damage_is_full(snap: *const BBSnap) -> u8 {
+    guard_no_term(1u8, || {
+        if snap.is_null() {
+            return 1;
+        }
+        let owned = BBSnapOwned::from_snap_ptr(snap);
+        if (*owned).damage_full {
+            1
+        } else {
+            0
+        }
+    })
+}
+
+/// Copy the snapshot's damaged-row indices into the caller's buffer. Returns
+/// the number of rows written (capped at `out_cap`). If `out` is null or
+/// `out_cap` is zero, returns 0. If the damage is `Full`, returns 0 —
+/// callers must check `bb_snap_damage_is_full` first and treat "full" as
+/// "all rows need redraw".
+///
+/// # Safety
+/// - `snap` must be a pointer from `bb_term_take_snapshot` or retained
+/// - `out` must either be null OR point to at least `out_cap` u16 slots
+///   of writable memory with correct alignment for u16.
+/// - Safe to call from any thread.
+#[no_mangle]
+pub unsafe extern "C" fn bb_snap_damage_rows(
+    snap: *const BBSnap,
+    out: *mut u16,
+    out_cap: usize,
+) -> usize {
+    guard_no_term(0usize, || {
+        if snap.is_null() || out.is_null() || out_cap == 0 {
+            return 0;
+        }
+        let owned = BBSnapOwned::from_snap_ptr(snap);
+        if (*owned).damage_full {
+            return 0;
+        }
+        let rows = &(*owned).damaged_rows;
+        let n = rows.len().min(out_cap);
+        std::ptr::copy_nonoverlapping(rows.as_ptr(), out, n);
+        n
     })
 }
 

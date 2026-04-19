@@ -38,9 +38,7 @@ fn csi_58_2_sets_rgb_underline_color() {
 fn csi_59_clears_underline_color() {
     // `\x1b[59m` resets back to default. Subsequent cells should report
     // the unset sentinel again.
-    let (flags, color) = unsafe {
-        feed_one(b"\x1b[4m\x1b[58:2::255:0:0m\x1b[59mX")
-    };
+    let (flags, color) = unsafe { feed_one(b"\x1b[4m\x1b[58:2::255:0:0m\x1b[59mX") };
     assert_ne!(flags & cell_flags::UNDERLINE, 0);
     assert_eq!(color, UNDERLINE_COLOR_UNSET);
 }
@@ -63,8 +61,7 @@ fn underline_color_independent_of_fg() {
     // surrounding text stays fg-colored. A regression where fg bled into
     // underline_color would be silently wrong (red text with red squiggles
     // looks fine in isolation) — pin that they're distinct.
-    let (_flags, color) =
-        unsafe { feed_one(b"\x1b[32m\x1b[4:3m\x1b[58:2::255:0:0mA") };
+    let (_flags, color) = unsafe { feed_one(b"\x1b[32m\x1b[4:3m\x1b[58:2::255:0:0mA") };
     // fg is green (set by [32m); underline is explicitly red. Underline
     // field must carry red, NOT green.
     assert_eq!(color & 0x00FF_FFFF, 0x00FF_0000);
