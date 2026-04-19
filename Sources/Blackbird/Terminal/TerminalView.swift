@@ -1938,7 +1938,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             hoverTooltipLabel = lbl
             label = lbl
         }
-        label.stringValue = urlString
+        // Clamp the displayed URL. A misbehaving remote could stuff
+        // megabytes of OSC 8 target into the link table; sizing an
+        // NSTextField against it would hang the UI and push the panel
+        // off-screen. 512 chars covers every realistic URL; anything
+        // over that gets an ellipsis so the user still sees the origin.
+        let maxDisplay = 512
+        label.stringValue = urlString.count > maxDisplay
+            ? String(urlString.prefix(maxDisplay)) + "…"
+            : urlString
         label.sizeToFit()
         let padX: CGFloat = 8, padY: CGFloat = 4
         let labelFrame = NSRect(
