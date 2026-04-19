@@ -3,6 +3,9 @@ import CoreText
 import Combine
 import Metal
 import MetalKit
+#if DEBUG
+import os
+#endif
 
 /// Fixed-cell metrics derived from a monospaced font.
 public struct CellMetrics {
@@ -201,7 +204,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     #if DEBUG
     private var frameCount = 0
-    private var lastFrameLogTime = Date()
+    private var lastFrameLogTime = CACurrentMediaTime()
+    private var lastFrameTime: CFTimeInterval = 0
+    private var frameIntervalMinMs: Double = .infinity
+    private var frameIntervalMaxMs: Double = 0
+    private var frameIntervalSumMs: Double = 0
+    // `os.Logger` (not `NSLog`) so `privacy: .public` markers on string
+    // interpolations actually take effect — NSLog builds its format string
+    // at runtime, which defeats the compile-time qualifier and redacts the
+    // entire message as `<private>` in the unified log.
+    private static let fpsLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                          category: "fps")
     #endif
 
     public init(frame frameRect: NSRect, device: MTLDevice) {
@@ -230,18 +243,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         self.framebufferOnly = true
         self.isPaused = false
         self.enableSetNeedsDisplay = false
-        // Upper-bound the redraw rate. CVDisplayLink syncs to the display's
-        // vblank, so this effectively becomes "whatever the screen supports":
-        // 60 Hz on a standard Retina, 120 Hz on a ProMotion MacBook or Studio
-        // Display. Moving the window between displays is handled by the OS —
-        // the link reattaches to the new screen automatically. The observer
-        // below (viewDidMoveToWindow) is just belt-and-suspenders logging.
+        // MTKView's internal CVDisplayLink drives `draw(in:)` at the screen's
+        // vblank rate. On a 60 Hz display that's 60 fps; on a ProMotion panel
+        // we'd *like* 120 fps but empirically macOS's coalescer refuses to
+        // promote the display for this workload no matter which API we use
+        // to request it — `preferredFramesPerSecond = 120`, `NSView.
+        // displayLink` / `NSWindow.displayLink` / `NSScreen.displayLink`
+        // with `preferredFrameRateRange = (80,120,120)` (or strict
+        // (120,120,120)) all fire every *other* vblank on the built-in
+        // Liquid Retina XDR (8.33 ms link.duration, 16.67 ms actual spacing).
+        // The DEBUG fps diagnostic below is a standing regression sensor:
+        // if a future macOS or a config change ever does promote us, we'll
+        // see mean interval drop to ~8.3 ms without code changes here.
         self.preferredFramesPerSecond = 120
-        // Opt in to triple-buffered presentation. On ProMotion displays this
-        // signals "high-framerate workload" so macOS's adaptive refresh
-        // promotes the display to 120 Hz while we're the frontmost window
-        // (inactive apps still throttle to 60 Hz for battery — that's
-        // intentional OS-level behavior and not something we should fight).
+        // Triple-buffered presentation + vsync. These are still worthwhile
+        // at 60 fps (no tearing, frame N+1 encodes while N presents) even
+        // though they aren't sufficient to unlock 120 Hz on their own.
         if let metalLayer = self.layer as? CAMetalLayer {
             metalLayer.maximumDrawableCount = 3
             metalLayer.displaySyncEnabled = true
@@ -573,15 +590,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         registerForDraggedTypes([.fileURL])
         #if DEBUG
         if let screen = window?.screen {
-            // On macOS, `maximumFramesPerSecond` reflects the screen's native
-            // refresh rate (60 on standard displays, 120 on ProMotion). The
-            // OS clamps our preferred rate to this automatically via the
-            // internal CVDisplayLink, so no manual retarget is needed — this
-            // is just so the DEBUG fps log can be sanity-checked against the
-            // expected ceiling.
+            // `maximumFramesPerSecond` is the panel's native ceiling (60 on
+            // standard Retina, 120 on ProMotion). Logged once per window
+            // attach so the periodic fps line below can be sanity-checked
+            // against the expected rate.
             let maxFPS = screen.maximumFramesPerSecond
-            NSLog("[Blackbird] attached to screen '%@' @ %d Hz max",
-                  screen.localizedName, maxFPS)
+            Self.fpsLogger.log("attached to screen '\(screen.localizedName, privacy: .public)' @ \(maxFPS, privacy: .public) Hz max")
         }
         #endif
 
@@ -610,6 +624,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         ) { [weak self] _ in
             self?.sendFocusEventIfNeeded(gained: false)
         })
+        #if DEBUG
+        // Window-attach logging (above) fires once per view⇄window pairing,
+        // not when the user drags the window between displays — the view's
+        // `window` property doesn't change on a screen move. Observe the
+        // window's own screen-change notification so the DEBUG fps log can
+        // be sanity-checked against whichever display the view is actually
+        // presenting on right now.
+        focusObservers.append(center.addObserver(
+            forName: NSWindow.didChangeScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, let screen = self.window?.screen else { return }
+            Self.fpsLogger.log("window moved to screen '\(screen.localizedName, privacy: .public)' @ \(screen.maximumFramesPerSecond, privacy: .public) Hz max")
+        })
+        #endif
     }
 
     deinit {
@@ -690,12 +720,50 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         #if DEBUG
+        // Count draws and sample the interval between consecutive calls so
+        // the periodic log can distinguish "N fps with 16.67ms spacing" (60 Hz
+        // vsync'd) from "N fps with 8.33ms spacing" (120 Hz vsync'd) from
+        // "N fps with wildly uneven spacing" (MTKView stalling). Use
+        // CACurrentMediaTime (mach_absolute_time) rather than Date — Date is
+        // wall-clock and drifts; we want strict monotonic elapsed here.
+        let nowMedia = CACurrentMediaTime()
+        if lastFrameTime != 0 {
+            let dtMs = (nowMedia - lastFrameTime) * 1000.0
+            frameIntervalSumMs += dtMs
+            if dtMs < frameIntervalMinMs { frameIntervalMinMs = dtMs }
+            if dtMs > frameIntervalMaxMs { frameIntervalMaxMs = dtMs }
+        }
+        lastFrameTime = nowMedia
         frameCount += 1
-        let now = Date()
-        if now.timeIntervalSince(lastFrameLogTime) >= 1.0 {
-            NSLog("[Blackbird] %d fps", frameCount)
+        let elapsed = nowMedia - lastFrameLogTime
+        if elapsed >= 1.0 {
+            let intervals = max(1, frameCount - 1)
+            let mean = frameIntervalSumMs / Double(intervals)
+            let screenName = window?.screen?.localizedName ?? "nil"
+            let maxFPS = window?.screen?.maximumFramesPerSecond ?? -1
+            let minMs = frameIntervalMinMs.isFinite ? frameIntervalMinMs : 0
+            // Ask CoreGraphics for the display's *current* mode refresh rate,
+            // independent of MTKView's internal timer. If this returns 120
+            // but we're drawing at 60 fps, the issue is MTKView's display
+            // link (not ProMotion being clamped by System Settings).
+            var hwHz: Double = -1
+            if let sNum = window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+                let cgID = CGDirectDisplayID(sNum.uint32Value)
+                if let mode = CGDisplayCopyDisplayMode(cgID) {
+                    hwHz = mode.refreshRate
+                }
+            }
+            let line = String(
+                format: "%d fps over %.2fs — interval min/mean/max = %.2f/%.2f/%.2f ms — screen '%@' (max %d Hz, hw mode %.2f Hz)",
+                frameCount, elapsed, minMs, mean, frameIntervalMaxMs,
+                screenName, maxFPS, hwHz
+            )
+            Self.fpsLogger.log("\(line, privacy: .public)")
             frameCount = 0
-            lastFrameLogTime = now
+            frameIntervalMinMs = .infinity
+            frameIntervalMaxMs = 0
+            frameIntervalSumMs = 0
+            lastFrameLogTime = nowMedia
         }
         #endif
     }
