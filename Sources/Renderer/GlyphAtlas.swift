@@ -217,6 +217,38 @@ public final class GlyphAtlas {
         )
     }
 
+    /// Pre-populate the atlas with glyphs the first real frame is almost
+    /// certain to touch: printable ASCII (0x20–0x7E) and box-drawing
+    /// (U+2500–U+257F). First-frame correctness is unaffected either way —
+    /// `lookupOrInsert` already rasterises on demand — but pre-warming
+    /// moves the ~50 CoreText calls off the first `draw(in:)` call, so the
+    /// user's first keystroke doesn't pay for the CTLineCreate path. Cheap
+    /// to call: each insert is one 32-byte CGContext plus a `texture.replace`
+    /// of ~2KB.
+    ///
+    /// Safe to call repeatedly; already-inserted glyphs short-circuit via
+    /// the `byScalar` cache. `MetalRenderer.reconfigure` calls this after
+    /// a font-size change so the new atlas is hot for the next repaint.
+    public func prewarmCommonGlyphs() {
+        // ASCII printable — covers every keystroke a US-layout user makes.
+        for value in 0x20...0x7E {
+            if let s = Unicode.Scalar(value) {
+                _ = lookupOrInsert(scalar: s, wide: false)
+            }
+        }
+        // Box drawing — `tree`, `htop`, `btop`, `less -N`, git's log graph,
+        // and Claude Code's own startup avatar all use these. Thin set
+        // (U+2500–U+257F) is what TUIs emit overwhelmingly; heavier ranges
+        // (block elements, legacy computing) rasterise lazily on first
+        // occurrence — rare enough that prewarming them would cost atlas
+        // slots that typical workloads never need.
+        for value in 0x2500...0x257F {
+            if let s = Unicode.Scalar(value) {
+                _ = lookupOrInsert(scalar: s, wide: false)
+            }
+        }
+    }
+
     /// True for Unicode ranges where the glyph is *designed* to tile with its
     /// neighbors — box drawing (`─│┌┐…`), block elements (`▀▄█▟…`), braille
     /// patterns (used by some TUIs as a 2×4 super-pixel grid), and Unicode

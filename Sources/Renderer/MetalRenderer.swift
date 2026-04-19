@@ -241,6 +241,11 @@ public final class MetalRenderer {
         self.metrics = metrics
         self.instanceBuffers = buffers
         self.instanceCapacities = [startCap, startCap, startCap]
+        // Warm ASCII + box-drawing into the atlas before the first draw so
+        // no user keystroke pays for the CTLineCreate path on the hot
+        // first-paint. Safe: this is a plain call into `lookupOrInsert`,
+        // which is idempotent.
+        atlas.prewarmCommonGlyphs()
     }
 
     /// Rebuild metrics + atlas for a new font size. Safe to call from the
@@ -258,6 +263,9 @@ public final class MetalRenderer {
         }
         self.metrics = newMetrics
         self.atlas = a
+        // Re-warm the new atlas so the post-resize first repaint doesn't
+        // pay for CoreText rasterisation of every visible character.
+        a.prewarmCommonGlyphs()
         // A new atlas points to different texture contents; the skip
         // cache is now stale. Force the next render to encode and present
         // even if every FrameKey field matches the previous frame.
