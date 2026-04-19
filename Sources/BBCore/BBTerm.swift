@@ -338,12 +338,19 @@ extension BBSnapshot: A11ySnapshotSource {
         var out: [String] = []
         out.reserveCapacity(rows)
         let cellsPtr = cellsPointer
+        let cellLen = cellCount
         let spacerMask = UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER)
         for r in 0..<rows {
             var chars: [Character] = []
             chars.reserveCapacity(cols)
             for c in 0..<cols {
-                let cell = cellsPtr[r * cols + c]
+                let idx = r * cols + c
+                // `cellsPtr` is a raw UnsafePointer — subscripting past
+                // the end is UB, not a trap. Guard against a
+                // corrupted snapshot where cells_len drifts below
+                // rows*cols.
+                guard idx < cellLen else { break }
+                let cell = cellsPtr[idx]
                 if cell.flags & spacerMask != 0 {
                     continue   // wide-glyph tail, already painted by the leading cell
                 }
