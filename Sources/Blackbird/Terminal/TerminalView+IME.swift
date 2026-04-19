@@ -230,6 +230,25 @@ extension TerminalView: NSTextInputClient {
         0
     }
 
+    /// NSTextInputClient routes editing keys that aren't printable through
+    /// `doCommand(by:)`: Backspace → `deleteBackward:`, Enter → `insertNewline:`,
+    /// arrows → `moveUp:` / `moveDown:` / `moveLeft:` / `moveRight:`, etc.
+    /// `inputContext?.handleEvent(event)` in `keyDown` calls this BEFORE
+    /// keyDown's encoder fall-through runs, so by the time the encoder sends
+    /// the correct byte to the PTY, the default `NSResponder` implementation
+    /// of (e.g.) `deleteBackward(_:)` has already walked up the chain and
+    /// rung the system bell — a beep on every Backspace/Enter/arrow while
+    /// typing.
+    ///
+    /// Absorb the selector here. We don't need to re-do the encoding — the
+    /// keyDown → encoder path handles it a few lines later with the actual
+    /// event (correct modifiers, kitty disambiguation, Option-as-Meta, etc.).
+    /// Leaving this empty IS the fix: the selector is "handled" (no further
+    /// routing), so `NSResponder`'s default doesn't fire its bell.
+    public override func doCommand(by selector: Selector) {
+        // Intentionally empty — see docstring above.
+    }
+
     // MARK: - Helpers
 
     /// Pixel rectangle of the cursor cell in this view's local coordinate
