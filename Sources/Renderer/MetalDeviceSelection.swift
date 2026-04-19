@@ -17,12 +17,6 @@ public protocol GPUDeviceProperties: AnyObject {
     var isRemovable: Bool { get }
 }
 
-extension MTLDevice {
-    // `MTLDevice` is already `AnyObject` since it's a Protocol-typed
-    // class-only protocol, so this conformance is zero-cost. Swift 6
-    // requires explicit conformance for protocol-typed method dispatch.
-}
-
 /// Pick the preferred GPU from a list, favoring integrated + internal.
 /// Pure function on the abstracted properties so the selection policy
 /// is exhaustively testable without needing a real `MTLDevice`.
