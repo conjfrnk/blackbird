@@ -30,10 +30,7 @@ unsafe extern "C" fn capture_cb(ev: bc::BBEvent, ctx: *mut c_void) {
     let cap = &*(ctx as *const Mutex<Captured>);
     let mut guard = cap.lock().unwrap();
     guard.events.push(ev.kind as u32);
-    if ev.kind as u32 == bc::BBEventKind::PtyWrite as u32
-        && !ev.payload.is_null()
-        && ev.len > 0
-    {
+    if ev.kind as u32 == bc::BBEventKind::PtyWrite as u32 && !ev.payload.is_null() && ev.len > 0 {
         let bytes = std::slice::from_raw_parts(ev.payload, ev.len);
         guard.pty_writes.push(bytes.to_vec());
     }

@@ -6,8 +6,6 @@
 //! future caller that doesn't clamp upstream can't leak memory past the
 //! grid edge.
 
-use std::ffi::CStr;
-
 use blackbird_core as bc;
 
 /// Call `bb_term_text_range` against a 10×5 grid primed with known content.
