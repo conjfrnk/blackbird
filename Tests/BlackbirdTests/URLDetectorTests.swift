@@ -57,6 +57,26 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(matches.first?.url.absoluteString, url)
     }
 
+    func test_scan_fileScheme_isRejected() throws {
+        // file:// URLs are excluded from URL detection because
+        // NSWorkspace.open on a `.command` / `.app` / `.pkg` path
+        // executes the payload. A remote printing such a URL in
+        // plain output shouldn't translate into a one-keystroke
+        // open gesture.
+        for raw in [
+            "file:///tmp/malicious.command",
+            "file:///Applications/Calculator.app",
+            "file:///etc/passwd",
+        ] {
+            let snap = try snapshot(from: raw)
+            let matches = URLDetector.scan(snapshot: snap)
+            XCTAssertEqual(
+                matches.count, 0,
+                "regex detector must not surface file:// URLs: \(raw)"
+            )
+        }
+    }
+
     func test_scan_twoURLs_sameLine_returnsTwoInOrder() throws {
         let a = "https://foo.com"
         let b = "https://bar.org/x"
