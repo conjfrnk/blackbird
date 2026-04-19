@@ -134,6 +134,24 @@ final class HyperlinkTests: XCTestCase {
         }
     }
 
+    func testOsc8UrlAllowlistHandlesPercentEncodedScheme() {
+        // Edge case: URL(string:) accepts some percent-encoded schemes
+        // like \`http%00:\`. Those should be treated as an unknown
+        // scheme (the NUL byte isn't part of "http" for allowlist
+        // purposes). Verify the lowercased scheme check isn't fooled.
+        for raw in [
+            "http%00://example.com",
+            "ht%00tp://example.com",
+            "http\u{0}://example.com",
+        ] {
+            guard let u = URL(string: raw) else { continue }
+            XCTAssertFalse(
+                OSC8URLPolicy.isAllowed(u),
+                "percent-encoded / embedded-NUL scheme must be rejected: \(raw)"
+            )
+        }
+    }
+
     func testOsc8UrlSchemeAllowlistRejectsDangerous() {
         // Classic OSC 8 injection vectors: a shell on a compromised host
         // can emit a hyperlink with any scheme; without the allowlist,
