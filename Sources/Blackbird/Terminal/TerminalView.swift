@@ -1537,9 +1537,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         guard let snap = currentSnapshot else { return }
         let displayRowForMatch = Int(m.line) + snap.displayOffset
         if displayRowForMatch < 0 {
-            session?.scroll(delta: Int32(-displayRowForMatch))
+            session?.scroll(delta: Int32(clamping: -displayRowForMatch))
         } else if displayRowForMatch >= snap.rows {
-            session?.scroll(delta: Int32(snap.rows - 1 - displayRowForMatch))
+            session?.scroll(delta: Int32(clamping: snap.rows - 1 - displayRowForMatch))
         }
     }
 
