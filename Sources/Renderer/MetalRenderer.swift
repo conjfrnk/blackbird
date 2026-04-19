@@ -104,6 +104,18 @@ public final class MetalRenderer {
     }
     private var lastFrameKey: FrameKey?
 
+    /// Runtime escape hatch. Set the env var `BB_NO_FRAME_SKIP=1` and
+    /// restart to disable the skip path entirely — every draw(in:) call
+    /// runs the full encode + present. Useful when a user reports a
+    /// redraw artifact ("looks weird after closing popup X") and we
+    /// want to A/B test whether frame-skip is responsible. Evaluated
+    /// once per renderer via `getenv` — changes require an app restart.
+    private let frameSkipDisabled: Bool = {
+        guard let cstr = getenv("BB_NO_FRAME_SKIP") else { return false }
+        let raw = String(cString: cstr)
+        return !raw.isEmpty && raw != "0"
+    }()
+
     public func setCursorBlinkEnabled(_ enabled: Bool) {
         if enabled != cursorBlinkEnabled {
             cursorBlinkEnabled = enabled
@@ -512,7 +524,7 @@ public final class MetalRenderer {
             cursorColorBits: Self.packSIMD4(cursorColor),
             blinkSkip: blinkSkipNow
         )
-        if frameKey == lastFrameKey {
+        if !frameSkipDisabled, frameKey == lastFrameKey {
             // Nothing that affects pixels has changed since the last
             // presented frame. Skip the whole pipeline — no CPU instance
             // rebuild, no GPU encode, no drawable acquisition. The
