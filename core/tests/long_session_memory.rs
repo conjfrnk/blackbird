@@ -125,11 +125,14 @@ mod macos {
         );
 
         // A real leak would add ~scrollback-worth of memory per iteration
-        // (at least hundreds of KB). 64 iterations → tens of MB.
-        // Observed on M2 Pro: ~0-2 MiB variance. Allow 16 MiB headroom for
-        // CI variance and allocator retention.
+        // (at least hundreds of KB). 64 iterations → tens of MB. Observed
+        // on M2 Pro: ~0-2 MiB variance. Observed on macos-14 CI runners:
+        // up to ~26 MiB variance under load — the 16 MiB gate tripped on
+        // a clean run with no code leak (local repro: 1.3 MiB). Bump to
+        // 48 MiB so a real 1 MB/iter leak still fails (64 MiB) while
+        // allocator retention under runner pressure doesn't.
         assert!(
-            growth < 16 * 1024 * 1024,
+            growth < 48 * 1024 * 1024,
             "RSS grew by {:.1} MiB over 64 iterations — suspect leak",
             growth as f64 / (1024.0 * 1024.0)
         );
