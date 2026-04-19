@@ -94,3 +94,52 @@ fn golden_csi_box() {
         blackbird_core::bb_term_free(term);
     }
 }
+
+/// Reproduce a Claude Code-style inline popup open / close cycle:
+/// draw base text, overwrite a middle row with a "popup" bar using
+/// cursor positioning + EL, then dismiss by re-emitting the original
+/// row over the popup. Alacritty must land on the restored base text
+/// — no ghost characters, no misplaced cursor. Without this, a bug
+/// class like CVE-fix-candidate "partial-line EL leaves stale cells"
+/// would silently regress under an alacritty_terminal upgrade.
+#[test]
+fn popup_open_close_restores_original_row() {
+    unsafe {
+        let term = blackbird_core::bb_term_new(40, 5, 100);
+        // Draw 5 rows of visible content.
+        for (i, line) in [
+            "row 0 original content here",
+            "row 1 original content here",
+            "row 2 original content here",
+            "row 3 original content here",
+            "row 4 original content here",
+        ]
+        .iter()
+        .enumerate()
+        {
+            // CUP (cursor position): ESC [ row+1 ; 1 H, then the line.
+            let seq = format!("\x1b[{};1H{}", i + 1, line);
+            blackbird_core::bb_term_input(term, seq.as_ptr(), seq.len());
+        }
+        // Claude Code-style popup: overwrite row 2 with a narrow "POPUP" bar
+        // using CUP + text + EL (clear to end of line).
+        let popup_open = "\x1b[3;1H╭─POPUP─╮\x1b[K";
+        blackbird_core::bb_term_input(term, popup_open.as_ptr(), popup_open.len());
+        // "Close" by rewriting the original content over the popup row,
+        // again with EL to clear the residue.
+        let popup_close = "\x1b[3;1Hrow 2 original content here\x1b[K";
+        blackbird_core::bb_term_input(term, popup_close.as_ptr(), popup_close.len());
+
+        let out = render_grid(term);
+        for i in 0..5 {
+            let expected = format!("row {} original content here", i);
+            let line = out.lines().nth(i).unwrap_or("");
+            assert_eq!(
+                line, expected,
+                "row {} must restore to original after popup close; got {:?}",
+                i, line
+            );
+        }
+        blackbird_core::bb_term_free(term);
+    }
+}
