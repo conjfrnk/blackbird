@@ -37,7 +37,7 @@
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
 	<key>SUEnableInstallerLauncherService</key>
-	<true/>
+	<false/>
 	<key>SUFeedURL</key>
 	<string>https://example.com/appcast.xml</string>
 	<key>SUPublicEDKey</key>

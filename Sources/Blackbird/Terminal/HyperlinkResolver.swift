@@ -40,7 +40,19 @@ public struct DefaultURLOpener: URLOpener {
 enum OSC8URLPolicy {
     /// Schemes we accept for OSC 8 hyperlinks. Matched case-insensitively
     /// against `URL.scheme` after construction.
-    static let allowedSchemes: Set<String> = ["http", "https", "ftp", "mailto", "file"]
+    ///
+    /// `file://` is deliberately **not** on this list. `NSWorkspace.open`
+    /// on a file URL dispatches to the registered opener, which for path
+    /// extensions like `.command`, `.app`, `.pkg`, `.workflow`,
+    /// `.terminal`, `.scpt`, `.webloc`, `.inetloc` means *immediate
+    /// execution*. A remote emitting `ESC]8;;file:///tmp/x.command` and
+    /// the user ⌘-clicking the embedded hyperlink would run the payload.
+    /// The click is an explicit gesture but the user sees only the anchor
+    /// text — they don't see the target extension unless they wait for
+    /// the tooltip. Strict-allowlist side of the tradeoff: drop `file`.
+    /// Users with a legitimate `file://` need, copy the path and `open`
+    /// from the shell.
+    static let allowedSchemes: Set<String> = ["http", "https", "ftp", "mailto"]
 
     /// Decide whether an OSC 8 URL is safe to hand to `NSWorkspace`.
     /// Rejects URLs with no scheme (malformed / relative) or a scheme

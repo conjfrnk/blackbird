@@ -67,7 +67,7 @@ final class HyperlinkTests: XCTestCase {
     }
 
     func testOsc8UrlSchemeAllowlistAccepts() {
-        for scheme in ["http", "https", "ftp", "mailto", "file", "HTTPS", "Mailto"] {
+        for scheme in ["http", "https", "ftp", "mailto", "HTTPS", "Mailto"] {
             let u = URL(string: "\(scheme):example")!
             XCTAssertTrue(
                 OSC8URLPolicy.isAllowed(u),
@@ -76,17 +76,36 @@ final class HyperlinkTests: XCTestCase {
         }
     }
 
+    func testOsc8UrlSchemeAllowlistRejectsFileScheme() {
+        // file:// is deliberately excluded. NSWorkspace.open on a file URL
+        // dispatches to the registered opener — for .command / .app / .pkg
+        // / .workflow / .terminal that's *immediate execution*. A single
+        // ⌘-click on a crafted OSC 8 file:// hyperlink shouldn't be a
+        // one-keystroke RCE.
+        for raw in [
+            "file:///tmp/malicious.command",
+            "file:///Applications/Calculator.app",
+            "file:///etc/passwd",
+            "file://localhost/tmp/readme.md",
+        ] {
+            guard let u = URL(string: raw) else { continue }
+            XCTAssertFalse(
+                OSC8URLPolicy.isAllowed(u),
+                "file:// must be rejected — execution hazard: \(raw)"
+            )
+        }
+    }
+
     func testOsc8UrlAllowlistAcceptsLegitimateVariants() {
         // URL(string:) accepts plenty of shapes — ports, query strings,
         // auth components, IPv6 literals. All should pass the scheme
         // gate; none should surface unsafe behaviour because NSWorkspace
-        // still dispatches via the registered http/https/ftp/file/mailto
-        // handler which is the user's browser / Finder / Mail.app.
+        // still dispatches via the registered http/https/ftp/mailto
+        // handler which is the user's browser / Mail.app.
         let ok = [
             "https://example.com:8443/path?q=1&x=2#frag",
             "http://[2001:db8::1]/",
             "mailto:root@example.com?subject=hi",
-            "file:///Users/me/readme.md",
             "ftp://ftp.example.com/pub/file.tgz",
         ]
         for raw in ok {

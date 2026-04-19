@@ -78,7 +78,12 @@ targets:
         SUPublicEDKey: ""
         SUEnableAutomaticChecks: false
         SUScheduledCheckInterval: 86400
-        SUEnableInstallerLauncherService: true
+        # Keep the privileged InstallerLauncher XPC service OFF until a
+        # real signed appcast (non-placeholder SUFeedURL + non-empty
+        # SUPublicEDKey) ships. Sparkle registers a root-level helper
+        # when this is true; with the current placeholder feed the
+        # updater never runs, so we don't need the surface live.
+        SUEnableInstallerLauncherService: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.conjfrnk.blackbird

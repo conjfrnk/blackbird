@@ -431,6 +431,53 @@ final class TerminalViewTests: XCTestCase {
         )
     }
 
+    func test_pasteSanitizerPipeline_handlesCombinedAttack() {
+        // Realistic crafted payload that mixes every attack class:
+        //   - CRLF line endings (Windows-origin paste)
+        //   - Embedded Ctrl+C (C0 escape)
+        //   - Embedded ESC (would drive terminal into unexpected mode)
+        //   - U+202E RLO (Trojan Source override)
+        //   - Embedded bracketed-paste terminator (nested-paste escape)
+        // Running the pipeline in the same order pasteText uses — normalise,
+        // then sanitize controls, then strip bidi — must produce a harmless
+        // byte sequence with only printable chars + real newlines.
+        var input = Data("ok\r\n".utf8)
+        input.append(0x03)                                           // Ctrl+C
+        input.append(Data("rm -rf".utf8))
+        input.append(contentsOf: [0xE2, 0x80, 0xAE])                 // U+202E RLO
+        input.append(Data(" /\n".utf8))
+        input.append(0x1B)                                           // ESC
+        input.append(Data("[2J".utf8))                               // clear screen
+        input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E])  // ESC[201~
+        input.append(Data("tail".utf8))
+
+        let normalised = TerminalView.normalizePasteLineEndings(input)
+        let cleanedControls = TerminalView.sanitizePasteControls(normalised)
+        let bidiStripped = TerminalView.stripBidiOverrides(cleanedControls)
+        let bracketStripped = TerminalView.sanitizeBracketedPaste(bidiStripped)
+
+        // Every byte <0x20 other than TAB/LF/CR must be gone.
+        for b in bracketStripped {
+            if b == 0x09 || b == 0x0A || b == 0x0D { continue }
+            XCTAssertGreaterThanOrEqual(
+                b, 0x20,
+                "byte 0x\(String(b, radix: 16)) survived sanitizer pipeline"
+            )
+            XCTAssertNotEqual(b, 0x7F, "DEL survived sanitizer pipeline")
+        }
+        // Bidi override sequence must be fully stripped (E2 80 AE gone as a unit).
+        XCTAssertFalse(
+            bracketStripped.contains(Data([0xE2, 0x80, 0xAE])),
+            "U+202E override byte sequence leaked through"
+        )
+        // Newlines normalised: no CR (0x0D) anywhere except as part of a CRLF
+        // we'd already collapsed. Check there's no stray CR.
+        XCTAssertFalse(
+            bracketStripped.contains(0x0D),
+            "CR byte leaked through normalizePasteLineEndings"
+        )
+    }
+
     func test_stripBidiOverrides_fastPathWhenNoE2Byte() {
         // Pure ASCII hits the early-return; the assertion is identity.
         let input = Data("pure ascii payload, no bidi".utf8)
