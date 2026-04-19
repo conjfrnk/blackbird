@@ -874,6 +874,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // that originated as u16.
         renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
+        // Any frame after a keystroke counts as "the keystroke landed on
+        // screen" for probe purposes. The renderer's frame-skip path returns
+        // early on unchanged state, so we only reach here on presented frames
+        // — close enough to true input→pixel for a diagnostic probe.
+        LatencyProbe.shared.markPresented()
         #if DEBUG
         // Count draws and sample the interval between consecutive calls so
         // the periodic log can distinguish "N fps with 16.67ms spacing" (60 Hz
@@ -1005,6 +1010,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             super.keyDown(with: event)
             return
         }
+
+        // Stamp the keystroke entry point for the input→pixel latency probe.
+        // No-op unless BB_LATENCY_PROBE=1. Placed after the ⌘ / no-session
+        // early returns so only keystrokes that actually dispatch toward the
+        // PTY get measured. The single-slot design collapses bursts to the
+        // most recent keystroke, which is exactly what the user perceives.
+        LatencyProbe.shared.markKeystroke()
 
         // Any shell-bound keystroke also cancels an active selection.
         if selection != nil { selection = nil }
