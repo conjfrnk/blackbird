@@ -57,6 +57,29 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(matches.first?.url.absoluteString, url)
     }
 
+    func test_scan_rejectsNonHttpSchemes() throws {
+        // Other schemes that NSWorkspace.open would silently dispatch
+        // to registered handlers must not survive the regex. If a
+        // future pattern edit loosens this, the test surfaces it.
+        for raw in [
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "ssh://user@host/",
+            "telnet://host:23/",
+            "x-man-page://printf",
+            "vnc://localhost:5900/",
+            "afp://server/share",
+            "smb://fileserver/share",
+        ] {
+            let snap = try snapshot(from: raw)
+            let matches = URLDetector.scan(snapshot: snap)
+            XCTAssertEqual(
+                matches.count, 0,
+                "regex must not match non-allowlisted scheme: \(raw)"
+            )
+        }
+    }
+
     func test_scan_fileScheme_isRejected() throws {
         // file:// URLs are excluded from URL detection because
         // NSWorkspace.open on a `.command` / `.app` / `.pkg` path
