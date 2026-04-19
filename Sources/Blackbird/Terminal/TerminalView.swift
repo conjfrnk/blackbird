@@ -2098,10 +2098,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool, session: TerminalSession) {
         let loc = convert(event.locationInWindow, from: nil)
-        let col = max(0, Int(loc.x / metrics.cellWidth))
-        // Text grid starts at `titlebarOnlyTopInset` (the titlebar), so subtract
-        // that before converting to row.
-        let row = max(0, Int((bounds.height - titlebarOnlyTopInset - loc.y) / metrics.cellHeight))
+        // Paranoia. `event.locationInWindow` is a CGFloat; a misbehaving
+        // input device or a bridged NaN / Infinity can slip through, and
+        // `Int(NaN)` / `Int(±Inf)` trap. Guard before the cast rather
+        // than after — the scrollWheel path already uses this pattern.
+        guard loc.x.isFinite, loc.y.isFinite else { return }
+        let rowY = (bounds.height - titlebarOnlyTopInset - loc.y) / metrics.cellHeight
+        let colX = loc.x / metrics.cellWidth
+        // Clamp to a sane cell range so oversized coordinates (user
+        // scrolled the window off the right edge of a 200k-col display)
+        // don't overflow Int32 when encodeMouseReport stringifies them.
+        let maxCol = 10_000, maxRow = 10_000
+        let col = max(0, min(maxCol, rowY.isFinite ? Int(colX) : 0))
+        let row = max(0, min(maxRow, rowY.isFinite ? Int(rowY) : 0))
         guard let bytes = Self.encodeMouseReport(
             sgr: sgrMouseEnabled(),
             button: button,

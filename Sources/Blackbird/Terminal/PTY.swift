@@ -229,7 +229,17 @@ public final class PTY {
             // the soft open-file limit. Typically 256 fds on macOS; each
             // close of an unopened slot returns EBADF in <1µs, so the whole
             // sweep is well under a millisecond — paid once per spawn.
-            let openMax = sysconf(Int32(_SC_OPEN_MAX))
+            //
+            // Clamp the bound. `sysconf(_SC_OPEN_MAX)` returns the soft
+            // `RLIMIT_NOFILE`, which a user with `ulimit -Sn unlimited`
+            // inflates to effectively LONG_MAX. Unclamped, the `Int32()`
+            // cast later traps on overflow and SIGILLs the child after
+            // fork, leaving the master fd stranded in the parent. 65536
+            // is plenty: we only need to cover every fd the GUI app has
+            // opened, and apps that legitimately hold >65k fds aren't
+            // spawning shells.
+            let rawMax = sysconf(Int32(_SC_OPEN_MAX))
+            let openMax: Int = rawMax > 65_536 || rawMax <= 0 ? 65_536 : Int(rawMax)
             if openMax > 3 {
                 for fd in Int32(3)..<Int32(openMax) {
                     _ = Darwin.close(fd)

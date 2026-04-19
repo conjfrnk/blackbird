@@ -45,6 +45,48 @@ fn osc8_empty_href_clears_attribution() {
 }
 
 #[test]
+fn osc8_drops_attribution_when_uri_exceeds_cap() {
+    // A remote can emit a megabyte-long URL as the OSC 8 target; the
+    // cap limits the per-snapshot CString allocation. Over-long URIs
+    // drop to "no attribution" rather than truncate — a truncated URL
+    // that opens would go to a different destination than the user
+    // expected. Pick a URI at 4 KiB + 1 to land just past the cap.
+    let long_uri: String = "https://example.com/?q=".to_string() + &"a".repeat(4096);
+    let seq = format!("\x1b]8;;{}\x1b\\X\x1b]8;;\x1b\\", long_uri);
+    assert_eq!(
+        snap_link_for_cell(seq.as_bytes(), 0, 0),
+        None,
+        "URI longer than 4 KiB must not produce a live link"
+    );
+}
+
+#[test]
+fn osc8_accepts_uri_at_cap_boundary() {
+    // 4 KiB exactly must still work — the cap is inclusive on 4096.
+    let uri: String =
+        "https://example.com/?q=".to_string() + &"a".repeat(4096 - "https://example.com/?q=".len());
+    assert_eq!(uri.len(), 4096);
+    let seq = format!("\x1b]8;;{}\x1b\\X\x1b]8;;\x1b\\", uri);
+    assert_eq!(
+        snap_link_for_cell(seq.as_bytes(), 0, 0).as_deref(),
+        Some(uri.as_str()),
+        "URI exactly at 4 KiB must survive"
+    );
+}
+
+#[test]
+fn bb_term_new_clamps_oversized_scrollback() {
+    // u32::MAX would tell alacritty to allocate unbounded history.
+    // Construction must still succeed (clamped silently to a sane cap)
+    // so a caller that passes a huge value doesn't strand the terminal.
+    unsafe {
+        let term = bb_term_new(80, 24, u32::MAX);
+        assert!(!term.is_null(), "huge scrollback must clamp, not fail");
+        bb_term_free(term);
+    }
+}
+
+#[test]
 fn osc8_invalid_link_id_returns_null() {
     unsafe {
         let term = bb_term_new(80, 24, 1000);

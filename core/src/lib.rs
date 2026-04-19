@@ -416,6 +416,15 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             cols: cols as usize,
             rows: rows as usize,
         };
+        // Cap scrollback at 200 000 lines. Alacritty allocates a Cell
+        // per (col, line) in scrollback; a legitimate 10 000 × 500 cols
+        // × 32-byte cells is already ~160 MiB. A caller passing u32::MAX
+        // through the FFI would tell alacritty to grow unbounded.
+        // 200k × 500 cols × 32B ≈ 3.2 GB — still a generous ceiling
+        // that covers every realistic workflow and exits gracefully
+        // before exhausting RAM.
+        const SCROLLBACK_MAX: u32 = 200_000;
+        let scrollback = scrollback.min(SCROLLBACK_MAX);
         let config = Config {
             scrolling_history: scrollback as usize,
             // Opt into alacritty's kitty keyboard protocol dispatch. Without
@@ -993,13 +1002,20 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         links.push(std::ffi::CString::new("").expect("empty CString is infallible"));
         let mut link_ids: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
 
+        // Per-URI length cap. A remote can emit megabytes of junk as the
+        // OSC 8 target; each snapshot retains the `CString` for the
+        // snapshot's lifetime. 4 KiB covers every realistic URL (the
+        // longest http URL in common use is ~2 KiB) and is what iTerm2
+        // applies. Over-long URIs drop to no-link rather than truncate
+        // — a truncated URL that opens is worse than no link.
+        const OSC8_URI_MAX: usize = 4096;
         for indexed in grid.display_iter() {
             let link_id: u16 = match indexed.cell.hyperlink() {
                 Some(h) => {
                     let uri = h.uri();
                     // alacritty's OSC 8 parser rejects empty URIs upstream, but
                     // we defensively treat an empty uri as "no link".
-                    if uri.is_empty() {
+                    if uri.is_empty() || uri.len() > OSC8_URI_MAX {
                         0
                     } else if let Some(&id) = link_ids.get(uri) {
                         id
