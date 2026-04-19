@@ -1831,18 +1831,26 @@ mod tests {
             0,
             "snap must be at offset 0 in BBSnapOwned"
         );
-        // BBCell ABI: 16 bytes, with link_id at offset 14 (replacing the
-        // former _reserved field). Swift and any other C ABI consumer reads
-        // cells directly from BBSnap.cells via these exact offsets.
+        // BBCell ABI: 20 bytes (bumped from 16 on 2026-04-19 to add
+        // underline_color for CSI 58 colored underlines). link_id stays at
+        // offset 14; underline_color lives at 16. Swift and any other C
+        // ABI consumer reads cells directly from BBSnap.cells via these
+        // exact offsets — any further field addition needs a bump here
+        // AND a corresponding stride update in CellInstance / Shaders.metal.
         assert_eq!(
             std::mem::size_of::<BBCell>(),
-            16,
-            "BBCell ABI size must remain 16 bytes"
+            20,
+            "BBCell ABI size must stay synchronized with the Swift reader's struct stride"
         );
         assert_eq!(
             std::mem::offset_of!(BBCell, link_id),
             14,
             "link_id must stay at offset 14 (replacing _reserved)"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BBCell, underline_color),
+            16,
+            "underline_color must stay at offset 16 — packed directly after link_id"
         );
     }
 
