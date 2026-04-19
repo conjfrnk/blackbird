@@ -80,14 +80,18 @@ public func bufferPoint(
     cols: Int,
     rows: Int
 ) -> BufferPoint {
-    // isFinite guards mirror CellMetrics.grid — `Int(Double)` traps on
-    // NaN / ±Infinity, which a stray Core Animation value could feed
-    // in through NSEvent.locationInWindow during unusual drags. Guard
-    // viewportHeight too; NaN there poisons the (viewportHeight-safeY)
-    // subtraction even when localPoint.y itself is finite.
-    let safeY = localPoint.y.isFinite ? localPoint.y : 0
-    let safeX = localPoint.x.isFinite ? localPoint.x : 0
-    let safeVH = viewportHeight.isFinite ? viewportHeight : 0
+    // Guard against two trap classes at Int(Double):
+    //   1. NaN / ±Infinity — a stray Core Animation value through
+    //      NSEvent.locationInWindow during unusual drags.
+    //   2. Finite-but-absurd values — e.g. 1e20 from a misbehaving
+    //      bridged CGPoint, where Int can't hold the magnitude.
+    // Clamp both to a sane pixel count per axis first. Zero for
+    // non-finite, then clamp to [0, 1_000_000] regardless. Mirrors
+    // CellMetrics.grid exactly.
+    let sanePx: CGFloat = 1_000_000
+    let safeY = localPoint.y.isFinite ? min(max(0, localPoint.y), sanePx) : 0
+    let safeX = localPoint.x.isFinite ? min(max(0, localPoint.x), sanePx) : 0
+    let safeVH = viewportHeight.isFinite ? min(max(0, viewportHeight), sanePx) : 0
     let displayRow = max(0, Int((safeVH - safeY) / cellHeight))
     let col = max(0, min(cols - 1, Int(safeX / cellWidth)))
     let rawLine = displayRow - displayOffset
