@@ -1485,8 +1485,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         // Search the entire retained buffer: from -historySize through rows-1.
         // textRange clamps out-of-range lines itself.
-        let topLine: Int32 = -Int32(snap.historySize)
-        let bottomLine = Int32(snap.rows - 1)
+        // historySize is a `u32` capped at 50k via bb_term_new, but
+        // `Int32(huge)` traps if some corrupted metadata ever exceeds
+        // Int32.max. `clamping:` saturates instead — a huge positive
+        // value becomes Int32.max, and `-Int32.max + 1 = Int32.min + 1`
+        // still compiles. Defensive only.
+        let topLine: Int32 = -Int32(clamping: snap.historySize)
+        let bottomLine = Int32(clamping: snap.rows - 1)
         if topLine > bottomLine { return }
         // Cap total matches. A remote-controlled scrollback full of the
         // query string (user searches "e", scrollback is 10 000 × 500
