@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import CoreText
 import Combine
 import Metal
@@ -621,6 +622,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.sendFocusEventIfNeeded(gained: true)
+            self?.enableSecureEventInputIfNeeded()
         })
         focusObservers.append(center.addObserver(
             forName: NSWindow.didResignKeyNotification,
@@ -628,6 +630,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.sendFocusEventIfNeeded(gained: false)
+            self?.disableSecureEventInputIfHeld()
         })
         #if DEBUG
         // Window-attach logging (above) fires once per view⇄window pairing,
@@ -656,6 +659,42 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // panel would otherwise linger briefly after the view is gone.
         hoverTooltipItem?.cancel()
         hoverTooltipPanel?.orderOut(nil)
+        // Release our EnableSecureEventInput refcount if the window
+        // closed while still key. Without this pair, secure-input mode
+        // leaks system-wide until the next reboot.
+        disableSecureEventInputIfHeld()
+    }
+
+    /// Whether THIS view currently owns a matched `EnableSecureEventInput`
+    /// refcount. Flipped on window-key gain / loss so the Disable call is
+    /// paired 1:1 with the Enable — mismatched refcounts at app quit would
+    /// leak secure-input mode system-wide until a reboot.
+    private var ownsSecureInput: Bool = false
+
+    /// Ask the OS to route keyboard events exclusively to the focused
+    /// process (us). Other apps — keyloggers, TextExpander, Keyboard
+    /// Maestro, AX-based automation — stop seeing keystrokes directed at
+    /// the terminal. The cost is real: legitimate productivity tools stop
+    /// working while focus is here. Terminal.app and iTerm2 both enable
+    /// this by default because a shell prompt takes passwords (sudo, ssh,
+    /// gpg unlock, 1Password CLI) and that content must not be
+    /// observable by user-land peers.
+    ///
+    /// `EnableSecureEventInput` is refcounted by the OS; pair every Enable
+    /// with exactly one Disable on blur so multi-window setups don't drift.
+    private func enableSecureEventInputIfNeeded() {
+        guard !ownsSecureInput else { return }
+        EnableSecureEventInput()
+        ownsSecureInput = true
+    }
+
+    /// Release our refcount, if any. Safe to call more than once — the
+    /// `ownsSecureInput` flag prevents a double-release that would under-
+    /// counts the global state and disable secure input system-wide.
+    private func disableSecureEventInputIfHeld() {
+        guard ownsSecureInput else { return }
+        DisableSecureEventInput()
+        ownsSecureInput = false
     }
 
     /// xterm focus-in/out reports. Enabled by the running program via
