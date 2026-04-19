@@ -118,6 +118,40 @@ final class PTYTests: XCTestCase {
         pty.terminate()
     }
 
+    func test_concurrentWriteAndWriteImmediate_doesNotDeadlock() throws {
+        // Regression guard for the writeImmediate / write lock-order
+        // deadlock fixed in bac607f. Fire many writes + writeImmediates
+        // from different queues concurrently; if the old `stateQueue →
+        // writeQueue` order ever comes back, this test times out.
+        let pty = try PTY.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "cat > /dev/null; exit"],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        let group = DispatchGroup()
+        let concurrentQ = DispatchQueue(
+            label: "test.concurrent", attributes: .concurrent
+        )
+        // 50 writes + 50 writeImmediates scheduled concurrently.
+        for _ in 0..<50 {
+            group.enter()
+            concurrentQ.async {
+                pty.write(Data("a".utf8))
+                group.leave()
+            }
+            group.enter()
+            concurrentQ.async {
+                pty.writeImmediate(Data([0x03]))  // Ctrl+C equivalent
+                group.leave()
+            }
+        }
+        // 3-second wait is generous; the old deadlock hung forever.
+        let timedOut = group.wait(timeout: .now() + 3.0)
+        XCTAssertEqual(timedOut, .success, "concurrent writes must not deadlock")
+        pty.terminate()
+    }
+
     func test_resizePropagatesSIGWINCH() throws {
         // Use stty inside the shell to confirm the PTY knows the new size.
         let pty = try PTY.spawn(
