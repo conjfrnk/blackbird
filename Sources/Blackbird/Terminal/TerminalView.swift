@@ -256,11 +256,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // if a future macOS or a config change ever does promote us, we'll
         // see mean interval drop to ~8.3 ms without code changes here.
         self.preferredFramesPerSecond = 120
-        // Triple-buffered presentation + vsync. These are still worthwhile
-        // at 60 fps (no tearing, frame N+1 encodes while N presents) even
-        // though they aren't sufficient to unlock 120 Hz on their own.
+        // Double-buffered presentation + vsync. Apple's default is 3;
+        // terminals are GPU-cheap (≤2000 instanced quads at 60 Hz), so
+        // the headroom from triple buffering is wasted and costs one
+        // extra frame of input-to-pixel latency — 16.67 ms we'd rather
+        // not pay on keystroke echo. 2 is what kitty / Ghostty target
+        // for the same reason. displaySyncEnabled stays on so we don't
+        // tear; under throughput bursts a future optimization can flip
+        // it off for the duration of a cat / log-tail workload.
         if let metalLayer = self.layer as? CAMetalLayer {
-            metalLayer.maximumDrawableCount = 3
+            metalLayer.maximumDrawableCount = 2
             metalLayer.displaySyncEnabled = true
         }
 
