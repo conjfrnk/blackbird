@@ -187,6 +187,30 @@ fn csi_18t_reports_text_area_in_cells() {
 }
 
 #[test]
+fn decrqss_request_does_not_echo_arbitrary_payload() {
+    // DECRQSS = `ESC P $ q <selector> ESC \` — "report settings".
+    // Historic concern: some terminals echo the request selector
+    // verbatim in the reply, letting a remote inject shell-visible
+    // bytes via a crafted selector. alacritty_terminal's reply is
+    // either an empty "invalid" response (`ESC P 0 $ r ESC \`) or a
+    // valid-settings echo for known selectors — it must *never*
+    // round-trip an attacker-controlled selector back as-is.
+    let attacker_selector = b"malicious-$(rm -rf ~)";
+    let mut input = b"\x1bP$q".to_vec();
+    input.extend_from_slice(attacker_selector);
+    input.extend_from_slice(b"\x1b\\");
+    let writes = run(&input);
+    let flattened: Vec<u8> = writes.iter().flatten().copied().collect();
+    assert!(
+        !flattened
+            .windows(attacker_selector.len())
+            .any(|w| w == attacker_selector),
+        "DECRQSS reply echoed attacker-controlled selector bytes; got {:?}",
+        flattened
+    );
+}
+
+#[test]
 fn osc_10_11_color_queries_are_silent() {
     // OSC 10 / 11 `?` is the "query fg / bg colour" form. Responding would
     // leak the configured palette back into the PTY; older terminals were
