@@ -40,10 +40,13 @@ final class BBTermTests: XCTestCase {
         // content-change token. If two snapshots ever shared an id — via
         // wraparound, reset, or a re-used counter — the renderer would
         // silently skip a repaint. Pin that the counter only moves up.
+        // Also: 0 is reserved as the "no snapshot" sentinel in FrameKey,
+        // so no real snapshot must ever get id 0.
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
         let a = try XCTUnwrap(term.snapshot())
         let b = try XCTUnwrap(term.snapshot())
         let c = try XCTUnwrap(term.snapshot())
+        XCTAssertGreaterThan(a.sequenceID, 0, "id 0 is reserved — no real snapshot may use it")
         XCTAssertLessThan(a.sequenceID, b.sequenceID)
         XCTAssertLessThan(b.sequenceID, c.sequenceID)
     }
