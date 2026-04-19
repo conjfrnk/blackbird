@@ -743,11 +743,10 @@ pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16)
         // machine. 1000 × 1000 × 32B ≈ 32 MB grid, comfortable.
         const MIN_DIM: u16 = 2;
         const MAX_DIM: u16 = 1000;
-        let clamp = |v: u16| v.max(MIN_DIM).min(MAX_DIM);
         let bb = &mut *term;
         let size = TermSize {
-            cols: clamp(cols) as usize,
-            rows: clamp(rows) as usize,
+            cols: cols.clamp(MIN_DIM, MAX_DIM) as usize,
+            rows: rows.clamp(MIN_DIM, MAX_DIM) as usize,
         };
         bb.term.resize(size);
     })
