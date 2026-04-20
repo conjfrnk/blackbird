@@ -20,15 +20,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// Space on the right of the titlebar reserved for the three traffic-
     /// light buttons on a standard-style macOS window. Used by the tab
     /// strip width calculation so pills never overlap the close / minimize
-    /// / zoom hotspots.
+    /// / zoom hotspots. The lock-indicator reservation lives inside the
+    /// (single) titlebar accessory view — see `TitlebarTabBarViewController.
+    /// lockReservation` — so this constant covers the only *external*
+    /// reservation we need at the window level.
     private static let trafficLightsReservation: CGFloat = 78
-    /// Additional reservation for every other `.right`-anchored titlebar
-    /// accessory this controller installs. Today: the secure-input lock
-    /// indicator (16 pt icon + 16 pt container padding = 32 pt, plus a
-    /// 4 pt gap so pills don't visually kiss the icon). Keep in lockstep
-    /// with every `addTitlebarAccessoryViewController(_:)` call where
-    /// `layoutAttribute == .right`.
-    private static let otherRightAccessoryReservation: CGFloat = 32 + 4
 
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
@@ -36,7 +32,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var cwdCancellable: AnyCancellable?
     private var titlebarTabBar: TitlebarTabBarViewController?
     private let secureInputPoller = SecureInputPoller()
-    private let secureInputIndicator = SecureInputIndicatorView()
     private var secureInputCancellable: AnyCancellable?
     private var tabGroupObservers: [NSKeyValueObservation] = []
     /// Identity of the last tab group we subscribed to. When `window.tabGroup`
@@ -295,6 +290,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let vc = TitlebarTabBarViewController(window: window)
         window.addTitlebarAccessoryViewController(vc)
         titlebarTabBar = vc
+        // Bind the SKE poller to the lock view embedded in the accessory.
+        // The lock lives inside the same `.right` accessory as the pills so
+        // AppKit can't stack a second right-anchored accessory behind the
+        // first — the failure mode that made the icon vanish on multi-tab.
+        secureInputCancellable = secureInputPoller.$isSecureInputActive
+            .receive(on: RunLoop.main)
+            .sink { [weak vc] active in
+                vc?.lockView.setActive(active)
+            }
         refreshTabBar()
         // Defer the first "hide native strip" toggle until after the
         // window joins a tab group; tabGroup is nil before show.
@@ -302,30 +306,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             self?.hideNativeTabStrip()
             self?.observeTabGroup()
         }
-        installSecureInputIndicator()
-    }
-
-    /// Install the secure-input lock icon as a right-aligned titlebar
-    /// accessory. Subscribes to the poller and forwards state changes
-    /// to the indicator view on the main RunLoop.
-    private func installSecureInputIndicator() {
-        guard let window else { return }
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 32, height: 28))
-        // Right-align the 16×16 icon with an 8 pt trailing inset, vertically
-        // centered in the 28 pt titlebar row.
-        secureInputIndicator.frame = NSRect(x: 8, y: 6, width: 16, height: 16)
-        container.addSubview(secureInputIndicator)
-
-        let vc = NSTitlebarAccessoryViewController()
-        vc.layoutAttribute = .right
-        vc.view = container
-        window.addTitlebarAccessoryViewController(vc)
-
-        secureInputCancellable = secureInputPoller.$isSecureInputActive
-            .receive(on: RunLoop.main)
-            .sink { [weak self] active in
-                self?.secureInputIndicator.setActive(active)
-            }
     }
 
     private func hideNativeTabStrip() {
@@ -452,10 +432,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
         let tabCount = window.tabGroup?.windows.count ?? 1
         if tabCount <= 1 {
-            // Restore the stock single-tab titlebar: title text centered,
-            // no custom pill chrome. Hide the accessory view entirely so
-            // it doesn't eat layout width.
-            titlebarTabBar?.view.isHidden = true
+            // Stock single-tab titlebar: title text centered, no pills.
+            // Accessory stays visible (lock still needs its slot) but
+            // shrinks to the lock-only width so the title has full room
+            // between the traffic lights and the lock.
+            titlebarTabBar?.view.isHidden = false
+            titlebarTabBar?.refreshSingleTab()
             window.titleVisibility = .visible
         } else {
             titlebarTabBar?.view.isHidden = false
@@ -463,15 +445,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // avoids stacking 'zsh' twice.
             window.titleVisibility = .hidden
             // Single source of truth for titlebar accessory width math —
-            // the tab bar VC just consumes what we give it. `200` floor
+            // the accessory VC owns the lock reservation arithmetic; we
+            // only subtract the traffic-light slot here. `200` floor
             // mirrors the previous value so narrow windows still render
             // at least something legible in the strip.
             let total = window.frame.width
-            let available = max(
-                200,
-                total - Self.trafficLightsReservation - Self.otherRightAccessoryReservation
-            )
-            titlebarTabBar?.refresh(availableWidth: available)
+            let available = max(200, total - Self.trafficLightsReservation)
+            titlebarTabBar?.refreshMultiTab(availableWidth: available)
         }
     }
 
