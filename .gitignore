@@ -60,6 +60,10 @@ eddsa_priv.pem
 # Developer-ID export password stash (name convention — never commit).
 PWORD*
 DevID*
+# Local signing workspace. Everything is ignored; only the README is tracked
+# so the convention is discoverable.
+.signing/*
+!.signing/README.md
 
 # cbindgen metadata artifact (written to repo root during header generation)
 libnull.rmeta
