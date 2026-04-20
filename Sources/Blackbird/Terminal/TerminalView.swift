@@ -2782,7 +2782,7 @@ extension TerminalView {
 
         let hadOffLine = inputLineMatches.count < matches.count
         if inputLineMatches.isEmpty {
-            findBar?.showTransientMessage("Only input-line matches can be replaced")
+            findBar?.showTransientMessage("No input-line matches to replace")
             return
         }
         // Process right-to-left so earlier col indices remain valid.
@@ -2839,19 +2839,23 @@ extension TerminalView {
         return findMatches
     }
 
-    /// Responder action for ⌘⌥E. If the find bar isn't shown or the replace row
-    /// isn't expanded, opens the bar and expands the replace row. The primary
-    /// purpose of this action is to reveal the replace row; actual replacement
-    /// is driven by the "Replace" button's delegate callback.
+    /// Responder action for ⌘⌥E. Behaviour:
+    ///   - Bar hidden  → install the bar, expand the replace row, focus find field.
+    ///   - Bar visible, replace collapsed → expand the replace row.
+    ///   - Bar visible, replace already expanded → trigger replace-current on
+    ///     the active match (same effect as clicking the "Replace" button).
     @objc public func performReplaceCurrent(_ sender: Any?) {
         if findBar == nil {
             installFindBar()
             findBar?.setReplaceVisible(true)
             findBar?.focus()
-        } else if let bar = findBar, !bar.isReplaceVisible {
-            bar.setReplaceVisible(true)
+            return
         }
-        // If the bar is already expanded the action is a no-op; the user
-        // interacts with the Replace button directly.
+        guard let bar = findBar else { return }
+        if !bar.isReplaceVisible {
+            bar.setReplaceVisible(true)
+            return
+        }
+        bar.triggerReplaceCurrent()
     }
 }

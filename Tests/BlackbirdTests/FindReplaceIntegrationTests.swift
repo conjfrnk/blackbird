@@ -168,6 +168,7 @@ final class FindReplaceIntegrationTests: XCTestCase {
 
 // MARK: - Test-only TerminalView hooks
 
+#if DEBUG
 extension TerminalView {
     /// Calls replaceCurrentMatch(with:) directly — bypasses the delegate chain
     /// so tests don't need a real FindBar wired up.
@@ -180,3 +181,4 @@ extension TerminalView {
         replaceAllMatches(with: replacement)
     }
 }
+#endif
