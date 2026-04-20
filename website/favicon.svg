@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Blackbird — Gruvbox Spectrum">
+  <defs>
+    <clipPath id="sq">
+      <rect x="0" y="0" width="1024" height="1024" rx="229" ry="229"></rect>
+    </clipPath>
+    <radialGradient id="bg" cx="0.5" cy="0.5" r="0.85">
+      <stop offset="0" stop-color="#282828"></stop>
+      <stop offset="1" stop-color="#0a0c0c"></stop>
+    </radialGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.35"></stop>
+      <stop offset="0.08" stop-color="#ffffff" stop-opacity="0.05"></stop>
+      <stop offset="0.92" stop-color="#000000" stop-opacity="0.05"></stop>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.40"></stop>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#sq)">
+    <rect width="1024" height="1024" fill="url(#bg)"></rect>
+
+    
+    
+    <circle cx="307.2" cy="225.28" r="34.816" fill="#fb4934"></circle>
+    <circle cx="378.88" cy="296.96" r="34.816" fill="#fe8019"></circle>
+    <circle cx="450.56" cy="368.64" r="34.816" fill="#fabd2f"></circle>
+    <circle cx="522.24" cy="440.32" r="34.816" fill="#b8bb26"></circle>
+
+    
+    <circle cx="593.92" cy="512" r="48.7424" fill="#fbf1c7"></circle>
+
+    
+    <circle cx="522.24" cy="583.68" r="34.816" fill="#8ec07c"></circle>
+    <circle cx="450.56" cy="655.36" r="34.816" fill="#83a598"></circle>
+    <circle cx="378.88" cy="727.04" r="34.816" fill="#d3869b"></circle>
+    <circle cx="307.2" cy="798.72" r="34.816" fill="#ebdbb2"></circle>
+  </g>
+
+  
+  <rect x="3" y="3" width="1018" height="1018" rx="226" ry="226" fill="none" stroke="url(#edge)" stroke-width="3"></rect>
+</svg>
