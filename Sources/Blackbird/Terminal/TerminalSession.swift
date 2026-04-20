@@ -44,10 +44,35 @@ public final class TerminalSession: ObservableObject {
 
     /// The most recent OSC 133 prompt/command mark observed from the shell,
     /// paired with its payload (exit code for kind D, empty otherwise).
-    /// A future ⌘⇧↑/⌘⇧↓ "jump to previous prompt" feature will consume a
-    /// ring of these; for v1 we expose the latest only so shell
-    /// integration is observably working without locking in a UI surface.
     @Published public internal(set) var lastPromptMark: (kind: BBTerm.PromptMarkKind, exitCode: String)?
+
+    /// Ring of recorded prompt-start positions (OSC 133 A). Each entry is
+    /// the (history_size, grid_row) at the instant the mark fired — which
+    /// together pin the prompt's absolute line number in the buffer so we
+    /// can scroll back to it even after thousands of lines of output have
+    /// scrolled it off-screen. Capped at `promptMarkCap` FIFO so long
+    /// sessions don't grow unbounded.
+    @Published public internal(set) var promptMarks: [PromptMark] = []
+
+    /// Current index inside `promptMarks` when cycling via
+    /// `jumpToPreviousPrompt` / `jumpToNextPrompt`. Nil means "not in
+    /// a jump cycle"; any new OSC 133 A resets to nil so the next Prev
+    /// jump starts from the newest mark again.
+    private var promptCursor: Int?
+
+    private static let promptMarkCap = 200
+
+    /// Position of a recorded prompt in buffer coordinates.
+    public struct PromptMark: Equatable, Hashable {
+        /// History size (scrollback line count) at the moment the prompt
+        /// was emitted. Monotonically grows in most sessions, up to the
+        /// scrollback cap; paired with `gridRow` this fixes the prompt's
+        /// absolute line.
+        public let historySize: Int
+        /// Grid row (0 = top of visible viewport) at the moment the prompt
+        /// was emitted.
+        public let gridRow: Int
+    }
 
     // MARK: - Title state
 
@@ -243,6 +268,93 @@ public final class TerminalSession: ObservableObject {
                 return
             }
             self.pty?.writeImmediate(bytes)
+        }
+    }
+
+    // MARK: - Prompt navigation
+
+    /// Record the (history, grid row) position at which an OSC 133 A
+    /// fired. Called on main from the event switch; takes a snapshot
+    /// synchronously via the core queue so the reading is consistent.
+    /// A new prompt resets `promptCursor` to nil so the next jump
+    /// starts from the newest mark.
+    private func recordPromptStart() {
+        guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
+            return
+        }
+        let mark = PromptMark(historySize: snap.historySize, gridRow: snap.cursorRow)
+        promptMarks.append(mark)
+        if promptMarks.count > Self.promptMarkCap {
+            promptMarks.removeFirst(promptMarks.count - Self.promptMarkCap)
+        }
+        promptCursor = nil
+    }
+
+    /// Scroll the viewport to the previous recorded prompt. First press
+    /// from a resting state jumps to the newest mark; subsequent presses
+    /// walk backwards through `promptMarks`. No-op when the ring is empty
+    /// (shell hasn't sourced the OSC 133 integration, or no commands have
+    /// run yet).
+    public func jumpToPreviousPrompt() {
+        guard !promptMarks.isEmpty else { return }
+        let next: Int = {
+            if let cur = promptCursor {
+                return max(0, cur - 1)
+            }
+            return promptMarks.count - 1
+        }()
+        promptCursor = next
+        scrollToMark(promptMarks[next])
+    }
+
+    /// Walk forward through the prompt ring toward the live view. No-op
+    /// when the user isn't already in a jump cycle — there's no "newer"
+    /// prompt than the one currently live.
+    public func jumpToNextPrompt() {
+        guard let cur = promptCursor, !promptMarks.isEmpty else { return }
+        let next = min(promptMarks.count - 1, cur + 1)
+        promptCursor = next
+        scrollToMark(promptMarks[next])
+    }
+
+    // MARK: - Test-only access
+
+    /// Internal hook for `PromptJumpTests` — appends a mark with the FIFO
+    /// cap applied, without needing a real shell to emit OSC 133. Not
+    /// public because the ring lifecycle is otherwise owned entirely by
+    /// the event switch.
+    internal func _testAppendMark(_ mark: PromptMark) {
+        promptMarks.append(mark)
+        if promptMarks.count > Self.promptMarkCap {
+            promptMarks.removeFirst(promptMarks.count - Self.promptMarkCap)
+        }
+        promptCursor = nil
+    }
+
+    /// Internal accessor exposing the otherwise-private cycle index so
+    /// tests can assert exact walk behaviour.
+    internal var _testPromptCursor: Int? { promptCursor }
+
+    /// Compute and apply the scroll delta that places a given mark near
+    /// the top of the current viewport.
+    ///
+    /// Math: display_offset D means the viewport's top row shows buffer
+    /// line (history_size - D). The mark's absolute line is
+    /// mark.historySize + mark.gridRow, so the target D that puts it at
+    /// the top is (current_history - mark.historySize - mark.gridRow).
+    /// Clamped to [0, current_history] because display_offset can't go
+    /// past the top of scrollback, and a negative target means the mark
+    /// is already below the current live bottom (odd — only possible if
+    /// scrollback was cleared between record and jump; fall back to live).
+    private func scrollToMark(_ mark: PromptMark) {
+        guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
+            return
+        }
+        let target = max(0, snap.historySize - mark.historySize - mark.gridRow)
+        let clampedTarget = min(target, snap.historySize)
+        let delta = clampedTarget - snap.displayOffset
+        if delta != 0 {
+            scroll(delta: Int32(clamping: delta))
         }
     }
 
@@ -472,12 +584,16 @@ public final class TerminalSession: ObservableObject {
                 case .promptMark(let kind, let exitCode):
                     // Shell integration: A = prompt start, B = command start,
                     // C = output start, D = command end (with exit code).
-                    // Session just publishes; downstream (TerminalView, a
-                    // future prompt-jump feature) can observe. Not wired to
-                    // any UI action yet — the event plumbing lands first so
-                    // the shell-integration scripts don't desync with the
-                    // renderer-side consumption.
                     self.lastPromptMark = (kind, exitCode)
+                    // Record kind-A positions so the user can jump back to
+                    // previous prompts. A fresh snapshot pins (history, row)
+                    // at this instant — the main-queue hop means the core
+                    // queue may have advanced slightly, but missing a line
+                    // or two of drift is negligible next to a multi-screen
+                    // scrollback jump.
+                    if kind == .promptStart {
+                        self.recordPromptStart()
+                    }
                 case .fatal(let msg):
                     // Surface as a title prefix for visibility; Plan 7 adds a
                     // dedicated diagnostics channel. Fatal should display

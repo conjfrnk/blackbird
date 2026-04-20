@@ -478,6 +478,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        // Prompt navigation — walks the OSC 133 A marks recorded by
+        // TerminalSession whenever the user's shell integration snippet
+        // emits a prompt-start escape. Matches iTerm2's ⌘⇧↑ / ⌘⇧↓
+        // convention so muscle memory carries over. No-op when no marks
+        // have been recorded (shell integration not sourced).
+        let prevPrompt = NSMenuItem(
+            title: "Previous Prompt",
+            action: #selector(TerminalView.jumpToPreviousPrompt(_:)),
+            keyEquivalent: "\u{F700}" // NSUpArrowFunctionKey
+        )
+        prevPrompt.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(prevPrompt)
+
+        let nextPrompt = NSMenuItem(
+            title: "Next Prompt",
+            action: #selector(TerminalView.jumpToNextPrompt(_:)),
+            keyEquivalent: "\u{F701}" // NSDownArrowFunctionKey
+        )
+        nextPrompt.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(nextPrompt)
+
+        menu.addItem(.separator())
+
         // Rename Tab… — routes via the responder chain to the key window's
         // MainWindowController. Uses ⌥⌘R because ⌘R is commonly a
         // refresh/reload shortcut in other apps, and we want to leave it

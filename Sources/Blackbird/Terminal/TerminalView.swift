@@ -1580,6 +1580,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         Preferences.shared.fontSize = 13
     }
 
+    /// Scroll the viewport up to the previous OSC 133 prompt mark. Hooked
+    /// to the "View → Previous Prompt" menu item (⌘⇧↑). No visible effect
+    /// unless the user has sourced the bundled shell-integration snippet,
+    /// because otherwise the session has no prompt marks recorded.
+    @objc public func jumpToPreviousPrompt(_ sender: Any?) {
+        session?.jumpToPreviousPrompt()
+    }
+
+    /// Scroll the viewport down to the next (newer) OSC 133 prompt mark.
+    /// No-op when the user isn't already cycling through prompts — the
+    /// newest prompt is always live.
+    @objc public func jumpToNextPrompt(_ sender: Any?) {
+        session?.jumpToNextPrompt()
+    }
+
     /// Trackpad pinch-to-zoom → font-size step. Accumulate the continuous
     /// magnification delta and trigger one step per threshold crossing.
     /// 0.15 is the same threshold Safari / Xcode use for "gesture felt a
