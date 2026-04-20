@@ -73,7 +73,6 @@
 		CB093791F908A038E9B9C70F /* HackNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 9D26D02D80D934AC18571AB9 /* HackNerdFontMono-Regular.ttf */; };
 		CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4612F747000A5316DE0CD55F /* TerminalView.swift */; };
 		CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */; };
-		D020AC9ADF23C16217885851 /* SecureInputIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC6FD41BC6C9E1220314A5BA /* SecureInputIndicator.swift */; };
 		D99C39D366CE2D06BF4082EB /* LatencyHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B99D2970157272D6841E2F5 /* LatencyHarnessTests.swift */; };
 		DA92E08EEE11AD711420DDF2 /* MetalDeviceSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDBE067E31FBB9F8651F3C50 /* MetalDeviceSelectionTests.swift */; };
 		E0E1272012D9B7B00E10E664 /* GlyphAtlasTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */; };
@@ -83,7 +82,6 @@
 		ED812F94FE464AE1F4E86007 /* MetalRendererTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */; };
 		EEA685668C43AB5E5DECAAED /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F7D804048B62FEB3D66F4F0 /* SettingsView.swift */; };
 		F0604FDE5FE129006623933C /* osc133.fish in Resources */ = {isa = PBXBuildFile; fileRef = 0E2A52AD38735646D352E5AF /* osc133.fish */; };
-		F6055EDECB2FFF6473733182 /* SecureInputIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA593DCD4DA8D906D1D16954 /* SecureInputIndicatorTests.swift */; };
 		F816DB935D868931D236E114 /* InlineRenameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C36192F62C6E40A498D70D /* InlineRenameTests.swift */; };
 		F8C99250E001E2D862D19244 /* TestHostTermination.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */; };
 		FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */; };
@@ -175,7 +173,6 @@
 		D92FE63DFF4EA7FE8A338897 /* HackNerdFontMono-BoldItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-BoldItalic.ttf"; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		DC63CD202483C22F3E8DAE71 /* PromptJumpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptJumpTests.swift; sourceTree = "<group>"; };
-		DC6FD41BC6C9E1220314A5BA /* SecureInputIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureInputIndicator.swift; sourceTree = "<group>"; };
 		DF8E87FBF674AD466760D74A /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppKit.framework; sourceTree = "<group>"; };
 		E4B31AE0836F0D3000C219D2 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Fonts; path = Sources/Blackbird/Resources/Fonts; sourceTree = SOURCE_ROOT; };
 		E51A54ACD363A09E47E79F62 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
@@ -183,7 +180,6 @@
 		EA0F474A7AF422E5AD4E5502 /* TabRenameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRenameTests.swift; sourceTree = "<group>"; };
 		EC1D8A560291CE5E7A0CAD11 /* URLDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetector.swift; sourceTree = "<group>"; };
 		F455C591EC38A7B3955CD5B8 /* FindBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBar.swift; sourceTree = "<group>"; };
-		FA593DCD4DA8D906D1D16954 /* SecureInputIndicatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureInputIndicatorTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -252,7 +248,6 @@
 				4EC02EBECC88454DC42A0233 /* PreferencesTests.swift */,
 				DC63CD202483C22F3E8DAE71 /* PromptJumpTests.swift */,
 				7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */,
-				FA593DCD4DA8D906D1D16954 /* SecureInputIndicatorTests.swift */,
 				83BD7639AA0AD9A74DDB61B6 /* SelectionModeTests.swift */,
 				EA0F474A7AF422E5AD4E5502 /* TabRenameTests.swift */,
 				5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */,
@@ -411,7 +406,6 @@
 			isa = PBXGroup;
 			children = (
 				E51A54ACD363A09E47E79F62 /* MainWindowController.swift */,
-				DC6FD41BC6C9E1220314A5BA /* SecureInputIndicator.swift */,
 				002A862CFC149DF32E992C50 /* TitlebarTabBar.swift */,
 				54EE4D20D3C306349C12E69A /* WindowBlur.swift */,
 			);
@@ -562,7 +556,6 @@
 				95D6A4034F6872A29F1474AF /* PowerAwareRendering.swift in Sources */,
 				2128B6F807CB069799F1A479 /* Preferences.swift in Sources */,
 				C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */,
-				D020AC9ADF23C16217885851 /* SecureInputIndicator.swift in Sources */,
 				C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */,
 				EEA685668C43AB5E5DECAAED /* SettingsView.swift in Sources */,
 				7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */,
@@ -610,7 +603,6 @@
 				7A9DA91C3A625A4B30BF8810 /* PowerAwareRenderingTests.swift in Sources */,
 				2C93251EFA04482D77211D2F /* PreferencesTests.swift in Sources */,
 				80C0D0D70170C602FEF10D53 /* PromptJumpTests.swift in Sources */,
-				F6055EDECB2FFF6473733182 /* SecureInputIndicatorTests.swift in Sources */,
 				8E940FAAE63AB7BE99D79886 /* SelectionModeTests.swift in Sources */,
 				6D27ABAFB174297CCD622E1D /* TabRenameTests.swift in Sources */,
 				91497F92ABED24A383320845 /* TerminalSessionTests.swift in Sources */,

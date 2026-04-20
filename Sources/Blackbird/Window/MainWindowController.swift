@@ -22,22 +22,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// strip width calculation so pills never overlap the close / minimize
     /// / zoom hotspots.
     private static let trafficLightsReservation: CGFloat = 78
-    /// Additional reservation for every other `.right`-anchored titlebar
-    /// accessory this controller installs. Today: the secure-input lock
-    /// indicator (16 pt icon + 16 pt container padding = 32 pt, plus a
-    /// 4 pt gap so pills don't visually kiss the icon). Keep in lockstep
-    /// with every `addTitlebarAccessoryViewController(_:)` call where
-    /// `layoutAttribute == .right`.
-    private static let otherRightAccessoryReservation: CGFloat = 32 + 4
 
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
     private var exitCancellable: AnyCancellable?
     private var cwdCancellable: AnyCancellable?
     private var titlebarTabBar: TitlebarTabBarViewController?
-    private let secureInputPoller = SecureInputPoller()
-    private let secureInputIndicator = SecureInputIndicatorView()
-    private var secureInputCancellable: AnyCancellable?
     private var tabGroupObservers: [NSKeyValueObservation] = []
     /// Identity of the last tab group we subscribed to. When `window.tabGroup`
     /// becomes a different object (drag-out creates a new standalone-window
@@ -263,7 +253,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// sprinkling extra notifications.
     func windowDidBecomeKey(_ notification: Notification) {
         session?.focusChanged(true)
-        secureInputPoller.start()
         refreshTabBar()
     }
 
@@ -273,7 +262,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// changes that don't take key away leave the mode state alone.
     func windowDidResignKey(_ notification: Notification) {
         session?.focusChanged(false)
-        secureInputPoller.stop()
     }
 
     /// Main-window transitions fire on a different schedule than key-window
@@ -302,30 +290,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             self?.hideNativeTabStrip()
             self?.observeTabGroup()
         }
-        installSecureInputIndicator()
-    }
-
-    /// Install the secure-input lock icon as a right-aligned titlebar
-    /// accessory. Subscribes to the poller and forwards state changes
-    /// to the indicator view on the main RunLoop.
-    private func installSecureInputIndicator() {
-        guard let window else { return }
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 32, height: 28))
-        // Right-align the 16×16 icon with an 8 pt trailing inset, vertically
-        // centered in the 28 pt titlebar row.
-        secureInputIndicator.frame = NSRect(x: 8, y: 6, width: 16, height: 16)
-        container.addSubview(secureInputIndicator)
-
-        let vc = NSTitlebarAccessoryViewController()
-        vc.layoutAttribute = .right
-        vc.view = container
-        window.addTitlebarAccessoryViewController(vc)
-
-        secureInputCancellable = secureInputPoller.$isSecureInputActive
-            .receive(on: RunLoop.main)
-            .sink { [weak self] active in
-                self?.secureInputIndicator.setActive(active)
-            }
     }
 
     private func hideNativeTabStrip() {
@@ -464,13 +428,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             window.titleVisibility = .hidden
             // Single source of truth for titlebar accessory width math —
             // the tab bar VC just consumes what we give it. `200` floor
-            // mirrors the previous value so narrow windows still render
-            // at least something legible in the strip.
+            // keeps narrow windows rendering at least something legible
+            // in the strip.
             let total = window.frame.width
-            let available = max(
-                200,
-                total - Self.trafficLightsReservation - Self.otherRightAccessoryReservation
-            )
+            let available = max(200, total - Self.trafficLightsReservation)
             titlebarTabBar?.refresh(availableWidth: available)
         }
     }

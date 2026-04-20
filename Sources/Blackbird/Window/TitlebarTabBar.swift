@@ -61,10 +61,10 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     /// single-tab windows skip the custom strip entirely.
     ///
     /// `availableWidth` is the caller's pre-computed titlebar budget for
-    /// this accessory: total window width minus every *other* right-anchored
-    /// accessory (traffic lights, secure-input indicator, …). The strip
-    /// owns zero layout math of its own — `MainWindowController` is the
-    /// single authority for reservation arithmetic.
+    /// this accessory: total window width minus the trailing space for
+    /// the traffic lights. The strip owns zero layout math of its own —
+    /// `MainWindowController` is the single authority for reservation
+    /// arithmetic.
     func refresh(availableWidth: CGFloat) {
         guard let window = hostWindow else { return }
         let tabs = window.tabGroup?.windows ?? [window]
