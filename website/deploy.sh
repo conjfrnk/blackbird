@@ -38,6 +38,12 @@ aws s3 cp robots.txt "s3://${BUCKET}/robots.txt" \
   --content-type "text/plain; charset=utf-8" \
   --profile "$PROFILE"
 
+# Sparkle appcast: clients poll once a day, so keep it revalidating.
+aws s3 cp appcast.xml "s3://${BUCKET}/appcast.xml" \
+  --cache-control "public,max-age=0,must-revalidate" \
+  --content-type "application/xml; charset=utf-8" \
+  --profile "$PROFILE"
+
 echo "Invalidating CloudFront cache..."
 aws cloudfront create-invalidation \
   --distribution-id "$DISTRIBUTION_ID" \
