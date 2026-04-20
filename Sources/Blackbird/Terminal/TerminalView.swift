@@ -1659,6 +1659,69 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return true
     }
 
+    /// Three-finger tap / Force Touch on the trackpad triggers
+    /// `quickLook(with:)` on the responder chain. Preview the current
+    /// selection (or the hovered OSC-8 link URL when no selection) in an
+    /// NSPopover anchored under the pointer — Ghostty / Safari / Xcode
+    /// idiom. Falls back to `super` when nothing useful is under the
+    /// pointer so macOS can still offer dictionary lookup / media preview
+    /// for other responder hits.
+    public override func quickLook(with event: NSEvent) {
+        // Priority: selection wins (user picked it explicitly) > hovered
+        // OSC-8 URL (already highlighted). Nothing actionable → defer
+        // to AppKit's default behaviour (dictionary / None).
+        let text: String? = {
+            if let sel = selectedStringForServices(), !sel.isEmpty {
+                return sel
+            }
+            if let snap = currentSnapshot, hoveredLinkID != 0,
+               let url = snap.linkURL(id: hoveredLinkID) {
+                return url
+            }
+            return nil
+        }()
+        guard let text else {
+            super.quickLook(with: event)
+            return
+        }
+
+        // Pointer position for the popover anchor. event.locationInWindow
+        // is in window space; convert to view space for the popover's
+        // positioning rect.
+        let pointInView = convert(event.locationInWindow, from: nil)
+        // Anchor a 1-pt rect at the pointer so the popover arrows find
+        // a precise spot. AppKit expands as needed to place the popover.
+        let anchor = NSRect(origin: pointInView, size: NSSize(width: 1, height: 1))
+
+        let label = NSTextField(labelWithString: text)
+        label.lineBreakMode = .byTruncatingMiddle
+        label.maximumNumberOfLines = 6
+        label.preferredMaxLayoutWidth = 420
+        label.cell?.usesSingleLineMode = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            container.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
+        ])
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = {
+            let vc = NSViewController()
+            vc.view = container
+            return vc
+        }()
+        popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+    }
+
     /// Selection → String without the clipboard scrubbing step. Services
     /// and Look Up get the raw text: the downstream app may legitimately
     /// want formatting characters the clipboard-sanitizer would strip,
