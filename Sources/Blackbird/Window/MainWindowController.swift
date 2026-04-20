@@ -20,6 +20,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
     private var exitCancellable: AnyCancellable?
+    private var cwdCancellable: AnyCancellable?
     private var titlebarTabBar: TitlebarTabBarViewController?
     private var tabGroupObservers: [NSKeyValueObservation] = []
     private var titleObserver: NSKeyValueObservation?
@@ -174,6 +175,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] _ in
                     self?.window?.performClose(nil)
+                }
+            // Bind the macOS proxy icon to the shell's current working
+            // directory (via OSC 7). Gives the user a draggable directory
+            // chip in the title bar — drop onto Finder to reveal, onto
+            // another app to hand off the path. iTerm2 and Terminal.app
+            // both do this; it's the classic macOS document-window
+            // citizenship cue. Nil URL (shell hasn't emitted OSC 7 yet, or
+            // cwd points at a path that resolves through a symlink we
+            // shouldn't chase) leaves the title bar iconless — same as
+            // any non-document window.
+            cwdCancellable = s.$lastKnownCwd
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] path in
+                    guard let win = self?.window else { return }
+                    if let path, !path.isEmpty {
+                        win.representedURL = URL(fileURLWithPath: path, isDirectory: true)
+                    } else {
+                        win.representedURL = nil
+                    }
                 }
         } catch {
             window?.title = "Blackbird — failed to start shell: \(error)"
