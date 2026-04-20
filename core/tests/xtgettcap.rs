@@ -228,3 +228,36 @@ fn xtgettcap_no_intermediates_no_reply() {
         "DCS without `+q` intermediate+final must not reply: {writes:?}"
     );
 }
+
+#[test]
+fn xtgettcap_wrong_action_byte_no_reply() {
+    // `DCS + r` is not XTGETTCAP (we only match `+q`). Must be inert —
+    // our hook's action guard should bail before latching `in_xtgettcap`.
+    let writes = run(b"\x1bP+r544E\x1b\\");
+    assert!(writes.is_empty(), "DCS +r must not reply: {writes:?}");
+}
+
+#[test]
+fn xtgettcap_empty_payload_produces_no_reply() {
+    // `ESC P + q ESC \\` — hook fires, no put bytes arrive, unhook sees
+    // an empty buffer. `split(b';')` on an empty slice yields one empty
+    // slice which we filter out → zero PtyWrite events.
+    let writes = run(b"\x1bP+q\x1b\\");
+    assert!(
+        writes.is_empty(),
+        "empty XTGETTCAP payload must not reply: {writes:?}"
+    );
+}
+
+#[test]
+fn xtgettcap_oversized_payload_is_gracefully_truncated() {
+    // 5000 bytes of garbage ASCII between `DCS +q` and ST. `put()` caps
+    // the buffer at < 4096 so we silently drop the tail. The resulting
+    // "cap" won't match our table → at most a status-0 reply. The only
+    // contract this test pins is "no crash, terminal stays live" —
+    // specifically that the 4 KiB cap in `put` holds under DoS input.
+    let mut input = b"\x1bP+q".to_vec();
+    input.extend(std::iter::repeat_n(b'A', 5000));
+    input.extend_from_slice(b"\x1b\\");
+    let _ = run(&input); // just must not panic
+}

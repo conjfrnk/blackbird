@@ -345,8 +345,11 @@ impl Perform for OscScanner<'_> {
             return;
         }
         *self.in_xtgettcap = false;
-        // `std::mem::take` leaves the owned buffer empty, preserving
-        // its allocation for the next query — no per-request heap churn.
+        // `std::mem::take` moves the buffer's bytes+allocation out into
+        // `buf` for the reply-building step; the field becomes
+        // `Vec::new()` (capacity 0). The next DCS will re-alloc on its
+        // first `put()`. XTGETTCAP is human-rate so this churn is
+        // invisible; simpler code wins over a micro-optimization.
         let buf = std::mem::take(self.xtgettcap_buf);
         // SAFETY: our parallel `vte::Parser` is driven from
         // `bb_term_input` OUTSIDE alacritty's `&mut Term` borrow, so
@@ -864,6 +867,14 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             // Also drive the parallel parser while we are mid-XTGETTCAP:
             // a `put`-heavy hex payload can be pure ASCII with no ESC/BEL,
             // so the `hook` latch is what keeps us here.
+            //
+            // `|| bb.in_xtgettcap`: defensive. If a future code path ever
+            // clears `osc_possibly_pending` while a DCS is still open
+            // (e.g. a ST-only terminator path we haven't needed yet),
+            // this keeps the osc_parser alive so our hook/put/unhook
+            // state advances. No current fragmentation scenario reaches
+            // this branch because `osc_possibly_pending` stays true from
+            // the DCS's opening ESC; kept as a safety belt.
             if bb.osc_possibly_pending || has_bel || bb.in_xtgettcap {
                 let mut osc = OscScanner {
                     cell: &bb.callback,
