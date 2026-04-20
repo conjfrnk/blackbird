@@ -39,6 +39,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private let secureInputIndicator = SecureInputIndicatorView()
     private var secureInputCancellable: AnyCancellable?
     private var tabGroupObservers: [NSKeyValueObservation] = []
+    /// Identity of the last tab group we subscribed to. When `window.tabGroup`
+    /// becomes a different object (drag-out creates a new standalone-window
+    /// group or nil; drag-back-in joins a different group), any KVO tokens
+    /// in `tabGroupObservers` are pointed at an instance that no longer
+    /// matters. Compare on every `refreshTabBar` and re-subscribe when the
+    /// identity changes.
+    private var lastObservedTabGroupID: ObjectIdentifier?
     private var titleObserver: NSKeyValueObservation?
     private var titleBroadcastObserver: NSObjectProtocol?
 
@@ -400,6 +407,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     func refreshTabBar() {
         guard let window else { return }
+        // Detect tab-group identity changes. A user dragging a tab out of a
+        // window produces a fresh NSWindowTabGroup (or nil on the detached
+        // side); dragging back in may join yet another group. KVO tokens in
+        // `tabGroupObservers` are bound to a single instance, so a change
+        // silently stops selection / add / visibility events on this
+        // controller. Clear-and-resubscribe keeps the strip in sync.
+        let currentGroupID = window.tabGroup.map(ObjectIdentifier.init)
+        if currentGroupID != lastObservedTabGroupID {
+            tabGroupObservers.removeAll()
+            lastObservedTabGroupID = currentGroupID
+            #if DEBUG
+            NSLog(
+                "[Blackbird] tab-group identity changed (%@) — resubscribing",
+                currentGroupID == nil ? "detached" : "new group"
+            )
+            #endif
+        }
         // The FIRST window's installTitlebarTabBar runs its async
         // observeTabGroup before any other window joins — so tabGroup is
         // nil at that moment and observers never attach. Subsequent ⌘T
