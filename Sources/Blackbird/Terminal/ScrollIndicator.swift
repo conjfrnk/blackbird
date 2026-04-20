@@ -13,12 +13,21 @@ import AppKit
 /// natural future extension but omitted to keep scope tight.
 final class ScrollIndicator: NSView {
     private let thumbLayer = CALayer()
+    /// Parent layer for every prompt-mark tick so we can animate / fade the
+    /// marks as a group without touching the thumb. Sits under the thumb so
+    /// the thumb always paints on top of a mark at the current offset.
+    private let marksContainer = CALayer()
+    /// Pool of mark sublayers. Grown on demand, excess layers hidden rather
+    /// than removed so rapid prompt emission doesn't thrash CALayer alloc.
+    private var markLayers: [CALayer] = []
     private var fadeOutWorkItem: DispatchWorkItem?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = .clear
+        marksContainer.opacity = 0
+        layer?.addSublayer(marksContainer)
         thumbLayer.backgroundColor = NSColor.white.withAlphaComponent(0.25).cgColor
         thumbLayer.cornerRadius = 2
         thumbLayer.opacity = 0
@@ -97,6 +106,75 @@ final class ScrollIndicator: NSView {
             thumbLayer.opacity = target
             CATransaction.commit()
         }
+    }
+
+    /// Render prompt-mark ticks along the track. Each mark's position is
+    /// derived from its (historySize, gridRow) snapshot so marks slide
+    /// upward as new content scrolls them into history.
+    ///
+    /// Call from the main thread whenever `TerminalSession.promptMarks`
+    /// changes OR the displayOffset changes (so marks stay visually anchored
+    /// during scroll). No-op while historySize == 0 (no buffer to position
+    /// against).
+    func updatePromptMarks(
+        _ marks: [TerminalSession.PromptMark],
+        historySize: Int,
+        rows: Int,
+        accentColor: NSColor
+    ) {
+        let total = historySize + rows
+        guard total > 0, !marks.isEmpty else {
+            marksContainer.opacity = 0
+            return
+        }
+        let track = bounds.height
+        // Tick geometry: 8 pt tall × 2 pt wide, painted in the accent
+        // colour at ~60 % alpha so the thumb over it still reads clearly.
+        let tickHeight: CGFloat = 8
+        let tickWidth: CGFloat = 2
+        let pad: CGFloat = 3
+        // Re-use or create one layer per mark. Excess hidden.
+        while markLayers.count < marks.count {
+            let l = CALayer()
+            l.cornerRadius = 1
+            marksContainer.addSublayer(l)
+            markLayers.append(l)
+        }
+        let color = accentColor.withAlphaComponent(0.65).cgColor
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for i in 0..<markLayers.count {
+            let l = markLayers[i]
+            if i >= marks.count {
+                l.isHidden = true
+                continue
+            }
+            let m = marks[i]
+            // Distance in lines from the bottom-most (live) row. Marks
+            // whose `historySize + gridRow` exceeds the current live
+            // bottom are "stale" (buffer content scrolled past the
+            // scrollback cap and the line is gone); clamp them off the
+            // track by setting alpha to zero.
+            let mLine = m.historySize + m.gridRow
+            let dist = historySize + rows - 1 - mLine
+            if dist < 0 || dist >= total {
+                l.isHidden = true
+                continue
+            }
+            let fraction = CGFloat(dist) / CGFloat(total)
+            let y = fraction * max(0, track - tickHeight)
+            l.isHidden = false
+            l.backgroundColor = color
+            l.frame = NSRect(
+                x: bounds.width - tickWidth - pad,
+                y: y,
+                width: tickWidth,
+                height: tickHeight
+            )
+        }
+        CATransaction.commit()
+        // Fade container up when we have marks to show.
+        marksContainer.opacity = 1
     }
 
     private func scheduleAutoHide() {

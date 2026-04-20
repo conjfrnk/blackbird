@@ -606,6 +606,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             historySize: snapshot.historySize,
             rows: snapshot.rows
         )
+        // Paint OSC 133 prompt ticks along the track so the user can see
+        // at a glance how far apart their prompts are (and how far up
+        // they've scrolled). No-op when the shell isn't sourcing the
+        // integration snippet — promptMarks stays empty.
+        if let s = session {
+            scrollIndicator.updatePromptMarks(
+                s.promptMarks,
+                historySize: snapshot.historySize,
+                rows: snapshot.rows,
+                accentColor: NSColor.controlAccentColor
+            )
+        }
         // Shell just enabled DECSET 1004 (focus events). If the window is
         // already key — typical: vim's init.vim or tmux's .conf flips this
         // on before the user interacts — notify the app of current focus
