@@ -10,6 +10,7 @@ final class PreferencesTests: XCTestCase {
     private var savedFontName: String = ""
     private var savedFontSize: Double = 0
     private var savedBellRaw: String = ""
+    private var savedCursorShapeRaw: String = ""
     private var savedOptionKeyRaw: String = ""
     private var savedCursorBlink: Bool = false
     private var savedConfirmClose: Bool = false
@@ -30,6 +31,7 @@ final class PreferencesTests: XCTestCase {
         savedFontName        = p.fontName
         savedFontSize        = p.fontSize
         savedBellRaw         = p.bellRaw
+        savedCursorShapeRaw  = p.cursorShapeRaw
         savedOptionKeyRaw    = p.optionKeyRaw
         savedCursorBlink     = p.cursorBlink
         savedConfirmClose    = p.confirmClose
@@ -45,6 +47,7 @@ final class PreferencesTests: XCTestCase {
         p.fontName         = savedFontName
         p.fontSize         = savedFontSize
         p.bellRaw          = savedBellRaw
+        p.cursorShapeRaw   = savedCursorShapeRaw
         p.optionKeyRaw     = savedOptionKeyRaw
         p.cursorBlink      = savedCursorBlink
         p.confirmClose     = savedConfirmClose

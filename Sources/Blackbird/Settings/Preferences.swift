@@ -24,6 +24,26 @@ public final class Preferences: ObservableObject {
         public var id: String { rawValue }
     }
 
+    public enum CursorShape: String, CaseIterable, Identifiable {
+        case followShell = "Follow Shell"
+        case block       = "Block"
+        case underline   = "Underline"
+        case bar         = "Bar"
+        public var id: String { rawValue }
+        /// `nil` → renderer uses the DECSCUSR shape from the current snapshot
+        /// (today's behaviour). A non-nil value pins the cursor regardless of
+        /// what the shell sends. Numeric codes match the snapshot encoding:
+        /// 0 block, 1 bar/beam, 2 underline.
+        public var rendererOverride: UInt8? {
+            switch self {
+            case .followShell: return nil
+            case .block:       return 0
+            case .bar:         return 1
+            case .underline:   return 2
+            }
+        }
+    }
+
     @AppStorage("theme")          public var themeRaw: String  = Theme.gruvbox.rawValue
     @AppStorage("themeMode")      public var themeModeRaw: String = ThemeMode.dark.rawValue
     @AppStorage("fontName")       public var fontName: String = "Hack Nerd Font Mono"
@@ -41,6 +61,7 @@ public final class Preferences: ObservableObject {
     }
     @AppStorage("cursorBlink")    public var cursorBlink: Bool = false
     @AppStorage("bell")           public var bellRaw: String = BellStyle.visual.rawValue
+    @AppStorage("cursorShape")    public var cursorShapeRaw: String = CursorShape.followShell.rawValue
     @AppStorage("optionKey")      public var optionKeyRaw: String = OptionKey.meta.rawValue
     @AppStorage("confirmClose")   public var confirmClose: Bool = true
     @AppStorage("autoUpdateChecks") public var autoUpdateChecks: Bool = false
@@ -75,6 +96,7 @@ public final class Preferences: ObservableObject {
     public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }
     public var bell: BellStyle      { BellStyle(rawValue: bellRaw) ?? .visual }
+    public var cursorShape: CursorShape { CursorShape(rawValue: cursorShapeRaw) ?? .followShell }
     public var optionKey: OptionKey { OptionKey(rawValue: optionKeyRaw) ?? .meta }
 
     /// Resolved `(opacity, blurRadius)` from the single translucency slider.
@@ -129,6 +151,7 @@ public final class Preferences: ObservableObject {
         if Theme(rawValue: themeRaw) == nil { themeRaw = Theme.defaultTheme.rawValue }
         if ThemeMode(rawValue: themeModeRaw) == nil { themeModeRaw = ThemeMode.auto.rawValue }
         if BellStyle(rawValue: bellRaw) == nil { bellRaw = BellStyle.visual.rawValue }
+        if CursorShape(rawValue: cursorShapeRaw) == nil { cursorShapeRaw = CursorShape.followShell.rawValue }
         if OptionKey(rawValue: optionKeyRaw) == nil { optionKeyRaw = OptionKey.meta.rawValue }
 
         // Force a through-didSet write on each numeric pref so values
