@@ -255,9 +255,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// the user Cmd-Tabs back to the terminal; tmux uses it to propagate
     /// focus to its inner panes so clients can update title / status.
     /// The session gates internally so no bytes emit when the mode is off.
+    ///
+    /// Also refreshes the pill strip: dragging a tab out of a group fires
+    /// no KVO on the detached side (its old group is gone), and no resize
+    /// either — but the detached window becomes key almost immediately.
+    /// Piggybacking on this callback keeps chrome consistent without
+    /// sprinkling extra notifications.
     func windowDidBecomeKey(_ notification: Notification) {
         session?.focusChanged(true)
         secureInputPoller.start()
+        refreshTabBar()
     }
 
     /// Forward window-focus loss. Paired with `windowDidBecomeKey` above.
@@ -267,6 +274,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func windowDidResignKey(_ notification: Notification) {
         session?.focusChanged(false)
         secureInputPoller.stop()
+    }
+
+    /// Main-window transitions fire on a different schedule than key-window
+    /// transitions (e.g., a background window can become main when its app
+    /// gains focus). Refresh here too so detached-window chrome settles in
+    /// every path — cheaper than tracking every edge individually.
+    func windowDidBecomeMain(_ notification: Notification) {
+        refreshTabBar()
     }
 
     // MARK: - Titlebar-integrated tab bar
