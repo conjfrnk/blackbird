@@ -93,6 +93,39 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  latency-gate:
+    name: Latency gate — p50/p99 regression check
+    runs-on: macos-14
+    needs: xcode
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build Rust core (universal)
+        run: scripts/build-core.sh
+
+      - name: Latency gate
+        run: LATENCY_P50_MS=6.0 LATENCY_P99_MS=20.0 scripts/bench-latency.sh
+
   swift-release-universal:
     name: Xcode — Release build (arm64 + x86_64 universal)
     runs-on: macos-14

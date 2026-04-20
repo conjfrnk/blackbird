@@ -34,11 +34,32 @@ public final class LatencyProbe {
 
     /// Read the env once at init so toggling has no per-call cost. A
     /// non-empty, non-"0" value enables; anything else leaves the probe off.
-    public let enabled: Bool = {
+    private let envEnabled: Bool = {
         guard let cstr = getenv("BB_LATENCY_PROBE") else { return false }
         let raw = String(cString: cstr)
         return !raw.isEmpty && raw != "0"
     }()
+
+    #if DEBUG
+    private var forceEnabledForTests: Bool = false
+
+    /// Force-enable the probe for the duration of a test. Use `_disableAfterTests()`
+    /// in a `defer` block to restore the default state after the test completes.
+    /// DEBUG-only: not compiled into release builds.
+    internal func _forceEnableForTests() { forceEnabledForTests = true }
+
+    /// Undo `_forceEnableForTests()`. Call from the test's `defer` block.
+    /// DEBUG-only: not compiled into release builds.
+    internal func _disableAfterTests() { forceEnabledForTests = false }
+    #endif
+
+    public var enabled: Bool {
+        #if DEBUG
+        return envEnabled || forceEnabledForTests
+        #else
+        return envEnabled
+        #endif
+    }
 
     public init() {}
 
