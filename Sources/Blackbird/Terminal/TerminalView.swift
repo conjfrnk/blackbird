@@ -2767,6 +2767,12 @@ extension TerminalView {
             return
         }
         sendReplacement(match: m, replacement: replacement)
+        // The replacement edits the shell line; every recorded match on that
+        // line has now shifted or vanished. Drop the cache so find-next
+        // doesn't scroll to a stale coordinate.
+        findMatches.removeAll()
+        findCurrentIndex = 0
+        findBar?.setMatchCount(0, of: 0)
     }
 
     /// Replace all find matches with `replacement`, processing right-to-left so
@@ -2789,6 +2795,10 @@ extension TerminalView {
         for m in inputLineMatches.sorted(by: { $0.startCol > $1.startCol }) {
             sendReplacement(match: m, replacement: replacement)
         }
+        // All input-line matches have been spliced; invalidate the cache.
+        findMatches.removeAll()
+        findCurrentIndex = 0
+        findBar?.setMatchCount(0, of: 0)
         if hadOffLine {
             findBar?.showTransientMessage("Replaced input-line matches (scrollback skipped)")
         }

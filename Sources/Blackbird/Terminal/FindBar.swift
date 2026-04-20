@@ -169,11 +169,6 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         matchLabel.stringValue = total == 0 ? "No matches" : "\(current + 1) / \(total)"
     }
 
-    /// Current text in the replace field. Exposed so responders (e.g. the ⌘⌥E
-    /// action) can trigger the replace-current flow without going through the
-    /// button's `@objc` action.
-    public var currentReplacementString: String { replaceField.stringValue }
-
     /// Fires the replace-current delegate callback with the current replacement
     /// string. Equivalent to clicking the "Replace" button. Used by ⌘⌥E when
     /// the bar is already expanded.
