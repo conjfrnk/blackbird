@@ -523,11 +523,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         beginRenameActiveTab()
     }
 
-    /// Show a simple Rename alert targeting this window's `session`. Empty
-    /// input clears any existing override and reverts to the auto (OSC)
-    /// title. Cancel leaves the current state untouched.
+    /// Entry point for ⌥⌘R and the `Rename…` context menu. Multi-tab
+    /// windows open the inline pill editor (new — see Task 8); single-tab
+    /// windows have no pill strip, so the legacy modal alert remains the
+    /// only sensible surface there.
     func beginRenameActiveTab() {
-        guard let session else { return }
+        guard let window, let session else { return }
+        let tabCount = window.tabGroup?.windows.count ?? 1
+        if tabCount >= 2, let vc = titlebarTabBar {
+            vc.beginInlineRename(for: window)
+        } else {
+            presentRenameAlert(for: session)
+        }
+    }
+
+    /// Legacy modal rename path, kept for single-tab windows. The empty
+    /// string means "clear override and revert to auto"; Cancel leaves
+    /// state untouched.
+    private func presentRenameAlert(for session: TerminalSession) {
         let alert = NSAlert()
         alert.messageText = "Rename tab"
         alert.informativeText = "Enter a new title. Leave empty to keep the current auto title."
@@ -545,6 +558,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guard response == .alertFirstButtonReturn else { return }
         let new = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         session.titleOverride = new.isEmpty ? nil : new
+    }
+
+    /// Receives the result of an inline pill rename. `trimmedTitle` is
+    /// already whitespace-trimmed by `TabStripView.commitEdit`; empty
+    /// string → clear override (revert to OSC / auto title).
+    func applyInlineRename(_ trimmedTitle: String) {
+        session?.titleOverride = trimmedTitle.isEmpty ? nil : trimmedTitle
     }
 
     @objc func resetActiveTabTitle(_ sender: Any?) {

@@ -32,6 +32,26 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
         stripView.onAddTab = {
             NSApp.sendAction(Selector(("newWindowForTab:")), to: nil, from: nil)
         }
+        // Inline-rename commit: the strip has already trimmed the input
+        // and converted "" → nil; just hand the value to the window's
+        // MainWindowController (which owns the session + override
+        // policy). This bypasses the responder chain — we already know
+        // the exact window being renamed.
+        stripView.onCommitRename = { window, newOverride in
+            guard let controller = window.windowController as? MainWindowController else { return }
+            controller.applyInlineRename(newOverride)
+        }
+    }
+
+    /// Enter inline rename mode for `window`'s pill, if any. Called by
+    /// `MainWindowController.beginRenameActiveTab` and the `Rename…`
+    /// context menu item when the window is part of a multi-tab group.
+    /// Single-tab windows fall back to the modal path on the controller.
+    func beginInlineRename(for window: NSWindow) {
+        guard let group = window.tabGroup else { return }
+        let tabs = group.windows
+        guard let idx = tabs.firstIndex(of: window) else { return }
+        stripView.beginEditing(pillIndex: idx)
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
@@ -68,12 +88,27 @@ final class TabStripView: NSView {
     var onSelectWindow: ((NSWindow) -> Void)?
     var onCloseWindow:  ((NSWindow) -> Void)?
     var onAddTab:       (() -> Void)?
+    /// Called when the user commits an inline rename. `newOverride` is the
+    /// trimmed value; `""` means "clear the override and revert to auto".
+    /// The strip does not call this on cancel (Escape or external
+    /// teardown).
+    var onCommitRename: ((NSWindow, String) -> Void)?
 
     private var tabs: [NSWindow] = []
     private weak var selectedTab: NSWindow?
     private var totalWidth: CGFloat = 0
     private var pillFrames: [CGRect] = []
     private var addButtonFrame: CGRect = .zero
+
+    // MARK: - Inline-edit state
+
+    /// Index of the pill currently in inline-edit mode, or `nil`. Only one
+    /// pill edits at a time; opening a second commits the first so the
+    /// user never silently loses an in-flight title edit.
+    private var editingPill: Int? = nil
+    /// Field editor used while a pill is being renamed. Lifetime matches
+    /// `editingPill` — nil'd together by `teardownEdit`.
+    private var editField: NSTextField? = nil
 
     /// Which pill is the cursor over, if any.
     private var hoveredPill: Int? = nil
@@ -96,6 +131,16 @@ final class TabStripView: NSView {
     override var isFlipped: Bool { true }
 
     func update(tabs: [NSWindow], selected: NSWindow, width: CGFloat) {
+        // An in-flight edit targets a specific pill index in the OLD tab
+        // list. If the list shape changes under us (tab closed, window
+        // dragged in, reorder), the field can end up floating over the
+        // wrong pill or off-strip entirely. Safest policy: commit on any
+        // layout-affecting update — preserves the user's work and drops
+        // the field before it becomes confusing. Cancels when there's no
+        // text field (e.g., first call before any edit).
+        if editingPill != nil {
+            commitEdit()
+        }
         self.tabs = tabs
         self.selectedTab = selected
         self.totalWidth = width
@@ -135,6 +180,119 @@ final class TabStripView: NSView {
         addButtonFrame = NSRect(x: x + gap, y: y, width: addW, height: h)
     }
 
+    // MARK: - Inline editing
+
+    /// Swap the pill at `pillIndex` into rename mode. Installs an
+    /// `NSTextField` over the pill's title area, pre-fills with the window
+    /// title, selects all. Commits any in-flight edit first so two
+    /// double-clicks in a row don't drop the first edit silently.
+    func beginEditing(pillIndex: Int) {
+        guard pillIndex >= 0,
+              pillIndex < tabs.count,
+              pillIndex < pillFrames.count
+        else { return }
+        if let existing = editingPill, existing != pillIndex {
+            commitEdit()
+        }
+        // If the field already exists for the same pill (e.g., user hit
+        // ⌥⌘R a second time on the same pill), just refocus it.
+        if editingPill == pillIndex, let existing = editField {
+            window?.makeFirstResponder(existing)
+            existing.currentEditor()?.selectAll(nil)
+            return
+        }
+        editingPill = pillIndex
+        let pill = pillFrames[pillIndex]
+        let closeRect = closeHotspot(in: pill)
+        // Size the field to the pill's title area (same math as the
+        // drawing path). 2 pt top/bottom inset keeps the field slightly
+        // inside the pill body so its focus-ring-free border is visible.
+        let fieldRect = NSRect(
+            x: pill.minX + closeRect.width + 6,
+            y: pill.minY + 2,
+            width: max(0, pill.width - (closeRect.width + 12)),
+            height: pill.height - 4
+        )
+        let field = NSTextField(frame: fieldRect)
+        field.font = Self.titleFont
+        field.alignment = .center
+        field.isBezeled = false
+        field.drawsBackground = true
+        field.backgroundColor = NSColor.textBackgroundColor
+        field.textColor = NSColor.labelColor
+        field.focusRingType = .none
+        field.stringValue = tabs[pillIndex].title.isEmpty ? "Untitled" : tabs[pillIndex].title
+        field.delegate = self
+        // Enter fires the action; action selector + target here is a
+        // defense-in-depth for environments where the field-editor
+        // `insertNewline:` command path doesn't route through the
+        // delegate. Both paths funnel through `commitEdit`.
+        field.target = self
+        field.action = #selector(editFieldCommitAction(_:))
+        addSubview(field)
+        window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+        editField = field
+        needsDisplay = true
+    }
+
+    @objc private func editFieldCommitAction(_ sender: Any?) {
+        commitEdit()
+    }
+
+    /// Publish the current edit-field value through `onCommitRename` and
+    /// tear down the field. Trims whitespace; empty → `""` which the
+    /// caller (MainWindowController.applyInlineRename) treats as
+    /// "clear override, revert to auto title".
+    private func commitEdit() {
+        guard let idx = editingPill,
+              let field = editField,
+              idx < tabs.count
+        else {
+            cancelEdit()
+            return
+        }
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = tabs[idx]
+        teardownEdit()
+        // Call through AFTER teardown so the consumer's side-effects
+        // (title publication → KVO → refreshTabBar) don't land while the
+        // subview is still alive and racing for the first-responder slot.
+        onCommitRename?(target, trimmed)
+    }
+
+    /// Dismiss the edit without publishing. Used for Escape and for any
+    /// path that takes the field down without consumer notification.
+    private func cancelEdit() {
+        teardownEdit()
+    }
+
+    private func teardownEdit() {
+        editField?.delegate = nil
+        editField?.removeFromSuperview()
+        editField = nil
+        editingPill = nil
+        needsDisplay = true
+    }
+
+    /// `true` while any pill is in inline-edit mode. Hover / close
+    /// rendering short-circuits on this so the editing pill doesn't
+    /// paint an `×` hotspot over its own text field.
+    private var isEditing: Bool { editingPill != nil }
+
+    #if DEBUG
+    /// Test hook — sets the editing field's value without going through
+    /// a real NSTextField + field-editor dance. Only meaningful while an
+    /// edit is in progress; no-op otherwise.
+    @objc func setEditTextForTesting(_ text: String) {
+        editField?.stringValue = text
+    }
+    /// Test hook — explicitly commits the in-flight edit.
+    @objc func commitEditForTesting() { commitEdit() }
+    /// Test hook — explicitly cancels the in-flight edit.
+    @objc func cancelEditForTesting() { cancelEdit() }
+    #endif
+
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
@@ -154,7 +312,8 @@ final class TabStripView: NSView {
         for (i, w) in tabs.enumerated() where i < pillFrames.count {
             let rect = pillFrames[i]
             let isSelected = w === selectedTab
-            let isHovered = hoveredPill == i
+            let isHovered = hoveredPill == i && !isEditing
+            let isBeingEdited = editingPill == i
 
             let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).cgPath
             ctx.addPath(path)
@@ -166,6 +325,12 @@ final class TabStripView: NSView {
                 ctx.setFillColor(inactiveBg)
             }
             ctx.fillPath()
+
+            // Pill being renamed — skip the title + close-hotspot drawing.
+            // The NSTextField subview covers the title area; drawing a
+            // label underneath would bleed through around the field's
+            // corners and confuse the eye about what's editable.
+            if isBeingEdited { continue }
 
             // Close `×` shown only when the pill is hovered. Drawn at
             // leading edge so text center stays stable. Tint with
@@ -262,10 +427,46 @@ final class TabStripView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+
+        // While a pill is being renamed, a click inside the edit field
+        // belongs to the field editor — we shouldn't see it here at all
+        // (subviews hit-test first), but the containing pill bounds still
+        // route through this method when the click lands on the pill body
+        // outside the field (e.g., the close hotspot area). Commit the
+        // in-flight edit on any outside click before processing so the
+        // click doesn't silently drop the edit.
+        if let idx = editingPill, idx < pillFrames.count {
+            let editingRect = pillFrames[idx]
+            if !NSPointInRect(p, editingRect) {
+                commitEdit()
+                // Fall through — the click was outside the editing pill,
+                // treat it as a normal click on whatever it landed on.
+            } else {
+                // Click inside the editing pill but outside the field
+                // (close hotspot area). Treat as commit-and-stay-put.
+                commitEdit()
+                return
+            }
+        }
+
         if NSPointInRect(p, addButtonFrame) {
             onAddTab?()
             return
         }
+
+        // Double-click on a pill body (outside the close hotspot) → enter
+        // inline rename mode. Matches Safari / Chrome / iTerm2 tab rename
+        // idiom — no modal alert, no menu trip.
+        if event.clickCount == 2 {
+            for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
+                let closeRect = closeHotspot(in: rect)
+                if !NSPointInRect(p, closeRect), i < tabs.count {
+                    beginEditing(pillIndex: i)
+                    return
+                }
+            }
+        }
+
         for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
             guard i < tabs.count else { return }
             // Only honour a close click when the user is actually hovered
@@ -309,7 +510,11 @@ final class TabStripView: NSView {
         } else {
             for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
                 hoveredPill = i
-                hoveredClose = NSPointInRect(p, closeHotspot(in: rect))
+                // Don't arm the close hotspot for the pill under edit —
+                // the `×` isn't drawn there and honouring a close click
+                // would toss the field and kill the session.
+                hoveredClose = editingPill != i
+                    && NSPointInRect(p, closeHotspot(in: rect))
                 break
             }
         }
@@ -385,6 +590,31 @@ final class TabStripView: NSView {
         menu.addItem(close)
 
         return menu
+    }
+}
+
+extension TabStripView: NSTextFieldDelegate {
+    /// Enter → commit, Escape → cancel. Routed through the field editor's
+    /// command dispatch so we get both Return on a physical keyboard and
+    /// Enter on the numeric keypad.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        if sel == #selector(NSResponder.cancelOperation(_:)) {
+            cancelEdit()
+            return true
+        }
+        if sel == #selector(NSResponder.insertNewline(_:)) {
+            commitEdit()
+            return true
+        }
+        return false
+    }
+
+    /// Focus loss that isn't routed through Enter / Escape — clicked
+    /// elsewhere in the app, ⌘-Tab to another app, etc. Commit so the
+    /// user's typed value survives. `cancelEdit` paths have already
+    /// nil'd `editField`, so this is a no-op in that case.
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if editField != nil { commitEdit() }
     }
 }
 
