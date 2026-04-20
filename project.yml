@@ -53,7 +53,7 @@ targets:
       properties:
         CFBundleName: Blackbird
         CFBundleDisplayName: Blackbird
-        CFBundleShortVersionString: "0.1.0"
+        CFBundleShortVersionString: "0.1.1"
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "Copyright © 2026 Connor Frank. MIT License."
         # Shells keep state (cwd, env, scrollback, in-flight writes). Opting
