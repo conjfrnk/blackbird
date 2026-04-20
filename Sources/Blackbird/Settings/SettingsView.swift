@@ -55,6 +55,11 @@ public struct SettingsView: View {
                 Text("Size: \(Int(prefs.fontSize))")
                 Slider(value: $prefs.fontSize, in: 9...32, step: 1)
             }
+            Picker("Cursor Shape", selection: $prefs.cursorShapeRaw) {
+                ForEach(Preferences.CursorShape.allCases) { s in
+                    Text(s.rawValue).tag(s.rawValue)
+                }
+            }
 
             Divider()
 
