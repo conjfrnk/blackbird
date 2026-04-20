@@ -432,7 +432,7 @@ fn find_cap_value(cap_hex: &[u8]) -> Option<&'static [u8]> {
 /// - RGB    = "8"             — truecolor bits per channel.
 /// - Smulx  = "\E[4:%p1%dm"   — styled underline select (SGR 4:n).
 /// - Setulc = "\E[58:2::%p1%{65536}%/%d:%p2%{256}%/%d:%p3%d%;m"
-///             — RGB underline color (SGR 58:2:R:G:B).
+///   — RGB underline color (SGR 58:2:R:G:B).
 ///
 /// Smulx/Setulc together are what nvim probes before emitting colored
 /// undercurl (`spellbad`, LSP diagnostics). Getting both right is the
