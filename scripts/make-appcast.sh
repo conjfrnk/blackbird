@@ -11,6 +11,12 @@ set -euo pipefail
 #                        https://dl.example.com/blackbird/
 #
 # Optional env:
+#   APPCAST_FEED_URL   — self-URL of the appcast feed, used in the <link>
+#                        element of a --full rendering. Defaults to
+#                        "${APPCAST_BASE_URL}/appcast.xml". Set this when
+#                        the feed lives on a different host than the
+#                        binaries (e.g. binaries on GitHub Releases but
+#                        the feed served from blackbird-terminal.com).
 #   SIGN_UPDATE        — path to Sparkle's sign_update binary. If unset,
 #                        the script looks in PATH first, then in the
 #                        Xcode DerivedData SPM artifact tree.
@@ -23,6 +29,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 : "${APPCAST_BASE_URL:?APPCAST_BASE_URL must be set (e.g. https://dl.example.com/blackbird/)}"
+FEED_URL="${APPCAST_FEED_URL:-${APPCAST_BASE_URL%/}/appcast.xml}"
 
 FULL=0
 if [[ "${1:-}" == "--full" ]]; then
@@ -88,7 +95,7 @@ if [[ "$FULL" == "1" ]]; then
      version="2.0">
   <channel>
     <title>Blackbird</title>
-    <link>${APPCAST_BASE_URL%/}/appcast.xml</link>
+    <link>${FEED_URL}</link>
     <description>Release feed for Blackbird.</description>
     <language>en</language>
 ${ITEM}
