@@ -74,8 +74,8 @@ targets:
         # to 256, which Stage Manager resolved over the catalog and rendered
         # as a generic tile when asking for 512+. A prebuilt full .icns sidesteps it.
         CFBundleIconFile: AppIcon
-        SUFeedURL: https://example.com/appcast.xml
-        SUPublicEDKey: ""
+        SUFeedURL: https://blackbird-terminal.com/appcast.xml
+        SUPublicEDKey: c0owV2OCS9djxEodLrUloctbMw+qQl52pVkZDuT8fV4=
         SUEnableAutomaticChecks: false
         SUScheduledCheckInterval: 86400
         # Keep the privileged InstallerLauncher XPC service OFF until a

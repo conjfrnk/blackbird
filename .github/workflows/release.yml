@@ -87,18 +87,25 @@ jobs:
             scripts/release.sh
           fi
 
-      - name: Locate DMG
+      - name: Stage DMGs (versioned + stable alias)
         id: dmg
         run: |
-          DMG_PATH=$(ls dist/Blackbird-*.dmg | head -1)
-          echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
-          echo "name=$(basename "$DMG_PATH")" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          VERSIONED=$(ls dist/Blackbird-*.dmg | head -1)
+          # Stable alias so the website's "Download for macOS" button can
+          # link to /releases/latest/download/Blackbird.dmg without knowing
+          # the tag.
+          cp "$VERSIONED" dist/Blackbird.dmg
+          echo "versioned=$VERSIONED" >> "$GITHUB_OUTPUT"
+          echo "stable=dist/Blackbird.dmg" >> "$GITHUB_OUTPUT"
 
-      - name: Upload DMG to release
+      - name: Upload DMGs to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: ${{ steps.dmg.outputs.path }}
+          files: |
+            ${{ steps.dmg.outputs.versioned }}
+            ${{ steps.dmg.outputs.stable }}
           draft: false
           prerelease: false
           generate_release_notes: true

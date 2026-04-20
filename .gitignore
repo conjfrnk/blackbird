@@ -46,6 +46,9 @@ target/
 
 # Credentials and signing
 *.p12
+*.p12.base64
+*.cer
+*.certSigningRequest
 *.mobileprovision
 AuthKey_*.p8
 Credentials.xcconfig
@@ -54,6 +57,9 @@ Credentials.xcconfig
 !.env.example
 dsa_priv.pem
 eddsa_priv.pem
+# Developer-ID export password stash (name convention — never commit).
+PWORD*
+DevID*
 
 # cbindgen metadata artifact (written to repo root during header generation)
 libnull.rmeta

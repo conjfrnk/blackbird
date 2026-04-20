@@ -39,9 +39,9 @@
 	<key>SUEnableInstallerLauncherService</key>
 	<false/>
 	<key>SUFeedURL</key>
-	<string>https://example.com/appcast.xml</string>
+	<string>https://blackbird-terminal.com/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string></string>
+	<string>c0owV2OCS9djxEodLrUloctbMw+qQl52pVkZDuT8fV4=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>
