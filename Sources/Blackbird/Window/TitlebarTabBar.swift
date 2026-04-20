@@ -39,16 +39,16 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     /// Re-read the tab group and re-lay pills. Caller is responsible for
     /// toggling `view.isHidden` based on tab count before calling this —
     /// single-tab windows skip the custom strip entirely.
-    func refresh() {
+    ///
+    /// `availableWidth` is the caller's pre-computed titlebar budget for
+    /// this accessory: total window width minus every *other* right-anchored
+    /// accessory (traffic lights, secure-input indicator, …). The strip
+    /// owns zero layout math of its own — `MainWindowController` is the
+    /// single authority for reservation arithmetic.
+    func refresh(availableWidth: CGFloat) {
         guard let window = hostWindow else { return }
         let tabs = window.tabGroup?.windows ?? [window]
         let selected = window.tabGroup?.selectedWindow ?? window
-        // Reserve room for the traffic lights (~78pt on standard macOS
-        // with all three visible). The rest of the titlebar belongs to
-        // us.
-        let trafficLightsReservation: CGFloat = 78
-        let totalTitlebarWidth = window.frame.width
-        let availableWidth = max(200, totalTitlebarWidth - trafficLightsReservation)
         stripView.update(tabs: tabs, selected: selected, width: availableWidth)
         view.frame = NSRect(x: 0, y: 0, width: availableWidth, height: TabStripView.height)
     }

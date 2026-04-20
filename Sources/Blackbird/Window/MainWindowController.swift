@@ -17,6 +17,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// Always reset immediately after the batch via a `defer`.
     static var bypassCloseConfirm: Bool = false
 
+    /// Space on the right of the titlebar reserved for the three traffic-
+    /// light buttons on a standard-style macOS window. Used by the tab
+    /// strip width calculation so pills never overlap the close / minimize
+    /// / zoom hotspots.
+    private static let trafficLightsReservation: CGFloat = 78
+    /// Additional reservation for every other `.right`-anchored titlebar
+    /// accessory this controller installs. Today: the secure-input lock
+    /// indicator (16 pt icon + 16 pt container padding = 32 pt, plus a
+    /// 4 pt gap so pills don't visually kiss the icon). Keep in lockstep
+    /// with every `addTitlebarAccessoryViewController(_:)` call where
+    /// `layoutAttribute == .right`.
+    private static let otherRightAccessoryReservation: CGFloat = 32 + 4
+
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
     private var exitCancellable: AnyCancellable?
@@ -410,7 +423,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // Tab pills carry the title; suppressing the system title
             // avoids stacking 'zsh' twice.
             window.titleVisibility = .hidden
-            titlebarTabBar?.refresh()
+            // Single source of truth for titlebar accessory width math —
+            // the tab bar VC just consumes what we give it. `200` floor
+            // mirrors the previous value so narrow windows still render
+            // at least something legible in the strip.
+            let total = window.frame.width
+            let available = max(
+                200,
+                total - Self.trafficLightsReservation - Self.otherRightAccessoryReservation
+            )
+            titlebarTabBar?.refresh(availableWidth: available)
         }
     }
 
