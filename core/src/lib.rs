@@ -11,7 +11,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
-use alacritty_terminal::vte::{Parser, Perform};
+use alacritty_terminal::vte::{Params, Parser, Perform};
 
 /// Dimensions struct required by `Term::new`.
 ///
@@ -280,7 +280,8 @@ impl EventListener for RoutingListener {
 // of alacritty: OSC 7 (cwd) and OSC 133 (prompt marks).
 // ---------------------------------------------------------------------------
 
-/// Minimal `vte::Perform` impl that fires on OSC 7 and OSC 133 payloads.
+/// Minimal `vte::Perform` impl that fires on OSC 7, OSC 133, and
+/// XTGETTCAP (DCS `+ q` ... ST) payloads.
 ///
 /// `alacritty_terminal` 0.26 / `vte` 0.15 do not handle these themselves —
 /// they fall through vte's `osc_dispatch` to the unhandled branch. Rather
@@ -288,14 +289,21 @@ impl EventListener for RoutingListener {
 /// have to forward perfectly), we run a second, stateful `vte::Parser`
 /// owned by `BBTerm` and driven from `bb_term_input` with the same byte
 /// stream. That parser drives this scanner, which dispatches by the first
-/// OSC param and no-ops every other Perform method.
+/// OSC param and no-ops every other Perform method — except `hook`/`put`/
+/// `unhook`, which implement Kitty's XTGETTCAP capability query protocol.
 ///
 /// Consolidated from two separate parsers (one per OSC number) into one —
 /// the earlier split cost ~15% of throughput because every byte was run
 /// through three parsers total (alacritty's main + two parallels). One
 /// scanner with an inexpensive first-param check is strictly cheaper.
+///
+/// XTGETTCAP state lives on `BBTerm` rather than this scanner because DCS
+/// sequences can fragment across multiple `bb_term_input` calls; the
+/// scanner is re-created per call and borrows the state via `&mut`.
 struct OscScanner<'a> {
     cell: &'a CallbackCell,
+    in_xtgettcap: &'a mut bool,
+    xtgettcap_buf: &'a mut Vec<u8>,
 }
 
 impl Perform for OscScanner<'_> {
@@ -311,7 +319,145 @@ impl Perform for OscScanner<'_> {
         // here only to satisfy the Perform signature.
         let _ = bell_terminated;
     }
+
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // XTGETTCAP opens as `ESC P + q` — intermediates == [b'+'],
+        // final byte == 'q'. Any other DCS (sixel, sync output, iTerm2
+        // conductor, etc.) stays inert: `dcs_rejection` tests pin that.
+        if intermediates == b"+" && action == 'q' {
+            *self.in_xtgettcap = true;
+            self.xtgettcap_buf.clear();
+        }
+    }
+
+    fn put(&mut self, byte: u8) {
+        // Only collect while inside a recognized XTGETTCAP sequence. Cap
+        // at 4 KiB as a DoS backstop: a legitimate query is at most a
+        // few hundred bytes; truncation of an oversized query produces
+        // a short reply rather than a crash or unbounded allocation.
+        if *self.in_xtgettcap && self.xtgettcap_buf.len() < 4096 {
+            self.xtgettcap_buf.push(byte);
+        }
+    }
+
+    fn unhook(&mut self) {
+        if !*self.in_xtgettcap {
+            return;
+        }
+        *self.in_xtgettcap = false;
+        // `std::mem::take` leaves the owned buffer empty, preserving
+        // its allocation for the next query — no per-request heap churn.
+        let buf = std::mem::take(self.xtgettcap_buf);
+        // SAFETY: our parallel `vte::Parser` is driven from
+        // `bb_term_input` OUTSIDE alacritty's `&mut Term` borrow, so
+        // firing synchronously here is safe — we are not re-entering
+        // alacritty. No deferred queue needed (unlike OSC 10/11/12,
+        // which must defer because they hit the palette mid-borrow).
+        unsafe { dispatch_xtgettcap(self.cell, &buf) };
+    }
 }
+
+/// Fire one `PtyWrite` reply per `;`-delimited cap. Unknown caps reply
+/// with status 0 and no `=value`. Match replies echo the request's cap
+/// hex verbatim (preserving casing) so TUIs can correlate requests and
+/// replies without canonicalizing.
+///
+/// # Safety
+/// Caller must ensure single-threaded access to `cell` (standard BBTerm
+/// thread discipline).
+unsafe fn dispatch_xtgettcap(cell: &CallbackCell, payload: &[u8]) {
+    for cap_hex in payload.split(|&b| b == b';') {
+        if cap_hex.is_empty() {
+            // `;;` or leading/trailing `;` — skip silently.
+            continue;
+        }
+        let reply = build_xtgettcap_reply(cap_hex);
+        cell.fire(BBEvent {
+            kind: BBEventKind::PtyWrite,
+            payload: reply.as_ptr(),
+            len: reply.len(),
+            i32_arg: 0,
+        });
+        // `reply` drops here; `fire` is synchronous so the C callback
+        // has already consumed the bytes by the time we release.
+    }
+}
+
+fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
+    match find_cap_value(cap_hex) {
+        Some(value_hex) => {
+            // DCS 1 + r <cap>=<value> ST
+            let mut v = Vec::with_capacity(cap_hex.len() + value_hex.len() + 8);
+            v.extend_from_slice(b"\x1bP1+r");
+            v.extend_from_slice(cap_hex);
+            v.push(b'=');
+            v.extend_from_slice(value_hex);
+            v.extend_from_slice(b"\x1b\\");
+            v
+        }
+        None => {
+            // DCS 0 + r <cap> ST
+            let mut v = Vec::with_capacity(cap_hex.len() + 7);
+            v.extend_from_slice(b"\x1bP0+r");
+            v.extend_from_slice(cap_hex);
+            v.extend_from_slice(b"\x1b\\");
+            v
+        }
+    }
+}
+
+/// ASCII-case-insensitive lookup against `XTGETTCAP_TABLE`. Cap hex is
+/// canonically uppercase, but tolerate lowercase defensively — some
+/// ncurses builds lowercase hex when emitting `tput`-style queries.
+fn find_cap_value(cap_hex: &[u8]) -> Option<&'static [u8]> {
+    for (key, value) in XTGETTCAP_TABLE {
+        if cap_hex.eq_ignore_ascii_case(key) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Kitty XTGETTCAP capabilities Blackbird claims. Each row is
+/// (hex-encoded cap name, hex-encoded terminfo-compiled value).
+///
+/// Values are the bytes of the terminfo string, hex-encoded upper-case.
+/// `\E` in terminfo source is ESC (0x1B), not a literal `\`+`E`, so the
+/// hex is `1B` in those positions.
+///
+/// Claimed caps (why each matters):
+/// - TN     = "xterm-kitty"  — the terminal identity string some TUIs
+///   key on to enable advanced protocols.
+/// - Co     = "256"          — color count.
+/// - RGB    = "8"             — truecolor bits per channel.
+/// - Smulx  = "\E[4:%p1%dm"   — styled underline select (SGR 4:n).
+/// - Setulc = "\E[58:2::%p1%{65536}%/%d:%p2%{256}%/%d:%p3%d%;m"
+///             — RGB underline color (SGR 58:2:R:G:B).
+///
+/// Smulx/Setulc together are what nvim probes before emitting colored
+/// undercurl (`spellbad`, LSP diagnostics). Getting both right is the
+/// whole point of claiming xterm-kitty.
+///
+/// Test `core/tests/xtgettcap.rs::xtgettcap_smulx_returns_expected_hex`
+/// and `..._setulc_returns_expected_hex` pin these exact hex strings.
+static XTGETTCAP_TABLE: &[(&[u8], &[u8])] = &[
+    // TN     = "TN"     → 544E        value "xterm-kitty"  → 787465726D2D6B69747479
+    (b"544E", b"787465726D2D6B69747479"),
+    // Co     = "Co"     → 436F        value "256"          → 323536
+    (b"436F", b"323536"),
+    // RGB    = "RGB"    → 524742      value "8"            → 38
+    (b"524742", b"38"),
+    // Smulx  = "Smulx"  → 536D756C78  value "\x1B[4:%p1%dm"
+    //                                 → 1B5B343A25703125646D
+    (b"536D756C78", b"1B5B343A25703125646D"),
+    // Setulc = "Setulc" → 536574756C63
+    //                                 value "\x1B[58:2::%p1%{65536}%/%d:%p2%{256}%/%d:%p3%d%;m"
+    //                                 → see test for byte-by-byte derivation
+    (
+        b"536574756C63",
+        b"1B5B35383A323A3A257031257B36353533367D252F25643A257032257B3235367D252F25643A2570332564253B6D",
+    ),
+];
 
 impl OscScanner<'_> {
     fn handle_osc7(&mut self, params: &[&[u8]]) {
@@ -503,6 +649,14 @@ pub struct BBTerm {
     /// skip the osc_parser entirely — the dominant case for `yes(1)`,
     /// `cat` on logs, and pipe output. Saves ~10-15 % on plain_text.
     osc_possibly_pending: bool,
+    /// XTGETTCAP (Kitty capability query) parser state. `in_xtgettcap`
+    /// latches true between `hook` (header `DCS + q` seen) and `unhook`
+    /// (ST terminator seen); `xtgettcap_buf` accumulates the payload
+    /// bytes. Persists across `bb_term_input` calls so a DCS fragmented
+    /// across PTY reads resolves to a single reply. See `OscScanner`'s
+    /// `hook`/`put`/`unhook` and `core/tests/xtgettcap.rs`.
+    in_xtgettcap: bool,
+    xtgettcap_buf: Vec<u8>,
     callback: Box<CallbackCell>,
 }
 
@@ -628,6 +782,8 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             color_queue,
             color_query_enabled: false,
             osc_possibly_pending: false,
+            in_xtgettcap: false,
+            xtgettcap_buf: Vec::with_capacity(64),
             callback,
         });
         Box::into_raw(bb)
@@ -705,8 +861,15 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             // clear the latch only then. Unterminated sequences stay
             // pending forever — pathological but harmless.
             let has_bel = memchr::memchr(0x07, slice).is_some();
-            if bb.osc_possibly_pending || has_bel {
-                let mut osc = OscScanner { cell: &bb.callback };
+            // Also drive the parallel parser while we are mid-XTGETTCAP:
+            // a `put`-heavy hex payload can be pure ASCII with no ESC/BEL,
+            // so the `hook` latch is what keeps us here.
+            if bb.osc_possibly_pending || has_bel || bb.in_xtgettcap {
+                let mut osc = OscScanner {
+                    cell: &bb.callback,
+                    in_xtgettcap: &mut bb.in_xtgettcap,
+                    xtgettcap_buf: &mut bb.xtgettcap_buf,
+                };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
                     bb.osc_possibly_pending = false;
@@ -736,7 +899,11 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // sequences (e.g. one byte per PTY read) still resolve to a
         // single event. No need to replicate the 2J-augmentation above:
         // OSC sequences don't care about ED.
-        let mut osc = OscScanner { cell: &bb.callback };
+        let mut osc = OscScanner {
+            cell: &bb.callback,
+            in_xtgettcap: &mut bb.in_xtgettcap,
+            xtgettcap_buf: &mut bb.xtgettcap_buf,
+        };
         bb.osc_parser.advance(&mut osc, slice);
         drain_color_requests(bb);
     })
