@@ -421,6 +421,17 @@ pub struct BBTerm {
     /// throughput tests showed running bytes through three parsers
     /// (alacritty + 2 parallels) cost ~15 % versus two parsers.
     osc_parser: Parser,
+    /// Latch: "the prior `bb_term_input` chunk contained an ESC byte and
+    /// may have left the OSC parser mid-sequence." When this is set, we
+    /// advance the OSC parser regardless of whether the current chunk has
+    /// ESC/BEL, so a split sequence (`\x1b]7;file://pa` + `th\x1b\\`)
+    /// resolves correctly. Cleared when we advance on a chunk with NO
+    /// ESC — which means either the prior sequence terminated in-chunk
+    /// (BEL seen, or ESC\ fully present) or we had a false latch. For
+    /// pure-text streams (no ESC anywhere), both bits stay false and we
+    /// skip the osc_parser entirely — the dominant case for `yes(1)`,
+    /// `cat` on logs, and pipe output. Saves ~10-15 % on plain_text.
+    osc_possibly_pending: bool,
     callback: Box<CallbackCell>,
 }
 
@@ -541,6 +552,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             term,
             processor: Processor::new(),
             osc_parser: Parser::new(),
+            osc_possibly_pending: false,
             callback,
         });
         Box::into_raw(bb)
@@ -604,14 +616,33 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // and skips ~linear time scanning for the 4-byte needle.
         if memchr::memchr(0x1B, slice).is_none() {
             bb.processor.advance(&mut bb.term, slice);
-            // Still drive the parallel OSC parser: a sequence begun in a
-            // prior chunk can be terminated by a BEL (0x07) in this
-            // ESC-free chunk, so we cannot skip the parallel parser even
-            // on the fast path.
-            let mut osc = OscScanner { cell: &bb.callback };
-            bb.osc_parser.advance(&mut osc, slice);
+            // OSC parser skip: pure-text chunks don't need the parallel
+            // state machine UNLESS (a) a prior chunk opened an OSC that
+            // may still be open, or (b) this chunk contains a BEL that
+            // could be an OSC terminator. For streams with zero ESC / BEL
+            // (the plain_text / `yes(1)` / `cat log` case), we skip
+            // vte::Parser entirely after the first ESC-free chunk.
+            //
+            // Clearing the latch: after an ESC-free advance, any
+            // ST-terminated (ESC \) OSC is still pending by definition
+            // (ST requires an ESC, which we didn't see). Only a BEL in
+            // this chunk can have terminated the pending sequence, so we
+            // clear the latch only then. Unterminated sequences stay
+            // pending forever — pathological but harmless.
+            let has_bel = memchr::memchr(0x07, slice).is_some();
+            if bb.osc_possibly_pending || has_bel {
+                let mut osc = OscScanner { cell: &bb.callback };
+                bb.osc_parser.advance(&mut osc, slice);
+                if has_bel {
+                    bb.osc_possibly_pending = false;
+                }
+            }
             return;
         }
+        // Chunk contains ESC — may open a new OSC that terminates in a
+        // later chunk. Set the latch so subsequent ESC-free chunks still
+        // reach the parser.
+        bb.osc_possibly_pending = true;
         let needle = b"\x1B[2J";
         let extra = b"\x1B[3J";
         let mut cursor = 0usize;
