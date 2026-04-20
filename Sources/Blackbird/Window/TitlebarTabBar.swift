@@ -6,29 +6,13 @@ import AppKit
 /// handles merging, selection, keyboard routing); we just hide the default
 /// strip-below-titlebar via view-walk and draw our own pills.
 ///
-/// Also hosts the Secure Keyboard Entry lock indicator at the trailing
-/// edge. We intentionally keep this and the tab pills under a *single*
-/// `.right`-anchored `NSTitlebarAccessoryViewController`: two sibling
-/// `.right` accessories stack in AppKit-defined order that sometimes
-/// hides the narrower one behind the wider one, and the lock was the
-/// casualty. One container, one layout pass, no fighting.
-///
-/// The custom pill strip only appears when ≥2 tabs exist (single-tab
-/// windows show the normal centered title). The lock stays visible
-/// across both states whenever `IsSecureEventInputEnabled()` is true.
+/// Single-tab windows hide the accessory entirely and show the normal
+/// window title. The custom pill strip only appears when ≥2 tabs exist,
+/// and then splits the titlebar width equally across the open tabs so
+/// 2 tabs = halves, 3 tabs = thirds, etc.
 final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
 
-    /// Trailing-edge reservation for the lock: 16 pt glyph + 8 pt inset to
-    /// the window edge + 8 pt gap between the last pill and the lock.
-    /// Also the full accessory width in single-tab mode (so the lock has
-    /// the same visual position whether or not pills are drawn).
-    static let lockReservation: CGFloat = 32
-
-    private let container = NSView(frame: .zero)
     private let stripView = TabStripView(frame: .zero)
-    /// Public so `MainWindowController` can bind the poller directly to
-    /// this view's `setActive(_:)` without reaching through more layers.
-    let lockView = SecureInputIndicatorView()
     private weak var hostWindow: NSWindow?
 
     init(window: NSWindow) {
@@ -39,10 +23,7 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
         // left of the edge (minus room for the traffic lights). `.bottom`
         // would put it below the titlebar — exactly what we're avoiding.
         layoutAttribute = .right
-        container.frame = NSRect(x: 0, y: 0, width: Self.lockReservation, height: TabStripView.height)
-        container.addSubview(stripView)
-        container.addSubview(lockView)
-        view = container
+        view = stripView
         stripView.onSelectWindow = { [weak self] w in
             self?.hostWindow?.tabGroup?.selectedWindow = w
             w.makeKeyAndOrderFront(nil)
@@ -75,49 +56,21 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
 
     required init?(coder: NSCoder) { fatalError("not supported") }
 
-    /// Multi-tab layout: container spans `availableWidth`; pills fill
-    /// everything except the trailing lock reservation.
+    /// Re-read the tab group and re-lay pills. Caller is responsible for
+    /// toggling `view.isHidden` based on tab count before calling this —
+    /// single-tab windows skip the custom strip entirely.
     ///
-    /// `availableWidth` is the caller's pre-computed titlebar budget —
-    /// total window width minus the traffic-light reservation. The
-    /// controller owns the lock reservation arithmetic so callers don't
-    /// have to.
-    func refreshMultiTab(availableWidth: CGFloat) {
+    /// `availableWidth` is the caller's pre-computed titlebar budget for
+    /// this accessory: total window width minus every *other* right-anchored
+    /// accessory (traffic lights, secure-input indicator, …). The strip
+    /// owns zero layout math of its own — `MainWindowController` is the
+    /// single authority for reservation arithmetic.
+    func refresh(availableWidth: CGFloat) {
         guard let window = hostWindow else { return }
-        let stripWidth = max(0, availableWidth - Self.lockReservation)
-        container.frame = NSRect(x: 0, y: 0, width: availableWidth, height: TabStripView.height)
-        stripView.isHidden = false
-        stripView.frame = NSRect(x: 0, y: 0, width: stripWidth, height: TabStripView.height)
         let tabs = window.tabGroup?.windows ?? [window]
         let selected = window.tabGroup?.selectedWindow ?? window
-        stripView.update(tabs: tabs, selected: selected, width: stripWidth)
-        positionLock()
-    }
-
-    /// Single-tab layout: container is lock-area wide, pills hidden.
-    /// Matches the pre-refactor two-accessory behavior — the title
-    /// centers between the traffic lights and our 32 pt lock slot.
-    func refreshSingleTab() {
-        container.frame = NSRect(x: 0, y: 0, width: Self.lockReservation, height: TabStripView.height)
-        stripView.isHidden = true
-        positionLock()
-    }
-
-    /// Anchor the 16×16 lock at the trailing edge, vertically aligned
-    /// with the pill center (pills are y=4, h=24 in `TabStripView`'s
-    /// flipped coords → center = 16 from top → 12 from bottom in this
-    /// unflipped container; a 16-tall lock at y=4 has its center at 12).
-    /// Keeping the two centers equal removes the 2 pt wobble the
-    /// old two-accessory layout produced.
-    private func positionLock() {
-        let size: CGFloat = 16
-        let trailingInset: CGFloat = 8
-        lockView.frame = NSRect(
-            x: container.bounds.width - size - trailingInset,
-            y: 4,
-            width: size,
-            height: size
-        )
+        stripView.update(tabs: tabs, selected: selected, width: availableWidth)
+        view.frame = NSRect(x: 0, y: 0, width: availableWidth, height: TabStripView.height)
     }
 }
 
