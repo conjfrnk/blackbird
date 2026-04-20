@@ -432,6 +432,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         findPrev.keyEquivalentModifierMask = [.command, .shift]
         findSubmenu.addItem(findPrev)
+        let replaceSelection = NSMenuItem(
+            title: "Replace Selection",
+            action: #selector(TerminalView.performReplaceCurrent(_:)),
+            keyEquivalent: "e"
+        )
+        replaceSelection.keyEquivalentModifierMask = [.command, .option]
+        findSubmenu.addItem(replaceSelection)
         let findParent = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
         findParent.submenu = findSubmenu
         menu.addItem(findParent)

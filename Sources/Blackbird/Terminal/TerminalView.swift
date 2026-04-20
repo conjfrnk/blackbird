@@ -167,6 +167,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// snapshot. Lets `testFirstRectReturnsCursorCellRect` pin a specific
     /// (row, col) without feeding the full BBTerm state machine.
     var cursorOverrideForTests: (row: Int, col: Int)?
+    /// Optional byte-capture closure for the replace path. When set,
+    /// `sendReplacement` appends bytes here instead of calling `session.send`.
+    /// Lets integration tests assert the exact DEL×N + replacement byte
+    /// sequence without a real PTY.
+    var replaceByteCapture: ((Data) -> Void)?
+    /// Test-only snapshot override for the replace path. When set, replace
+    /// helpers read cursor position from this value instead of `currentSnapshot`.
+    var replaceSnapshotForTests: BBSnapshot?
+    /// Test-only find-matches override for the replace path.
+    var replaceFindMatchesForTests: [(line: Int32, startCol: Int, endCol: Int)]?
     #endif
 
     private final class FlashView: NSView {
@@ -2732,5 +2742,116 @@ extension TerminalView: FindBarDelegate {
         findBar = nil
         selection = nil
         window?.makeFirstResponder(self)
+    }
+
+    public func findBar(_ bar: FindBar, didRequestReplace kind: FindBar.ReplaceKind, with replacement: String) {
+        switch kind {
+        case .current: replaceCurrentMatch(with: replacement)
+        case .all:     replaceAllMatches(with: replacement)
+        }
+    }
+}
+
+// MARK: - Replace helpers
+
+extension TerminalView {
+    /// Replace the current find match with `replacement`. Only works when the
+    /// match is on the live input line (cursor row). Otherwise a transient
+    /// warning is shown in the find bar.
+    func replaceCurrentMatch(with replacement: String) {
+        let matches = effectiveFindMatches()
+        guard !matches.isEmpty, findCurrentIndex < matches.count else { return }
+        let m = matches[findCurrentIndex]
+        guard isOnLiveInputLine(m) else {
+            findBar?.showTransientMessage("Only input-line matches can be replaced")
+            return
+        }
+        sendReplacement(match: m, replacement: replacement)
+    }
+
+    /// Replace all find matches with `replacement`, processing right-to-left so
+    /// earlier column indices stay valid as the shell receives each replacement.
+    /// Matches not on the live input line are skipped; if any were skipped a
+    /// warning is shown in the find bar.
+    func replaceAllMatches(with replacement: String) {
+        let matches = effectiveFindMatches()
+        guard !matches.isEmpty else { return }
+        guard let snap = effectiveSnapshot() else { return }
+        let cursorLine = Int32(snap.cursorRow)
+        let inputLineMatches = matches.filter { $0.line == cursorLine }
+
+        let hadOffLine = inputLineMatches.count < matches.count
+        if inputLineMatches.isEmpty {
+            findBar?.showTransientMessage("Only input-line matches can be replaced")
+            return
+        }
+        // Process right-to-left so earlier col indices remain valid.
+        for m in inputLineMatches.sorted(by: { $0.startCol > $1.startCol }) {
+            sendReplacement(match: m, replacement: replacement)
+        }
+        if hadOffLine {
+            findBar?.showTransientMessage("Replaced input-line matches (scrollback skipped)")
+        }
+    }
+
+    /// Emits DEL×N bytes to erase the matched span, then the UTF-8 replacement.
+    private func sendReplacement(
+        match m: (line: Int32, startCol: Int, endCol: Int),
+        replacement: String
+    ) {
+        let matchLen = m.endCol - m.startCol + 1
+        guard matchLen > 0 else { return }
+        let delBytes = Data(repeating: 0x7F, count: matchLen)
+        #if DEBUG
+        if let capture = replaceByteCapture {
+            capture(delBytes)
+            if !replacement.isEmpty { capture(Data(replacement.utf8)) }
+            return
+        }
+        #endif
+        guard let session else { return }
+        session.send(delBytes)
+        if !replacement.isEmpty {
+            session.send(Data(replacement.utf8))
+        }
+    }
+
+    /// Returns true when the match's buffer line equals the cursor's buffer line,
+    /// i.e. the match is on the live shell input line.
+    private func isOnLiveInputLine(_ m: (line: Int32, startCol: Int, endCol: Int)) -> Bool {
+        guard let snap = effectiveSnapshot() else { return false }
+        return m.line == Int32(snap.cursorRow)
+    }
+
+    /// The snapshot to use for replace logic: test override when set, else the live one.
+    private func effectiveSnapshot() -> BBSnapshot? {
+        #if DEBUG
+        if let override = replaceSnapshotForTests { return override }
+        #endif
+        return currentSnapshot
+    }
+
+    /// The find-matches array to use for replace logic: test override when set, else live.
+    private func effectiveFindMatches() -> [(line: Int32, startCol: Int, endCol: Int)] {
+        #if DEBUG
+        if let override = replaceFindMatchesForTests { return override }
+        #endif
+        return findMatches
+    }
+
+    /// Responder action for ⌘⌥E. If the find bar isn't shown or the replace row
+    /// isn't expanded, opens the bar and expands the replace row. The primary
+    /// purpose of this action is to reveal the replace row; actual replacement
+    /// is driven by the "Replace" button's delegate callback.
+    @objc public func performReplaceCurrent(_ sender: Any?) {
+        if findBar == nil {
+            installFindBar()
+            findBar?.setReplaceVisible(true)
+            findBar?.focus()
+        } else if let bar = findBar, !bar.isReplaceVisible {
+            bar.setReplaceVisible(true)
+        }
+        // If the bar is already expanded the action is a no-op; the user
+        // interacts with the Replace button directly.
     }
 }
