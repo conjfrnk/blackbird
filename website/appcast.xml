@@ -7,9 +7,15 @@
     <link>https://blackbird-terminal.com/appcast.xml</link>
     <description>Release feed for Blackbird.</description>
     <language>en</language>
-    <!-- Items are appended here after each release. Populate by running:
-         APPCAST_BASE_URL=https://github.com/conjfrnk/blackbird/releases/download/vX.Y.Z \
-           scripts/make-appcast.sh --full > website/appcast.xml
-         then `cd website && ./deploy.sh`. -->
+    <item>
+      <title>Version 0.1.0</title>
+      <pubDate>Mon, 20 Apr 2026 21:20:05 +0000</pubDate>
+      <sparkle:version>0.1.0</sparkle:version>
+      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/conjfrnk/blackbird/releases/download/v0.1.0/Blackbird-0.1.0.dmg"
+                 type="application/octet-stream"
+                 sparkle:edSignature="/fRVqGoqKlPDCPnJMpbnlDapLd6V8DBdDiLwwwu5qspnNKNT+2QrPNmPN/ND+LGEoY/n0BWtHgVMG8gEBLuPBA==" length="16396809" />
+    </item>
   </channel>
 </rss>
