@@ -545,6 +545,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // translucency.
         renderer.setBackgroundOpacity(Float(opacity), keepBgOpaque: false)
         renderer.setCursorBlinkEnabled(Preferences.shared.cursorBlink)
+        renderer.setCursorShapeOverride(Preferences.shared.cursorShape.rendererOverride)
         setWindowAppearance(opacity: opacity, themeBg: (bgR, bgG, bgB))
         window?.setBackgroundBlurRadius(blurRadius)
         // If an IME composition is in flight when the theme changes, repaint
