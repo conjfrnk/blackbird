@@ -134,6 +134,10 @@ Two regression gates run in CI on every push:
 
 Runtime frame-rate diagnostic in Debug: `./scripts/run-with-probe.sh` tails the unified log and reports `fps] N fps over 1.00s — interval min/mean/max = …` once per second, plus `latency] n=500 p50=X p99=Y` when the keystroke-to-pixel probe ring flushes (set `BB_LATENCY_PROBE=1`). On Apple Silicon with a 120 Hz Built-in Retina Display the stream reports a steady `8.40 ms` mean interval (native ProMotion).
 
+### Terminal throughput vs. other macOS terminals
+
+`scripts/bench-vte-compare.sh` runs the Alacritty team's [`vtebench`](https://github.com/alacritty/vtebench) suite inside Terminal.app, iTerm2, Ghostty, Alacritty, and Blackbird, then summarises median MB/s per benchmark with `scripts/bench-vte-summarize.py`. See [`docs/benchmarks/vtebench-2026-04-20.md`](docs/benchmarks/vtebench-2026-04-20.md) for the full table, methodology, and caveats — vtebench measures PTY-drain throughput only, not latency or frame pacing, so treat the result as one axis of perf, not the whole story.
+
 ## Packaging a release
 
 `scripts/release.sh` builds a universal Release binary, verifies the code signature, and writes a DMG to `./dist/`. Pass `notarize` to also submit to Apple's notary service and staple the ticket (requires `APPLE_ID`, `APP_SPECIFIC_PASSWORD`, `TEAM_ID`).

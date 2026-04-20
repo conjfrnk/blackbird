@@ -1,7 +1,11 @@
 # Claude and AI-generated artifacts
 .claude/
 .superpowers/
-docs/
+# Ignore docs/* (AI-generated scratchpads) but re-include curated dirs.
+# Git won't descend into an excluded directory, so the exclusion targets the
+# *contents* of docs/ rather than the dir itself.
+docs/*
+!docs/benchmarks/
 CLAUDE.md
 AGENTS.md
 .cursor/
