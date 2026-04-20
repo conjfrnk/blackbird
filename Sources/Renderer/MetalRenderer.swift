@@ -137,6 +137,55 @@ public final class MetalRenderer {
     }
     private var lastFrameKey: FrameKey?
 
+    /// Strict subset of FrameKey fields that decide whether a prior frame's
+    /// per-row cache is still visually correct: everything in FrameKey
+    /// EXCEPT `snapshotSeq`, `cursorRow`, and `cursorCol`. Snapshot
+    /// sequence changing is the normal "new content" path; cursor movement
+    /// is covered by alacritty's damage tracking (it damages both the old
+    /// and new cursor cells). A mismatch on any other field invalidates
+    /// the whole cache and forces a full rebuild — selection sweeps,
+    /// theme hot-swaps, display-offset changes, etc.
+    private struct CacheKey: Equatable {
+        let cols: Int
+        let rows: Int
+        let hoveredLinkID: UInt16
+        let selMode: UInt8
+        let selALine: Int32
+        let selBLine: Int32
+        let selACol: Int32
+        let selBCol: Int32
+        let focused: Bool
+        let cursorShape: UInt8
+        let cursorVisible: Bool
+        let displayOffset: UInt16
+        let topInsetPoints: Float
+        let defaultBgRgb: UInt32
+        let backgroundOpacity: Float
+        let keepBgOpaque: Bool
+        let accentColor: SIMD4<Float>
+        let cursorColor: SIMD4<Float>
+        let blinkSkip: Bool
+    }
+    private var lastCacheKey: CacheKey?
+
+    /// Per-row instance cache. Index i holds the CellInstances emitted by
+    /// buildRowInstances for visible row i under the current CacheKey.
+    /// Reused across frames when CacheKey is stable; only damaged rows
+    /// (from `BBSnapshot.damagedRows`) are rebuilt. Flattened into the
+    /// GPU instance buffer each frame — a ~1 MB memcpy that costs far
+    /// less than iterating 16 000 cells.
+    private var rowInstanceCache: [[CellInstance]] = []
+
+    /// Kill switch for the dirty-rows fast path. Set `BB_NO_DIRTY_ROWS=1`
+    /// and restart to force a full rebuild every frame — useful when
+    /// debugging a "some rows look stale" artifact to confirm whether
+    /// the cache is responsible. Evaluated once per renderer.
+    private let dirtyRowsDisabled: Bool = {
+        guard let cstr = getenv("BB_NO_DIRTY_ROWS") else { return false }
+        let raw = String(cString: cstr)
+        return !raw.isEmpty && raw != "0"
+    }()
+
     /// Runtime escape hatch. Set the env var `BB_NO_FRAME_SKIP=1` and
     /// restart to disable the skip path entirely — every draw(in:) call
     /// runs the full encode + present. Useful when a user reports a
@@ -270,6 +319,8 @@ public final class MetalRenderer {
         // cache is now stale. Force the next render to encode and present
         // even if every FrameKey field matches the previous frame.
         self.lastFrameKey = nil
+        self.lastCacheKey = nil
+        self.rowInstanceCache = []
         return true
     }
 
@@ -280,37 +331,278 @@ public final class MetalRenderer {
     /// hot-swap that only mutates the palette) can force a repaint.
     public func invalidate() {
         self.lastFrameKey = nil
+        self.lastCacheKey = nil
+        self.rowInstanceCache = []
     }
 
-    /// Write cell instance data into the ring slot at `frameIndex`. Returns
-    /// the count of instances actually written (= non-empty cells).
+    /// Rebuild instances for a single visible row into an output Vec,
+    /// consulting snapshot cells, selection, hover, and cursor-inversion
+    /// state. Pure — does not touch GPU buffers or cache state. Called by
+    /// `buildInstances` for every row on a full rebuild, or only for the
+    /// damaged rows on a partial rebuild.
     ///
-    /// `blockCursorCell`, when non-nil, identifies a single (row, col) whose
-    /// cell should render *inverted* so it doubles as the block cursor: the
-    /// glyph appears in the cell's current bg colour on top of a solid
-    /// cursor-colour background. Callers use this for focused-block cursors
-    /// so the character under the cursor stays visible (matches iTerm2 /
-    /// Terminal.app). Other shapes (bar, underline, unfocused outline)
-    /// continue to go through `cursorPipelineState`.
+    /// Returns a `[CellInstance]` because rows emit a variable count of
+    /// instances (blank cells contribute nothing; wide-glyph rows emit
+    /// fewer than cols; selection/link-hover may push to 1-per-cell). The
+    /// caller concatenates these into the GPU buffer each frame.
+    private func buildRowInstances(
+        snapshot: BBSnapshot,
+        row: Int,
+        isSelected: (Int32, Int) -> Bool,
+        blockCursorCell: (row: Int, col: Int)?
+    ) -> [CellInstance] {
+        let selectionTint = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)
+        let cellW = Float(metrics.cellWidth)
+        let cellH = Float(metrics.cellHeight)
+        let cellsPtr = snapshot.cellsPointer
+        let cols = snapshot.cols
+        let hoveredID = hoveredLinkID
+        // Upper bound: every cell emits at most one instance. Reserve so
+        // the common case avoids growing the Vec.
+        var out: [CellInstance] = []
+        out.reserveCapacity(cols)
+
+        for col in 0..<cols {
+            let idx = row * cols + col
+            // `cellsPtr` is a raw pointer; reading past `cellCount` would
+            // be UB, not a trap. Same invariant alacritty guarantees but
+            // re-checked here so a buggy snapshot can't cascade.
+            if idx >= snapshot.cellCount { break }
+            let cell = cellsPtr[idx]
+            let scalar = cell.ch
+            var fg = Self.rgbToSIMD(cell.fg)
+            var bg = Self.rgbToSIMD(cell.bg)
+            let attrs: SIMD4<UInt32> = {
+                var flags: UInt32 = 0
+                if hoveredID != 0 && cell.link_id == hoveredID {
+                    flags |= CellAttributeMask.linkHover.rawValue
+                }
+                // Translate cell_flags bits that the shader needs to
+                // render into our flat renderer-side bitset. Cell flags
+                // live in Rust-stable constants (BBCore bridging header);
+                // mapping here keeps the shader ignorant of the Rust
+                // layout so a future cell_flags reshuffle stays local.
+                let cf = cell.flags
+                if (cf & UInt16(STRIKE)) != 0 {
+                    flags |= CellAttributeMask.strike.rawValue
+                }
+                if (cf & UInt16(UNDERLINE)) != 0 {
+                    flags |= CellAttributeMask.underline.rawValue
+                }
+                if (cf & UInt16(UNDERLINE_DOUBLE)) != 0 {
+                    flags |= CellAttributeMask.underlineDouble.rawValue
+                }
+                if (cf & UInt16(UNDERCURL)) != 0 {
+                    flags |= CellAttributeMask.undercurl.rawValue
+                }
+                if (cf & UInt16(UNDERLINE_DOTTED)) != 0 {
+                    flags |= CellAttributeMask.underlineDotted.rawValue
+                }
+                if (cf & UInt16(UNDERLINE_DASHED)) != 0 {
+                    flags |= CellAttributeMask.underlineDashed.rawValue
+                }
+                // Pack CSI 58 underline colour into attrs.z. The shader
+                // treats UNDERLINE_COLOR_UNSET as "fall back to fg",
+                // so the cheapest path is to forward the u32 as-is.
+                return SIMD4<UInt32>(flags, 0, cell.underline_color, 0)
+            }()
+            // Reverse video (SGR 7): swap the cell's fg and bg so the
+            // glyph reads against the inverted highlight. Forces a bg
+            // quad (we can't skip drawing into the clearColor because
+            // the "new bg" is the original fg, which is a real colour).
+            let reverse = (cell.flags & UInt16(REVERSE)) != 0
+            if reverse {
+                let orig = fg
+                fg = bg
+                bg = orig
+            }
+            // DIM (SGR 2): halve the fg brightness so dimmed text reads
+            // softer without affecting bg. Applied after REVERSE so the
+            // resulting glyph colour is what's visibly dimmed.
+            if (cell.flags & UInt16(DIM)) != 0 {
+                fg.x *= 0.5
+                fg.y *= 0.5
+                fg.z *= 0.5
+            }
+            // Treat the theme's default bg as "no bg" so the transparent
+            // clearColor can show through. Cells with explicit colors
+            // (vim highlights, status lines, syntax bg) still draw their
+            // bg quad; whether they stay solid or become translucent is
+            // a user choice (keepBgOpaque).
+            // After a REVERSE swap the effective bg is the original fg,
+            // which is always a concrete palette value — treat it as a
+            // real background so the highlight paints.
+            let effectiveBgRgb = reverse ? cell.fg : cell.bg
+            let isDefaultBg = !reverse && cell.bg == defaultBgRgb
+            let hasBg = reverse || (!isDefaultBg && effectiveBgRgb != 0x000000)
+
+            // Determine the bg alpha for what we'll write into
+            // CellInstance:
+            //   - Default bg → alpha 0 so the shader's mix() produces a
+            //     transparent result where the glyph doesn't cover —
+            //     clearColor (already transparent) shows through.
+            //   - Explicit bg, keepBgOpaque on → alpha 1 (unchanged).
+            //   - Explicit bg, keepBgOpaque off → alpha = opacity.
+            let bgAlpha: Float
+            if isDefaultBg {
+                bgAlpha = 0.0
+            } else if keepBgOpaque {
+                bgAlpha = 1.0
+            } else {
+                bgAlpha = backgroundOpacity
+            }
+            bg.w = bgAlpha
+
+            let bufferLine = Int32(row) - Int32(snapshot.displayOffset)
+            let selected = isSelected(bufferLine, col)
+            var effectiveBg = selected ? selectionTint : bg
+            var effectiveHasBg = selected ? true : hasBg
+
+            // Invert at the cursor cell so the block cursor shows the
+            // underlying glyph in reverse-video. Selection wins over
+            // the cursor (matches iTerm2: selection highlight spans a
+            // cell even if the cursor is on it).
+            if !selected,
+               let bc = blockCursorCell,
+               bc.row == row,
+               bc.col == col {
+                // Use whatever the cell's bg *would* have been (explicit
+                // or theme-default) as the glyph colour, so the
+                // character reads against the cursor's body.
+                let resolvedBg: UInt32 = hasBg ? cell.bg : defaultBgRgb
+                fg = Self.rgbToSIMD(resolvedBg)
+                effectiveBg = cursorColor
+                effectiveBg.w = 1.0
+                effectiveHasBg = true
+            }
+
+            let xPx = Float(col) * cellW
+            let yPx = Float(row) * cellH + topInsetPoints
+
+            // WIDE_CHAR_SPACER / LEADING_WIDE_CHAR_SPACER sit to the right
+            // of (or on the wrapped-leading col before) a wide glyph. The
+            // wide glyph's 2x quad already covers this column, so any
+            // draw here would overpaint its right half. Skip unless the
+            // selection highlight needs a bg quad — in that case the
+            // highlight must span both halves of the wide cell.
+            let isSpacer = (cell.flags &
+                (UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER))) != 0
+            if isSpacer {
+                if selected || effectiveHasBg || attrs.x != 0 {
+                    out.append(CellInstance(
+                        cellPosPx: SIMD2<Float>(xPx, yPx),
+                        quadSizePx: SIMD2<Float>(cellW, cellH),
+                        uvOrigin: .zero,
+                        uvSize: .zero,
+                        fgColor: fg,
+                        bgColor: effectiveBg,
+                        attrs: attrs
+                    ))
+                }
+                continue
+            }
+
+            // WIDE_CHAR cells carry a CJK / wide-emoji glyph that logically
+            // spans two cells. The atlas rasterises them into a 2x-wide
+            // slot and reports a doubled uvSize.x; we draw a 2x-wide quad
+            // so the full glyph lands on screen.
+            let isWide = (cell.flags & UInt16(WIDE_CHAR)) != 0
+            let quadW = isWide ? cellW * 2.0 : cellW
+            let quadSize = SIMD2<Float>(quadW, cellH)
+
+            // Render cell if it has a glyph OR a non-default background.
+            if scalar != 0 && scalar != 0x20 /* space */ {
+                if let us = Unicode.Scalar(scalar),
+                   let entry = atlas.lookupOrInsert(scalar: us, wide: isWide) {
+                    out.append(CellInstance(
+                        cellPosPx: SIMD2<Float>(xPx, yPx),
+                        quadSizePx: quadSize,
+                        uvOrigin: entry.uvOrigin,
+                        uvSize: entry.uvSize,
+                        fgColor: fg,
+                        bgColor: effectiveBg,
+                        attrs: attrs
+                    ))
+                }
+            } else if effectiveHasBg || attrs.x != 0 {
+                // Space with colored background (status lines, vim highlights),
+                // inside an active selection, or carrying an accent
+                // attribute (link hover). Draw a full-cell quad with
+                // zero coverage so the shader's bg/accent paths still fire.
+                out.append(CellInstance(
+                    cellPosPx: SIMD2<Float>(xPx, yPx),
+                    quadSizePx: quadSize,
+                    uvOrigin: .zero,
+                    uvSize: .zero,
+                    fgColor: fg,
+                    bgColor: effectiveBg,
+                    attrs: attrs
+                ))
+            }
+        }
+        return out
+    }
+
+    /// Orchestrates per-row rebuild + GPU buffer flatten using the
+    /// `rowInstanceCache`. Either rebuilds every row (full path) or only
+    /// the rows alacritty's damage iterator flagged as changed (partial
+    /// path). Returns the total instance count the encoder should draw.
     @discardableResult
     private func buildInstances(
         snapshot: BBSnapshot,
         isSelected: (Int32, Int) -> Bool = { _, _ in false },
-        blockCursorCell: (row: Int, col: Int)? = nil
+        blockCursorCell: (row: Int, col: Int)? = nil,
+        partialRowsOnly: Set<Int>? = nil
     ) -> Int {
-        let selectionTint = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)  // AppKit accent-ish blue
-        let needed = snapshot.cols * snapshot.rows
-        // Defensive: alacritty's display_iter always yields cols×rows cells,
-        // and the Rust FFI preserves that invariant via Vec::with_capacity +
-        // push-per-cell. But the cells pointer lives in Rust-owned memory
-        // and we're about to index into it; a future refactor that breaks
-        // the invariant would silently read past the buffer end with
-        // assumingMemoryBound pointer arithmetic. Bail on the frame rather
-        // than emit UB into the GPU's instance buffer.
+        let rows = snapshot.rows
+        let cols = snapshot.cols
+        let needed = cols * rows
+        // Defensive bound — see original comment on the single-loop
+        // version. Same invariant, same bail-out on violation.
         guard snapshot.cellCount >= needed else { return 0 }
+
+        // Re-size the per-row cache when grid dims changed. Shrinking is
+        // handled by assignment (old entries over the new row count are
+        // dropped). Growing initializes new rows to empty so the partial
+        // path — which assumes the cache is indexable for every visible
+        // row — stays sound.
+        if rowInstanceCache.count != rows {
+            rowInstanceCache = Array(repeating: [], count: rows)
+        }
+
+        if let damaged = partialRowsOnly {
+            // Partial rebuild: only the rows alacritty says changed.
+            // Iterate a sorted copy so we never hit the same row twice
+            // if a future source deduplicates imperfectly.
+            for row in damaged where row >= 0 && row < rows {
+                rowInstanceCache[row] = buildRowInstances(
+                    snapshot: snapshot,
+                    row: row,
+                    isSelected: isSelected,
+                    blockCursorCell: blockCursorCell
+                )
+            }
+        } else {
+            // Full rebuild — cache key changed, first frame, or damage
+            // exceeded the partial threshold.
+            for row in 0..<rows {
+                rowInstanceCache[row] = buildRowInstances(
+                    snapshot: snapshot,
+                    row: row,
+                    isSelected: isSelected,
+                    blockCursorCell: blockCursorCell
+                )
+            }
+        }
+
+        // Flatten into the current-slot GPU buffer. Even the partial path
+        // copies every row — the CPU savings come from skipping the
+        // per-cell inner work on unchanged rows, not from skipping the
+        // memcpy (which is tiny: ~1 MB at 80-byte stride × 16k cells).
+        let total = rowInstanceCache.reduce(0) { $0 + $1.count }
         let slot = currentSlot
-        if needed > instanceCapacities[slot] {
-            let newCap = max(needed, instanceCapacities[slot] * 2)
+        if total > instanceCapacities[slot] {
+            let newCap = max(total, instanceCapacities[slot] * 2)
             if let newBuf = device.makeBuffer(
                 length: newCap * MemoryLayout<CellInstance>.stride,
                 options: [.storageModeShared]
@@ -318,203 +610,23 @@ public final class MetalRenderer {
                 instanceBuffers[slot] = newBuf
                 instanceCapacities[slot] = newCap
             } else {
-                // Out-of-GPU-memory (or device tear-down) while trying to
-                // grow the instance buffer. Writing cells past the current
-                // capacity would be UB; skip this frame instead. The renderer
-                // retries on the next draw, so transient failures self-heal.
+                // Out-of-GPU-memory while growing — skip frame. Next
+                // repaint will retry.
                 return 0
             }
         }
 
         let ptr = instanceBuffers[slot].contents().assumingMemoryBound(to: CellInstance.self)
         var count = 0
-        let cellW = Float(metrics.cellWidth)
-        let cellH = Float(metrics.cellHeight)
-        let cellsPtr = snapshot.cellsPointer
-
-        // Non-zero only when the mouse is hovering a cell with an OSC 8
-        // link. Cells whose `link_id` matches this value get the
-        // `linkHover` attribute bit so the shader draws an accent-coloured
-        // underline across the entire link span, not just the cell under
-        // the pointer.
-        let hoveredID = hoveredLinkID
-        for row in 0..<snapshot.rows {
-            for col in 0..<snapshot.cols {
-                let idx = row * snapshot.cols + col
-                let cell = cellsPtr[idx]
-                let scalar = cell.ch
-                var fg = Self.rgbToSIMD(cell.fg)
-                var bg = Self.rgbToSIMD(cell.bg)
-                let attrs: SIMD4<UInt32> = {
-                    var flags: UInt32 = 0
-                    if hoveredID != 0 && cell.link_id == hoveredID {
-                        flags |= CellAttributeMask.linkHover.rawValue
-                    }
-                    // Translate cell_flags bits that the shader needs to
-                    // render into our flat renderer-side bitset. Cell flags
-                    // live in Rust-stable constants (BBCore bridging header);
-                    // mapping here keeps the shader ignorant of the Rust
-                    // layout so a future cell_flags reshuffle stays local.
-                    let cf = cell.flags
-                    if (cf & UInt16(STRIKE)) != 0 {
-                        flags |= CellAttributeMask.strike.rawValue
-                    }
-                    if (cf & UInt16(UNDERLINE)) != 0 {
-                        flags |= CellAttributeMask.underline.rawValue
-                    }
-                    if (cf & UInt16(UNDERLINE_DOUBLE)) != 0 {
-                        flags |= CellAttributeMask.underlineDouble.rawValue
-                    }
-                    if (cf & UInt16(UNDERCURL)) != 0 {
-                        flags |= CellAttributeMask.undercurl.rawValue
-                    }
-                    if (cf & UInt16(UNDERLINE_DOTTED)) != 0 {
-                        flags |= CellAttributeMask.underlineDotted.rawValue
-                    }
-                    if (cf & UInt16(UNDERLINE_DASHED)) != 0 {
-                        flags |= CellAttributeMask.underlineDashed.rawValue
-                    }
-                    // Pack CSI 58 underline colour into attrs.z. The shader
-                    // treats UNDERLINE_COLOR_UNSET as "fall back to fg",
-                    // so the cheapest path is to forward the u32 as-is.
-                    return SIMD4<UInt32>(flags, 0, cell.underline_color, 0)
-                }()
-                // Reverse video (SGR 7): swap the cell's fg and bg so the
-                // glyph reads against the inverted highlight. Forces a bg
-                // quad (we can't skip drawing into the clearColor because
-                // the "new bg" is the original fg, which is a real colour).
-                let reverse = (cell.flags & UInt16(REVERSE)) != 0
-                if reverse {
-                    let orig = fg
-                    fg = bg
-                    bg = orig
-                }
-                // DIM (SGR 2): halve the fg brightness so dimmed text reads
-                // softer without affecting bg. Applied after REVERSE so the
-                // resulting glyph colour is what's visibly dimmed.
-                if (cell.flags & UInt16(DIM)) != 0 {
-                    fg.x *= 0.5
-                    fg.y *= 0.5
-                    fg.z *= 0.5
-                }
-                // Treat the theme's default bg as "no bg" so the transparent
-                // clearColor can show through. Cells with explicit colors
-                // (vim highlights, status lines, syntax bg) still draw their
-                // bg quad; whether they stay solid or become translucent is
-                // a user choice (keepBgOpaque).
-                // After a REVERSE swap the effective bg is the original fg,
-                // which is always a concrete palette value — treat it as a
-                // real background so the highlight paints.
-                let effectiveBgRgb = reverse ? cell.fg : cell.bg
-                let isDefaultBg = !reverse && cell.bg == defaultBgRgb
-                let hasBg = reverse || (!isDefaultBg && effectiveBgRgb != 0x000000)
-
-                // Determine the bg alpha for what we'll write into
-                // CellInstance:
-                //   - Default bg → alpha 0 so the shader's mix() produces a
-                //     transparent result where the glyph doesn't cover —
-                //     clearColor (already transparent) shows through.
-                //   - Explicit bg, keepBgOpaque on → alpha 1 (unchanged).
-                //   - Explicit bg, keepBgOpaque off → alpha = opacity.
-                let bgAlpha: Float
-                if isDefaultBg {
-                    bgAlpha = 0.0
-                } else if keepBgOpaque {
-                    bgAlpha = 1.0
-                } else {
-                    bgAlpha = backgroundOpacity
-                }
-                bg.w = bgAlpha
-
-                let bufferLine = Int32(row) - Int32(snapshot.displayOffset)
-                let selected = isSelected(bufferLine, col)
-                var effectiveBg = selected ? selectionTint : bg
-                var effectiveHasBg = selected ? true : hasBg
-
-                // Invert at the cursor cell so the block cursor shows the
-                // underlying glyph in reverse-video. Selection wins over
-                // the cursor (matches iTerm2: selection highlight spans a
-                // cell even if the cursor is on it).
-                if !selected,
-                   let bc = blockCursorCell,
-                   bc.row == row,
-                   bc.col == col {
-                    // Use whatever the cell's bg *would* have been (explicit
-                    // or theme-default) as the glyph colour, so the
-                    // character reads against the cursor's body.
-                    let resolvedBg: UInt32 = hasBg ? cell.bg : defaultBgRgb
-                    fg = Self.rgbToSIMD(resolvedBg)
-                    effectiveBg = cursorColor
-                    effectiveBg.w = 1.0
-                    effectiveHasBg = true
-                }
-
-                let xPx = Float(col) * cellW
-                let yPx = Float(row) * cellH + topInsetPoints
-
-                // WIDE_CHAR_SPACER / LEADING_WIDE_CHAR_SPACER sit to the right
-                // of (or on the wrapped-leading col before) a wide glyph. The
-                // wide glyph's 2x quad already covers this column, so any
-                // draw here would overpaint its right half. Skip unless the
-                // selection highlight needs a bg quad — in that case the
-                // highlight must span both halves of the wide cell.
-                let isSpacer = (cell.flags &
-                    (UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER))) != 0
-                if isSpacer {
-                    if selected || effectiveHasBg || attrs.x != 0 {
-                        ptr[count] = CellInstance(
-                            cellPosPx: SIMD2<Float>(xPx, yPx),
-                            quadSizePx: SIMD2<Float>(cellW, cellH),
-                            uvOrigin: .zero,
-                            uvSize: .zero,
-                            fgColor: fg,
-                            bgColor: effectiveBg,
-                            attrs: attrs
-                        )
-                        count += 1
-                    }
-                    continue
-                }
-
-                // WIDE_CHAR cells carry a CJK / wide-emoji glyph that logically
-                // spans two cells. The atlas rasterises them into a 2x-wide
-                // slot and reports a doubled uvSize.x; we draw a 2x-wide quad
-                // so the full glyph lands on screen.
-                let isWide = (cell.flags & UInt16(WIDE_CHAR)) != 0
-                let quadW = isWide ? cellW * 2.0 : cellW
-                let quadSize = SIMD2<Float>(quadW, cellH)
-
-                // Render cell if it has a glyph OR a non-default background.
-                if scalar != 0 && scalar != 0x20 /* space */ {
-                    if let us = Unicode.Scalar(scalar),
-                       let entry = atlas.lookupOrInsert(scalar: us, wide: isWide) {
-                        ptr[count] = CellInstance(
-                            cellPosPx: SIMD2<Float>(xPx, yPx),
-                            quadSizePx: quadSize,
-                            uvOrigin: entry.uvOrigin,
-                            uvSize: entry.uvSize,
-                            fgColor: fg,
-                            bgColor: effectiveBg,
-                            attrs: attrs
-                        )
-                        count += 1
-                    }
-                } else if effectiveHasBg || attrs.x != 0 {
-                    // Space with colored background (status lines, vim highlights),
-                    // inside an active selection, or carrying an accent
-                    // attribute (link hover). Draw a full-cell quad with
-                    // zero coverage so the shader's bg/accent paths still fire.
-                    ptr[count] = CellInstance(
-                        cellPosPx: SIMD2<Float>(xPx, yPx),
-                        quadSizePx: quadSize,
-                        uvOrigin: .zero,
-                        uvSize: .zero,
-                        fgColor: fg,
-                        bgColor: effectiveBg,
-                        attrs: attrs
-                    )
-                    count += 1
-                }
+        for row in 0..<rows {
+            let rowInsts = rowInstanceCache[row]
+            if rowInsts.isEmpty { continue }
+            rowInsts.withUnsafeBufferPointer { src in
+                guard let base = src.baseAddress else { return }
+                // memcpy — safe because CellInstance is POD and the GPU
+                // buffer is non-overlapping with the Swift Array storage.
+                ptr.advanced(by: count).initialize(from: base, count: src.count)
+                count += src.count
             }
         }
         return count
@@ -713,11 +825,60 @@ public final class MetalRenderer {
             let blockCursorCell: (row: Int, col: Int)? = useCellInvertedCursor
                 ? (row: screenCursorRow, col: snap.cursorCol)
                 : nil
+
+            // Decide whether to take the partial-rebuild path. The cache
+            // is "compatible" when every visible-state input to the row
+            // builder matches the prior frame (CacheKey equality). When
+            // it matches AND alacritty reports partial damage with a
+            // manageable count, we only rebuild the damaged rows — the
+            // rest are copied from rowInstanceCache unchanged.
+            //
+            // The row-count threshold (rows / 2) guards against the case
+            // where damage covers most of the screen anyway: the
+            // per-row-skip overhead would exceed the savings. Above the
+            // threshold, just rebuild everything.
+            let newCacheKey = CacheKey(
+                cols: snap.cols,
+                rows: snap.rows,
+                hoveredLinkID: hoveredLinkID,
+                selMode: selFields.mode,
+                selALine: selFields.aLine,
+                selBLine: selFields.bLine,
+                selACol: selFields.aCol,
+                selBCol: selFields.bCol,
+                focused: focused,
+                cursorShape: UInt8(snap.cursorShape),
+                cursorVisible: snap.cursorVisible,
+                displayOffset: UInt16(snap.displayOffset),
+                topInsetPoints: topInsetPoints,
+                defaultBgRgb: defaultBgRgb,
+                backgroundOpacity: backgroundOpacity,
+                keepBgOpaque: keepBgOpaque,
+                accentColor: accentColor,
+                cursorColor: cursorColor,
+                blinkSkip: blinkSkipNow
+            )
+            let cacheCompatible = !dirtyRowsDisabled
+                && lastCacheKey == newCacheKey
+                && rowInstanceCache.count == snap.rows
+
+            let partialRows: Set<Int>? = {
+                guard cacheCompatible else { return nil }
+                guard !snap.damageIsFull else { return nil }
+                let damaged = snap.damagedRows
+                if damaged.isEmpty || damaged.count >= (snap.rows + 1) / 2 {
+                    return nil
+                }
+                return Set(damaged)
+            }()
+
             let instanceCount = buildInstances(
                 snapshot: snap,
                 isSelected: isSelected,
-                blockCursorCell: blockCursorCell
+                blockCursorCell: blockCursorCell,
+                partialRowsOnly: partialRows
             )
+            lastCacheKey = newCacheKey
             if instanceCount > 0 {
                 var uniforms = FrameUniforms(
                     viewportPx: viewportPoints,
