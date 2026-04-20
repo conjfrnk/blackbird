@@ -41,11 +41,14 @@ public final class SecureInputPoller {
         }
     }
 
-    /// Direct state injection for unit tests. Bypasses the OS query so tests
-    /// can assert on the published value without holding real secure input.
+    #if DEBUG
+    /// Test hook: lets tests flip state without invoking the Carbon API.
+    /// Release builds omit this surface entirely — Connor's rule for all
+    /// test-only hooks.
     public func _injectSecureStateForTests(_ active: Bool) {
         isSecureInputActive = active
     }
+    #endif
 }
 
 /// A 16×16 titlebar accessory icon that appears (unhides) whenever
