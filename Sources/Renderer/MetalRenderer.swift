@@ -155,6 +155,10 @@ public final class MetalRenderer {
         let selACol: Int32
         let selBCol: Int32
         let focused: Bool
+        /// Effective cursor shape: user override if set, else the snapshot's
+        /// DECSCUSR shape. `setCursorShapeOverride` also invalidates
+        /// `lastCacheKey` directly, so pinning a shape that happens to equal
+        /// the current snapshot shape still repaints exactly once.
         let cursorShape: UInt8
         let cursorVisible: Bool
         let displayOffset: UInt16
@@ -206,6 +210,26 @@ public final class MetalRenderer {
             // regardless of where in the cycle we were. Clearing the skip
             // cache forces that next frame to actually encode.
             lastFrameKey = nil
+        }
+    }
+
+    /// User-pinned cursor shape. `nil` → follow the snapshot's DECSCUSR
+    /// value (default behaviour). A non-nil value overrides the shape the
+    /// shell most recently set, so users who want a bar cursor regardless
+    /// of `\e[2 q'` / `\e[0 q'` get it.
+    ///
+    /// Cache invalidation runs through the frame-key / cache-key
+    /// substitution in `draw(in:)`: changing the override mutates
+    /// `effectiveShape`, which flows into both keys and forces a rebuild.
+    /// We also null the last-keys here so the override lands on the very
+    /// next frame even if the snapshot is otherwise identical.
+    private var cursorShapeOverride: UInt8? = nil
+
+    public func setCursorShapeOverride(_ shape: UInt8?) {
+        if shape != cursorShapeOverride {
+            cursorShapeOverride = shape
+            lastFrameKey = nil
+            lastCacheKey = nil
         }
     }
 
@@ -695,7 +719,7 @@ public final class MetalRenderer {
             focused: focused,
             cursorRow: Int32(snapshot?.cursorRow ?? -1),
             cursorCol: Int32(snapshot?.cursorCol ?? -1),
-            cursorShape: UInt8(snapshot?.cursorShape ?? 3),
+            cursorShape: cursorShapeOverride ?? UInt8(snapshot?.cursorShape ?? 3),
             cursorVisible: snapshot?.cursorVisible ?? false,
             displayOffset: UInt16(snapshot?.displayOffset ?? 0),
             topInsetPoints: topInsetPoints,
@@ -796,7 +820,12 @@ public final class MetalRenderer {
             // isn't visible and we skip drawing it — scrolling back should
             // never show a phantom cursor on a scrollback line.
             let screenCursorRow = snap.cursorRow + snap.displayOffset
-            let shape = UInt32(snap.cursorShape)
+            // User's pinned shape (`cursorShapeOverride`) wins over the
+            // snapshot's DECSCUSR shape. When nil, follow the shell. Used
+            // everywhere below — `useCellInvertedCursor`, the "hidden"
+            // short-circuit, and the cache key.
+            let effectiveShape: UInt8 = cursorShapeOverride ?? UInt8(snap.cursorShape)
+            let shape = UInt32(effectiveShape)
             // Reset the blink cycle every time the cursor moves, so a
             // moving cursor is continuously visible. Tracked in
             // grid-coordinate space (cursorRow/Col), not screen row.
@@ -847,7 +876,7 @@ public final class MetalRenderer {
                 selACol: selFields.aCol,
                 selBCol: selFields.bCol,
                 focused: focused,
-                cursorShape: UInt8(snap.cursorShape),
+                cursorShape: effectiveShape,
                 cursorVisible: snap.cursorVisible,
                 displayOffset: UInt16(snap.displayOffset),
                 topInsetPoints: topInsetPoints,
