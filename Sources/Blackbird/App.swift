@@ -112,6 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Normal (non-test) launch: open the main window with a shell session.
+        // Replace Sparkle's verbose "up to date" alert before any updater
+        // session can spin up (scheduled check, menu action, etc.).
+        SparkleAlertOverride.install()
         installMainMenu()
         installSparkleMenuItem()
         // Live-toggle Sparkle's auto-check when the pref changes, so the

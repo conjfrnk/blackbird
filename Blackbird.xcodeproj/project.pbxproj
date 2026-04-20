@@ -33,6 +33,7 @@
 		4D998CBEB54F5EBA512EE58F /* TerminalView+IME.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */; };
 		4D9B5BAF29650F44CDBAD0A8 /* HackNerdFontMono-BoldItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D92FE63DFF4EA7FE8A338897 /* HackNerdFontMono-BoldItalic.ttf */; };
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
+		5550A8FFFDF83F5AEE2CCCC4 /* UpdaterUserDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E45B1606A823D8BDBB90FCC /* UpdaterUserDriver.swift */; };
 		66BDCBF186346C6913023FC5 /* DamageTrackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */; };
 		6A4A848FAF8BE625DC512F81 /* FindReplaceIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */; };
 		6D27ABAFB174297CCD622E1D /* TabRenameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0F474A7AF422E5AD4E5502 /* TabRenameTests.swift */; };
@@ -107,6 +108,7 @@
 		0CFB9D9863A2F1D2ACD61D6E /* BlackbirdTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BlackbirdTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		0D7DD21160AFF51FCA0B6374 /* Preferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Preferences.swift; sourceTree = "<group>"; };
 		0E2A52AD38735646D352E5AF /* osc133.fish */ = {isa = PBXFileReference; path = osc133.fish; sourceTree = "<group>"; };
+		0E45B1606A823D8BDBB90FCC /* UpdaterUserDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterUserDriver.swift; sourceTree = "<group>"; };
 		11194E0650067380506F53B2 /* BBTermTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermTests.swift; sourceTree = "<group>"; };
 		1178A5B3ED186EDB37EAB9E2 /* osc133.zsh */ = {isa = PBXFileReference; path = osc133.zsh; sourceTree = "<group>"; };
 		12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindReplaceIntegrationTests.swift; sourceTree = "<group>"; };
@@ -294,6 +296,7 @@
 			children = (
 				AA3C166E3043F25B8791103E /* App.swift */,
 				DACE89CC5DC7A082BAF6BF37 /* Info.plist */,
+				0E45B1606A823D8BDBB90FCC /* UpdaterUserDriver.swift */,
 				38F741D68EDDA0273488DABA /* Input */,
 				9791A004BE38E9D9C74F9CCA /* Resources */,
 				019B2409D2F4991FA45E6153 /* Settings */,
@@ -568,6 +571,7 @@
 				47C98A15F7530D2D7BC49CA3 /* ThemeManager.swift in Sources */,
 				7849DEE8A0065721883B426D /* TitlebarTabBar.swift in Sources */,
 				2981BF48385C26CDAFC92476 /* URLDetector.swift in Sources */,
+				5550A8FFFDF83F5AEE2CCCC4 /* UpdaterUserDriver.swift in Sources */,
 				E96F4B91B70AA6443185F96D /* WindowBlur.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
