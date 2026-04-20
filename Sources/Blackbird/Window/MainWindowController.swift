@@ -22,6 +22,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var exitCancellable: AnyCancellable?
     private var cwdCancellable: AnyCancellable?
     private var titlebarTabBar: TitlebarTabBarViewController?
+    private let secureInputPoller = SecureInputPoller()
+    private let secureInputIndicator = SecureInputIndicatorView()
+    private var secureInputCancellable: AnyCancellable?
     private var tabGroupObservers: [NSKeyValueObservation] = []
     private var titleObserver: NSKeyValueObservation?
     private var titleBroadcastObserver: NSObjectProtocol?
@@ -234,6 +237,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// The session gates internally so no bytes emit when the mode is off.
     func windowDidBecomeKey(_ notification: Notification) {
         session?.focusChanged(true)
+        secureInputPoller.start()
     }
 
     /// Forward window-focus loss. Paired with `windowDidBecomeKey` above.
@@ -242,6 +246,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// changes that don't take key away leave the mode state alone.
     func windowDidResignKey(_ notification: Notification) {
         session?.focusChanged(false)
+        secureInputPoller.stop()
     }
 
     // MARK: - Titlebar-integrated tab bar
@@ -262,6 +267,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             self?.hideNativeTabStrip()
             self?.observeTabGroup()
         }
+        installSecureInputIndicator()
+    }
+
+    /// Install the secure-input lock icon as a right-aligned titlebar
+    /// accessory. Subscribes to the poller and forwards state changes
+    /// to the indicator view on the main RunLoop.
+    private func installSecureInputIndicator() {
+        guard let window else { return }
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 32, height: 28))
+        // Right-align the 16×16 icon with an 8 pt trailing inset, vertically
+        // centered in the 28 pt titlebar row.
+        secureInputIndicator.frame = NSRect(x: 8, y: 6, width: 16, height: 16)
+        container.addSubview(secureInputIndicator)
+
+        let vc = NSTitlebarAccessoryViewController()
+        vc.layoutAttribute = .right
+        vc.view = container
+        window.addTitlebarAccessoryViewController(vc)
+
+        secureInputCancellable = secureInputPoller.$isSecureInputActive
+            .receive(on: RunLoop.main)
+            .sink { [weak self] active in
+                self?.secureInputIndicator.setActive(active)
+            }
     }
 
     private func hideNativeTabStrip() {
