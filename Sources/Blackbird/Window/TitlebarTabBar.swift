@@ -49,8 +49,44 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
         let trafficLightsReservation: CGFloat = 78
         let totalTitlebarWidth = window.frame.width
         let availableWidth = max(200, totalTitlebarWidth - trafficLightsReservation)
-        stripView.update(tabs: tabs, selected: selected, width: availableWidth)
-        view.frame = NSRect(x: 0, y: 0, width: availableWidth, height: TabStripView.height)
+        // Match the actual titlebar height so pills can center against
+        // the traffic lights. With `tabbingMode = .preferred` AppKit
+        // reserves extra space in the titlebar for the default tab
+        // strip (which we suppress via view-walk), so the titlebar is
+        // often taller than 28pt. A 28-pt stripView anchored to the
+        // top of that taller bar leaves empty space below and pills
+        // visually skew above the traffic lights — the viewWillLayout
+        // override below restretches us whenever the superview's
+        // height changes.
+        let h = currentTitlebarHeight() ?? TabStripView.height
+        stripView.update(tabs: tabs, selected: selected, width: availableWidth, height: h)
+        view.frame = NSRect(x: 0, y: 0, width: availableWidth, height: h)
+    }
+
+    /// AppKit parents the accessory view inside the titlebar. Match our
+    /// view's height to its superview on every layout pass so a tabbing-
+    /// mode taller titlebar doesn't leave our pills floating near the top.
+    override func viewWillLayout() {
+        super.viewWillLayout()
+        guard
+            let parentH = view.superview?.bounds.height,
+            parentH > 0,
+            abs(parentH - view.frame.height) > 0.5
+        else { return }
+        view.frame.size.height = parentH
+        stripView.setHeight(parentH)
+    }
+
+    /// Best-effort titlebar height from the hosted window: titlebar =
+    /// window frame height − content layout rect height. Returns nil
+    /// when the layout isn't yet settled (first pass before window is
+    /// ordered in), so the caller can fall back to the static default.
+    private func currentTitlebarHeight() -> CGFloat? {
+        guard let window = hostWindow else { return nil }
+        let windowH = window.frame.height
+        let contentH = window.contentLayoutRect.height
+        let diff = windowH - contentH
+        return diff > 1 ? diff : nil
     }
 }
 
@@ -95,11 +131,23 @@ final class TabStripView: NSView {
 
     override var isFlipped: Bool { true }
 
-    func update(tabs: [NSWindow], selected: NSWindow, width: CGFloat) {
+    func update(tabs: [NSWindow], selected: NSWindow, width: CGFloat, height: CGFloat) {
         self.tabs = tabs
         self.selectedTab = selected
         self.totalWidth = width
-        self.frame = NSRect(x: 0, y: 0, width: width, height: Self.height)
+        self.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        layoutPills()
+        needsDisplay = true
+    }
+
+    /// Called by the accessory VC when AppKit changes our superview's
+    /// height (e.g. tab-bar reservation engages on the 2nd window of a
+    /// group). Resizes our frame and re-lays pills so they stay
+    /// centered against the traffic lights instead of anchoring to the
+    /// top of the taller titlebar.
+    func setHeight(_ h: CGFloat) {
+        guard abs(h - frame.height) > 0.5 else { return }
+        frame.size.height = h
         layoutPills()
         needsDisplay = true
     }
@@ -111,8 +159,15 @@ final class TabStripView: NSView {
 
     private func layoutPills() {
         pillFrames.removeAll(keepingCapacity: true)
-        let y: CGFloat = 3
-        let h = Self.height - 6
+        let h = Self.height - 6                     // pill visual height
+        // Center pills vertically within our actual bounds. Hardcoding
+        // y=3 worked only when the stripView happened to be the same
+        // height as a standard 28 pt titlebar; with tabbing-mode reservation
+        // the titlebar is taller (~38 pt) and pills floated near the top
+        // — visibly above the traffic lights. `isFlipped == true` so y=0
+        // is top-of-view, (bounds.height − h)/2 drops us to the visual
+        // center regardless of titlebar height variations.
+        let y = max(0, (bounds.height - h) / 2)
         let addW = Self.addButtonWidth
         let gap = Self.pillSpacing
         let trail = Self.trailingInset
