@@ -438,6 +438,18 @@ uint32_t bb_snap_link_id_at(const struct BBSnap *snap, uint16_t row, uint16_t co
 const char *bb_snap_link_url(const struct BBSnap *snap, uint32_t link_id);
 
 /**
+ * Toggle OSC 10 / 11 / 12 `?` reply behaviour. Disabled by default so
+ * a hostile remote can't round-trip the palette back into the PTY
+ * (mitigates the zsh-vi-mode command-injection class). Pass `1` to
+ * enable replies when running a known-safe shell that wants nvim /
+ * tmux auto-theming.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null is a no-op.
+ */
+void bb_term_set_color_query_enabled(struct BBTerm *term, uint8_t enabled);
+
+/**
  * Read the current terminal mode bitfield as a `bb_mode::*` union.
  * O(1) — no snapshot allocation. Use when a caller needs to branch on
  * a single mode bit (e.g., focus-event emission must check

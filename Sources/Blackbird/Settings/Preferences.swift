@@ -45,6 +45,13 @@ public final class Preferences: ObservableObject {
     @AppStorage("confirmClose")   public var confirmClose: Bool = true
     @AppStorage("autoUpdateChecks") public var autoUpdateChecks: Bool = false
     @AppStorage("osc52Enabled")   public var osc52Enabled: Bool = true
+    /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. Off by default
+    /// because the reply (`\e]10;rgb:…\e\\`) is routed back into the PTY
+    /// where a misbehaving shell / zsh-vi-mode can interpret it as
+    /// commands. Turn on if you want nvim / tmux auto-theming and you
+    /// trust your shell's escape-handling. See `terminal_replies.rs`
+    /// security test.
+    @AppStorage("colorQueryEnabled") public var colorQueryEnabled: Bool = false
     /// Combined transparency + blur intensity on a 1…10 scale. 1 = fully
     /// opaque, 10 = maximum transparency with heavy blur. 5 is the
     /// daily-driver default — the lift Connor ended up preferring after

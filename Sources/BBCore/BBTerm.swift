@@ -142,6 +142,16 @@ public final class BBTerm {
         bb_term_set_named_color(h, UInt16(slot), rgb)
     }
 
+    /// Enable or disable OSC 10 / 11 / 12 `?` reply behaviour. Off by
+    /// default so a hostile remote can't round-trip the palette back into
+    /// the PTY (mitigates the zsh-vi-mode command-injection class). Users
+    /// who want Neovim / tmux auto-theming on a modern shell can opt in
+    /// via Preferences — see `Preferences.shared.colorQueryEnabled`.
+    public func setColorQueryEnabled(_ enabled: Bool) {
+        guard let h = handle else { return }
+        bb_term_set_color_query_enabled(h, enabled ? 1 : 0)
+    }
+
     /// Extract UTF-8 text between two buffer points. `rectangular` selects
     /// the axis-aligned bounding box between start/end; `false` selects the
     /// prose-style sweep (first line from startCol, middle lines full, last

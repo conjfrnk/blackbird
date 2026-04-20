@@ -4,12 +4,13 @@ use std::cell::UnsafeCell;
 use std::os::raw::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use alacritty_terminal::vte::{Parser, Perform};
 
 /// Dimensions struct required by `Term::new`.
@@ -146,6 +147,53 @@ impl CallbackCell {
 }
 
 // ---------------------------------------------------------------------------
+// ColorRequestQueue — deferred OSC 10/11/12 color-query responses
+// ---------------------------------------------------------------------------
+
+/// Parked `Event::ColorRequest` events. Alacritty fires these from inside
+/// `term.dynamic_color_sequence`, which holds `&mut Term`; we can't re-borrow
+/// the term to read the palette from the listener. Instead the listener
+/// pushes `(index, formatter)` pairs here, and `bb_term_input` drains the
+/// queue after `processor.advance` returns (releasing the mutable borrow),
+/// resolves the palette value, calls the formatter, and fires a PtyWrite.
+///
+/// # Thread-safety contract
+/// Same as `CallbackCell` — single-threaded access on the BBTerm owner's
+/// thread.
+struct ColorRequestQueue(UnsafeCell<Vec<ColorRequestEntry>>);
+
+struct ColorRequestEntry {
+    index: usize,
+    formatter: Arc<dyn Fn(Rgb) -> String + Sync + Send>,
+}
+
+// SAFETY: the owning BBTerm is never shared across threads; same reasoning
+// as CallbackCell.
+unsafe impl Send for ColorRequestQueue {}
+unsafe impl Sync for ColorRequestQueue {}
+
+impl ColorRequestQueue {
+    fn new() -> Self {
+        ColorRequestQueue(UnsafeCell::new(Vec::new()))
+    }
+
+    /// # Safety
+    /// Caller must ensure no concurrent access.
+    unsafe fn push(&self, entry: ColorRequestEntry) {
+        (*self.0.get()).push(entry);
+    }
+
+    /// Take and clear the queue. Returned vec is owned; the internal
+    /// storage is reset to an empty Vec.
+    ///
+    /// # Safety
+    /// Caller must ensure no concurrent access.
+    unsafe fn drain(&self) -> Vec<ColorRequestEntry> {
+        std::mem::take(&mut *self.0.get())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RoutingListener — bridges alacritty_terminal events to C callbacks
 // ---------------------------------------------------------------------------
 
@@ -160,6 +208,7 @@ impl CallbackCell {
 /// `BBTerm`.  No concurrent access to the callback state is permitted.
 struct RoutingListener {
     cell: *const CallbackCell,
+    color_queue: *const ColorRequestQueue,
 }
 
 // SAFETY: the owning BBTerm is never moved to another thread while in use.
@@ -209,9 +258,17 @@ impl EventListener for RoutingListener {
                         i32_arg: 0,
                     });
                 }
+                Event::ColorRequest(index, formatter) => {
+                    // Defer — we're inside alacritty's &mut Term borrow via
+                    // dynamic_color_sequence, so the palette isn't readable
+                    // from here. `bb_term_input` drains this queue right
+                    // after processor.advance returns, reads the palette,
+                    // calls the formatter, and emits PtyWrite.
+                    (*self.color_queue).push(ColorRequestEntry { index, formatter });
+                }
                 // All other variants (MouseCursorDirty, ResetTitle, ClipboardLoad,
-                // ColorRequest, TextAreaSizeRequest, CursorBlinkingChange,
-                // Wakeup, Exit, ChildExit) are intentionally ignored.
+                // TextAreaSizeRequest, CursorBlinkingChange, Wakeup, Exit,
+                // ChildExit) are intentionally ignored.
                 _ => {}
             }
         }
@@ -421,6 +478,20 @@ pub struct BBTerm {
     /// throughput tests showed running bytes through three parsers
     /// (alacritty + 2 parallels) cost ~15 % versus two parsers.
     osc_parser: Parser,
+    /// Deferred queue of OSC 10/11/12 color-query responses — see
+    /// ColorRequestQueue. Drained after every `processor.advance` call in
+    /// `bb_term_input` so the response writes land in the same input
+    /// batch that emitted the query. Responses are actually emitted only
+    /// when `color_query_enabled` is true.
+    color_queue: Box<ColorRequestQueue>,
+    /// Whether OSC 10 / 11 / 12 `?` queries produce a reply. Off by
+    /// default: historically, replying leaked the palette back into the
+    /// PTY, which zsh-vi-mode could interpret as commands (CVE class on
+    /// older shells). Users who want nvim / tmux auto-theming on a
+    /// modern shell can opt in via Preferences. See
+    /// `core/tests/terminal_replies.rs::osc_10_11_color_queries_are_silent`
+    /// for the default-off pinning.
+    color_query_enabled: bool,
     /// Latch: "the prior `bb_term_input` chunk contained an ESC byte and
     /// may have left the OSC parser mid-sequence." When this is set, we
     /// advance the OSC parser regardless of whether the current chunk has
@@ -544,14 +615,18 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         };
 
         let callback = Box::new(CallbackCell::new());
+        let color_queue = Box::new(ColorRequestQueue::new());
         let listener = RoutingListener {
             cell: &*callback as *const CallbackCell,
+            color_queue: &*color_queue as *const ColorRequestQueue,
         };
         let term = Term::new(config, &size, listener);
         let bb = Box::new(BBTerm {
             term,
             processor: Processor::new(),
             osc_parser: Parser::new(),
+            color_queue,
+            color_query_enabled: false,
             osc_possibly_pending: false,
             callback,
         });
@@ -637,6 +712,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     bb.osc_possibly_pending = false;
                 }
             }
+            drain_color_requests(bb);
             return;
         }
         // Chunk contains ESC — may open a new OSC that terminates in a
@@ -662,7 +738,71 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // OSC sequences don't care about ED.
         let mut osc = OscScanner { cell: &bb.callback };
         bb.osc_parser.advance(&mut osc, slice);
+        drain_color_requests(bb);
     })
+}
+
+/// Resolve every pending OSC 10/11/12 response and emit it as a PtyWrite
+/// event. Called after every `processor.advance` in `bb_term_input`
+/// returns — at that point we're no longer inside alacritty's `&mut Term`
+/// borrow, so the palette is readable.
+///
+/// # Safety
+/// Caller must ensure single-threaded access to `bb.color_queue` and
+/// `bb.callback` (the usual BBTerm thread discipline).
+unsafe fn drain_color_requests(bb: &mut BBTerm) {
+    let entries = (*bb.color_queue).drain();
+    if entries.is_empty() {
+        return;
+    }
+    // Security default: drop the queue silently unless the user has
+    // explicitly enabled replies. Ignoring here rather than blocking the
+    // push keeps the wire path identical in both modes — a future
+    // always-enable would only need to flip this flag.
+    if !bb.color_query_enabled {
+        return;
+    }
+    let palette = bb.term.colors();
+    for entry in entries {
+        // palette[idx] is Option<Rgb>. None means the theme hasn't set
+        // this slot; fall back to a sensible default so we still reply
+        // rather than leaving the TUI timing out.
+        let rgb = palette[entry.index].unwrap_or_else(|| palette_default_rgb(entry.index));
+        let reply = (entry.formatter)(rgb);
+        // The `reply` String owns its bytes for the duration of this
+        // scope; `fire` is synchronous (calls the registered C callback
+        // which must copy bytes if it wants to outlive the call).
+        let bytes = reply.as_bytes();
+        bb.callback.fire(BBEvent {
+            kind: BBEventKind::PtyWrite,
+            payload: bytes.as_ptr(),
+            len: bytes.len(),
+            i32_arg: 0,
+        });
+    }
+}
+
+/// Fallback Rgb for palette slots the theme hasn't filled in. OSC 10 / 11 /
+/// 12 queries target indices 256 (Foreground), 257 (Background), 258
+/// (Cursor). The 16 base colors use the xterm default table; the 240-entry
+/// 256-color cube is computed. Anything outside that falls back to a
+/// visible-on-any-background grey so silence is never the TUI's response.
+fn palette_default_rgb(index: usize) -> Rgb {
+    let packed: u32 = if index < 256 {
+        indexed_color_rgb(index as u8)
+    } else {
+        match index {
+            256 => named_color_rgb(&NamedColor::Foreground),
+            257 => named_color_rgb(&NamedColor::Background),
+            258 => 0xFFFFFF, // cursor default: solid white
+            _ => 0xEEEEEE,
+        }
+    };
+    Rgb {
+        r: ((packed >> 16) & 0xFF) as u8,
+        g: ((packed >> 8) & 0xFF) as u8,
+        b: (packed & 0xFF) as u8,
+    }
 }
 
 /// Flat cell layout for cross-language consumption. Swift reads these directly.
@@ -1407,6 +1547,24 @@ pub unsafe extern "C" fn bb_snap_link_url(
     })
 }
 
+/// Toggle OSC 10 / 11 / 12 `?` reply behaviour. Disabled by default so
+/// a hostile remote can't round-trip the palette back into the PTY
+/// (mitigates the zsh-vi-mode command-injection class). Pass `1` to
+/// enable replies when running a known-safe shell that wants nvim /
+/// tmux auto-theming.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_set_color_query_enabled(term: *mut BBTerm, enabled: u8) {
+    guard_with_term(term, (), || {
+        if term.is_null() {
+            return;
+        }
+        (*term).color_query_enabled = enabled != 0;
+    })
+}
+
 /// Read the current terminal mode bitfield as a `bb_mode::*` union.
 /// O(1) — no snapshot allocation. Use when a caller needs to branch on
 /// a single mode bit (e.g., focus-event emission must check
@@ -1861,8 +2019,10 @@ mod tests {
             ..Default::default()
         };
         let callback = Box::new(CallbackCell::new());
+        let color_queue = Box::new(ColorRequestQueue::new());
         let listener = RoutingListener {
             cell: &*callback as *const CallbackCell,
+            color_queue: &*color_queue as *const ColorRequestQueue,
         };
         let mut term = Term::new(config, &size, listener);
 

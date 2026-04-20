@@ -99,6 +99,12 @@ public struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("Reply to color queries (OSC 10/11/12)", isOn: $prefs.colorQueryEnabled)
+            Text("When on, TUIs that ask for the current fg / bg / cursor color receive a `rgb:…` reply — Neovim and tmux use this for light/dark auto-detection. Off by default because the reply is written back into the PTY, where a misbehaving shell's vi-mode handler could treat the color bytes as commands. Leave off on untrusted remotes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding()
     }

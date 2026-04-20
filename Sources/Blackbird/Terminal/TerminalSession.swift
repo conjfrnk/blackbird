@@ -140,6 +140,7 @@ public final class TerminalSession: ObservableObject {
     /// spawning a child process. Production paths always have a PTY.
     private let pty: PTY?
     private let coreQueue = DispatchQueue(label: "blackbird.core")
+    private var preferencesSubscription: AnyCancellable?
 
     public static func start(
         shell: String,
@@ -490,7 +491,24 @@ public final class TerminalSession: ObservableObject {
         // forced unwrap here will crash those tests. If you need eager
         // PTY setup, gate it with `if let pty { … }` and state why in a
         // comment — don't drop the guard.
-        //
+
+        // Apply the current OSC 10/11/12 color-query preference to the
+        // core. Core default is off for security reasons; user opt-in
+        // flips it on here at session start. Changes to the pref at
+        // runtime propagate via the Preferences subscription below.
+        coreQueue.async { [bbterm] in
+            bbterm.setColorQueryEnabled(Preferences.shared.colorQueryEnabled)
+        }
+        preferencesSubscription = Preferences.shared.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let enabled = Preferences.shared.colorQueryEnabled
+                self.coreQueue.async { [bbterm = self.bbterm] in
+                    bbterm.setColorQueryEnabled(enabled)
+                }
+            }
+
         // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
         pty?.onBytes = { [weak self] data in
             guard let self else { return }
