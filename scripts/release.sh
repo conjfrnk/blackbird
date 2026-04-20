@@ -22,27 +22,45 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 DIST_DIR="$REPO_ROOT/dist"
+ARCHIVE_PATH="$DIST_DIR/Blackbird.xcarchive"
+EXPORT_DIR="$DIST_DIR/Export"
+EXPORT_OPTIONS="$SCRIPT_DIR/ExportOptions.plist"
 mkdir -p "$DIST_DIR"
 
 echo "==> Building Rust core (universal)"
 bash scripts/build-core.sh
 
-echo "==> xcodebuild Release"
+# `xcodebuild archive` + `-exportArchive` is the only path that gives us
+# distribution-grade signatures: secure timestamp on every inner binary,
+# no injected `get-task-allow` entitlement, and a deep re-sign of Sparkle's
+# nested XPCs + Updater.app with our Developer ID. A plain `xcodebuild
+# build` skips all three and fails notarization.
+echo "==> xcodebuild archive"
+rm -rf "$ARCHIVE_PATH"
 xcodebuild \
     -project Blackbird.xcodeproj \
     -scheme Blackbird \
     -configuration Release \
+    -archivePath "$ARCHIVE_PATH" \
     -derivedDataPath "$DIST_DIR/DerivedData" \
-    build \
+    archive \
     ONLY_ACTIVE_ARCH=NO \
     CODE_SIGN_STYLE=Manual \
     ${DEVELOPER_ID:+CODE_SIGN_IDENTITY="$DEVELOPER_ID"} \
     >/dev/null
 
-APP_SRC="$DIST_DIR/DerivedData/Build/Products/Release/Blackbird.app"
+echo "==> xcodebuild -exportArchive (Developer ID)"
+rm -rf "$EXPORT_DIR"
+xcodebuild -exportArchive \
+    -archivePath "$ARCHIVE_PATH" \
+    -exportOptionsPlist "$EXPORT_OPTIONS" \
+    -exportPath "$EXPORT_DIR" \
+    >/dev/null
+
+APP_SRC="$EXPORT_DIR/Blackbird.app"
 APP_DST="$DIST_DIR/Blackbird.app"
 if [[ ! -d "$APP_SRC" ]]; then
-    echo "!! Missing Release build output at $APP_SRC"
+    echo "!! Missing exported app at $APP_SRC"
     exit 1
 fi
 rm -rf "$APP_DST"
