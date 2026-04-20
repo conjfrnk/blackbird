@@ -23,6 +23,7 @@ Thumbs.db
 # Xcode
 DerivedData/
 build/
+dist/
 *.xcodeproj/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcworkspace/xcuserdata/
