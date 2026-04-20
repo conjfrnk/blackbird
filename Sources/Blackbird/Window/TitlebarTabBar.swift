@@ -111,15 +111,16 @@ final class TabStripView: NSView {
 
     private func layoutPills() {
         pillFrames.removeAll(keepingCapacity: true)
-        let h = Self.height - 6                     // pill visual height
-        // Center pills vertically within our actual bounds. Hardcoding
-        // y=3 worked only when the stripView happened to be the same
-        // height as a standard 28 pt titlebar; with tabbing-mode reservation
-        // the titlebar is taller (~38 pt) and pills floated near the top
-        // — visibly above the traffic lights. `isFlipped == true` so y=0
-        // is top-of-view, (bounds.height − h)/2 drops us to the visual
-        // center regardless of titlebar height variations.
-        let y = max(0, (bounds.height - h) / 2)
+        // Pill geometry: the stripView is 28 pt tall (standard titlebar);
+        // pills are 24 pt, anchored at y=4 so their bottom edge sits flush
+        // with the titlebar/content seam (Safari / Chrome style) and their
+        // top sits visually BELOW the traffic-light centers — matching how
+        // the lights read as a unit at the titlebar top rather than
+        // centered in it. Previously h=22 at y=3 made pills look floating-
+        // high; the 2 pt taller body + 1 pt drop lines them up against the
+        // traffic lights on eye-test.
+        let h: CGFloat = 24
+        let y: CGFloat = 4
         let addW = Self.addButtonWidth
         let gap = Self.pillSpacing
         let trail = Self.trailingInset
