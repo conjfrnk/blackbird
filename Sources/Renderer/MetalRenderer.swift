@@ -554,8 +554,13 @@ public final class MetalRenderer {
 
             // Render cell if it has a glyph OR a non-default background.
             if scalar != 0 && scalar != 0x20 /* space */ {
+                let glyphStyle = GlyphAtlas.Style(
+                    bold: (cell.flags & UInt16(BOLD)) != 0,
+                    italic: (cell.flags & UInt16(ITALIC)) != 0
+                )
                 if let us = Unicode.Scalar(scalar),
-                   let entry = atlas.lookupOrInsert(scalar: us, wide: isWide) {
+                   let entry = atlas.lookupOrInsert(
+                       scalar: us, wide: isWide, style: glyphStyle) {
                     out.append(CellInstance(
                         cellPosPx: SIMD2<Float>(xPx, yPx),
                         quadSizePx: quadSize,

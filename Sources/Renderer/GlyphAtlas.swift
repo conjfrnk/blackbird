@@ -14,6 +14,32 @@ import os
 /// work).
 public final class GlyphAtlas {
 
+    /// Style bits that affect glyph appearance. Separate from the scalar so
+    /// bold / italic / bold-italic variants cache independently — prior
+    /// behaviour keyed on scalar alone, causing an 'a' typed in SGR 1 (bold)
+    /// to return the regular-weight glyph already in the cache (and vice
+    /// versa). Raw representation matches BBCore cell flags (BOLD=1,
+    /// ITALIC=2) for a zero-shift translation on the renderer side.
+    public struct Style: Hashable {
+        public let bold: Bool
+        public let italic: Bool
+
+        public init(bold: Bool, italic: Bool) {
+            self.bold = bold
+            self.italic = italic
+        }
+
+        public static let regular = Style(bold: false, italic: false)
+    }
+
+    /// Cache key for `byKey`. Scalar + style together uniquely identify a
+    /// rasterised glyph at the atlas's baked-in font size / scale.
+    private struct GlyphKey: Hashable {
+        let scalarValue: UInt32
+        let bold: Bool
+        let italic: Bool
+    }
+
     public struct Entry {
         public let uvOrigin: SIMD2<Float>
         public let uvSize: SIMD2<Float>
@@ -35,7 +61,11 @@ public final class GlyphAtlas {
     /// (point_size × scale); UVs stay normalized [0, 1] regardless.
     public let scale: CGFloat
 
-    private var byScalar: [UInt32: Entry] = [:]
+    private var byKey: [GlyphKey: Entry] = [:]
+    /// Font-variant cache so we only pay CTFontCreateCopyWithSymbolicTraits
+    /// once per (bold × italic) combination rather than per glyph insertion.
+    /// Up to 4 entries total.
+    private var styledFonts: [Style: NSFont] = [:]
     private var nextSlot: Int = 0
     #if DEBUG
     /// Counter for lookup-or-insert calls that found a full atlas and had
@@ -104,10 +134,23 @@ public final class GlyphAtlas {
     /// Return the atlas entry for `scalar`, rasterizing it into the next free
     /// slot(s) on first use. `wide == true` allocates two adjacent slots and
     /// rasterises into a 2x-wide bitmap — required for CJK and wide emoji so
-    /// the glyph doesn't clip at the slot boundary. Returns nil if the atlas
-    /// is full and the glyph hasn't been inserted before.
-    public func lookupOrInsert(scalar: UnicodeScalar, wide: Bool = false) -> Entry? {
-        if let existing = byScalar[scalar.value] { return existing }
+    /// the glyph doesn't clip at the slot boundary. `style` carries SGR bold /
+    /// italic bits; the atlas caches each (scalar, style) combination
+    /// independently so SGR 1 / SGR 3 render with the correct font variant
+    /// rather than returning whichever variant landed in the cache first.
+    /// Returns nil if the atlas is full and the glyph hasn't been inserted
+    /// before.
+    public func lookupOrInsert(
+        scalar: UnicodeScalar,
+        wide: Bool = false,
+        style: Style = .regular
+    ) -> Entry? {
+        let key = GlyphKey(
+            scalarValue: scalar.value,
+            bold: style.bold,
+            italic: style.italic
+        )
+        if let existing = byKey[key] { return existing }
         let slotsNeeded = wide ? 2 : 1
 
         // If the wide glyph wouldn't fit in the current row (only one slot
@@ -139,7 +182,7 @@ public final class GlyphAtlas {
         let pxX = col * cellPxWidth
         let pxY = row * cellPxHeight
 
-        rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide)
+        rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style)
 
         let uvOrigin = SIMD2<Float>(
             Float(pxX) / Float(texture.width),
@@ -150,14 +193,45 @@ public final class GlyphAtlas {
             Float(cellPxHeight) / Float(texture.height)
         )
         let entry = Entry(uvOrigin: uvOrigin, uvSize: uvSize, isWide: wide)
-        byScalar[scalar.value] = entry
+        byKey[key] = entry
         nextSlot = slot + slotsNeeded
         return entry
     }
 
     // MARK: - Rasterization
 
-    private func rasterize(scalar: UnicodeScalar, intoSlotAt origin: (x: Int, y: Int), wide: Bool = false) {
+    /// Resolve the font variant for `style`, caching the result so
+    /// CTFontCreateCopyWithSymbolicTraits runs at most 4 times per atlas.
+    /// The fallback to the base font keeps rendering functional if the
+    /// user's chosen family lacks a bold / italic variant (e.g. a thin
+    /// mono-only family) — we'd rather the glyph be visible at regular
+    /// weight than missing entirely.
+    private func styledFont(for style: Style) -> NSFont {
+        if let cached = styledFonts[style] { return cached }
+        var traits: CTFontSymbolicTraits = []
+        if style.bold { traits.insert(.traitBold) }
+        if style.italic { traits.insert(.traitItalic) }
+        let base = metrics.font as CTFont
+        let resolved: NSFont
+        if traits.isEmpty {
+            resolved = metrics.font
+        } else if let variant = CTFontCreateCopyWithSymbolicTraits(
+            base, 0.0, nil, traits, traits
+        ) {
+            resolved = variant as NSFont
+        } else {
+            resolved = metrics.font
+        }
+        styledFonts[style] = resolved
+        return resolved
+    }
+
+    private func rasterize(
+        scalar: UnicodeScalar,
+        intoSlotAt origin: (x: Int, y: Int),
+        wide: Bool = false,
+        style: Style = .regular
+    ) {
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
         let cs = CGColorSpaceCreateDeviceGray()
@@ -183,9 +257,10 @@ public final class GlyphAtlas {
         ctx.textMatrix = .identity
 
         let str = String(scalar)
+        let font = styledFont(for: style)
         let attr = NSAttributedString(
             string: str,
-            attributes: [.font: metrics.font, .foregroundColor: NSColor.white]
+            attributes: [.font: font, .foregroundColor: NSColor.white]
         )
         let line = CTLineCreateWithAttributedString(attr)
 
