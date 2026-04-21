@@ -7,3 +7,17 @@ version = "0.1.0"
 edition = "2021"
 # alacritty_terminal 0.26.0 declares rust-version = "1.85.0", setting the floor.
 rust-version = "1.85"
+
+# Release profile for the statically-linked core lib. Defaults (LTO off,
+# codegen-units = 16, no strip) left ~1.2 MiB of debug info in the
+# universal .a; thin LTO + single codegen unit gets the blackbird_core
+# object to ~400 KiB without measurable throughput regression on the
+# VTE parser hot path (throughput gate covers this). `strip = "symbols"`
+# keeps names out of the shipped binary. panic = "unwind" is NOT
+# flipped — `guard_with_term` / `guard_with_snap` rely on catch_unwind
+# to route panics through `BBEventKind::Fatal`; panic = "abort" would
+# regress that safety property. Audit rust-build F2.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
