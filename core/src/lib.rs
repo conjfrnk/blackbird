@@ -2828,6 +2828,30 @@ mod tests {
             16,
             "underline_color must stay at offset 16 — packed directly after link_id"
         );
+        // Also pin the tail of BBSnap: mode / history_size / cursor_shape
+        // sit past the pointer fields, so a future field insertion BEFORE
+        // them would silently shift their offsets in the Swift bridge.
+        // Audit rust-core-3 F15 + rust-build F7.
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, mode),
+            12,
+            "mode offset is the load-bearing anchor for the u32 tail"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, history_size),
+            32,
+            "history_size follows cells at offset 32"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, cursor_shape),
+            36,
+            "cursor_shape follows history_size"
+        );
+        assert_eq!(
+            std::mem::size_of::<BBSnap>(),
+            40,
+            "BBSnap total size (including tail padding) must match Swift's stride"
+        );
     }
 
     #[test]
