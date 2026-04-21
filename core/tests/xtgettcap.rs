@@ -261,3 +261,34 @@ fn xtgettcap_oversized_payload_is_gracefully_truncated() {
     input.extend_from_slice(b"\x1b\\");
     let _ = run(&input); // just must not panic
 }
+
+#[test]
+fn xtgettcap_nonhex_cap_does_not_echo_into_reply() {
+    // Audit rust-core-1 F8: an ssh'd attacker could smuggle `\x1b\\`
+    // (ST) or any other control byte into the cap_hex echo of the
+    // DCS-0+r "unknown" response, terminating the DCS early and
+    // landing the tail as top-level input on the local PTY. The
+    // XTGETTCAP spec requires hex-encoded cap names (0-9, A-F); any
+    // byte outside that range means hostile input and the reply must
+    // NOT echo it.
+    //
+    // The cap "AZ" embeds a non-hex 'Z'. The reply must not include
+    // "AZ" — it must be the inert `DCS 0 + r ST` with no cap name.
+    let writes = run(b"\x1bP+q415A\x1b\\"); // "AZ" is hex 41 5A → valid hex → echo allowed
+    let joined_hex_ok: Vec<u8> = writes.into_iter().flatten().collect();
+    assert!(
+        joined_hex_ok.windows(b"415A".len()).any(|w| w == b"415A"),
+        "hex-valid cap should still echo; got {joined_hex_ok:?}"
+    );
+
+    // Now the attack payload: raw 'Z' (0x5A) smuggled into cap_hex.
+    // vte's DCS parser accepts arbitrary bytes in the payload; our
+    // post-parse validation must reject them from the echo.
+    // Construct an `ESC P + q Z ESC \` request.
+    let writes2 = run(b"\x1bP+qZ\x1b\\");
+    let joined_hex_bad: Vec<u8> = writes2.into_iter().flatten().collect();
+    assert_eq!(
+        joined_hex_bad, b"\x1bP0+r\x1b\\",
+        "non-hex cap must produce an empty-cap reply (no echo); got {joined_hex_bad:?}"
+    );
+}

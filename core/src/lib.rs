@@ -470,8 +470,17 @@ unsafe fn dispatch_xtgettcap(cell: &CallbackCell, payload: &[u8]) {
 }
 
 fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
-    match find_cap_value(cap_hex) {
-        Some(value_hex) => {
+    // Reject anything that isn't pure hex. XTGETTCAP specifies the payload
+    // as hex-encoded cap name bytes, but nothing upstream enforced it —
+    // an ssh'd attacker could smuggle `\x1b\\` (ST) or other control
+    // bytes inside the cap_hex echo of the DCS-0-r "unknown" response,
+    // terminating the DCS early and landing the tail bytes as top-level
+    // input (shell-injection primitive on the remote). Audit
+    // rust-core-1 F8. Unknown non-hex cap → reply with an empty cap
+    // name so the reply stays well-formed and the echo channel closes.
+    let is_valid_hex = !cap_hex.is_empty() && cap_hex.iter().all(|b| b.is_ascii_hexdigit());
+    match (is_valid_hex, find_cap_value(cap_hex)) {
+        (true, Some(value_hex)) => {
             // DCS 1 + r <cap>=<value> ST
             let mut v = Vec::with_capacity(cap_hex.len() + value_hex.len() + 8);
             v.extend_from_slice(b"\x1bP1+r");
@@ -481,13 +490,17 @@ fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
             v.extend_from_slice(b"\x1b\\");
             v
         }
-        None => {
-            // DCS 0 + r <cap> ST
+        (true, None) => {
+            // DCS 0 + r <cap> ST — hex echo is safe.
             let mut v = Vec::with_capacity(cap_hex.len() + 7);
             v.extend_from_slice(b"\x1bP0+r");
             v.extend_from_slice(cap_hex);
             v.extend_from_slice(b"\x1b\\");
             v
+        }
+        (false, _) => {
+            // DCS 0 + r ST — no echo; hostile bytes dropped.
+            b"\x1bP0+r\x1b\\".to_vec()
         }
     }
 }
