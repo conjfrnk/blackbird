@@ -38,3 +38,26 @@ lipo -create \
 
 echo "==> wrote $UNIVERSAL_DIR/lib${CRATE}.a"
 lipo -info "$UNIVERSAL_DIR/lib${CRATE}.a"
+
+# Drift gate for the committed cbindgen header. build.rs regenerates
+# core/include/BBCore.h as a side effect of the cargo builds above;
+# if what just got written differs from the committed copy, the
+# developer's working tree is out of sync and needs either a
+# deliberate commit or a rebase before pushing. Default is STRICT:
+# fail on drift so CI catches forgotten-header commits. Locally pass
+# BB_ALLOW_HEADER_DRIFT=1 while iterating to keep the check as a
+# warning instead of an error. Audit rust-build F1.
+if [ -d "$REPO_ROOT/.git" ] && command -v git >/dev/null 2>&1; then
+    if ! git -C "$REPO_ROOT" diff --quiet -- core/include/BBCore.h; then
+        if [ "${BB_ALLOW_HEADER_DRIFT:-0}" = "1" ]; then
+            echo "warning: core/include/BBCore.h has uncommitted cbindgen changes" >&2
+        else
+            echo "error: core/include/BBCore.h drifted from the committed copy —" >&2
+            echo "       cbindgen produced different output than what's on disk." >&2
+            echo "       Commit the regenerated header, or set BB_ALLOW_HEADER_DRIFT=1" >&2
+            echo "       for a local iteration." >&2
+            git -C "$REPO_ROOT" --no-pager diff -- core/include/BBCore.h >&2
+            exit 1
+        fi
+    fi
+fi
