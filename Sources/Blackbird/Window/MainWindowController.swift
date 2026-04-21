@@ -1,6 +1,9 @@
 import AppKit
 import Combine
 import Metal
+#if DEBUG
+import os
+#endif
 
 extension Notification.Name {
     /// Fired whenever any MainWindowController observes its own window's
@@ -38,6 +41,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var lastObservedTabGroupID: ObjectIdentifier?
     private var titleObserver: NSKeyValueObservation?
     private var titleBroadcastObserver: NSObjectProtocol?
+
+    #if DEBUG
+    /// `os.Logger` (not `NSLog`) so `privacy: .public` markers actually take
+    /// effect — `log stream`'s reader otherwise redacts the message body to
+    /// `<private>` because NSLog builds its format string at runtime.
+    private static let tabsLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                           category: "tabs")
+    #endif
 
     /// Called when the window is about to close. AppDelegate uses this to
     /// remove the controller from its tracking array.
@@ -357,13 +368,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // the shell's reported title, and broadcast so sibling tabs in the
         // same group also re-read this window's new title when they repaint
         // their own pill (each pill strip lists every tab).
+        //
+        // The broadcast is scoped to the SAME tab group: a title change in
+        // window A only matters for windows that show A's pill. Posting with
+        // `object: hostWindow` lets observers compare tab groups and skip
+        // both their own posts (already refreshed via the local KVO above)
+        // and posts from windows in unrelated tab groups (their pills don't
+        // list us). Without this every title change refreshed every window
+        // in every group across the app, and the originating window
+        // refreshed twice.
         if let hostWindow = window {
             titleObserver = hostWindow.observe(\.title, options: [.new]) { [weak self] _, _ in
                 DispatchQueue.main.async {
                     self?.refreshTabBar()
                     NotificationCenter.default.post(
                         name: .blackbirdTabTitleChanged,
-                        object: nil
+                        object: hostWindow
                     )
                 }
             }
@@ -371,8 +391,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 forName: .blackbirdTabTitleChanged,
                 object: nil,
                 queue: .main
-            ) { [weak self] _ in
-                self?.refreshTabBar()
+            ) { [weak self] notification in
+                guard
+                    let self,
+                    let myWindow = self.window,
+                    let senderWindow = notification.object as? NSWindow
+                else { return }
+                // Skip the originating window — already refreshed via its
+                // own titleObserver KVO callback.
+                if senderWindow === myWindow { return }
+                // Skip windows in unrelated tab groups — our pill strip
+                // doesn't list any of their tabs.
+                guard
+                    let myGroup = myWindow.tabGroup,
+                    let theirGroup = senderWindow.tabGroup,
+                    myGroup === theirGroup
+                else { return }
+                self.refreshTabBar()
             }
             titleBroadcastObserver = tok
         }
@@ -397,10 +432,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             tabGroupObservers.removeAll()
             lastObservedTabGroupID = currentGroupID
             #if DEBUG
-            NSLog(
-                "[Blackbird] tab-group identity changed (%@) — resubscribing",
-                currentGroupID == nil ? "detached" : "new group"
-            )
+            let kind = currentGroupID == nil ? "detached" : "new group"
+            Self.tabsLogger.log("tab-group identity changed (\(kind, privacy: .public)) — resubscribing")
             #endif
         }
         // The FIRST window's installTitlebarTabBar runs its async
@@ -417,9 +450,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let tabCount = window.tabGroup?.windows.count ?? 1
         if tabCount <= 1 {
             // Restore the stock single-tab titlebar: title text centered,
-            // no custom pill chrome. Hide the accessory view entirely so
-            // it doesn't eat layout width.
+            // no custom pill chrome. Hide the accessory view AND collapse
+            // its frame to zero so AppKit doesn't keep reserving the strip's
+            // last multi-tab width on the right side of the titlebar — that
+            // reservation was pushing the centered window title leftward
+            // for the rest of the window's life after returning to one tab.
             titlebarTabBar?.view.isHidden = true
+            titlebarTabBar?.view.frame = .zero
             window.titleVisibility = .visible
         } else {
             titlebarTabBar?.view.isHidden = false
@@ -509,9 +546,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         alert.addButton(withTitle: "Cancel")
 
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        // Pre-fill with the current effective title so the user can
-        // lightly edit it rather than retyping from scratch.
-        field.stringValue = session.displayTitle
+        // Pre-fill with the current effective title so the user can lightly
+        // edit it rather than retyping from scratch. `displayTitle` is now
+        // optional (returns nil when no override AND no OSC title yet) — fall
+        // back to `window.title` so the alert shows the shell-basename seed
+        // that's actually on screen instead of an empty field.
+        field.stringValue = session.displayTitle ?? (window?.title ?? "")
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
 
