@@ -77,6 +77,20 @@ final class PTYTests: XCTestCase {
             "__XPC_DYLD_LIBRARY_PATH",
             "LaunchInstanceID",
             "SECURITYSESSIONID",
+            // dyld injection surface — F8 hardening.
+            "DYLD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_FRAMEWORK_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "DYLD_FALLBACK_FRAMEWORK_PATH",
+            "DYLD_PRINT_TO_FILE",
+            "DYLD_PRINT_APIS",
+            "DYLD_PRINT_STATISTICS",
+            // Allocator / logging / CoreAnimation debug leakage.
+            "MallocNanoZone",
+            "OS_ACTIVITY_MODE",
+            "CA_DEBUG_TRANSACTIONS",
+            "CA_ASSERT_MAIN_THREAD_TRANSACTIONS",
         ]
         let actual = Set(PTY.scrubbedParentEnvVars)
         XCTAssertTrue(

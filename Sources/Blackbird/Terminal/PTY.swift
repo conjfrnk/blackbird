@@ -1,8 +1,6 @@
 import Foundation
 import Darwin
-#if DEBUG
 import os
-#endif
 
 /// Wraps a child process running behind a pseudo-terminal master fd.
 ///
@@ -50,6 +48,29 @@ public final class PTY {
         "__XPC_DYLD_LIBRARY_PATH",
         "LaunchInstanceID",
         "SECURITYSESSIONID",
+        // Apple dyld injection surface. If Blackbird is ever run under
+        // mitmproxy / SimulatorTrampoline / a debugging shim, any of these
+        // leaking into the child shell means the first `sudo` / `curl`
+        // inherits the injected library — a privilege-adjacent footgun.
+        "DYLD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "DYLD_PRINT_TO_FILE",
+        "DYLD_PRINT_APIS",
+        "DYLD_PRINT_STATISTICS",
+        // Xcode / Instruments injection that changes libc allocator
+        // behavior in child processes — surprising when it leaks.
+        "MallocNanoZone",
+        // Unified-logging silencing used outside Xcode proper. Distinct
+        // from OS_ACTIVITY_DT_MODE above; both need scrubbing.
+        "OS_ACTIVITY_MODE",
+        // CoreAnimation debug flags. If the GUI inherited these from a
+        // debug launch, they spam any child GUI / SwiftUI command with
+        // transaction asserts unrelated to the user's session.
+        "CA_DEBUG_TRANSACTIONS",
+        "CA_ASSERT_MAIN_THREAD_TRANSACTIONS",
     ]
 
     private let masterFD: Int32
@@ -70,11 +91,17 @@ public final class PTY {
     /// tab, shared across all reads).
     private let readBufferSize = 128 * 1024
 
+    /// Shared `os.Logger` for PTY diagnostics (read-loop errno, envOverride
+    /// rejections). `os.Logger` — not `NSLog` — so messages appear in
+    /// `log stream --predicate 'subsystem == "dev.conjfrnk.blackbird"'`
+    /// instead of being redacted to `<private>`.
+    private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                       category: "pty")
+
     #if DEBUG
-    /// `os.Logger` (not `NSLog`) so PTY write failures actually appear in
-    /// `log stream` output instead of being redacted to `<private>`.
-    private static let writeLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
-                                            category: "pty")
+    /// Backwards-compatible alias for the write-failure diagnostics added
+    /// in commit 7628afe. Kept DEBUG-only until F11 lands.
+    private static let writeLogger = logger
     #endif
 
     private func shouldKeepRunning() -> Bool {
@@ -260,7 +287,29 @@ public final class PTY {
                     _ = Darwin.close(fd)
                 }
             }
+            // Validate envOverrides before handing them to `setenv`. Swift
+            // String → C bridging truncates at the first NUL, so a key like
+            // `"PATH\0.malicious"` would silently reach `setenv` as `PATH`
+            // and an attacker-controlled value could be split on NUL. A
+            // key containing `=` is outright rejected by POSIX setenv but
+            // filtering it here keeps errno clean and the log readable.
+            // Logging rather than crashing: this runs post-fork-pre-exec
+            // where async-signal-safety matters and libc asserts aren't
+            // safe. os.Logger's underlying `os_log` is documented as
+            // async-signal-safe on Darwin.
             for (k, v) in envOverrides {
+                if k.isEmpty || k.contains("\0") || k.contains("=") {
+                    Self.logger.log(
+                        "PTY.spawn rejecting envOverride: invalid key (empty / contains NUL or '=')"
+                    )
+                    continue
+                }
+                if v.contains("\0") {
+                    Self.logger.log(
+                        "PTY.spawn rejecting envOverride for key=\(k, privacy: .public): value contains NUL"
+                    )
+                    continue
+                }
                 setenv(k, v, 1)
             }
             // TERM resolved in the parent so we don't call Foundation /
@@ -326,14 +375,30 @@ public final class PTY {
                 let n = buffer.withUnsafeMutableBufferPointer { buf -> Int in
                     read(self.masterFD, buf.baseAddress, buf.count)
                 }
-                if n <= 0 {
-                    // EOF or error — child has closed its side, or terminate()
-                    // sent SIGHUP which caused the child to hang up.
+                if n > 0 {
+                    let data = Data(buffer[0..<n])
+                    self.onBytes?(data)
+                    continue
+                }
+                if n == 0 {
+                    // Genuine EOF — slave closed, child has exited.
                     self.markStopped()
                     break
                 }
-                let data = Data(buffer[0..<n])
-                self.onBytes?(data)
+                // n < 0: inspect errno. EINTR is always safe to retry;
+                // EAGAIN/EWOULDBLOCK shouldn't normally fire on a blocking
+                // fd but retry defensively in case any subsystem toggles
+                // O_NONBLOCK. Any other errno — EIO (slave gone), EBADF
+                // (fd closed under us), ENXIO, etc. — means the session
+                // is unrecoverable; log and tear down.
+                let savedErrno = errno
+                if savedErrno == EINTR { continue }
+                if savedErrno == EAGAIN || savedErrno == EWOULDBLOCK { continue }
+                Self.logger.log(
+                    "PTY.read error errno=\(savedErrno, privacy: .public) fd=\(self.masterFD, privacy: .public) — tearing down"
+                )
+                self.markStopped()
+                break
             }
             // Drain any pending writes before close so they don't land on a
             // closed-and-reused fd belonging to some unrelated part of the
@@ -363,26 +428,58 @@ public final class PTY {
             // up while still giving the window a prompt teardown.
             var status: Int32 = 0
             let gracePeriod: useconds_t = 200_000  // 200 ms
+            // `reaped` guards against ever treating an un-reaped child as
+            // having an exit status. Also serves as a structural barrier
+            // to double-reap if this teardown block is ever re-entered
+            // (it shouldn't be — the read loop runs once per PTY — but
+            // the flag keeps the invariant explicit rather than implicit).
             var reaped = false
             let waited = waitpid(self.childPID, &status, WNOHANG)
             if waited == self.childPID {
                 reaped = true
+            } else if waited < 0 && errno == ECHILD {
+                // Already reaped elsewhere (shouldn't happen — no one else
+                // waits on childPID — but treat as "unknown" rather than
+                // looping on a non-existent child).
+                reaped = false
             } else {
                 usleep(gracePeriod)
                 let retry = waitpid(self.childPID, &status, WNOHANG)
                 if retry == self.childPID {
                     reaped = true
+                } else if retry < 0 && errno == ECHILD {
+                    reaped = false
                 } else {
                     // Still here — SIGHUP was ignored. Force the exit.
                     _ = kill(self.childPID, SIGKILL)
-                    _ = waitpid(self.childPID, &status, 0)
-                    reaped = true
+                    let forced = waitpid(self.childPID, &status, 0)
+                    reaped = (forced == self.childPID)
                 }
             }
-            // Extract the exit code if the child exited normally; else -1.
-            let exitCode: Int32 = reaped && (status & 0x7f == 0)
-                ? ((status >> 8) & 0xff)
-                : -1
+            // Decode the child's termination status per POSIX. Callers
+            // historically treated -1 as "unknown / session torn down";
+            // preserve that for timeout / un-reaped paths. Otherwise:
+            //   - WIFEXITED: raw exit code 0..255
+            //   - WIFSIGNALED: 128 + signum (standard shell convention so
+            //     e.g. a SIGSEGV (11) surfaces as 139, SIGKILL (9) as 137,
+            //     letting a future crash-reporter distinguish "shell
+            //     exited cleanly" from "shell died of signal").
+            let exitCode: Int32
+            if !reaped {
+                exitCode = -1
+            } else if (status & 0x7f) == 0 {
+                // WIFEXITED: low 7 bits clear means normal exit.
+                exitCode = (status >> 8) & 0xff
+            } else if (status & 0x7f) != 0x7f && (status & 0x7f) != 0 {
+                // WIFSIGNALED: low 7 bits are the terminating signal,
+                // and they're neither 0 (exited) nor 0x7f (stopped).
+                let signum = status & 0x7f
+                exitCode = 128 + signum
+            } else {
+                // WIFSTOPPED or otherwise unclassifiable — the child
+                // wasn't actually terminated. Treat as unknown.
+                exitCode = -1
+            }
             DispatchQueue.main.async { [weak self] in
                 self?.onExit?(exitCode)
             }
