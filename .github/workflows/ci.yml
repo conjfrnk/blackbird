@@ -22,7 +22,7 @@ jobs:
     name: Rust — fmt, clippy, test (debug + release)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -53,7 +53,7 @@ jobs:
     runs-on: macos-14
     needs: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -105,7 +105,7 @@ jobs:
     runs-on: macos-14
     needs: xcode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -138,7 +138,7 @@ jobs:
     runs-on: macos-14
     needs: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -189,7 +189,7 @@ jobs:
     runs-on: macos-14
     needs: xcode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -235,7 +235,7 @@ jobs:
     # shrinking + committing the offending input to corpus/ over reintroducing
     # continue-on-error.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust nightly (cargo-fuzz needs nightly)
         uses: dtolnay/rust-toolchain@nightly
@@ -270,7 +270,7 @@ jobs:
     runs-on: macos-14
     needs: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -294,7 +294,7 @@ jobs:
     runs-on: macos-14
     needs: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -316,7 +316,7 @@ jobs:
     name: Security posture — entitlements + hardened runtime
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Pins hardened runtime on, refuses any com.apple.security.cs.disable-*
       # entitlement, and confirms the release pipeline still targets
