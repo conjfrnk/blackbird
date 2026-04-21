@@ -1962,11 +1962,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         switch item.action {
         case #selector(copy(_:)):                      return selection != nil
         case #selector(selectAll(_:)):                 return currentSnapshot != nil
-        case #selector(paste(_:)):                     return NSPasteboard.general.string(forType: .string) != nil
+        case #selector(paste(_:)):
+            // Paste needs BOTH a session to receive the bytes AND string
+            // content on the pasteboard. Before this check, a paste on a
+            // view with no session silently dropped the clipboard content
+            // instead of clearly disabling the menu item.
+            // Audit terminal-view-2 F13.
+            return session != nil && NSPasteboard.general.string(forType: .string) != nil
         case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
         case #selector(performFindNextAction(_:)):     return !findMatches.isEmpty
         case #selector(performFindPreviousAction(_:)): return !findMatches.isEmpty
         case #selector(clearBufferAndScrollback(_:)):  return session != nil
+        case #selector(jumpToPreviousPrompt(_:)),
+             #selector(jumpToNextPrompt(_:)):
+            // Same pattern: disabling until OSC 133 marks exist is more
+            // honest than beeping on every press.
+            return (session?.promptMarks.isEmpty == false)
         case #selector(increaseFontSize(_:)),
              #selector(decreaseFontSize(_:)),
              #selector(resetFontSize(_:)): return session != nil
