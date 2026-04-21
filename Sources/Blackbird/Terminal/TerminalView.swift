@@ -697,6 +697,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// observer that drives the live accent-colour push into the renderer.
     private var accentObservers: [NSObjectProtocol] = []
 
+    public override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        // Drop the hover tooltip before the window reference changes. The
+        // panel is parented to the current window; leaving it up across a
+        // reparent lands it at stale coordinates (and, if the old window
+        // is being torn down, against a freed NSWindow). Audit
+        // terminal-view-2 F19.
+        hoverTooltipItem?.cancel()
+        hoverTooltipItem = nil
+        hoverTooltipPanel?.orderOut(nil)
+    }
+
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         // Register every time the view attaches to a new window — AppKit
