@@ -24,7 +24,9 @@ targets:
     type: application
     platform: macOS
     sources:
-      - Sources/Blackbird
+      - path: Sources/Blackbird
+        excludes:
+          - Resources/**
       - Sources/BBCore
       - Sources/Renderer
       - path: Sources/Blackbird/Resources/Fonts
@@ -34,6 +36,12 @@ targets:
       - path: Sources/Blackbird/Resources/Terminfo/kitty.terminfo
         buildPhase: resources
       - path: Sources/Blackbird/Resources/AppIcon.icns
+        buildPhase: resources
+      - path: Sources/Blackbird/Resources/shell/osc133.bash
+        buildPhase: resources
+      - path: Sources/Blackbird/Resources/shell/osc133.fish
+        buildPhase: resources
+      - path: Sources/Blackbird/Resources/shell/osc133.zsh
         buildPhase: resources
     preBuildScripts:
       - name: Build Rust core
@@ -101,10 +109,8 @@ targets:
         LIBRARY_SEARCH_PATHS:
           - $(SRCROOT)/core/target/universal/release
     dependencies:
-      - framework: AppKit.framework
-        embed: false
-      - framework: SwiftUI.framework
-        embed: false
+      - sdk: AppKit.framework
+      - sdk: SwiftUI.framework
       - package: Sparkle
 
   BlackbirdTests:

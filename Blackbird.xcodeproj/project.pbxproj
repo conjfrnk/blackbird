@@ -11,8 +11,6 @@
 		02007B68AC1EAE3435AF574C /* LatencyProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C1918604B5A7FA5FF34818C /* LatencyProbeTests.swift */; };
 		066BC101049897C27F5BB3E5 /* osc133.zsh in Resources */ = {isa = PBXBuildFile; fileRef = 1178A5B3ED186EDB37EAB9E2 /* osc133.zsh */; };
 		10ED4F0567A44DC417CF66AD /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = D1D6B11109581801C6072917 /* AppIcon.icns */; };
-		188E5D391CA19FE7A0B4400E /* HackNerdFontMono-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 96ECD242F27E94BA194BECD6 /* HackNerdFontMono-Italic.ttf */; };
-		19A90E50E12A0234010B511A /* HackNerdFontMono-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 157ABF0CFF0DDECE748E0149 /* HackNerdFontMono-Bold.ttf */; };
 		1DFA371FD2502A8FA6AB320B /* HyperlinkResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */; };
 		1EFCAE939B4A1B5F562F54E0 /* kitty.terminfo in Resources */ = {isa = PBXBuildFile; fileRef = 673FE2E71DCD08F9286D5C60 /* kitty.terminfo */; };
 		2128B6F807CB069799F1A479 /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DD21160AFF51FCA0B6374 /* Preferences.swift */; };
@@ -31,7 +29,6 @@
 		46A5F55FC8F712CEB85EF215 /* AccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6160AD20DD99CBE80ABC5C40 /* AccessibilityTests.swift */; };
 		47C98A15F7530D2D7BC49CA3 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */; };
 		4D998CBEB54F5EBA512EE58F /* TerminalView+IME.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */; };
-		4D9B5BAF29650F44CDBAD0A8 /* HackNerdFontMono-BoldItalic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D92FE63DFF4EA7FE8A338897 /* HackNerdFontMono-BoldItalic.ttf */; };
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
 		5550A8FFFDF83F5AEE2CCCC4 /* UpdaterUserDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E45B1606A823D8BDBB90FCC /* UpdaterUserDriver.swift */; };
 		66BDCBF186346C6913023FC5 /* DamageTrackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */; };
@@ -71,7 +68,6 @@
 		C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E03399349EE1327FBF8F2F /* Selection.swift */; };
 		C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */; };
 		C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3C166E3043F25B8791103E /* App.swift */; };
-		CB093791F908A038E9B9C70F /* HackNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 9D26D02D80D934AC18571AB9 /* HackNerdFontMono-Regular.ttf */; };
 		CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4612F747000A5316DE0CD55F /* TerminalView.swift */; };
 		CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */; };
 		D99C39D366CE2D06BF4082EB /* LatencyHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B99D2970157272D6841E2F5 /* LatencyHarnessTests.swift */; };
@@ -102,7 +98,7 @@
 		002A862CFC149DF32E992C50 /* TitlebarTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TitlebarTabBar.swift; sourceTree = "<group>"; };
 		00E03399349EE1327FBF8F2F /* Selection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Selection.swift; sourceTree = "<group>"; };
 		00E5603BF177A2BC06BB5822 /* HostileInputIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostileInputIntegrationTests.swift; sourceTree = "<group>"; };
-		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = SwiftUI.framework; sourceTree = "<group>"; };
+		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		0AE9625B30620C23E398A2EB /* BBTerm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTerm.swift; sourceTree = "<group>"; };
 		0B671ECA2BD417DF4532B282 /* BufferPointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferPointTests.swift; sourceTree = "<group>"; };
 		0CFB9D9863A2F1D2ACD61D6E /* BlackbirdTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BlackbirdTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -115,7 +111,6 @@
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		14E5F5AA20D171CAD16112AD /* MetalDeviceSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDeviceSelection.swift; sourceTree = "<group>"; };
 		15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasTests.swift; sourceTree = "<group>"; };
-		157ABF0CFF0DDECE748E0149 /* HackNerdFontMono-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-Bold.ttf"; sourceTree = "<group>"; };
 		22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdResolver.swift; sourceTree = "<group>"; };
 		24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRendererTests.swift; sourceTree = "<group>"; };
 		26B359BBCEB85D55F2981EDD /* LatencyProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyProbe.swift; sourceTree = "<group>"; };
@@ -155,11 +150,8 @@
 		89B63611281711C31CDD3303 /* CwdTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdTests.swift; sourceTree = "<group>"; };
 		8CFAD8B88865C349CC141C65 /* IMETests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMETests.swift; sourceTree = "<group>"; };
 		9400CC161B796E22A62232EE /* HyperlinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HyperlinkTests.swift; sourceTree = "<group>"; };
-		96ECD242F27E94BA194BECD6 /* HackNerdFontMono-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-Italic.ttf"; sourceTree = "<group>"; };
 		9B99D2970157272D6841E2F5 /* LatencyHarnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyHarnessTests.swift; sourceTree = "<group>"; };
-		9D26D02D80D934AC18571AB9 /* HackNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
 		9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
-		A11DA5208B97A9B34DE21001 /* .gitattributes */ = {isa = PBXFileReference; path = .gitattributes; sourceTree = "<group>"; };
 		A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHostTermination.swift; sourceTree = "<group>"; };
 		A8C36192F62C6E40A498D70D /* InlineRenameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRenameTests.swift; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
@@ -172,10 +164,9 @@
 		D1D6B11109581801C6072917 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 		D5AF4F844A7BAA90FB92C475 /* FindBarReplaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarReplaceTests.swift; sourceTree = "<group>"; };
 		D766892D203AEA71CC70B95C /* TranslucencyCurveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslucencyCurveTests.swift; sourceTree = "<group>"; };
-		D92FE63DFF4EA7FE8A338897 /* HackNerdFontMono-BoldItalic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "HackNerdFontMono-BoldItalic.ttf"; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		DC63CD202483C22F3E8DAE71 /* PromptJumpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptJumpTests.swift; sourceTree = "<group>"; };
-		DF8E87FBF674AD466760D74A /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = AppKit.framework; sourceTree = "<group>"; };
+		DF8E87FBF674AD466760D74A /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
 		E4B31AE0836F0D3000C219D2 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Fonts; path = Sources/Blackbird/Resources/Fonts; sourceTree = SOURCE_ROOT; };
 		E51A54ACD363A09E47E79F62 /* MainWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowController.swift; sourceTree = "<group>"; };
 		E6E41D23703A7FE0195559D6 /* KeyEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoder.swift; sourceTree = "<group>"; };
@@ -359,23 +350,10 @@
 			children = (
 				D1D6B11109581801C6072917 /* AppIcon.icns */,
 				E4B31AE0836F0D3000C219D2 /* Fonts */,
-				AA06D8AE7A763BC89D67BF2C /* Fonts */,
 				7DD7C670AF62A16C3BE22AEE /* shell */,
 				E78DD4939FF211A70389EBD1 /* Terminfo */,
 			);
 			path = Resources;
-			sourceTree = "<group>";
-		};
-		AA06D8AE7A763BC89D67BF2C /* Fonts */ = {
-			isa = PBXGroup;
-			children = (
-				A11DA5208B97A9B34DE21001 /* .gitattributes */,
-				157ABF0CFF0DDECE748E0149 /* HackNerdFontMono-Bold.ttf */,
-				D92FE63DFF4EA7FE8A338897 /* HackNerdFontMono-BoldItalic.ttf */,
-				96ECD242F27E94BA194BECD6 /* HackNerdFontMono-Italic.ttf */,
-				9D26D02D80D934AC18571AB9 /* HackNerdFontMono-Regular.ttf */,
-			);
-			path = Fonts;
 			sourceTree = "<group>";
 		};
 		E78DD4939FF211A70389EBD1 /* Terminfo */ = {
@@ -498,10 +476,6 @@
 			files = (
 				10ED4F0567A44DC417CF66AD /* AppIcon.icns in Resources */,
 				B5C08008A69925EA6A53F6C5 /* Fonts in Resources */,
-				19A90E50E12A0234010B511A /* HackNerdFontMono-Bold.ttf in Resources */,
-				4D9B5BAF29650F44CDBAD0A8 /* HackNerdFontMono-BoldItalic.ttf in Resources */,
-				188E5D391CA19FE7A0B4400E /* HackNerdFontMono-Italic.ttf in Resources */,
-				CB093791F908A038E9B9C70F /* HackNerdFontMono-Regular.ttf in Resources */,
 				1EFCAE939B4A1B5F562F54E0 /* kitty.terminfo in Resources */,
 				6EF45785D6A1AAA933C589E1 /* osc133.bash in Resources */,
 				F0604FDE5FE129006623933C /* osc133.fish in Resources */,
@@ -748,10 +722,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"\".\"",
-				);
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/core/include",
 				);
@@ -842,10 +812,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				COMBINE_HIDPI_IMAGES = YES;
-				FRAMEWORK_SEARCH_PATHS = (
-					"$(inherited)",
-					"\".\"",
-				);
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/core/include",
 				);
