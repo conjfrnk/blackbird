@@ -145,16 +145,31 @@ public func wordRange(
     let cols = snapshot.cols
     func ch(_ c: Int) -> Character? { snapshot.character(at: c, row: row) }
 
-    // Point is on a blank / break / empty cell — there is no word to
-    // expand. Return nil so callers (e.g. .word selection expansion) keep
-    // their existing range instead of collapsing to a zero-width point.
-    guard let here = ch(point.col), !wordBreakers.contains(here) else {
+    // Wide-char (CJK, wide emoji) cells occupy two columns; the trailing
+    // column has ch=0 (spacer) even though the logical word continues
+    // through it. If the click landed on the trailing half, back up one
+    // to the leading cell so the expansion finds the real character —
+    // otherwise double-click on the right half of "中" returned nil and
+    // the selection didn't expand. Audit findbar-selection F36.
+    let anchorCol: Int
+    if ch(point.col) != nil {
+        anchorCol = point.col
+    } else if point.col > 0, ch(point.col - 1) != nil {
+        anchorCol = point.col - 1
+    } else {
         return nil
     }
 
-    var l = point.col
+    // Point is on a blank / break / empty cell — there is no word to
+    // expand. Return nil so callers (e.g. .word selection expansion) keep
+    // their existing range instead of collapsing to a zero-width point.
+    guard let here = ch(anchorCol), !wordBreakers.contains(here) else {
+        return nil
+    }
+
+    var l = anchorCol
     while l > 0, let c = ch(l - 1), !wordBreakers.contains(c) { l -= 1 }
-    var r = point.col
+    var r = anchorCol
     while r + 1 < cols, let c = ch(r + 1), !wordBreakers.contains(c) { r += 1 }
 
     return (BufferPoint(line: point.line, col: l), BufferPoint(line: point.line, col: r))
