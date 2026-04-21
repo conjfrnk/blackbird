@@ -8,6 +8,22 @@ import Combine
 public final class Preferences: ObservableObject {
     public static let shared = Preferences()
 
+    // MARK: - Schema version
+    //
+    // `prefsSchemaVersion` is the integer on-disk version of the Preferences
+    // layout. Bump it whenever a pref key is renamed, a pref's type changes,
+    // or an enum rawValue migrates (e.g. `BellStyle.visual` → `.audioVisual`).
+    // `migrateIfNeeded()` walks the stored version forward to `currentSchemaVersion`,
+    // one version at a time, then writes the new version back.
+    //
+    // Today's layout is v1 and there's nothing to migrate — the call is a
+    // no-op placeholder that establishes the hook. Future migration work
+    // lands inside the `switch` in `migrateIfNeeded()` so that an upgrading
+    // user's prefs survive rename/type changes instead of silently resetting
+    // to defaults via the enum-rawValue repair pass below. (settings F2)
+    public static let currentSchemaVersion: Int = 1
+    private static let schemaVersionKey = "prefsSchemaVersion"
+
     public enum ThemeMode: String, CaseIterable, Identifiable {
         case auto, light, dark
         public var id: String { rawValue }
@@ -129,6 +145,16 @@ public final class Preferences: ObservableObject {
     }
 
     private init() {
+        // Register the schema version in NSRegistrationDomain so a fresh
+        // install (no key on disk) reads back as v1 — which signals "current
+        // layout" to `migrateIfNeeded()` and skips the migration walk. A
+        // user upgrading from a future-reset build where the key was
+        // removed will also see v1 and be treated as current. (settings F2)
+        UserDefaults.standard.register(defaults: [
+            Preferences.schemaVersionKey: Preferences.currentSchemaVersion
+        ])
+        migrateIfNeeded()
+
         // Migrate legacy PostScript names written by earlier builds
         // ("SFMono-Regular", "HackNerdFontMono-Regular") to the family name
         // the Settings picker uses. Without this, the picker shows nothing
@@ -162,5 +188,55 @@ public final class Preferences: ObservableObject {
         // the didSet chain and normalises once at launch.
         fontSize = fontSize
         translucency = translucency
+    }
+
+    /// Walk the on-disk schema version forward to `currentSchemaVersion`,
+    /// one step at a time. Today's layout is v1 and this is a no-op — the
+    /// method exists so future pref renames / type changes have a single
+    /// place to land migration logic. (settings F2)
+    ///
+    /// Pattern for future migrations:
+    /// ```
+    /// switch stored {
+    /// case 1: /* migrate 1 → 2: rename key, rewrite enum raws, etc. */
+    ///         stored = 2
+    ///         fallthrough
+    /// case 2: /* migrate 2 → 3 … */
+    ///         stored = 3
+    ///         fallthrough
+    /// default: break
+    /// }
+    /// UserDefaults.standard.set(stored, forKey: Preferences.schemaVersionKey)
+    /// ```
+    private func migrateIfNeeded() {
+        let stored = UserDefaults.standard.integer(forKey: Preferences.schemaVersionKey)
+        // `integer(forKey:)` returns 0 if the key is absent AND no registered
+        // default is in NSRegistrationDomain. We registered v1 above, so a
+        // fresh install reads v1 and skips the walk. A 0 here would mean
+        // registration didn't take (shouldn't happen) — treat as v1 too so
+        // we don't log-spam on every launch.
+        let effective = stored == 0 ? Preferences.currentSchemaVersion : stored
+        guard effective < Preferences.currentSchemaVersion else {
+            // Already current (or newer, e.g. downgrade). Stamp the current
+            // version so a downgrade still leaves the key present for future
+            // upgrades to observe.
+            if stored != Preferences.currentSchemaVersion {
+                UserDefaults.standard.set(
+                    Preferences.currentSchemaVersion,
+                    forKey: Preferences.schemaVersionKey
+                )
+            }
+            return
+        }
+        // No migrations yet. Future work lands here, version-by-version.
+        // Example skeleton:
+        //   var v = effective
+        //   if v == 1 { /* migrate v1 → v2 */; v = 2 }
+        //   if v == 2 { /* migrate v2 → v3 */; v = 3 }
+        //   UserDefaults.standard.set(v, forKey: Preferences.schemaVersionKey)
+        UserDefaults.standard.set(
+            Preferences.currentSchemaVersion,
+            forKey: Preferences.schemaVersionKey
+        )
     }
 }

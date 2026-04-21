@@ -4,13 +4,46 @@ import AppKit
 /// Single object that observes `Preferences` + `NSApp.effectiveAppearance`
 /// (for Auto mode) and pushes the resolved palette into every registered
 /// session + view.
+///
+/// Threading: annotated `@MainActor`. All palette mutations, registration
+/// bookkeeping, and Preferences reads must happen on the main runloop. Every
+/// fire-path (`objectWillChange` sink, `effectiveAppearance` KVO, first-show
+/// `refresh`, `register`) already hops via `DispatchQueue.main.async` or is
+/// called directly from AppKit main-thread callbacks, so this annotation
+/// is descriptive — it just nails the invariant down so a future background-
+/// queue caller (or Swift Concurrency migration) gets a compile-time warning
+/// instead of a silently-corrupt `registrations` array. (settings F4)
+@MainActor
 public final class ThemeManager {
     public static let shared = ThemeManager()
 
     private var observers = [AnyCancellable]()
     private var appearanceObs: NSKeyValueObservation?
     private weak var currentApp: NSApplication?
-    private var registrations: [(() -> TerminalSession?, () -> TerminalView?)] = []
+
+    /// One registration per live window controller. `owner` is held weakly
+    /// and keyed by `ObjectIdentifier(owner)` so a window teardown auto-
+    /// evicts the entry — no explicit unregister() needed from the caller.
+    /// (main-window F1)
+    private struct Registration {
+        weak var owner: AnyObject?
+        let sessionProvider: () -> TerminalSession?
+        let viewProvider: () -> TerminalView?
+    }
+    private var registrations: [ObjectIdentifier: Registration] = [:]
+
+    /// Cache of the inputs that actually determine the resolved palette.
+    /// `objectWillChange` fires on every `@AppStorage` write (font-size
+    /// slider, cursor-blink toggle, OSC 52 toggle, …), but 90% of those
+    /// don't touch the palette. Compare the tuple on every would-be apply
+    /// and skip the 19× `bbterm.setColor` + renderer push when nothing
+    /// palette-relevant changed. (settings F1)
+    private struct PaletteInputs: Equatable {
+        let themeRaw: String
+        let themeModeRaw: String
+        let appearanceIsDark: Bool
+    }
+    private var lastPaletteInputs: PaletteInputs?
 
     private init() {
         observers.append(
@@ -19,7 +52,7 @@ public final class ThemeManager {
                     // objectWillChange fires before the update; re-apply on
                     // the next runloop tick once the @AppStorage value has
                     // actually settled.
-                    DispatchQueue.main.async { self?.applyToAll() }
+                    DispatchQueue.main.async { self?.applyToAllIfPaletteChanged() }
                 }
         )
     }
@@ -27,13 +60,24 @@ public final class ThemeManager {
     public func attach(toApp app: NSApplication) {
         currentApp = app
         appearanceObs = app.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.applyToAll() }
+            DispatchQueue.main.async { self?.applyToAllIfPaletteChanged() }
         }
     }
 
-    public func register(sessionProvider: @escaping () -> TerminalSession?,
+    /// Register a (session, view) pair keyed by a long-lived owner object
+    /// (typically the `MainWindowController`). The owner is captured weakly,
+    /// so when the controller deinits the entry auto-evicts on the next
+    /// apply pass — callers don't need to pair this with an unregister.
+    /// Re-registering with the same owner replaces the prior entry.
+    public func register(owner: AnyObject,
+                         sessionProvider: @escaping () -> TerminalSession?,
                          viewProvider:    @escaping () -> TerminalView?) {
-        registrations.append((sessionProvider, viewProvider))
+        let key = ObjectIdentifier(owner)
+        registrations[key] = Registration(
+            owner: owner,
+            sessionProvider: sessionProvider,
+            viewProvider: viewProvider
+        )
         apply(session: sessionProvider(), view: viewProvider())
     }
 
@@ -55,16 +99,55 @@ public final class ThemeManager {
     /// so quantities that need a live windowNumber — like the CGS blur
     /// radius — actually take effect.
     public func refresh() {
+        // Unconditional apply — first-show blur wiring needs this even when
+        // the palette itself hasn't changed since the last apply (the window
+        // number wasn't live last time). Bypass the equality gate.
         applyToAll()
     }
 
+    /// Called from the Preferences-change sink and the effectiveAppearance
+    /// KVO. Short-circuits when no palette-relevant input changed — prevents
+    /// font-size slider drags from re-applying the palette at per-frame
+    /// rates. (settings F1)
+    private func applyToAllIfPaletteChanged() {
+        let inputs = currentPaletteInputs()
+        if let last = lastPaletteInputs, last == inputs {
+            // Still reap dead owners even on the fast path so the dictionary
+            // doesn't grow when palette-irrelevant prefs churn.
+            reapDeadRegistrations()
+            return
+        }
+        lastPaletteInputs = inputs
+        applyToAll()
+    }
+
+    private func currentPaletteInputs() -> PaletteInputs {
+        let p = Preferences.shared
+        let app = currentApp ?? NSApp
+        let isDark = app?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return PaletteInputs(
+            themeRaw: p.themeRaw,
+            themeModeRaw: p.themeModeRaw,
+            appearanceIsDark: isDark
+        )
+    }
+
+    private func reapDeadRegistrations() {
+        for (key, reg) in registrations where reg.owner == nil {
+            registrations.removeValue(forKey: key)
+        }
+    }
+
     private func applyToAll() {
-        // Reap registrations whose window controller has been deallocated
-        // (both providers return nil), then apply to the survivors. Without
-        // the prune the array grows by one closure per opened-then-closed
-        // window for the life of the process.
-        registrations.removeAll { s, v in s() == nil && v() == nil }
-        for (s, v) in registrations { apply(session: s(), view: v()) }
+        // Reap registrations whose owner (MainWindowController) has been
+        // deallocated. Weak-owner keying means dead windows self-evict
+        // here — no explicit unregister call is required from the caller
+        // side. (main-window F1)
+        reapDeadRegistrations()
+        lastPaletteInputs = currentPaletteInputs()
+        for reg in registrations.values {
+            apply(session: reg.sessionProvider(), view: reg.viewProvider())
+        }
     }
 
     private func apply(session: TerminalSession?, view: TerminalView?) {

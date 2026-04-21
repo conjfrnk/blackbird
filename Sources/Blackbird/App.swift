@@ -89,6 +89,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // User consented — skip the per-tab "process is still running" alert.
         MainWindowController.bypassCloseConfirm = true
+        // Reset on the next runloop tick so the flag doesn't stick true
+        // forever if termination is later cancelled by a downstream save /
+        // document prompt. AppKit's batch-close sweep after `.terminateNow`
+        // runs synchronously on this same tick, so the bypass is still in
+        // force for every `windowShouldClose` callback triggered by the
+        // sweep; the async hop then clears the flag once the current
+        // runloop iteration drains. (main-window F5)
+        DispatchQueue.main.async {
+            MainWindowController.bypassCloseConfirm = false
+        }
         return .terminateNow
     }
 

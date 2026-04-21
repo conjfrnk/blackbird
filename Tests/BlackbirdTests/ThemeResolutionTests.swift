@@ -86,6 +86,10 @@ final class ThemeResolutionTests: XCTestCase {
 
     // MARK: - ThemeManager.resolvedPalette
 
+    // MainActor-isolated because `ThemeManager` is now `@MainActor`; the
+    // resolvedPalette getter touches actor-isolated state. XCTest already
+    // runs these on the main thread so the annotation is descriptive.
+    @MainActor
     func test_resolvedPalette_gruvboxDark_matchesThemePalette() {
         Preferences.shared.themeRaw = Theme.gruvbox.rawValue
         Preferences.shared.themeModeRaw = "dark"
@@ -93,6 +97,7 @@ final class ThemeResolutionTests: XCTestCase {
         XCTAssertEqual(resolved, Theme.gruvbox.palette(dark: true))
     }
 
+    @MainActor
     func test_resolvedPalette_solarizedLight_matchesThemePalette() {
         Preferences.shared.themeRaw = Theme.solarized.rawValue
         Preferences.shared.themeModeRaw = "light"
@@ -100,6 +105,7 @@ final class ThemeResolutionTests: XCTestCase {
         XCTAssertEqual(resolved, Theme.solarized.palette(dark: false))
     }
 
+    @MainActor
     func test_resolvedPalette_invalidThemeRaw_fallsBackGracefully() {
         Preferences.shared.themeRaw = "NotAThing"
         Preferences.shared.themeModeRaw = "dark"

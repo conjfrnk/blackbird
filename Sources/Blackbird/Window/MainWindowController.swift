@@ -188,7 +188,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             )
             view.session = s
             self.session = s
+            // Registration is keyed by `owner: self` inside ThemeManager and
+            // the owner is held weakly — when this controller deinits, the
+            // entry auto-evicts on the next apply pass. No explicit
+            // unregister needed on teardown. (main-window F1)
             ThemeManager.shared.register(
+                owner: self,
                 sessionProvider: { [weak self] in self?.session },
                 viewProvider:    { [weak self] in self?.terminalView }
             )
