@@ -1927,22 +1927,34 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             selection = nil
             return
         }
+        let opts = findBar?.options ?? FindBar.Options()
+        // Compile the regex once. An invalid regex silently degrades to
+        // zero matches (UI placeholder signals regex mode is on; bad
+        // patterns just don't match anything until the user fixes them).
+        let stringOptions: String.CompareOptions = {
+            var s: String.CompareOptions = []
+            if !opts.caseSensitive { s.insert(.caseInsensitive) }
+            return s
+        }()
+        let regex: NSRegularExpression?
+        if opts.regex {
+            var regexOpts: NSRegularExpression.Options = []
+            if !opts.caseSensitive { regexOpts.insert(.caseInsensitive) }
+            regex = try? NSRegularExpression(pattern: query, options: regexOpts)
+            if regex == nil {
+                // Invalid pattern — show 0 matches, no crash. User sees
+                // the counter stay at 0/0 while they fix the expression.
+                findBar?.setMatchCount(0, of: 0)
+                selection = nil
+                return
+            }
+        } else {
+            regex = nil
+        }
         // Search the entire retained buffer: from -historySize through rows-1.
-        // textRange clamps out-of-range lines itself.
-        // historySize is a `u32` capped at 50k via bb_term_new, but
-        // `Int32(huge)` traps if some corrupted metadata ever exceeds
-        // Int32.max. `clamping:` saturates instead — a huge positive
-        // value becomes Int32.max, and `-Int32.max + 1 = Int32.min + 1`
-        // still compiles. Defensive only.
         let topLine: Int32 = -Int32(clamping: snap.historySize)
         let bottomLine = Int32(clamping: snap.rows - 1)
         if topLine > bottomLine { return }
-        // Cap total matches. A remote-controlled scrollback full of the
-        // query string (user searches "e", scrollback is 10 000 × 500
-        // cols of 'e') would build ~2 M match tuples in main memory —
-        // main-thread freeze + OOM. 10 000 matches covers every
-        // realistic search; past that the UI's "N / M" counter stops
-        // being useful anyway.
         let findMatchLimit = 10_000
         outer: for ln in topLine...bottomLine {
             let hay = session.textRange(
@@ -1951,13 +1963,33 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 rectangular: false
             )
             guard !hay.isEmpty else { continue }
-            var cursor = hay.startIndex
-            while let r = hay.range(of: query, options: [.caseInsensitive], range: cursor..<hay.endIndex) {
-                let startCol = hay.distance(from: hay.startIndex, to: r.lowerBound)
-                let endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
-                findMatches.append((line: ln, startCol: startCol, endCol: endCol))
-                cursor = r.upperBound
+            if let re = regex {
+                let ns = hay as NSString
+                re.enumerateMatches(
+                    in: hay,
+                    options: [],
+                    range: NSRange(location: 0, length: ns.length)
+                ) { result, _, stop in
+                    guard let r = result?.range, r.length > 0 else { return }
+                    // Translate UTF-16 range to grapheme-cell positions
+                    // the same way URLDetector does; simple 1:1 holds for
+                    // ASCII (the dominant case) but keeps correct counts
+                    // for non-BMP scalars appearing in the haystack.
+                    let startCol = r.location
+                    let endCol = r.location + r.length - 1
+                    findMatches.append((line: ln, startCol: startCol, endCol: endCol))
+                    if findMatches.count >= findMatchLimit { stop.pointee = true }
+                }
                 if findMatches.count >= findMatchLimit { break outer }
+            } else {
+                var cursor = hay.startIndex
+                while let r = hay.range(of: query, options: stringOptions, range: cursor..<hay.endIndex) {
+                    let startCol = hay.distance(from: hay.startIndex, to: r.lowerBound)
+                    let endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
+                    findMatches.append((line: ln, startCol: startCol, endCol: endCol))
+                    cursor = r.upperBound
+                    if findMatches.count >= findMatchLimit { break outer }
+                }
             }
         }
         findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
@@ -3070,6 +3102,12 @@ extension TerminalView: FindBarDelegate {
 
     public func findBar(_ bar: FindBar, didAdvance direction: FindBar.Direction) {
         advanceFind(direction: direction)
+    }
+
+    public func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options) {
+        // Re-run the current query with the new options. Safe no-op
+        // when the query is empty (performSearch short-circuits).
+        performSearch(query: findQuery)
     }
 
     public func findBarDidClose(_ bar: FindBar) {

@@ -13,12 +13,19 @@ public protocol FindBarDelegate: AnyObject {
     /// reporting, bracketed paste) because `sendReplacement` synthesises DEL
     /// bytes + UTF-8 that a TUI would interpret as key input.
     func findBarShouldAllowReplace(_ bar: FindBar) -> Bool
+    /// Called when the user toggles the case-sensitivity or regex-mode
+    /// state. Implementations should re-run the current search against
+    /// the new options. Default: no-op (options are ignored).
+    func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options)
 }
 
 extension FindBarDelegate {
     /// Default: allow replace. Conformers that own terminal state should
     /// override this and inspect `BBTermMode` before returning `true`.
     public func findBarShouldAllowReplace(_ bar: FindBar) -> Bool { true }
+    /// Default: no-op. TerminalView's conformer overrides to re-run
+    /// performSearch with the new flags.
+    public func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options) {}
 }
 
 public final class FindBar: NSView, NSTextFieldDelegate {
@@ -26,6 +33,46 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     /// Whether the replace operation targets just the current match or all matches.
     public enum ReplaceKind { case current, all }
+
+    /// Search options exposed through the find bar. Case-insensitive
+    /// substring is still the default (matches Terminal.app / Safari
+    /// / VS Code "off" state) — users opt into case-sensitive and/or
+    /// regex mode via ⌘⌥C and ⌘⌥R respectively. Audit findbar-selection F1.
+    public struct Options: Equatable {
+        public var caseSensitive: Bool
+        public var regex: Bool
+        public init(caseSensitive: Bool = false, regex: Bool = false) {
+            self.caseSensitive = caseSensitive
+            self.regex = regex
+        }
+    }
+
+    /// Current option state. Read by the delegate when re-running
+    /// searches. Mutating either field fires the options-changed
+    /// delegate hook so the search re-runs immediately.
+    public private(set) var options = Options() {
+        didSet {
+            guard options != oldValue else { return }
+            delegate?.findBar(self, didChangeOptions: options)
+        }
+    }
+
+    @objc public func toggleCaseSensitive(_ sender: Any?) {
+        options.caseSensitive.toggle()
+        field.placeholderString = placeholderString()
+    }
+
+    @objc public func toggleRegexMode(_ sender: Any?) {
+        options.regex.toggle()
+        field.placeholderString = placeholderString()
+    }
+
+    private func placeholderString() -> String {
+        var flags: [String] = []
+        if options.regex { flags.append("regex") }
+        if options.caseSensitive { flags.append("Aa") }
+        return flags.isEmpty ? "Find" : "Find  [\(flags.joined(separator: " · "))]"
+    }
 
     public weak var delegate: FindBarDelegate?
 
