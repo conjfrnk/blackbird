@@ -153,6 +153,115 @@ final class IMETests: XCTestCase {
                       "resignKey teardown must not commit into PTY")
     }
 
+    // MARK: - Audit swift-tests-input F12 additions
+
+    /// Canonical dead-key case called out in the audit: the user types
+    /// Option+E (which produces the combining acute-accent preedit "e"),
+    /// then commits with "é". The marked state must clear on commit and
+    /// only the final composed grapheme reaches the PTY — not "e" + "é"
+    /// duplicated, and not the intermediate "e" at all.
+    func testInsertTextAfterMarkedTextClearsMarkedState() throws {
+        let (view, pty) = try makeViewAndFakePty(optionIsMeta: false)
+        view.setMarkedText("e",
+                           selectedRange: NSRange(location: 1, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText(),
+                      "preedit must install after setMarkedText")
+        XCTAssertTrue(pty.sent.isEmpty,
+                      "preedit 'e' must not reach PTY before commit")
+        view.insertText("é",
+                        replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertFalse(view.hasMarkedText(),
+                       "commit must clear marked state")
+        XCTAssertEqual(
+            pty.sent, Data("é".utf8),
+            "only the final composed grapheme reaches the PTY — not 'e' + 'é'"
+        )
+    }
+
+    /// Multi-character composition (representative of Pinyin / Romaji IMEs):
+    /// the user types several keys that form a composing buffer, then
+    /// commits a different grapheme. No byte of the composing buffer may
+    /// reach the PTY; only the final commit does.
+    func testLongCompositionNoByteLeaksBeforeCommit() throws {
+        let (view, pty) = try makeViewAndFakePty()
+        // Step through a multi-key composition — each setMarkedText call
+        // extends the preedit buffer. All of these must stay off the PTY.
+        view.setMarkedText("n",
+                           selectedRange: NSRange(location: 1, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(pty.sent.isEmpty, "'n' preedit must not reach PTY")
+        view.setMarkedText("ni",
+                           selectedRange: NSRange(location: 2, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(pty.sent.isEmpty, "'ni' preedit must not reach PTY")
+        view.setMarkedText("nih",
+                           selectedRange: NSRange(location: 3, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(pty.sent.isEmpty, "'nih' preedit must not reach PTY")
+        // Commit to "你" (CJK character, 3 bytes UTF-8: 0xE4 0xBD 0xA0).
+        view.insertText("你",
+                        replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertFalse(view.hasMarkedText())
+        XCTAssertEqual(
+            pty.sent, Data("你".utf8),
+            "only the committed grapheme reaches the PTY, not any preedit byte"
+        )
+    }
+
+    /// Replacing one marked buffer with another must leave `hasMarkedText`
+    /// true and still not leak any composing bytes. Corresponds to the
+    /// common IME pattern where the candidate list narrows the composition
+    /// and the preedit text changes in place.
+    func testMarkedTextReplacementKeepsCompositionNoLeak() throws {
+        let (view, pty) = try makeViewAndFakePty()
+        view.setMarkedText("か",
+                           selectedRange: NSRange(location: 1, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText())
+        // Replace with a different marked buffer — candidate narrowing.
+        view.setMarkedText("かん",
+                           selectedRange: NSRange(location: 2, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText(),
+                      "replacement must leave composition active")
+        XCTAssertTrue(pty.sent.isEmpty,
+                      "no preedit byte of either 'か' or 'かん' may reach PTY")
+        // Empty marked-text string is the conventional "clear composition"
+        // signal (see `setMarkedText` at TerminalView+IME.swift line 144).
+        view.setMarkedText("",
+                           selectedRange: NSRange(location: 0, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertFalse(view.hasMarkedText(),
+                       "empty marked-text must clear composition")
+        XCTAssertTrue(pty.sent.isEmpty,
+                      "clearing composition via empty marked-text must not commit")
+    }
+
+    /// `setMarkedText` accepting an `NSAttributedString` (the common case
+    /// for IMEs that colour segmented clauses) must behave identically to
+    /// the plain-string form. The preedit string is not sent, and a commit
+    /// through `insertText(NSAttributedString, ...)` commits the plain
+    /// string form.
+    func testAttributedMarkedTextAndAttributedCommit() throws {
+        let (view, pty) = try makeViewAndFakePty()
+        let marked = NSAttributedString(
+            string: "abc",
+            attributes: [.markedClauseSegment: 0]
+        )
+        view.setMarkedText(marked,
+                           selectedRange: NSRange(location: 3, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText())
+        XCTAssertTrue(pty.sent.isEmpty)
+
+        let commit = NSAttributedString(string: "ABC")
+        view.insertText(commit,
+                        replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertFalse(view.hasMarkedText())
+        XCTAssertEqual(pty.sent, Data("ABC".utf8))
+    }
+
     private func makeViewAndFakePty(optionIsMeta: Bool = true) throws
         -> (TerminalView, RecordingPTY)
     {

@@ -1,0 +1,22 @@
+# Auto-update third-party GitHub Actions so moving tags (@v4, @stable, etc.)
+# are surfaced as PRs rather than pulling in whatever landed upstream since
+# the last manual update. The audit (docs-meta F5) flagged actions/checkout@v4
+# + dtolnay/rust-toolchain@stable + Swatinem/rust-cache@v2 as supply-chain
+# exposure; this is the lighter-weight alternative to pinning every action
+# to a specific SHA.
+#
+# Cargo dependencies are already pinned via Cargo.lock + the exact `=0.26.0`
+# pin on alacritty_terminal in core/Cargo.toml. Swift package deps are
+# resolved via Package.resolved. So only GitHub Actions need this channel.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions

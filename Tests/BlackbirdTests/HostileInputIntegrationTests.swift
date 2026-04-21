@@ -193,4 +193,156 @@ final class HostileInputIntegrationTests: XCTestCase {
         XCTAssertTrue(decoded.contains("tail-bytes"),
                       "content after a bidi override must still arrive: got \(decoded)")
     }
+
+    // MARK: - Property-style fuzz (audit F8)
+
+    /// Feed 1000 random byte sequences (each 1..128 bytes) into a single
+    /// `BBTerm.input` and assert zero `Fatal` events surface. The Rust side
+    /// uses `catch_unwind` so a panic becomes a `Fatal` event rather than a
+    /// process-level abort; observing zero is the correctness signal.
+    ///
+    /// Memory ceiling: 128 bytes × 1000 iterations = 128 KB of test input
+    /// total, all freed after each input call returns (BBTerm doesn't retain
+    /// the raw bytes — it parses them into grid state with a 10k-line
+    /// scrollback cap already enforced by the core).
+    func testRandomByteInputDoesNotPanic() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        var fatals: [String] = []
+        term.onEvent { ev in
+            if case .fatal(let msg) = ev { fatals.append(msg) }
+        }
+        // Deterministic seed: we want reproducible failures, not a flaky CI
+        // signal. `SystemRandomNumberGenerator` is unseeded; use a simple
+        // xorshift so re-running the test with the same source yields the
+        // same input stream.
+        var rng = SeededRNG(seed: 0xB1ACBBBD)
+        for iter in 0..<1000 {
+            let length = Int.random(in: 1...128, using: &rng)
+            var bytes = [UInt8](repeating: 0, count: length)
+            for i in 0..<length {
+                bytes[i] = UInt8.random(in: 0...255, using: &rng)
+            }
+            term.input(bytes)
+            XCTAssertTrue(
+                fatals.isEmpty,
+                "iter \(iter): BBTerm raised fatal event for \(bytes.count)-byte input: \(fatals)"
+            )
+        }
+    }
+
+    /// Overlong / illegal UTF-8 must not kill the parser. The cases here are
+    /// the classic attack shapes:
+    ///   - `0xC0 0x80`       — overlong NUL (historically used to smuggle
+    ///                          a NUL past naive length checks).
+    ///   - `0xED 0xA0 0x80`  — UTF-16 surrogate half encoded as CESU-8.
+    ///   - `0xF8 0x88 0x80 0x80 0x80` — 5-byte UTF-8 (encodes > U+10FFFF).
+    ///   - `0xFF` / `0xFE`   — bytes that are never valid anywhere in UTF-8.
+    /// The terminal must ingest them without panicking; garbled output is OK,
+    /// a crash is not.
+    func testMalformedUtf8DoesNotPanic() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        var fatals: [String] = []
+        term.onEvent { ev in
+            if case .fatal(let msg) = ev { fatals.append(msg) }
+        }
+        let sequences: [[UInt8]] = [
+            [0xC0, 0x80],                               // overlong NUL
+            [0xED, 0xA0, 0x80],                         // U+D800 surrogate
+            [0xED, 0xBF, 0xBF],                         // U+DFFF surrogate
+            [0xF8, 0x88, 0x80, 0x80, 0x80],             // 5-byte (> U+10FFFF)
+            [0xFF],                                     // never valid
+            [0xFE],                                     // never valid
+            [0xC2],                                     // truncated 2-byte lead
+            [0xE2, 0x82],                               // truncated 3-byte
+            [0xF0, 0x9F],                               // truncated 4-byte
+            [0x80],                                     // lone continuation byte
+        ]
+        for seq in sequences {
+            term.input(seq)
+            XCTAssertTrue(
+                fatals.isEmpty,
+                "malformed UTF-8 \(seq.map { String($0, radix: 16) }) produced fatal: \(fatals)"
+            )
+        }
+    }
+
+    /// A 3-byte UTF-8 scalar split across two `input` calls must resume
+    /// correctly once the tail arrives. We don't assert the intermediate
+    /// state (parser may or may not buffer bytes internally) — the
+    /// correctness signal is zero fatal events and some non-empty grid
+    /// state after both halves have landed.
+    func testSplitMultibyteAtBoundaryDoesNotPanic() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        var fatals: [String] = []
+        term.onEvent { ev in
+            if case .fatal(let msg) = ev { fatals.append(msg) }
+        }
+        // "€" = U+20AC = 0xE2 0x82 0xAC (3 bytes).
+        term.input([0xE2, 0x82])
+        term.input([0xAC])
+        // "😀" = U+1F600 = 0xF0 0x9F 0x98 0x80 (4 bytes).
+        term.input([0xF0, 0x9F, 0x98])
+        term.input([0x80])
+        XCTAssertTrue(fatals.isEmpty,
+                      "split-multibyte input produced fatal: \(fatals)")
+        _ = try XCTUnwrap(term.snapshot(),
+                          "terminal must still produce a snapshot after split-multibyte input")
+    }
+
+    /// OSC-8 URI boundary around the 4 KiB cap enforced by
+    /// `bb_term_take_snapshot`. Sizes:
+    ///   - 4095 bytes: well under the cap, must be accepted.
+    ///   - 4097 bytes: one byte over the cap, must be rejected.
+    /// We don't test the exact cap (4096) because the spec allows either
+    /// side of the fence to own the boundary — both 4096-accepted and
+    /// 4096-rejected are defensible. We do pin the two sides so a cap
+    /// regression of more than one byte in either direction fails CI.
+    func testOsc8URICapBoundary() throws {
+        // Memory note: 4097 bytes of 'a' + the OSC 8 overhead is ~4.2 KB per
+        // iteration; no concern.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+
+        // 4095: under the cap. Use "https://example.com/" (20 bytes) + 4075 'a's.
+        let underCapURI = "https://example.com/" + String(repeating: "a", count: 4075)
+        XCTAssertEqual(underCapURI.count, 4095)
+        term.input("\u{1B}]8;;\(underCapURI)\u{1B}\\x\u{1B}]8;;\u{1B}\\")
+        let snapUnder = try XCTUnwrap(term.snapshot())
+        XCTAssertNotEqual(
+            snapUnder.linkID(row: 0, col: 0), 0,
+            "4095-byte OSC 8 URI must be accepted (under 4 KiB cap)"
+        )
+
+        // Clear and try the 4097-byte case on a clean term.
+        term.clearAll()
+        let overCapURI = "https://example.com/" + String(repeating: "b", count: 4077)
+        XCTAssertEqual(overCapURI.count, 4097)
+        term.input("\u{1B}]8;;\(overCapURI)\u{1B}\\y\u{1B}]8;;\u{1B}\\")
+        let snapOver = try XCTUnwrap(term.snapshot())
+        XCTAssertEqual(
+            snapOver.linkID(row: 0, col: 0), 0,
+            "4097-byte OSC 8 URI must be rejected (over 4 KiB cap)"
+        )
+    }
+}
+
+/// Deterministic xorshift32 RNG. Used only in `testRandomByteInputDoesNotPanic`
+/// so the fuzz signal is reproducible — a flaky-because-random test would
+/// defeat the purpose of the sweep.
+///
+/// Not a security-grade RNG; the audit explicitly asked for "property-style"
+/// coverage which is plenty for smoke-testing `term.input` panic paths.
+private struct SeededRNG: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) {
+        // Avoid zero state (xorshift would lock up).
+        self.state = seed == 0 ? 1 : seed
+    }
+    mutating func next() -> UInt64 {
+        var x = state
+        x ^= x << 13
+        x ^= x >> 7
+        x ^= x << 17
+        state = x
+        return x
+    }
 }
