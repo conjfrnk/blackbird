@@ -2013,6 +2013,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
         let point = bufferPointFromEvent(event)
+        // Shift-click extends the current selection from its ANCHOR to the
+        // click point — the standard macOS / iTerm2 gesture for precise
+        // selection adjustment. Without it, shift-click would start a new
+        // zero-width selection, discarding whatever the user just carefully
+        // selected. Audit findbar-selection F17.
+        if event.clickCount == 1,
+           event.modifierFlags.contains(.shift),
+           let existing = selection {
+            selection = Selection(anchor: existing.anchor, cursor: point, mode: existing.mode)
+            isDragging = true
+            return
+        }
         let mode: Selection.Mode
         switch event.clickCount {
         case 3: mode = .line
