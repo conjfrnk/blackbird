@@ -61,17 +61,35 @@ APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}
   APPCAST_FEED_URL="https://blackbird-terminal.com/appcast.xml" \
   bash scripts/make-appcast.sh --full > website/appcast.xml
 
-echo "==> Deploying website to S3 + CloudFront"
-( cd website && bash deploy.sh )
-
+# Ordering matters: commit + push FIRST, then S3 deploy. If the push fails
+# (auth hiccup, someone else pushed main, hook rejection), S3 is untouched
+# so the live appcast keeps matching the tracked appcast. If the S3 upload
+# fails AFTER the push succeeds, a subsequent re-run of this script is
+# idempotent: the appcast regenerates to the same content (same DMG bytes,
+# same EdDSA signature input), `git diff --cached --quiet` will then say
+# "nothing to commit" and we fall through to re-deploying S3 on retry.
 echo "==> Committing appcast.xml"
 git add website/appcast.xml
 if git diff --cached --quiet; then
-    echo "!! website/appcast.xml is unchanged — nothing to commit."
+    echo "==> website/appcast.xml unchanged — skipping commit (assuming retry after S3 failure)"
+else
+    git commit -m "feat(website): signed appcast for ${TAG}"
+fi
+
+echo "==> Pushing to origin main (before S3 deploy — if this fails we stop)"
+if ! git push origin main; then
+    echo "error: git push origin main failed. S3 was NOT touched." >&2
+    echo "error: resolve the push failure and re-run this script." >&2
     exit 1
 fi
-git commit -m "feat(website): signed appcast for ${TAG}"
-git push origin main
+
+echo "==> Deploying website to S3 + CloudFront"
+if ! ( cd website && bash deploy.sh ); then
+    echo "error: S3/CloudFront deploy failed AFTER git push succeeded." >&2
+    echo "error: the tracked appcast is now ahead of the live appcast." >&2
+    echo "error: re-run this script; the commit step is idempotent and will re-deploy." >&2
+    exit 1
+fi
 
 echo
 echo "Done. $TAG is live on blackbird-terminal.com/appcast.xml."

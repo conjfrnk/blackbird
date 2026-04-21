@@ -53,25 +53,52 @@ FORBIDDEN_PATTERNS=(
 )
 
 # Search the tree but exclude generated/derived output and cached deps.
-SEARCH_PATHS=(project.yml Sources scripts/release.sh .github)
+# Scope covers: YAML project config, Swift sources, bundled resources, the
+# release script, CI workflows, the repo-root (for stray *.entitlements), and
+# the tracked Xcode project (hand edits to pbxproj would otherwise slip past).
+SEARCH_PATHS=(
+  project.yml
+  Sources
+  Resources
+  scripts/release.sh
+  .github
+  Blackbird.xcodeproj/project.pbxproj
+)
+
+# Repo-root *.entitlements files (tracked, not under Sources/Resources).
+ROOT_ENT_FILES=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] && ROOT_ENT_FILES+=("$f")
+done < <(git ls-files -- '*.entitlements' ':!:Sources/**' ':!:Resources/**' 2>/dev/null || true)
 
 for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
-  if grep -rnH "$pattern" "${SEARCH_PATHS[@]}" 2>/dev/null; then
+  targets=("${SEARCH_PATHS[@]}")
+  if (( ${#ROOT_ENT_FILES[@]} > 0 )); then
+    targets+=("${ROOT_ENT_FILES[@]}")
+  fi
+  # Skip missing paths (e.g. no Resources/ yet) so grep doesn't error out.
+  existing=()
+  for t in "${targets[@]}"; do
+    [[ -e "$t" ]] && existing+=("$t")
+  done
+  if (( ${#existing[@]} > 0 )) && grep -rnH "$pattern" "${existing[@]}" 2>/dev/null; then
     fail "forbidden entitlement present: $pattern"
   fi
 done
 pass "no runtime-downgrading entitlements present"
 
 # ---------------------------------------------------------------------------
-# 3. No *.entitlements files in Sources/ (we don't ship custom entitlements
-#    today; if one gets added, require it to go through this review).
+# 3. No tracked *.entitlements files anywhere in the repo (we don't ship
+#    custom entitlements today; if one gets added, require it to go through
+#    this review). Use `git ls-files` so any tracked path is caught,
+#    regardless of whether it lives under Sources/, Resources/, or the root.
 # ---------------------------------------------------------------------------
-ENT_FILES=$(find Sources -name "*.entitlements" -type f 2>/dev/null || true)
+ENT_FILES="$(git ls-files -- '*.entitlements' 2>/dev/null || true)"
 if [[ -n "$ENT_FILES" ]]; then
   echo "$ENT_FILES"
-  fail "unexpected .entitlements file(s) in Sources/; review and update this script's allowlist"
+  fail "unexpected tracked .entitlements file(s); review and update this script's allowlist"
 fi
-pass "no .entitlements files in Sources/"
+pass "no tracked .entitlements files in the repo"
 
 # ---------------------------------------------------------------------------
 # 4. Release signing identity is Developer ID, not adhoc.
@@ -129,7 +156,15 @@ pass "Sparkle $SPARKLE_VER ≥ 2.6.4 security cutoff"
 #    product collapses. Keep this posture explicit so a drive-by "enable
 #    sandbox for security" PR gets caught here rather than at runtime.
 # ---------------------------------------------------------------------------
-if grep -rn "com.apple.security.app-sandbox" "${SEARCH_PATHS[@]}" 2>/dev/null; then
+sandbox_targets=("${SEARCH_PATHS[@]}")
+if (( ${#ROOT_ENT_FILES[@]} > 0 )); then
+  sandbox_targets+=("${ROOT_ENT_FILES[@]}")
+fi
+sandbox_existing=()
+for t in "${sandbox_targets[@]}"; do
+  [[ -e "$t" ]] && sandbox_existing+=("$t")
+done
+if (( ${#sandbox_existing[@]} > 0 )) && grep -rn "com.apple.security.app-sandbox" "${sandbox_existing[@]}" 2>/dev/null; then
   fail "com.apple.security.app-sandbox detected; Blackbird must stay un-sandboxed to fork shells"
 fi
 pass "no App Sandbox entitlement (intentional — terminals need arbitrary-fork capability)"

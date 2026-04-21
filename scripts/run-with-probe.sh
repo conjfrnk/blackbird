@@ -54,6 +54,30 @@ BIN="$APP/Contents/MacOS/Blackbird"
 echo "==> Binary: $BIN"
 
 # ---------------------------------------------------------------------------
+# Re-sign the ad-hoc DerivedData bundle with an Apple Development identity.
+#
+# Project memory: hardened-runtime + ad-hoc app + ad-hoc Sparkle = dyld
+# rejects the bundle on launch (this was the v0.1.0 DerivedData crash). The
+# build above uses CODE_SIGNING_ALLOWED=NO which produces an ad-hoc bundle,
+# so re-sign with a real Apple Development cert before launch.
+#
+# CI doesn't have a signing identity; set BB_SKIP_RESIGN=1 there.
+# ---------------------------------------------------------------------------
+if [[ "${BB_SKIP_RESIGN:-0}" == "1" ]]; then
+  echo "==> BB_SKIP_RESIGN=1 — skipping re-sign (CI mode)"
+else
+  RESIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Apple Development/ { print $2; exit }')"
+  if [[ -z "$RESIGN_IDENTITY" ]]; then
+    echo "error: no 'Apple Development' identity in the codesigning keychain." >&2
+    echo "error: set BB_SKIP_RESIGN=1 to skip (CI), or add an Apple Development cert." >&2
+    exit 1
+  fi
+  echo "==> Re-signing $APP with: $RESIGN_IDENTITY"
+  codesign --force --sign "$RESIGN_IDENTITY" "$APP" >/dev/null
+fi
+
+# ---------------------------------------------------------------------------
 # Kill any prior Blackbird so we don't end up with two instances.
 # ---------------------------------------------------------------------------
 if pgrep -x Blackbird >/dev/null 2>&1; then
