@@ -1705,19 +1705,28 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let cols = grid.columns() as u16;
         let mut cells: Vec<BBCell> = Vec::with_capacity(rows as usize * cols as usize);
 
-        // OSC 8 hyperlink interning. `links[0]` is a placeholder so cell
-        // `link_id == 0` always means "no OSC 8 attribution". Subsequent URIs
-        // get 1-based indices. Caps:
+        // OSC 8 hyperlink interning. When non-empty, `links[0]` is the
+        // "no link" sentinel so cell `link_id == 0` always means "no
+        // OSC 8 attribution" and subsequent URIs get 1-based indices.
+        // Caps:
         //   - distinct URIs per snapshot: `u16::MAX - 1 = 65534`
         //   - per-URI bytes: 4 KiB (covers any realistic http URL)
         //   - total interned bytes: 1 MiB per snapshot
-        // The total-bytes cap (rust-core-3 F1) defends against a hostile
-        // TUI that writes distinct 4 KiB URIs into every cell of a large
-        // grid: without it, one snapshot can retain ~256 MiB of CStrings.
-        // Over the 1 MiB ceiling, new URIs drop to no-link rather than
-        // truncate.
+        // The total-bytes cap (rust-core-3 F1) defends against a
+        // hostile TUI that writes distinct 4 KiB URIs into every cell
+        // of a large grid: without it, one snapshot can retain ~256
+        // MiB of CStrings. Over the 1 MiB ceiling, new URIs drop to
+        // no-link rather than truncate.
+        //
+        // rust-core-3 F9: `links` starts empty and the index-0
+        // sentinel CString is pushed only when the first hyperlink
+        // cell is seen. The common case — ProMotion frame re-render
+        // with no OSC 8 on screen — pays zero heap allocations for
+        // the intern table. `bb_snap_link_url` short-circuits on
+        // `link_id == 0`, and a non-zero lookup against an empty
+        // `links` misses the bounds check and returns null — so the
+        // empty-Vec shape is safe.
         let mut links: Vec<std::ffi::CString> = Vec::new();
-        links.push(std::ffi::CString::new("").expect("empty CString is infallible"));
 
         const OSC8_URI_MAX: usize = 4096;
         const OSC8_TOTAL_BYTES_MAX: usize = 1024 * 1024;
@@ -1732,10 +1741,6 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                         0
                     } else if let Some(&id) = link_ids.get(uri) {
                         id
-                    } else if links.len() >= u16::MAX as usize {
-                        // Out of ids — drop attribution silently. 65 534 links
-                        // per snapshot is already well past any realistic TUI.
-                        0
                     } else if total_uri_bytes.saturating_add(uri.len()) > OSC8_TOTAL_BYTES_MAX {
                         // Bytes budget exhausted. Stop interning new URIs,
                         // leaving previously-interned ones intact on their
@@ -1746,11 +1751,30 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                         // CString); fall back to "no link" rather than panic.
                         match std::ffi::CString::new(uri) {
                             Ok(cs) => {
-                                let id = links.len() as u16;
-                                links.push(cs);
-                                link_ids.insert(uri.to_owned(), id);
-                                total_uri_bytes += uri.len();
-                                id
+                                // F9 lazy sentinel: the first interned URI
+                                // of the snapshot materializes the index-0
+                                // "no link" placeholder. After this,
+                                // `links.len()` is the next id to hand out
+                                // (1-based).
+                                if links.is_empty() {
+                                    links.push(
+                                        std::ffi::CString::new("")
+                                            .expect("empty CString is infallible"),
+                                    );
+                                }
+                                if links.len() >= u16::MAX as usize {
+                                    // Out of ids — drop attribution
+                                    // silently. 65 534 links per snapshot
+                                    // is already well past any realistic
+                                    // TUI.
+                                    0
+                                } else {
+                                    let id = links.len() as u16;
+                                    links.push(cs);
+                                    link_ids.insert(uri.to_owned(), id);
+                                    total_uri_bytes += uri.len();
+                                    id
+                                }
                             }
                             Err(_) => 0,
                         }
@@ -3771,6 +3795,118 @@ mod tests {
                 !bb.link_id_cache.is_empty(),
                 "link_id_cache must retain entries across snapshots"
             );
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-3 F1 — TOTAL-BYTES CAP. A hostile TUI
+    /// writing distinct ~4 KiB URIs into many cells must not retain
+    /// arbitrary megabytes of CStrings per snapshot: once the 1 MiB
+    /// ceiling is crossed, subsequent distinct URIs drop to `link_id =
+    /// 0` (no link) instead of polluting `BBSnapOwned::links`.
+    ///
+    /// Memory discipline: 40 × 30 = 1200 cells; we emit 300 distinct
+    /// URIs at ~4 KiB each → ~1.2 MiB of raw URI bytes, ~2-3 MiB peak
+    /// including HashMap/String overhead. Well below any OOM threshold
+    /// (the snapshot-cells array itself is ~40 KiB).
+    ///
+    /// Expectations:
+    ///   - at least one early cell retains a live link (cache fills
+    ///     up to ~1 MiB before it saturates)
+    ///   - at least one late cell has `link_id == 0` (cap fired)
+    ///   - the live-link count is strictly less than 300 — proving the
+    ///     cap dropped something. A regression that removed the cap
+    ///     would let all 300 intern.
+    #[test]
+    fn osc8_intern_cap_drops_links_past_1mib() {
+        unsafe {
+            let term = bb_term_new(40, 30, 100);
+            // 300 distinct ~4 KiB URIs. Each `X` lands on its own cell;
+            // 300 cells fit in the top 8 rows of a 40×30 grid, so none
+            // scroll off the screen before the snapshot.
+            //
+            // `bulk` is shared across URIs (one 4 KiB allocation) to
+            // keep test peak RAM near the raw-URI total rather than
+            // 300× that figure.
+            let bulk = "a".repeat(4000);
+            for i in 0..300u32 {
+                let uri = format!("https://example.com/{i:03}-{bulk}");
+                let seq = format!("\x1b]8;;{uri}\x1b\\X\x1b]8;;\x1b\\");
+                bb_term_input(term, seq.as_bytes().as_ptr(), seq.len());
+            }
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null());
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+
+            // A prefix of cells must have live links (cap not yet hit).
+            let live_prefix = cells.iter().take(10).any(|c| c.link_id != 0);
+            assert!(
+                live_prefix,
+                "early URIs must intern successfully before the 1 MiB cap fires"
+            );
+
+            // A suffix of cells must have been dropped to link_id = 0.
+            // The 256th distinct URI alone pushes past 1 MiB; anything
+            // after that falls into the "budget exhausted" branch.
+            let dropped = cells.iter().take(300).filter(|c| c.link_id == 0).count();
+            assert!(
+                dropped > 0,
+                "at least one URI past the 1 MiB cap must drop to link_id = 0"
+            );
+
+            // Cross-check: the live-link count is bounded. With 4 KiB
+            // URIs and a 1 MiB cap, we expect at most ~260 live links
+            // (`1_048_576 / 4032 ≈ 260`). Pin a loose upper bound that
+            // would catch a regression where the cap is gone (all 300
+            // would intern).
+            let live_link_count = cells.iter().take(300).filter(|c| c.link_id != 0).count();
+            assert!(
+                live_link_count < 300,
+                "cap must drop some URIs; saw {live_link_count}/300 live"
+            );
+
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-3 F9 — ZERO-LINK FAST PATH. A snapshot
+    /// of a grid with zero OSC 8 cells must not build the `links` Vec
+    /// (no sentinel CString, no HashMap insert). We can't observe the
+    /// allocation count directly, but the observable contract is:
+    ///   - `bb_snap_link_url(snap, 0)` returns null (every snapshot,
+    ///     per API — sanity)
+    ///   - `bb_snap_link_url(snap, N)` for any `N > 0` also returns
+    ///     null, because `links` is empty and the bounds check misses
+    ///   - no panic, no UB reading past an empty Vec
+    #[test]
+    fn osc8_zero_link_snapshot_skips_intern_alloc() {
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            // Write plain text — no OSC 8 anywhere.
+            let seq = b"hello world";
+            bb_term_input(term, seq.as_ptr(), seq.len());
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null());
+
+            // Every cell must have link_id == 0.
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+            for (i, c) in cells.iter().enumerate() {
+                assert_eq!(
+                    c.link_id, 0,
+                    "cell {i} in a zero-OSC-8 grid must have link_id == 0"
+                );
+            }
+
+            // link_id = 0 short-circuit.
+            assert!(bb_snap_link_url(snap, 0).is_null());
+            // Any non-zero id against an empty `links` Vec must resolve
+            // to null — not panic, not dereference past the end.
+            assert!(bb_snap_link_url(snap, 1).is_null());
+            assert!(bb_snap_link_url(snap, 42).is_null());
+            assert!(bb_snap_link_url(snap, u32::MAX).is_null());
+
+            bb_snap_release(snap);
             bb_term_free(term);
         }
     }
