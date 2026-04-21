@@ -84,7 +84,19 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        # Regenerate + fail if the committed pbxproj drifted from what
+        # project.yml describes. Audit xcode-project F1 — the pbxproj is
+        # tracked in git AND auto-generated; without a drift gate a PR
+        # that updates only pbxproj and not project.yml (or vice versa)
+        # merges fine and silently diverges the two.
+        run: |
+          xcodegen generate
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
+            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+            echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            exit 1
+          fi
 
       - name: Build Rust core (universal)
         run: scripts/build-core.sh
@@ -136,7 +148,19 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        # Regenerate + fail if the committed pbxproj drifted from what
+        # project.yml describes. Audit xcode-project F1 — the pbxproj is
+        # tracked in git AND auto-generated; without a drift gate a PR
+        # that updates only pbxproj and not project.yml (or vice versa)
+        # merges fine and silently diverges the two.
+        run: |
+          xcodegen generate
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
+            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+            echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            exit 1
+          fi
 
       - name: Build Rust core (universal)
         run: scripts/build-core.sh
@@ -169,7 +193,19 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        # Regenerate + fail if the committed pbxproj drifted from what
+        # project.yml describes. Audit xcode-project F1 — the pbxproj is
+        # tracked in git AND auto-generated; without a drift gate a PR
+        # that updates only pbxproj and not project.yml (or vice versa)
+        # merges fine and silently diverges the two.
+        run: |
+          xcodegen generate
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
+            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+            echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            exit 1
+          fi
 
       - name: Build Rust core (universal)
         run: scripts/build-core.sh
@@ -220,7 +256,19 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        run: xcodegen generate
+        # Regenerate + fail if the committed pbxproj drifted from what
+        # project.yml describes. Audit xcode-project F1 — the pbxproj is
+        # tracked in git AND auto-generated; without a drift gate a PR
+        # that updates only pbxproj and not project.yml (or vice versa)
+        # merges fine and silently diverges the two.
+        run: |
+          xcodegen generate
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
+            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+            echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            exit 1
+          fi
 
       - name: Build Rust core (universal)
         run: scripts/build-core.sh
