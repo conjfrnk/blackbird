@@ -807,6 +807,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         applyPowerAwareFrameRate()
     }
 
+    /// Asymmetric hysteresis on thermal-driven frame-rate throttling.
+    /// `.fair` is the boundary state macOS toggles between when sampling
+    /// drifts around a warmth threshold — without a guard, the fps would
+    /// pulse 120 → 30 → 120 several times per minute on a machine hovering
+    /// near the edge. Once we've throttled, require `.nominal` (not just
+    /// `.fair`) to come back up; once unthrottled, require `.serious` or
+    /// worse to throttle. `.fair` is a no-op in either direction.
+    /// Audit latency-power F5.
+    private var isThermalThrottled: Bool = false
+
     /// Read current NSProcessInfo + occlusion state, compute the
     /// target frame rate via `preferredFrameRate(...)`, and apply it
     /// to this MTKView. Safe to call from any notification handler.
@@ -817,10 +827,30 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return !window.occlusionState.contains(.visible)
         }()
         let nativeMax = window?.screen?.maximumFramesPerSecond ?? 60
+        // Apply thermal hysteresis before consulting preferredFrameRate:
+        // the pure function reacts to `.serious`/`.critical`, so we stretch
+        // the observed state to `.serious` while throttled until we see a
+        // definite `.nominal` return, and vice-versa for promotion.
+        let rawThermal = info.thermalState
+        let effectiveThermal: ProcessInfo.ThermalState
+        switch rawThermal {
+        case .nominal:
+            isThermalThrottled = false
+            effectiveThermal = .nominal
+        case .fair:
+            // No transition: preserve the current throttled state. Report
+            // the pure function whatever keeps the output stable.
+            effectiveThermal = isThermalThrottled ? .serious : .fair
+        case .serious, .critical:
+            isThermalThrottled = true
+            effectiveThermal = rawThermal
+        @unknown default:
+            effectiveThermal = rawThermal
+        }
         let target = preferredFrameRate(
             isOccluded: isOccluded,
             isLowPowerMode: info.isLowPowerModeEnabled,
-            thermalState: info.thermalState,
+            thermalState: effectiveThermal,
             nativeMaxFPS: nativeMax
         )
         switch target {
