@@ -166,6 +166,51 @@ final class TabStripView: NSView {
         needsDisplay = true
     }
 
+    // MARK: - Accessibility
+    //
+    // Each pill + the `+` button are drawn shapes, not real views, so
+    // NSAccessibility sees nothing by default. VoiceOver skips over the
+    // tab strip entirely. Expose per-pill NSAccessibilityElement buttons
+    // keyed to window titles, plus a "New Tab" button, so rotor and VO
+    // navigation reach them. Audit titlebar-tabs F3.
+
+    override func isAccessibilityElement() -> Bool { false }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+
+    override func accessibilityLabel() -> String? { "Tabs" }
+
+    override func accessibilityChildren() -> [Any]? {
+        var out: [NSAccessibilityElement] = []
+        for (i, window) in tabs.enumerated() where i < pillFrames.count {
+            out.append(makePillElement(pillIndex: i, window: window))
+        }
+        out.append(makeAddButtonElement())
+        return out
+    }
+
+    private func makePillElement(pillIndex: Int, window: NSWindow) -> NSAccessibilityElement {
+        let frame = pillFrames[pillIndex]
+        let element = BBTabPillAccessibilityElement(
+            parent: self,
+            frame: frame,
+            title: window.title.isEmpty ? "Untitled" : window.title,
+            isSelected: window === selectedTab,
+            onSelect: { [weak self] in self?.onSelectWindow?(window) },
+            onClose: { [weak self] in self?.onCloseWindow?(window) }
+        )
+        return element
+    }
+
+    private func makeAddButtonElement() -> NSAccessibilityElement {
+        let element = BBAddTabAccessibilityElement(
+            parent: self,
+            frame: addButtonFrame,
+            onAdd: { [weak self] in self?.onAddTab?() }
+        )
+        return element
+    }
+
     private static let addButtonWidth: CGFloat = 22
     private static let pillSpacing: CGFloat = 2
     private static let trailingInset: CGFloat = 8
@@ -659,5 +704,71 @@ private extension NSBezierPath {
             }
         }
         return path
+    }
+}
+
+/// Accessibility proxy for a single tab pill. Maps its `activate` to
+/// `onSelect` (equivalent to clicking the pill) and exposes a custom
+/// "Close Tab" action that routes to `onClose`. Frame in parent-view
+/// coordinates; NSAccessibility transforms to screen space for VO.
+final class BBTabPillAccessibilityElement: NSAccessibilityElement {
+    private let onSelect: () -> Void
+    private let onClose: () -> Void
+    private let _title: String
+    private let _isSelected: Bool
+    private weak var parentView: NSView?
+
+    init(parent: NSView, frame: NSRect, title: String, isSelected: Bool,
+         onSelect: @escaping () -> Void, onClose: @escaping () -> Void) {
+        self._title = title
+        self._isSelected = isSelected
+        self.onSelect = onSelect
+        self.onClose = onClose
+        self.parentView = parent
+        super.init()
+        setAccessibilityParent(parent)
+        setAccessibilityRole(.button)
+        setAccessibilityFrameInParentSpace(frame)
+    }
+
+    override func accessibilityLabel() -> String? {
+        _isSelected ? "Tab, \(_title), selected" : "Tab, \(_title)"
+    }
+
+    override func isAccessibilityEnabled() -> Bool { true }
+
+    override func accessibilityPerformPress() -> Bool {
+        onSelect()
+        return true
+    }
+
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        [NSAccessibilityCustomAction(name: "Close Tab") { [weak self] in
+            self?.onClose()
+            return true
+        }]
+    }
+}
+
+/// Accessibility proxy for the trailing `+` button. Role=.button with
+/// a single press action that fires `onAddTab`.
+final class BBAddTabAccessibilityElement: NSAccessibilityElement {
+    private let onAdd: () -> Void
+
+    init(parent: NSView, frame: NSRect, onAdd: @escaping () -> Void) {
+        self.onAdd = onAdd
+        super.init()
+        setAccessibilityParent(parent)
+        setAccessibilityRole(.button)
+        setAccessibilityFrameInParentSpace(frame)
+    }
+
+    override func accessibilityLabel() -> String? { "New Tab" }
+
+    override func isAccessibilityEnabled() -> Bool { true }
+
+    override func accessibilityPerformPress() -> Bool {
+        onAdd()
+        return true
     }
 }
