@@ -109,6 +109,8 @@ final class TerminalViewTests: XCTestCase {
             arguments: [],
             size: .init(cols: 80, rows: 24)
         )
+        // Guarantee child reap even if the wait() below times out.
+        defer { session.terminate() }
         let device = MTLCreateSystemDefaultDevice()!
         let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
         view.session = session
@@ -131,8 +133,6 @@ final class TerminalViewTests: XCTestCase {
 
         XCTAssertGreaterThan(finalSnap?.cols ?? 0, 80)
         XCTAssertGreaterThan(finalSnap?.rows ?? 0, 24)
-
-        session.terminate()
     }
 
     func test_viewRendersGivenSnapshotWithoutCrash() throws {
@@ -141,6 +141,8 @@ final class TerminalViewTests: XCTestCase {
             arguments: [],
             size: .init(cols: 80, rows: 24)
         )
+        // Guarantee child reap even if the wait() or XCTUnwrap below traps.
+        defer { session.terminate() }
 
         let exp = expectation(description: "snap")
         var seen: BBSnapshot?
@@ -161,8 +163,6 @@ final class TerminalViewTests: XCTestCase {
         let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
         view.session = session
         view.render(snapshot: seen!)  // must not crash
-
-        session.terminate()
     }
 
     func test_controlCSendsSigintViaEncoder() {
@@ -198,38 +198,28 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_commandKeyDoesNotSendToPty() throws {
-        // Simulate ⌘C on the TerminalView and verify the session received no bytes.
-        // We use a cat-backed session because /bin/cat echoes only what it receives
-        // — so if we accidentally sent 'c' to cat, it would echo back.
+        // Byte-level assertion of the ⌘-isolation invariant. The view's
+        // keyDown fast-returns on `.command`-flagged events before the
+        // session / encoder / sendToSession path runs; hooking the
+        // `ptyRecorderForTests` recorder lets us prove zero bytes reached
+        // that path. No real PTY is needed because the ⌘ branch returns
+        // before the `guard let session` check — so a headless view with
+        // a nil session is sufficient and matches IMETests' pattern.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let recorder = RecordingPTY()
+        view.ptyRecorderForTests = recorder
 
-        let session = try TerminalSession.start(
-            shell: "/bin/cat",
-            arguments: [],
-            size: .init(cols: 80, rows: 24)
-        )
-        let device = MTLCreateSystemDefaultDevice()!
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
-        view.session = session
+        // Baseline: an IME commit flows through sendToSession and MUST land
+        // in the recorder, proving the hook works on this view. Without this
+        // anchor a regression that broke the recorder wiring could hide a
+        // real ⌘-isolation failure behind a silent recorder.
+        view.insertText("c", replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertEqual(recorder.sent, Data("c".utf8),
+                       "recorder must capture a non-⌘ IME commit as sanity")
+        recorder.sent.removeAll()
 
-        // First, send a known byte so we have a baseline the snapshot contains.
-        // Use "x\n" so cat echoes "x".
-        session.send(Data("x\n".utf8))
-
-        // Wait for the baseline echo.
-        let baseline = expectation(description: "baseline echo")
-        var snapAfterBaseline: BBSnapshot?
-        var c: AnyCancellable?
-        c = session.$snapshot.sink { s in
-            if let s, s.character(at: 0, row: 0) == "x", snapAfterBaseline == nil {
-                snapAfterBaseline = s
-                c?.cancel()
-                baseline.fulfill()
-            }
-        }
-        wait(for: [baseline], timeout: 3.0)
-
-        // Now synthesize a ⌘C event and deliver it to the view.
-        let cmdCEvent = NSEvent.keyEvent(
+        // Synthesize a ⌘C keyDown and deliver it to the view.
+        let cmdCEvent = try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
             modifierFlags: [.command],
@@ -240,20 +230,16 @@ final class TerminalViewTests: XCTestCase {
             charactersIgnoringModifiers: "c",
             isARepeat: false,
             keyCode: 8
-        )!
+        ))
         view.keyDown(with: cmdCEvent)
 
-        // Give the event loop time to propagate any (incorrect) byte.
+        // Give the runloop a hop in case any stray async path posted bytes.
         let settle = expectation(description: "settle")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settle.fulfill() }
+        DispatchQueue.main.async { settle.fulfill() }
         wait(for: [settle], timeout: 1.0)
 
-        // Pragmatic version: just assert no crash + view is still alive.
-        // A full intercept-based test would require session.send to be injectable.
-        // For Plan 2 the non-crash + unit test on KeyEncoder.encode is enough;
-        // selection + real copy wiring lands in Plan 6.
-        XCTAssertNotNil(view.session)
-        session.terminate()
+        XCTAssertTrue(recorder.sent.isEmpty,
+                      "⌘C must never produce PTY bytes; recorder captured \(Array(recorder.sent))")
     }
 
     // MARK: - Selection mode routing in mouseDown
@@ -270,6 +256,11 @@ final class TerminalViewTests: XCTestCase {
             arguments: [],
             size: .init(cols: 80, rows: 24)
         )
+        // Register teardown on the XCTestCase so a wait() timeout or a throw
+        // from XCTUnwrap below can't leak a zombie /bin/cat child. Matches
+        // the project's test-memory rule: every real forkpty gets a
+        // reap-on-exit guard even under the failure path.
+        addTeardownBlock { session.terminate() }
         view.session = session
         let exp = expectation(description: "initial snapshot")
         var c: AnyCancellable?
@@ -301,13 +292,13 @@ final class TerminalViewTests: XCTestCase {
 
     func test_mouseDown_option_triggersRectangularSelection() throws {
         let view = try makeViewForSelection()
+        // Session teardown registered via addTeardownBlock in the helper.
         // Middle of the view → somewhere inside the grid.
         let mid = NSPoint(x: 200, y: 200)
         let ev = try mouseDownEvent(at: mid, modifiers: [.option])
         view.mouseDown(with: ev)
         XCTAssertEqual(view.selection?.mode, .rectangular,
                        "⌥-drag should trigger rectangular selection")
-        view.session?.terminate()
     }
 
     func test_mouseDown_noModifiers_triggersCharacterSelection() throws {
@@ -317,7 +308,6 @@ final class TerminalViewTests: XCTestCase {
         view.mouseDown(with: ev)
         XCTAssertEqual(view.selection?.mode, .character,
                        "Plain drag should be prose-style character selection")
-        view.session?.terminate()
     }
 
     func test_mouseDown_doubleClick_triggersWordSelection() throws {
@@ -327,7 +317,6 @@ final class TerminalViewTests: XCTestCase {
         view.mouseDown(with: ev)
         XCTAssertEqual(view.selection?.mode, .word,
                        "Double-click should start a word-mode selection")
-        view.session?.terminate()
     }
 
     func test_mouseDown_tripleClick_triggersLineSelection() throws {
@@ -337,7 +326,6 @@ final class TerminalViewTests: XCTestCase {
         view.mouseDown(with: ev)
         XCTAssertEqual(view.selection?.mode, .line,
                        "Triple-click should start a line-mode selection")
-        view.session?.terminate()
     }
 
     // MARK: - Bracketed-paste sanitiser
@@ -870,6 +858,13 @@ final class TerminalViewTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
+        // NSWindow defaults to `isReleasedWhenClosed = true`, which turns
+        // `window.close()` into a release of a local whose lifetime ARC
+        // still thinks it owns → double-free / use-after-free (ASAN catches
+        // it as SEGV in objc_release). Switching to false makes the
+        // `defer` teardown a plain order-out; ARC handles the dealloc on
+        // scope exit.
+        window.isReleasedWhenClosed = false
         let device = MTLCreateSystemDefaultDevice()!
         let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
         window.contentView = view
@@ -879,6 +874,13 @@ final class TerminalViewTests: XCTestCase {
             arguments: ["-c", "printf '\\033]2;blackbird-title-test\\007'; sleep 0.5"],
             size: .init(cols: 80, rows: 24)
         )
+        // Teardown MUST happen even if an XCTUnwrap / wait between here and
+        // the tail of the test throws — otherwise a failed assertion leaves
+        // a zombie /bin/sh plus a live NSWindow until the test host exits.
+        defer {
+            session.terminate()
+            window.close()
+        }
         view.session = session
 
         // Poll window.title — updates dispatch to main; the test runs on main.
@@ -893,7 +895,5 @@ final class TerminalViewTests: XCTestCase {
         }
         wait(for: [exp], timeout: 3.0)
         timer.invalidate()
-
-        session.terminate()
     }
 }

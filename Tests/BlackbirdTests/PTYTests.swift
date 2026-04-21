@@ -167,30 +167,73 @@ final class PTYTests: XCTestCase {
     }
 
     func test_resizePropagatesSIGWINCH() throws {
-        // Use stty inside the shell to confirm the PTY knows the new size.
+        // End-to-end: spawn a shell, wait for its initial `stty size` line,
+        // then call `pty.resize(...)` and assert the WINCH trap fires with
+        // the NEW dimensions. Previously this test only verified initial-
+        // spawn winsize — it never exercised resize at all. Using a WINCH
+        // handler that prints size (instead of `ioctl(masterFD, TIOCGWINSZ)`
+        // directly) keeps the test inside the test target and still proves
+        // the full kernel-level pipeline: TIOCSWINSZ → kernel delivers
+        // SIGWINCH to the fg process group → shell handler reads new size.
         let pty = try PTY.spawn(
             executable: "/bin/sh",
-            arguments: ["-c", "stty size; exit"],
+            arguments: [
+                "-c",
+                // Print size on spawn, then arm a WINCH trap that re-prints
+                // it and exits. `sleep 10 &` backgrounds the sleep so the
+                // parent shell blocks in `wait` instead of in `sleep`'s
+                // syscall — only `wait` is an interruptible shell builtin
+                // that lets traps fire immediately on signal receipt.
+                // Foregrounding `sleep` directly would queue SIGWINCH until
+                // `sleep` exited, which outlasts the test timeout.
+                "stty size; trap 'stty size; exit 0' WINCH; sleep 10 & wait",
+            ],
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
+        // Guarantee reap even if a wait() below times out.
+        defer { pty.terminate() }
 
-        let exp = expectation(description: "size")
+        // Wait for the initial "24 80" line so we know the trap is armed
+        // before we fire the resize. If we resize too early the shell may
+        // not have registered the trap yet and the SIGWINCH is a no-op on
+        // subsequent output.
+        let initial = expectation(description: "initial size")
         var out = Data()
-        var fulfilled = false
-        pty.onBytes = { [weak pty] chunk in
+        var sawInitial = false
+        var sawResized = false
+        let resized = expectation(description: "resized size")
+        let lock = NSLock()
+        pty.onBytes = { chunk in
+            lock.lock()
             out.append(chunk)
-            if out.contains("\n".data(using: .utf8)!), !fulfilled {
-                fulfilled = true
-                pty?.onBytes = nil
-                exp.fulfill()
+            let text = String(data: out, encoding: .utf8) ?? ""
+            if !sawInitial, text.contains("24 80") {
+                sawInitial = true
+                lock.unlock()
+                initial.fulfill()
+                return
             }
+            if sawInitial, !sawResized, text.contains("40 120") {
+                sawResized = true
+                lock.unlock()
+                resized.fulfill()
+                return
+            }
+            lock.unlock()
         }
+        wait(for: [initial], timeout: 3.0)
 
-        wait(for: [exp], timeout: 3.0)
+        // Drive the actual resize. TIOCSWINSZ updates the kernel winsize and
+        // posts SIGWINCH to the tty's foreground pgroup; the shell trap
+        // reads the new size and prints it.
+        pty.resize(to: .init(cols: 120, rows: 40))
+
+        wait(for: [resized], timeout: 3.0)
+        lock.lock()
         let line = String(data: out, encoding: .utf8) ?? ""
-        XCTAssertTrue(line.contains("24 80"), "stty reported: \(line)")
-
-        pty.terminate()
+        lock.unlock()
+        XCTAssertTrue(line.contains("40 120"),
+                      "post-resize stty must report new dims; saw: \(line)")
     }
 }
