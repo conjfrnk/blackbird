@@ -2254,6 +2254,58 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         sendMouseEvent(event, button: 2, press: false, session: session)
     }
 
+    // MARK: - Middle-mouse button reporting
+    //
+    // xterm mouse protocol: button 1 = middle. Many TUIs (nvim, less,
+    // tmux) expect middle-click to paste or to trigger a custom binding;
+    // without these hooks the event never reaches the shell. Mirrors the
+    // left/right handlers: ⌥ escapes reporting so the user can still
+    // paste locally over a TUI. Audit terminal-view-2 F9.
+
+    public override func otherMouseDown(with event: NSEvent) {
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session else {
+            super.otherMouseDown(with: event)
+            return
+        }
+        sendMouseEvent(event, button: 1, press: true, session: session)
+    }
+
+    public override func otherMouseDragged(with event: NSEvent) {
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session,
+              anyEventMouseEnabled() || dragReportingEnabled() else {
+            super.otherMouseDragged(with: event)
+            return
+        }
+        // xterm motion reporting: button + 32 for drag-with-button-held.
+        sendMouseEvent(event, button: 1 + 32, press: true, session: session)
+    }
+
+    public override func otherMouseUp(with event: NSEvent) {
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session else {
+            super.otherMouseUp(with: event)
+            return
+        }
+        sendMouseEvent(event, button: 1, press: false, session: session)
+    }
+
+    /// True when the TUI enabled DEC mode 1003 (any-event tracking —
+    /// cursor motion without a button). Implied by the SGR mouse mode
+    /// bit being set alongside motion; narrower predicate than
+    /// `mouseReportingEnabled` so we only fire no-button motion
+    /// reports when explicitly asked. Audit terminal-view-2 F14.
+    private func anyEventMouseEnabled() -> Bool {
+        guard let mode = currentSnapshot?.termMode else { return false }
+        return mode.contains(.mouseMotion)
+    }
+
+    private func dragReportingEnabled() -> Bool {
+        guard let mode = currentSnapshot?.termMode else { return false }
+        return mode.contains(.mouseDrag)
+    }
+
     private enum ResizeCorner { case topLeft, topRight, bottomLeft, bottomRight }
     private struct ResizeContext {
         let corner: ResizeCorner
@@ -2435,7 +2487,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let screenRow = Int(point.line) + (currentSnapshot?.displayOffset ?? 0)
         let col = point.col
         updateHover(screenRow: screenRow, col: col, locationInWindow: event.locationInWindow)
+        // DEC mode 1003 — any-event tracking. When the TUI has asked for
+        // motion reports (without requiring a button), emit a motion
+        // event even in the no-button case. xterm uses button 35 (32 +
+        // 3 "release", which the protocol uses to mean "no button
+        // currently pressed"). Fires only when the hover cell actually
+        // changed so we don't flood the PTY at pointer-update cadence.
+        // Audit terminal-view-2 F14.
+        if let session, mouseReportingEnabled(), anyEventMouseEnabled(),
+           !event.modifierFlags.contains(.option),
+           lastReportedMotionCell != BBXYPoint(col: col, row: screenRow) {
+            lastReportedMotionCell = BBXYPoint(col: col, row: screenRow)
+            sendMouseEvent(event, button: 35, press: true, session: session)
+        }
     }
+
+    private struct BBXYPoint: Equatable { let col: Int; let row: Int }
+    /// Last (col, row) reported via DEC 1003 any-event tracking, for
+    /// per-cell deduplication. Reset by leaving the view.
+    private var lastReportedMotionCell: BBXYPoint?
 
     public override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
