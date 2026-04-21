@@ -65,3 +65,28 @@ struct CellInstance {
     /// Attribute bitmask + packed underline-color. See struct header.
     var attrs: SIMD4<UInt32>      // 16 bytes
 }
+
+/// Pin the CellInstance stride so a future field addition / reordering can't
+/// silently diverge from the `CellInstance` struct in Shaders.metal. A
+/// mismatch here would read garbage into every vertex attribute at runtime
+/// and present as "random cells draw solid black" or UV-scrambled glyphs —
+/// the kind of visual regression the audit (glyph-atlas F8) flagged as only
+/// catchable by a static layout assertion.
+///
+/// If this fires after a deliberate field change: update Shaders.metal's
+/// mirror struct to match, rebuild, and only then update this constant.
+private let _cellInstanceLayoutPinned: Void = {
+    assert(MemoryLayout<CellInstance>.stride == 80,
+           "CellInstance stride drifted from the 80-byte contract mirrored "
+           + "in Shaders.metal — update the shader struct BEFORE widening "
+           + "this number.")
+    assert(MemoryLayout<CellInstance>.alignment == 16,
+           "CellInstance alignment must match Metal's natural 16-byte "
+           + "alignment for SIMD4 types.")
+}()
+
+/// Forces evaluation of `_cellInstanceLayoutPinned` at module load so the
+/// assertion fires during unit tests / debug runs rather than only when a
+/// particular code path touches the constant.
+@inline(never)
+func _pinCellInstanceLayout() { _ = _cellInstanceLayoutPinned }
