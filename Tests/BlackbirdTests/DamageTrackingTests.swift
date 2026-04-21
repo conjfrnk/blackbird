@@ -36,13 +36,28 @@ final class DamageTrackingTests: XCTestCase {
         // Boundary check: the Swift wrapper allocates a buffer of size
         // rows. A future alacritty that reports a damaged row index >=
         // rows would write past the buffer without this cap. Pin the
-        // behavior.
+        // behavior. Force a PARTIAL-damage scenario by writing to a
+        // single row without scrolling — `A\r\nB\r\nC\r\nD\r\n`
+        // scrolled the grid which produced damageIsFull=true and left
+        // the bounds assertions in the `!snap.damageIsFull` branch as
+        // dead code (audit swift-tests-core F4).
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 3)))
-        _ = term.snapshot()  // drain
-        // Force scroll to produce Full damage
-        term.input("A\r\nB\r\nC\r\nD\r\n")
+        _ = term.snapshot()  // drain initial full-damage
+        // Write only to row 0 (no \n, stays on the first visible row).
+        // Alacritty reports partial damage for this; if it ever reports
+        // Full we still pin *some* contract below.
+        term.input("hi")
         let snap = try XCTUnwrap(term.snapshot())
-        if !snap.damageIsFull {
+        if snap.damageIsFull {
+            XCTAssertEqual(
+                snap.damagedRows, [],
+                "full-damage must surface as empty damagedRows, not stray indices"
+            )
+        } else {
+            XCTAssertFalse(
+                snap.damagedRows.isEmpty,
+                "partial damage must report at least one row; saw none"
+            )
             for row in snap.damagedRows {
                 XCTAssertLessThan(row, Int(snap.rows))
                 XCTAssertGreaterThanOrEqual(row, 0)
