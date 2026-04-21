@@ -166,12 +166,11 @@ typedef uint32_t BBEventKind;
 /**
  * Opaque handle exposed to Swift.
  *
- * SAFETY: Rust drops struct fields in declaration order. `term` owns a
- * RoutingListener whose raw pointer targets `callback`, so `term` must be
- * declared BEFORE `callback` — this makes `term` drop first, leaving the
- * pointer valid during Term's destruction. The Fatal event delivery path
- * (in `guard_with_term`) fires during teardown, making this ordering
- * load-bearing.
+ * `callback` and `color_queue` are shared with the owned `Term`'s
+ * `RoutingListener` via `Arc`. Field drop order between `term` and the
+ * cells is no longer load-bearing for memory safety (rust-core-1 F3):
+ * each Arc keeps its inner cell alive as long as any clone exists, so an
+ * event firing during `Term`'s destruction still lands on live memory.
  */
 struct BBTerm;
 

@@ -233,6 +233,15 @@ impl ColorRequestQueue {
         *self.cap_hit_logged.get() = false;
         std::mem::take(&mut *self.entries.get())
     }
+
+    /// Number of currently-queued entries. Test-only introspection.
+    ///
+    /// # Safety
+    /// Caller must ensure no concurrent access.
+    #[cfg(test)]
+    unsafe fn len(&self) -> usize {
+        (*self.entries.get()).len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,34 +250,35 @@ impl ColorRequestQueue {
 
 /// Event listener that forwards terminal events to a registered C callback.
 ///
-/// Holds a raw pointer into the `CallbackCell` owned by the parent `BBTerm`.
-/// The pointer is valid for the entire lifetime of the `Term<RoutingListener>`
-/// because `Term` is always dropped before `BBTerm`.
+/// Shares ownership of the `CallbackCell` and `ColorRequestQueue` with the
+/// parent `BBTerm` via `Arc`. The previous implementation used raw pointers
+/// and relied on field drop order (`Term` dropped before `Box<CallbackCell>`)
+/// to keep them valid — a structural invariant enforced only by comments.
+/// `Arc` shares the allocation, so even in a future refactor where the
+/// listener outlives the owning `BBTerm` or an event fires mid-teardown,
+/// every access lands on live memory (rust-core-1 F3).
 ///
 /// # Thread-safety contract
 /// Must be constructed and used exclusively on the thread that owns the
-/// `BBTerm`.  No concurrent access to the callback state is permitted.
+/// `BBTerm`. The Arcs are `Send + Sync` (the inner cells unsafe-impl `Sync`
+/// under single-thread discipline), but BBTerm's own single-thread rule
+/// still forbids concurrent `bb_term_input` calls — that is the real
+/// invariant. Arc merely removes the drop-order footgun that otherwise
+/// turned a future refactor into silent use-after-free.
 struct RoutingListener {
-    cell: *const CallbackCell,
-    color_queue: *const ColorRequestQueue,
+    cell: Arc<CallbackCell>,
+    color_queue: Arc<ColorRequestQueue>,
 }
-
-// SAFETY: the owning BBTerm is never moved to another thread while in use.
-unsafe impl Send for RoutingListener {}
-// Sync is deliberately NOT implemented — RoutingListener holds a raw pointer
-// that is only valid on the thread that owns its BBTerm. If alacritty_terminal
-// ever requires EventListener: Sync, revisit the whole synchronization model
-// (likely by switching CallbackCell to atomic pointers).
 
 impl EventListener for RoutingListener {
     fn send_event(&self, event: Event) {
-        // SAFETY: `cell` is non-null and valid (owned by the enclosing BBTerm
-        // which is alive whenever Term<RoutingListener>::send_event runs).
-        // Single-thread discipline means no concurrent access.
+        // SAFETY: `cell` and `color_queue` remain live for as long as any
+        // Arc clone exists; single-thread discipline (see RoutingListener
+        // doc) means no concurrent access.
         unsafe {
             match event {
                 Event::Bell => {
-                    (*self.cell).fire(BBEvent {
+                    self.cell.fire(BBEvent {
                         kind: BBEventKind::Bell,
                         payload: std::ptr::null(),
                         len: 0,
@@ -276,7 +286,7 @@ impl EventListener for RoutingListener {
                     });
                 }
                 Event::Title(ref s) => {
-                    (*self.cell).fire(BBEvent {
+                    self.cell.fire(BBEvent {
                         kind: BBEventKind::Title,
                         payload: s.as_ptr(),
                         len: s.len(),
@@ -284,7 +294,7 @@ impl EventListener for RoutingListener {
                     });
                 }
                 Event::ClipboardStore(_, ref s) => {
-                    (*self.cell).fire(BBEvent {
+                    self.cell.fire(BBEvent {
                         kind: BBEventKind::Osc52Clipboard,
                         payload: s.as_ptr(),
                         len: s.len(),
@@ -293,7 +303,7 @@ impl EventListener for RoutingListener {
                 }
                 Event::PtyWrite(ref s) => {
                     let bytes = s.as_bytes();
-                    (*self.cell).fire(BBEvent {
+                    self.cell.fire(BBEvent {
                         kind: BBEventKind::PtyWrite,
                         payload: bytes.as_ptr(),
                         len: bytes.len(),
@@ -310,7 +320,9 @@ impl EventListener for RoutingListener {
                     // the drop signal here — the listener can't replywrite
                     // anyway, and the one-shot log inside push() surfaces
                     // the hostile case for diagnostics.
-                    let _ = (*self.color_queue).push(ColorRequestEntry { index, formatter });
+                    let _ = self
+                        .color_queue
+                        .push(ColorRequestEntry { index, formatter });
                 }
                 // All other variants (MouseCursorDirty, ResetTitle, ClipboardLoad,
                 // TextAreaSizeRequest, CursorBlinkingChange, Wakeup, Exit,
@@ -681,12 +693,11 @@ fn percent_decode(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Opaque handle exposed to Swift.
 ///
-/// SAFETY: Rust drops struct fields in declaration order. `term` owns a
-/// RoutingListener whose raw pointer targets `callback`, so `term` must be
-/// declared BEFORE `callback` — this makes `term` drop first, leaving the
-/// pointer valid during Term's destruction. The Fatal event delivery path
-/// (in `guard_with_term`) fires during teardown, making this ordering
-/// load-bearing.
+/// `callback` and `color_queue` are shared with the owned `Term`'s
+/// `RoutingListener` via `Arc`. Field drop order between `term` and the
+/// cells is no longer load-bearing for memory safety (rust-core-1 F3):
+/// each Arc keeps its inner cell alive as long as any clone exists, so an
+/// event firing during `Term`'s destruction still lands on live memory.
 pub struct BBTerm {
     term: Term<RoutingListener>,
     processor: Processor,
@@ -703,7 +714,7 @@ pub struct BBTerm {
     /// `bb_term_input` so the response writes land in the same input
     /// batch that emitted the query. Responses are actually emitted only
     /// when `color_query_enabled` is true.
-    color_queue: Box<ColorRequestQueue>,
+    color_queue: Arc<ColorRequestQueue>,
     /// Whether OSC 10 / 11 / 12 `?` queries produce a reply. Off by
     /// default: historically, replying leaked the palette back into the
     /// PTY, which zsh-vi-mode could interpret as commands (CVE class on
@@ -731,16 +742,27 @@ pub struct BBTerm {
     /// `hook`/`put`/`unhook` and `core/tests/xtgettcap.rs`.
     in_xtgettcap: bool,
     xtgettcap_buf: Vec<u8>,
-    callback: Box<CallbackCell>,
-    /// Intern cache for OSC 8 URIs. Maps URI string → `link_id` used within
-    /// the most recent snapshot. Carried across snapshots so repeated TUI
-    /// re-paints don't re-allocate a `HashMap` + re-copy every URL
-    /// (rust-core-3 F1). `clear()`-ed but not `drop()`-ed between snapshots
-    /// so the backing buckets survive across frames. The per-snapshot
-    /// `BBSnapOwned::links` Vec is still constructed fresh each time
-    /// (lifetimes differ), but the hash probe for "did I see this URI
-    /// already?" is now O(1) amortized without allocator churn.
-    link_id_cache: std::collections::HashMap<String, u16>,
+    callback: Arc<CallbackCell>,
+    /// Persistent OSC 8 URI intern store (rust-core-3 F1). Maps URI string →
+    /// shared `Arc<CStr>`; entries survive across snapshots so the same URI
+    /// appearing frame after frame is interned exactly once (not per-snapshot).
+    /// A new snapshot pushes `Arc::clone(&cstr)` into its local `links` Vec —
+    /// cheap (one atomic increment) vs. the old `CString::new(uri.to_owned())`
+    /// per appearance.
+    ///
+    /// Bounded globally by `uri_cache_bytes` against
+    /// `OSC8_TOTAL_INTERN_BYTES_CAP` (1 MiB) so a hostile TUI writing
+    /// distinct 4 KiB URIs cannot retain arbitrary megabytes of CStrings.
+    /// When the budget would be exceeded, new URIs silently drop to
+    /// `link_id = 0` (no link) rather than evicting older entries —
+    /// eviction would invalidate the `*const c_char` returned by
+    /// `bb_snap_link_url` on still-live snapshots that reference those
+    /// Arcs.
+    uri_cstr_cache: std::collections::HashMap<String, Arc<std::ffi::CStr>>,
+    /// Total bytes currently retained by `uri_cstr_cache` (sum of URI byte
+    /// lengths, excluding the terminating NUL). Drives the
+    /// `OSC8_TOTAL_INTERN_BYTES_CAP` gate in `bb_term_take_snapshot`.
+    uri_cache_bytes: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -864,11 +886,11 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             ..Default::default()
         };
 
-        let callback = Box::new(CallbackCell::new());
-        let color_queue = Box::new(ColorRequestQueue::new());
+        let callback = Arc::new(CallbackCell::new());
+        let color_queue = Arc::new(ColorRequestQueue::new());
         let listener = RoutingListener {
-            cell: &*callback as *const CallbackCell,
-            color_queue: &*color_queue as *const ColorRequestQueue,
+            cell: Arc::clone(&callback),
+            color_queue: Arc::clone(&color_queue),
         };
         let term = Term::new(config, &size, listener);
         let bb = Box::new(BBTerm {
@@ -881,7 +903,8 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             in_xtgettcap: false,
             xtgettcap_buf: Vec::with_capacity(64),
             callback,
-            link_id_cache: std::collections::HashMap::new(),
+            uri_cstr_cache: std::collections::HashMap::new(),
+            uri_cache_bytes: 0,
         });
         Box::into_raw(bb)
     })
@@ -1253,10 +1276,15 @@ struct BBSnapOwned {
     snap: BBSnap,
     rc: AtomicUsize,
     cells_owned: Vec<BBCell>,
-    /// Index 0 reserved as a sentinel "no link"; index N matches `BBCell.link_id`.
-    /// CStrings live for the snapshot's lifetime so `bb_snap_link_url` can hand
-    /// out raw pointers without copying.
-    links: Vec<std::ffi::CString>,
+    /// OSC 8 URI table. Empty when the grid had no OSC 8 cells (rust-core-3 F9
+    /// short-circuit — no sentinel push, no HashMap, no allocation); otherwise
+    /// index 0 is a reserved empty-string sentinel and index N matches
+    /// `BBCell.link_id`. Stored as `Arc<CStr>` so the same interned URI is
+    /// shared across snapshots via `BBTerm::uri_cstr_cache` (rust-core-3 F1),
+    /// avoiding a `CString::new(uri.to_owned())` per appearance. The pointer
+    /// handed out by `bb_snap_link_url` is stable for the snapshot's lifetime
+    /// because the Arc's pointee never moves.
+    links: Vec<Arc<std::ffi::CStr>>,
     /// Rows whose content changed between this snapshot and the previous.
     /// Extracted from alacritty's `Term::damage()` before the grid read, then
     /// the term's damage is reset so each snapshot reports deltas.
@@ -1288,7 +1316,7 @@ impl BBSnapOwned {
         mode: u32,
         cursor_shape: u8,
         cells: Vec<BBCell>,
-        links: Vec<std::ffi::CString>,
+        links: Vec<Arc<std::ffi::CStr>>,
         damaged_rows: Vec<u16>,
         damage_full: bool,
     ) -> Box<BBSnapOwned> {
@@ -1689,14 +1717,17 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         };
         bb.term.reset_damage();
 
-        // Pluck the intern cache out of `bb` so we can mutate it while
-        // holding an immutable borrow on `bb.term` (for `grid`). The
-        // `HashMap` allocation is preserved (`clear` retains buckets),
-        // avoiding the per-snapshot re-allocation called out in
-        // rust-core-3 F1. We stuff the cache back into `bb` after the
-        // grid iteration finishes.
-        let mut link_ids = std::mem::take(&mut bb.link_id_cache);
-        link_ids.clear();
+        // Pluck the persistent URI intern cache out of `bb` so we can
+        // mutate it while holding an immutable borrow on `bb.term` (for
+        // `grid`). Entries survive across snapshots (rust-core-3 F1):
+        // the same URI appearing frame after frame is interned exactly
+        // once across the terminal's lifetime. A new snapshot
+        // `Arc::clone`s the existing CStr into its local `links` — one
+        // atomic increment, zero allocation. `uri_cache_bytes` tracks
+        // the global byte footprint; new URIs dropped silently once
+        // it crosses `OSC8_TOTAL_INTERN_BYTES_CAP` (1 MiB).
+        let mut uri_cache = std::mem::take(&mut bb.uri_cstr_cache);
+        let mut uri_cache_bytes = bb.uri_cache_bytes;
 
         let palette = bb.term.colors();
         let grid = bb.term.grid();
@@ -1709,28 +1740,35 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // "no link" sentinel so cell `link_id == 0` always means "no
         // OSC 8 attribution" and subsequent URIs get 1-based indices.
         // Caps:
-        //   - distinct URIs per snapshot: `u16::MAX - 1 = 65534`
+        //   - distinct URIs per snapshot: `u16::MAX - 1 = 65534` (local ids)
         //   - per-URI bytes: 4 KiB (covers any realistic http URL)
-        //   - total interned bytes: 1 MiB per snapshot
-        // The total-bytes cap (rust-core-3 F1) defends against a
-        // hostile TUI that writes distinct 4 KiB URIs into every cell
-        // of a large grid: without it, one snapshot can retain ~256
-        // MiB of CStrings. Over the 1 MiB ceiling, new URIs drop to
-        // no-link rather than truncate.
+        //   - total interned bytes ACROSS the persistent cache:
+        //     `OSC8_TOTAL_INTERN_BYTES_CAP` = 1 MiB. Without a global
+        //     byte cap a hostile TUI writing distinct 4 KiB URIs can
+        //     retain ~256 MiB of CStrings per live snapshot ×
+        //     outstanding refcount (rust-core-3 F1). Over the ceiling,
+        //     new URIs drop to no-link rather than evict — eviction
+        //     would invalidate pointers held by still-live snapshots
+        //     that `Arc::clone`d the existing CStr.
         //
         // rust-core-3 F9: `links` starts empty and the index-0
         // sentinel CString is pushed only when the first hyperlink
         // cell is seen. The common case — ProMotion frame re-render
         // with no OSC 8 on screen — pays zero heap allocations for
-        // the intern table. `bb_snap_link_url` short-circuits on
-        // `link_id == 0`, and a non-zero lookup against an empty
-        // `links` misses the bounds check and returns null — so the
-        // empty-Vec shape is safe.
-        let mut links: Vec<std::ffi::CString> = Vec::new();
+        // the intern table (and, with the persistent cache, zero
+        // allocations for repeat-URI snapshots too). `bb_snap_link_url`
+        // short-circuits on `link_id == 0`, and a non-zero lookup
+        // against an empty `links` misses the bounds check and
+        // returns null — so the empty-Vec shape is safe.
+        let mut links: Vec<Arc<std::ffi::CStr>> = Vec::new();
+        // Per-snapshot URI → local id map. `String` keys let us look
+        // up by `&str` (via `Borrow<str>`) without cloning alacritty's
+        // Hyperlink-scoped &str out of its borrow. Only one
+        // `String::from` per unique URI per snapshot.
+        let mut local_uri_to_id: Option<std::collections::HashMap<String, u16>> = None;
 
         const OSC8_URI_MAX: usize = 4096;
-        const OSC8_TOTAL_BYTES_MAX: usize = 1024 * 1024;
-        let mut total_uri_bytes: usize = 0;
+        const OSC8_TOTAL_INTERN_BYTES_CAP: usize = 1024 * 1024;
         for indexed in grid.display_iter() {
             let link_id: u16 = match indexed.cell.hyperlink() {
                 Some(h) => {
@@ -1739,44 +1777,57 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                     // we defensively treat an empty uri as "no link".
                     if uri.is_empty() || uri.len() > OSC8_URI_MAX {
                         0
-                    } else if let Some(&id) = link_ids.get(uri) {
-                        id
-                    } else if total_uri_bytes.saturating_add(uri.len()) > OSC8_TOTAL_BYTES_MAX {
-                        // Bytes budget exhausted. Stop interning new URIs,
-                        // leaving previously-interned ones intact on their
-                        // cells (via the `get` branch above).
-                        0
                     } else {
-                        // Skip if the URI contains an interior NUL (can't be a
-                        // CString); fall back to "no link" rather than panic.
-                        match std::ffi::CString::new(uri) {
-                            Ok(cs) => {
-                                // F9 lazy sentinel: the first interned URI
-                                // of the snapshot materializes the index-0
-                                // "no link" placeholder. After this,
-                                // `links.len()` is the next id to hand out
-                                // (1-based).
-                                if links.is_empty() {
-                                    links.push(
-                                        std::ffi::CString::new("")
-                                            .expect("empty CString is infallible"),
-                                    );
-                                }
-                                if links.len() >= u16::MAX as usize {
-                                    // Out of ids — drop attribution
-                                    // silently. 65 534 links per snapshot
-                                    // is already well past any realistic
-                                    // TUI.
-                                    0
+                        // Lazy init: first hyperlink of the snapshot
+                        // materializes `links` (with its sentinel) and
+                        // the local URI map.
+                        if links.is_empty() {
+                            let sentinel: Arc<std::ffi::CStr> = std::ffi::CString::default().into();
+                            links.push(sentinel);
+                            local_uri_to_id = Some(std::collections::HashMap::with_capacity(8));
+                        }
+                        let local_map = local_uri_to_id
+                            .as_mut()
+                            .expect("local_uri_to_id initialised above");
+                        if let Some(&id) = local_map.get(uri) {
+                            id
+                        } else if links.len() >= u16::MAX as usize {
+                            // Out of per-snapshot ids — drop
+                            // attribution silently. 65 534 links per
+                            // snapshot is already well past any
+                            // realistic TUI.
+                            0
+                        } else {
+                            // Persistent-cache hit? reuse the Arc (one
+                            // atomic increment, zero allocation). Miss
+                            // → intern subject to the global byte cap.
+                            let cstr_arc: Option<Arc<std::ffi::CStr>> =
+                                if let Some(existing) = uri_cache.get(uri) {
+                                    Some(Arc::clone(existing))
+                                } else if uri_cache_bytes.saturating_add(uri.len())
+                                    > OSC8_TOTAL_INTERN_BYTES_CAP
+                                {
+                                    None
                                 } else {
+                                    match std::ffi::CString::new(uri) {
+                                        Ok(cs) => {
+                                            let arc: Arc<std::ffi::CStr> = cs.into();
+                                            uri_cache.insert(uri.to_owned(), Arc::clone(&arc));
+                                            uri_cache_bytes += uri.len();
+                                            Some(arc)
+                                        }
+                                        Err(_) => None,
+                                    }
+                                };
+                            match cstr_arc {
+                                Some(arc) => {
                                     let id = links.len() as u16;
-                                    links.push(cs);
-                                    link_ids.insert(uri.to_owned(), id);
-                                    total_uri_bytes += uri.len();
+                                    links.push(arc);
+                                    local_map.insert(uri.to_owned(), id);
                                     id
                                 }
+                                None => 0,
                             }
-                            Err(_) => 0,
                         }
                     }
                 }
@@ -1812,15 +1863,19 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let display_offset = grid.display_offset().min(u16::MAX as usize) as u16;
         let history_size = grid.history_size().min(u32::MAX as usize) as u32;
         // Drop the `grid`/`palette` borrows (and by extension the `&bb.term`
-        // borrow) before we touch `bb.link_id_cache` mutably below. The
+        // borrow) before we touch `bb.uri_cstr_cache` mutably below. The
         // `cursor_style()`/`mode()` reads through `bb.term` happen through a
         // fresh immutable borrow, which is compatible with handing the
         // cache back via `&mut bb`.
         let _ = grid;
         let _ = palette;
-        // Return the intern cache to BBTerm so the next snapshot reuses
-        // the bucket allocation (rust-core-3 F1).
-        bb.link_id_cache = link_ids;
+        // `local_uri_to_id` lives and dies with this snapshot.
+        drop(local_uri_to_id);
+        // Return the persistent intern cache to BBTerm. Entries survive
+        // across snapshots (rust-core-3 F1) so repeat URIs are a hash
+        // probe + Arc-clone next frame, not a full CString allocation.
+        bb.uri_cstr_cache = uri_cache;
+        bb.uri_cache_bytes = uri_cache_bytes;
         let term_mode = bb.term.mode();
         let mode = extract_mode(term_mode);
         // DECTCEM (ESC [ ? 25 h/l) toggles SHOW_CURSOR. Previously we
@@ -2557,12 +2612,16 @@ mod tests {
             scrolling_history: scrollback,
             ..Default::default()
         };
-        let callback = Box::new(CallbackCell::new());
-        let color_queue = Box::new(ColorRequestQueue::new());
+        let callback = Arc::new(CallbackCell::new());
+        let color_queue = Arc::new(ColorRequestQueue::new());
         let listener = RoutingListener {
-            cell: &*callback as *const CallbackCell,
-            color_queue: &*color_queue as *const ColorRequestQueue,
+            cell: Arc::clone(&callback),
+            color_queue: Arc::clone(&color_queue),
         };
+        // Keep the Arcs alive past listener construction so the inner
+        // cells survive for the lifetime of `term`.
+        let _callback_keepalive = callback;
+        let _color_queue_keepalive = color_queue;
         let mut term = Term::new(config, &size, listener);
 
         // Feed (rows + scrollback) newlines so that exactly `scrollback` lines
@@ -3771,30 +3830,66 @@ mod tests {
         }
     }
 
-    /// Regression for rust-core-3 F1: the URI intern table is cached on
-    /// the `BBTerm` so repeated snapshots reuse the HashMap's buckets
-    /// rather than allocating fresh every frame.
+    /// Regression for rust-core-3 F1: the URI intern store is truly
+    /// persistent across snapshots — the same URI seen again in a later
+    /// snapshot is NOT reallocated. We verify by taking two snapshots
+    /// with the same URI and confirming:
+    ///   1. `uri_cstr_cache` has the entry after the first snapshot.
+    ///   2. The interned `Arc<CStr>` pointer is the SAME across
+    ///      snapshots — proving reuse, not reallocation.
+    ///   3. `uri_cache_bytes` does not grow on the second snapshot.
     #[test]
     fn osc8_intern_cache_is_retained_on_bbterm() {
         unsafe {
             let term = bb_term_new(10, 2, 100);
-            // Take 3 snapshots in a row; each snapshot reuses the cache.
-            for _ in 0..3 {
-                let s = bb_term_take_snapshot(term);
-                assert!(!s.is_null());
-                bb_snap_release(s);
-            }
-            // Emit a single OSC 8 sequence so the cache has content we
-            // can inspect through the private field.
+            // Emit an OSC 8 so the cache gets an entry.
             let seq = b"\x1b]8;;https://x.test/\x1b\\Y\x1b]8;;\x1b\\";
             bb_term_input(term, seq.as_ptr(), seq.len());
-            let s = bb_term_take_snapshot(term);
-            bb_snap_release(s);
+
+            let s1 = bb_term_take_snapshot(term);
+            assert!(!s1.is_null());
+
             let bb = &*term;
             assert!(
-                !bb.link_id_cache.is_empty(),
-                "link_id_cache must retain entries across snapshots"
+                !bb.uri_cstr_cache.is_empty(),
+                "uri_cstr_cache must retain entries across snapshots"
             );
+            assert!(
+                bb.uri_cache_bytes > 0,
+                "uri_cache_bytes must track bytes of retained URIs"
+            );
+            let bytes_before = bb.uri_cache_bytes;
+            // Capture a raw pointer to the cached Arc's pointee — used
+            // below to confirm the second snapshot reuses this exact
+            // allocation (not a fresh one).
+            let cached_arc = bb
+                .uri_cstr_cache
+                .get("https://x.test/")
+                .expect("URI must be interned after first snapshot");
+            let cached_ptr = cached_arc.as_ptr();
+
+            // Second snapshot — same URI still in the grid. Must reuse.
+            let s2 = bb_term_take_snapshot(term);
+            assert!(!s2.is_null());
+            let bb = &*term;
+            assert_eq!(
+                bb.uri_cache_bytes, bytes_before,
+                "uri_cache_bytes must not grow on a repeat URI — the \
+                 intern store should have reused the existing entry"
+            );
+            let cached_arc_2 = bb
+                .uri_cstr_cache
+                .get("https://x.test/")
+                .expect("URI must still be interned on second snapshot");
+            assert_eq!(
+                cached_arc_2.as_ptr(),
+                cached_ptr,
+                "repeated URI across snapshots must share the same Arc<CStr> \
+                 allocation, not re-intern"
+            );
+
+            bb_snap_release(s1);
+            bb_snap_release(s2);
             bb_term_free(term);
         }
     }
@@ -3908,6 +4003,82 @@ mod tests {
 
             bb_snap_release(snap);
             bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-1 F3: `RoutingListener` holds `Arc<...>`
+    /// instead of raw pointers, so the `CallbackCell` and
+    /// `ColorRequestQueue` remain live even if the listener outlives the
+    /// owning `BBTerm` or an event fires during teardown. The previous
+    /// implementation's invariant ("Term always dropped before BBTerm")
+    /// was only documented; a future refactor could quietly violate it
+    /// and turn it into use-after-free.
+    ///
+    /// The test pins the observable contract:
+    ///   1. A listener cloned out of a `BBTerm` still refers to the same
+    ///      `CallbackCell` (Arc refcount ≥ 2 after clone).
+    ///   2. Dropping the BBTerm while the listener still holds its Arc
+    ///      leaves the callback storage valid — we can still call `fire`
+    ///      through the listener's Arc without UB (no segfault, no
+    ///      Miri stacked-borrows complaint).
+    ///   3. `push` into a ColorRequestQueue whose BBTerm has dropped
+    ///      still succeeds and doesn't touch freed memory.
+    #[test]
+    fn routing_listener_arc_survives_bbterm_drop() {
+        unsafe {
+            let term_ptr = bb_term_new(10, 3, 100);
+            assert!(!term_ptr.is_null());
+            // Clone out the Arcs. The BBTerm still holds its own clones
+            // via `callback` + `color_queue`, and the Term's listener
+            // holds a third pair internally.
+            let cell_arc: Arc<CallbackCell> = Arc::clone(&(*term_ptr).callback);
+            let queue_arc: Arc<ColorRequestQueue> = Arc::clone(&(*term_ptr).color_queue);
+            assert!(
+                Arc::strong_count(&cell_arc) >= 2,
+                "cloning the callback Arc must increment the refcount"
+            );
+            assert!(
+                Arc::strong_count(&queue_arc) >= 2,
+                "cloning the color_queue Arc must increment the refcount"
+            );
+
+            // Drop the BBTerm — this drops the Term (which drops its
+            // listener, which drops its Arc pair) AND the BBTerm's own
+            // Arc pair. Our out-of-BBTerm clone is the only reference
+            // left to each cell.
+            bb_term_free(term_ptr);
+
+            // After free, the cells are still live (our Arcs hold them).
+            // fire() with no callback registered is a no-op but must
+            // not UAF. This is the regression — previously the raw
+            // pointer in the listener could dangle if drop order
+            // changed; with Arc, the cell is alive as long as an Arc
+            // clone exists.
+            cell_arc.fire(BBEvent {
+                kind: BBEventKind::Bell,
+                payload: std::ptr::null(),
+                len: 0,
+                i32_arg: 0,
+            });
+
+            // Same for the color queue: push must not touch freed
+            // memory. No callback is registered inside the cell so
+            // the entry just sits in the vec until our Arc drops.
+            let fmt: Arc<dyn Fn(Rgb) -> String + Sync + Send> = Arc::new(|_rgb| String::new());
+            assert!(queue_arc.push(ColorRequestEntry {
+                index: 0,
+                formatter: fmt,
+            }));
+            assert_eq!(queue_arc.len(), 1);
+
+            // Our clones are the last holders. Drop them explicitly —
+            // this runs the real destructors for `CallbackCell` and
+            // `ColorRequestQueue` after the `BBTerm` has been gone
+            // for several lines. Under the old raw-pointer regime,
+            // every access above would have dereferenced freed
+            // memory.
+            drop(cell_arc);
+            drop(queue_arc);
         }
     }
 }
