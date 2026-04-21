@@ -23,7 +23,16 @@ enum CwdResolver {
     /// Blackbird window — the very first window in that case. Returning
     /// nil is correct: `PTY.spawn` then lands in `$HOME`.
     static func forNewTab(source: TerminalSession?) -> String? {
-        source?.lastKnownCwd ?? source?.foregroundWorkingDirectory()
+        if let cwd = source?.lastKnownCwd { return cwd }
+        // `foregroundWorkingDirectory()` dereferences `PTY.masterFD`. If the
+        // session already exited, the fd has been closed and the OS may have
+        // handed the same integer to an unrelated caller within this process
+        // (low probability but real). `tcgetpgrp` on a reused fd would point
+        // at a foreign pgroup's cwd. Gate on `exitCode == nil` so we only
+        // consult the PTY while it's still live; otherwise return nil and
+        // let `PTY.spawn` apply its `$HOME` fallback.
+        guard let src = source, src.exitCode == nil else { return nil }
+        return src.foregroundWorkingDirectory()
     }
 
     /// ⌘N: always a fresh start. Never inherits the active tab's cwd —
