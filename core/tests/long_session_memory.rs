@@ -106,36 +106,62 @@ mod macos {
             rss_warm as f64 / (1024.0 * 1024.0)
         );
 
-        // Sustained load: many iterations of the full new/input/snap/free
-        // cycle. An unbounded snapshot leak would reveal itself here as
-        // linear growth with N.
+        // First batch: 64 iterations. Records how much RSS grows during
+        // the initial steady-state phase.
         for _ in 0..64 {
             unsafe { one_iteration(&payload) };
         }
+        let rss_mid = rss_bytes();
+        let growth_first = rss_mid.saturating_sub(rss_warm);
+        eprintln!(
+            "growth after batch 1 (64 iter): {:.1} MiB",
+            growth_first as f64 / (1024.0 * 1024.0)
+        );
 
+        // Second batch: 64 more. A true leak grows at the same rate as
+        // the first batch (per-iteration cost is constant). Allocator
+        // retention plateaus after the first batch because the pool has
+        // already sized up to the working set.
+        for _ in 0..64 {
+            unsafe { one_iteration(&payload) };
+        }
         let rss_end = rss_bytes();
+        let growth_second = rss_end.saturating_sub(rss_mid);
         eprintln!(
-            "post-run RSS: {:.1} MiB",
-            rss_end as f64 / (1024.0 * 1024.0)
-        );
-        let growth = rss_end.saturating_sub(rss_warm);
-        eprintln!(
-            "growth over 64 iterations: {:.1} MiB",
-            growth as f64 / (1024.0 * 1024.0)
+            "growth after batch 2 (64 iter): {:.1} MiB",
+            growth_second as f64 / (1024.0 * 1024.0)
         );
 
-        // A real leak would add ~scrollback-worth of memory per iteration
-        // (at least hundreds of KB). 64 iterations → tens of MB. Observed
-        // on M2 Pro: ~0-2 MiB variance. Observed on macos-14 CI runners:
-        // up to ~26 MiB variance under load — the 16 MiB gate tripped on
-        // a clean run with no code leak (local repro: 1.3 MiB). Bump to
-        // 48 MiB so a real 1 MB/iter leak still fails (64 MiB) while
-        // allocator retention under runner pressure doesn't.
+        // Absolute bound: 48 MiB for the full 128 iterations. Matches
+        // the original threshold shape — allocator retention on loaded
+        // macos-14 runners has been observed up to ~26 MiB.
+        let growth_total = rss_end.saturating_sub(rss_warm);
         assert!(
-            growth < 48 * 1024 * 1024,
-            "RSS grew by {:.1} MiB over 64 iterations — suspect leak",
-            growth as f64 / (1024.0 * 1024.0)
+            growth_total < 48 * 1024 * 1024,
+            "RSS grew by {:.1} MiB over 128 iterations — suspect leak",
+            growth_total as f64 / (1024.0 * 1024.0)
         );
+
+        // Delta-of-deltas: a sustained leak would show growth_second >=
+        // growth_first * 0.5 (i.e. half or more of the original rate
+        // persists). Allocator retention falls off sharply; we've
+        // observed <5 MiB of second-batch growth on clean runs. Audit
+        // rust-tests F9. Only trip when the first batch had a visible
+        // signal in the first place — on a cold runner the ratio is
+        // noise.
+        let min_visible_first = 4 * 1024 * 1024; // 4 MiB
+        if growth_first > min_visible_first {
+            let second_ratio =
+                (growth_second as f64) / (growth_first as f64);
+            assert!(
+                second_ratio < 0.5,
+                "second-batch RSS growth {} MiB is {:.0}% of first \
+                 batch {} MiB — sustained growth suggests a per-iteration leak",
+                growth_second / (1024 * 1024),
+                second_ratio * 100.0,
+                growth_first / (1024 * 1024)
+            );
+        }
     }
 
     #[test]
