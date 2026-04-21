@@ -114,33 +114,28 @@ final class BBTermTests: XCTestCase {
         XCTAssertEqual(received, "my-title")
     }
 
-    // Pin down what alacritty_terminal hands us in Event::ClipboardStore.
-    // The Swift session layer writes the payload straight through to
-    // NSPasteboard, so alacritty changing this shape in a future bump would
-    // mean we're either double-decoding (corrupts clipboard) or stuffing a
-    // "c;<base64>" literal into the user's clipboard. This test locks the
-    // assumption that alacritty 0.26 already decoded the base64.
-    func test_osc52Payload_shapeViaAlacritty() throws {
+    // OSC 52 clipboard-store is gated off by default (rust-core audit F10):
+    // `alacritty_terminal`'s `Osc52` config is configured to `Disabled`
+    // inside `bb_term_new`, so the PTY cannot stuff the user's clipboard
+    // without the user first opting in via a Swift-side toggle. This
+    // test pins the secure-by-default contract — if a future refactor
+    // re-enables OSC 52 at the Rust layer, the Swift test catches it.
+    func test_osc52Store_disabledByDefault_noEventEmitted() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 40, rows: 5)))
-        let exp = expectation(description: "osc52 payload")
-        var captured: String?
+        var sawEvent = false
         term.onEvent { ev in
-            if case .osc52Clipboard(let s) = ev, captured == nil {
-                captured = s
-                exp.fulfill()
+            if case .osc52Clipboard = ev {
+                sawEvent = true
             }
         }
-        // OSC 52 ; c ; base64("hello") ST. ST = ESC \ (0x1B 0x5C) or BEL.
-        // aGVsbG8= is base64("hello").
+        // OSC 52 ; c ; base64("hello") ST. Valid store payload — must be
+        // silently dropped. aGVsbG8= is base64("hello").
         term.input("\u{1B}]52;c;aGVsbG8=\u{07}")
-        wait(for: [exp], timeout: 1.0)
-        let payload = try XCTUnwrap(captured, "no OSC 52 event received")
-        // Pin the shape so the TerminalSession parser matches what
-        // alacritty_terminal 0.26 hands back. The Swift side must agree.
-        // Fails loudly if alacritty changes what it emits in a future bump.
-        XCTAssertEqual(
-            payload, "hello",
-            "alacritty 0.26 should hand us the decoded OSC 52 text; got \(payload.debugDescription)"
+        // Pump the runloop briefly so any queued event dispatch lands.
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+        XCTAssertFalse(
+            sawEvent,
+            "OSC 52 store must be inert by default; Osc52Clipboard fired"
         )
     }
 

@@ -112,18 +112,36 @@ fn null_inputs_are_safe() {
 }
 
 #[test]
-fn null_out_buffer_returns_zero() {
+fn null_out_buffer_acts_as_length_probe() {
+    // New contract (rust-core-4 F2): `out = null` is a length probe. The
+    // first snapshot of a fresh term reports damage_full = true, so the
+    // total damaged-rows count is 0 regardless. Take a second snapshot
+    // after a tiny write to exercise the partial-damage probe path.
     unsafe {
         let term = new_term(10, 3);
-        let s = bb_term_take_snapshot(term);
-        assert_eq!(bb_snap_damage_rows(s, std::ptr::null_mut(), 16), 0);
-        bb_snap_release(s);
+        let s0 = bb_term_take_snapshot(term);
+        // damage_full; probe returns 0.
+        assert_eq!(bb_snap_damage_rows(s0, std::ptr::null_mut(), 16), 0);
+        bb_snap_release(s0);
+
+        bb_term_input(term, b"X".as_ptr(), 1);
+        let s1 = bb_term_take_snapshot(term);
+        if bb_snap_damage_is_full(s1) == 0 {
+            // Probe via null out — returns total damaged row count.
+            let probed = bb_snap_damage_rows(s1, std::ptr::null_mut(), 16);
+            // Sanity-size an actual write and compare.
+            let mut buf = [0u16; 16];
+            let written = bb_snap_damage_rows(s1, buf.as_mut_ptr(), buf.len());
+            assert_eq!(probed, written);
+        }
+        bb_snap_release(s1);
         bb_term_free(term);
     }
 }
 
 #[test]
-fn zero_cap_returns_zero() {
+fn zero_cap_returns_total_as_length_probe() {
+    // New contract: `out_cap = 0` with a non-null `out` still probes total.
     unsafe {
         let term = new_term(10, 3);
         // Force partial damage with a write + drain.
@@ -132,7 +150,12 @@ fn zero_cap_returns_zero() {
         bb_term_input(term, b"X".as_ptr(), 1);
         let s1 = bb_term_take_snapshot(term);
         let mut buf = [0u16; 4];
-        assert_eq!(bb_snap_damage_rows(s1, buf.as_mut_ptr(), 0), 0);
+        let total_probe = bb_snap_damage_rows(s1, buf.as_mut_ptr(), 0);
+        if bb_snap_damage_is_full(s1) == 0 {
+            // buf untouched; return value is the total damaged-rows count.
+            let written = bb_snap_damage_rows(s1, buf.as_mut_ptr(), buf.len());
+            assert_eq!(total_probe, written);
+        }
         bb_snap_release(s1);
         bb_term_free(term);
     }

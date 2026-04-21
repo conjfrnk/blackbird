@@ -116,16 +116,26 @@ fn osc52_readback_empty_selection_list_does_not_echo() {
 }
 
 #[test]
-fn osc52_store_is_allowed_and_surfaces_as_event() {
-    // Counter-check: writes ARE accepted and surface as Osc52Clipboard
-    // events. This ensures we haven't over-blocked clipboard I/O: the
-    // "set" direction remains functional (gated by prefs in Swift),
-    // only "get" is blocked at the FFI bridge.
-    // Payload "aGVsbG8=" is base64("hello").
-    let (events, _writes) = feed(b"\x1b]52;c;aGVsbG8=\x07");
+fn osc52_store_is_silently_dropped_by_default() {
+    // Default defence-in-depth (rust-core-2 F10): alacritty's `Osc52`
+    // config is flipped to `Disabled`, so the PTY cannot silently stuff
+    // the user's clipboard via `\x1b]52;c;...`. `Event::ClipboardStore`
+    // is never emitted, no `Osc52Clipboard` event reaches the callback,
+    // and no PTY-side reply is generated either. The Swift side's
+    // `osc52Enabled` preference remains the single source of truth for
+    // any future opt-in path (which would flow through a dedicated FFI
+    // toggle; intentionally not wired yet to keep the secure-by-default
+    // contract explicit).
+    // Payload "aGVsbG8=" is base64("hello"), a valid store request.
+    let (events, writes) = feed(b"\x1b]52;c;aGVsbG8=\x07");
     assert!(
-        events.contains(&(bc::BBEventKind::Osc52Clipboard as u32)),
-        "write-form OSC 52 must still fire Osc52Clipboard; got {:?}",
+        !events.contains(&(bc::BBEventKind::Osc52Clipboard as u32)),
+        "OSC 52 store must be inert by default; got {:?}",
         events
+    );
+    assert!(
+        writes.is_empty(),
+        "OSC 52 store must not produce PTY replies; got {:?}",
+        writes
     );
 }

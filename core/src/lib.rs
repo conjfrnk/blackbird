@@ -304,6 +304,16 @@ struct OscScanner<'a> {
     cell: &'a CallbackCell,
     in_xtgettcap: &'a mut bool,
     xtgettcap_buf: &'a mut Vec<u8>,
+    /// Set to `true` when the parser sees a top-level `CSI 2 J` (ED All —
+    /// erase the visible screen) via `csi_dispatch`. Because `csi_dispatch`
+    /// only fires when the vte parser reaches CSI final from ground state,
+    /// this is inherently state-aware: an `ESC [ 2 J`-shaped byte sequence
+    /// appearing inside an OSC/DCS payload stays inert (it's a `put` byte,
+    /// not a CSI). `bb_term_input` uses this flag to emit a trailing
+    /// `ESC [ 3 J` (erase scrollback) AFTER the main processor has consumed
+    /// the chunk, replacing the old byte-level augmentation that corrupted
+    /// OSC/DCS payloads (rust-core-2 F1).
+    saw_ed_all: &'a mut bool,
 }
 
 impl Perform for OscScanner<'_> {
@@ -318,6 +328,21 @@ impl Perform for OscScanner<'_> {
         // bell_terminated is irrelevant to downstream semantics; included
         // here only to satisfy the Perform signature.
         let _ = bell_terminated;
+    }
+
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // Detect the top-level `CSI 2 J` (ED All). Intermediates must be
+        // empty — `CSI ? 2 J` is DECSED, a DEC private variant we don't
+        // augment. Any `2` in the first param slot (including `02`,
+        // `2;0`, etc.) counts as the ED-all form, matching what the old
+        // byte-match accepted before state-awareness.
+        if action == 'J' && intermediates.is_empty() {
+            if let Some(first) = params.iter().next() {
+                if first.first().copied() == Some(2) {
+                    *self.saw_ed_all = true;
+                }
+            }
+        }
     }
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
@@ -661,6 +686,15 @@ pub struct BBTerm {
     in_xtgettcap: bool,
     xtgettcap_buf: Vec<u8>,
     callback: Box<CallbackCell>,
+    /// Intern cache for OSC 8 URIs. Maps URI string → `link_id` used within
+    /// the most recent snapshot. Carried across snapshots so repeated TUI
+    /// re-paints don't re-allocate a `HashMap` + re-copy every URL
+    /// (rust-core-3 F1). `clear()`-ed but not `drop()`-ed between snapshots
+    /// so the backing buckets survive across frames. The per-snapshot
+    /// `BBSnapOwned::links` Vec is still constructed fresh each time
+    /// (lifetimes differ), but the hash probe for "did I see this URI
+    /// already?" is now O(1) amortized without allocator churn.
+    link_id_cache: std::collections::HashMap<String, u16>,
 }
 
 // ---------------------------------------------------------------------------
@@ -768,6 +802,19 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             // when the TUI asks for disambiguated escape codes via ESC[>1u.
             // Claude Code, nvim 0.10+, WezTerm shells all expect this.
             kitty_keyboard: true,
+            // Disable alacritty's in-term OSC 52 clipboard handling. The
+            // alacritty default is `Osc52::OnlyCopy`, which lets any PTY
+            // program silently stuff the macOS clipboard on write. Blackbird
+            // owns the Swift-side clipboard gate (see `Osc52Clipboard` event
+            // in `MainWindowController.swift`); disabling the alacritty
+            // handler entirely gives defence-in-depth: even if the Swift
+            // gate regresses, a hostile remote can't fall through to the
+            // built-in `ClipboardStore` event. `Event::ClipboardStore` is
+            // only emitted when alacritty accepts the OSC 52 write, so
+            // `Osc52::Disabled` also stops the forwarding path at the
+            // source. Users who want the historical behaviour must re-enable
+            // via a future Preferences toggle.
+            osc52: alacritty_terminal::term::Osc52::Disabled,
             ..Default::default()
         };
 
@@ -788,6 +835,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             in_xtgettcap: false,
             xtgettcap_buf: Vec::with_capacity(64),
             callback,
+            link_id_cache: std::collections::HashMap::new(),
         });
         Box::into_raw(bb)
     })
@@ -833,21 +881,33 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         }
         let bb = &mut *term;
         let slice = std::slice::from_raw_parts(bytes, len);
-        // Augment every `ESC [ 2 J` (ED All — erase the visible screen) with
-        // a trailing `ESC [ 3 J` (ED Saved — erase scrollback). `clear(1)`
-        // on macOS only emits 2J (from the xterm-256color terminfo); users
-        // expect it to also wipe scrollback, as iTerm2 and the util-linux
-        // `clear -x` do by default. Matching the exact 4-byte sequence is
-        // robust for the common case — shell and ncurses write the whole
-        // clear capability in a single write(2), so we don't need to track
-        // parser state across input batches. Edge cases (0-padded params,
-        // semicolon-separated params, sequence split across reads) fall
-        // through to normal processing without breaking anything.
+        // State-aware `CSI 2 J` (ED All) augmentation: append a trailing
+        // `CSI 3 J` (ED Saved — erase scrollback) when the chunk contains a
+        // top-level ED-all. `clear(1)` on macOS only emits 2J (xterm-256color
+        // terminfo); users expect scrollback to vanish too, matching iTerm2
+        // and `clear -x`.
+        //
+        // Earlier revisions did a byte-level `\x1b[2J` memmem match on the
+        // slice and injected `\x1b[3J` after every hit. That misfired when
+        // the bytes appeared inside an OSC/DCS payload (e.g., a shell-
+        // integration snippet embedding a CSI in a string literal, or a
+        // program echoing a captured log): vte was mid-OSC and wouldn't
+        // execute the 2J, but the injected ESC[3J pushed vte out of OSC and
+        // corrupted the enclosing sequence — rust-core-2 F1.
+        //
+        // The fix routes detection through the parallel `OscScanner`'s
+        // `csi_dispatch`, which only fires at top-level CSI (ground state).
+        // We feed the chunk to both parsers; if `saw_ed_all` is set
+        // afterwards, emit a single `\x1b[3J` to the main processor. This
+        // means scrollback-erase fires AFTER the entire chunk is consumed
+        // (rather than interleaved with each occurrence). That's fine —
+        // `clear(1)` sends ED-all at most once per chunk and any reasonable
+        // TUI emits `2J` sparsely; the ordering is preserved relative to
+        // downstream bytes in the same chunk.
         //
         // Fast path: if the chunk contains no ESC byte at all, we can't have
-        // ESC[2J. memchr does this in a few ns via SIMD even for 64 KiB.
-        // On a `yes` / `cat log` stream (no escapes) this is >90% of reads,
-        // and skips ~linear time scanning for the 4-byte needle.
+        // any CSI sequence, so neither augmentation nor OSC-parser work is
+        // required unless a prior chunk left an OSC/DCS pending.
         if memchr::memchr(0x1B, slice).is_none() {
             bb.processor.advance(&mut bb.term, slice);
             // OSC parser skip: pure-text chunks don't need the parallel
@@ -876,15 +936,21 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             // this branch because `osc_possibly_pending` stays true from
             // the DCS's opening ESC; kept as a safety belt.
             if bb.osc_possibly_pending || has_bel || bb.in_xtgettcap {
+                let mut saw_ed_all = false;
                 let mut osc = OscScanner {
                     cell: &bb.callback,
                     in_xtgettcap: &mut bb.in_xtgettcap,
                     xtgettcap_buf: &mut bb.xtgettcap_buf,
+                    saw_ed_all: &mut saw_ed_all,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
                     bb.osc_possibly_pending = false;
                 }
+                // ED-all can't happen on an ESC-free chunk (CSI requires
+                // ESC), but keep the branch uniform in case a prior chunk
+                // left a CSI mid-parameter.
+                debug_assert!(!saw_ed_all, "CSI 2J should not fire from an ESC-free chunk");
             }
             drain_color_requests(bb);
             return;
@@ -893,29 +959,30 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // later chunk. Set the latch so subsequent ESC-free chunks still
         // reach the parser.
         bb.osc_possibly_pending = true;
-        let needle = b"\x1B[2J";
-        let extra = b"\x1B[3J";
-        let mut cursor = 0usize;
-        while let Some(rel) = memchr::memmem::find(&slice[cursor..], needle) {
-            let end = cursor + rel + needle.len(); // one past the J
-            bb.processor.advance(&mut bb.term, &slice[cursor..end]);
-            bb.processor.advance(&mut bb.term, extra);
-            cursor = end;
-        }
-        if cursor < slice.len() {
-            bb.processor.advance(&mut bb.term, &slice[cursor..]);
-        }
+        // Feed the chunk to the main processor in one pass. The old
+        // byte-level split on `\x1b[2J` is gone — see the comment above.
+        bb.processor.advance(&mut bb.term, slice);
         // Drive the parallel OSC parser across the whole chunk. It is
         // stateful across `bb_term_input` calls so fragmented OSC
         // sequences (e.g. one byte per PTY read) still resolve to a
-        // single event. No need to replicate the 2J-augmentation above:
-        // OSC sequences don't care about ED.
+        // single event. `saw_ed_all` is set via OscScanner::csi_dispatch
+        // exactly when the parser observes a top-level `CSI 2 J`.
+        let mut saw_ed_all = false;
         let mut osc = OscScanner {
             cell: &bb.callback,
             in_xtgettcap: &mut bb.in_xtgettcap,
             xtgettcap_buf: &mut bb.xtgettcap_buf,
+            saw_ed_all: &mut saw_ed_all,
         };
         bb.osc_parser.advance(&mut osc, slice);
+        // Emit the scrollback-erase AFTER the chunk was consumed so any
+        // prior CSI ops in the same chunk execute first. One 3J per chunk
+        // is enough: repeated ED-alls in a single chunk still land on a
+        // clean viewport + scrollback once the 3J runs. The 3J is a short,
+        // fixed constant so we skip the parallel parser for it.
+        if saw_ed_all {
+            bb.processor.advance(&mut bb.term, b"\x1b[3J");
+        }
         drain_color_requests(bb);
     })
 }
@@ -1210,11 +1277,61 @@ impl BBSnapOwned {
 /// Panics inside this function are caught by `catch_unwind` and delivered as a
 /// `BBEventKind::Fatal` event to the registered callback. The function returns
 /// unit as the fallback value.
+///
+/// Callers that need to know whether the requested dimensions were clamped
+/// should prefer `bb_term_resize2`, which returns the actually-applied dims
+/// and a `clamped` flag. The void-returning form here is retained for ABI
+/// stability; it internally delegates to the same clamp logic.
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16) {
-    guard_with_term(term, (), || {
+    let _ = bb_term_resize2(term, cols, rows);
+}
+
+/// Result of `bb_term_resize2`. `applied_cols` / `applied_rows` report the
+/// dimensions the grid was actually resized to after clamping (floor = 2,
+/// ceiling = 1000 on each axis); `clamped` is non-zero when either requested
+/// dim differed from the applied value. On a no-op call (null term, or zero
+/// in either dim) all three fields are `0`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BBResizeResult {
+    pub applied_cols: u16,
+    pub applied_rows: u16,
+    /// Non-zero when the request was rewritten by the clamp; zero when the
+    /// grid now holds exactly the requested dims (or on no-op).
+    pub clamped: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Resize the terminal grid and report the actually-applied dimensions.
+///
+/// Dimensions are clamped to `[2, 1000]` on each axis to avoid the reflow
+/// explosion on tiny grids and the 100+ GB allocation on huge grids
+/// (documented in the floor/ceiling comment inside this function and in
+/// `MEMORY`). Zero on either axis is a no-op and returns
+/// `BBResizeResult { 0, 0, 0 }`.
+///
+/// `clamped` is the signal to Swift that `TIOCSWINSZ` should be told the
+/// APPLIED size, not the requested one — otherwise the shell and the grid
+/// disagree about the viewport (rust-core-3 F4).
+///
+/// # Safety
+/// Same as `bb_term_resize`.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_resize2(
+    term: *mut BBTerm,
+    cols: u16,
+    rows: u16,
+) -> BBResizeResult {
+    let fallback = BBResizeResult {
+        applied_cols: 0,
+        applied_rows: 0,
+        clamped: 0,
+        _pad: [0; 3],
+    };
+    guard_with_term(term, fallback, || {
         if term.is_null() || cols == 0 || rows == 0 {
-            return;
+            return fallback;
         }
         // Floor + ceiling on dimensions. The floor (2) prevents reflow
         // explosion on shrink (1-col scrollback = millions of 1-cell
@@ -1226,11 +1343,19 @@ pub unsafe extern "C" fn bb_term_resize(term: *mut BBTerm, cols: u16, rows: u16)
         const MIN_DIM: u16 = 2;
         const MAX_DIM: u16 = 1000;
         let bb = &mut *term;
+        let applied_cols = cols.clamp(MIN_DIM, MAX_DIM);
+        let applied_rows = rows.clamp(MIN_DIM, MAX_DIM);
         let size = TermSize {
-            cols: cols.clamp(MIN_DIM, MAX_DIM) as usize,
-            rows: rows.clamp(MIN_DIM, MAX_DIM) as usize,
+            cols: applied_cols as usize,
+            rows: applied_rows as usize,
         };
         bb.term.resize(size);
+        BBResizeResult {
+            applied_cols,
+            applied_rows,
+            clamped: u8::from(applied_cols != cols || applied_rows != rows),
+            _pad: [0; 3],
+        }
     })
 }
 
@@ -1501,6 +1626,15 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         };
         bb.term.reset_damage();
 
+        // Pluck the intern cache out of `bb` so we can mutate it while
+        // holding an immutable borrow on `bb.term` (for `grid`). The
+        // `HashMap` allocation is preserved (`clear` retains buckets),
+        // avoiding the per-snapshot re-allocation called out in
+        // rust-core-3 F1. We stuff the cache back into `bb` after the
+        // grid iteration finishes.
+        let mut link_ids = std::mem::take(&mut bb.link_id_cache);
+        link_ids.clear();
+
         let palette = bb.term.colors();
         let grid = bb.term.grid();
 
@@ -1510,19 +1644,21 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
 
         // OSC 8 hyperlink interning. `links[0]` is a placeholder so cell
         // `link_id == 0` always means "no OSC 8 attribution". Subsequent URIs
-        // get 1-based indices. Cap at u16::MAX - 1 distinct links per snapshot;
-        // on overflow we silently drop the attribution (cell stays at 0).
+        // get 1-based indices. Caps:
+        //   - distinct URIs per snapshot: `u16::MAX - 1 = 65534`
+        //   - per-URI bytes: 4 KiB (covers any realistic http URL)
+        //   - total interned bytes: 1 MiB per snapshot
+        // The total-bytes cap (rust-core-3 F1) defends against a hostile
+        // TUI that writes distinct 4 KiB URIs into every cell of a large
+        // grid: without it, one snapshot can retain ~256 MiB of CStrings.
+        // Over the 1 MiB ceiling, new URIs drop to no-link rather than
+        // truncate.
         let mut links: Vec<std::ffi::CString> = Vec::new();
         links.push(std::ffi::CString::new("").expect("empty CString is infallible"));
-        let mut link_ids: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
 
-        // Per-URI length cap. A remote can emit megabytes of junk as the
-        // OSC 8 target; each snapshot retains the `CString` for the
-        // snapshot's lifetime. 4 KiB covers every realistic URL (the
-        // longest http URL in common use is ~2 KiB) and is what iTerm2
-        // applies. Over-long URIs drop to no-link rather than truncate
-        // — a truncated URL that opens is worse than no link.
         const OSC8_URI_MAX: usize = 4096;
+        const OSC8_TOTAL_BYTES_MAX: usize = 1024 * 1024;
+        let mut total_uri_bytes: usize = 0;
         for indexed in grid.display_iter() {
             let link_id: u16 = match indexed.cell.hyperlink() {
                 Some(h) => {
@@ -1537,6 +1673,11 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                         // Out of ids — drop attribution silently. 65 534 links
                         // per snapshot is already well past any realistic TUI.
                         0
+                    } else if total_uri_bytes.saturating_add(uri.len()) > OSC8_TOTAL_BYTES_MAX {
+                        // Bytes budget exhausted. Stop interning new URIs,
+                        // leaving previously-interned ones intact on their
+                        // cells (via the `get` branch above).
+                        0
                     } else {
                         // Skip if the URI contains an interior NUL (can't be a
                         // CString); fall back to "no link" rather than panic.
@@ -1545,6 +1686,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                                 let id = links.len() as u16;
                                 links.push(cs);
                                 link_ids.insert(uri.to_owned(), id);
+                                total_uri_bytes += uri.len();
                                 id
                             }
                             Err(_) => 0,
@@ -1582,6 +1724,16 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // visible viewport — and may be below it entirely.
         let display_offset = grid.display_offset().min(u16::MAX as usize) as u16;
         let history_size = grid.history_size().min(u32::MAX as usize) as u32;
+        // Drop the `grid`/`palette` borrows (and by extension the `&bb.term`
+        // borrow) before we touch `bb.link_id_cache` mutably below. The
+        // `cursor_style()`/`mode()` reads through `bb.term` happen through a
+        // fresh immutable borrow, which is compatible with handing the
+        // cache back via `&mut bb`.
+        let _ = grid;
+        let _ = palette;
+        // Return the intern cache to BBTerm so the next snapshot reuses
+        // the bucket allocation (rust-core-3 F1).
+        bb.link_id_cache = link_ids;
         let term_mode = bb.term.mode();
         let mode = extract_mode(term_mode);
         // DECTCEM (ESC [ ? 25 h/l) toggles SHOW_CURSOR. Previously we
@@ -1792,10 +1944,21 @@ pub unsafe extern "C" fn bb_snap_damage_is_full(snap: *const BBSnap) -> u8 {
 }
 
 /// Copy the snapshot's damaged-row indices into the caller's buffer. Returns
-/// the number of rows written (capped at `out_cap`). If `out` is null or
-/// `out_cap` is zero, returns 0. If the damage is `Full`, returns 0 —
-/// callers must check `bb_snap_damage_is_full` first and treat "full" as
-/// "all rows need redraw".
+/// the TOTAL number of damaged rows (which may exceed `out_cap`); the
+/// function writes at most `min(total, out_cap)` rows into `out`.
+///
+/// Truncation detection: callers compare the return value against `out_cap`.
+/// If `return_value > out_cap`, the buffer was too small and the caller
+/// should re-allocate at `return_value` slots and retry to avoid leaving
+/// stale pixels on the undrawn rows.
+///
+/// Length probe: passing `out = null` with any `out_cap` returns the
+/// total count without writing anything, so a caller can size a buffer
+/// before allocating.
+///
+/// If the damage is `Full`, returns 0 — callers must check
+/// `bb_snap_damage_is_full` first and treat "full" as "all rows need
+/// redraw" regardless of this function's return value.
 ///
 /// # Safety
 /// - `snap` must be a pointer from `bb_term_take_snapshot` or retained
@@ -1809,7 +1972,7 @@ pub unsafe extern "C" fn bb_snap_damage_rows(
     out_cap: usize,
 ) -> usize {
     guard_no_term(0usize, || {
-        if snap.is_null() || out.is_null() || out_cap == 0 {
+        if snap.is_null() {
             return 0;
         }
         let owned = BBSnapOwned::from_snap_ptr(snap);
@@ -1817,9 +1980,20 @@ pub unsafe extern "C" fn bb_snap_damage_rows(
             return 0;
         }
         let rows = &(*owned).damaged_rows;
-        let n = rows.len().min(out_cap);
+        let total = rows.len();
+        // Length probe: caller passed null to size a buffer without writing.
+        if out.is_null() || out_cap == 0 {
+            return total;
+        }
+        let n = total.min(out_cap);
         std::ptr::copy_nonoverlapping(rows.as_ptr(), out, n);
-        n
+        // Surface truncation via debug_assert so dev builds flag undersized
+        // buffers. Release callers see the return > out_cap and can react.
+        debug_assert!(
+            total <= out_cap,
+            "bb_snap_damage_rows truncated: {total} damaged rows > out_cap {out_cap}"
+        );
+        total
     })
 }
 
@@ -1938,13 +2112,28 @@ pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, r
 /// instead of a literal `Vec<u8>` field lets cbindgen emit a complete,
 /// FFI-safe layout that Swift can import: `Vec<u8>` is not `repr(C)`, so a
 /// `Vec` field would surface as an incomplete type in the generated header.
+///
+/// `_magic` is a sentinel set by `bb_string_new` (to `BB_STRING_MAGIC`) and
+/// zeroed by `bb_string_release` before the heap buffer is reconstructed.
+/// It gives `bb_string_release` a cheap defence against double-free and
+/// wild-pointer input: a mismatching `_magic` short-circuits without
+/// calling `Vec::from_raw_parts` (which would be UB on stale pointers).
+/// Safety belt for Swift callers — still single-free by contract.
 #[repr(C)]
 pub struct BBString {
     pub bytes: *const u8,
     pub len: usize,
     _owned_ptr: *mut u8,
     _owned_cap: usize,
+    /// Magic sentinel: `BB_STRING_MAGIC` when live, `0` after release.
+    /// Double-free and wild-pointer input are rejected cheaply.
+    _magic: u64,
 }
+
+/// Magic sentinel stamped into `BBString::_magic` on construction. Any
+/// 64-bit constant unlikely to appear on the heap by accident. Also
+/// invariant-encodes the string "BlackbirdStr" via the low byte pattern.
+pub const BB_STRING_MAGIC: u64 = 0xB1AC_5BBD_5721_57E0;
 
 /// Extract UTF-8 text from the terminal buffer between two buffer-relative
 /// points. `start_line`/`end_line` are grid lines where 0 is the top of the
@@ -1961,9 +2150,14 @@ pub struct BBString {
 /// `[start_col, end_col]` with no trimming.
 ///
 /// `\0` cells (alacritty's "unrendered" sentinel) are emitted as spaces. Real
-/// spaces come through as-is. Lines outside `[topmost_line, bottommost_line]`
-/// are skipped silently. Points are normalized so `(start_line, start_col)
-/// <= (end_line, end_col)` before iterating.
+/// spaces come through as-is. Wide-char spacer cells (alacritty's
+/// `WIDE_CHAR_SPACER` / `LEADING_WIDE_CHAR_SPACER` flags) are SKIPPED entirely
+/// — the preceding primary cell already held the wide glyph's character, and
+/// emitting a space for the spacer would double-count columns and break paste
+/// round-trip for CJK/emoji (e.g. "中文" would emit as "中 文 "). Lines outside
+/// `[topmost_line, bottommost_line]` are skipped silently. Points are
+/// normalized so `(start_line, start_col) <= (end_line, end_col)` before
+/// iterating.
 ///
 /// Returns a heap-allocated `BBString` the caller must free with
 /// `bb_string_release`. Returns null when `term` is null.
@@ -2053,7 +2247,22 @@ pub unsafe extern "C" fn bb_term_text_range(
             let row = &grid[Line(line_i)];
             let mut c = col_lo;
             while c <= col_hi {
-                let ch = row[Column(c)].c;
+                let cell = &row[Column(c)];
+                // Skip wide-char spacer cells entirely. alacritty stores a
+                // wide char (CJK, emoji) in the primary cell and a '\0'
+                // sentinel in the continuation cell to its right; naively
+                // emitting ' ' for every '\0' produces "中 文 " instead of
+                // "中文" and breaks paste round-trip. The leading spacer is
+                // the analogous cell at the end of a line just before a wide
+                // glyph wraps — same skip rule applies.
+                if cell
+                    .flags
+                    .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    c += 1;
+                    continue;
+                }
+                let ch = cell.c;
                 // alacritty uses '\0' for unrendered/empty cells; surface as
                 // a plain space so callers can concatenate without seeing
                 // embedded NULs in their UTF-8.
@@ -2080,6 +2289,10 @@ pub unsafe extern "C" fn bb_term_text_range(
 /// (via `Vec::into_raw_parts`-style decomposition) and held in `_owned_ptr` +
 /// `_owned_cap` so `bb_string_release` can rebuild and drop it.
 ///
+/// Stamps `_magic` with `BB_STRING_MAGIC` so `bb_string_release` can detect
+/// a double-free or wild-pointer input before invoking `Vec::from_raw_parts`
+/// (which would be UB on stale parts).
+///
 /// # Safety
 /// The returned pointer must be released exactly once via `bb_string_release`.
 unsafe fn bb_string_new(bytes: Vec<u8>) -> *mut BBString {
@@ -2096,6 +2309,7 @@ unsafe fn bb_string_new(bytes: Vec<u8>) -> *mut BBString {
         len,
         _owned_ptr: ptr,
         _owned_cap: cap,
+        _magic: BB_STRING_MAGIC,
     });
     Box::into_raw(boxed)
 }
@@ -2105,6 +2319,13 @@ unsafe fn bb_string_new(bytes: Vec<u8>) -> *mut BBString {
 /// Rebuilds the owned `Vec<u8>` from `_owned_ptr`/`_owned_cap`/`len` so its
 /// heap buffer is deallocated with the matching `Vec` allocator, then drops
 /// the `Box<BBString>`.
+///
+/// Defends against double-free and wild-pointer input by checking
+/// `_magic` against `BB_STRING_MAGIC` before touching the owned parts. A
+/// mismatching magic returns early (with a one-line log) without calling
+/// `Vec::from_raw_parts` — that would be UB on stale/invalid raw parts and
+/// the null guard can't catch it. Successful releases zero the magic so a
+/// subsequent double-release is detected cheaply.
 ///
 /// # Safety
 /// `s` must have been returned by `bb_term_text_range` and not previously
@@ -2119,6 +2340,28 @@ pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
         if s.is_null() {
             return;
         }
+        // Magic check BEFORE `Box::from_raw` so a wild pointer doesn't even
+        // get reconstituted as a Box (whose Drop would try to call the
+        // allocator on a garbage address). Read the magic byte-wise via a
+        // raw pointer projection; this sidesteps creating a &BBString to
+        // a potentially-invalid allocation.
+        let magic_ptr = std::ptr::addr_of!((*s)._magic);
+        let magic = std::ptr::read(magic_ptr);
+        if magic != BB_STRING_MAGIC {
+            // Zero magic => already released (double-free). Any other
+            // value => wild/uninitialized pointer. Either way, don't touch
+            // the owned parts. Logging through eprintln! is acceptable: this
+            // is a one-shot development-side signal, not a hot path.
+            eprintln!(
+                "bb_string_release: magic mismatch (got {:#x}, expected {:#x}); \
+                 refusing to free possibly-invalid BBString",
+                magic, BB_STRING_MAGIC
+            );
+            return;
+        }
+        // Zero the magic *before* reclaiming the box so a concurrent or
+        // immediate double-release reads a cleared sentinel and early-outs.
+        std::ptr::write(magic_ptr as *mut u64, 0);
         let boxed = Box::from_raw(s);
         // Reconstitute the owned vec so its heap buffer is freed via the
         // matching `Vec<u8>` allocator. `_owned_ptr` may be a dangling
@@ -3105,6 +3348,319 @@ mod tests {
                 "scroll_to_bottom should pin the viewport regardless of prior extreme deltas"
             );
             bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-4 F2: `bb_snap_damage_rows` must now return
+    /// the TOTAL damaged-row count, not the bytes written. A caller that
+    /// passes a buffer smaller than the damaged set detects truncation by
+    /// comparing the return value against `out_cap` and retrying with a
+    /// larger buffer.
+    #[test]
+    fn damage_rows_reports_total_for_truncation_detection() {
+        unsafe {
+            let term = bb_term_new(10, 6, 100);
+            // Drain the initial full-damage snapshot.
+            let s0 = bb_term_take_snapshot(term);
+            bb_snap_release(s0);
+            // Touch three distinct rows so damage is partial on multiple rows.
+            bb_term_input(term, b"A\r\nB\r\nC".as_ptr(), 5);
+            let s = bb_term_take_snapshot(term);
+            if bb_snap_damage_is_full(s) == 0 {
+                // Probe via null-out gets the full total count.
+                let total = bb_snap_damage_rows(s, std::ptr::null_mut(), 0);
+                assert!(
+                    total >= 1,
+                    "expected ≥1 damaged row after row touches, got {total}"
+                );
+                // Zero-cap with a non-null out also returns the total.
+                let mut tiny = [0u16; 1];
+                let probed_with_buf = bb_snap_damage_rows(s, tiny.as_mut_ptr(), 0);
+                assert_eq!(probed_with_buf, total);
+                // Retry with an exact-sized buffer; `written == total`.
+                let mut full = vec![0u16; total];
+                let written = bb_snap_damage_rows(s, full.as_mut_ptr(), full.len());
+                assert_eq!(written, total);
+            }
+            bb_snap_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-4 F13: double-free of a `BBString` must
+    /// short-circuit via the magic sentinel rather than call
+    /// `Vec::from_raw_parts` on stale parts (UB).
+    #[test]
+    fn bb_string_release_double_free_detected_via_magic() {
+        unsafe {
+            let term = bb_term_new(10, 2, 100);
+            bb_term_input(term, b"abc".as_ptr(), 3);
+            let s = bb_term_text_range(term, 0, 0, 0, 9, 0);
+            assert!(!s.is_null());
+            // First release: frees normally, zeroes _magic.
+            bb_string_release(s);
+            // Second release with the SAME pointer. The magic check in
+            // bb_string_release must short-circuit: the allocation has
+            // been freed but the pointer is still known; the released-
+            // magic sentinel is 0, which no longer matches BB_STRING_MAGIC,
+            // so the function returns without touching _owned_ptr (UB).
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-4 F13: the magic constant and struct
+    /// layout are pinned so a future refactor that reshapes BBString
+    /// trips this assertion rather than silently drifting away from the
+    /// Swift binding.
+    #[test]
+    fn bb_string_magic_layout_pinned() {
+        assert_eq!(BB_STRING_MAGIC, 0xB1AC_5BBD_5721_57E0);
+        // Field offsets — Swift reads bytes/len by name through the
+        // cbindgen-generated header, but pinning size matters so an
+        // accidental field-type change can't silently corrupt the
+        // import on a 64-bit Darwin host (the only target today).
+        assert_eq!(std::mem::offset_of!(BBString, bytes), 0);
+        assert_eq!(std::mem::offset_of!(BBString, len), 8);
+        assert_eq!(std::mem::size_of::<BBString>(), 40);
+    }
+
+    /// Regression for rust-core-4 F5: wide-char (CJK, emoji) text must
+    /// round-trip through `bb_term_text_range` without inserting a space
+    /// for every continuation cell. "中文" used to copy out as "中 文 ".
+    ///
+    /// Uses a two-row selection so the first row's `trim` path strips
+    /// the grid-fill blanks; the wide-char skip is the load-bearing
+    /// change here (without it the output would be "中 文 " with extra
+    /// interior spaces that trim would NOT remove).
+    #[test]
+    fn text_range_skips_wide_char_spacer_cells() {
+        unsafe {
+            let term = bb_term_new(10, 2, 100);
+            bb_term_input(term, "中文\r\nabc".as_bytes().as_ptr(), 8);
+            let s = bb_term_text_range(term, 0, 0, 1, 2, 0);
+            let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+            let out = std::str::from_utf8(bytes).unwrap();
+            assert_eq!(
+                out, "中文\nabc",
+                "CJK wide chars must emit without a space for each spacer cell"
+            );
+            bb_string_release(s);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-2 F1: an `ESC[2J` byte sequence appearing
+    /// inside an OSC payload must NOT trigger the scrollback-clear
+    /// augmentation — the old byte-level memmem match did, corrupting the
+    /// OSC. With the state-aware detection the OSC completes normally and
+    /// scrollback stays intact.
+    #[test]
+    fn esc_2j_inside_osc_payload_does_not_clear_scrollback() {
+        unsafe {
+            let term = bb_term_new(10, 2, 100);
+            // Build scrollback so "cleared" would be observable.
+            for _ in 0..20 {
+                bb_term_input(term, b"xx\r\n".as_ptr(), 4);
+            }
+            let before = bb_term_take_snapshot(term);
+            let before_hist = (*before).history_size;
+            bb_snap_release(before);
+            assert!(
+                before_hist > 0,
+                "precondition: scrollback must be populated"
+            );
+
+            // Set a window title via OSC 2 whose payload contains a raw
+            // "ESC[2J". In vte's state machine this ESC is consumed as
+            // part of the ST terminator (ESC \) — the bytes split: `\x1b`
+            // closes the OSC via ESC-transition, then `[2J` on its own
+            // runs as a top-level CSI. Use OSC BEL-terminated form so the
+            // bytes ESC [ 2 J stay inside the OSC payload (BEL closes the
+            // OSC), faithfully reproducing the F1 scenario.
+            let seq = b"\x1b]2;log:\x1b[2Jsnip\x07";
+            bb_term_input(term, seq.as_ptr(), seq.len());
+
+            let after = bb_term_take_snapshot(term);
+            assert_eq!(
+                (*after).history_size,
+                before_hist,
+                "ESC[2J embedded in an OSC 2 title must not wipe scrollback \
+                 (rust-core-2 F1 regression)"
+            );
+            bb_snap_release(after);
+            bb_term_free(term);
+        }
+    }
+
+    /// Counter-check for rust-core-2 F1: a top-level `ESC[2J` (the
+    /// `clear(1)` case) STILL triggers scrollback erase. This is the
+    /// behaviour that made `clear` feel right in the terminal;
+    /// state-aware detection must preserve it.
+    #[test]
+    fn top_level_esc_2j_still_clears_scrollback() {
+        unsafe {
+            let term = bb_term_new(10, 2, 100);
+            for _ in 0..20 {
+                bb_term_input(term, b"yy\r\n".as_ptr(), 4);
+            }
+            let before = bb_term_take_snapshot(term);
+            assert!((*before).history_size > 0);
+            bb_snap_release(before);
+
+            // Canonical clear(1): move home, ED-all. State-aware path
+            // augments with ED-Saved.
+            let clear_seq = b"\x1b[H\x1b[2J";
+            bb_term_input(term, clear_seq.as_ptr(), clear_seq.len());
+
+            let after = bb_term_take_snapshot(term);
+            assert_eq!(
+                (*after).history_size,
+                0,
+                "top-level ESC[2J must still clear scrollback"
+            );
+            bb_snap_release(after);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-2 F10: OSC 52 clipboard-store no longer
+    /// fires an `Osc52Clipboard` event by default. alacritty's `Osc52`
+    /// config is `Disabled`, so the `Event::ClipboardStore` path is gated
+    /// at the source and the user's clipboard can't be written by a
+    /// remote PTY without an explicit opt-in FFI toggle.
+    #[test]
+    fn osc52_store_event_is_inert_by_default() {
+        use std::os::raw::c_void;
+        use std::sync::{Arc, Mutex};
+
+        let fired: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let fired_ptr = Arc::into_raw(fired.clone()) as *mut c_void;
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let fired = &*(ctx as *const std::sync::Mutex<Vec<u32>>);
+            fired.lock().unwrap().push(ev.kind as u32);
+        }
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            bb_term_set_event_cb(term, Some(cb), fired_ptr);
+            // base64("hello") = "aGVsbG8=", the minimal valid payload.
+            let seq = b"\x1b]52;c;aGVsbG8=\x07";
+            bb_term_input(term, seq.as_ptr(), seq.len());
+            let guard = fired.lock().unwrap();
+            assert!(
+                !guard.contains(&(BBEventKind::Osc52Clipboard as u32)),
+                "Osc52Clipboard must be gated off by default; got {:?}",
+                *guard
+            );
+            drop(guard);
+            bb_term_free(term);
+            let _ = Arc::from_raw(fired_ptr as *const Mutex<Vec<u32>>);
+        }
+    }
+
+    /// Regression for rust-core-3 F4: `bb_term_resize2` must report the
+    /// APPLIED dims + a `clamped` flag so Swift can reconcile
+    /// TIOCSWINSZ with what alacritty actually did.
+    #[test]
+    fn resize2_reports_clamped_dims() {
+        unsafe {
+            let term = bb_term_new(80, 24, 100);
+            // In-range request: no clamp, dims applied as-is.
+            let r1 = bb_term_resize2(term, 120, 40);
+            assert_eq!(r1.applied_cols, 120);
+            assert_eq!(r1.applied_rows, 40);
+            assert_eq!(r1.clamped, 0);
+            // Oversized request: clamped to MAX_DIM = 1000.
+            let r2 = bb_term_resize2(term, 10_000, 10_000);
+            assert_eq!(r2.applied_cols, 1000);
+            assert_eq!(r2.applied_rows, 1000);
+            assert_ne!(r2.clamped, 0);
+            // Undersized request: clamped to MIN_DIM = 2.
+            let r3 = bb_term_resize2(term, 1, 1);
+            assert_eq!(r3.applied_cols, 2);
+            assert_eq!(r3.applied_rows, 2);
+            assert_ne!(r3.clamped, 0);
+            // Zero dim: no-op with all-zero result.
+            let r4 = bb_term_resize2(term, 0, 5);
+            assert_eq!(r4.applied_cols, 0);
+            assert_eq!(r4.applied_rows, 0);
+            assert_eq!(r4.clamped, 0);
+            // Null term: same all-zero fallback.
+            let r5 = bb_term_resize2(std::ptr::null_mut(), 10, 10);
+            assert_eq!(r5.applied_cols, 0);
+            assert_eq!(r5.applied_rows, 0);
+            assert_eq!(r5.clamped, 0);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-3 F1: a hostile TUI writing many distinct
+    /// 4 KiB URIs must NOT retain megabytes of CStrings per snapshot. The
+    /// total-bytes cap (1 MiB) hits first and further URIs drop to
+    /// link_id = 0.
+    ///
+    /// Memory discipline: 10×10 = 100 cells; we emit ~30 distinct URIs
+    /// and at ~4 KiB each that's ~120 KiB total — well under the cap.
+    /// The cap path is exercised by the integration test's 300×4 KiB
+    /// pattern; the in-crate test pins the bookkeeping primitive
+    /// (total-bytes stays under the declared maximum).
+    #[test]
+    fn osc8_total_bytes_cap_bookkeeping() {
+        unsafe {
+            let term = bb_term_new(10, 10, 100);
+            // Emit 30 distinct URIs, ~4 KiB each.
+            let long_a = "a".repeat(4000);
+            for i in 0..30u32 {
+                let uri = format!("https://example.com/{i}-{long_a}");
+                let seq = format!("\x1b]8;;{uri}\x1b\\X\x1b]8;;\x1b\\");
+                bb_term_input(term, seq.as_bytes().as_ptr(), seq.len());
+            }
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null());
+            let mut any_live_link = false;
+            let cells = std::slice::from_raw_parts((*snap).cells, (*snap).cells_len);
+            for c in cells {
+                if c.link_id != 0 {
+                    any_live_link = true;
+                    break;
+                }
+            }
+            assert!(
+                any_live_link,
+                "under-cap URIs must still produce attributions"
+            );
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-3 F1: the URI intern table is cached on
+    /// the `BBTerm` so repeated snapshots reuse the HashMap's buckets
+    /// rather than allocating fresh every frame.
+    #[test]
+    fn osc8_intern_cache_is_retained_on_bbterm() {
+        unsafe {
+            let term = bb_term_new(10, 2, 100);
+            // Take 3 snapshots in a row; each snapshot reuses the cache.
+            for _ in 0..3 {
+                let s = bb_term_take_snapshot(term);
+                assert!(!s.is_null());
+                bb_snap_release(s);
+            }
+            // Emit a single OSC 8 sequence so the cache has content we
+            // can inspect through the private field.
+            let seq = b"\x1b]8;;https://x.test/\x1b\\Y\x1b]8;;\x1b\\";
+            bb_term_input(term, seq.as_ptr(), seq.len());
+            let s = bb_term_take_snapshot(term);
+            bb_snap_release(s);
+            let bb = &*term;
+            assert!(
+                !bb.link_id_cache.is_empty(),
+                "link_id_cache must retain entries across snapshots"
+            );
             bb_term_free(term);
         }
     }

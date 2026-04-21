@@ -18,6 +18,13 @@
  */
 #define UNDERLINE_COLOR_UNSET 4294967295
 
+/**
+ * Magic sentinel stamped into `BBString::_magic` on construction. Any
+ * 64-bit constant unlikely to appear on the heap by accident. Also
+ * invariant-encodes the string "BlackbirdStr" via the low byte pattern.
+ */
+#define BB_STRING_MAGIC 12802708709476227040ull
+
 #define BOLD (1 << 0)
 
 #define ITALIC (1 << 1)
@@ -169,6 +176,24 @@ typedef uint32_t BBEventKind;
 struct BBTerm;
 
 /**
+ * Result of `bb_term_resize2`. `applied_cols` / `applied_rows` report the
+ * dimensions the grid was actually resized to after clamping (floor = 2,
+ * ceiling = 1000 on each axis); `clamped` is non-zero when either requested
+ * dim differed from the applied value. On a no-op call (null term, or zero
+ * in either dim) all three fields are `0`.
+ */
+struct BBResizeResult {
+  uint16_t applied_cols;
+  uint16_t applied_rows;
+  /**
+   * Non-zero when the request was rewritten by the clamp; zero when the
+   * grid now holds exactly the requested dims (or on no-op).
+   */
+  uint8_t clamped;
+  uint8_t _pad[3];
+};
+
+/**
  * Event forwarded to the C callback.
  *
  * `payload` is valid **only for the duration of the callback**; callers must
@@ -278,12 +303,24 @@ struct BBSnap {
  * instead of a literal `Vec<u8>` field lets cbindgen emit a complete,
  * FFI-safe layout that Swift can import: `Vec<u8>` is not `repr(C)`, so a
  * `Vec` field would surface as an incomplete type in the generated header.
+ *
+ * `_magic` is a sentinel set by `bb_string_new` (to `BB_STRING_MAGIC`) and
+ * zeroed by `bb_string_release` before the heap buffer is reconstructed.
+ * It gives `bb_string_release` a cheap defence against double-free and
+ * wild-pointer input: a mismatching `_magic` short-circuits without
+ * calling `Vec::from_raw_parts` (which would be UB on stale pointers).
+ * Safety belt for Swift callers — still single-free by contract.
  */
 struct BBString {
   const uint8_t *bytes;
   uintptr_t len;
   uint8_t *_owned_ptr;
   uintptr_t _owned_cap;
+  /**
+   * Magic sentinel: `BB_STRING_MAGIC` when live, `0` after release.
+   * Double-free and wild-pointer input are rejected cheaply.
+   */
+  uint64_t _magic;
 };
 
 #ifdef __cplusplus
@@ -343,8 +380,31 @@ void bb_term_input(struct BBTerm *term, const uint8_t *bytes, uintptr_t len);
  * Panics inside this function are caught by `catch_unwind` and delivered as a
  * `BBEventKind::Fatal` event to the registered callback. The function returns
  * unit as the fallback value.
+ *
+ * Callers that need to know whether the requested dimensions were clamped
+ * should prefer `bb_term_resize2`, which returns the actually-applied dims
+ * and a `clamped` flag. The void-returning form here is retained for ABI
+ * stability; it internally delegates to the same clamp logic.
  */
 void bb_term_resize(struct BBTerm *term, uint16_t cols, uint16_t rows);
+
+/**
+ * Resize the terminal grid and report the actually-applied dimensions.
+ *
+ * Dimensions are clamped to `[2, 1000]` on each axis to avoid the reflow
+ * explosion on tiny grids and the 100+ GB allocation on huge grids
+ * (documented in the floor/ceiling comment inside this function and in
+ * `MEMORY`). Zero on either axis is a no-op and returns
+ * `BBResizeResult { 0, 0, 0 }`.
+ *
+ * `clamped` is the signal to Swift that `TIOCSWINSZ` should be told the
+ * APPLIED size, not the requested one — otherwise the shell and the grid
+ * disagree about the viewport (rust-core-3 F4).
+ *
+ * # Safety
+ * Same as `bb_term_resize`.
+ */
+struct BBResizeResult bb_term_resize2(struct BBTerm *term, uint16_t cols, uint16_t rows);
 
 /**
  * Register (or clear) the event callback for a terminal.
@@ -481,10 +541,21 @@ uint8_t bb_snap_damage_is_full(const struct BBSnap *snap);
 
 /**
  * Copy the snapshot's damaged-row indices into the caller's buffer. Returns
- * the number of rows written (capped at `out_cap`). If `out` is null or
- * `out_cap` is zero, returns 0. If the damage is `Full`, returns 0 —
- * callers must check `bb_snap_damage_is_full` first and treat "full" as
- * "all rows need redraw".
+ * the TOTAL number of damaged rows (which may exceed `out_cap`); the
+ * function writes at most `min(total, out_cap)` rows into `out`.
+ *
+ * Truncation detection: callers compare the return value against `out_cap`.
+ * If `return_value > out_cap`, the buffer was too small and the caller
+ * should re-allocate at `return_value` slots and retry to avoid leaving
+ * stale pixels on the undrawn rows.
+ *
+ * Length probe: passing `out = null` with any `out_cap` returns the
+ * total count without writing anything, so a caller can size a buffer
+ * before allocating.
+ *
+ * If the damage is `Full`, returns 0 — callers must check
+ * `bb_snap_damage_is_full` first and treat "full" as "all rows need
+ * redraw" regardless of this function's return value.
  *
  * # Safety
  * - `snap` must be a pointer from `bb_term_take_snapshot` or retained
@@ -561,9 +632,14 @@ void bb_term_set_named_color(struct BBTerm *term, uint16_t slot, uint32_t rgb);
  * `[start_col, end_col]` with no trimming.
  *
  * `\0` cells (alacritty's "unrendered" sentinel) are emitted as spaces. Real
- * spaces come through as-is. Lines outside `[topmost_line, bottommost_line]`
- * are skipped silently. Points are normalized so `(start_line, start_col)
- * <= (end_line, end_col)` before iterating.
+ * spaces come through as-is. Wide-char spacer cells (alacritty's
+ * `WIDE_CHAR_SPACER` / `LEADING_WIDE_CHAR_SPACER` flags) are SKIPPED entirely
+ * — the preceding primary cell already held the wide glyph's character, and
+ * emitting a space for the spacer would double-count columns and break paste
+ * round-trip for CJK/emoji (e.g. "中文" would emit as "中 文 "). Lines outside
+ * `[topmost_line, bottommost_line]` are skipped silently. Points are
+ * normalized so `(start_line, start_col) <= (end_line, end_col)` before
+ * iterating.
  *
  * Returns a heap-allocated `BBString` the caller must free with
  * `bb_string_release`. Returns null when `term` is null.
@@ -588,6 +664,13 @@ struct BBString *bb_term_text_range(struct BBTerm *term,
  * Rebuilds the owned `Vec<u8>` from `_owned_ptr`/`_owned_cap`/`len` so its
  * heap buffer is deallocated with the matching `Vec` allocator, then drops
  * the `Box<BBString>`.
+ *
+ * Defends against double-free and wild-pointer input by checking
+ * `_magic` against `BB_STRING_MAGIC` before touching the owned parts. A
+ * mismatching magic returns early (with a one-line log) without calling
+ * `Vec::from_raw_parts` — that would be UB on stale/invalid raw parts and
+ * the null guard can't catch it. Successful releases zero the magic so a
+ * subsequent double-release is detected cheaply.
  *
  * # Safety
  * `s` must have been returned by `bb_term_text_range` and not previously

@@ -358,15 +358,31 @@ public final class BBSnapshot {
     /// Not cached — calls `bb_snap_damage_rows` each read. Renderers
     /// that consume this should store the result themselves (typical
     /// access pattern: read once per frame in `buildInstances`).
+    ///
+    /// Handles the `bb_snap_damage_rows` total-count contract (rust-core-4
+    /// F2): if the returned `total` exceeds the allocated capacity the
+    /// buffer was too small to hold every damaged row; re-allocate at the
+    /// reported size and retry exactly once. In practice damage is capped
+    /// at the screen rows, so the first pass covers every legitimate case.
     public var damagedRows: [Int] {
         guard !damageIsFull else { return [] }
         let cap = Int(handle.pointee.rows)
         var out = [UInt16](repeating: 0, count: cap)
-        let n = out.withUnsafeMutableBufferPointer { buf -> Int in
+        let total = out.withUnsafeMutableBufferPointer { buf -> Int in
             guard let base = buf.baseAddress else { return 0 }
             return Int(bb_snap_damage_rows(handle, base, UInt(cap)))
         }
-        return out[0..<n].map { Int($0) }
+        if total <= cap {
+            return out[0..<total].map { Int($0) }
+        }
+        // Truncation path: re-allocate at the reported total and retry.
+        var retry = [UInt16](repeating: 0, count: total)
+        let written = retry.withUnsafeMutableBufferPointer { buf -> Int in
+            guard let base = buf.baseAddress else { return 0 }
+            return Int(bb_snap_damage_rows(handle, base, UInt(total)))
+        }
+        let n = min(written, retry.count)
+        return retry[0..<n].map { Int($0) }
     }
 
     // MARK: - OSC 8 hyperlink attribution
