@@ -18,6 +18,11 @@ fn main() {
         .write_to_file(&out_file);
 
     println!("cargo:rerun-if-changed=build.rs");
+    // `src/lib.rs` is the only rust source today, but watching `src/`
+    // future-proofs the rerun trigger: a new file under src/ that
+    // declares types consumed by cbindgen would otherwise not be
+    // picked up until the next unrelated rebuild. Audit rust-build F3.
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 }

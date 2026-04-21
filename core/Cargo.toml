@@ -18,4 +18,8 @@ alacritty_terminal = "=0.26.0"
 memchr = "2"
 
 [build-dependencies]
-cbindgen = "0.27"
+# cbindgen patch-pinned so a 0.27.x → 0.28 bump doesn't silently reshape
+# the generated C header on `cargo update`. Audit rust-build F4. The
+# workspace lockfile already fixes the exact version in practice, but
+# this makes the floor explicit for consumers without the lockfile.
+cbindgen = "=0.27.0"
