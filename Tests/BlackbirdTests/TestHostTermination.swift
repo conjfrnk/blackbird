@@ -12,6 +12,7 @@ final class TestHostTermination: NSObject, XCTestObservation {
     static let shared = TestHostTermination()
     private var registered = false
     private let lock = NSLock()
+    private var issueCount: Int = 0
 
     func register() {
         lock.lock()
@@ -21,13 +22,33 @@ final class TestHostTermination: NSObject, XCTestObservation {
         registered = true
     }
 
+    func testCase(_ testCase: XCTestCase, didRecord issue: XCTIssue) {
+        lock.lock()
+        issueCount += 1
+        lock.unlock()
+    }
+
+    func testSuite(_ testSuite: XCTestSuite, didRecord issue: XCTIssue) {
+        lock.lock()
+        issueCount += 1
+        lock.unlock()
+    }
+
     func testBundleDidFinish(_ testBundle: Bundle) {
         // Small delay so any pending main-thread work (cancellables, etc.)
-        // completes before we exit. Use exit(0) directly rather than
+        // completes before we exit. Use exit() directly rather than
         // NSApp.terminate because XCTest can intercept the latter and keep
         // the process alive (empirical — we were getting zombie host apps).
+        //
+        // Propagate test status to the exit code: any recorded XCTIssue
+        // (assertion failure, thrown error, crash) exits non-zero so CI
+        // catches red runs. Without this, a failing test bundle still
+        // exited 0 and passed CI silently.
+        lock.lock()
+        let failed = issueCount > 0
+        lock.unlock()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            exit(0)
+            exit(failed ? 1 : 0)
         }
     }
 }
