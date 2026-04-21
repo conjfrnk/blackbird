@@ -11,12 +11,17 @@ set -euo pipefail
 #                        https://dl.example.com/blackbird/
 #
 # Optional env:
-#   APPCAST_FEED_URL   — self-URL of the appcast feed, used in the <link>
-#                        element of a --full rendering. Defaults to
+#   APPCAST_FEED_URL   — self-URL of the appcast feed. Used as the
+#                        <atom:link rel="self"> reference and defaults to
 #                        "${APPCAST_BASE_URL}/appcast.xml". Set this when
 #                        the feed lives on a different host than the
 #                        binaries (e.g. binaries on GitHub Releases but
 #                        the feed served from blackbird-terminal.com).
+#   APPCAST_SITE_URL   — project homepage URL, used as the RSS
+#                        <channel>/<link>. Defaults to
+#                        "https://blackbird-terminal.com/". The RSS spec
+#                        says <channel>/<link> should be the human-
+#                        readable homepage of the feed, not the feed URL.
 #   SIGN_UPDATE        — path to Sparkle's sign_update binary. If unset,
 #                        the script looks in PATH first, then in the
 #                        Xcode DerivedData SPM artifact tree.
@@ -30,6 +35,7 @@ cd "$REPO_ROOT"
 
 : "${APPCAST_BASE_URL:?APPCAST_BASE_URL must be set (e.g. https://dl.example.com/blackbird/)}"
 FEED_URL="${APPCAST_FEED_URL:-${APPCAST_BASE_URL%/}/appcast.xml}"
+SITE_URL="${APPCAST_SITE_URL:-https://blackbird-terminal.com/}"
 
 FULL=0
 if [[ "${1:-}" == "--full" ]]; then
@@ -105,7 +111,7 @@ ITEM=$(cat <<XML
       <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <enclosure url="${URL}"
-                 type="application/octet-stream"
+                 type="application/x-apple-diskimage"
                  ${SIG_LINE} />
     </item>
 XML
@@ -116,10 +122,12 @@ if [[ "$FULL" == "1" ]]; then
 <?xml version="1.0" standalone="yes"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
      xmlns:dc="http://purl.org/dc/elements/1.1/"
+     xmlns:atom="http://www.w3.org/2005/Atom"
      version="2.0">
   <channel>
     <title>Blackbird</title>
-    <link>${FEED_URL}</link>
+    <link>${SITE_URL}</link>
+    <atom:link href="${FEED_URL}" rel="self" type="application/rss+xml" />
     <description>Release feed for Blackbird.</description>
     <language>en</language>
 ${ITEM}
