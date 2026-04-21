@@ -1,6 +1,9 @@
 import Foundation
 import Combine
 import AppKit
+#if DEBUG
+import os
+#endif
 
 /// Owns a PTY and a BBTerm. Wires PTY output into the VT parser, publishes
 /// snapshots of the grid to observers.
@@ -21,6 +24,13 @@ public final class TerminalSession: ObservableObject {
     /// 1 MiB matches Ghostty's default and comfortably accommodates log-
     /// and code-paste workflows.
     public static let osc52MaxBytes: Int = 1 * 1024 * 1024
+
+    #if DEBUG
+    /// `os.Logger` (not `NSLog`) so OSC 52 cap diagnostics survive the
+    /// unified-log redaction NSLog incurs at runtime-format time.
+    private static let osc52Logger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                            category: "osc52")
+    #endif
 
     @Published public private(set) var snapshot: BBSnapshot?
     /// Effective, observable title for UI binding. Always equals `displayTitle`
@@ -99,17 +109,17 @@ public final class TerminalSession: ObservableObject {
     }
 
     /// The title to display in the window / tab bar. Override wins when set;
-    /// otherwise falls back to the shell-reported OSC title; otherwise a
-    /// generic default.
-    public var displayTitle: String {
+    /// otherwise the shell-reported OSC title; otherwise `nil` so the
+    /// TerminalView sink keeps the current `window.title` (which the window
+    /// controller seeds with the shell basename at session start). Returning
+    /// a literal "Terminal" placeholder here used to overwrite the
+    /// shell-basename seed the moment a user cleared their rename override
+    /// in a session whose shell hadn't emitted OSC 0/2 yet — bare bash/zsh
+    /// without a precmd-titler is the common trigger.
+    public var displayTitle: String? {
         if let override = titleOverride, !override.isEmpty { return override }
-        return oscTitle.isEmpty ? defaultTitle : oscTitle
+        return oscTitle.isEmpty ? nil : oscTitle
     }
-
-    /// Fallback title used when neither an override nor an OSC title is set.
-    /// Kept short; the window controller seeds a shell-basename title at
-    /// session start, so this only appears in tests / headless instances.
-    private var defaultTitle: String { "Terminal" }
 
     /// Called by the event router when the shell emits OSC 0/2. Keeps
     /// `oscTitle` and the published `title` in sync. Harmless to call with
@@ -123,7 +133,9 @@ public final class TerminalSession: ObservableObject {
     /// Recompute `displayTitle` and republish on the `@Published title`
     /// pipeline. UI observes via Combine (`TerminalView.$title.sink`);
     /// there's no notification channel — Combine is canonical. Callers on
-    /// any thread hop to main if needed.
+    /// any thread hop to main if needed. A nil value means "no real title
+    /// to set" — the sink falls back to the current window.title (shell
+    /// basename) instead of overwriting it with a placeholder.
     private func publishTitle() {
         let value: String? = displayTitle
         if Thread.isMainThread {
@@ -568,8 +580,9 @@ public final class TerminalSession: ObservableObject {
                     guard Preferences.shared.osc52Enabled else { break }
                     if text.utf8.count > Self.osc52MaxBytes {
                         #if DEBUG
-                        NSLog("[Blackbird] OSC 52 payload %d bytes exceeds %d cap — dropping",
-                              text.utf8.count, Self.osc52MaxBytes)
+                        Self.osc52Logger.log(
+                            "OSC 52 payload \(text.utf8.count, privacy: .public) bytes exceeds \(Self.osc52MaxBytes, privacy: .public) cap — dropping"
+                        )
                         #endif
                         break
                     }
