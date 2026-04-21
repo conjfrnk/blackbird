@@ -45,6 +45,30 @@ fi
 DMG_NAME="$(basename "$DMG")"
 VERSION="$(echo "$DMG_NAME" | sed -E 's/^Blackbird-(.*)\.dmg$/\1/')"
 
+# Extract CFBundleVersion from the built app's Info.plist. This is what
+# Sparkle compares against the installed CFBundleVersion to decide if an
+# update is available; using the display version here (e.g. "0.1.2")
+# breaks that comparison against older installs whose build number is a
+# plain integer like "1" — Sparkle's component-wise comparator sees
+# [0,1,2] < [1] and hides the update. Mount the DMG read-only, read the
+# plist, detach. Requires nothing beyond built-in macOS tools.
+MOUNT_POINT="$(mktemp -d -t blackbird-dmg)"
+# `-owners off` avoids a root-owner warning on read-only mounts; `-nobrowse`
+# hides the volume from Finder so this doesn't spam the sidebar.
+hdiutil attach "$DMG" -nobrowse -noverify -noautoopen -readonly -owners off \
+    -mountpoint "$MOUNT_POINT" >/dev/null
+BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+    "$MOUNT_POINT/Blackbird.app/Contents/Info.plist")"
+hdiutil detach "$MOUNT_POINT" -quiet
+rmdir "$MOUNT_POINT" 2>/dev/null || true
+
+if ! [[ "$BUILD" =~ ^[0-9]+$ ]]; then
+    echo "!! CFBundleVersion in the shipped app is '$BUILD', not a monotonic integer." >&2
+    echo "   Sparkle's comparator requires this to be a strictly-increasing integer" >&2
+    echo "   so installs on older builds recognise the update as newer." >&2
+    exit 1
+fi
+
 # Locate sign_update. Homebrew installs it as `sign_update`; SPM checkout
 # puts it under DerivedData.
 SIGN_UPDATE_PATH="${SIGN_UPDATE:-}"
@@ -77,7 +101,7 @@ ITEM=$(cat <<XML
     <item>
       <title>Version ${VERSION}</title>
       <pubDate>${PUB_DATE}</pubDate>
-      <sparkle:version>${VERSION}</sparkle:version>
+      <sparkle:version>${BUILD}</sparkle:version>
       <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <enclosure url="${URL}"

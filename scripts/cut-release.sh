@@ -80,10 +80,24 @@ if [[ "$CURRENT" == "$VERSION" ]]; then
     exit 1
 fi
 
-echo "==> Bumping $CURRENT → $VERSION"
+# CFBundleVersion is the monotonic build number Sparkle uses for its
+# appcast `<sparkle:version>` comparison. Keep it in lockstep with the
+# short-version bump so that every release is strictly "newer" than the
+# one before it, even when Sparkle is comparing a display version like
+# "0.1.2" against an installed CFBundleVersion of "3".
+CURRENT_BUILD="$(grep -E '^ *CFBundleVersion:' project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+if ! [[ "$CURRENT_BUILD" =~ ^[0-9]+$ ]]; then
+    echo "!! CFBundleVersion in project.yml isn't a plain integer (got '$CURRENT_BUILD')." >&2
+    echo "   cut-release.sh only knows how to increment monotonic integers." >&2
+    exit 1
+fi
+NEW_BUILD=$((CURRENT_BUILD + 1))
+
+echo "==> Bumping $CURRENT → $VERSION (build $CURRENT_BUILD → $NEW_BUILD)"
 
 # macOS sed requires an empty arg for -i; keep portable.
 sed -i '' -E "s/(CFBundleShortVersionString: )\"[^\"]+\"/\\1\"${VERSION}\"/" project.yml
+sed -i '' -E "s/(CFBundleVersion: )\"[^\"]+\"/\\1\"${NEW_BUILD}\"/" project.yml
 
 if ! command -v xcodegen >/dev/null 2>&1; then
     echo "!! xcodegen not found — install via 'brew install xcodegen'" >&2
@@ -91,10 +105,16 @@ if ! command -v xcodegen >/dev/null 2>&1; then
 fi
 xcodegen generate >/dev/null
 
-# Sanity: Info.plist must now reflect the new version.
+# Sanity: Info.plist must now reflect both the new display version and
+# the bumped build number. If either is wrong, abort before tagging.
 PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Blackbird/Info.plist 2>/dev/null)"
 if [[ "$PLIST_VERSION" != "$VERSION" ]]; then
     echo "!! Info.plist still reports $PLIST_VERSION after regen. Aborting." >&2
+    exit 1
+fi
+PLIST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Sources/Blackbird/Info.plist 2>/dev/null)"
+if [[ "$PLIST_BUILD" != "$NEW_BUILD" ]]; then
+    echo "!! Info.plist CFBundleVersion is $PLIST_BUILD, expected $NEW_BUILD. Aborting." >&2
     exit 1
 fi
 
