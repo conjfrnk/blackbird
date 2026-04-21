@@ -275,8 +275,30 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - NSTextFieldDelegate
 
+    /// Search debounce timer. Without this, every keystroke runs a full-
+    /// scrollback scan (up to 10k matches × one FFI call per history row)
+    /// while the user is still typing — wasted work the user can't see
+    /// because the next keystroke invalidates the result. Coalesce typing
+    /// bursts to one scan 150 ms after the last keystroke. Audit
+    /// findbar-selection F38.
+    private var searchDebounceTimer: Timer?
+
     public func controlTextDidChange(_ notification: Notification) {
-        delegate?.findBar(self, didChangeQuery: field.stringValue)
+        searchDebounceTimer?.invalidate()
+        let query = field.stringValue
+        // Empty query → fire immediately so the cleared-match state surfaces
+        // in the UI without a 150 ms flicker of stale matches.
+        if query.isEmpty {
+            delegate?.findBar(self, didChangeQuery: query)
+            return
+        }
+        searchDebounceTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.15,
+            repeats: false
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.delegate?.findBar(self, didChangeQuery: self.field.stringValue)
+        }
     }
 
     public func control(
