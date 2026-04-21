@@ -130,6 +130,23 @@ final class TabStripView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// Pass-through hit testing: only claim mouse events that fall on a pill,
+    /// the `+` button, or an active inline-rename field. Empty regions of the
+    /// strip belong to AppKit's titlebar so the user can still ⌘-drag the
+    /// window or invoke standard titlebar gestures from the gaps. Without this
+    /// the strip's full frame swallowed clicks that landed in the empty area
+    /// between pills and the right edge — `mouseDown` returned silently and
+    /// nothing else got a chance to handle the event.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Subviews (the inline-edit text field) get first crack — defer to the
+        // default chain so the field editor still receives clicks routed at it.
+        if let sub = super.hitTest(point), sub !== self { return sub }
+        let local = convert(point, from: superview)
+        if NSPointInRect(local, addButtonFrame) { return self }
+        for rect in pillFrames where NSPointInRect(local, rect) { return self }
+        return nil
+    }
+
     func update(tabs: [NSWindow], selected: NSWindow, width: CGFloat) {
         // An in-flight edit targets a specific pill index in the OLD tab
         // list. If the list shape changes under us (tab closed, window
