@@ -1708,14 +1708,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// unless the user has sourced the bundled shell-integration snippet,
     /// because otherwise the session has no prompt marks recorded.
     @objc public func jumpToPreviousPrompt(_ sender: Any?) {
-        session?.jumpToPreviousPrompt()
+        if session?.jumpToPreviousPrompt() != true {
+            // Ring empty (no shell integration, or no commands yet) OR
+            // already at the oldest prompt. NSBeep is the standard macOS
+            // "no-op" feedback — quiet, doesn't steal focus. Audit
+            // terminal-view-2 F25.
+            NSSound.beep()
+        }
     }
 
     /// Scroll the viewport down to the next (newer) OSC 133 prompt mark.
     /// No-op when the user isn't already cycling through prompts — the
     /// newest prompt is always live.
     @objc public func jumpToNextPrompt(_ sender: Any?) {
-        session?.jumpToNextPrompt()
+        if session?.jumpToNextPrompt() != true {
+            NSSound.beep()
+        }
     }
 
     /// Trackpad pinch-to-zoom → font-size step. Accumulate the continuous

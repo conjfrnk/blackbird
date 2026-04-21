@@ -341,8 +341,9 @@ public final class TerminalSession: ObservableObject {
     /// walk backwards through `promptMarks`. No-op when the ring is empty
     /// (shell hasn't sourced the OSC 133 integration, or no commands have
     /// run yet).
-    public func jumpToPreviousPrompt() {
-        guard !promptMarks.isEmpty else { return }
+    @discardableResult
+    public func jumpToPreviousPrompt() -> Bool {
+        guard !promptMarks.isEmpty else { return false }
         let next: Int = {
             if let cur = promptCursor {
                 return max(0, cur - 1)
@@ -351,16 +352,20 @@ public final class TerminalSession: ObservableObject {
         }()
         promptCursor = next
         scrollToMark(promptMarks[next])
+        return true
     }
 
     /// Walk forward through the prompt ring toward the live view. No-op
     /// when the user isn't already in a jump cycle — there's no "newer"
-    /// prompt than the one currently live.
-    public func jumpToNextPrompt() {
-        guard let cur = promptCursor, !promptMarks.isEmpty else { return }
+    /// prompt than the one currently live. Returns true when a jump
+    /// happened so the view can surface "no more prompts" feedback.
+    @discardableResult
+    public func jumpToNextPrompt() -> Bool {
+        guard let cur = promptCursor, !promptMarks.isEmpty else { return false }
         let next = min(promptMarks.count - 1, cur + 1)
         promptCursor = next
         scrollToMark(promptMarks[next])
+        return true
     }
 
     // MARK: - Test-only access
