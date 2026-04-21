@@ -157,10 +157,31 @@ impl CallbackCell {
 /// queue after `processor.advance` returns (releasing the mutable borrow),
 /// resolves the palette value, calls the formatter, and fires a PtyWrite.
 ///
+/// # DoS backstop
+/// `push` is hard-capped at `COLOR_REQUEST_QUEUE_CAP` entries. A hostile
+/// stream spamming `ESC]4;N;?BEL` across a single `bb_term_input` chunk
+/// would otherwise force an unbounded number of `Arc<dyn Fn>` trait-object
+/// allocations inside one call, inconsistent with the 4 KiB `xtgettcap_buf`
+/// cap already defending the sibling DCS path (rust-core-1 F1). 256 covers
+/// any legitimate probe — xterm reads the entire 256-entry palette at
+/// startup — and is well below the point where per-entry allocation churn
+/// becomes user-visible.
+///
 /// # Thread-safety contract
 /// Same as `CallbackCell` — single-threaded access on the BBTerm owner's
 /// thread.
-struct ColorRequestQueue(UnsafeCell<Vec<ColorRequestEntry>>);
+struct ColorRequestQueue {
+    entries: UnsafeCell<Vec<ColorRequestEntry>>,
+    /// True once `push` has refused at least one entry since the latest
+    /// `drain`. Drives a one-shot log per cap-hit episode — per-drop
+    /// logging would itself become the DoS amplifier we're defending
+    /// against.
+    cap_hit_logged: UnsafeCell<bool>,
+}
+
+/// Upper bound on queued `ColorRequestEntry`s between two drains. See
+/// `ColorRequestQueue` doc for rationale.
+const COLOR_REQUEST_QUEUE_CAP: usize = 256;
 
 struct ColorRequestEntry {
     index: usize,
@@ -174,22 +195,43 @@ unsafe impl Sync for ColorRequestQueue {}
 
 impl ColorRequestQueue {
     fn new() -> Self {
-        ColorRequestQueue(UnsafeCell::new(Vec::new()))
+        ColorRequestQueue {
+            entries: UnsafeCell::new(Vec::new()),
+            cap_hit_logged: UnsafeCell::new(false),
+        }
     }
 
+    /// Append an entry, dropping silently when the queue is already at
+    /// `COLOR_REQUEST_QUEUE_CAP`. Returns `true` when the entry was
+    /// accepted.
+    ///
     /// # Safety
     /// Caller must ensure no concurrent access.
-    unsafe fn push(&self, entry: ColorRequestEntry) {
-        (*self.0.get()).push(entry);
+    unsafe fn push(&self, entry: ColorRequestEntry) -> bool {
+        let vec = &mut *self.entries.get();
+        if vec.len() >= COLOR_REQUEST_QUEUE_CAP {
+            let logged = &mut *self.cap_hit_logged.get();
+            if !*logged {
+                *logged = true;
+                eprintln!(
+                    "blackbird_core: ColorRequestQueue hit cap ({COLOR_REQUEST_QUEUE_CAP}); \
+                     further OSC 4/10/11/12 queries in this batch dropped"
+                );
+            }
+            return false;
+        }
+        vec.push(entry);
+        true
     }
 
-    /// Take and clear the queue. Returned vec is owned; the internal
-    /// storage is reset to an empty Vec.
+    /// Take and clear the queue. Resets the cap-hit latch so the next
+    /// hit episode logs again.
     ///
     /// # Safety
     /// Caller must ensure no concurrent access.
     unsafe fn drain(&self) -> Vec<ColorRequestEntry> {
-        std::mem::take(&mut *self.0.get())
+        *self.cap_hit_logged.get() = false;
+        std::mem::take(&mut *self.entries.get())
     }
 }
 
@@ -264,7 +306,11 @@ impl EventListener for RoutingListener {
                     // from here. `bb_term_input` drains this queue right
                     // after processor.advance returns, reads the palette,
                     // calls the formatter, and emits PtyWrite.
-                    (*self.color_queue).push(ColorRequestEntry { index, formatter });
+                    // push() is `bool`-returning for DoS capping; we ignore
+                    // the drop signal here — the listener can't replywrite
+                    // anyway, and the one-shot log inside push() surfaces
+                    // the hostile case for diagnostics.
+                    let _ = (*self.color_queue).push(ColorRequestEntry { index, formatter });
                 }
                 // All other variants (MouseCursorDirty, ResetTitle, ClipboardLoad,
                 // TextAreaSizeRequest, CursorBlinkingChange, Wakeup, Exit,
@@ -2439,6 +2485,37 @@ mod tests {
         unsafe {
             assert!(bb_term_new(0, 24, 1000).is_null());
             assert!(bb_term_new(80, 0, 1000).is_null());
+        }
+    }
+
+    /// Regression for rust-core-1 F1: ColorRequestQueue::push must cap at
+    /// COLOR_REQUEST_QUEUE_CAP so a hostile stream spamming
+    /// `ESC]4;N;?BEL` can't force unbounded Arc<dyn Fn> allocations inside
+    /// a single bb_term_input call. Direct-construct the queue so the
+    /// test is insensitive to alacritty's OSC 4 parser dedup / rate policy.
+    #[test]
+    fn color_request_queue_push_caps_entries() {
+        let q = ColorRequestQueue::new();
+        let fmt: Arc<dyn Fn(Rgb) -> String + Sync + Send> = Arc::new(|_rgb| String::new());
+        unsafe {
+            for _ in 0..COLOR_REQUEST_QUEUE_CAP {
+                assert!(q.push(ColorRequestEntry {
+                    index: 0,
+                    formatter: Arc::clone(&fmt),
+                }));
+            }
+            // One past the cap must be refused.
+            assert!(!q.push(ColorRequestEntry {
+                index: 0,
+                formatter: Arc::clone(&fmt),
+            }));
+            let drained = q.drain();
+            assert_eq!(drained.len(), COLOR_REQUEST_QUEUE_CAP);
+            // After draining the latch resets and a new push goes through.
+            assert!(q.push(ColorRequestEntry {
+                index: 0,
+                formatter: Arc::clone(&fmt),
+            }));
         }
     }
 
