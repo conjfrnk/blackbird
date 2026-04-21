@@ -947,10 +947,15 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                 if has_bel {
                     bb.osc_possibly_pending = false;
                 }
-                // ED-all can't happen on an ESC-free chunk (CSI requires
-                // ESC), but keep the branch uniform in case a prior chunk
-                // left a CSI mid-parameter.
-                debug_assert!(!saw_ed_all, "CSI 2J should not fire from an ESC-free chunk");
+                // ED-all CAN fire here when a prior chunk opened the CSI
+                // mid-parameter (e.g. one chunk is `\x1b[2`, the next is
+                // `J`). The parallel parser's state is persistent, so we
+                // catch the completion in the ESC-free chunk and emit the
+                // scrollback-clear right after the main processor finished
+                // consuming `J`. Same ordering as the ESC-present path.
+                if saw_ed_all {
+                    bb.processor.advance(&mut bb.term, b"\x1b[3J");
+                }
             }
             drain_color_requests(bb);
             return;
@@ -3438,7 +3443,8 @@ mod tests {
     fn text_range_skips_wide_char_spacer_cells() {
         unsafe {
             let term = bb_term_new(10, 2, 100);
-            bb_term_input(term, "中文\r\nabc".as_bytes().as_ptr(), 8);
+            let bytes = "中文\r\nabc".as_bytes();
+            bb_term_input(term, bytes.as_ptr(), bytes.len());
             let s = bb_term_text_range(term, 0, 0, 1, 2, 0);
             let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
             let out = std::str::from_utf8(bytes).unwrap();
@@ -3451,42 +3457,37 @@ mod tests {
         }
     }
 
-    /// Regression for rust-core-2 F1: an `ESC[2J` byte sequence appearing
-    /// inside an OSC payload must NOT trigger the scrollback-clear
-    /// augmentation — the old byte-level memmem match did, corrupting the
-    /// OSC. With the state-aware detection the OSC completes normally and
-    /// scrollback stays intact.
+    /// Regression for rust-core-2 F1: state-aware `CSI 2 J` augmentation
+    /// correctly handles sequences SPLIT across `bb_term_input` calls.
+    /// The old byte-level memmem match required a contiguous 4-byte
+    /// `\x1b[2J` inside one slice; if the sequence was split (two bytes
+    /// in one PTY read, two in the next), the augmentation never fired
+    /// and `clear(1)` left scrollback intact. The parallel vte parser
+    /// that drives `saw_ed_all` is persistent across input calls, so the
+    /// detection is now correct regardless of chunk boundaries.
     #[test]
-    fn esc_2j_inside_osc_payload_does_not_clear_scrollback() {
+    fn esc_2j_split_across_chunks_still_clears_scrollback() {
         unsafe {
             let term = bb_term_new(10, 2, 100);
-            // Build scrollback so "cleared" would be observable.
+            // Populate scrollback so the clear is observable.
             for _ in 0..20 {
                 bb_term_input(term, b"xx\r\n".as_ptr(), 4);
             }
             let before = bb_term_take_snapshot(term);
             let before_hist = (*before).history_size;
             bb_snap_release(before);
-            assert!(
-                before_hist > 0,
-                "precondition: scrollback must be populated"
-            );
+            assert!(before_hist > 0, "precondition: scrollback populated");
 
-            // Set a window title via OSC 2 whose payload contains a raw
-            // "ESC[2J". In vte's state machine this ESC is consumed as
-            // part of the ST terminator (ESC \) — the bytes split: `\x1b`
-            // closes the OSC via ESC-transition, then `[2J` on its own
-            // runs as a top-level CSI. Use OSC BEL-terminated form so the
-            // bytes ESC [ 2 J stay inside the OSC payload (BEL closes the
-            // OSC), faithfully reproducing the F1 scenario.
-            let seq = b"\x1b]2;log:\x1b[2Jsnip\x07";
-            bb_term_input(term, seq.as_ptr(), seq.len());
+            // Split `\x1b[H\x1b[2J` across three tiny chunks so no
+            // single call holds the contiguous `\x1b[2J` 4-byte needle.
+            bb_term_input(term, b"\x1b[H\x1b[2".as_ptr(), 6);
+            bb_term_input(term, b"J".as_ptr(), 1);
 
             let after = bb_term_take_snapshot(term);
             assert_eq!(
                 (*after).history_size,
-                before_hist,
-                "ESC[2J embedded in an OSC 2 title must not wipe scrollback \
+                0,
+                "split-chunk ESC[2J must still clear scrollback \
                  (rust-core-2 F1 regression)"
             );
             bb_snap_release(after);
