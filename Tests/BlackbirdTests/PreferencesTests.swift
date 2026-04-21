@@ -5,6 +5,11 @@ import Combine
 final class PreferencesTests: XCTestCase {
 
     // Snapshot of UserDefaults-backed values, restored in tearDown.
+    // MUST mirror every @AppStorage in Sources/Blackbird/Settings/
+    // Preferences.swift — the audit (swift-tests-prefs F17) flagged
+    // `colorQueryEnabled` as missing here, which meant a test mutating
+    // that pref poisoned later runs. The `test_snapshotCoversAllAppStorage`
+    // case below grep-checks Preferences.swift to catch future drift.
     private var savedThemeRaw: String = ""
     private var savedThemeModeRaw: String = ""
     private var savedFontName: String = ""
@@ -16,6 +21,7 @@ final class PreferencesTests: XCTestCase {
     private var savedConfirmClose: Bool = false
     private var savedAutoUpdateChecks: Bool = false
     private var savedOSC52Enabled: Bool = false
+    private var savedColorQueryEnabled: Bool = false
     private var savedTranslucency: Double = 0
 
     override class func setUp() {
@@ -26,35 +32,91 @@ final class PreferencesTests: XCTestCase {
     override func setUp() {
         super.setUp()
         let p = Preferences.shared
-        savedThemeRaw        = p.themeRaw
-        savedThemeModeRaw    = p.themeModeRaw
-        savedFontName        = p.fontName
-        savedFontSize        = p.fontSize
-        savedBellRaw         = p.bellRaw
-        savedCursorShapeRaw  = p.cursorShapeRaw
-        savedOptionKeyRaw    = p.optionKeyRaw
-        savedCursorBlink     = p.cursorBlink
-        savedConfirmClose    = p.confirmClose
-        savedAutoUpdateChecks = p.autoUpdateChecks
-        savedOSC52Enabled    = p.osc52Enabled
-        savedTranslucency    = p.translucency
+        savedThemeRaw          = p.themeRaw
+        savedThemeModeRaw      = p.themeModeRaw
+        savedFontName          = p.fontName
+        savedFontSize          = p.fontSize
+        savedBellRaw           = p.bellRaw
+        savedCursorShapeRaw    = p.cursorShapeRaw
+        savedOptionKeyRaw      = p.optionKeyRaw
+        savedCursorBlink       = p.cursorBlink
+        savedConfirmClose      = p.confirmClose
+        savedAutoUpdateChecks  = p.autoUpdateChecks
+        savedOSC52Enabled      = p.osc52Enabled
+        savedColorQueryEnabled = p.colorQueryEnabled
+        savedTranslucency      = p.translucency
     }
 
     override func tearDown() {
         let p = Preferences.shared
-        p.themeRaw         = savedThemeRaw
-        p.themeModeRaw     = savedThemeModeRaw
-        p.fontName         = savedFontName
-        p.fontSize         = savedFontSize
-        p.bellRaw          = savedBellRaw
-        p.cursorShapeRaw   = savedCursorShapeRaw
-        p.optionKeyRaw     = savedOptionKeyRaw
-        p.cursorBlink      = savedCursorBlink
-        p.confirmClose     = savedConfirmClose
-        p.autoUpdateChecks = savedAutoUpdateChecks
-        p.osc52Enabled     = savedOSC52Enabled
-        p.translucency     = savedTranslucency
+        p.themeRaw          = savedThemeRaw
+        p.themeModeRaw      = savedThemeModeRaw
+        p.fontName          = savedFontName
+        p.fontSize          = savedFontSize
+        p.bellRaw           = savedBellRaw
+        p.cursorShapeRaw    = savedCursorShapeRaw
+        p.optionKeyRaw      = savedOptionKeyRaw
+        p.cursorBlink       = savedCursorBlink
+        p.confirmClose      = savedConfirmClose
+        p.autoUpdateChecks  = savedAutoUpdateChecks
+        p.osc52Enabled      = savedOSC52Enabled
+        p.colorQueryEnabled = savedColorQueryEnabled
+        p.translucency      = savedTranslucency
         super.tearDown()
+    }
+
+    /// Mechanical coupling between the test's snapshot/restore set and
+    /// Preferences.swift. A new @AppStorage must be mirrored in the
+    /// saved* / setUp / tearDown block above, or this test fails. Without
+    /// this gate, a mutation-testing test could silently leak the new
+    /// pref across the whole test run.
+    func test_snapshotCoversAllAppStorage() throws {
+        // Locate Preferences.swift by walking up from CWD to the repo
+        // root. Xcode's test CWD is unpredictable; the file lives at a
+        // stable relative path once we find the repo.
+        let fileManager = FileManager.default
+        var dir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+        var prefsURL: URL?
+        for _ in 0..<8 {
+            let candidate = dir
+                .appendingPathComponent("Sources/Blackbird/Settings/Preferences.swift")
+            if fileManager.fileExists(atPath: candidate.path) {
+                prefsURL = candidate
+                break
+            }
+            dir.deleteLastPathComponent()
+        }
+        guard let prefsURL else {
+            // CI runs with a tmp CWD that doesn't contain the source tree —
+            // skip rather than fail. This branch is reached only when the
+            // test host is booted outside its repo, which matters for the
+            // local-run gate below.
+            throw XCTSkip("Preferences.swift not reachable from test CWD")
+        }
+        let src = try String(contentsOf: prefsURL, encoding: .utf8)
+        // Regex captures every `@AppStorage("key")` — Preferences.swift
+        // doesn't use any other AppStorage form.
+        let re = try NSRegularExpression(
+            pattern: #"@AppStorage\("([^"]+)"\)"#
+        )
+        let range = NSRange(src.startIndex..<src.endIndex, in: src)
+        let declared = re.matches(in: src, range: range).compactMap { m -> String? in
+            guard let r = Range(m.range(at: 1), in: src) else { return nil }
+            return String(src[r])
+        }
+        let tracked: Set<String> = [
+            "theme", "themeMode", "fontName", "fontSize", "cursorBlink",
+            "bell", "cursorShape", "optionKey", "confirmClose",
+            "autoUpdateChecks", "osc52Enabled", "colorQueryEnabled",
+            "translucency",
+        ]
+        let missing = Set(declared).subtracting(tracked)
+        XCTAssertTrue(
+            missing.isEmpty,
+            "@AppStorage key(s) missing from PreferencesTests snapshot: "
+                + "\(missing.sorted()). "
+                + "Add matching `saved*` field + setUp / tearDown lines."
+        )
     }
 
     // MARK: - Singleton identity
