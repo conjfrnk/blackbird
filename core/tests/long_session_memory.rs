@@ -151,8 +151,7 @@ mod macos {
         // noise.
         let min_visible_first = 4 * 1024 * 1024; // 4 MiB
         if growth_first > min_visible_first {
-            let second_ratio =
-                (growth_second as f64) / (growth_first as f64);
+            let second_ratio = (growth_second as f64) / (growth_first as f64);
             assert!(
                 second_ratio < 0.5,
                 "second-batch RSS growth {} MiB is {:.0}% of first \
