@@ -154,6 +154,39 @@ public final class TerminalSession: ObservableObject {
     private let coreQueue = DispatchQueue(label: "blackbird.core")
     private var preferencesSubscription: AnyCancellable?
 
+    // MARK: - Main-publish coalescer (audit F1)
+    //
+    // F1 flagged that a runaway producer (`yes | cat`, `cat hugefile`) would
+    // queue unbounded `DispatchQueue.main.async { self.snapshot = snap }`
+    // work items from `feed(_:)` — every 128 KiB PTY chunk produced one main-
+    // queue write, each retaining a BBSnapshot, each waking TerminalView's
+    // Combine sink and scheduling a Metal draw. On a bursty producer this
+    // floods main and grows RSS linearly with the producer/consumer gap.
+    //
+    // We picked the "coalesce on the main-publish side" approach from the
+    // audit's Alternative: snapshots are retained-reference objects, so
+    // dropping intermediates is safe — the renderer only needs the latest.
+    // We keep at most one pending main dispatch per session: feeds that
+    // arrive while a dispatch is in flight overwrite the pending slot
+    // instead of enqueueing a new work item. This caps main-queue snapshot
+    // traffic at a constant regardless of PTY throughput.
+    //
+    // We did not pursue the full read-side backpressure path (bytes-in-
+    // flight counter + semaphore-blocked PTY read loop) because the main-
+    // queue flood was the observable half of F1 (bounded by producer rate
+    // on coreQueue, but main is far more contention-sensitive) and the
+    // coalescer fixes it without reaching into PTY's read loop or adding
+    // a cross-queue blocking primitive — which would change the thread
+    // model documented at the top of this file and complicate teardown.
+    //
+    // F11: queued feeds kept publishing snapshots after `onExit` / window
+    // close. `isTerminated` gates the feed path so post-termination feeds
+    // are dropped instead of still waking main.
+    private let publishLock = NSLock()
+    private var pendingSnapshot: BBSnapshot?
+    private var snapshotDispatchScheduled: Bool = false
+    private var isTerminated: Bool = false
+
     public static func start(
         shell: String,
         arguments: [String],
@@ -491,6 +524,18 @@ public final class TerminalSession: ObservableObject {
     }
 
     public func terminate() {
+        // Gate the feed path (F11): coreQueue may have queued feeds ahead
+        // of us; those will run `feed(_:)` after terminate() returns and
+        // would otherwise keep waking main with fresh snapshots of a grid
+        // nobody is looking at. The flag is read inside `feed` under
+        // `publishLock` so the store here is visible to whichever queue
+        // executes the straggler.
+        publishLock.lock()
+        isTerminated = true
+        // Drop any pending main dispatch's payload — the already-scheduled
+        // work item will observe `isTerminated` and bail before assigning.
+        pendingSnapshot = nil
+        publishLock.unlock()
         pty?.terminate()
     }
 
@@ -641,24 +686,66 @@ public final class TerminalSession: ObservableObject {
         }
 
         // Take an initial snapshot so observers have something on screen.
+        // Routed through the coalescer so ordering against the first real
+        // feed is deterministic (both go through the same single-slot +
+        // single-dispatch path).
         coreQueue.async { [weak self] in
             guard let self else { return }
             if let snap = self.bbterm.snapshot() {
-                DispatchQueue.main.async {
-                    self.snapshot = snap
-                }
+                self.publishPendingSnapshot(snap)
             }
         }
     }
 
     /// Called on `coreQueue`.
     private func feed(_ data: Data) {
+        // F11: drop feeds that raced past `terminate()`. Reading under the
+        // lock pairs with the store in `terminate()`; the lock also covers
+        // the pending-snapshot slot updated below, so we can't end up with
+        // a scheduled dispatch for a session that has since terminated.
+        publishLock.lock()
+        if isTerminated {
+            publishLock.unlock()
+            return
+        }
+        publishLock.unlock()
+
         let bytes = [UInt8](data)
         bbterm.input(bytes)
-        if let snap = bbterm.snapshot() {
-            DispatchQueue.main.async { [weak self] in
-                self?.snapshot = snap
-            }
+        guard let snap = bbterm.snapshot() else { return }
+        publishPendingSnapshot(snap)
+    }
+
+    /// Coalesce snapshot publishes to at most one in-flight main dispatch
+    /// (F1). The pending slot holds the latest snapshot; a second feed
+    /// that arrives before the dispatch fires overwrites the slot instead
+    /// of enqueueing another work item. The scheduled handler reads-and-
+    /// clears the slot on main and assigns `self.snapshot`, which is still
+    /// `@Published` so all existing Combine subscribers (TerminalView,
+    /// tests) see the latest value — just not every intermediate.
+    private func publishPendingSnapshot(_ snap: BBSnapshot) {
+        publishLock.lock()
+        pendingSnapshot = snap
+        if snapshotDispatchScheduled {
+            publishLock.unlock()
+            return
+        }
+        snapshotDispatchScheduled = true
+        publishLock.unlock()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.publishLock.lock()
+            let latest = self.pendingSnapshot
+            self.pendingSnapshot = nil
+            self.snapshotDispatchScheduled = false
+            let terminated = self.isTerminated
+            self.publishLock.unlock()
+            // F11: if the session terminated between schedule and fire,
+            // don't write to `@Published` — the consumer may already be
+            // tearing down and we'd waste a downstream render cycle.
+            guard !terminated, let latest else { return }
+            self.snapshot = latest
         }
     }
 }

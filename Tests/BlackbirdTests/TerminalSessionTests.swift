@@ -229,4 +229,119 @@ final class TerminalSessionTests: XCTestCase {
         wait(for: [exp], timeout: 3.0)
         session.terminate()
     }
+
+    /// Audit F1: feeds must coalesce to at most one main-queue snapshot
+    /// write while main is busy, regardless of producer rate. We feed
+    /// many small chunks synchronously via `feedBytesForTests` (which
+    /// `coreQueue.sync`s) *before* spinning the runloop. Main cannot
+    /// process any dispatched work during the feed loop, so with the
+    /// coalescer the pending slot should be overwritten N-1 times and
+    /// the `@Published snapshot` subscriber should fire a small bounded
+    /// number of times after `wait(for:)` — NOT once per feed.
+    ///
+    /// Memory/time: 2000 iterations × 4-byte chunks ≈ 8 KB of input; each
+    /// iteration runs `bb_term_input` on 4 bytes + takes a snapshot,
+    /// well under a millisecond per iteration on a 2×2 grid. Total well
+    /// under one second of runtime. Nowhere near the OOM-resize floor.
+    func test_feedCoalescesMainPublishes() {
+        let session = TerminalSession.makeHeadlessForTests()
+        let sinkCount = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        sinkCount.initialize(to: 0)
+        defer { sinkCount.deallocate() }
+
+        var c: AnyCancellable?
+        c = session.$snapshot
+            .dropFirst()  // skip the initial-nil publish
+            .sink { _ in
+                // This fires on whatever thread the @Published was set
+                // on — main, in our case, since the coalescer always
+                // hops to main.
+                sinkCount.pointee += 1
+            }
+
+        // 2000 tiny feeds back-to-back. Each one:
+        //   - `coreQueue.sync` → `feed(_:)` → `bbterm.input` + snapshot
+        //   - `publishPendingSnapshot` stores in the slot
+        //   - first feed schedules a main dispatch; subsequent feeds
+        //     overwrite the slot because `snapshotDispatchScheduled==true`
+        // The test runs on main, so main can't drain between feeds.
+        let chunk = Data("data".utf8)
+        for _ in 0..<2000 {
+            session.feedBytesForTests(chunk)
+        }
+
+        // Let main drain the (single) pending dispatch.
+        let drained = expectation(description: "main drains")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 3.0)
+
+        c?.cancel()
+        session.terminate()
+
+        // With coalescing, we expect exactly 1 sink call (the single
+        // coalesced dispatch). Allow up to 5 to absorb any main-queue
+        // scheduler quirks (e.g. if one of the pre-feed blocks scheduled
+        // during wire() got its own dispatch before the loop started).
+        // Without coalescing, this would be 2000.
+        XCTAssertLessThanOrEqual(
+            sinkCount.pointee, 5,
+            "expected coalesced publishes (≤ 5) for 2000 feeds, got \(sinkCount.pointee)"
+        )
+        XCTAssertGreaterThanOrEqual(
+            sinkCount.pointee, 1,
+            "at least one publish should have landed"
+        )
+    }
+
+    /// Audit F11: after `terminate()`, queued feeds must not keep
+    /// publishing snapshots. Simulate the post-exit race: feed, then
+    /// terminate, then feed again. The second feed runs post-termination
+    /// and must be a no-op on `@Published snapshot`.
+    func test_terminateGatesFurtherFeeds() {
+        let session = TerminalSession.makeHeadlessForTests()
+
+        // Drain the wire() initial snapshot so we start from a known
+        // baseline.
+        let seed = expectation(description: "initial snapshot")
+        var seedCancellable: AnyCancellable?
+        seedCancellable = session.$snapshot
+            .compactMap { $0 }
+            .sink { _ in
+                seedCancellable?.cancel()
+                seed.fulfill()
+            }
+        wait(for: [seed], timeout: 3.0)
+
+        // Now count post-terminate publishes.
+        let postTerminateCount = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        postTerminateCount.initialize(to: 0)
+        defer { postTerminateCount.deallocate() }
+
+        session.terminate()
+
+        var c: AnyCancellable?
+        c = session.$snapshot
+            .dropFirst()
+            .sink { _ in
+                postTerminateCount.pointee += 1
+            }
+
+        // Any feed here simulates a straggler that `coreQueue.async`
+        // queued before termination. Post-terminate, the F11 gate must
+        // early-return before publishing.
+        for _ in 0..<50 {
+            session.feedBytesForTests(Data("x".utf8))
+        }
+
+        // Spin main in case some stale dispatch is pending.
+        let drained = expectation(description: "main drains")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 3.0)
+
+        c?.cancel()
+        XCTAssertEqual(
+            postTerminateCount.pointee, 0,
+            "feeds after terminate() must not publish snapshots"
+        )
+    }
 }
