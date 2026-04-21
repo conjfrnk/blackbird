@@ -224,4 +224,49 @@ final class WordRangeTests: XCTestCase {
         }
         XCTAssertNil(r)
     }
+
+    // MARK: - Shell / source sigils (audit findbar-selection F14)
+    //
+    // `$PATH`, `user@host.com`, `env=VALUE`, `#define FOO`, `&ref`, `|pipe`,
+    // and `<angle>` should double-click as single units rather than
+    // fragment at every sigil. Before the fix these characters were in
+    // the wordBreakers set; after the fix they are not.
+
+    func test_dollarSigil_selectsAsPartOfIdentifier() throws {
+        let snap = try snapshot(for: "$PATH end")
+        // $PATH spans cols 0-4 inclusive.
+        assertRange(wordRange(around: p(0), in: snap, displayOffset: 0), 0, 4)
+        assertRange(wordRange(around: p(2), in: snap, displayOffset: 0), 0, 4)
+        assertRange(wordRange(around: p(4), in: snap, displayOffset: 0), 0, 4)
+    }
+
+    func test_atSign_inEmailStaysUnbroken() throws {
+        let snap = try snapshot(for: "me@host.com")
+        // All 11 cols (0..10) must belong to the same word.
+        assertRange(wordRange(around: p(0), in: snap, displayOffset: 0), 0, 10)
+        assertRange(wordRange(around: p(2), in: snap, displayOffset: 0), 0, 10)
+        assertRange(wordRange(around: p(10), in: snap, displayOffset: 0), 0, 10)
+    }
+
+    func test_equalsSign_inAssignmentStaysUnbroken() throws {
+        let snap = try snapshot(for: "KEY=value")
+        // KEY=value spans cols 0-8.
+        assertRange(wordRange(around: p(0), in: snap, displayOffset: 0), 0, 8)
+        assertRange(wordRange(around: p(3), in: snap, displayOffset: 0), 0, 8)
+        assertRange(wordRange(around: p(8), in: snap, displayOffset: 0), 0, 8)
+    }
+
+    func test_hashSign_inDefineStaysUnbroken() throws {
+        let snap = try snapshot(for: "#define end")
+        // #define spans cols 0-6.
+        assertRange(wordRange(around: p(0), in: snap, displayOffset: 0), 0, 6)
+        assertRange(wordRange(around: p(3), in: snap, displayOffset: 0), 0, 6)
+    }
+
+    func test_semicolon_stillBreaks() throws {
+        // Prose punctuation is preserved.
+        let snap = try snapshot(for: "aa;bb")
+        assertRange(wordRange(around: p(0), in: snap, displayOffset: 0), 0, 1)
+        assertRange(wordRange(around: p(3), in: snap, displayOffset: 0), 3, 4)
+    }
 }

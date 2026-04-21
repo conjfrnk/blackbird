@@ -108,19 +108,26 @@ public func displayRow(for bufferLine: Int32, displayOffset: Int, rows: Int) -> 
     return row
 }
 
-/// Characters that break word runs for double-click selection. Matches
-/// Terminal.app / iTerm2 defaults — anything that feels like punctuation
-/// or whitespace stops the word.
+/// Characters that break word runs for double-click selection. Tuned
+/// for shell / source-code workflows where `$PATH`, `user@host.com`,
+/// `env=VALUE`, `#define FOO`, and `&ref` should double-click as single
+/// units (audit findbar-selection F14). Prose punctuation (comma,
+/// semicolon, question, exclamation) still breaks. Matches iTerm2's
+/// "selectionWords" default more closely than Terminal.app's aggressive
+/// default.
 private let wordBreakers: Set<Character> = [
     " ", "\t", "\n", "\r",
-    // `.` and `:` intentionally OMITTED — double-click on paths
-    // (`/usr/local/bin`), dotted identifiers (`config.ini`), and host:port
-    // (`example.com:8080`) should select as single units. `,` and `;` stay
-    // as breakers because they're almost always prose punctuation.
-    ",", ";",
+    // `.` and `:` are OMITTED — paths (`/usr/local/bin`), dotted
+    // identifiers (`config.ini`), and host:port (`example.com:8080`)
+    // should select as single units.
+    // `$ & # @ = ! | < >` are also OMITTED — shell sigils + env
+    // assignments + HTML/doc sigils belong to their neighbouring token.
+    // Remaining breakers are prose punctuation + bracket pairs + quotes +
+    // `?` (URL query / shell glob boundary) + unary `~` (home dir, stays
+    // via prose fallback in most contexts).
+    ",", ";", "?",
     "(", ")", "[", "]", "{", "}",
-    "'", "\"", "`", "<", ">", "|",
-    "=", "&", "$", "#", "@", "!", "?",
+    "'", "\"", "`",
 ]
 
 /// Extend `point` outward along its line until a word-break character
