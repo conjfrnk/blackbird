@@ -102,7 +102,36 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// return stale text that the grid no longer contains (VoiceOver would
     /// read content the user is no longer seeing).
     var currentSnapshot: BBSnapshot? {
-        didSet { a11yCache.snapshotIdentity = nil }
+        didSet {
+            a11yCache.snapshotIdentity = nil
+            // Find-match coordinates are relative to the buffer at the
+            // time performSearch ran. Any snapshot swap may have scrolled
+            // history, wrapped lines, or overwritten matched rows; rerun
+            // the search against the fresh grid so ⌘G cycles live hits
+            // instead of ghost rows. Debounce via the displaylink so a
+            // burst of snapshots collapses to one re-scan. Audit
+            // findbar-selection F11.
+            if findBar != nil, !findQuery.isEmpty {
+                scheduleFindRefresh()
+            }
+        }
+    }
+
+    /// Track that a find-refresh is pending so concurrent snapshot bursts
+    /// collapse to one main-queue dispatch.
+    private var findRefreshPending: Bool = false
+
+    private func scheduleFindRefresh() {
+        guard !findRefreshPending else { return }
+        findRefreshPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.findRefreshPending = false
+            // Query could have been cleared by the time the dispatch fires
+            // (FindBar closed, user cleared the field). Early-return then.
+            guard !self.findQuery.isEmpty, self.findBar != nil else { return }
+            self.performSearch(query: self.findQuery)
+        }
     }
     /// Optional test-only override that feeds the NSAccessibility value
     /// path without a real `BBTerm`. Production never sets this — the live
