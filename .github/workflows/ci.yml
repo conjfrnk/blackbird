@@ -225,6 +225,14 @@ jobs:
             CODE_SIGN_IDENTITY=""
 
       - name: Run smoke
+        # The smoke script re-signs the built .app with an `Apple Development`
+        # identity before launch — hardened-runtime + ad-hoc = dyld rejects
+        # the launch on a dev machine (the v0.1.0 repro vector). CI has no
+        # such identity in its keychain and doesn't need it (the runner
+        # launches the binary inside a fresh session); BB_SKIP_RESIGN=1 skips
+        # the re-sign step without weakening the dev-machine default.
+        env:
+          BB_SKIP_RESIGN: "1"
         run: scripts/smoke.sh
 
   rust-fuzz-smoke:
