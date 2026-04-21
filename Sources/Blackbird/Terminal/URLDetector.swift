@@ -33,9 +33,24 @@ public enum URLDetector {
     public static func scan(snapshot: BBSnapshot) -> [URLMatch] {
         var out: [URLMatch] = []
         for row in 0..<snapshot.rows {
+            // Build the line AND a parallel UTF-16-offset → column map so
+            // the regex's NSRange (UTF-16 units) can be translated back to
+            // cell columns. A non-BMP character (e.g. 😀 = U+1F600 = 2
+            // UTF-16 units) occupies one cell but two UTF-16 positions; the
+            // old code used `r.location` directly as a column, which
+            // mis-columned every match that appeared after a non-BMP glyph
+            // on the same row (audit swift-tests-core F6).
             var line = ""
+            var utf16ToCol: [Int] = []  // index: UTF-16 offset, value: column
+            utf16ToCol.reserveCapacity(snapshot.cols)
             for col in 0..<snapshot.cols {
-                line.append(snapshot.character(at: col, row: row) ?? " ")
+                let ch = snapshot.character(at: col, row: row) ?? " "
+                let before = line.utf16.count
+                line.append(ch)
+                let after = line.utf16.count
+                for _ in before..<after {
+                    utf16ToCol.append(col)
+                }
             }
             let nsLine = line as NSString
             regex.enumerateMatches(
@@ -51,11 +66,17 @@ public enum URLDetector {
                 let substring = nsLine.substring(with: r)
                 guard let url = URL(string: substring) else { return }
                 let bufferLine = Int32(row - snapshot.displayOffset)
+                // Defensive bounds — the map is always the exact length of
+                // `nsLine.length`, but pin the reads just in case a future
+                // snapshot helper returns an odd-width cell (e.g. a
+                // combining-mark preceding a base glyph).
+                let startIdx = min(max(0, r.location), utf16ToCol.count - 1)
+                let endIdx = min(r.location + r.length - 1, utf16ToCol.count - 1)
                 out.append(URLMatch(
                     url: url,
                     line: bufferLine,
-                    startCol: r.location,
-                    endCol: r.location + r.length - 1
+                    startCol: utf16ToCol[startIdx],
+                    endCol: utf16ToCol[endIdx]
                 ))
             }
         }

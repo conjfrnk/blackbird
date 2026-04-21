@@ -269,6 +269,30 @@ final class URLDetectorTests: XCTestCase {
         let q = BufferPoint(line: 42, col: 17)
         XCTAssertNil(URLDetector.match(at: q, in: []))
     }
+
+    /// Regression for swift-tests-core F6: URLDetector used to use regex
+    /// NSRange.location (UTF-16 offset) as the column index directly, so
+    /// a URL after a non-BMP character on the same row would be mis-
+    /// columned by one per non-BMP char. The (scalar → column) map now
+    /// translates UTF-16 offsets back to cells.
+    func test_scan_urlAfterNonBMP_correctStartCol() throws {
+        // 😀 (U+1F600) is one terminal cell but two UTF-16 units. The URL
+        // that follows is at column 2 (1 for 😀 + 1 for the space).
+        let text = "😀 https://example.com"
+        let snap = try snapshot(from: text, cols: 60, rows: 3)
+        let matches = URLDetector.scan(snapshot: snap)
+        let m = try XCTUnwrap(matches.first,
+                              "expected one URL match, got \(matches.count)")
+        // 😀 occupies col 0; alacritty normally treats it as a wide char
+        // (cols 0-1), space at col 2, URL starts at col 3. Accept either
+        // (2 or 3) — what we DON'T accept is the old buggy 4 (UTF-16
+        // index of the URL start).
+        XCTAssertTrue(
+            m.startCol == 2 || m.startCol == 3,
+            "startCol should be a cell index (2 or 3), got \(m.startCol)"
+        )
+        XCTAssertEqual(m.url.absoluteString, "https://example.com")
+    }
 }
 
 // Allow XCTAssertEqual on [URLMatch] for empty-result tests.
