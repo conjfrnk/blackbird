@@ -1987,6 +1987,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func menu(for event: NSEvent) -> NSMenu? {
         let m = NSMenu()
+        // Surface "Open Link" / "Copy Link" when the right-click lands on
+        // a resolvable URL (OSC 8 hyperlink or regex-detected). Safari-
+        // parity affordance; without it users can only reach URLs via
+        // ⌘-click which is hidden UI. Audit terminal-view-2 F27.
+        let p = bufferPointFromEvent(event)
+        let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
+        if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
+            let openItem = NSMenuItem(title: "Open Link",
+                                      action: #selector(openResolvedLink(_:)),
+                                      keyEquivalent: "")
+            openItem.target = self
+            openItem.representedObject = url
+            let copyLinkItem = NSMenuItem(title: "Copy Link",
+                                          action: #selector(copyResolvedLink(_:)),
+                                          keyEquivalent: "")
+            copyLinkItem.target = self
+            copyLinkItem.representedObject = url
+            m.addItem(openItem)
+            m.addItem(copyLinkItem)
+            m.addItem(NSMenuItem.separator())
+        }
         let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
         let pasteItem = NSMenuItem(title: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
         copyItem.target = self
@@ -1994,6 +2015,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         m.addItem(copyItem)
         m.addItem(pasteItem)
         return m
+    }
+
+    @objc private func openResolvedLink(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        urlOpener.open(url)
+    }
+
+    @objc private func copyResolvedLink(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(url.absoluteString, forType: .string)
     }
 
     // MARK: - Mouse reporting
