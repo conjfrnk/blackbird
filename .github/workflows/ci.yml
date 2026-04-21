@@ -48,6 +48,17 @@ jobs:
       - name: test (release)
         run: cargo test -p blackbird_core --lib --tests --release
 
+      - name: audit (RustSec advisories)
+        # `cargo audit` checks every transitive dep in Cargo.lock against
+        # the RustSec advisory database. Runs after tests so a new
+        # advisory doesn't block unrelated signal — but still blocks
+        # merges: a known-vulnerable dep is always a PR blocker (audit
+        # rust-build F10). `--deny warnings` promotes yanked-crate
+        # warnings to errors; the lockfile is already strict-version.
+        run: |
+          cargo install cargo-audit --locked --version "^0.22" || true
+          cargo audit --deny warnings
+
   xcode:
     name: Xcode — build + test
     runs-on: macos-14
