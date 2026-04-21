@@ -59,16 +59,19 @@ public final class KeyEncoder {
 
         let kitty = mode.contains(.disambiguateEscCodes)
         let nonCmdMods = modifiers.subtracting(.command)
-        let hasMods = !nonCmdMods.subtracting(.option).isEmpty
-            || (nonCmdMods.contains(.option) && optionIsMeta == false && nonCmdMods != [.option])
-            || nonCmdMods.contains(.shift)
-            || nonCmdMods.contains(.control)
+        // In Native-Option mode the shell should not see Option at all —
+        // Option-e produces 'é' and Option+Enter produces a plain CR. Stripping
+        // .option here makes both the hasMods predicate and the CSI u modifier
+        // param agree that Option is invisible in Native mode.
+        let effectiveMods: Modifiers = optionIsMeta ? nonCmdMods : nonCmdMods.subtracting(.option)
+        let hasMods = !effectiveMods.isEmpty
 
         // Kitty disambiguation: Enter / Esc / Tab / Backspace with any
-        // modifier must emit `CSI <cp>;<mod>u` so the TUI can distinguish
-        // Shift+Enter from plain Enter, Ctrl+Tab from Tab, etc.
+        // effective modifier must emit `CSI <cp>;<mod>u` so the TUI can
+        // distinguish Shift+Enter from plain Enter, Option+Esc from plain
+        // Esc (which previously leaked as two raw ESCs), etc.
         if kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) {
-            return csiU(codepoint: cp, modifiers: nonCmdMods)
+            return csiU(codepoint: cp, modifiers: effectiveMods)
         }
 
         // Shift+Tab → CSI Z (reverse tab, "backtab"). Completion widgets and
@@ -82,12 +85,15 @@ public final class KeyEncoder {
         // Ctrl+printable: only the first character is transformed.
         if modifiers.contains(.control), let scalar = chars.unicodeScalars.first {
             // Kitty disambiguation: Ctrl+{i,m,[,h} legacy-alias Tab/Enter/Esc/
-            // Backspace. Under flag 1, emit CSI u so the TUI can tell them
-            // apart. Other Ctrl+letter combinations are unambiguous (Ctrl+c
-            // only comes from Ctrl+c) and stay as their C0 byte so shells'
+            // Backspace. Under flag 1, any modifier combination including
+            // these collider letters emits CSI u so the TUI can tell them
+            // apart from the unmodified Tab/Enter/Esc/Backspace they alias.
+            // The codepoint is normalized to the lowercase collider so Shift
+            // reports via the mod param instead of by changing the base key.
+            // Other Ctrl+letter combinations stay as their C0 byte so shells'
             // SIGINT / SIGQUIT / word-motion bindings keep working.
-            if kitty, isCtrlOnly(nonCmdMods), ctrlLetterCollidesWithC0(scalar) {
-                return csiU(codepoint: UInt32(scalar.value), modifiers: nonCmdMods)
+            if kitty, let cp = ctrlColliderCodepoint(for: scalar) {
+                return csiU(codepoint: cp, modifiers: effectiveMods)
             }
             if let ctrlByte = controlByte(for: scalar) {
                 return Data([ctrlByte])
@@ -117,18 +123,17 @@ public final class KeyEncoder {
         }
     }
 
-    /// True when `mods` is exactly `.control` (possibly with `.option` when
-    /// Option is acting as Meta, which we collapse into the CSI u mod bits).
-    private func isCtrlOnly(_ mods: Modifiers) -> Bool {
-        mods == [.control]
-    }
-
-    /// Ctrl+{i, m, [, h} legacy-alias Tab/Enter/Esc/Backspace respectively.
-    /// These are the four cases the kitty protocol explicitly disambiguates.
-    private func ctrlLetterCollidesWithC0(_ scalar: UnicodeScalar) -> Bool {
+    /// For Ctrl+{i, m, [, h} (the four C0 colliders), return the kitty-protocol
+    /// codepoint normalized to the lowercase form so Shift is reported through
+    /// the modifier param rather than by flipping between 'i' (105) and 'I' (73).
+    /// '[' has no case. Returns nil for any non-collider.
+    private func ctrlColliderCodepoint(for scalar: UnicodeScalar) -> UInt32? {
         switch scalar {
-        case "i", "I", "m", "M", "[", "h", "H": return true
-        default: return false
+        case "i", "I": return 105
+        case "m", "M": return 109
+        case "h", "H": return 104
+        case "[":      return 91
+        default:       return nil
         }
     }
 

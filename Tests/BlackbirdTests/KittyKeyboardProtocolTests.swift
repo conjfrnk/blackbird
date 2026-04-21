@@ -172,6 +172,155 @@ final class KittyKeyboardProtocolTests: XCTestCase {
                        Data())
     }
 
+    // MARK: - Option / Meta under kitty (regression for bypass bug)
+
+    // Historical bug (audit C1 / key-encoder F2): with optionIsMeta=true and
+    // kitty flag 1 active, Option+{Enter, Esc, Tab, Backspace} fell through
+    // the hasMods predicate and emitted legacy "ESC <byte>" — for Esc that
+    // meant two raw ESCs, which nvim interprets as an abort. All four must
+    // emit `CSI <cp>;3u` so the TUI sees the Alt modifier unambiguously.
+
+    func test_optionEnter_metaMode_emitsCsiU() {
+        let enc = KeyEncoder(optionIsMeta: true)
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.option], mode: kittyOn),
+                       csiU(13, mod: 3))
+    }
+
+    func test_optionEsc_metaMode_emitsCsiU_notDoubleEsc() {
+        let enc = KeyEncoder(optionIsMeta: true)
+        XCTAssertEqual(enc.encode(chars: "\u{1B}", modifiers: [.option], mode: kittyOn),
+                       csiU(27, mod: 3))
+    }
+
+    func test_optionTab_metaMode_emitsCsiU() {
+        let enc = KeyEncoder(optionIsMeta: true)
+        XCTAssertEqual(enc.encode(chars: "\t", modifiers: [.option], mode: kittyOn),
+                       csiU(9, mod: 3))
+    }
+
+    func test_optionBackspace_metaMode_emitsCsiU() {
+        let enc = KeyEncoder(optionIsMeta: true)
+        XCTAssertEqual(enc.encode(chars: "\u{7F}", modifiers: [.option], mode: kittyOn),
+                       csiU(127, mod: 3))
+    }
+
+    // Native-Option mode: Option is invisible to the shell for modified
+    // specials too. Option+Enter under kitty should fall through to plain
+    // CR, not emit an Alt-bit in the CSI u.
+
+    func test_optionEnter_nativeMode_fallsThroughToCR() {
+        let enc = KeyEncoder(optionIsMeta: false)
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.option], mode: kittyOn),
+                       Data([0x0D]))
+    }
+
+    func test_optionTab_nativeMode_fallsThroughToHT() {
+        let enc = KeyEncoder(optionIsMeta: false)
+        XCTAssertEqual(enc.encode(chars: "\t", modifiers: [.option], mode: kittyOn),
+                       Data([0x09]))
+    }
+
+    // Native-Option + Shift: shift still must appear in the CSI u, but Alt
+    // (bit 2) must not. Audit F4.
+
+    func test_shiftOptionEnter_nativeMode_csiUShiftOnly() {
+        let enc = KeyEncoder(optionIsMeta: false)
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift, .option], mode: kittyOn),
+                       csiU(13, mod: 2))
+    }
+
+    // Option+printable under kitty + Meta mode — legacy ESC-prefix Meta.
+    // Kitty flag 1 only disambiguates the four C0-aliasing keys; other
+    // printables still use Meta-ESC so Emacs M-x etc. keep working.
+
+    func test_optionA_metaMode_kittyOn_stillEscPrefix() {
+        let enc = KeyEncoder(optionIsMeta: true)
+        XCTAssertEqual(enc.encode(chars: "a", modifiers: [.option], mode: kittyOn),
+                       Data([0x1B, 0x61]))
+    }
+
+    // MARK: - Multi-modifier Ctrl collisions (audit F6 / F7)
+
+    func test_shiftCtrlI_kitty_distinctFromCtrlI() {
+        // AppKit delivers Shift+Ctrl+i with chars="I". Without the fix the
+        // encoder fell through to controlByte and emitted 0x09 (Tab), so a
+        // TUI couldn't tell Shift+Ctrl+i from plain Tab.
+        let enc = KeyEncoder()
+        let out = enc.encode(chars: "I", modifiers: [.shift, .control], mode: kittyOn)
+        XCTAssertEqual(out, csiU(105, mod: 6),
+                       "Shift+Ctrl+i must emit CSI 105;6u under kitty, not the Tab byte")
+    }
+
+    func test_shiftCtrlOpenBracket_kitty_distinctFromEsc() {
+        // Same shape as F7: Shift+Ctrl+[ must NOT collapse to bare ESC.
+        let enc = KeyEncoder()
+        let out = enc.encode(chars: "{", modifiers: [.shift, .control], mode: kittyOn)
+        // On US layout Shift+[ produces "{", but kitty wants the unshifted
+        // collider's codepoint with shift in the mod param. We accept either
+        // the shifted "{" (123) path or the unshifted "[" (91) path — but
+        // the bare 0x1B escape is the regression.
+        XCTAssertNotEqual(out, Data([0x1B]),
+                          "Shift+Ctrl+[ must not fall through to bare ESC")
+    }
+
+    func test_shiftCtrlM_kitty_distinctFromEnter() {
+        let enc = KeyEncoder()
+        let out = enc.encode(chars: "M", modifiers: [.shift, .control], mode: kittyOn)
+        XCTAssertEqual(out, csiU(109, mod: 6))
+    }
+
+    func test_ctrlOptionI_metaMode_kitty_distinctFromCtrlI() {
+        // Three-mod combo: Option-as-Meta + Ctrl + i. All three bits in the
+        // mod param (shift=1, alt=2, ctrl=4) → mod 1 + 2 + 4 = 7.
+        let enc = KeyEncoder(optionIsMeta: true)
+        let out = enc.encode(chars: "i", modifiers: [.option, .control], mode: kittyOn)
+        XCTAssertEqual(out, csiU(105, mod: 7))
+    }
+
+    // MARK: - Progressive enhancement flags 2/4/8/16 (pin current no-op)
+
+    // We accept flags 2-5 via the mode bitfield but the encoder does not
+    // consume them yet (audit key-encoder F1). Pin today's behavior so a
+    // future change that starts consuming them has to update these tests
+    // explicitly rather than silently breaking TUIs that have enabled them.
+
+    func test_flag2_reportEventTypes_doesNotAlterKeyDownEncoding() {
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes]
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
+                       csiU(13, mod: 2))
+    }
+
+    func test_flag4_reportAlternateKeys_doesNotAlterEncoding() {
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportAlternateKeys]
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
+                       csiU(13, mod: 2))
+    }
+
+    func test_flag8_reportAllKeysAsEsc_doesNotAlterEncoding() {
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportAllKeysAsEsc]
+        XCTAssertEqual(enc.encode(chars: "a", modifiers: [], mode: mode),
+                       Data([0x61]))
+    }
+
+    func test_flag16_reportAssociatedText_doesNotAlterEncoding() {
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportAssociatedText]
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
+                       csiU(13, mod: 2))
+    }
+
+    func test_allFlagsTogether_doNotAlterEncoding() {
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes,
+                                .reportAlternateKeys, .reportAllKeysAsEsc,
+                                .reportAssociatedText]
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
+                       csiU(13, mod: 2))
+    }
+
     // MARK: - End-to-end: round-trip with real BBTerm
 
     func test_endToEnd_kittyProtocolLightsBitAndFlipsEncoder() {
