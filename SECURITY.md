@@ -149,7 +149,9 @@ legitimate repaint.
 - Sparkle ≥ 2.6.4 pinned in `Package.resolved`
 - App Sandbox entitlement absent
 - `SUFeedURL` ⇔ `SUPublicEDKey` consistency
-- `SUEnableInstallerLauncherService` off while feed is placeholder
+- `SUEnableInstallerLauncherService` off (stays off by policy — the
+  installer-launcher XPC service is never appropriate for a signed
+  Developer-ID distribution; Sparkle installs in-place)
 
 ## Reporting
 

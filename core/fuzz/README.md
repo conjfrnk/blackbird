@@ -1,7 +1,10 @@
 # blackbird_core fuzz harness
 
-Covers `bb_term_input` — the PTY-output → VT-parser boundary. Never run
-as part of CI's quick loop; invoke manually or in nightly campaigns.
+Covers `bb_term_input` — the PTY-output → VT-parser boundary. CI's
+`rust-fuzz-smoke` job runs each target for 30 s on every push/PR — a
+fast regression gate, not an exhaustive campaign. For serious bug
+hunting, invoke manually with a larger `-max_total_time` budget, or
+run nightly against a committed seed corpus.
 
 ## Quickstart (macOS)
 

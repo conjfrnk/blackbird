@@ -10,6 +10,12 @@ on:
         description: Git tag to release (e.g. v0.1.0)
         required: true
 
+# Workflow default: read-only. The release job opts into contents:
+# write explicitly so a compromised checkout-adjacent action cannot
+# create or force-push a release.
+permissions:
+  contents: read
+
 jobs:
   release:
     name: Build, sign, notarize, publish DMG

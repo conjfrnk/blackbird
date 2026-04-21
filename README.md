@@ -24,7 +24,7 @@ A macOS-only terminal emulator. Native AppKit + SwiftUI. Metal-rendered. NSWindo
 
 - Swift, Metal, AppKit, SwiftUI for the app shell, renderer, and Settings UI.
 - Rust `alacritty_terminal` 0.26.0 for the VT core, wrapped in a thin C ABI (20 functions, header auto-generated via `cbindgen`).
-- Sparkle 2.x for auto-updates (inert until the appcast URL and EdDSA public key are configured; dev builds no-op).
+- Sparkle 2.x for auto-updates, signed appcast at https://blackbird-terminal.com/appcast.xml; dev builds no-op because `SUFeedURL` only resolves inside a signed release bundle.
 - Universal binary (arm64 + x86_64), macOS 14+.
 
 ## Features

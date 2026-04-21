@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Workflow-wide: read-only. No CI job needs write access — CI is pure
+# verification (build, test, fuzz smoke, latency/memory gates). A
+# compromised third-party action can therefore not push, comment, or
+# create releases even if exploited.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
