@@ -1,5 +1,8 @@
 import Foundation
 import Darwin
+#if DEBUG
+import os
+#endif
 
 /// Wraps a child process running behind a pseudo-terminal master fd.
 ///
@@ -66,6 +69,13 @@ public final class PTY {
     /// 16 KiB cap without burning meaningful memory (one allocation per
     /// tab, shared across all reads).
     private let readBufferSize = 128 * 1024
+
+    #if DEBUG
+    /// `os.Logger` (not `NSLog`) so PTY write failures actually appear in
+    /// `log stream` output instead of being redacted to `<private>`.
+    private static let writeLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                            category: "pty")
+    #endif
 
     private func shouldKeepRunning() -> Bool {
         stateQueue.sync { _isRunning }
@@ -428,8 +438,10 @@ public final class PTY {
                 }
                 if errno == EINTR || errno == EAGAIN { continue }
                 #if DEBUG
-                NSLog("[Blackbird] PTY.write FAILED after %d/%d bytes errno=%d fd=%d",
-                      offset, rawBuf.count, errno, fd)
+                let savedErrno = errno
+                Self.writeLogger.log(
+                    "PTY.write FAILED after \(offset, privacy: .public)/\(rawBuf.count, privacy: .public) bytes errno=\(savedErrno, privacy: .public) fd=\(fd, privacy: .public)"
+                )
                 #endif
                 delivered = false
                 break
