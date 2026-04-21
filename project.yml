@@ -61,14 +61,14 @@ targets:
       properties:
         CFBundleName: Blackbird
         CFBundleDisplayName: Blackbird
-        CFBundleShortVersionString: "0.1.3"
+        CFBundleShortVersionString: "0.1.4"
         # Monotonic build number. This is the value Sparkle's appcast
         # `<sparkle:version>` compares against when deciding if an update is
         # newer. It MUST increase every release — Sparkle compares
         # component-wise, so an unbumped "1" vs a shipped "0.1.2" evaluates
         # as 1 > 0 and hides the update ("you're up to date"). Fine so long
         # as cut-release.sh owns the bump.
-        CFBundleVersion: "3"
+        CFBundleVersion: "4"
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: "Copyright © 2026 Connor Frank. MIT License."
         # Shells keep state (cwd, env, scrollback, in-flight writes). Opting
