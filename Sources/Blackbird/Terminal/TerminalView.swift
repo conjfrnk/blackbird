@@ -319,6 +319,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if let metalLayer = self.layer as? CAMetalLayer {
             metalLayer.maximumDrawableCount = 3
             metalLayer.displaySyncEnabled = true
+            // Pin the colorspace to sRGB so Display P3 panels don't
+            // reinterpret our 8-bit RGB values in P3-native primaries
+            // (reds +~30% saturated, greens shifted). Audit metal-renderer
+            // F10. The pixel format is `.bgra8Unorm` (not `_srgb`), so the
+            // shader operates in gamma-encoded space by design — matching
+            // Terminal.app / Alacritty's effective behavior. If a future
+            // commit flips to `_srgb` with linear shader math, this
+            // colorspace must track (sRGB decode is the matching choice).
+            metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         }
 
         // Minimal right-edge scroll indicator (pass-through hit testing —
