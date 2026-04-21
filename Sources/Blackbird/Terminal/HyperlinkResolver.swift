@@ -55,12 +55,43 @@ enum OSC8URLPolicy {
     static let allowedSchemes: Set<String> = ["http", "https", "ftp", "mailto"]
 
     /// Decide whether an OSC 8 URL is safe to hand to `NSWorkspace`.
-    /// Rejects URLs with no scheme (malformed / relative) or a scheme
-    /// outside the allowlist. Case-insensitive — RFC 3986 says scheme is
-    /// case-insensitive, and browsers canonicalise to lowercase.
+    /// Rejects URLs with no scheme (malformed / relative), a scheme
+    /// outside the allowlist, or a `mailto:` URL carrying headers that
+    /// could exfiltrate to an attacker. Case-insensitive — RFC 3986
+    /// says scheme is case-insensitive, and browsers canonicalise to
+    /// lowercase.
     static func isAllowed(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
-        return allowedSchemes.contains(scheme)
+        guard allowedSchemes.contains(scheme) else { return false }
+        if scheme == "mailto" {
+            return isMailtoSafe(url)
+        }
+        return true
+    }
+
+    /// `mailto:` syntax (RFC 6068) allows query headers:
+    /// `mailto:to@host?cc=…&bcc=…&subject=…&body=…`. An OSC 8 payload
+    /// like `mailto:you@example.com?bcc=attacker@evil.com&subject=...`
+    /// visually claims to email "you" but silently BCCs the attacker
+    /// when the user clicks. Other dangerous headers: `Reply-To`
+    /// (redirects replies), `In-Reply-To` (threads into an attacker
+    /// thread), arbitrary `X-Custom-Header`. RFC 6068 restricts the
+    /// allowed headers but NSWorkspace hands the raw URL to Mail.app
+    /// which trusts it.
+    ///
+    /// Policy: only accept `mailto:address`, or `mailto:address?subject=…`
+    /// with nothing else. Subject-only is enough for UX (GitHub issue
+    /// templates etc.) without the exfil risk.
+    private static func isMailtoSafe(_ url: URL) -> Bool {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        guard let items = comps.queryItems, !items.isEmpty else {
+            return true
+        }
+        return items.allSatisfy { item in
+            item.name.lowercased() == "subject"
+        }
     }
 }
 
