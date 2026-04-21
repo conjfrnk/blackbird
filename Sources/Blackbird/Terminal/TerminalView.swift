@@ -93,7 +93,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// the cursor coordinates for the candidate-window anchor). Internal
     /// so the `TerminalView+IME.swift` extension can see it; no setter is
     /// exposed — `render(snapshot:)` is the only writer.
-    var currentSnapshot: BBSnapshot?
+    ///
+    /// The `didSet` invalidates `a11yCache` on every swap. The cache is
+    /// keyed on `BBSnapshot.a11yIdentity`, which is a raw pointer into the
+    /// FFI's heap — after the old snapshot is released, the allocator is
+    /// free to hand the same slab back to the next snapshot (ABA). Without
+    /// this reset, `accessibilityValue()` could hit the old cache and
+    /// return stale text that the grid no longer contains (VoiceOver would
+    /// read content the user is no longer seeing).
+    var currentSnapshot: BBSnapshot? {
+        didSet { a11yCache.snapshotIdentity = nil }
+    }
     /// Optional test-only override that feeds the NSAccessibility value
     /// path without a real `BBTerm`. Production never sets this — the live
     /// render path uses `currentSnapshot`.
@@ -343,10 +353,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // this we'd paint two different "accents" in the same window.
         pushSystemAccentToRenderer()
         // Observe accent changes so Settings → Appearance → Accent swap
-        // reflects live. Registered on the shared system-colours
-        // notification; tokens go into `focusObservers` for the existing
-        // centralised removal in `deinit`.
-        focusObservers.append(NotificationCenter.default.addObserver(
+        // reflects live. The accent observer is process-global (not bound
+        // to any specific window), so it lives in `accentObservers` — a
+        // dedicated array that survives `viewDidMoveToWindow` (which tears
+        // down and rebuilds `focusObservers` to re-bind to the new window).
+        // Otherwise, the first re-parenting — e.g. dragging a tab out to a
+        // new window — would silently drop accent tracking everywhere.
+        accentObservers.append(NotificationCenter.default.addObserver(
             forName: NSColor.systemColorsDidChangeNotification,
             object: nil,
             queue: .main
@@ -475,6 +488,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     public required init(coder: NSCoder) { fatalError("not supported") }
 
     public override var acceptsFirstResponder: Bool { true }
+
+    /// NSView's default returns `true` when the view is non-opaque — and our
+    /// MTKView is non-opaque whenever the user enables translucency, so by
+    /// default AppKit quietly converts every click-drag inside the terminal
+    /// into a window drag (mouseDown still fires, but the first mouseDragged
+    /// is intercepted). Pin this to `false` so click-drag always reaches
+    /// `mouseDragged(with:)` for text selection; explicit ⌘-drag still moves
+    /// the window via `performDrag(with:)` in `mouseDown`.
+    public override var mouseDownCanMoveWindow: Bool { false }
 
     public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
@@ -657,6 +679,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var powerObservers: [NSObjectProtocol] = []
     private var occlusionObservers: [NSObjectProtocol] = []
 
+    /// Process-global observers that must survive re-parenting between
+    /// windows. `viewDidMoveToWindow` unconditionally tears down
+    /// `focusObservers`; anything we want to keep live across a tab-drag-out
+    /// / window-swap goes here and is torn down only in `deinit`.
+    ///
+    /// Currently holds the `NSColor.systemColorsDidChangeNotification`
+    /// observer that drives the live accent-colour push into the renderer.
+    private var accentObservers: [NSObjectProtocol] = []
+
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         // Register every time the view attaches to a new window — AppKit
@@ -702,6 +733,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         ) { [weak self] _ in
             self?.sendFocusEventIfNeeded(gained: false)
             self?.disableSecureEventInputIfHeld()
+            // Tear down any in-flight IME composition so a stale preedit
+            // can't commit into the next-focused terminal on Cmd-Tab. See
+            // `discardCompositionOnResignKey()` for the rationale.
+            self?.discardCompositionOnResignKey()
         })
         #if DEBUG
         // Window-attach logging (above) fires once per view⇄window pairing,
@@ -807,6 +842,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         for token in occlusionObservers {
             NotificationCenter.default.removeObserver(token)
         }
+        for token in accentObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
         // Tear down any pending hover tooltip. The DispatchWorkItem
         // captures self weakly so it won't crash on late fire, but the
         // panel would otherwise linger briefly after the view is gone.
@@ -903,8 +941,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         renderer.setTopInsetPoints(currentTop)
         if currentTop != lastSafeAreaTop {
             lastSafeAreaTop = currentTop
+            // SIGWINCH must NOT run synchronously from the MTKViewDelegate
+            // draw callback: `session.resize(to:)` is a blocking call that
+            // re-enters the snapshot publisher and burns main-thread cycles
+            // during frame assembly (defeats ProMotion's 120 Hz promotion
+            // and storms the PTY when the titlebar inset jitters during
+            // fullscreen/style-mask transitions). Defer to the next runloop
+            // turn. `propagateResize` dedups against `lastPropagatedSize`, so
+            // scheduling when the grid hasn't actually changed is a no-op.
             lastPropagatedSize = nil
-            propagateResize()
+            DispatchQueue.main.async { [weak self] in
+                self?.propagateResize()
+            }
         }
         let focused = window?.isKeyWindow ?? false
         // Hovered OSC 8 link id is set by `mouseMoved`; the renderer reads
@@ -2507,7 +2555,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private var a11yCache = A11yCache()
 
-    public override func isAccessibilityElement() -> Bool { true }
+    public override func isAccessibilityElement() -> Bool {
+        // When the find bar is installed, declaring ourselves a leaf would
+        // hide its text fields and buttons from VoiceOver entirely — AppKit
+        // stops descending into subviews of an accessibility-leaf parent.
+        // Become a container in that mode; `accessibilityChildren()` below
+        // exposes the find bar (and every other subview) so VO can reach
+        // them. When the bar is absent, keep the leaf behaviour so VO
+        // focus lands on a single "Terminal" element (matches what
+        // `testStaticTextRole` pins).
+        findBar == nil
+    }
 
     public override func accessibilityRole() -> NSAccessibility.Role? { .staticText }
 
@@ -2515,6 +2573,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func accessibilityHelp() -> String? {
         "Terminal output. Scroll back to read earlier content."
+    }
+
+    public override func accessibilityChildren() -> [Any]? {
+        // Only meaningful when we're in container mode (find bar visible).
+        // AppKit ignores `accessibilityChildren()` on a leaf, but returning
+        // the default (super) here keeps behaviour symmetric in case a
+        // future tool inspects the value directly.
+        guard let bar = findBar else { return super.accessibilityChildren() }
+        // Order matters for VO navigation: bar on top visually, every
+        // other subview below. Covers drop-highlight / bell flash / scroll
+        // indicator in case any of them ever grow accessibility affordances.
+        var kids: [Any] = [bar]
+        for sub in subviews where sub !== bar {
+            kids.append(sub)
+        }
+        return kids
     }
 
     public override func accessibilityValue() -> Any? {
@@ -2768,7 +2842,14 @@ extension TerminalView: FindBarDelegate {
     public func findBarDidClose(_ bar: FindBar) {
         findBar?.removeFromSuperview()
         findBar = nil
-        selection = nil
+        // F10: wipe match state so ⌘G after close doesn't cycle stale
+        // coordinates against a mutated buffer or a new (yet-unissued) query.
+        findMatches.removeAll()
+        findCurrentIndex = 0
+        findQuery = ""
+        // F30: deliberately preserve `selection` so Esc-then-⌘C on a found
+        // match still copies. The selection is wiped by the next mouse click
+        // or shell-bound keystroke (see keyDown handler).
         window?.makeFirstResponder(self)
     }
 
@@ -2777,6 +2858,28 @@ extension TerminalView: FindBarDelegate {
         case .current: replaceCurrentMatch(with: replacement)
         case .all:     replaceAllMatches(with: replacement)
         }
+    }
+
+    /// F3: TUI-guard. Refuses replace when the terminal mode indicates a
+    /// full-screen TUI is running (vim, less, htop) — alt-screen, any
+    /// mouse-reporting flag, or bracketed-paste active. In those modes the
+    /// DEL+UTF-8 byte stream emitted by `sendReplacement` would be
+    /// interpreted as key input by the TUI instead of readline-style erase.
+    public func findBarShouldAllowReplace(_ bar: FindBar) -> Bool {
+        guard let mode = effectiveSnapshot()?.termMode else {
+            // No snapshot yet → nothing to replace anyway; err on "allow" so
+            // tests that don't stub a snapshot still exercise the old path.
+            return true
+        }
+        let tuiSignals: BBTermMode = [
+            .altScreen,
+            .mouseReportClick,
+            .mouseMotion,
+            .mouseDrag,
+            .sgrMouse,
+            .bracketedPaste,
+        ]
+        return mode.intersection(tuiSignals).isEmpty
     }
 }
 

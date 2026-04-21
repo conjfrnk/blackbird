@@ -6,6 +6,19 @@ public protocol FindBarDelegate: AnyObject {
     func findBarDidClose(_ bar: FindBar)
     /// Fired when the user clicks "Replace" (`.current`) or "Replace All" (`.all`).
     func findBar(_ bar: FindBar, didRequestReplace kind: FindBar.ReplaceKind, with replacement: String)
+    /// Asked before the replace delegate fires. Return `false` to refuse the
+    /// replace operation — FindBar will display a transient warning instead of
+    /// emitting bytes. Implementations should return `false` when the terminal
+    /// is in a mode that indicates a TUI is running (alt-screen, mouse
+    /// reporting, bracketed paste) because `sendReplacement` synthesises DEL
+    /// bytes + UTF-8 that a TUI would interpret as key input.
+    func findBarShouldAllowReplace(_ bar: FindBar) -> Bool
+}
+
+extension FindBarDelegate {
+    /// Default: allow replace. Conformers that own terminal state should
+    /// override this and inspect `BBTermMode` before returning `true`.
+    public func findBarShouldAllowReplace(_ bar: FindBar) -> Bool { true }
 }
 
 public final class FindBar: NSView, NSTextFieldDelegate {
@@ -171,10 +184,22 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     /// Fires the replace-current delegate callback with the current replacement
     /// string. Equivalent to clicking the "Replace" button. Used by ⌘⌥E when
-    /// the bar is already expanded.
+    /// the bar is already expanded. Honours the TUI-guard: if the delegate
+    /// reports that replace is unsafe (alt-screen, mouse-reporting, or
+    /// bracketed-paste active) the call is refused with a transient banner.
     public func triggerReplaceCurrent() {
-        delegate?.findBar(self, didRequestReplace: .current, with: replaceField.stringValue)
+        guard let delegate else { return }
+        guard delegate.findBarShouldAllowReplace(self) else {
+            showTransientMessage(FindBar.tuiActiveMessage)
+            return
+        }
+        delegate.findBar(self, didRequestReplace: .current, with: replaceField.stringValue)
     }
+
+    /// Banner shown when replace is refused because the terminal appears to be
+    /// running a full-screen TUI. Exposed as a static constant so tests can
+    /// assert against the exact wording.
+    public static let tuiActiveMessage = "Replace unavailable while TUI is active"
 
     /// Shows a transient status message in the match label, auto-clearing after
     /// 2 seconds. Used by the replace path to surface
@@ -231,11 +256,21 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     }
 
     @objc private func replaceCurrent() {
-        delegate?.findBar(self, didRequestReplace: .current, with: replaceField.stringValue)
+        guard let delegate else { return }
+        guard delegate.findBarShouldAllowReplace(self) else {
+            showTransientMessage(FindBar.tuiActiveMessage)
+            return
+        }
+        delegate.findBar(self, didRequestReplace: .current, with: replaceField.stringValue)
     }
 
     @objc private func replaceAll() {
-        delegate?.findBar(self, didRequestReplace: .all, with: replaceField.stringValue)
+        guard let delegate else { return }
+        guard delegate.findBarShouldAllowReplace(self) else {
+            showTransientMessage(FindBar.tuiActiveMessage)
+            return
+        }
+        delegate.findBar(self, didRequestReplace: .all, with: replaceField.stringValue)
     }
 
     // MARK: - NSTextFieldDelegate
@@ -280,6 +315,12 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     /// Simulates a click on the "Replace All" button.
     public func _clickReplaceAllForTests() {
         replaceAll()
+    }
+
+    /// Reads the current match-label text so tests can assert that the
+    /// TUI-guard transient banner fired.
+    public func _matchLabelStringForTests() -> String {
+        matchLabel.stringValue
     }
     #endif
 }

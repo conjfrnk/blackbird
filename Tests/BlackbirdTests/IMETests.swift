@@ -71,6 +71,88 @@ final class IMETests: XCTestCase {
         XCTAssertGreaterThan(rect.height, 0)
     }
 
+    /// F1 regression: `firstRect(forCharacterRange:)` must honour a
+    /// sub-range inside the marked text so the candidate popover anchors
+    /// under the currently-highlighted clause, not the start of composition.
+    /// A request at offset 3 should land ~3 cells to the right of offset 0.
+    func testFirstRectOffsetTracksMarkedRangeLocation() throws {
+        let (view, _) = try makeViewAndFakePty()
+        view.installCursorForTests(row: 0, col: 0)
+        view.setMarkedText("abcdef",
+                           selectedRange: NSRange(location: 6, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        let base = view.firstRect(
+            forCharacterRange: NSRange(location: 0, length: 1),
+            actualRange: nil
+        )
+        let offset = view.firstRect(
+            forCharacterRange: NSRange(location: 3, length: 1),
+            actualRange: nil
+        )
+        // Same row → same origin.y; offset request should be strictly to
+        // the right of the base request by ~3 cell widths.
+        XCTAssertEqual(base.origin.y, offset.origin.y, accuracy: 0.01)
+        XCTAssertGreaterThan(offset.origin.x, base.origin.x)
+        let cellWidth = view.metrics.cellWidth
+        XCTAssertEqual(offset.origin.x - base.origin.x,
+                       3 * cellWidth,
+                       accuracy: 0.5)
+    }
+
+    /// F1 regression: out-of-range / sentinel requests must write
+    /// NSNotFound back into `actualRange` and hand back the cursor rect.
+    func testFirstRectNotFoundForOutOfRangeRequest() throws {
+        let (view, _) = try makeViewAndFakePty()
+        view.installCursorForTests(row: 0, col: 0)
+        view.setMarkedText("abc",
+                           selectedRange: NSRange(location: 3, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        var actual = NSRange(location: 0, length: 0)
+        _ = view.firstRect(
+            forCharacterRange: NSRange(location: NSNotFound, length: 0),
+            actualRange: &actual
+        )
+        XCTAssertEqual(actual.location, NSNotFound)
+        XCTAssertEqual(actual.length, 0)
+    }
+
+    /// F1 regression: `actualRange` must report the clamped range when
+    /// the IME asks for "the whole marked text" with an intentionally-
+    /// oversized length (common pattern: `(0, NSIntegerMax)`).
+    func testFirstRectActualRangeClampsToMarkedExtent() throws {
+        let (view, _) = try makeViewAndFakePty()
+        view.installCursorForTests(row: 0, col: 0)
+        view.setMarkedText("abcd",
+                           selectedRange: NSRange(location: 4, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        var actual = NSRange(location: 0, length: 0)
+        _ = view.firstRect(
+            forCharacterRange: NSRange(location: 0, length: .max),
+            actualRange: &actual
+        )
+        XCTAssertEqual(actual.location, 0)
+        XCTAssertEqual(actual.length, 4)
+    }
+
+    /// F2 regression: when the hosting window resigns key the in-flight
+    /// preedit must be discarded so it can't commit into the next-focused
+    /// terminal after Cmd-Tab. The test exercises the production teardown
+    /// path via `_testOnly_simulateWindowResignKey()` rather than
+    /// synthesising an `NSWindow.didResignKeyNotification`, which the
+    /// headless test host can't do reliably.
+    func testCompositionClearedOnWindowResignKey() throws {
+        let (view, pty) = try makeViewAndFakePty()
+        view.setMarkedText("かん",
+                           selectedRange: NSRange(location: 2, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText())
+        view._testOnly_simulateWindowResignKey()
+        XCTAssertFalse(view.hasMarkedText(),
+                       "preedit must be cleared on window resignKey")
+        XCTAssertTrue(pty.sent.isEmpty,
+                      "resignKey teardown must not commit into PTY")
+    }
+
     private func makeViewAndFakePty(optionIsMeta: Bool = true) throws
         -> (TerminalView, RecordingPTY)
     {

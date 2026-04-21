@@ -136,6 +136,88 @@ final class FindBarReplaceTests: XCTestCase {
         XCTAssertEqual(recorder.capturedKind, .all)
         XCTAssertEqual(recorder.capturedReplacement, "second")
     }
+
+    // MARK: - TUI-guard (F3)
+    //
+    // When the delegate reports `findBarShouldAllowReplace == false` (e.g.
+    // alt-screen / mouse-reporting / bracketed-paste active in TerminalView),
+    // Replace must refuse to fire the replace delegate and must instead show
+    // the transient TUI banner in the match label.
+
+    func test_tuiGuard_refusesReplaceCurrent_whenDelegateDenies() {
+        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
+        let recorder = GuardableReplaceDelegateRecorder()
+        recorder.allowReplace = false
+        bar.delegate = recorder
+
+        bar._setReplaceFieldStringForTests("bar")
+        bar._clickReplaceCurrentForTests()
+
+        XCTAssertNil(recorder.capturedKind,
+                     "Replace must not fire while the TUI-guard denies the operation")
+        XCTAssertEqual(bar._matchLabelStringForTests(), FindBar.tuiActiveMessage,
+                       "Match label must surface the TUI-active banner")
+    }
+
+    func test_tuiGuard_refusesReplaceAll_whenDelegateDenies() {
+        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
+        let recorder = GuardableReplaceDelegateRecorder()
+        recorder.allowReplace = false
+        bar.delegate = recorder
+
+        bar._setReplaceFieldStringForTests("bar")
+        bar._clickReplaceAllForTests()
+
+        XCTAssertNil(recorder.capturedKind,
+                     "Replace All must not fire while the TUI-guard denies the operation")
+        XCTAssertEqual(bar._matchLabelStringForTests(), FindBar.tuiActiveMessage,
+                       "Match label must surface the TUI-active banner")
+    }
+
+    func test_tuiGuard_refusesTriggerReplaceCurrent_whenDelegateDenies() {
+        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
+        let recorder = GuardableReplaceDelegateRecorder()
+        recorder.allowReplace = false
+        bar.delegate = recorder
+
+        bar._setReplaceFieldStringForTests("bar")
+        // triggerReplaceCurrent is the ⌘⌥E path — must also honour the guard.
+        bar.triggerReplaceCurrent()
+
+        XCTAssertNil(recorder.capturedKind,
+                     "⌘⌥E path must not fire while the TUI-guard denies the operation")
+        XCTAssertEqual(bar._matchLabelStringForTests(), FindBar.tuiActiveMessage)
+    }
+
+    func test_tuiGuard_allowsReplace_whenDelegateAllows() {
+        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
+        let recorder = GuardableReplaceDelegateRecorder()
+        recorder.allowReplace = true
+        bar.delegate = recorder
+
+        bar._setReplaceFieldStringForTests("bar")
+        bar._clickReplaceCurrentForTests()
+
+        XCTAssertEqual(recorder.capturedKind, .current,
+                       "Replace must fire normally when the TUI-guard allows")
+        XCTAssertEqual(recorder.capturedReplacement, "bar")
+        // No banner should have been shown.
+        XCTAssertNotEqual(bar._matchLabelStringForTests(), FindBar.tuiActiveMessage)
+    }
+
+    func test_tuiGuard_defaultImplementation_allowsReplace() {
+        // The plain ReplaceDelegateRecorder does not override the guard, so
+        // the default `true` implementation must keep the legacy behaviour.
+        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
+        let recorder = ReplaceDelegateRecorder()
+        bar.delegate = recorder
+
+        bar._setReplaceFieldStringForTests("ok")
+        bar._clickReplaceCurrentForTests()
+
+        XCTAssertEqual(recorder.capturedKind, .current,
+                       "Delegates that don't override the guard must default to allowing replace")
+    }
 }
 
 // MARK: - Test helper
@@ -152,4 +234,21 @@ private final class ReplaceDelegateRecorder: FindBarDelegate {
         capturedKind = kind
         capturedReplacement = replacement
     }
+}
+
+/// Same as `ReplaceDelegateRecorder` but also overrides the TUI-guard so
+/// individual tests can flip the gate to exercise the refuse path.
+private final class GuardableReplaceDelegateRecorder: FindBarDelegate {
+    var capturedKind: FindBar.ReplaceKind?
+    var capturedReplacement: String?
+    var allowReplace: Bool = true
+
+    func findBar(_ bar: FindBar, didChangeQuery query: String) {}
+    func findBar(_ bar: FindBar, didAdvance direction: FindBar.Direction) {}
+    func findBarDidClose(_ bar: FindBar) {}
+    func findBar(_ bar: FindBar, didRequestReplace kind: FindBar.ReplaceKind, with replacement: String) {
+        capturedKind = kind
+        capturedReplacement = replacement
+    }
+    func findBarShouldAllowReplace(_ bar: FindBar) -> Bool { allowReplace }
 }

@@ -216,11 +216,58 @@ extension TerminalView: NSTextInputClient {
         forCharacterRange range: NSRange,
         actualRange: NSRangePointer?
     ) -> NSRect {
-        actualRange?.pointee = range
+        // Base anchor: the cursor cell in local view coords. Used directly
+        // for the empty / no-composition / out-of-range cases, and as the
+        // left-edge origin for the per-clause offset math below.
         let cellRect = cursorCellRectInView()
-        guard let window else { return cellRect }
-        let windowRect = convert(cellRect, to: nil)
-        return window.convertToScreen(windowRect)
+        let cellWidth = metrics.cellWidth
+
+        // Convert a local-view rect to screen coords. Falls back to the
+        // local rect when we're not yet in a window (can happen during
+        // headless tests or between `viewWillMove`/`viewDidMoveToWindow`).
+        func toScreen(_ local: NSRect) -> NSRect {
+            guard let window else { return local }
+            return window.convertToScreen(convert(local, to: nil))
+        }
+
+        // No active composition → defer to the cursor cell, same as the
+        // prior behaviour. Signal to the caller that we didn't honour a
+        // sub-range by writing NSNotFound into `actualRange`.
+        guard let c = composition else {
+            actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+            return toScreen(cellRect)
+        }
+
+        let total = c.attributedText.length
+        // Sentinel / empty / degenerate requests: the IME doesn't know what
+        // sub-range to anchor under. Per the NSTextInputClient convention,
+        // report NSNotFound in `actualRange` and hand back the cursor rect
+        // so the candidate popover still has a sensible place to sit.
+        if range.location == NSNotFound || range.length < 0 || total == 0 {
+            actualRange?.pointee = NSRange(location: NSNotFound, length: 0)
+            return toScreen(cellRect)
+        }
+
+        // Clamp against the marked-text extent, mirroring the clamping
+        // `attributedSubstring(forProposedRange:…)` already applies. An
+        // IME that hands us `(0, NSIntegerMax)` to mean "the whole thing"
+        // lands here with `clamped == (0, total)`.
+        let loc = max(0, min(range.location, total))
+        let len = max(0, min(range.length, total - loc))
+        let clamped = NSRange(location: loc, length: len)
+        actualRange?.pointee = clamped
+
+        // Cell-count offset from the composition's left edge. `length == 0`
+        // is an insertion point (caret-style anchor): use a one-cell-wide
+        // rect so the candidate window gets a non-zero hit box.
+        let widthCells = max(1, clamped.length)
+        let offsetRect = NSRect(
+            x: cellRect.minX + CGFloat(clamped.location) * cellWidth,
+            y: cellRect.minY,
+            width: CGFloat(widthCells) * cellWidth,
+            height: cellRect.height
+        )
+        return toScreen(offsetRect)
     }
 
     public func characterIndex(for point: NSPoint) -> Int {
@@ -359,6 +406,44 @@ extension TerminalView: NSTextInputClient {
         let b = CGFloat(rgb & 0xFF) / 255.0
         return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
     }
+
+    /// Discard any in-flight preedit composition when the hosting window
+    /// resigns key. Without this, a partially-composed Pinyin/Romaji buffer
+    /// survives Cmd-Tab — AppKit may tear down our `NSTextInputContext`
+    /// state on deactivation, so the next Space / Enter / arrow the user
+    /// types no longer routes through `insertText` and the preedit becomes
+    /// a ghost overlay layered above the shell. Worse, in a multi-tab
+    /// setup the stale preedit can bleed into the next-focused terminal.
+    ///
+    /// Wired from `TerminalView.viewDidMoveToWindow` alongside the existing
+    /// `didBecomeKey` / `didResignKey` focus-event observers so there's a
+    /// single owner of window-notification lifetimes. Called on the main
+    /// queue by the notification observer; `[weak self]` in the caller
+    /// guards against late-fire after the view is gone.
+    func discardCompositionOnResignKey() {
+        // Early-out when there's nothing to tear down. Avoids churning the
+        // preedit overlay subview hierarchy for every Cmd-Tab on a window
+        // the user isn't actively composing in.
+        guard composition != nil else { return }
+        // `discardMarkedText()` is the AppKit-side counterpart to
+        // `unmarkText()` — it tells the system input context to drop its
+        // cached state so the next keystroke starts a fresh composition.
+        // Pair with `unmarkText()` so our own `composition` + overlay
+        // state is cleared too.
+        inputContext?.discardMarkedText()
+        unmarkText()
+    }
+
+    #if DEBUG
+    /// Test hook that exercises the same teardown path the window-resign
+    /// observer runs. The real notification requires a live `NSWindow`
+    /// transitioning out of key state, which the headless test harness
+    /// can't synthesise reliably; this lets `IMETests` assert that a
+    /// preedit buffer is cleared without booting a full windowed host.
+    func _testOnly_simulateWindowResignKey() {
+        discardCompositionOnResignKey()
+    }
+    #endif
 
     /// IME-commit wrapper around `session.send(bytes)` — used ONLY by the
     /// NSTextInputClient commit path and the main `keyDown` encoder
