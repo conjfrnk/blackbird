@@ -262,7 +262,17 @@ jobs:
           fi
           for target in $TARGETS; do
             echo "==> fuzzing $target for 30s"
-            cargo fuzz run "$target" -- -max_total_time=30
+            # -max_len 16384: bound per-input at 16 KiB so the fuzzer
+            # doesn't mutate toward multi-MB payloads that exhaust the
+            # 30 s budget on one testcase. 16 KiB is comfortably larger
+            # than the committed OSC 8 oversize seed (8 KiB).
+            # -rss_limit_mb 2048: cap total fuzzer RSS at 2 GiB so a
+            # runaway-allocation bug surfaces as an libFuzzer-caught OOM
+            # rather than a GHA OOM kill (which is harder to reproduce).
+            cargo fuzz run "$target" -- \
+              -max_total_time=30 \
+              -max_len=16384 \
+              -rss_limit_mb=2048
           done
 
   rust-throughput:
