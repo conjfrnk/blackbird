@@ -1013,11 +1013,23 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
         return;
     }
     let palette = bb.term.colors();
+    // `palette` is alacritty's fixed-width `Colors` table. Its length is a
+    // public `COUNT` constant (269 today — 256 indexed + 13 named). The
+    // `Index` impl panics on out-of-bounds, so bound-check first. A
+    // direct index was sound for every value the current alacritty/vte
+    // surface can emit, but future widenings must not panic into
+    // `BBEventKind::Fatal` (rust-core-2 F2).
     for entry in entries {
+        let slot: Option<alacritty_terminal::vte::ansi::Rgb> =
+            if entry.index < alacritty_terminal::term::color::COUNT {
+                palette[entry.index]
+            } else {
+                None
+            };
         // palette[idx] is Option<Rgb>. None means the theme hasn't set
         // this slot; fall back to a sensible default so we still reply
         // rather than leaving the TUI timing out.
-        let rgb = palette[entry.index].unwrap_or_else(|| palette_default_rgb(entry.index));
+        let rgb = slot.unwrap_or_else(|| palette_default_rgb(entry.index));
         let reply = (entry.formatter)(rgb);
         // The `reply` String owns its bytes for the duration of this
         // scope; `fire` is synchronous (calls the registered C callback
@@ -1992,12 +2004,12 @@ pub unsafe extern "C" fn bb_snap_damage_rows(
         }
         let n = total.min(out_cap);
         std::ptr::copy_nonoverlapping(rows.as_ptr(), out, n);
-        // Surface truncation via debug_assert so dev builds flag undersized
-        // buffers. Release callers see the return > out_cap and can react.
-        debug_assert!(
-            total <= out_cap,
-            "bb_snap_damage_rows truncated: {total} damaged rows > out_cap {out_cap}"
-        );
+        // Truncation signal: callers compare the returned `total` against
+        // `out_cap`; `total > out_cap` means the buffer was too small and
+        // the caller should re-allocate at `total` and retry. We don't
+        // `debug_assert` here because truncation is a legitimate API shape
+        // when the caller is size-probing — the log is routed via Swift
+        // when the caller wants diagnostics.
         total
     })
 }
@@ -3387,6 +3399,26 @@ mod tests {
                 let mut full = vec![0u16; total];
                 let written = bb_snap_damage_rows(s, full.as_mut_ptr(), full.len());
                 assert_eq!(written, total);
+
+                // Truncation path (only exercises when total ≥ 2 — which
+                // occurs for the three-row write above in release but may
+                // collapse to 1 row in debug if alacritty coalesces). When
+                // total ≥ 2, passing `out_cap = 1` writes exactly one row
+                // but still reports `total` so the caller detects the
+                // shortfall and can re-allocate.
+                if total >= 2 {
+                    let mut shortfall = [u16::MAX; 1];
+                    let reported = bb_snap_damage_rows(s, shortfall.as_mut_ptr(), 1);
+                    assert_eq!(
+                        reported, total,
+                        "return value must be total even on truncation"
+                    );
+                    assert_ne!(
+                        shortfall[0],
+                        u16::MAX,
+                        "first slot must be written even on truncation"
+                    );
+                }
             }
             bb_snap_release(s);
             bb_term_free(term);
