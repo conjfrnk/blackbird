@@ -244,6 +244,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // entire message as `<private>` in the unified log.
     private static let fpsLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                           category: "fps")
+    /// Companion to `fpsLogger` for the keyDown debug breadcrumbs. Same
+    /// readability rationale: NSLog redacted these to `<private>` so a
+    /// `log stream` filter on the keyboard category produced unreadable
+    /// lines. Routing through `os.Logger` with explicit `privacy: .public`
+    /// keeps the keystroke trail visible in Console.
+    private static let keyLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                          category: "keyboard")
     #endif
 
     public init(frame frameRect: NSRect, device: MTLDevice) {
@@ -1024,11 +1031,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // user's own output as it scrolls past.
         cancelHoverTooltip()
         #if DEBUG
-        NSLog("[Blackbird] keyDown: keyCode=%d flags=0x%lx chars=%@ charsIgnoring=%@",
-              event.keyCode,
-              UInt(event.modifierFlags.rawValue),
-              event.characters?.debugDescription ?? "nil",
-              event.charactersIgnoringModifiers?.debugDescription ?? "nil")
+        let keyCode = event.keyCode
+        let modBits = UInt(event.modifierFlags.rawValue)
+        let chDesc = event.characters?.debugDescription ?? "nil"
+        let chIgn = event.charactersIgnoringModifiers?.debugDescription ?? "nil"
+        Self.keyLogger.debug(
+            "keyDown keyCode=\(keyCode, privacy: .public) flags=0x\(String(modBits, radix: 16), privacy: .public) chars=\(chDesc, privacy: .public) charsIgnoring=\(chIgn, privacy: .public)"
+        )
         #endif
 
         // ⌘-prefixed events never encode into PTY bytes. They're reserved for
@@ -1041,7 +1050,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
 
         guard let session else {
-            NSLog("[Blackbird] keyDown: no session, passing to super")
+            #if DEBUG
+            Self.keyLogger.debug("keyDown: no session, passing to super")
+            #endif
             super.keyDown(with: event)
             return
         }
@@ -1096,7 +1107,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // TUI can distinguish them from Tab / Enter / Esc / Backspace.
         if event.modifierFlags.contains(.control) {
             #if DEBUG
-            NSLog("[Blackbird] keyDown: Control modifier detected")
+            Self.keyLogger.debug("keyDown: Control modifier detected")
             #endif
             let kittyActive = currentSnapshot?.termMode.contains(.disambiguateEscCodes) ?? false
             let baseLetter = event.charactersIgnoringModifiers?.lowercased().first
@@ -1136,7 +1147,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // Fast path didn't match — fall through to encoder which also
             // handles Ctrl via controlByte().
             #if DEBUG
-            NSLog("[Blackbird] keyDown: fast path didn't match, trying encoder")
+            Self.keyLogger.debug("keyDown: fast path didn't match, trying encoder")
             #endif
         }
 
@@ -1163,12 +1174,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let bytes = encoder.encode(chars: chars, modifiers: mods, mode: termMode)
         #if DEBUG
         if !bytes.isEmpty {
-            NSLog("[Blackbird] keyDown: encoder produced %d bytes: %@",
-                  bytes.count,
-                  bytes.map { String(format: "0x%02x", $0) }.joined(separator: " "))
+            let hex = bytes.map { String(format: "0x%02x", $0) }.joined(separator: " ")
+            Self.keyLogger.debug(
+                "keyDown encoder produced \(bytes.count, privacy: .public) bytes: \(hex, privacy: .public)"
+            )
         } else {
-            NSLog("[Blackbird] keyDown: encoder produced empty data for chars=%@ mods=%d",
-                  chars.debugDescription, mods.rawValue)
+            Self.keyLogger.debug(
+                "keyDown encoder produced empty data for chars=\(chars.debugDescription, privacy: .public) mods=\(mods.rawValue, privacy: .public)"
+            )
         }
         #endif
         if !bytes.isEmpty { sendToSession(bytes) }
@@ -2064,6 +2077,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // reveal and the accent underline; the next mouseMoved delivery
         // will repaint them against the fresh cell if appropriate.
         cancelHoverTooltip()
+        clearHoveredLink()
+        // The cached hover cell is also stale once the grid moved, so the
+        // next mouseMoved will re-resolve the link id even if the pointer
+        // hasn't physically moved a pixel between the scroll and the next
+        // delivery (otherwise updateHover would early-return on the same
+        // (row, col) and leave hoveredLinkID at zero).
+        lastHoverCell = nil
         guard let session else { super.scrollWheel(with: event); return }
         // ⌥-scroll bypasses mouse reporting so the user can always reach
         // scrollback locally, even inside a TUI that captured the wheel.
@@ -2307,26 +2327,33 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private func clearHover() {
         lastHoverCell = nil
         cancelHoverTooltip()
+        clearHoveredLink()
     }
 
-    /// Cancel any pending tooltip reveal, drop the tooltip panel if it's
-    /// up, and clear the accent underline. Called from mouseExited,
-    /// scrollWheel (grid moves underneath the pointer — the old cell
-    /// coordinates no longer map to the link the user was pointing at),
-    /// keyDown (typing dismisses the tooltip so it doesn't obscure the
-    /// user's own output), and deinit (teardown hygiene).
+    /// Cancel any pending tooltip reveal and drop the tooltip panel if it's
+    /// up. Does NOT clear the accent underline / hovered-link id — that
+    /// belongs to `clearHoveredLink()`. Called from keyDown so typing
+    /// dismisses the dwell tooltip without simultaneously stripping the
+    /// underline off the link the user is still hovering. (Previously this
+    /// did clear the link id too, so a single keystroke killed the underline
+    /// until the pointer physically moved off and back onto the link.)
     private func cancelHoverTooltip() {
         hoverTooltipItem?.cancel()
         hoverTooltipItem = nil
         dismissHoverTooltip()
-        if hoveredLinkID != 0 {
-            hoveredLinkID = 0
-            // Push the cleared id straight to the renderer so the next
-            // frame drops the underline even before the usual draw-path
-            // plumbing runs.
-            renderer.setHoveredLinkID(0)
-            needsDisplay = true
-        }
+    }
+
+    /// Drop the accent underline + hovered-link id and force a repaint.
+    /// Called from `clearHover` (mouseExited / scroll-invalidates-cache) and
+    /// `deinit`. Decoupled from the tooltip so keyDown can dismiss the
+    /// tooltip alone without disturbing the underline.
+    private func clearHoveredLink() {
+        guard hoveredLinkID != 0 else { return }
+        hoveredLinkID = 0
+        // Push the cleared id straight to the renderer so the next frame
+        // drops the underline even before the usual draw-path plumbing runs.
+        renderer.setHoveredLinkID(0)
+        needsDisplay = true
     }
 
     private func showHoverTooltip(urlString: String, anchor: NSPoint) {
