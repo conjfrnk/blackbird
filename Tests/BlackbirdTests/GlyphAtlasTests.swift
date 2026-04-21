@@ -10,33 +10,35 @@ final class GlyphAtlasTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
-    // MARK: - Saturation behavior (new)
+    // MARK: - Saturation behavior
 
-    func test_saturation_returnsNilForOverflow() throws {
-        // Tiny capacity so saturation hits fast. Insert until full, then
-        // verify the next lookup returns nil — never a garbage Entry.
-        // Protects downstream callers (MetalRenderer.buildInstances) that
-        // assume nil means "skip glyph", not "use uninitialized data".
+    func test_saturation_flushesAndReinserts() throws {
+        // After the glyph-atlas F3 fix the atlas recovers from saturation
+        // by flushing byKey + resetting nextSlot, so a hostile stream of
+        // rare glyphs no longer permanently blanks the atlas. Pins the
+        // post-flush behaviour: the overflow glyph IS inserted (non-nil
+        // entry), and a previously-inserted glyph may re-rasterise on
+        // demand — either answer is valid so long as it's non-nil.
         let font = NSFont(name: "Menlo", size: 13) ?? .systemFont(ofSize: 13)
         let metrics = CellMetrics(font: font)
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let atlas = try XCTUnwrap(GlyphAtlas(
             device: device, metrics: metrics, capacityGlyphs: 4, scale: 1
         ))
-        // Insert 4 distinct narrow glyphs.
+        // Fill to capacity.
         for cp: UInt32 in 0x41...0x44 {
             let s = try XCTUnwrap(UnicodeScalar(cp))
             XCTAssertNotNil(atlas.lookupOrInsert(scalar: s))
         }
-        // 5th must overflow → nil.
+        // Overflow MUST now succeed (post-flush slot 0 is free).
         let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
-        XCTAssertNil(
+        XCTAssertNotNil(
             atlas.lookupOrInsert(scalar: overflow),
-            "atlas at capacity must return nil, not a stale Entry"
+            "atlas saturation must flush + admit the new glyph, not drop it"
         )
-        // Previously-inserted glyphs still resolve.
-        let alive = try XCTUnwrap(UnicodeScalar(0x41 as UInt32))
-        XCTAssertNotNil(atlas.lookupOrInsert(scalar: alive))
+        // A glyph that was present pre-flush now re-inserts cleanly.
+        let previously = try XCTUnwrap(UnicodeScalar(0x41 as UInt32))
+        XCTAssertNotNil(atlas.lookupOrInsert(scalar: previously))
     }
 
     func test_initRejectsZeroCapacity() {

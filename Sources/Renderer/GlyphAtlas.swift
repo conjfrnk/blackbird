@@ -165,16 +165,35 @@ public final class GlyphAtlas {
                 slot = (slot / slotCols + 1) * slotCols
             }
         }
-        guard slot + slotsNeeded <= capacityGlyphs else {
+        if slot + slotsNeeded > capacityGlyphs {
+            // Atlas is full. Before the fix the new glyph dropped silently
+            // and rendered as blank for the rest of the window's lifetime —
+            // one hostile `cat` over a CJK file permanently blanked every
+            // unseen glyph. Audit glyph-atlas F3.
+            //
+            // Recovery: flush the cache and start over. Recently-used
+            // glyphs get re-rasterised on their next appearance (one
+            // CTLineCreate per glyph, ~μs per) which is the right
+            // trade-off vs an unbounded atlas size or full LRU bookkeeping
+            // on every lookup. Prewarmed ASCII + box-drawing are re-
+            // inserted on demand by the render path, same way they
+            // landed initially. One flush per episode.
             #if DEBUG
             saturationHits += 1
             if saturationHits == 1 || saturationHits % 1000 == 0 {
                 Self.logger.log(
-                    "atlas saturated at \(self.capacityGlyphs, privacy: .public) glyphs; dropped scalar U+\(String(scalar.value, radix: 16), privacy: .public) (hit #\(self.saturationHits, privacy: .public))"
+                    "atlas saturated at \(self.capacityGlyphs, privacy: .public); flushed & rebuilding (hit #\(self.saturationHits, privacy: .public))"
                 )
             }
             #endif
-            return nil
+            byKey.removeAll(keepingCapacity: true)
+            nextSlot = 0
+            slot = 0
+            if wide && slotsNeeded > slotCols {
+                // Pathological: a wide glyph in an atlas narrower than 2
+                // slots. Give up on this one — the atlas was misconfigured.
+                return nil
+            }
         }
 
         let col = slot % slotCols
