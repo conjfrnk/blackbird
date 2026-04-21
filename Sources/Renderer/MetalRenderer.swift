@@ -2,8 +2,18 @@ import Metal
 import MetalKit
 import AppKit
 import BBCore
+import os
 
 public final class MetalRenderer {
+
+    /// Shared `os.Logger` for renderer diagnostics. GPU command-buffer errors
+    /// (device lost, page fault, shader trap) and teardown-drain events route
+    /// here so they survive in the unified log with readable `privacy: .public`
+    /// strings — the project-wide rule from `feedback_nslog_private_format`:
+    /// NSLog's runtime format redacts everything to `<private>`, which hides
+    /// the diagnostic we actually need.
+    private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                       category: "renderer")
 
     /// Glyph atlas slots. 4096 covers ASCII + Latin supplements + common CJK
     /// + box-drawing + emoji-presentation for typical workloads without
@@ -331,6 +341,12 @@ public final class MetalRenderer {
     /// own mirror of metrics in sync.
     @discardableResult
     public func reconfigure(metrics newMetrics: CellMetrics, scale: CGFloat) -> Bool {
+        // The skip-cache + per-row cache are read/written from `render(in:)`
+        // on the main thread; any mutation here must match that contract or
+        // a concurrent render would see half-updated state. Enforce it —
+        // comments elsewhere in the file claim main-thread but nothing was
+        // asserting it.
+        dispatchPrecondition(condition: .onQueue(.main))
         guard let a = GlyphAtlas(device: device, metrics: newMetrics, capacityGlyphs: Self.atlasCapacity, scale: scale) else {
             return false
         }
@@ -354,6 +370,8 @@ public final class MetalRenderer {
     /// Left `public` so callers outside the renderer (e.g. a future theme
     /// hot-swap that only mutates the palette) can force a repaint.
     public func invalidate() {
+        // Same main-thread contract as `reconfigure` — see note there.
+        dispatchPrecondition(condition: .onQueue(.main))
         self.lastFrameKey = nil
         self.lastCacheKey = nil
         self.rowInstanceCache = []
@@ -764,7 +782,19 @@ public final class MetalRenderer {
         // Signal the slot free when the GPU finishes reading it. Must be
         // registered before `commit()` so there's no race with an immediate
         // GPU-side completion.
-        buffer.addCompletedHandler { [weak self] _ in
+        //
+        // Also inspect `status`/`error` so GPU faults (device lost, page
+        // fault, shader trap) surface in the unified log instead of
+        // silently blanking the window. `privacy: .public` is load-bearing
+        // for readability — see `feedback_nslog_private_format`.
+        buffer.addCompletedHandler { [weak self] cb in
+            if cb.status == .error {
+                if let err = cb.error {
+                    Self.logger.error("command buffer failed: \(String(describing: err), privacy: .public)")
+                } else {
+                    Self.logger.error("command buffer ended with .error status (no NSError)")
+                }
+            }
             self?.inflightSemaphore.signal()
         }
 
@@ -947,6 +977,32 @@ public final class MetalRenderer {
         encoder.endEncoding()
         buffer.present(drawable)
         buffer.commit()
+    }
+
+    deinit {
+        // DispatchSemaphore's contract: "all associated waits must be
+        // balanced before deallocation, or the program traps." If a window
+        // closes while frames are still in flight, the GPU completion
+        // handlers haven't run yet, so our inflightSemaphore has
+        // outstanding waits without matching signals. Deallocating it in
+        // that state aborts the process.
+        //
+        // The fix is simple: commit an empty command buffer on our queue
+        // and `waitUntilCompleted`. The empty buffer orders behind any
+        // real frames already committed, and waiting for it forces every
+        // prior completion handler to run — which signals the semaphore
+        // back to balance. Then deinit of the semaphore is safe.
+        //
+        // Called on whatever thread releases the last strong ref (usually
+        // main, but not guaranteed). `waitUntilCompleted` is documented
+        // safe from any thread; no additional synchronisation needed.
+        if let drain = commandQueue.makeCommandBuffer() {
+            drain.commit()
+            drain.waitUntilCompleted()
+        }
+        #if DEBUG
+        Self.logger.debug("MetalRenderer deinit — in-flight frames drained")
+        #endif
     }
 }
 

@@ -73,4 +73,29 @@ final class MetalRendererTests: XCTestCase {
         XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("e")))
         XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("H")))
     }
+
+    func test_rendererDeinitDrainsWithoutCrash() throws {
+        // Regression guard for audit F8: releasing a MetalRenderer must
+        // drain in-flight command buffers (if any) before the
+        // DispatchSemaphore deallocates, otherwise an imbalanced wait/signal
+        // count traps the process. Deinit commits a no-op command buffer
+        // and waits for completion — this test verifies the release path
+        // doesn't crash and that the object is actually freed.
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        weak var weakRef: MetalRenderer?
+        autoreleasepool {
+            var renderer: MetalRenderer? = MetalRenderer(device: device, metrics: metrics)
+            XCTAssertNotNil(renderer)
+            weakRef = renderer
+            renderer = nil
+        }
+        // If deinit crashed, we'd never reach here. If the release didn't
+        // zero the weak ref, something is retaining it (bug in the test
+        // or a leaked capture). Either way, an explicit check beats silent
+        // pass.
+        XCTAssertNil(weakRef, "MetalRenderer should be deallocated once all strong refs drop")
+    }
 }
