@@ -452,6 +452,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         replaceSelection.keyEquivalentModifierMask = [.command, .option]
         findSubmenu.addItem(replaceSelection)
+        findSubmenu.addItem(.separator())
+        // ⌘⌥C toggles case-sensitive find, ⌘⌥R toggles regex mode.
+        // Matches iTerm2 Find's equivalents; visible in the placeholder
+        // when enabled. Routes through the responder chain to the focused
+        // TerminalView's findBar (target=nil).
+        let caseToggle = NSMenuItem(
+            title: "Find: Case Sensitive",
+            action: #selector(TerminalView.toggleFindCaseSensitive(_:)),
+            keyEquivalent: "c"
+        )
+        caseToggle.keyEquivalentModifierMask = [.command, .option]
+        findSubmenu.addItem(caseToggle)
+        let regexToggle = NSMenuItem(
+            title: "Find: Regular Expression",
+            action: #selector(TerminalView.toggleFindRegex(_:)),
+            keyEquivalent: "r"
+        )
+        regexToggle.keyEquivalentModifierMask = [.command, .option]
+        findSubmenu.addItem(regexToggle)
         let findParent = NSMenuItem(title: "Find", action: nil, keyEquivalent: "")
         findParent.submenu = findSubmenu
         menu.addItem(findParent)

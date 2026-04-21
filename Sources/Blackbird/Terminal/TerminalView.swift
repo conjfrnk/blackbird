@@ -1726,6 +1726,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     @objc public func performFindNextAction(_ sender: Any?)     { advanceFind(direction: .forward) }
     @objc public func performFindPreviousAction(_ sender: Any?) { advanceFind(direction: .backward) }
 
+    /// ⌘⌥C: toggle case-sensitive find. Installs the find bar if
+    /// needed so the menu item works even when the bar is closed.
+    @objc public func toggleFindCaseSensitive(_ sender: Any?) {
+        if findBar == nil { installFindBar() }
+        findBar?.toggleCaseSensitive(sender)
+    }
+
+    /// ⌘⌥R: toggle regex find.
+    @objc public func toggleFindRegex(_ sender: Any?) {
+        if findBar == nil { installFindBar() }
+        findBar?.toggleRegexMode(sender)
+    }
+
     @objc public func clearBufferAndScrollback(_ sender: Any?) {
         session?.clearAll()
     }
@@ -2033,6 +2046,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
         case #selector(performFindNextAction(_:)):     return !findMatches.isEmpty
         case #selector(performFindPreviousAction(_:)): return !findMatches.isEmpty
+        case #selector(toggleFindCaseSensitive(_:)):
+            item.state = (findBar?.options.caseSensitive == true) ? .on : .off
+            return currentSnapshot != nil
+        case #selector(toggleFindRegex(_:)):
+            item.state = (findBar?.options.regex == true) ? .on : .off
+            return currentSnapshot != nil
         case #selector(clearBufferAndScrollback(_:)):  return session != nil
         case #selector(jumpToPreviousPrompt(_:)),
              #selector(jumpToNextPrompt(_:)):
