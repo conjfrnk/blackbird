@@ -48,24 +48,33 @@ fn text_range_zero_to_zero_returns_single_char() {
 
 #[test]
 fn text_range_col_past_last_clamps_to_grid_edge() {
-    // start_col=999 on a 10-col grid: the Rust side clamps to last_col
-    // rather than reading past the row. Prose mode from (0,999) to
-    // (0,999) collapses to the last column's char.
+    // start_col=999 on a 10-col grid: the Rust side clamps to last_col (9).
+    // Prose mode from (0,999) to (0,999) collapses to the char at col 9,
+    // which is an unrendered cell (cols 5-9 were never written to — only
+    // "hello" at cols 0-4). Unrendered cells surface as a single space.
+    // If the clamp ever regresses to reading past the last column, this
+    // assertion will change (either by trap or by reading OOB memory),
+    // so a permissive `is_some()` check would hide the regression.
     let got = text_range_over_primed_grid(0, 999, 0, 999, 0);
-    // last column of row 0 on our primed grid is a space (row is "hello"
-    // in cols 0-4, rest spaces). `textRange` strips trailing whitespace
-    // on multi-line prose mode but not on single-line.
-    assert!(got.is_some(), "out-of-range col must not return null");
-    let _ = got;
+    assert_eq!(
+        got.as_deref(),
+        Some(" "),
+        "out-of-range col must clamp to last-col space"
+    );
 }
 
 #[test]
 fn text_range_max_col_does_not_trap() {
-    // u16::MAX cols would otherwise trigger arithmetic oddities if not
-    // clamped. Must return a valid (possibly empty) string without
-    // trap.
+    // u16::MAX at both endpoints clamps to (0,9)..(0,9) — same result as
+    // above. The point of this test is to catch arithmetic overflow or
+    // panic in the clamp path. Assert the exact post-clamp content so a
+    // future refactor that reads further than last_col trips the test.
     let got = text_range_over_primed_grid(0, u16::MAX, 0, u16::MAX, 0);
-    assert!(got.is_some(), "u16::MAX col must not trap");
+    assert_eq!(
+        got.as_deref(),
+        Some(" "),
+        "u16::MAX col must clamp to last-col space without trapping"
+    );
 }
 
 #[test]

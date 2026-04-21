@@ -2462,6 +2462,57 @@ mod tests {
         }
     }
 
+    /// Regression: bb_term_new/bb_term_resize must clamp oversized dims to
+    /// MAX_DIM (1000). The original OOM incident was fuzz/Swift passing
+    /// u16::MAX for cols/rows, triggering a 100+ GB alloc inside alacritty's
+    /// grid allocator. We deliberately DO NOT pass u16::MAX here — if the
+    /// clamp ever regresses, this test would itself OOM the CI runner. 10 000
+    /// is 10× MAX_DIM, safely allocatable if the clamp were (catastrophically)
+    /// removed, and well outside anything a legitimate caller could want.
+    /// The paired Swift-side clamp at TerminalSession.swift is tested
+    /// independently; this is defence-in-depth on the Rust side.
+    #[test]
+    fn new_clamps_oversized_dimensions() {
+        unsafe {
+            let term = bb_term_new(10_000, 10_000, 1000);
+            assert!(!term.is_null());
+            let snap = bb_term_take_snapshot(term);
+            assert!(
+                (*snap).cols <= 1000,
+                "bb_term_new must clamp oversized cols to MAX_DIM (got {})",
+                (*snap).cols
+            );
+            assert!(
+                (*snap).rows <= 1000,
+                "bb_term_new must clamp oversized rows to MAX_DIM (got {})",
+                (*snap).rows
+            );
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    #[test]
+    fn resize_clamps_oversized_dimensions() {
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_resize(term, 10_000, 10_000);
+            let snap = bb_term_take_snapshot(term);
+            assert!(
+                (*snap).cols <= 1000,
+                "bb_term_resize must clamp oversized cols (got {})",
+                (*snap).cols
+            );
+            assert!(
+                (*snap).rows <= 1000,
+                "bb_term_resize must clamp oversized rows (got {})",
+                (*snap).rows
+            );
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
     /// Regression: resize_changes_dimensions covers the nominal case, but the
     /// interesting failure mode is resize + scrollback. Feeding enough lines
     /// to build history and then shrinking should preserve the scrollback
