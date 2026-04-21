@@ -252,3 +252,72 @@ private final class GuardableReplaceDelegateRecorder: FindBarDelegate {
     }
     func findBarShouldAllowReplace(_ bar: FindBar) -> Bool { allowReplace }
 }
+
+/// Tests for FindBar.Options (case-sensitive + regex). Verifies the
+/// options-changed delegate hook fires with the right state and that the
+/// public toggles round-trip through the field's placeholder so the user
+/// always sees the active flags.
+final class FindBarOptionsTests: XCTestCase {
+
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
+    private final class OptionsRecorder: FindBarDelegate {
+        var history: [FindBar.Options] = []
+        func findBar(_ bar: FindBar, didChangeQuery query: String) {}
+        func findBar(_ bar: FindBar, didAdvance direction: FindBar.Direction) {}
+        func findBarDidClose(_ bar: FindBar) {}
+        func findBar(_ bar: FindBar, didRequestReplace kind: FindBar.ReplaceKind, with replacement: String) {}
+        func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options) {
+            history.append(options)
+        }
+    }
+
+    func test_defaultOptions_areOff() {
+        let bar = FindBar(frame: .zero)
+        XCTAssertFalse(bar.options.caseSensitive)
+        XCTAssertFalse(bar.options.regex)
+    }
+
+    func test_toggleCaseSensitive_firesDelegateWithNewState() {
+        let bar = FindBar(frame: .zero)
+        let recorder = OptionsRecorder()
+        bar.delegate = recorder
+        bar.toggleCaseSensitive(nil)
+        XCTAssertEqual(recorder.history.count, 1)
+        XCTAssertTrue(recorder.history.first?.caseSensitive ?? false)
+        XCTAssertFalse(recorder.history.first?.regex ?? true)
+    }
+
+    func test_toggleRegexMode_firesDelegateWithNewState() {
+        let bar = FindBar(frame: .zero)
+        let recorder = OptionsRecorder()
+        bar.delegate = recorder
+        bar.toggleRegexMode(nil)
+        XCTAssertEqual(recorder.history.count, 1)
+        XCTAssertTrue(recorder.history.first?.regex ?? false)
+    }
+
+    func test_toggleBoth_coalescesInDelegateOrder() {
+        let bar = FindBar(frame: .zero)
+        let recorder = OptionsRecorder()
+        bar.delegate = recorder
+        bar.toggleCaseSensitive(nil)
+        bar.toggleRegexMode(nil)
+        XCTAssertEqual(recorder.history.count, 2)
+        let final = recorder.history.last
+        XCTAssertTrue(final?.caseSensitive == true && final?.regex == true)
+    }
+
+    func test_sameOptionToggleTwice_returnsToOffAndFiresTwice() {
+        let bar = FindBar(frame: .zero)
+        let recorder = OptionsRecorder()
+        bar.delegate = recorder
+        bar.toggleCaseSensitive(nil)
+        bar.toggleCaseSensitive(nil)
+        XCTAssertEqual(recorder.history.count, 2)
+        XCTAssertFalse(bar.options.caseSensitive)
+    }
+}
