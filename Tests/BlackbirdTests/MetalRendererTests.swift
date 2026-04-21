@@ -1,5 +1,6 @@
 import XCTest
 import Metal
+import MetalKit
 @testable import Blackbird
 
 final class MetalRendererTests: XCTestCase {
@@ -97,5 +98,223 @@ final class MetalRendererTests: XCTestCase {
         // or a leaked capture). Either way, an explicit check beats silent
         // pass.
         XCTAssertNil(weakRef, "MetalRenderer should be deallocated once all strong refs drop")
+    }
+
+    // MARK: - Audit F11: render(in:) direct coverage
+    //
+    // Memory/time pre-flight per MEMORY `feedback_test_memory_safety`:
+    //   Grid is 20x8 = 160 cells. Renderer holds three instance buffers
+    //   at the startup capacity (200*80 = 16 000 CellInstance slots); at
+    //   roughly 48 bytes each that's ~2.3 MB total. BBTerm ring buffer
+    //   with 8 rows is trivial. No test here constructs a larger grid.
+    //   The offscreen MTKView below never acquires a drawable (no
+    //   CAMetalLayer has a connection), so `render(in:)` hits the
+    //   early-return path after `wait/signal` balance — no GPU work
+    //   submitted, no persistent resources leaked.
+
+    /// MTKView subclass that never vends a drawable. `render(in:)`
+    /// acquires `view.currentDrawable` and `view.currentRenderPassDescriptor`
+    /// before encoding; when either is nil the renderer takes the
+    /// early-return path (signal semaphore, skip encode/commit). Tests
+    /// use this to exercise every code path up to and including the
+    /// drawable acquisition — FrameKey build, frame-skip comparison,
+    /// slot rotation, semaphore wait/signal balance — without ever
+    /// presenting a real drawable.
+    ///
+    /// Why a subclass instead of a stock MTKView: a stock offscreen
+    /// MTKView in a test host still vends a fresh
+    /// `CAMetalDrawable` on demand (the CAMetalLayer is real even
+    /// without a window). Calling `buffer.present(drawable)` on that
+    /// drawable then `.commit()` hands it off for display; a second
+    /// call to `render(in:)` would then see the same drawable slot
+    /// recycled and AppKit/Core Animation logs `[API] Each
+    /// CAMetalLayerDrawable can only be presented once!`. Returning
+    /// nil sidesteps the whole encode path.
+    private final class NoDrawableMTKView: MTKView {
+        override var currentDrawable: CAMetalDrawable? { nil }
+        override var currentRenderPassDescriptor: MTLRenderPassDescriptor? { nil }
+    }
+
+    /// Build a small offscreen MTKView that never returns a drawable.
+    /// `render(in:)` will early-return on the `drawable == nil` branch
+    /// after balancing its semaphore — the code paths we actually want
+    /// to exercise (FrameKey build, frame-skip compare, slot rotation)
+    /// all run before that branch. Crashes in those paths surface here.
+    private func makeOffscreenMTKView(device: MTLDevice) -> MTKView {
+        let view = NoDrawableMTKView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 192),
+            device: device
+        )
+        // Don't let the view try to drive a timer-based draw; tests
+        // call render(in:) directly.
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
+        return view
+    }
+
+    /// Spin up a BBTerm, feed it a line of text, return a fresh snapshot
+    /// for the renderer. Small grid keeps memory and CPU bounded.
+    private func makeSmallSnapshot(text: String = "abc") throws -> BBSnapshot {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 8)))
+        term.input(text)
+        return try XCTUnwrap(term.snapshot())
+    }
+
+    func test_render_withNoSnapshot_doesNotCrash() throws {
+        // Exercises the "snapshot is nil" branch: render() still runs
+        // blink-phase computation, builds a FrameKey with default values,
+        // takes a slot, then exits because the drawable is nil.
+        // Verifies semaphore balancing on the no-snapshot early-return.
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+        // Three successive calls to prove the semaphore isn't leaking
+        // waits: if a single `signal()` was missed, the fourth would
+        // block indefinitely (3 slots). Keep it below 4 for safety.
+        renderer.render(in: view, snapshot: nil, focused: true)
+        renderer.render(in: view, snapshot: nil, focused: true)
+        renderer.render(in: view, snapshot: nil, focused: true)
+    }
+
+    func test_render_withSnapshot_doesNotCrash() throws {
+        // Exercises the full FrameKey build + CacheKey build +
+        // buildInstances(...) path for a small snapshot. Drawable is
+        // nil in headless xctest, so the method exits before
+        // encoder/commit — which is fine for coverage purposes. The
+        // branches we're actually pinning (frame-skip compare, slot
+        // rotation, instance count) all run before the drawable check.
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+        let snapshot = try makeSmallSnapshot(text: "hello")
+        renderer.render(in: view, snapshot: snapshot, focused: true, selection: nil)
+    }
+
+    func test_render_repeatedIdenticalSnapshot_stable() throws {
+        // Audit F11 intent: frame-skip cache. When render() is called
+        // twice with the same snapshot + state, the second call should
+        // short-circuit at `frameKey == lastFrameKey`. We can't read
+        // `lastFrameKey` directly without further test hooks, but we
+        // can assert the path is stable (no crash, no unbalanced
+        // semaphore, no deadlock) across many identical calls.
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+        let snapshot = try makeSmallSnapshot(text: "cached")
+        // 10 back-to-back identical renders: first builds the cache,
+        // next 9 should hit the frame-skip short-circuit (which never
+        // touches the semaphore, per the source comment "we never
+        // claimed a slot, so we don't signal back"). If that balance
+        // is off, the test host deadlocks — hence the tight upper
+        // bound.
+        for _ in 0..<10 {
+            renderer.render(in: view, snapshot: snapshot, focused: true)
+        }
+    }
+
+    func test_render_afterInvalidate_rerunsPath() throws {
+        // `invalidate()` clears lastFrameKey so the next render rebuilds
+        // instances instead of frame-skipping. We can't observe the
+        // rebuild from outside directly — but we can verify the call
+        // order doesn't crash and leaves the renderer in a sane state
+        // by reaching for the atlas afterwards.
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+        let snap = try makeSmallSnapshot(text: "x")
+        renderer.render(in: view, snapshot: snap, focused: true)
+        renderer.invalidate()
+        renderer.render(in: view, snapshot: snap, focused: true)
+        // Atlas must still respond to lookups after the invalidate+render
+        // round trip. Regression guard against an invalidate() that
+        // accidentally frees the atlas texture.
+        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("x")))
+    }
+
+    func test_render_withCursorBlinkEnabled_exercisesBlinkPhase() throws {
+        // Audit F11 intent: blink-phase logic. Enabling blink causes
+        // `render()` to compute a phase against CACurrentMediaTime and
+        // fold that into the FrameKey (blinkSkipNow). Exercising the
+        // path at two wall-clock moments guarantees the blink-phase
+        // branch runs. Exact observability requires DEBUG-only hooks
+        // we don't have; this test pins "it doesn't crash and the
+        // renderer remains usable".
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+        let snapshot = try makeSmallSnapshot(text: "|")
+        renderer.setCursorBlinkEnabled(true)
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+        // A tiny delay between renders so any wall-clock–driven logic
+        // (blink phase, time-based caches) sees a forward step. 10 ms
+        // is well under the 1.06 s blink cycle, so we don't guarantee
+        // a phase flip — we just ensure the phase math runs with a
+        // non-zero elapsed value.
+        Thread.sleep(forTimeInterval: 0.01)
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+        renderer.setCursorBlinkEnabled(false)
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+    }
+
+    func test_render_focusedVsUnfocused_stable() throws {
+        // `focused` is part of the FrameKey — toggling it must not
+        // crash, and the frame-skip cache must invalidate (because the
+        // key differs). We stop short of asserting that cache state
+        // because there's no exposed hook; the smoke test catches
+        // crashes in the branches that depend on `focused` (cursor
+        // fill flag, block-cursor inversion).
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+        let snap = try makeSmallSnapshot(text: "f")
+        renderer.render(in: view, snapshot: snap, focused: true)
+        renderer.render(in: view, snapshot: snap, focused: false)
+        renderer.render(in: view, snapshot: snap, focused: true)
+    }
+
+    func test_render_withDamagedSnapshot_exercisesPartialRebuild() throws {
+        // Audit F11 intent: partial-row rebuild. When the CacheKey is
+        // stable across two frames and the snapshot carries partial
+        // damage, only damaged rows get rebuilt in `rowInstanceCache`.
+        // We drive two renders in a row: the first establishes the
+        // cache, the second reuses it with whatever damage the terminal
+        // reports after we push a second chunk of input. The partial-
+        // rebuild path runs unless damage >= rows/2, which is unlikely
+        // for a single-line append.
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+
+        // Use a single BBTerm across two snapshots so the second
+        // snapshot actually tracks delta damage, not full damage.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 8)))
+        term.input("aaa")
+        let snap1 = try XCTUnwrap(term.snapshot())
+        renderer.render(in: view, snapshot: snap1, focused: true)
+
+        term.input("b")
+        let snap2 = try XCTUnwrap(term.snapshot())
+        renderer.render(in: view, snapshot: snap2, focused: true)
     }
 }

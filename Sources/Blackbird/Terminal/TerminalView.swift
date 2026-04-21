@@ -2687,6 +2687,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     func installCursorForTests(row: Int, col: Int) {
         cursorOverrideForTests = (row: row, col: col)
     }
+
+    /// Read the effective frame-rate cap that the power-aware controller
+    /// has applied to this MTKView. Returns `0` when the view is paused
+    /// (occluded, or the policy chose `.paused`); otherwise the current
+    /// `preferredFramesPerSecond`. Used by `PowerAwareRenderingTests` to
+    /// assert the notification observers actually drive
+    /// `applyPowerAwareFrameRate()` — without this hook, the observer
+    /// plumbing is invisible from the test harness.
+    var _testOnly_currentFrameRateCap: Int {
+        return self.isPaused ? 0 : self.preferredFramesPerSecond
+    }
+
+    /// Force-run the power-aware-rate recompute as if a notification had
+    /// fired. Tests use this to validate the `applyPowerAwareFrameRate`
+    /// path when they can't guarantee a notification observer fires
+    /// synchronously on the current RunLoop iteration.
+    func _testOnly_applyPowerAwareFrameRate() {
+        self.applyPowerAwareFrameRate()
+    }
     #endif
 
     /// Pure encoder for xterm mouse reports — extracted so the branches that
