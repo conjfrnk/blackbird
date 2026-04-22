@@ -22,8 +22,19 @@ public enum TargetFrameRate: Equatable {
 /// - **Occluded window** → `.paused`. If the user can't see us, we
 ///   shouldn't compute pixels. `CAMetalLayer.compositor` still holds
 ///   the previously-presented drawable, so unhiding restores the last
-///   frame instantly; the next snapshot change re-drives a real
-///   render via `setNeedsDisplay`.
+///   frame instantly.
+///
+///   How rendering resumes: `TerminalView` runs with
+///   `enableSetNeedsDisplay = false` and is driven by MTKView's internal
+///   `CVDisplayLink`. When `applyPowerAwareFrameRate` flips `isPaused`
+///   back to `false`, MTKView's display link resumes on the next vsync
+///   and the next draw tick renders the current snapshot. A snapshot
+///   change that arrived during occlusion shows up on that first post-
+///   un-occlude tick — there's a one-vsync latency floor before the
+///   window becomes visible again, which is below perception for a
+///   terminal workload. `setNeedsDisplay` is NOT the un-occlude driver
+///   (earlier doc drift — `enableSetNeedsDisplay` is off). Audit
+///   latency-power F6.
 /// - **Low power mode on** → cap at 30. Mirrors Ghostty (Mitchell
 ///   Hashimoto: "if you're on battery and macOS wants to slow
 ///   Ghostty down, it can and we respect it"). 30 fps is still smooth

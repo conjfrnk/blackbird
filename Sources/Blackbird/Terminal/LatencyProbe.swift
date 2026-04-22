@@ -23,6 +23,16 @@ public final class LatencyProbe {
     /// no-op. A single slot is enough: keystrokes almost always arrive faster
     /// than they can be rendered, so collapsing to the latest one captures
     /// the user-visible latency of the most recent input.
+    ///
+    /// Protected by `lock`. The field is written from main (`markKeystroke`
+    /// called by `TerminalView.keyDown`) and read + cleared from the MTKView
+    /// draw thread (`markPresented` via `draw(in:)`). Without the lock an 8-
+    /// byte `Double` store-on-A / load-on-B is not guaranteed atomic under
+    /// Swift's memory model — TSan flags it, and a future contributor that
+    /// moves `keyDown` off the main thread would lose samples to tearing.
+    /// Taking the existing NSLock around the single-slot read/write adds ~5ns
+    /// per keystroke and ~5ns per frame, both below the noise floor of the
+    /// probe itself. Audit latency-power F1.
     private var pendingKeystrokeAt: CFTimeInterval = 0
 
     private var samplesMs: [Double] = []
@@ -68,7 +78,10 @@ public final class LatencyProbe {
     /// doesn't include our own upstream bookkeeping.
     public func markKeystroke() {
         guard enabled else { return }
-        pendingKeystrokeAt = CACurrentMediaTime()
+        let now = CACurrentMediaTime()
+        lock.lock()
+        pendingKeystrokeAt = now
+        lock.unlock()
     }
 
     /// Record that a frame just presented. If a keystroke is pending, the
@@ -78,10 +91,12 @@ public final class LatencyProbe {
     /// number.
     public func markPresented() {
         guard enabled else { return }
+        lock.lock()
         let pending = pendingKeystrokeAt
+        pendingKeystrokeAt = 0
+        lock.unlock()
         guard pending > 0 else { return }
         let dtMs = (CACurrentMediaTime() - pending) * 1000.0
-        pendingKeystrokeAt = 0
         lock.lock()
         samplesMs.append(dtMs)
         let shouldFlush = samplesMs.count >= Self.flushThreshold
