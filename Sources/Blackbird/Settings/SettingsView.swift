@@ -22,107 +22,172 @@ public struct SettingsView: View {
             .sorted()
     }()
 
+    /// Human-readable "short (build)" version string used in the Updates
+    /// tab. Read once per launch; neither value changes at runtime.
+    private static let versionString: String = {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return short == build ? short : "\(short) (\(build))"
+    }()
+
     public init() {}
 
     public var body: some View {
-        TabView {
+        tabs.frame(minWidth: 520, minHeight: 520)
+    }
+
+    // `.containerBackground(for: .window)` is macOS 15+. On older systems
+    // the NSVisualEffectView installed behind the hosting controller
+    // (see SettingsWindowController) already shows through any non-
+    // opaque SwiftUI layers, so the guard is purely to adopt the
+    // explicit-clear-window API when available.
+    @ViewBuilder
+    private var tabs: some View {
+        let base = TabView {
             appearanceTab.tabItem { Label("Appearance", systemImage: "paintpalette") }
             behaviorTab.tabItem   { Label("Behavior",   systemImage: "keyboard") }
             updatesTab.tabItem    { Label("Updates",    systemImage: "arrow.down.circle") }
         }
-        .frame(minWidth: 480, minHeight: 280)
-        .padding()
+        if #available(macOS 15.0, *) {
+            base.containerBackground(.clear, for: .window)
+        } else {
+            base
+        }
     }
+
+    // MARK: - Appearance
 
     private var appearanceTab: some View {
         Form {
-            Picker("Theme Mode", selection: $prefs.themeModeRaw) {
-                ForEach(Preferences.ThemeMode.allCases) { m in
-                    Text(m.displayName).tag(m.rawValue)
+            Section("Theme") {
+                Picker("Mode", selection: $prefs.themeModeRaw) {
+                    ForEach(Preferences.ThemeMode.allCases) { m in
+                        Text(m.displayName).tag(m.rawValue)
+                    }
                 }
-            }
-            Picker("Theme", selection: $prefs.themeRaw) {
-                ForEach(Theme.allCases) { t in
-                    Text(t.displayName).tag(t.rawValue)
-                }
-            }
-            Picker("Font", selection: $prefs.fontName) {
-                ForEach(Self.cachedMonospaceFamilies, id: \.self) { name in
-                    Text(name).tag(name)
-                }
-            }
-            HStack {
-                Text("Size: \(Int(prefs.fontSize))")
-                Slider(value: $prefs.fontSize, in: 9...32, step: 1)
-            }
-            Picker("Cursor Shape", selection: $prefs.cursorShapeRaw) {
-                ForEach(Preferences.CursorShape.allCases) { s in
-                    Text(s.rawValue).tag(s.rawValue)
+                Picker("Palette", selection: $prefs.themeRaw) {
+                    ForEach(Theme.allCases) { t in
+                        Text(t.displayName).tag(t.rawValue)
+                    }
                 }
             }
 
-            Divider()
+            Section("Font") {
+                Picker("Family", selection: $prefs.fontName) {
+                    ForEach(Self.cachedMonospaceFamilies, id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                }
+                LabeledContent("Size") {
+                    HStack(spacing: 8) {
+                        Slider(value: $prefs.fontSize, in: 9...32, step: 1)
+                        Text("\(Int(prefs.fontSize)) pt")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+            }
 
-            // Single combined translucency slider (1 = opaque, 10 = very
-            // see-through with heavy blur). Default 3 is a subtle lift.
-            HStack {
-                Text("Translucency:").frame(width: 110, alignment: .trailing)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
+            Section("Cursor") {
+                Picker("Shape", selection: $prefs.cursorShapeRaw) {
+                    ForEach(Preferences.CursorShape.allCases) { s in
+                        Text(s.rawValue).tag(s.rawValue)
+                    }
+                }
+                Toggle("Blink", isOn: $prefs.cursorBlink)
+            }
+
+            Section {
+                LabeledContent("Translucency") {
+                    HStack(spacing: 8) {
+                        Text("Solid")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                         Slider(value: $prefs.translucency, in: 1...10, step: 1)
-                        Text("\(Int(prefs.translucency))").frame(width: 32, alignment: .trailing)
-                    }
-                    HStack {
-                        Text("Solid").font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Text("Ghost").font(.caption).foregroundStyle(.secondary)
+                        Text("Ghost")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
                 }
+            } footer: {
+                Text("Higher values make the window background more translucent and apply a stronger blur.")
             }
         }
-        .padding()
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
+
+    // MARK: - Behavior
 
     private var behaviorTab: some View {
         Form {
-            Toggle("Cursor Blink", isOn: $prefs.cursorBlink)
-            Picker("Bell", selection: $prefs.bellRaw) {
-                ForEach(Preferences.BellStyle.allCases) { s in
-                    Text(s.rawValue).tag(s.rawValue)
+            Section("Terminal") {
+                Picker("Bell", selection: $prefs.bellRaw) {
+                    ForEach(Preferences.BellStyle.allCases) { s in
+                        Text(s.rawValue).tag(s.rawValue)
+                    }
                 }
-            }
-            Picker("Option Key", selection: $prefs.optionKeyRaw) {
-                ForEach(Preferences.OptionKey.allCases) { o in
-                    Text(o.rawValue).tag(o.rawValue)
+                Picker("Option Key", selection: $prefs.optionKeyRaw) {
+                    ForEach(Preferences.OptionKey.allCases) { o in
+                        Text(o.rawValue).tag(o.rawValue)
+                    }
                 }
+                Toggle("Confirm close while running", isOn: $prefs.confirmClose)
             }
-            Toggle("Confirm close while running", isOn: $prefs.confirmClose)
 
-            Divider()
-            Toggle("Remote clipboard write (OSC 52)", isOn: $prefs.osc52Enabled)
-            Text("When on, remote shells (e.g., a server emitting OSC 52 or `tmux set -g set-clipboard on`) can write text directly to your Mac clipboard. Turn off if you're working on untrusted remotes.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Section {
+                Toggle("Allow remote clipboard writes (OSC 52)", isOn: $prefs.osc52Enabled)
+            } footer: {
+                Text("Lets remote shells (for example, via `tmux set -g set-clipboard on`) write text directly to your Mac clipboard. Turn off on untrusted servers.")
+            }
 
-            Toggle("Reply to color queries (OSC 10/11/12)", isOn: $prefs.colorQueryEnabled)
-            Text("When on, TUIs that ask for the current fg / bg / cursor color receive a `rgb:…` reply — Neovim and tmux use this for light/dark auto-detection. Off by default because the reply is written back into the PTY, where a misbehaving shell's vi-mode handler could treat the color bytes as commands. Leave off on untrusted remotes.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Section {
+                Toggle("Reply to color queries (OSC 10/11/12)", isOn: $prefs.colorQueryEnabled)
+            } footer: {
+                Text("Lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors for light/dark auto-detection. Off by default: the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
+            }
         }
-        .padding()
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
+
+    // MARK: - Updates
 
     private var updatesTab: some View {
         Form {
-            Toggle("Check for updates automatically", isOn: $prefs.autoUpdateChecks)
-            Text("Blackbird can check the official release feed at app launch and notify you when a new version is available. Off by default.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding()
-    }
+            Section {
+                LabeledContent("Version") {
+                    Text(Self.versionString)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .textSelection(.enabled)
+                }
+            }
 
+            Section {
+                Toggle("Check for updates automatically", isOn: $prefs.autoUpdateChecks)
+            } footer: {
+                Text("Check the release feed at launch and notify when a new version is available.")
+            }
+
+            if AppDelegate.isUpdaterConfigured {
+                Section {
+                    Button {
+                        NSApp.sendAction(
+                            #selector(AppDelegate.checkForUpdatesFromUI(_:)),
+                            to: nil,
+                            from: nil
+                        )
+                    } label: {
+                        Text("Check for Updates Now")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.large)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+    }
 }

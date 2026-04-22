@@ -49,8 +49,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// True when Info.plist has a non-placeholder SUFeedURL and a non-empty
     /// SUPublicEDKey (both required by Sparkle 2.x). Kept here so the whole
     /// Sparkle integration is a single gate — flip the config values and
-    /// every dependent path lights up.
-    private static var isUpdaterConfigured: Bool {
+    /// every dependent path lights up. Exposed so `SettingsView` can gate
+    /// its "Check for Updates Now" button on the same condition that
+    /// decides whether the app-menu item is installed.
+    static var isUpdaterConfigured: Bool {
         let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? ""
         let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String ?? ""
         let placeholder = feed.isEmpty
@@ -178,6 +180,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // AppKit-hosted settings window — see SettingsWindowController for
         // why we don't rely on SwiftUI's `Settings { … }` scene wiring.
         SettingsWindowController.shared.show()
+    }
+
+    /// Responder-chain entry point for the Settings window's "Check for
+    /// Updates Now" button. The button uses NSApp.sendAction with a nil
+    /// target; AppDelegate is in the responder chain so this selector is
+    /// reached without the button needing a direct reference to the
+    /// private `updaterController`. No-op when the updater isn't
+    /// configured (dev builds on placeholder Info.plist) — matches the
+    /// menu item's behavior.
+    @objc func checkForUpdatesFromUI(_ sender: Any?) {
+        updaterController?.checkForUpdates(sender)
     }
 
     // MARK: - Controller factory
