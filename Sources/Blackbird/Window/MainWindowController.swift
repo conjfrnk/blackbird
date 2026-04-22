@@ -20,14 +20,45 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// Always reset immediately after the batch via a `defer`.
     static var bypassCloseConfirm: Bool = false
 
-    /// Space on the left of the titlebar reserved for the three traffic-
-    /// light buttons on a standard-style macOS window. Used by the tab
-    /// strip width calculation so pills never overlap the close / minimize
-    /// / zoom hotspots. Zoom's right edge sits near x=67 at the standard
-    /// button layout; 75 gives an ~8pt gap between the zoom button and
-    /// the first pill, matching the 8pt trailingInset on the right edge
-    /// so the strip reads symmetric to the eye.
-    private static let trafficLightsReservation: CGFloat = 75
+    /// Fallback traffic-light reservation for environments where the live
+    /// window-button geometry can't be queried (pre-install, nil window,
+    /// non-standard style mask). The live path queries
+    /// `standardWindowButton(.zoomButton)` and adds a visual gap —
+    /// preferred because Apple nudges the light geometry between macOS
+    /// releases (Big Sur, Sonoma both moved them by a few points) and
+    /// a hard-coded 75 eventually drifts. Audit titlebar-tabs F11.
+    private static let trafficLightsReservationFallback: CGFloat = 75
+
+    /// Visual padding between the zoom button's trailing edge and the
+    /// first pill. Matches the 8pt trailingInset used inside the strip
+    /// (TabStripView.trailingInset) so the bar reads symmetric to the
+    /// eye. Audit titlebar-tabs F11.
+    private static let trafficLightsTrailingPadding: CGFloat = 8
+
+    /// Compute the left-side space that must be reserved for the three
+    /// traffic-light buttons, measured live from the window's standard
+    /// buttons where possible. Falls back to
+    /// `trafficLightsReservationFallback` for edge cases (missing
+    /// buttons, non-standard style mask). Audit titlebar-tabs F11.
+    private func trafficLightsReservation() -> CGFloat {
+        guard let window else { return Self.trafficLightsReservationFallback }
+        // `zoomButton` is the trailing button of the three-light cluster
+        // on standard windows. `superview` is the button container whose
+        // frame holds the full cluster — more accurate than summing the
+        // three individual buttons because Apple occasionally bakes
+        // inter-button padding inside the container's frame.
+        let reservation: CGFloat
+        if let zoom = window.standardWindowButton(.zoomButton) {
+            let maxX = zoom.superview?.frame.maxX ?? zoom.frame.maxX
+            reservation = maxX + Self.trafficLightsTrailingPadding
+        } else {
+            reservation = Self.trafficLightsReservationFallback
+        }
+        // Guard against a pathological window style mask that returns
+        // 0 for the zoom button frame (e.g. a frameless inspector
+        // panel). Fall back if the computed reservation is suspicious.
+        return reservation > 20 ? reservation : Self.trafficLightsReservationFallback
+    }
 
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?
@@ -646,7 +677,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // keeps narrow windows rendering at least something legible
             // in the strip.
             let total = window.frame.width
-            let available = max(200, total - Self.trafficLightsReservation)
+            let available = max(200, total - trafficLightsReservation())
             titlebarTabBar?.refresh(availableWidth: available)
         }
     }

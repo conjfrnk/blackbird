@@ -664,5 +664,39 @@ public final class PTY {
         // against the read loop's read(), which could otherwise produce a
         // double-close or an fd-reuse bug under rapid session churn (Plan 4).
         kill(childPID, SIGHUP)
+        // Audit pty F3. A shell running `trap '' HUP` (or any other
+        // HUP-ignoring init flow) won't close the slave fd in response
+        // to the signal above, so the read loop stays blocked forever
+        // and the child-process + master-fd never get cleaned up.
+        // Schedule an asynchronous escalation to SIGKILL after a short
+        // grace period — SIGKILL cannot be trapped, so the kernel
+        // forces the child's exit, which closes the slave fd and the
+        // read loop picks up EOF and runs its normal teardown path
+        // (close + waitpid) from there.
+        //
+        // Use `asyncAfter` on a global concurrent queue so the
+        // escalation work doesn't block the caller's thread (the
+        // caller is usually main via `TerminalSession.terminate` /
+        // deinit) and doesn't hold any of PTY's serial queues —
+        // holding `stateQueue` for 200ms would stall the read loop's
+        // close handshake, and holding `writeQueue` would stall any
+        // in-flight `writeImmediate` that raced past the `markStopped`
+        // early-return. The escalation block reads only the captured
+        // `pid` (a value type) and calls `kill` directly; no shared
+        // state is accessed.
+        let pid = childPID
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + .milliseconds(200)
+        ) {
+            // Poll for the child. `kill(pid, 0)` returns 0 iff the
+            // process exists and we can signal it. A non-zero return
+            // means ESRCH (already exited) or EPERM (impossible here
+            // since we're the parent); either way, don't escalate.
+            guard kill(pid, 0) == 0 else { return }
+            _ = kill(pid, SIGKILL)
+            Self.logger.log(
+                "PTY.terminate escalated to SIGKILL pid=\(pid, privacy: .public) (HUP-ignoring child)"
+            )
+        }
     }
 }

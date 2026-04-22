@@ -88,6 +88,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     private var prefsCancellable: AnyCancellable?
 
+    /// Snapshot of the preferences fields this view actually observes —
+    /// `fontName`, `fontSize`, and `optionKey`. Used by the preferences
+    /// Combine sink to short-circuit when the emitted
+    /// `objectWillChange` was driven by an unrelated property (theme
+    /// swap, translucency slider, etc.). Audit terminal-view-1 F4.
+    private struct PrefsObservedKey: Equatable {
+        let fontName: String
+        let fontSize: Double
+        let optionKey: Preferences.OptionKey
+    }
+    private var lastObservedPrefsKey: PrefsObservedKey?
+
     /// Latest `BBSnapshot` published by the session. Read by the renderer
     /// path, the accessibility cache, and the IME extension (which needs
     /// the cursor coordinates for the candidate-window anchor). Internal
@@ -237,6 +249,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
     private var isDragging = false
 
+    /// Repeating timer that drives edge-autoscroll while the user is
+    /// dragging a selection past the top/bottom of the viewport. AppKit
+    /// only delivers `mouseDragged` on pointer motion, so a user who
+    /// holds the pointer stationary past the edge would otherwise see
+    /// the autoscroll stall (the selection can't grow into scrollback
+    /// rows that are off-screen). Fires at a modest ~60 Hz cadence so
+    /// short-duration holds don't feel jittery. Audit terminal-view-2
+    /// F2.
+    private var selectionAutoscrollTimer: Timer?
+    /// Latest scroll direction the autoscroll timer is running with: +1
+    /// for "reveal older rows" (drag past the top), -1 for "reveal
+    /// newer rows" (drag past the bottom). Stored so the timer fires
+    /// can replay the same direction without recomputing on each tick.
+    private var selectionAutoscrollDirection: Int32 = 0
+
     private var findBar: FindBar?
     private var findMatches: [(line: Int32, startCol: Int, endCol: Int)] = []
     private var findCurrentIndex: Int = 0
@@ -375,12 +402,35 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         dropHighlightView.autoresizingMask = [.width, .height]
         addSubview(dropHighlightView)
 
+        // Audit terminal-view-1 F3+F4. Preferences.objectWillChange fires
+        // on EVERY `@Published` mutation across the preferences object —
+        // theme swap, translucency slider, bell mode, etc. — not just the
+        // font/encoder-relevant ones. Two-layer mitigation:
+        //   F3: subscribe with `.receive(on: DispatchQueue.main)` so the
+        //       downstream work is hopped to main exactly once; the old
+        //       inner `DispatchQueue.main.async` added a redundant runloop
+        //       tick when the publisher was already emitting on main.
+        //   F4: dedupe via a cached `(fontName, fontSize, optionKey)`
+        //       tuple; skip the NSFontManager / CellMetrics / renderer
+        //       work when none of the three observed keys actually moved.
+        //       Cuts NSFont lookups from "one per unrelated pref" to
+        //       "one per real font/option change".
         prefsCancellable = Preferences.shared.objectWillChange
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                DispatchQueue.main.async {
-                    self?.syncFontFromPreferences()
-                    self?.syncEncoderFromPreferences()
+                guard let self else { return }
+                let p = Preferences.shared
+                let key = PrefsObservedKey(
+                    fontName: p.fontName,
+                    fontSize: p.fontSize,
+                    optionKey: p.optionKey
+                )
+                if key == self.lastObservedPrefsKey {
+                    return
                 }
+                self.lastObservedPrefsKey = key
+                self.syncFontFromPreferences()
+                self.syncEncoderFromPreferences()
             }
 
         // Push the system accent into the renderer immediately so the
@@ -930,6 +980,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // panel would otherwise linger briefly after the view is gone.
         hoverTooltipItem?.cancel()
         hoverTooltipPanel?.orderOut(nil)
+        // Selection-autoscroll timer, if the user torn the view down
+        // mid-drag (rare but possible on app quit). Invalidate directly
+        // rather than via the nil-checking helper so we don't swallow
+        // the intent in the unlikely case the property access races
+        // the deinit. Audit terminal-view-2 F2.
+        selectionAutoscrollTimer?.invalidate()
         // Release our EnableSecureEventInput refcount if the window
         // closed while still key. Without this pair, secure-input mode
         // leaks system-wide until the next reboot.
@@ -1140,16 +1196,28 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
 
-        session.$snapshot.sink { [weak self] snap in
-            guard let self, let snap else { return }
-            DispatchQueue.main.async {
+        // Audit terminal-view-1 F3. Each `.sink` below previously wrapped
+        // its body in `DispatchQueue.main.async` — a no-op hop when the
+        // publisher already emits on main (TerminalSession coalesces to
+        // main via `publishPendingSnapshot`), and a UI-touch-off-main
+        // hazard if it ever doesn't. Declaring `.receive(on:
+        // DispatchQueue.main)` upstream shifts the whole closure onto
+        // main exactly once; saves a runloop tick per update on the
+        // snapshot path (which feeds the renderer's keystroke→pixel
+        // cadence) and makes the thread contract explicit at the
+        // subscription point rather than implicit at every call site.
+        session.$snapshot
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] snap in
+                guard let self, let snap else { return }
                 self.render(snapshot: snap)
             }
-        }.store(in: &cancellables)
+            .store(in: &cancellables)
 
-        session.$title.sink { [weak self] title in
-            guard let self else { return }
-            DispatchQueue.main.async {
+        session.$title
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] title in
+                guard let self else { return }
                 // Tab labels in AppKit's native tab group mirror window.title,
                 // so one write covers both the titlebar and the tab. When the
                 // shell hasn't emitted OSC 0/2 yet (stock zsh/bash until the
@@ -1159,14 +1227,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 let useTitle = title?.isEmpty == false ? title : fallback
                 self.window?.title = useTitle ?? "Blackbird"
             }
-        }.store(in: &cancellables)
+            .store(in: &cancellables)
 
-        session.$bellCounter.sink { [weak self] counter in
-            guard let self else { return }
-            guard counter > self.lastBellCounter else { return }
-            self.lastBellCounter = counter
-            DispatchQueue.main.async { self.flashBell() }
-        }.store(in: &cancellables)
+        session.$bellCounter
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] counter in
+                guard let self else { return }
+                guard counter > self.lastBellCounter else { return }
+                self.lastBellCounter = counter
+                self.flashBell()
+            }
+            .store(in: &cancellables)
     }
 
     private func flashBell() {
@@ -2365,6 +2436,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     public override func mouseUp(with event: NSEvent) {
         if isDragging {
             isDragging = false
+            // Tear down the edge-autoscroll timer armed during the
+            // drag. If the release happened while still inside the
+            // edge band the timer may still be ticking; stopping it
+            // here prevents a stray scroll after `mouseUp` returns.
+            // Audit terminal-view-2 F2.
+            stopSelectionAutoscroll()
             // A zero-width selection means the user clicked without
             // dragging — no content to show, so clear. Applies to every
             // mode: .character clicks leave anchor == cursor directly;
@@ -2381,6 +2458,92 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if mouseReportingEnabled() && !optionHeld, let session {
             sendMouseEvent(event, button: 0, press: false, session: session)
         }
+    }
+
+    /// Arm, re-arm, or tear down the selection-drag autoscroll timer based
+    /// on the cursor's current edge-band status. `direction`:
+    ///   +1 = top edge (reveal older rows),
+    ///   -1 = bottom edge (reveal newer rows),
+    ///    0 = inside the viewport (stop autoscroll).
+    /// Audit terminal-view-2 F2.
+    private func updateSelectionAutoscroll(direction: Int32) {
+        if direction == 0 {
+            stopSelectionAutoscroll()
+            return
+        }
+        if selectionAutoscrollDirection == direction,
+           selectionAutoscrollTimer != nil {
+            // Already running in the correct direction — nothing to do.
+            // Keep the timer tick as the sole driver; the user's
+            // `mouseDragged` landing in the same band just confirms the
+            // existing direction.
+            return
+        }
+        selectionAutoscrollDirection = direction
+        selectionAutoscrollTimer?.invalidate()
+        // ~60 Hz cadence: fast enough that holding at the edge feels
+        // responsive, slow enough to avoid 120 Hz Metal-pressure storms
+        // on ProMotion. The timer does one `session.scroll(delta:)` per
+        // tick; the new snapshot propagates through the normal
+        // Combine→render path.
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self, self.isDragging else {
+                self?.stopSelectionAutoscroll()
+                return
+            }
+            // Re-derive the selection cursor from the current mouse
+            // location so the selection keeps growing as the
+            // viewport scrolls under a stationary pointer. Without
+            // this the selection would freeze to whatever bufferPoint
+            // the last `mouseDragged` recorded.
+            self.session?.scroll(delta: self.selectionAutoscrollDirection)
+            if var sel = self.selection,
+               let mouseWindow = self.window?.mouseLocationOutsideOfEventStream {
+                let local = self.convert(mouseWindow, from: nil)
+                let fakePoint = self.bufferPointFromLocalPoint(local)
+                sel.cursor = fakePoint
+                self.selection = sel
+                if sel.mode == .word || sel.mode == .line {
+                    self.expandSelectionUnderAnchor()
+                }
+            }
+        }
+        // Install into the main runloop in common mode so the timer
+        // keeps firing during tracking runloops (menu bar, dropdowns,
+        // live resize). Default mode would stall the timer inside
+        // those, which defeats the point — users might trigger one of
+        // those UIs mid-drag via the Edit menu's "Select All" or
+        // similar.
+        RunLoop.main.add(timer, forMode: .common)
+        selectionAutoscrollTimer = timer
+    }
+
+    /// Stop any in-flight selection autoscroll timer. Safe to call when
+    /// no timer is running. Audit terminal-view-2 F2.
+    private func stopSelectionAutoscroll() {
+        selectionAutoscrollTimer?.invalidate()
+        selectionAutoscrollTimer = nil
+        selectionAutoscrollDirection = 0
+    }
+
+    /// Same math as `bufferPointFromEvent` but takes an already-converted
+    /// local point so the autoscroll timer — which doesn't have an
+    /// `NSEvent` to pass — can derive a selection cursor from the raw
+    /// mouse location. Audit terminal-view-2 F2.
+    private func bufferPointFromLocalPoint(_ local: CGPoint) -> BufferPoint {
+        let snap = currentSnapshot
+        let textAreaHeight = bounds.height - titlebarOnlyTopInset
+        let clampedY = min(max(0, local.y), max(0, textAreaHeight))
+        let clampedLocal = CGPoint(x: local.x, y: clampedY)
+        return bufferPoint(
+            forView: clampedLocal,
+            cellWidth: metrics.cellWidth,
+            cellHeight: metrics.cellHeight,
+            viewportHeight: textAreaHeight,
+            displayOffset: snap?.displayOffset ?? 0,
+            cols: snap?.cols ?? 80,
+            rows: snap?.rows ?? 24
+        )
     }
 
     public override func rightMouseDown(with event: NSEvent) {
@@ -2614,11 +2777,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             let local = convert(event.locationInWindow, from: nil)
             // Top edge is `titlebarOnlyTopInset` below the raw view top because
             // the titlebar sits in the upper inset under fullSizeContentView.
+            //
+            // Audit terminal-view-2 F2. AppKit stops delivering
+            // `mouseDragged` the moment the pointer stops moving, so a
+            // user who drags to the edge and holds still would see
+            // autoscroll stop until they wiggled the pointer. Arm a
+            // repeating timer while inside an edge band; the timer
+            // drives the actual `session.scroll` so selection extension
+            // continues even on a stationary hold. `mouseUp` /
+            // `mouseExited` tear the timer down.
+            let direction: Int32
             if local.y > bounds.height - titlebarOnlyTopInset - metrics.cellHeight {
-                session?.scroll(delta: 1)
+                direction = 1
             } else if local.y < metrics.cellHeight {
-                session?.scroll(delta: -1)
+                direction = -1
+            } else {
+                direction = 0
             }
+            updateSelectionAutoscroll(direction: direction)
             sel.cursor = bufferPointFromEvent(event)
             selection = sel
             // F15 (findbar-selection): .word and .line modes set their

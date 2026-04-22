@@ -129,6 +129,13 @@ final class TabStripView: NSView, NSDraggingSource {
     private var hoveredAdd = false
     private var trackingArea: NSTrackingArea?
 
+    /// Pill index currently holding keyboard focus, or `nil` when the
+    /// strip itself is first responder with no specific pill focused.
+    /// Drives the focus ring rendered in `draw(_:)` and the
+    /// `moveLeft:`/`moveRight:`/`performClick:` key handlers. Audit
+    /// titlebar-tabs F4.
+    private var focusedPill: Int? = nil
+
     // MARK: - Drag-to-reorder state
 
     /// Set by `mouseDown` when a click lands on a pill body (outside the
@@ -210,6 +217,10 @@ final class TabStripView: NSView, NSDraggingSource {
         // field below. (main-window F6)
         let listShapeChanged = self.tabs.count != tabs.count
             || !zip(self.tabs, tabs).allSatisfy { $0 === $1 }
+        // Collect titles BEFORE updating so VoiceOver value-changed
+        // notifications can be posted against the correct pill after
+        // the tab array refreshes. Audit titlebar-tabs F5.
+        let oldTitles: [String] = self.tabs.map { $0.title }
         if editingPill != nil, listShapeChanged {
             commitEdit()
         }
@@ -218,6 +229,24 @@ final class TabStripView: NSView, NSDraggingSource {
         self.totalWidth = width
         self.frame = NSRect(x: 0, y: 0, width: width, height: Self.height)
         layoutPills()
+        // Post VO value-changed notifications when a title changed but
+        // the list shape didn't. The per-pill accessibility element
+        // exposes the title via `accessibilityLabel`, so a bare
+        // repaint + `NSAccessibility.post(..., valueChanged)` is
+        // enough for VO to re-read the pill. Skip on list-shape
+        // changes — AppKit's container-children invalidation will
+        // handle those more comprehensively. Audit titlebar-tabs F5.
+        if !listShapeChanged {
+            for (i, window) in tabs.enumerated() where i < oldTitles.count {
+                if window.title != oldTitles[i], i < pillFrames.count {
+                    let element = makePillElement(pillIndex: i, window: window)
+                    NSAccessibility.post(
+                        element: element,
+                        notification: .valueChanged
+                    )
+                }
+            }
+        }
         // Width-only update: move the edit field to track the pill's new
         // x/width so the caret doesn't drift off-pill. Geometry mirrors
         // `beginEditing`'s field-rect computation.
@@ -385,6 +414,15 @@ final class TabStripView: NSView, NSDraggingSource {
     /// tear down the field. Trims whitespace; empty → `""` which the
     /// caller (MainWindowController.applyInlineRename) treats as
     /// "clear override, revert to auto title".
+    ///
+    /// Note: titlebar-tabs F8 flagged pure-whitespace input over a
+    /// non-empty existing title as an "accidental override clear".
+    /// The current contract — and the existing
+    /// `InlineRenameTests.test_commit_empty_forwards_empty_string`
+    /// pinning — is that whitespace-only commits still forward as the
+    /// empty string so the consumer can map it to "revert to OSC".
+    /// Modifying that behaviour would be a test-owner change; deferred
+    /// here.
     private func commitEdit() {
         guard let idx = editingPill,
               let field = editField,
@@ -521,6 +559,20 @@ final class TabStripView: NSView, NSDraggingSource {
                 x: titleArea.midX - tsize.width / 2,
                 y: titleArea.midY - tsize.height / 2
             ))
+
+            // Keyboard focus ring. Full-Keyboard-Access users can't
+            // reach the pills without one. Drawn on TOP of the fill +
+            // title so it's visible regardless of selected/hovered
+            // state. Accent-coloured for consistency with the rest of
+            // AppKit's focus indicators. Audit titlebar-tabs F4.
+            if focusedPill == i && isStripFirstResponder() {
+                let focusPath = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1),
+                                             xRadius: 4, yRadius: 4).cgPath
+                ctx.addPath(focusPath)
+                ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
+                ctx.setLineWidth(2)
+                ctx.strokePath()
+            }
         }
 
         // Trailing `+` button. Same label-tint so it stays visible on
@@ -682,6 +734,109 @@ final class TabStripView: NSView, NSDraggingSource {
         pendingDragPillIndex = nil
         pendingDragStartPoint = nil
         super.mouseUp(with: event)
+    }
+
+    // MARK: - Keyboard focus (titlebar-tabs F4)
+
+    /// Accept first responder so Full-Keyboard-Access users (Tab /
+    /// Shift-Tab key path) can reach the strip. While focused, arrow
+    /// keys move the focus between pills, Space/Return activates the
+    /// focused pill, and Delete closes it.
+    override var acceptsFirstResponder: Bool { !tabs.isEmpty }
+
+    override func becomeFirstResponder() -> Bool {
+        guard super.becomeFirstResponder() else { return false }
+        // Default focus to the currently-selected pill so Tab->strip
+        // lands on the user's active tab rather than always column 0.
+        if focusedPill == nil, !tabs.isEmpty {
+            if let sel = selectedTab,
+               let idx = tabs.firstIndex(where: { $0 === sel }) {
+                focusedPill = idx
+            } else {
+                focusedPill = 0
+            }
+        }
+        needsDisplay = true
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let ok = super.resignFirstResponder()
+        if ok {
+            // Keep `focusedPill` set so Tab->back restores the last
+            // focused pill. Just repaint so the ring disappears while
+            // another responder is active.
+            needsDisplay = true
+        }
+        return ok
+    }
+
+    /// True while the window's first responder is this strip. The focus
+    /// ring only renders when true so the ring isn't painted after a
+    /// responder swap leaves `focusedPill` valid but the strip
+    /// inactive. Audit titlebar-tabs F4.
+    private func isStripFirstResponder() -> Bool {
+        window?.firstResponder === self
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Let interpretKeyEvents route arrow/Space/Return/Delete through
+        // the standard NSResponder selector dispatch so our
+        // `moveLeft:`/`moveRight:`/`insertNewline:`/`deleteBackward:`
+        // overrides below fire. Unrecognised selectors fall back to
+        // super (menu bar bindings, etc.).
+        self.interpretKeyEvents([event])
+    }
+
+    override func moveLeft(_ sender: Any?) {
+        guard !tabs.isEmpty else { return }
+        let current = focusedPill ?? 0
+        focusedPill = max(0, current - 1)
+        needsDisplay = true
+    }
+
+    override func moveRight(_ sender: Any?) {
+        guard !tabs.isEmpty else { return }
+        let current = focusedPill ?? 0
+        focusedPill = min(tabs.count - 1, current + 1)
+        needsDisplay = true
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        activateFocusedPill()
+    }
+
+    /// Space (via `insertText` under FKA) also selects — matches
+    /// AppKit's standard "button"-ish activation. NSTextField-style
+    /// `performKeyEquivalent` isn't used here because we want the
+    /// Space to activate even without a Cmd modifier.
+    override func insertText(_ insertString: Any) {
+        if let str = insertString as? String, str == " " {
+            activateFocusedPill()
+            return
+        }
+        super.insertText(insertString)
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        guard let idx = focusedPill, idx < tabs.count else { return }
+        // Close the focused tab; keep focus on the same index (which
+        // now points at the next-over tab after the close).
+        let closing = tabs[idx]
+        onCloseWindow?(closing)
+        // Don't mutate `focusedPill` here — the close triggers a tab
+        // group refresh that calls `update(tabs:selected:width:)`, and
+        // we want the focus to land on the closest surviving pill.
+        // Clamp in a follow-up so out-of-bounds reads don't crash.
+        if let idx = focusedPill, idx >= tabs.count {
+            focusedPill = max(0, tabs.count - 1)
+        }
+        needsDisplay = true
+    }
+
+    private func activateFocusedPill() {
+        guard let idx = focusedPill, idx < tabs.count else { return }
+        onSelectWindow?(tabs[idx])
     }
 
     // MARK: - Drag session: source
@@ -966,12 +1121,12 @@ final class TabStripView: NSView, NSDraggingSource {
 
     // MARK: - Context menu (right-click to rename)
 
-    /// Build a per-pill context menu on right-click. The Rename / Reset
-    /// items dispatch via the responder chain (nil target) — AppKit routes
-    /// them to the key window's `MainWindowController`. To ensure the
-    /// controller that receives the action is the one for the right-clicked
-    /// pill (not whichever pill happens to currently be selected), we
-    /// pre-select the pill's window before returning the menu.
+    /// Build a per-pill context menu on right-click. Rename / Reset items
+    /// target the right-clicked window's `MainWindowController`
+    /// explicitly so the responder chain's state at the moment the menu
+    /// fires (which may lag key-window transitions on slow machines or
+    /// under tests) can't mis-route the action to a different window's
+    /// controller. Audit titlebar-tabs F15.
     override func menu(for event: NSEvent) -> NSMenu? {
         let p = convert(event.locationInWindow, from: nil)
         // Hit-test against pillFrames. Falling outside a pill (e.g. over the
@@ -984,20 +1139,23 @@ final class TabStripView: NSView, NSDraggingSource {
 
         let targetWindow = tabs[idx]
         // Bring the right-clicked tab to the front before showing the menu.
-        // Without this, ⌘/responder-chain dispatch on the resulting items
-        // would go to the previously-selected pill's controller, which
-        // isn't what the user clicked on. Selecting also flips window.key
-        // in the same runloop tick so by the time the user picks Rename…,
-        // the correct controller is in the responder chain.
+        // This is still the correct UX (the menu visually corresponds to
+        // the selected pill), even though the explicit menu targets below
+        // no longer depend on responder chain state.
         onSelectWindow?(targetWindow)
 
         let menu = NSMenu()
+
+        // Explicit targets, not responder-chain dispatch. Audit
+        // titlebar-tabs F15.
+        let controller = targetWindow.windowController as? MainWindowController
 
         let rename = NSMenuItem(
             title: "Rename…",
             action: #selector(MainWindowController.renameActiveTab(_:)),
             keyEquivalent: ""
         )
+        rename.target = controller
         menu.addItem(rename)
 
         let reset = NSMenuItem(
@@ -1005,6 +1163,7 @@ final class TabStripView: NSView, NSDraggingSource {
             action: #selector(MainWindowController.resetActiveTabTitle(_:)),
             keyEquivalent: ""
         )
+        reset.target = controller
         menu.addItem(reset)
 
         menu.addItem(.separator())
