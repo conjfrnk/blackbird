@@ -533,7 +533,18 @@ public final class PTY {
                     offset += written
                     continue
                 }
-                if errno == EINTR || errno == EAGAIN { continue }
+                if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    // EAGAIN doesn't normally fire on a blocking fd
+                    // (which we open by default), but a future
+                    // refactor could flip the master to O_NONBLOCK and
+                    // a tight `continue` loop here would burn 100% CPU
+                    // until the kernel buffer drains. Sleep briefly to
+                    // yield back the scheduler on each retry. Audit
+                    // pty F7.
+                    usleep(200)
+                    continue
+                }
                 #if DEBUG
                 let savedErrno = errno
                 Self.writeLogger.log(
@@ -556,10 +567,20 @@ public final class PTY {
     public func hasForegroundChild() -> Bool {
         let fg = tcgetpgrp(masterFD)
         guard fg > 0 else { return false }
-        // pgid of the shell process = same as its pid unless something
-        // weird is happening. getpgid(pid) returns the pgroup of pid.
         let shellPgid = getpgid(childPID)
-        if shellPgid <= 0 { return false }
+        if shellPgid <= 0 {
+            // ECHILD typically — means the shell process is gone. No
+            // foreground child to report; return false so callers don't
+            // block on a dead session. Audit pty F5.
+            return false
+        }
+        // Normal case: the shell's pgid equals its pid, and
+        // `fg != shellPgid` means some other process group is the
+        // foreground (a command running under the shell). If the shell
+        // has deliberately `setpgid`'d to a different pgroup — rare, but
+        // legal — this comparison is the right one: we're asking "is
+        // the FOREGROUND tty-reader different from the SHELL pgroup?",
+        // which is what close-confirm and cwd-inheritance actually need.
         return fg != shellPgid
     }
 
@@ -604,12 +625,31 @@ public final class PTY {
     // MARK: - Resize
 
     public func resize(to size: Size) {
+        // Reject zero / nonsense dims before touching the ioctl — a
+        // degenerate winsize (cols=0 or rows=0) leaves the child's
+        // termios in an unusable state and silently breaks anything
+        // that queries terminal width. TerminalSession already clamps
+        // for the BBTerm side, but PTY is a public class that a future
+        // caller could exercise directly; defence in depth. Audit
+        // pty F4.
+        guard size.cols > 0, size.rows > 0 else {
+            Self.logger.log(
+                "PTY.resize refused degenerate dims cols=\(size.cols, privacy: .public) rows=\(size.rows, privacy: .public)"
+            )
+            return
+        }
         var winsize = Darwin.winsize(
             ws_row: size.rows, ws_col: size.cols,
             ws_xpixel: 0, ws_ypixel: 0
         )
-        _ = withUnsafeMutablePointer(to: &winsize) { ptr in
+        let result = withUnsafeMutablePointer(to: &winsize) { ptr in
             ioctl(masterFD, TIOCSWINSZ, ptr)
+        }
+        if result != 0 {
+            let savedErrno = errno
+            Self.logger.log(
+                "PTY.resize TIOCSWINSZ failed errno=\(savedErrno, privacy: .public) fd=\(self.masterFD, privacy: .public)"
+            )
         }
     }
 
