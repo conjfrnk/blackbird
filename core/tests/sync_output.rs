@@ -74,11 +74,13 @@ fn sync_survives_fragment_across_feed_calls() {
 }
 
 #[test]
-fn snapshot_taken_mid_sync_is_stable() {
-    // Snapshots are allowed mid-sync (alacritty's term state is valid
-    // whether or not the parser is in a sync region — the sync bytes
-    // haven't been applied yet). Pin: a snapshot taken after BSU but
-    // before ESU shows the pre-sync state, NOT half-applied content.
+fn sync_region_buffers_bytes_until_esu() {
+    // Regression for rust-tests F6 (renamed from `snapshot_taken_mid_sync_is_stable`
+    // — the original name implied a concurrency invariant, but snapshots are
+    // synchronous and called from the same thread that drives input, so
+    // there's no race to test against. What this test actually pins is the
+    // sync buffering contract: bytes sent between BSU (`\x1b[?2026h`) and
+    // ESU (`\x1b[?2026l`) must not land in the grid until ESU arrives).
     unsafe {
         let term = bb_term_new(10, 1, 100);
         // Prime the grid so we can detect a partial write.

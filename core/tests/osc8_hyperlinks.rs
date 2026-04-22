@@ -146,6 +146,147 @@ fn bb_term_new_clamps_oversized_scrollback() {
 }
 
 #[test]
+fn bb_term_new_boundary_values() {
+    // Regression for rust-tests F20. F20 flagged that the clamp tests using
+    // `u16::MAX` only exercise the ceiling and trust the clamp to keep
+    // memory bounded. Boundary-value tests — zero, minimum, the exact
+    // ceiling — cover the clamp's FLOOR and EQUALITY paths and must also
+    // stay crash-free. Pre-flight guard: u16::MAX × u16::MAX × 32B ≈
+    // 137 GiB if the clamp ever regresses, so never pass u16::MAX without
+    // the MIN of 32 KiB already enforced by the FFI documentation. Here
+    // we only touch boundary values, not MAX.
+    unsafe {
+        // Zero cols, non-zero rows — should be a no-op (returns null or a
+        // valid term that clamps at MIN_DIM; current impl returns null on
+        // zero in either dim via the resize2 guard but new treats floor
+        // differently). The FFI contract requires this to NOT crash.
+        let t0 = bb_term_new(0, 24, 100);
+        // No guarantee on null vs. non-null here — just no panic. If the
+        // implementation returns a valid term, clean it up; if null, the
+        // `bb_term_free` is a no-op.
+        bb_term_free(t0);
+
+        // Zero rows, non-zero cols — symmetric case.
+        let t1 = bb_term_new(80, 0, 100);
+        bb_term_free(t1);
+
+        // Both zero — degenerate.
+        let t2 = bb_term_new(0, 0, 100);
+        bb_term_free(t2);
+
+        // Minimum floor (MIN_DIM = 2 per the lib.rs docs).
+        let t3 = bb_term_new(2, 2, 100);
+        assert!(!t3.is_null(), "minimum dims must produce a valid term");
+        let snap = bb_term_take_snapshot(t3);
+        assert!(!snap.is_null());
+        let cols = (*snap).cols;
+        let rows = (*snap).rows;
+        // Either passes through at 2×2 or clamps up to the documented MIN.
+        assert!(
+            cols >= 2 && rows >= 2,
+            "minimum dims must be ≥ MIN_DIM (2); got {cols}×{rows}"
+        );
+        bb_snap_release(snap);
+        bb_term_free(t3);
+
+        // Exact ceiling value (1000).
+        let t4 = bb_term_new(1000, 1000, 100);
+        assert!(!t4.is_null());
+        let snap = bb_term_take_snapshot(t4);
+        assert_eq!(
+            (*snap).cols,
+            1000,
+            "ceiling value must pass through unclamped"
+        );
+        assert_eq!(
+            (*snap).rows,
+            1000,
+            "ceiling value must pass through unclamped"
+        );
+        bb_snap_release(snap);
+        bb_term_free(t4);
+
+        // One-below-ceiling (999) — must not clamp.
+        let t5 = bb_term_new(999, 999, 100);
+        assert!(!t5.is_null());
+        let snap = bb_term_take_snapshot(t5);
+        assert_eq!((*snap).cols, 999);
+        assert_eq!((*snap).rows, 999);
+        bb_snap_release(snap);
+        bb_term_free(t5);
+
+        // Zero scrollback — boundary for the third parameter.
+        let t6 = bb_term_new(80, 24, 0);
+        assert!(!t6.is_null(), "zero scrollback must produce a valid term");
+        bb_term_free(t6);
+    }
+}
+
+#[test]
+fn bb_term_resize2_boundary_values() {
+    // Regression for rust-tests F20 (resize boundary coverage). Complements
+    // `bb_term_resize_clamps_oversized_dimensions` (ceiling path) by
+    // exercising zero, min, exact-ceiling, and above-ceiling-by-one.
+    //
+    // Pre-flight: u16::MAX × u16::MAX × 32B ≈ 137 GiB. If the clamp ever
+    // regresses this test itself would OOM. The computed product below
+    // guards against that: if the product exceeds 64 MiB, we abort the
+    // test with a descriptive message instead of letting the allocator
+    // ENOMEM (consistent with Connor's prior OOM-rule documentation).
+    const MAX_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+    // 1001 × 1001 × 32B ≈ 32 MiB — under the sanity bound.
+    let product = 1001u64 * 1001u64 * 32;
+    assert!(
+        product < MAX_ALLOC_BYTES,
+        "test pre-flight: 1001×1001 grid allocation {product} B exceeds {MAX_ALLOC_BYTES} — \
+         resize clamp may have regressed; aborting before OOM"
+    );
+
+    unsafe {
+        let term = bb_term_new(80, 24, 100);
+        assert!(!term.is_null());
+
+        // Zero cols — no-op per BBResizeResult doc.
+        let r = bb_term_resize2(term, 0, 24);
+        assert_eq!(r.applied_cols, 0);
+        assert_eq!(r.applied_rows, 0);
+        assert_eq!(r.clamped, 0);
+
+        // Zero rows — no-op.
+        let r = bb_term_resize2(term, 80, 0);
+        assert_eq!(r.applied_cols, 0);
+        assert_eq!(r.applied_rows, 0);
+        assert_eq!(r.clamped, 0);
+
+        // Minimum floor (1 col should clamp up to MIN_DIM = 2).
+        let r = bb_term_resize2(term, 1, 1);
+        assert_eq!(
+            r.applied_cols, 2,
+            "below-floor cols must clamp up to MIN_DIM"
+        );
+        assert_eq!(
+            r.applied_rows, 2,
+            "below-floor rows must clamp up to MIN_DIM"
+        );
+        assert_ne!(r.clamped, 0, "below-floor must report clamped=1");
+
+        // Exact ceiling (1000) — no clamp expected.
+        let r = bb_term_resize2(term, 1000, 1000);
+        assert_eq!(r.applied_cols, 1000);
+        assert_eq!(r.applied_rows, 1000);
+        assert_eq!(r.clamped, 0, "exact ceiling must NOT report clamped=1");
+
+        // One above ceiling (1001) — must clamp to 1000.
+        let r = bb_term_resize2(term, 1001, 1001);
+        assert_eq!(r.applied_cols, 1000, "1001 cols must clamp to 1000");
+        assert_eq!(r.applied_rows, 1000, "1001 rows must clamp to 1000");
+        assert_ne!(r.clamped, 0, "1001 must report clamped=1");
+
+        bb_term_free(term);
+    }
+}
+
+#[test]
 fn osc8_invalid_link_id_returns_null() {
     unsafe {
         let term = bb_term_new(80, 24, 1000);

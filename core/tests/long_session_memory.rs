@@ -166,10 +166,14 @@ mod macos {
     #[test]
     #[ignore = "memory growth gate; run with: cargo test --release --test long_session_memory -- --ignored --nocapture"]
     fn snapshot_churn_is_bounded() {
-        // Single long-lived terminal, many many snapshots. If bb_snap_release
-        // drops the wrong ref, we'd leak one snapshot's worth of cells per
-        // call — a 200x60 grid is ~96 KB, so 50k snapshots of leak would be
-        // ~4.8 GB.
+        // Regression for rust-tests F10. The seed phase materialises the
+        // scrollback working set, so measuring `rss_seed` after that and
+        // asserting `rss_end - rss_seed < 32 MiB` let a sustained per-iter
+        // leak hide below the inflated baseline. Fix: measure mid-run and
+        // end-of-run, then assert the *delta of deltas* — a real snapshot
+        // leak grows linearly with snapshot count, so the back half of the
+        // run should show no more growth than the front half's allocator
+        // noise; allocator retention plateaus quickly.
         let term = unsafe { bc::bb_term_new(200, 60, 10_000) };
         assert!(!term.is_null());
 
@@ -183,29 +187,63 @@ mod macos {
         let rss_seed = rss_bytes();
         eprintln!("seed RSS: {:.1} MiB", rss_seed as f64 / (1024.0 * 1024.0));
 
-        for _ in 0..50_000 {
+        // First batch of 25k snapshots. Establishes steady-state RSS after
+        // the allocator has sized up to match per-snapshot churn.
+        for _ in 0..25_000 {
             let s = unsafe { bc::bb_term_take_snapshot(term) };
             assert!(!s.is_null());
             unsafe { bc::bb_snap_release(s) };
         }
-
-        let rss_end = rss_bytes();
+        let rss_mid = rss_bytes();
+        let growth_first = rss_mid.saturating_sub(rss_seed);
         eprintln!(
-            "after 50k snapshots RSS: {:.1} MiB",
-            rss_end as f64 / (1024.0 * 1024.0)
+            "after 25k snapshots RSS: {:.1} MiB (growth from seed: {:.1} MiB)",
+            rss_mid as f64 / (1024.0 * 1024.0),
+            growth_first as f64 / (1024.0 * 1024.0)
         );
 
-        // 50k snapshot acquire/release. A real ref-count bug in bb_snap_release
-        // leaks ~96 KB per call (one 200x60 grid) → 4.8 GiB total, dwarfing any
-        // threshold. macos-14 runners observed up to ~16.5 MiB of allocator
-        // retention noise here, so the limit sits at 32 MiB — still 100×+ below
-        // the smallest interesting leak rate (1-in-100 calls leaking).
-        let growth = rss_end.saturating_sub(rss_seed);
-        assert!(
-            growth < 32 * 1024 * 1024,
-            "RSS grew by {:.1} MiB over 50k snapshots — suspect snapshot leak",
-            growth as f64 / (1024.0 * 1024.0)
+        // Second batch of 25k. A real ref-count leak keeps growing at the
+        // same rate; allocator retention plateaus.
+        for _ in 0..25_000 {
+            let s = unsafe { bc::bb_term_take_snapshot(term) };
+            assert!(!s.is_null());
+            unsafe { bc::bb_snap_release(s) };
+        }
+        let rss_end = rss_bytes();
+        let growth_second = rss_end.saturating_sub(rss_mid);
+        eprintln!(
+            "after 50k snapshots RSS: {:.1} MiB (growth from midpoint: {:.1} MiB)",
+            rss_end as f64 / (1024.0 * 1024.0),
+            growth_second as f64 / (1024.0 * 1024.0)
         );
+
+        // Absolute bound remains: 32 MiB total over 50k snapshots. A real
+        // ref-count bug leaking one 200×60 grid (~96 KB) per call would
+        // dwarf this threshold (~4.8 GiB total).
+        let growth_total = rss_end.saturating_sub(rss_seed);
+        assert!(
+            growth_total < 32 * 1024 * 1024,
+            "RSS grew by {:.1} MiB over 50k snapshots — suspect snapshot leak",
+            growth_total as f64 / (1024.0 * 1024.0)
+        );
+
+        // Delta-of-deltas gate: the back half must not exceed the front
+        // half's growth by more than a small tolerance. This isolates
+        // sustained per-iteration leaks from one-shot allocator warm-up.
+        // Only trip when the first batch had a visible signal — on a cold
+        // runner the ratio is noise.
+        let min_visible_first = 2 * 1024 * 1024; // 2 MiB
+        if growth_first > min_visible_first {
+            let second_ratio = (growth_second as f64) / (growth_first as f64);
+            assert!(
+                second_ratio < 0.5,
+                "second-batch snapshot RSS growth {} MiB is {:.0}% of first \
+                 batch {} MiB — sustained growth suggests a snapshot leak",
+                growth_second / (1024 * 1024),
+                second_ratio * 100.0,
+                growth_first / (1024 * 1024)
+            );
+        }
 
         unsafe { bc::bb_term_free(term) };
     }

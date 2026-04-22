@@ -251,15 +251,75 @@ fn xtgettcap_empty_payload_produces_no_reply() {
 
 #[test]
 fn xtgettcap_oversized_payload_is_gracefully_truncated() {
-    // 5000 bytes of garbage ASCII between `DCS +q` and ST. `put()` caps
-    // the buffer at < 4096 so we silently drop the tail. The resulting
-    // "cap" won't match our table → at most a status-0 reply. The only
-    // contract this test pins is "no crash, terminal stays live" —
-    // specifically that the 4 KiB cap in `put` holds under DoS input.
+    // Regression for rust-tests F18. 5000 bytes of 'A' between `DCS +q` and
+    // ST. `put()` caps the buffer at < 4096 so we silently drop the tail.
+    // The resulting cap ("AAAA..." of ≤4096 bytes) is syntactically valid
+    // hex (every 'A' is a hex digit) so the echo path is allowed to reply
+    // with it — but the reply length must be bounded by the `put` cap so
+    // a hostile sender can't amplify 5 KiB of input into an unbounded
+    // PtyWrite stream. The original test pinned only "no crash".
+    //
+    // Contract pinned here:
+    //   - at most one PtyWrite event (the single cap has no `;` splits)
+    //   - the reply is a well-formed status-0 DCS: starts with `ESC P 0 + r`
+    //     and ends with ST (`ESC \\`)
+    //   - reply length is bounded by the 4 KiB cap + small header/footer
+    //     (empirically ≤ 4104 bytes). A regression removing the cap would
+    //     echo the full 5000+ bytes and trip this bound.
+    //   - the reply contains no ESC control bytes in the interior (the
+    //     status-0 echo must not smuggle an embedded ST that would
+    //     prematurely terminate the DCS response on the remote).
     let mut input = b"\x1bP+q".to_vec();
     input.extend(std::iter::repeat_n(b'A', 5000));
     input.extend_from_slice(b"\x1b\\");
-    let _ = run(&input); // just must not panic
+    let writes = run(&input);
+
+    // At most one reply for one cap.
+    assert!(
+        writes.len() <= 1,
+        "oversized payload must produce ≤1 PtyWrite event; got {} events",
+        writes.len()
+    );
+
+    if let Some(reply) = writes.first() {
+        assert!(
+            reply.starts_with(b"\x1bP0+r"),
+            "reply must be a status-0 DCS; got first 16 bytes: {:?}",
+            &reply[..reply.len().min(16)]
+        );
+        assert!(
+            reply.ends_with(b"\x1b\\"),
+            "reply must terminate with ST (ESC \\); got last 8 bytes: {:?}",
+            &reply[reply.len().saturating_sub(8)..]
+        );
+
+        // Reply length bounded by the 4 KiB cap in `put` + fixed header
+        // (`\x1bP0+r`, 5 bytes) + ST (`\x1b\\`, 2 bytes). A regression that
+        // removed the cap would let 5000+ bytes through.
+        const PUT_CAP: usize = 4096;
+        const HEADER_LEN: usize = 5;
+        const ST_LEN: usize = 2;
+        assert!(
+            reply.len() <= PUT_CAP + HEADER_LEN + ST_LEN,
+            "oversized-payload reply length {} exceeds the 4 KiB `put` cap — \
+             the DoS backstop regressed",
+            reply.len()
+        );
+
+        // Info-leak shape guard: no embedded ESC in the interior of the
+        // reply. If the echo ever started emitting raw ESC bytes (e.g.
+        // via a non-hex bypass), a remote could terminate the DCS early
+        // and land arbitrary follow-on bytes as top-level PTY input.
+        // Allowed ESCs: one at byte 0 (DCS open) and one at reply.len()-2
+        // (ST). Anywhere else is a smuggling vector.
+        let interior = &reply[1..reply.len().saturating_sub(2)];
+        assert!(
+            !interior.contains(&0x1B),
+            "reply interior contains ESC — potential ST-smuggling leak; \
+             reply first 32 bytes: {:?}",
+            &reply[..reply.len().min(32)]
+        );
+    }
 }
 
 #[test]

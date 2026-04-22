@@ -94,9 +94,21 @@ fn ascii_cell_has_no_wide_flags() {
 
 #[test]
 fn combining_acute_attaches_to_previous_glyph() {
-    // `e\u{0301}` (e + combining acute). alacritty stores the base glyph in
-    // the cell and keeps combining marks in a separate `zerowidth` list on
-    // the cell. Cursor advances by 1, not 2.
+    // Regression for rust-tests F11. `e\u{0301}` (e + combining acute).
+    // alacritty stores the base glyph in the cell and keeps combining
+    // marks in a separate `zerowidth` list on the cell. Cursor advances
+    // by 1, not 2.
+    //
+    // NOTE: Blackbird's `BBCell` FFI surface only exposes a single
+    // `ch: u32` per cell — combining marks are NOT currently surfaced to
+    // the Swift host. This test pins that documented gap: `c0.ch` holds
+    // the base glyph, the combining mark `U+0301` is stored internally by
+    // alacritty but is unreachable from the snapshot. If a future FFI
+    // change starts surfacing combining marks (via a new field, a
+    // separate `bb_snap_combining_mark_at` accessor, or a variation of
+    // `ch` that embeds the mark codepoint), the new assertion shape
+    // should replace the "combining mark is dropped at FFI boundary"
+    // claim below.
     with_term(10, 2, |term| {
         feed(term, "e\u{0301}".as_bytes());
         let s = snap(term);
@@ -104,6 +116,21 @@ fn combining_acute_attaches_to_previous_glyph() {
         let c0 = cell_at(s, 0, 0);
         // Base glyph stays in cell 0.
         assert_eq!(c0.ch, b'e' as u32);
+        // Pin the FFI-level fact that `ch` holds ONLY the base glyph.
+        // The combining mark U+0301 is not encoded into `ch` (that would
+        // require a non-Unicode-scalar packing — anything > 0x10FFFF is
+        // invalid). This is the documented limitation: swift-side copy of
+        // `café` via `bb_term_text_range` recovers "cafe" + one combining
+        // mark through the stateful grid walk, not from `cell.ch`.
+        assert_ne!(
+            c0.ch, 0x0301,
+            "U+0301 combining acute must not replace the base glyph in cell.ch"
+        );
+        assert!(
+            c0.ch <= 0x10FFFF,
+            "cell.ch must be a valid Unicode scalar, not a composite; got {:#x}",
+            c0.ch
+        );
         // Nothing visible in cell 1 (alacritty stores empty cells as space).
         let c1 = cell_at(s, 1, 0);
         assert_eq!(
@@ -113,6 +140,38 @@ fn combining_acute_attaches_to_previous_glyph() {
         );
         // Cursor advanced by one glyph only.
         assert_eq!(unsafe { (*s).cursor_col }, 1);
+
+        // Document the current behaviour of `bb_term_text_range` for cells
+        // that carry combining marks: the extractor walks cells by `ch`
+        // only, so the base glyph round-trips but the combining mark is
+        // DROPPED. F11 flagged this as a latent gap — if a caller of
+        // `textRange` ever copy/pastes "café" the accent silently
+        // disappears.
+        //
+        // This assertion PINS that gap so a fix (or a subtle regression
+        // that happens to add a second mark somewhere) trips here. If a
+        // future patch adds combining-mark retention to `bb_term_text_range`
+        // (e.g. via alacritty's zerowidth list on the grid), flip this to
+        // `assert_eq!(text, "e\u{0301}")` and the gap is closed.
+        unsafe {
+            let raw = bc::bb_term_text_range(term, 0, 0, 0, 0, 0);
+            assert!(
+                !raw.is_null(),
+                "text_range over base glyph must return a buffer"
+            );
+            let bytes = std::slice::from_raw_parts((*raw).bytes, (*raw).len);
+            let text = std::str::from_utf8(bytes)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            bc::bb_string_release(raw);
+            assert_eq!(
+                text, "e",
+                "current behaviour: combining mark is dropped by text_range. \
+                 If this test ever starts returning \"e\\u{{0301}}\", the FFI \
+                 gained combining-mark retention — update the assertion to \
+                 match and close rust-tests F11. Got {text:?}"
+            );
+        }
 
         release(s);
     });
