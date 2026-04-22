@@ -2180,8 +2180,9 @@ pub unsafe extern "C" fn bb_snap_damage_is_full(snap: *const BBSnap) -> u8 {
 ///
 /// # Safety
 /// - `snap` must be a pointer from `bb_term_take_snapshot` or retained
-/// - `out` must either be null OR point to at least `out_cap` u16 slots
-///   of writable memory with correct alignment for u16.
+/// - `out` must either be null OR point to at least `out_cap * 2` bytes of
+///   writable memory. No u16 alignment is required on `out` — the body
+///   copies byte-wise (rust-core-4 F3).
 /// - Safe to call from any thread.
 #[no_mangle]
 pub unsafe extern "C" fn bb_snap_damage_rows(
@@ -2204,7 +2205,16 @@ pub unsafe extern "C" fn bb_snap_damage_rows(
             return total;
         }
         let n = total.min(out_cap);
-        std::ptr::copy_nonoverlapping(rows.as_ptr(), out, n);
+        // Copy as raw bytes (not u16) so an unaligned `out` — e.g. a caller
+        // that cast a u8 buffer via `.cast::<u16>()` at an odd address — is
+        // well-defined on every target, not just those that forgive
+        // unaligned stores. Each u16 is 2 bytes, so `n * 2` bytes total
+        // (rust-core-4 F3).
+        std::ptr::copy_nonoverlapping(
+            rows.as_ptr() as *const u8,
+            out as *mut u8,
+            n * std::mem::size_of::<u16>(),
+        );
         // Truncation signal: callers compare the returned `total` against
         // `out_cap`; `total > out_cap` means the buffer was too small and
         // the caller should re-allocate at `total` and retry. We don't
@@ -2511,9 +2521,32 @@ pub unsafe extern "C" fn bb_term_text_range(
 /// a double-free or wild-pointer input before invoking `Vec::from_raw_parts`
 /// (which would be UB on stale parts).
 ///
+/// For an empty payload (`bytes.is_empty()`), both `bytes` and `_owned_ptr`
+/// are set to null so a C consumer can rely on `bytes == NULL ⇔ len == 0`.
+/// `Vec::new().as_mut_ptr()` would otherwise hand back `NonNull::dangling()`
+/// (a non-null sentinel equal to `align_of::<u8>()`), which (a) breaks that
+/// invariant for Swift/C callers and (b) is UB if passed to `memcpy` with
+/// `n == 0` under strict C11 semantics. `bb_string_release` mirrors the
+/// null check and skips `Vec::from_raw_parts` for the empty case
+/// (rust-core-4 F1).
+///
 /// # Safety
 /// The returned pointer must be released exactly once via `bb_string_release`.
 unsafe fn bb_string_new(bytes: Vec<u8>) -> *mut BBString {
+    if bytes.is_empty() {
+        // Drop the vec eagerly; we know its capacity is irrelevant once we
+        // publish null. Any residual heap buffer (non-zero cap on an empty
+        // vec) deallocates with the Vec's own allocator, not ours to track.
+        drop(bytes);
+        let boxed = Box::new(BBString {
+            bytes: std::ptr::null(),
+            len: 0,
+            _owned_ptr: std::ptr::null_mut(),
+            _owned_cap: 0,
+            _magic: BB_STRING_MAGIC,
+        });
+        return Box::into_raw(boxed);
+    }
     let mut v = bytes;
     v.shrink_to_fit();
     let len = v.len();
@@ -2582,12 +2615,13 @@ pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
         std::ptr::write(magic_ptr as *mut u64, 0);
         let boxed = Box::from_raw(s);
         // Reconstitute the owned vec so its heap buffer is freed via the
-        // matching `Vec<u8>` allocator. `_owned_ptr` may be a dangling
-        // sentinel when `_owned_cap == 0` (empty-string case); that's what
-        // `Vec::as_mut_ptr` handed us in `bb_string_new`, and
-        // `Vec::from_raw_parts` accepts the round-trip as long as the triple
-        // came from a real `Vec`, which it did.
-        let _ = Vec::from_raw_parts(boxed._owned_ptr, boxed.len, boxed._owned_cap);
+        // matching `Vec<u8>` allocator. `bb_string_new` short-circuits
+        // empty payloads to `_owned_ptr = null`, so skip `from_raw_parts`
+        // there — calling it with a null pointer is UB even when cap is 0
+        // (rust-core-4 F1).
+        if !boxed._owned_ptr.is_null() {
+            let _ = Vec::from_raw_parts(boxed._owned_ptr, boxed.len, boxed._owned_cap);
+        }
         drop(boxed);
     })
 }
@@ -3742,6 +3776,33 @@ mod tests {
             // so the function returns without touching _owned_ptr (UB).
             bb_string_release(s);
             bb_term_free(term);
+        }
+    }
+
+    /// Regression for rust-core-4 F1: an empty payload must surface as
+    /// `bytes == NULL` (and len == 0) so Swift/C consumers can treat
+    /// `NULL ⇔ empty` as a load-bearing invariant, rather than receiving
+    /// `Vec::new().as_mut_ptr()`'s dangling-alignment sentinel. Also
+    /// verifies `bb_string_release` tolerates the null `_owned_ptr` without
+    /// calling `Vec::from_raw_parts(null, ...)` (UB).
+    #[test]
+    fn bb_string_new_empty_bytes_is_null() {
+        unsafe {
+            let s = bb_string_new(Vec::new());
+            assert!(
+                !s.is_null(),
+                "bb_string_new itself should still return a valid Box"
+            );
+            let as_ref = &*s;
+            assert!(
+                as_ref.bytes.is_null(),
+                "empty payload must expose bytes = NULL to C consumers",
+            );
+            assert_eq!(as_ref.len, 0);
+            assert!(as_ref._owned_ptr.is_null());
+            assert_eq!(as_ref._owned_cap, 0);
+            // Release must be a clean no-op on the Vec::from_raw_parts path.
+            bb_string_release(s);
         }
     }
 

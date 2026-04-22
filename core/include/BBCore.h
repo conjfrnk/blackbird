@@ -567,8 +567,9 @@ uint8_t bb_snap_damage_is_full(const struct BBSnap *snap);
  *
  * # Safety
  * - `snap` must be a pointer from `bb_term_take_snapshot` or retained
- * - `out` must either be null OR point to at least `out_cap` u16 slots
- *   of writable memory with correct alignment for u16.
+ * - `out` must either be null OR point to at least `out_cap * 2` bytes of
+ *   writable memory. No u16 alignment is required on `out` — the body
+ *   copies byte-wise (rust-core-4 F3).
  * - Safe to call from any thread.
  */
 uintptr_t bb_snap_damage_rows(const struct BBSnap *snap, uint16_t *out, uintptr_t out_cap);
