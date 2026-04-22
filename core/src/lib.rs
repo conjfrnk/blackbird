@@ -853,10 +853,29 @@ fn payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 ///
 /// # Safety
 /// `term` must be either null (no event delivery) or a valid `&*term` target.
+///
+/// # Nested-delivery contract
+/// If a panic occurs while a Fatal event is already being dispatched on this
+/// thread (i.e. the user callback called back into a `bb_term_*` function
+/// and that call panicked), the nested Fatal is SWALLOWED rather than
+/// re-dispatched. Re-dispatching would invoke the same user callback while
+/// it is still on the stack — a recipe for deadlock (the callback may hold
+/// the lock it took on first entry) or unbounded recursion (if the callback
+/// immediately re-panics). The Swift side cannot assume every panic within
+/// a re-entered FFI call surfaces as a Fatal event; the first panic will,
+/// subsequent nested ones won't. See rust-core-5 F3.
 unsafe fn guard_with_term<T>(term: *mut BBTerm, fallback: T, f: impl FnOnce() -> T) -> T {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(payload) => {
+            // Re-entry guard: the dispatch below calls the user callback
+            // with a Fatal event. If that dispatch is already in flight on
+            // this thread (callback → bb_term_* → panic → we're here
+            // again), swallow the payload to break the cycle.
+            if FFI_FATAL_IN_FLIGHT.with(|c| c.get()) {
+                return fallback;
+            }
+            let _guard = FatalInFlightGuard::enter();
             if !term.is_null() {
                 let bb = &*term;
                 let msg = payload_to_string(&*payload);
@@ -879,6 +898,29 @@ unsafe fn guard_with_term<T>(term: *mut BBTerm, fallback: T, f: impl FnOnce() ->
             }
             fallback
         }
+    }
+}
+
+thread_local! {
+    /// True while `guard_with_term` is dispatching a Fatal event to the user
+    /// callback on this thread. Re-entering (callback → bb_term_* → panic)
+    /// drops the nested Fatal instead of recursing. See rust-core-5 F3.
+    static FFI_FATAL_IN_FLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard: flips `FFI_FATAL_IN_FLIGHT` to `true` on entry and back to
+/// `false` on drop. The Drop impl also fires if an unexpected panic escapes
+/// the inner `catch_unwind`, ensuring the latch never sticks.
+struct FatalInFlightGuard;
+impl FatalInFlightGuard {
+    fn enter() -> Self {
+        FFI_FATAL_IN_FLIGHT.with(|c| c.set(true));
+        FatalInFlightGuard
+    }
+}
+impl Drop for FatalInFlightGuard {
+    fn drop(&mut self) {
+        FFI_FATAL_IN_FLIGHT.with(|c| c.set(false));
     }
 }
 
@@ -3441,6 +3483,84 @@ mod tests {
 
             bb_term_free(term);
             Arc::from_raw(fired_ptr as *const Mutex<Vec<(u32, String)>>);
+        }
+    }
+
+    /// Regression for rust-core-5 F3: if a Fatal dispatch re-enters the
+    /// FFI (callback panics a `bb_term_*` call), the nested Fatal must be
+    /// swallowed so the same callback isn't re-invoked recursively. We
+    /// arrange exactly that shape: callback, on its first Fatal, calls
+    /// `bb_term_test_only_panic(term)` which panics inside guard_with_term;
+    /// the FFI_FATAL_IN_FLIGHT latch must cause the second dispatch to
+    /// drop instead of firing the callback a second time (or deadlocking
+    /// if the callback held a re-entrant lock).
+    #[test]
+    fn fatal_dispatch_does_not_reenter_callback() {
+        use std::os::raw::c_void;
+        use std::sync::{Arc, Mutex};
+
+        // Pair: (invocation-count, has-re-panicked-once).
+        // Mutex is NOT intentionally re-entrant — the swallow path is what
+        // keeps this test from deadlocking, not NSLock-style recursion.
+        struct State {
+            term: *mut BBTerm,
+            invocations: Mutex<u32>,
+            already_re_panicked: Mutex<bool>,
+        }
+        // *mut BBTerm is not Send/Sync; the callback runs synchronously
+        // on the test's own thread so we can cross that boundary safely.
+        unsafe impl Send for State {}
+        unsafe impl Sync for State {}
+
+        let state = Arc::new(State {
+            term: std::ptr::null_mut(),
+            invocations: Mutex::new(0),
+            already_re_panicked: Mutex::new(false),
+        });
+        // We'll write `term` into the Arc after creation by leaking the
+        // Arc into a raw ptr, creating term, patching the field, and
+        // handing the ptr to the callback context.
+        let state_ptr = Arc::into_raw(Arc::clone(&state)) as *mut c_void;
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let state = &*(ctx as *const State);
+            *state.invocations.lock().unwrap() += 1;
+            if ev.kind == BBEventKind::Fatal {
+                let mut done = state.already_re_panicked.lock().unwrap();
+                if !*done {
+                    *done = true;
+                    drop(done);
+                    // Re-enter the FFI: this call itself panics inside
+                    // guard_with_term. Without the re-entry latch we
+                    // would be invoked recursively here and would
+                    // observe `invocations == 2` below.
+                    bb_term_test_only_panic(state.term);
+                }
+            }
+        }
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            // Patch the `term` field post-hoc. Arc::into_raw gave us a raw
+            // const pointer; we unsafe-mutate a field it points to through
+            // a *mut cast. The field is !Send/!Sync but we've declared
+            // State as such above; no other thread is reading while we
+            // write, so this is sound.
+            let state_mut = state_ptr as *mut State;
+            std::ptr::addr_of_mut!((*state_mut).term).write(term);
+
+            bb_term_set_event_cb(term, Some(cb), state_ptr);
+            bb_term_test_only_panic(term);
+
+            let invocations = *state.invocations.lock().unwrap();
+            assert_eq!(
+                invocations, 1,
+                "callback must be invoked exactly once; nested Fatal was \
+                 re-dispatched instead of swallowed (rust-core-5 F3 regression)",
+            );
+
+            bb_term_free(term);
+            Arc::from_raw(state_ptr as *const State);
         }
     }
 
