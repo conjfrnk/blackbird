@@ -31,6 +31,14 @@ public final class KeyEncoder {
         case home, end, pageUp, pageDown
         case delete, insert
         case f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
+        // Keypad keys — only routed through encodeSpecial when the TUI
+        // has enabled application-keypad mode (DECPAM, `appKeypad`).
+        // Without the mode bit the legacy bytes (plain digits, plain
+        // operators) are correct, so we let those chars take the normal
+        // `encode(chars:)` path. Audit key-encoder F9.
+        case kp0, kp1, kp2, kp3, kp4, kp5, kp6, kp7, kp8, kp9
+        case kpEnter, kpPlus, kpMinus, kpMultiply, kpDivide
+        case kpDecimal, kpEquals
     }
 
     /// Kitty-protocol event-type sub-parameter (`CSI <cp>;<mod>:<event>u`).
@@ -242,7 +250,8 @@ public final class KeyEncoder {
     public func encodeSpecial(
         _ key: SpecialKey,
         modifiers: Modifiers,
-        applicationCursorKeys: Bool = false
+        applicationCursorKeys: Bool = false,
+        applicationKeypad: Bool = false
     ) -> Data {
         // Modifier-encoded keys use CSI with a trailing modifier parameter.
         // Modern xterm convention: CSI 1;M <final> where M = 1 + bitmask.
@@ -336,6 +345,68 @@ public final class KeyEncoder {
                 return Data([0x1B, 0x5B]) + Data(code.utf8) + Data([0x3B]) + Data(String(modBits).utf8) + Data([0x7E])
             }
             return Data([0x1B, 0x5B]) + Data(code.utf8) + Data([0x7E])
+
+        case .kp0, .kp1, .kp2, .kp3, .kp4, .kp5, .kp6, .kp7, .kp8, .kp9,
+             .kpEnter, .kpPlus, .kpMinus, .kpMultiply, .kpDivide,
+             .kpDecimal, .kpEquals:
+            // DECPAM (application keypad mode). Only active when the TUI
+            // has requested it via `ESC =`; otherwise the caller should
+            // pass the plain digit / operator through `encode(chars:)`
+            // instead of routing through here. xterm keypad mappings:
+            //   0…9  → ESC O p … ESC O y
+            //   +    → ESC O k       −    → ESC O m
+            //   *    → ESC O j       /    → ESC O o
+            //   .    → ESC O n       =    → ESC O X
+            //   Enter→ ESC O M
+            // See xterm's termcap `ka1..kc3` plus `kp*` entries.
+            let final: UInt8 = {
+                switch key {
+                case .kp0: return 0x70  // p
+                case .kp1: return 0x71  // q
+                case .kp2: return 0x72  // r
+                case .kp3: return 0x73  // s
+                case .kp4: return 0x74  // t
+                case .kp5: return 0x75  // u
+                case .kp6: return 0x76  // v
+                case .kp7: return 0x77  // w
+                case .kp8: return 0x78  // x
+                case .kp9: return 0x79  // y
+                case .kpEnter:    return 0x4D // M
+                case .kpPlus:     return 0x6B // k
+                case .kpMinus:    return 0x6D // m
+                case .kpMultiply: return 0x6A // j
+                case .kpDivide:   return 0x6F // o
+                case .kpDecimal:  return 0x6E // n
+                case .kpEquals:   return 0x58 // X
+                default: return 0x70
+                }
+            }()
+            if applicationKeypad {
+                // SS3 <final> — ESC O <final>
+                return Data([0x1B, 0x4F, final])
+            }
+            // Fall back to the plain character. Callers should avoid
+            // routing here when DECPAM is off; this branch exists so a
+            // future dispatch refactor can't regress to emitting nothing.
+            let legacy: UInt8 = {
+                switch key {
+                case .kp0: return 0x30;  case .kp1: return 0x31
+                case .kp2: return 0x32;  case .kp3: return 0x33
+                case .kp4: return 0x34;  case .kp5: return 0x35
+                case .kp6: return 0x36;  case .kp7: return 0x37
+                case .kp8: return 0x38;  case .kp9: return 0x39
+                case .kpEnter:    return 0x0D  // CR
+                case .kpPlus:     return 0x2B
+                case .kpMinus:    return 0x2D
+                case .kpMultiply: return 0x2A
+                case .kpDivide:   return 0x2F
+                case .kpDecimal:  return 0x2E
+                case .kpEquals:   return 0x3D
+                default: return 0x00
+                }
+            }()
+            _ = hasMods // keypad modifier encoding is TUI-specific; omit.
+            return Data([legacy])
         }
     }
 

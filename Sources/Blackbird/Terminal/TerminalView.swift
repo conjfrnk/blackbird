@@ -1284,7 +1284,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
         if let special = Self.specialKey(for: event) {
             let appCursor = termMode.contains(.appCursor)
-            let bytes = encoder.encodeSpecial(special, modifiers: mods, applicationCursorKeys: appCursor)
+            let appKeypad = termMode.contains(.appKeypad)
+            let bytes = encoder.encodeSpecial(
+                special,
+                modifiers: mods,
+                applicationCursorKeys: appCursor,
+                applicationKeypad: appKeypad
+            )
             if !bytes.isEmpty { sendToSession(bytes) }
             return
         }
@@ -1407,6 +1413,48 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         case NSEvent.SpecialKey.f10: return .f10
         case NSEvent.SpecialKey.f11: return .f11
         case NSEvent.SpecialKey.f12: return .f12
+        default:
+            // Keypad keys aren't exposed via NSEvent.specialKey.
+            // NSEvent.modifierFlags.numericPad fires for external
+            // numeric-keypad keys (and for the arrow-cluster on some
+            // layouts — hence the explicit keyCode check). Only detect
+            // the digit / operator keypad keys, never the arrows
+            // (arrows route through the existing specialKey mapping
+            // above via NSEvent.SpecialKey.*Arrow).
+            if event.modifierFlags.contains(.numericPad) {
+                return keypadKey(for: event)
+            }
+            return nil
+        }
+    }
+
+    /// Map a numeric-keypad NSEvent to the matching SpecialKey. Returns
+    /// nil for anything outside the explicit keypad scan-code set so
+    /// the caller's default path can handle arrows (which also carry
+    /// `.numericPad` on some keyboards).
+    private static func keypadKey(for event: NSEvent) -> KeyEncoder.SpecialKey? {
+        // Virtual key codes from Carbon/HIToolbox are stable across
+        // keyboard layouts. Hard-coded here rather than via
+        // kVK_ANSI_Keypad0 constants because those live in Carbon, and
+        // Blackbird doesn't otherwise link that umbrella.
+        switch event.keyCode {
+        case 82: return .kp0
+        case 83: return .kp1
+        case 84: return .kp2
+        case 85: return .kp3
+        case 86: return .kp4
+        case 87: return .kp5
+        case 88: return .kp6
+        case 89: return .kp7
+        case 91: return .kp8
+        case 92: return .kp9
+        case 76: return .kpEnter
+        case 69: return .kpPlus
+        case 78: return .kpMinus
+        case 67: return .kpMultiply
+        case 75: return .kpDivide
+        case 65: return .kpDecimal
+        case 81: return .kpEquals
         default: return nil
         }
     }

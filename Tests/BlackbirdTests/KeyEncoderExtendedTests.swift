@@ -551,11 +551,73 @@ final class KeyEncoderExtendedTests: XCTestCase {
     }
 
     func test_appKeypad_combinedWithDisambiguate_doesNotChangePlainDigits() {
-        // Even when kitty flag 1 is also active, appKeypad is a no-op.
+        // Even when kitty flag 1 is also active, appKeypad is a no-op
+        // for the `encode()` path — DECPAM only rewrites keys routed
+        // through `encodeSpecial` (kp0..9 / kpEnter / kpPlus / etc.).
         let enc = KeyEncoder()
         let both: BBTermMode = [.appKeypad, .disambiguateEscCodes]
         XCTAssertEqual(enc.encode(chars: "7", modifiers: [], mode: both),
                        Data([0x37]))
+    }
+
+    // MARK: - DECPAM (application keypad mode) via encodeSpecial
+
+    /// When DECPAM is active and the user presses a numeric keypad key,
+    /// encodeSpecial emits SS3 sequences per the xterm keypad mapping.
+    /// Digit 0..9 → ESC O p..y, operators → dedicated letters, Enter → M.
+    func test_appKeypad_on_digits_emitSS3() {
+        let enc = KeyEncoder()
+        let pairs: [(KeyEncoder.SpecialKey, UInt8)] = [
+            (.kp0, 0x70), (.kp1, 0x71), (.kp2, 0x72), (.kp3, 0x73),
+            (.kp4, 0x74), (.kp5, 0x75), (.kp6, 0x76), (.kp7, 0x77),
+            (.kp8, 0x78), (.kp9, 0x79),
+        ]
+        for (key, final) in pairs {
+            XCTAssertEqual(
+                enc.encodeSpecial(
+                    key, modifiers: [], applicationKeypad: true
+                ),
+                Data([0x1B, 0x4F, final]),
+                "DECPAM \(key) should emit ESC O \(String(UnicodeScalar(final)))"
+            )
+        }
+    }
+
+    func test_appKeypad_on_operators_emitSS3() {
+        let enc = KeyEncoder()
+        let pairs: [(KeyEncoder.SpecialKey, UInt8)] = [
+            (.kpEnter, 0x4D),     // M
+            (.kpPlus, 0x6B),      // k
+            (.kpMinus, 0x6D),     // m
+            (.kpMultiply, 0x6A),  // j
+            (.kpDivide, 0x6F),    // o
+            (.kpDecimal, 0x6E),   // n
+            (.kpEquals, 0x58),    // X
+        ]
+        for (key, final) in pairs {
+            XCTAssertEqual(
+                enc.encodeSpecial(
+                    key, modifiers: [], applicationKeypad: true
+                ),
+                Data([0x1B, 0x4F, final])
+            )
+        }
+    }
+
+    func test_appKeypad_off_fallBackToLegacyDigit() {
+        // When DECPAM is off the keypad keys should pass their legacy
+        // character through. Callers normally never route keypad events
+        // through encodeSpecial without DECPAM, but the fallback
+        // guards a future routing refactor.
+        let enc = KeyEncoder()
+        XCTAssertEqual(
+            enc.encodeSpecial(.kp5, modifiers: [], applicationKeypad: false),
+            Data([0x35])
+        )
+        XCTAssertEqual(
+            enc.encodeSpecial(.kpEnter, modifiers: [], applicationKeypad: false),
+            Data([0x0D])
+        )
     }
 
     // MARK: - F10 (audit). optionIsMeta interaction with Ctrl+Option+arrow
