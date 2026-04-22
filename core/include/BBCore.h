@@ -329,6 +329,15 @@ extern "C" {
 /**
  * Create a new terminal. Returns null on invalid input or internal error.
  *
+ * # Thread safety
+ * The returned handle is NOT Sync / Sendable. Once created, every subsequent
+ * `bb_term_*` call on this handle MUST happen on the same thread; the handle
+ * may never be accessed concurrently from two threads, even with external
+ * locking. Crossing threads is undefined behavior. In Swift, restrict the
+ * handle to the @MainActor or confine it to a single dedicated serial queue.
+ * Debug builds latch the first accessor's ThreadId and debug_assert on
+ * mismatch (rust-core-1 F2/F10).
+ *
  * # Safety
  * The returned pointer must be freed exactly once via `bb_term_free`.
  *

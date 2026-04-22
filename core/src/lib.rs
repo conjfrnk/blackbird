@@ -105,7 +105,7 @@ pub type BBEventCb = unsafe extern "C" fn(BBEvent, *mut c_void);
 
 /// Interior-mutable storage for the registered C callback and its context
 /// pointer.  Both `BBTerm` and `RoutingListener` reference the same cell;
-/// `BBTerm` owns it via `Box`.
+/// `BBTerm` owns it via `Arc`.
 ///
 /// # Thread-safety contract
 /// All access to `CallbackCell` is restricted to the single thread that owns
@@ -113,7 +113,18 @@ pub type BBEventCb = unsafe extern "C" fn(BBEvent, *mut c_void);
 /// FFI contract already forbids concurrent calls on the same `term` handle
 /// (documented on `bb_term_input`).  Under this single-thread discipline no
 /// data race can occur, making the `UnsafeCell` sound.
-struct CallbackCell(UnsafeCell<(Option<BBEventCb>, *mut c_void)>);
+///
+/// In debug builds, the first thread to touch the cell is latched into
+/// `owner`; subsequent cross-thread access trips a `debug_assert_eq` — a
+/// runtime diagnostic for the otherwise-silent UB if the Swift side
+/// accidentally ships a handle across threads, or if a future
+/// `alacritty_terminal` point release spawns a background thread that calls
+/// `send_event`. Zero cost in release (rust-core-1 F2/F10).
+struct CallbackCell {
+    slot: UnsafeCell<(Option<BBEventCb>, *mut c_void)>,
+    #[cfg(debug_assertions)]
+    owner: std::sync::OnceLock<std::thread::ThreadId>,
+}
 
 // SAFETY: the owning BBTerm is never shared across threads; see contract above.
 unsafe impl Send for CallbackCell {}
@@ -122,15 +133,35 @@ unsafe impl Sync for CallbackCell {}
 
 impl CallbackCell {
     fn new() -> Self {
-        CallbackCell(UnsafeCell::new((None, std::ptr::null_mut())))
+        CallbackCell {
+            slot: UnsafeCell::new((None, std::ptr::null_mut())),
+            #[cfg(debug_assertions)]
+            owner: std::sync::OnceLock::new(),
+        }
     }
+
+    #[cfg(debug_assertions)]
+    fn debug_check_thread(&self) {
+        let current = std::thread::current().id();
+        let owner = *self.owner.get_or_init(|| current);
+        debug_assert_eq!(
+            owner, current,
+            "blackbird_core: BBTerm handle used from multiple threads \
+             (CallbackCell) — single-thread-per-handle contract violated",
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline(always)]
+    fn debug_check_thread(&self) {}
 
     /// Update the stored callback and context.
     ///
     /// # Safety
     /// Caller must ensure no concurrent access.
     unsafe fn set(&self, cb: Option<BBEventCb>, ctx: *mut c_void) {
-        *self.0.get() = (cb, ctx);
+        self.debug_check_thread();
+        *self.slot.get() = (cb, ctx);
     }
 
     /// Invoke the stored callback if one is registered.
@@ -139,7 +170,8 @@ impl CallbackCell {
     /// Caller must ensure no concurrent access and that the `BBEvent` fields
     /// are valid for the duration of the call.
     unsafe fn fire(&self, event: BBEvent) {
-        let (cb, ctx) = *self.0.get();
+        self.debug_check_thread();
+        let (cb, ctx) = *self.slot.get();
         if let Some(f) = cb {
             f(event, ctx);
         }
@@ -169,7 +201,8 @@ impl CallbackCell {
 ///
 /// # Thread-safety contract
 /// Same as `CallbackCell` — single-threaded access on the BBTerm owner's
-/// thread.
+/// thread. Debug builds latch `owner` on first access and debug_assert on
+/// mismatch (rust-core-1 F2/F10).
 struct ColorRequestQueue {
     entries: UnsafeCell<Vec<ColorRequestEntry>>,
     /// True once `push` has refused at least one entry since the latest
@@ -177,6 +210,8 @@ struct ColorRequestQueue {
     /// logging would itself become the DoS amplifier we're defending
     /// against.
     cap_hit_logged: UnsafeCell<bool>,
+    #[cfg(debug_assertions)]
+    owner: std::sync::OnceLock<std::thread::ThreadId>,
 }
 
 /// Upper bound on queued `ColorRequestEntry`s between two drains. See
@@ -198,8 +233,25 @@ impl ColorRequestQueue {
         ColorRequestQueue {
             entries: UnsafeCell::new(Vec::new()),
             cap_hit_logged: UnsafeCell::new(false),
+            #[cfg(debug_assertions)]
+            owner: std::sync::OnceLock::new(),
         }
     }
+
+    #[cfg(debug_assertions)]
+    fn debug_check_thread(&self) {
+        let current = std::thread::current().id();
+        let owner = *self.owner.get_or_init(|| current);
+        debug_assert_eq!(
+            owner, current,
+            "blackbird_core: BBTerm handle used from multiple threads \
+             (ColorRequestQueue) — single-thread-per-handle contract violated",
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline(always)]
+    fn debug_check_thread(&self) {}
 
     /// Append an entry, dropping silently when the queue is already at
     /// `COLOR_REQUEST_QUEUE_CAP`. Returns `true` when the entry was
@@ -208,6 +260,7 @@ impl ColorRequestQueue {
     /// # Safety
     /// Caller must ensure no concurrent access.
     unsafe fn push(&self, entry: ColorRequestEntry) -> bool {
+        self.debug_check_thread();
         let vec = &mut *self.entries.get();
         if vec.len() >= COLOR_REQUEST_QUEUE_CAP {
             let logged = &mut *self.cap_hit_logged.get();
@@ -230,6 +283,7 @@ impl ColorRequestQueue {
     /// # Safety
     /// Caller must ensure no concurrent access.
     unsafe fn drain(&self) -> Vec<ColorRequestEntry> {
+        self.debug_check_thread();
         *self.cap_hit_logged.get() = false;
         std::mem::take(&mut *self.entries.get())
     }
@@ -806,7 +860,7 @@ unsafe fn guard_with_term<T>(term: *mut BBTerm, fallback: T, f: impl FnOnce() ->
             if !term.is_null() {
                 let bb = &*term;
                 let msg = payload_to_string(&*payload);
-                let (cb, ctx) = *bb.callback.0.get();
+                let (cb, ctx) = *bb.callback.slot.get();
                 if let Some(cb) = cb {
                     let bytes = msg.as_bytes();
                     let ev = BBEvent {
@@ -842,6 +896,15 @@ fn guard_no_term<T>(fallback: T, f: impl FnOnce() -> T) -> T {
 // ---------------------------------------------------------------------------
 
 /// Create a new terminal. Returns null on invalid input or internal error.
+///
+/// # Thread safety
+/// The returned handle is NOT Sync / Sendable. Once created, every subsequent
+/// `bb_term_*` call on this handle MUST happen on the same thread; the handle
+/// may never be accessed concurrently from two threads, even with external
+/// locking. Crossing threads is undefined behavior. In Swift, restrict the
+/// handle to the @MainActor or confine it to a single dedicated serial queue.
+/// Debug builds latch the first accessor's ThreadId and debug_assert on
+/// mismatch (rust-core-1 F2/F10).
 ///
 /// # Safety
 /// The returned pointer must be freed exactly once via `bb_term_free`.
@@ -2609,6 +2672,44 @@ mod tests {
                 formatter: Arc::clone(&fmt),
             }));
         }
+    }
+
+    /// Regression for rust-core-1 F2/F10: CallbackCell must debug_assert on
+    /// cross-thread access so accidental Swift-side @Sendable leakage (or a
+    /// future alacritty release that calls send_event on a background
+    /// thread) surfaces as a diagnosable panic instead of silent UB.
+    /// Only meaningful in debug builds where the latch is live.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn callback_cell_catches_cross_thread_access() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let cell = Arc::new(CallbackCell::new());
+        // Latch the owner on this thread by touching the cell once.
+        unsafe {
+            cell.fire(BBEvent {
+                kind: BBEventKind::Bell,
+                payload: std::ptr::null(),
+                len: 0,
+                i32_arg: 0,
+            });
+        }
+        let cell_clone = Arc::clone(&cell);
+        let result = std::thread::spawn(move || {
+            catch_unwind(AssertUnwindSafe(|| unsafe {
+                cell_clone.fire(BBEvent {
+                    kind: BBEventKind::Bell,
+                    payload: std::ptr::null(),
+                    len: 0,
+                    i32_arg: 0,
+                });
+            }))
+        })
+        .join()
+        .expect("spawned thread panicked before catch_unwind caught anything");
+        assert!(
+            result.is_err(),
+            "cross-thread CallbackCell::fire should trip the debug_assert_eq",
+        );
     }
 
     /// Verify that scrollback is wired up: after feeding enough newlines to
