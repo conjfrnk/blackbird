@@ -20,11 +20,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// Always reset immediately after the batch via a `defer`.
     static var bypassCloseConfirm: Bool = false
 
-    /// Space on the right of the titlebar reserved for the three traffic-
+    /// Space on the left of the titlebar reserved for the three traffic-
     /// light buttons on a standard-style macOS window. Used by the tab
     /// strip width calculation so pills never overlap the close / minimize
-    /// / zoom hotspots.
-    private static let trafficLightsReservation: CGFloat = 78
+    /// / zoom hotspots. Zoom's right edge sits near x=67 at the standard
+    /// button layout; 75 gives an ~8pt gap between the zoom button and
+    /// the first pill, matching the 8pt trailingInset on the right edge
+    /// so the strip reads symmetric to the eye.
+    private static let trafficLightsReservation: CGFloat = 75
 
     private(set) var session: TerminalSession?
     private(set) var terminalView: TerminalView?

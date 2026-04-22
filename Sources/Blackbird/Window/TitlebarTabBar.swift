@@ -213,19 +213,17 @@ final class TabStripView: NSView {
 
     private static let addButtonWidth: CGFloat = 22
     private static let pillSpacing: CGFloat = 2
-    private static let trailingInset: CGFloat = 8
+    private static let trailingInset: CGFloat = 4
     private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .regular)
 
     private func layoutPills() {
         pillFrames.removeAll(keepingCapacity: true)
         // Pill geometry: the stripView is 28 pt tall (standard titlebar);
-        // pills are 24 pt, anchored at y=4 so their bottom edge sits flush
-        // with the titlebar/content seam (Safari / Chrome style) and their
-        // top sits visually BELOW the traffic-light centers — matching how
-        // the lights read as a unit at the titlebar top rather than
-        // centered in it. Previously h=22 at y=3 made pills look floating-
-        // high; the 2 pt taller body + 1 pt drop lines them up against the
-        // traffic lights on eye-test.
+        // pills are 24 pt at y=4 → center=16, which matches the traffic-
+        // light vertical midline. Traffic lights aren't exactly centered
+        // in the titlebar — their origin sits ~2pt below center on
+        // modern macOS — so strict mathematical centering (y=2, center=14)
+        // reads visibly high; y=4 restores the offset.
         let h: CGFloat = 24
         let y: CGFloat = 4
         let addW = Self.addButtonWidth
