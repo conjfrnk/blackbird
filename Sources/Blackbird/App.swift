@@ -272,71 +272,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         guard let newWindow = controller.window else { return }
         if let sourceWindow = source?.window {
-            // Pre-emptively suppress the animations AppKit runs during
-            // the merge. Three layers cover the three ways AppKit
-            // schedules the work:
-            //   1. CATransaction.setDisableActions(true) — kills implicit
-            //      CA-layer animations on any view whose `actions` dict
-            //      contains animatable keys.
-            //   2. NSAnimationContext duration=0 +
-            //      allowsImplicitAnimation=false — kills AppKit's
-            //      higher-level view animations that flow through the
-            //      context even when implicit-layer actions are off.
-            //   3. per-window `animationBehavior = .none` on both the
-            //      source and the new window — kills `orderFront`-style
-            //      full-window fades independent of the context stack.
-            // The three together stop the ~150ms tab-merge animation
-            // that otherwise briefly paints AppKit's native tab strip.
-            let sourcePrior = sourceWindow.animationBehavior
-            let newPrior = newWindow.animationBehavior
-            sourceWindow.animationBehavior = .none
-            newWindow.animationBehavior = .none
-
+            // Wrap the merge in a zero-duration animation context AND a
+            // disabled-actions CATransaction. AppKit otherwise plays an
+            // ~150ms cross-fade / slide animation that transiently shows
+            // its native tab-strip-below-titlebar even though our
+            // titlebar accessory hides it on the next frame. With both
+            // animation paths suppressed the merge becomes a single
+            // synchronous transaction and the native strip never gets a
+            // visible frame.
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             NSAnimationContext.beginGrouping()
             NSAnimationContext.current.duration = 0
-            NSAnimationContext.current.allowsImplicitAnimation = false
-
             // addTabbedWindow(_:ordered:) orders-front and makes-key as a
             // side effect — no separate showWindow / makeKeyAndOrderFront
             // needed. Doing both was causing a brief standalone-window
             // flash before the merge on some launches.
             sourceWindow.addTabbedWindow(newWindow, ordered: .above)
-            // Two-step hide on every controller in the freshly-formed
-            // group:
-            //   1. `toggleTabBar` on the window — AppKit's proper API
-            //      to flip isTabBarVisible to false. This collapses
-            //      the NSTitlebarAccessoryClipView's reserved 36pt
-            //      region (the "empty band" where the strip would go),
-            //      not just the NSTabBar subview.
-            //   2. Our walker — defensive second pass in case toggle
-            //      races the layout, picking up the NSTabBar by class
-            //      name and setting isHidden + frame=.zero.
-            // Both run inside the suppressed-animation transaction so
-            // neither fires its own cross-fade.
+            // Hide the native strip immediately on every controller in
+            // the group so the layout pass that finalises the merge
+            // never gets to render the strip's pixels. The KVO-driven
+            // hide path will fire as well, but those fire after the
+            // first paint of the merged window state.
             for win in sourceWindow.tabGroup?.windows ?? [] {
-                if win.tabGroup?.isTabBarVisible == true {
-                    win.toggleTabBar(nil)
-                }
                 (win.windowController as? MainWindowController)?
                     .hideNativeTabStripImmediate()
             }
-            // Bring the new window key INSIDE the transaction so the
-            // focus transition itself can't trigger a post-transaction
-            // animation pass that re-shows the strip.
-            newWindow.makeKeyAndOrderFront(nil)
-
             NSAnimationContext.endGrouping()
             CATransaction.commit()
-
-            sourceWindow.animationBehavior = sourcePrior
-            newWindow.animationBehavior = newPrior
         } else {
             // No existing Blackbird window — fall back to a standalone.
             controller.showWindow(nil)
-            newWindow.makeKeyAndOrderFront(nil)
         }
+        newWindow.makeKeyAndOrderFront(nil)
         // Tell every controller in the group to refresh its custom tab
         // bar. NSWindowTabGroup's `.windows` property is not reliably
         // KVO-fireable on tab-add, so we invalidate explicitly.
