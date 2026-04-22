@@ -155,7 +155,18 @@ legitimate repaint.
 
 ## Reporting
 
-Security reports: open a GitHub issue at
-https://github.com/conjfrnk/blackbird with the `security` label.
-For coordinated disclosure, contact the maintainer via the email on
-their GitHub profile.
+**Preferred channel — GitHub Private Security Advisories:**
+https://github.com/conjfrnk/blackbird/security/advisories/new
+
+Use this for any vulnerability report. The form creates a private thread
+between the reporter and the maintainer; the report is never visible in
+the public issue tracker, and a CVE can be requested from the same page
+once a fix is ready.
+
+**Coordinated-disclosure fallback:** email the maintainer via the
+address on the GitHub profile at https://github.com/conjfrnk.
+
+**Do NOT:** open a public issue or a public pull request that describes
+an unpatched vulnerability. Terminal emulators commonly parse untrusted
+output — an RCE report on the public tracker is a zero-day for every
+user running an older build.

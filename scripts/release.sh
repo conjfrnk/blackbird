@@ -81,6 +81,21 @@ if [[ $CODESIGN_STATUS -ne 0 ]]; then
 fi
 printf '%s\n' "$CODESIGN_LOG" | tail -3
 
+# Sparkle is a SwiftPM binary product (XCFramework) pulled via
+# XCRemoteSwiftPackageReference. Xcode's SPM integration auto-creates an
+# implicit "Embed & Sign" step for package products that include
+# .framework/.xpc bundles — there's no visible PBXCopyFilesBuildPhase in
+# the pbxproj. If a future Sparkle release changes its artifact layout or
+# Xcode's SPM embedding behavior, the app could build clean and ship
+# without the framework, leaving auto-update silently broken on users'
+# installs. Hard-fail here so the DMG never packages a broken bundle.
+# Audit xcode-project F14.
+if [[ ! -d "$APP_DST/Contents/Frameworks/Sparkle.framework" ]]; then
+    echo "!! Sparkle.framework missing from $APP_DST/Contents/Frameworks/" >&2
+    echo "!! SwiftPM-managed embedding probably failed. Re-run xcodegen and rebuild." >&2
+    exit 1
+fi
+
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DST/Contents/Info.plist" 2>/dev/null || echo "0.0.0")"
 DMG_NAME="Blackbird-${VERSION}.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"

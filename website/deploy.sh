@@ -52,3 +52,23 @@ aws cloudfront create-invalidation \
   --output text
 
 echo "Deployed to https://blackbird-terminal.com"
+
+# Post-deploy sanity: verify the CloudFront Response Headers Policy is
+# serving security headers we asked for. Drift here (someone detaches
+# the policy from the distribution, or the invalidation races ahead of
+# a config change) lets the site ship without HSTS/CSP, re-opening the
+# attack surface website F2 was closed against. Warning-only so deploy
+# doesn't block on a flaky probe. Run scripts/apply-security-headers.sh
+# once if the policy needs to be (re-)attached.
+echo "Verifying security headers..."
+HEADERS="$(curl -sSI --max-time 10 https://blackbird-terminal.com/ 2>/dev/null || true)"
+missing=()
+for h in "strict-transport-security" "content-security-policy" "x-content-type-options" "referrer-policy"; do
+    if ! grep -qi "^${h}:" <<<"$HEADERS"; then
+        missing+=("$h")
+    fi
+done
+if (( ${#missing[@]} > 0 )); then
+    echo "!! warning: security headers missing from live response: ${missing[*]}"
+    echo "!! run ./apply-security-headers.sh to reattach the CloudFront policy (website F2)"
+fi
