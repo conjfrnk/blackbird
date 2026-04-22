@@ -271,10 +271,43 @@ extension TerminalView: NSTextInputClient {
     }
 
     public func characterIndex(for point: NSPoint) -> Int {
-        // Terminals don't expose a richer character index because every
-        // cell is independently addressable. 0 is the documented default
-        // for "point doesn't fall on a character".
-        0
+        // During a composition, map the screen point back to an offset
+        // inside the marked text so the input method can reposition
+        // candidates / navigate within the preedit on click. Without
+        // this, clicking on a candidate word during Chinese/Japanese
+        // input misses and VoiceOver's read-at-point always reads the
+        // composition's first grapheme. Audit terminal-ime F5.
+        guard let composition else { return NSNotFound }
+        // Convert screen to local using the same inverse transform
+        // firstRect(forCharacterRange:) uses forward.
+        guard let localWindow = window?.convertPoint(fromScreen: point) else {
+            return NSNotFound
+        }
+        let local = convert(localWindow, from: nil)
+        let cellRect = cursorCellRectInView()
+        let cw = max(metrics.cellWidth, 1)
+        // Offset relative to the composition's leading edge in CELLS,
+        // then map to a UTF-16 index by accumulating cellWidth per
+        // grapheme from the composition string.
+        let dx = local.x - cellRect.minX
+        guard dx >= 0 else { return 0 }
+        let cellOffset = Int((dx / cw).rounded(.down))
+        // Walk graphemes summing width until we reach cellOffset.
+        var consumed = 0
+        var utf16Index = 0
+        for cluster in composition.attributedText.string {
+            let clusterCells = cluster.unicodeScalars.reduce(0) {
+                $0 + Self.cellWidth(for: $1)
+            }
+            if consumed + clusterCells > cellOffset {
+                return 0 + utf16Index
+            }
+            consumed += clusterCells
+            utf16Index += String(cluster).utf16.count
+        }
+        // Past the composition's end → clamp to the last valid index.
+        let length = composition.attributedText.length
+        return max(0, length - 1)
     }
 
     /// NSTextInputClient routes editing keys that aren't printable through
@@ -290,10 +323,29 @@ extension TerminalView: NSTextInputClient {
     /// Absorb the selector here. We don't need to re-do the encoding — the
     /// keyDown → encoder path handles it a few lines later with the actual
     /// event (correct modifiers, kitty disambiguation, Option-as-Meta, etc.).
-    /// Leaving this empty IS the fix: the selector is "handled" (no further
-    /// routing), so `NSResponder`'s default doesn't fire its bell.
+    /// Leaving this empty WAS the fix for the printable-key selectors, but
+    /// two exceptions need real handling (audit terminal-ime F3):
+    /// - `cancelOperation:` fires on Esc during an active composition; the
+    ///   IME expects "abort the preedit" not "encode Esc". Clear the
+    ///   composition so the user can re-start input without the stale
+    ///   marked text showing through.
+    /// - `complete:` fires on some layouts for Fn-key accessibility
+    ///   completion; let NSResponder's default run so VoiceOver users
+    ///   still get the standard chain. Likewise `noop:` is a safe pass.
     public override func doCommand(by selector: Selector) {
-        // Intentionally empty — see docstring above.
+        if selector == #selector(NSResponder.cancelOperation(_:)),
+           composition != nil {
+            inputContext?.discardMarkedText()
+            unmarkText()
+            return
+        }
+        if selector == NSSelectorFromString("complete:") ||
+           selector == NSSelectorFromString("noop:") {
+            super.doCommand(by: selector)
+            return
+        }
+        // Everything else: absorb silently. keyDown has already routed
+        // the raw NSEvent through the encoder.
     }
 
     // MARK: - Helpers
@@ -365,11 +417,17 @@ extension TerminalView: NSTextInputClient {
             return
         }
         let cellRect = cursorCellRectInView()
-        let charCount = composition.attributedText.string.count
-        // One cell per grapheme is close enough for CJK composition. We
-        // don't need exact glyph metrics for the dotted underline — a dashed
-        // rule across the preedit span is the affordance users track.
-        let width = max(metrics.cellWidth, metrics.cellWidth * CGFloat(charCount))
+        // Width in cells, not graphemes. `String.count` counts grapheme
+        // clusters, but CJK + wide emoji occupy TWO terminal cells per
+        // grapheme — under-sizing by 50% leaves the theme-bg fill
+        // bleeding through the right half of every wide glyph. Audit
+        // terminal-ime F4. Walk the composition's scalars and weight
+        // each by its East Asian Width so the overlay matches what
+        // the grid will paint.
+        let cellCount = Self.terminalCellWidth(
+            of: composition.attributedText.string
+        )
+        let width = max(metrics.cellWidth, metrics.cellWidth * CGFloat(cellCount))
         let frame = NSRect(
             x: cellRect.origin.x,
             y: cellRect.origin.y,
@@ -460,5 +518,56 @@ extension TerminalView: NSTextInputClient {
         }
         #endif
         session?.send(bytes)
+    }
+
+    /// Approximate terminal-cell width of a string. Each grapheme cluster
+    /// contributes 1 cell for ASCII/Latin/Cyrillic, 2 cells for CJK
+    /// ideographs and wide emoji, 0 cells for combining marks or
+    /// zero-width joiners. Good enough for preedit overlay sizing;
+    /// exact glyph metrics would require a CoreText pass per composition
+    /// update which is too slow for per-keystroke refreshes.
+    static func terminalCellWidth(of string: String) -> Int {
+        var total = 0
+        for scalar in string.unicodeScalars {
+            total += cellWidth(for: scalar)
+        }
+        return total
+    }
+
+    /// Rough cell-width classification for a single scalar. Based on
+    /// Unicode's East Asian Width property plus the emoji / symbol
+    /// ranges that terminal emulators conventionally treat as wide.
+    static func cellWidth(for scalar: UnicodeScalar) -> Int {
+        let v = scalar.value
+        // Combining marks / zero-width joiners / VS16 etc. → 0 cells.
+        if (0x0300...0x036F).contains(v)   // Combining Diacriticals
+            || (0x200B...0x200F).contains(v) // ZW* + bidi marks
+            || (0xFE00...0xFE0F).contains(v) // Variation Selectors 1-16
+            || v == 0x200D                   // ZWJ
+            || (0xFE20...0xFE2F).contains(v) // Combining Half Marks
+        {
+            return 0
+        }
+        // Common wide ranges. Covers the cases users actually hit at
+        // Blackbird's prompt: CJK ideographs, Hangul syllables,
+        // fullwidth forms, wide emoji.
+        if (0x1100...0x115F).contains(v)    // Hangul Jamo
+            || (0x2E80...0x303E).contains(v) // CJK Radicals + Kangxi
+            || (0x3041...0x33FF).contains(v) // Hiragana + Katakana + CJK Symbols
+            || (0x3400...0x4DBF).contains(v) // CJK Ext A
+            || (0x4E00...0x9FFF).contains(v) // CJK Unified Ideographs
+            || (0xA000...0xA4CF).contains(v) // Yi
+            || (0xAC00...0xD7A3).contains(v) // Hangul Syllables
+            || (0xF900...0xFAFF).contains(v) // CJK Compatibility Ideographs
+            || (0xFE30...0xFE4F).contains(v) // CJK Compatibility Forms
+            || (0xFF00...0xFF60).contains(v) // Fullwidth Forms
+            || (0xFFE0...0xFFE6).contains(v) // Fullwidth signs
+            || (0x1F300...0x1F9FF).contains(v) // Misc symbols + emoji
+            || (0x20000...0x2FFFD).contains(v) // CJK Ext B/C/D/E
+            || (0x30000...0x3FFFD).contains(v) // CJK Ext G
+        {
+            return 2
+        }
+        return 1
     }
 }
