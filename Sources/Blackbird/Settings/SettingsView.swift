@@ -2,7 +2,13 @@ import SwiftUI
 import AppKit
 
 public struct SettingsView: View {
-    @StateObject private var prefs = Preferences.shared
+    // `Preferences.shared` is a long-lived singleton; using `@ObservedObject`
+    // (rather than `@StateObject`) makes it explicit that SettingsView doesn't
+    // own the object's lifecycle — the view just observes a pre-existing one.
+    // `@StateObject` would still function here because its init closure is
+    // evaluated once, but it adds lifecycle semantics SettingsView doesn't
+    // need and reads wrong at a glance.
+    @ObservedObject private var prefs = Preferences.shared
 
     /// Cached list of monospaced font families on the system. Built once
     /// per process launch and reused across SettingsView renders —
@@ -14,10 +20,8 @@ public struct SettingsView: View {
     private static let cachedMonospaceFamilies: [String] = {
         NSFontManager.shared.availableFontFamilies
             .filter { name in
-                if let font = NSFont(name: name, size: 12) {
-                    return font.isFixedPitch
-                }
-                return false
+                guard let font = NSFont(name: name, size: 12) else { return false }
+                return font.isFixedPitch
             }
             .sorted()
     }()
@@ -95,21 +99,29 @@ public struct SettingsView: View {
                         Text(s.rawValue).tag(s.rawValue)
                     }
                 }
-                Toggle("Blink", isOn: $prefs.cursorBlink)
+                Toggle("Blink cursor", isOn: $prefs.cursorBlink)
             }
 
+            // Translucency lives in its own "Window" section — the previous
+            // layout left it as a headerless row that visually floated below
+            // the Cursor section. Pairing it with the explanatory footer under
+            // a proper header also matches how every other pref group in this
+            // file is organized. SwiftUI's titleKey+footer convenience doesn't
+            // exist on macOS 14, so we spell out header:/footer: builders.
             Section {
                 LabeledContent("Translucency") {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         Text("Solid")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         Slider(value: $prefs.translucency, in: 1...10, step: 1)
                         Text("Ghost")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
+            } header: {
+                Text("Window")
             } footer: {
                 Text("Higher values make the window background more translucent and apply a stronger blur.")
             }
@@ -133,19 +145,21 @@ public struct SettingsView: View {
                         Text(o.rawValue).tag(o.rawValue)
                     }
                 }
-                Toggle("Confirm close while running", isOn: $prefs.confirmClose)
+                Toggle("Confirm quit while processes are running", isOn: $prefs.confirmClose)
             }
 
             Section {
                 Toggle("Allow remote clipboard writes (OSC 52)", isOn: $prefs.osc52Enabled)
-            } footer: {
-                Text("Lets remote shells (for example, via `tmux set -g set-clipboard on`) write text directly to your Mac clipboard. Turn off on untrusted servers.")
-            }
-
-            Section {
                 Toggle("Reply to color queries (OSC 10/11/12)", isOn: $prefs.colorQueryEnabled)
+            } header: {
+                Text("Security")
             } footer: {
-                Text("Lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors for light/dark auto-detection. Off by default: the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
+                // The two toggles in this section are related (both gate what
+                // a remote / in-terminal program can ask the emulator to do),
+                // so one combined footer keeps the UI dense without losing the
+                // explanatory nuance each toggle needs. Blank line separates
+                // the two paragraphs.
+                Text("OSC 52 lets remote shells write text to your Mac clipboard. Disable it on untrusted servers.\n\nOSC 10/11/12 lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors. Off by default — the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
             }
         }
         .formStyle(.grouped)
@@ -156,7 +170,7 @@ public struct SettingsView: View {
 
     private var updatesTab: some View {
         Form {
-            Section {
+            Section("About") {
                 LabeledContent("Version") {
                     Text(Self.versionString)
                         .foregroundStyle(.secondary)
@@ -167,6 +181,8 @@ public struct SettingsView: View {
 
             Section {
                 Toggle("Check for updates automatically", isOn: $prefs.autoUpdateChecks)
+            } header: {
+                Text("Automatic updates")
             } footer: {
                 Text("Check the release feed at launch and notify when a new version is available.")
             }

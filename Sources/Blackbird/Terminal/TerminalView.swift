@@ -529,7 +529,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Force a grid recomputation on the next layout — propagateResize
         // compares against lastPropagatedSize, so clear it.
         lastPropagatedSize = nil
-        propagateResize()
+        // Async resize — font change is a one-off, not a drag loop, so we
+        // don't need the sync-return-with-snapshot guarantee. Using the
+        // async path prevents coreQueue backlog (shell streaming output)
+        // from blocking main while the pref change is applied.
+        propagateResize(async: true)
         // Re-layout the scroll indicator (its Y depends on cellHeight).
         needsLayout = true
     }
@@ -615,7 +619,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// iTerm2, which both leave breathing room below the prompt.
     public static let bottomContentInsetPoints: CGFloat = 10
 
-    private func propagateResize() {
+    private func propagateResize(async asyncResize: Bool = false) {
         guard let session else { return }
         // `.fullSizeContentView` means our bounds include the titlebar region —
         // subtract it (via titlebarOnlyTopInset) so we don't size the grid as
@@ -637,9 +641,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
         guard size != lastPropagatedSize else { return }
         lastPropagatedSize = size
-        // TerminalSession.resize is synchronous — returns after the snapshot
-        // is in place so the next MTKView frame renders at the new size.
-        session.resize(to: size)
+        // Drag path uses sync `resize` so each frame renders at the right
+        // grid size (avoids one-frame-at-old-grid jitter). Font-change path
+        // (and any other non-drag caller) uses `resizeAsync` to keep the
+        // main thread from blocking on coreQueue when a chatty shell has a
+        // feed backlog — otherwise clicking "Size: 14" in Settings while
+        // something's streaming output beachballs for hundreds of ms.
+        if asyncResize {
+            session.resizeAsync(to: size)
+        } else {
+            session.resize(to: size)
+        }
     }
 
     // MARK: - Rendering

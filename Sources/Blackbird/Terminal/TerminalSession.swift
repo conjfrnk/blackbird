@@ -444,9 +444,13 @@ public final class TerminalSession: ObservableObject {
         // produced a one-frame lag that users saw as jitter — content at old
         // grid size against new viewport for ~8ms, then catching up.
         //
-        // Blocking cost: a single bb_term_resize call plus snapshot, well
-        // under a millisecond in practice. Safe from deadlock: coreQueue
-        // never syncs back to the caller's queue.
+        // Blocking cost under an idle coreQueue: a single bb_term_resize call
+        // plus snapshot, well under a millisecond. Under a coreQueue backlog
+        // (a chatty shell mid-burst) the caller waits for every queued
+        // `feed(_:)` to drain first — callers that don't need the drag-path
+        // jitter-free guarantee should use `resizeAsync` instead (font-change
+        // path, which otherwise beachballs Settings clicks when Claude /
+        // xcodebuild are streaming into the terminal).
         //
         // Clamp cols/rows to the same 2×2 floor and 1000×1000 ceiling the
         // Rust core enforces, so the PTY's TIOCSWINSZ gets dimensions
@@ -455,9 +459,7 @@ public final class TerminalSession: ObservableObject {
         // at 2×2; a UInt16.max request allocates hundreds of GB in the
         // grid. Keeping PTY + grid in lockstep avoids off-by-one cursor
         // / wrap bugs after the mismatch.
-        let cols = min(1000, max(2, size.cols))
-        let rows = min(1000, max(2, size.rows))
-        let clamped = Size(cols: cols, rows: rows)
+        let clamped = Self.clampResize(size)
         var newSnap: BBSnapshot?
         coreQueue.sync {
             self.pty?.resize(to: clamped)
@@ -470,6 +472,32 @@ public final class TerminalSession: ObservableObject {
         } else {
             DispatchQueue.main.async { self.snapshot = newSnap }
         }
+    }
+
+    /// Async sibling of `resize(to:)` for non-drag callers. Trades the
+    /// in-hand post-resize snapshot (which `resize` returns with so a
+    /// window-drag frame never shows old-grid-at-new-viewport) for a
+    /// guaranteed non-blocking main thread. Used by the font-change path,
+    /// where the resize is a one-off (not a drag loop) and a coreQueue
+    /// backlog must not hold main hostage while shells stream output.
+    /// Ordering against in-flight feeds is preserved because coreQueue is
+    /// serial; the resulting snapshot is routed through the same coalescer
+    /// `feed(_:)` uses.
+    public func resizeAsync(to size: Size) {
+        let clamped = Self.clampResize(size)
+        coreQueue.async { [weak self] in
+            guard let self else { return }
+            self.pty?.resize(to: clamped)
+            self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows))
+            guard let snap = self.bbterm.snapshot() else { return }
+            self.publishPendingSnapshot(snap)
+        }
+    }
+
+    private static func clampResize(_ size: Size) -> Size {
+        let cols = min(1000, max(2, size.cols))
+        let rows = min(1000, max(2, size.rows))
+        return Size(cols: cols, rows: rows)
     }
 
     public func scroll(delta: Int32) {
@@ -521,23 +549,30 @@ public final class TerminalSession: ObservableObject {
     }
 
     /// Push a full palette into the Rust term + publish a fresh snapshot so
-    /// cells re-color on the next draw. Serialized through `coreQueue`.
+    /// cells re-color on the next draw. Serialized through `coreQueue` as
+    /// `async` — the previous `sync` flavour blocked main waiting for any
+    /// pending `feed(_:)` items to drain, which on a chatty shell
+    /// (`xcodebuild test`, tailing logs, Claude streaming) turns every
+    /// Settings click that changes the palette / cursor / translucency into
+    /// a visible beachball. Async preserves ordering against feeds because
+    /// `coreQueue` is serial, and the resulting snapshot is routed through
+    /// the same single-slot coalescer that `feed(_:)` publishes through
+    /// (see `publishPendingSnapshot`), so a palette change mid-burst can't
+    /// jump ahead of or duplicate the snapshot stream.
     public func applyPalette(_ palette: ThemePalette) {
-        var newSnap: BBSnapshot?
-        coreQueue.sync {
+        coreQueue.async { [weak self] in
+            guard let self else { return }
             for (i, c) in palette.ansi.enumerated() {
-                bbterm.setColor(slot: i, rgb: c)
+                self.bbterm.setColor(slot: i, rgb: c)
             }
             // NamedColor layout in alacritty 0.26:
             //   256 = Foreground, 257 = Background, 258 = Cursor
-            bbterm.setColor(slot: 256, rgb: palette.foreground)
-            bbterm.setColor(slot: 257, rgb: palette.background)
-            bbterm.setColor(slot: 258, rgb: palette.cursor)
-            newSnap = bbterm.snapshot()
+            self.bbterm.setColor(slot: 256, rgb: palette.foreground)
+            self.bbterm.setColor(slot: 257, rgb: palette.background)
+            self.bbterm.setColor(slot: 258, rgb: palette.cursor)
+            guard let snap = self.bbterm.snapshot() else { return }
+            self.publishPendingSnapshot(snap)
         }
-        guard let newSnap else { return }
-        if Thread.isMainThread { snapshot = newSnap }
-        else { DispatchQueue.main.async { self.snapshot = newSnap } }
     }
 
     /// Extract text between two buffer points. Serialized through the core

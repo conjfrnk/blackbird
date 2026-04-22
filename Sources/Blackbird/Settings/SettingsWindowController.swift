@@ -24,9 +24,9 @@ final class SettingsWindowController {
     /// Show the settings window. The hosting controller + window are built
     /// once and reused — swapping a fresh NSHostingController into the same
     /// window on every show has a race where the second attachment commits
-    /// an empty view tree (blank white content). SettingsView binds to the
-    /// shared Preferences @StateObject, so the cached view picks up any
-    /// preference change automatically; no need to rebuild it.
+    /// an empty view tree (blank white content). SettingsView binds to
+    /// `Preferences.shared` via `@ObservedObject`, so the cached view picks
+    /// up any preference change automatically; no need to rebuild it.
     func show() {
         if window == nil {
             let w = makeWindow()
