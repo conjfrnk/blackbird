@@ -33,6 +33,15 @@ public final class KeyEncoder {
         case f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
     }
 
+    /// Kitty-protocol event-type sub-parameter (`CSI <cp>;<mod>:<event>u`).
+    /// Only surfaces in the CSI-u output when `reportEventTypes` is set;
+    /// the legacy path ignores it entirely.
+    public enum EventType: Int {
+        case press   = 1
+        case `repeat` = 2
+        case release = 3
+    }
+
     /// If true, Option modifier produces ESC+char (traditional Meta behavior).
     /// If false, Option produces the character the OS assigned (e.g., Option-e -> accent).
     /// Plan 5 will surface this as a setting; for now hardcoded true.
@@ -47,7 +56,25 @@ public final class KeyEncoder {
     /// - Parameter mode: terminal mode bits from the current snapshot.
     ///   When `mode.contains(.disambiguateEscCodes)` the kitty progressive
     ///   enhancement path is active; otherwise we emit legacy bytes.
-    public func encode(chars: String, modifiers: Modifiers, mode: BBTermMode = []) -> Data {
+    /// - Parameter eventType: press / repeat / release. When mode contains
+    ///   `.reportEventTypes`, CSI-u output carries the event type as a
+    ///   sub-parameter of the modifier field. In all other cases:
+    ///   `.press` / `.repeat` encode identically to the default
+    ///   behaviour; `.release` returns empty `Data` because the key-down
+    ///   code path is the only one that emits bytes to the PTY.
+    public func encode(
+        chars: String,
+        modifiers: Modifiers,
+        mode: BBTermMode = [],
+        eventType: EventType = .press
+    ) -> Data {
+        // Release events are reported ONLY when Kitty flag 2 is active
+        // AND the key would have gone through the CSI-u path. Everything
+        // else drops the release — legacy TUIs get confused by post-key
+        // traffic they didn't ask for.
+        if eventType == .release && !mode.contains(.reportEventTypes) {
+            return Data()
+        }
         guard !chars.isEmpty else { return Data() }
 
         // ⌘-prefixed keys belong to the app layer (menu shortcuts, window
@@ -71,15 +98,7 @@ public final class KeyEncoder {
         // distinguish Shift+Enter from plain Enter, Option+Esc from plain
         // Esc (which previously leaked as two raw ESCs), etc.
         if kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) {
-            return csiU(codepoint: cp, modifiers: effectiveMods)
-        }
-
-        // Shift+Tab → CSI Z (reverse tab, "backtab"). Completion widgets and
-        // the readline/zsh reverse-menu selection all expect this specific
-        // sequence when kitty mode is NOT active. AppKit delivers Shift+Tab
-        // as chars "\t" with .shift set.
-        if !kitty, modifiers.contains(.shift), chars == "\t" {
-            return Data([0x1B, 0x5B, 0x5A])    // ESC [ Z
+            return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
         }
 
         // Ctrl+printable: only the first character is transformed.
@@ -93,11 +112,29 @@ public final class KeyEncoder {
             // Other Ctrl+letter combinations stay as their C0 byte so shells'
             // SIGINT / SIGQUIT / word-motion bindings keep working.
             if kitty, let cp = ctrlColliderCodepoint(for: scalar) {
-                return csiU(codepoint: cp, modifiers: effectiveMods)
+                return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
+            }
+            if eventType == .release {
+                return Data()
             }
             if let ctrlByte = controlByte(for: scalar) {
                 return Data([ctrlByte])
             }
+        }
+
+        // Release events past here would end up emitting a legacy byte
+        // sequence (CSI Z, ESC+UTF-8, or plain UTF-8) with no paired
+        // release form. Drop so release traffic matches press traffic.
+        if eventType == .release {
+            return Data()
+        }
+
+        // Shift+Tab → CSI Z (reverse tab, "backtab"). Completion widgets and
+        // the readline/zsh reverse-menu selection all expect this specific
+        // sequence when kitty mode is NOT active. AppKit delivers Shift+Tab
+        // as chars "\t" with .shift set.
+        if !kitty, modifiers.contains(.shift), chars == "\t" {
+            return Data([0x1B, 0x5B, 0x5A])    // ESC [ Z
         }
 
         // Option as Meta: prepend ESC.
@@ -137,15 +174,27 @@ public final class KeyEncoder {
         }
     }
 
-    /// `CSI <codepoint> ; <modParam> u`. Collapses the `;M` when modParam==1
-    /// (no effective modifiers, per the kitty spec).
-    private func csiU(codepoint: UInt32, modifiers: Modifiers) -> Data {
+    /// `CSI <codepoint> ; <modParam>[:<eventType>] u`. Collapses the
+    /// modifier field when modParam == 1 AND eventType == .press (the
+    /// kitty spec says the entire `;M` can be omitted then). When
+    /// eventType is non-press the modifier field is always emitted so
+    /// the `:N` sub-parameter parses correctly.
+    private func csiU(
+        codepoint: UInt32,
+        modifiers: Modifiers,
+        eventType: EventType = .press
+    ) -> Data {
         let mod = modifierParam(modifiers)
         var bytes: [UInt8] = [0x1B, 0x5B]                 // ESC [
         bytes.append(contentsOf: Array(String(codepoint).utf8))
-        if mod > 1 {
+        let includeMod = mod > 1 || eventType != .press
+        if includeMod {
             bytes.append(0x3B)                            // ;
             bytes.append(contentsOf: Array(String(mod).utf8))
+            if eventType != .press {
+                bytes.append(0x3A)                        // :
+                bytes.append(contentsOf: Array(String(eventType.rawValue).utf8))
+            }
         }
         bytes.append(0x75)                                // u
         return Data(bytes)

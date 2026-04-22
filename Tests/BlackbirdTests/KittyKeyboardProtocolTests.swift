@@ -279,16 +279,90 @@ final class KittyKeyboardProtocolTests: XCTestCase {
 
     // MARK: - Progressive enhancement flags 2/4/8/16 (pin current no-op)
 
-    // We accept flags 2-5 via the mode bitfield but the encoder does not
-    // consume them yet (audit key-encoder F1). Pin today's behavior so a
-    // future change that starts consuming them has to update these tests
-    // explicitly rather than silently breaking TUIs that have enabled them.
+    // Flag 2 (reportEventTypes) is implemented — see the "event type"
+    // tests below. Flags 4/8/16 are accepted via the mode bitfield but
+    // the encoder doesn't consume them yet (key-encoder F1 deferred
+    // pieces). Pin today's no-op behaviour so a future change has to
+    // update these tests deliberately.
 
     func test_flag2_reportEventTypes_doesNotAlterKeyDownEncoding() {
+        // press event-type encodes identically whether flag 2 is on or
+        // off. The only visible change is that keyUp emits CSI-u with
+        // a release event (tested below).
         let enc = KeyEncoder()
         let mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes]
         XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
                        csiU(13, mod: 2))
+    }
+
+    // MARK: - Flag 2: release events
+
+    func test_flag2_release_on_csiU_key_emitsReleaseSuffix() {
+        // Shift+Enter press emits ESC[13;2u. Flag 2 makes the paired
+        // release emit ESC[13;2:3u (same modifier, event-type 3 = release).
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes]
+        let out = enc.encode(
+            chars: "\r", modifiers: [.shift], mode: mode, eventType: .release
+        )
+        XCTAssertEqual(out, Data("\u{1B}[13;2:3u".utf8))
+    }
+
+    func test_flag2_release_without_modifier_stillIncludesModField() {
+        // Release events ALWAYS emit the modifier field even when the
+        // effective modifier is 1 (none) — the `:3` sub-parameter has
+        // no place to attach without it. Spec-compliant Kitty parsers
+        // reject a bare ESC[13:3u.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes]
+        let out = enc.encode(
+            chars: "\r", modifiers: [], mode: mode, eventType: .release
+        )
+        // Unmodified Enter doesn't hit the CSI-u path; release drops.
+        XCTAssertEqual(out, Data())
+    }
+
+    func test_flag2_release_without_flag2_returnsEmpty() {
+        // Without flag 2, release events must never emit bytes — legacy
+        // TUIs crash on unexpected post-keystroke traffic.
+        let enc = KeyEncoder()
+        let out = enc.encode(
+            chars: "\r", modifiers: [.shift], mode: kittyOn, eventType: .release
+        )
+        XCTAssertEqual(out, Data())
+    }
+
+    func test_flag2_release_plainPrintableKey_returnsEmpty() {
+        // Plain 'a' keyDown emits 0x61 — no CSI u, no release event
+        // either. Release reporting only applies to keys that went
+        // through a CSI-u branch.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes]
+        XCTAssertEqual(
+            enc.encode(chars: "a", modifiers: [], mode: mode, eventType: .release),
+            Data()
+        )
+    }
+
+    func test_flag2_release_ctrlCollider_emitsReleaseSuffix() {
+        // Ctrl+i under flag 1+2: press is ESC[105;5u, release is
+        // ESC[105;5:3u.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes]
+        let out = enc.encode(
+            chars: "i", modifiers: [.control], mode: mode, eventType: .release
+        )
+        XCTAssertEqual(out, Data("\u{1B}[105;5:3u".utf8))
+    }
+
+    func test_flag2_repeat_encodesLikePressWithEventType2() {
+        // Repeat event-type = 2. ESC[13;2:2u for Shift+Enter repeat.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes]
+        let out = enc.encode(
+            chars: "\r", modifiers: [.shift], mode: mode, eventType: .repeat
+        )
+        XCTAssertEqual(out, Data("\u{1B}[13;2:2u".utf8))
     }
 
     func test_flag4_reportAlternateKeys_doesNotAlterEncoding() {

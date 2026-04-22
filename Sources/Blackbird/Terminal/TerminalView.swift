@@ -1315,6 +1315,48 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if !bytes.isEmpty { sendToSession(bytes) }
     }
 
+    /// Key release. Only surfaces bytes when Kitty progressive-enhancement
+    /// flag 2 (`reportEventTypes`) is active — the encoder's release path
+    /// returns empty `Data` otherwise, and no shell binding depends on
+    /// post-keystroke traffic we synthesise ourselves. Audit key-encoder F1
+    /// (partial — flag 2 of the four progressive-enhancement flags).
+    public override func keyUp(with event: NSEvent) {
+        guard let session else {
+            super.keyUp(with: event)
+            return
+        }
+        if event.modifierFlags.contains(.command) {
+            super.keyUp(with: event)
+            return
+        }
+        let termMode = currentSnapshot?.termMode ?? []
+        // Fast path: if the TUI hasn't enabled release reporting the
+        // encoder will return empty anyway, so skip the whole work.
+        guard termMode.contains(.reportEventTypes) else {
+            super.keyUp(with: event)
+            return
+        }
+        let mods = KeyEncoder.Modifiers(event: event)
+        if let special = Self.specialKey(for: event) {
+            // SpecialKey release isn't encoded in flag 2 today — the
+            // Kitty spec only defines release events for the
+            // CSI-u-emitting subset. Arrow / F-key releases fall through
+            // unchanged until flag 8 (all-keys-as-CSI-u) is implemented.
+            _ = special
+            super.keyUp(with: event)
+            return
+        }
+        let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
+        let bytes = encoder.encode(
+            chars: chars, modifiers: mods, mode: termMode, eventType: .release
+        )
+        if !bytes.isEmpty {
+            sendToSession(bytes)
+        } else {
+            super.keyUp(with: event)
+        }
+    }
+
     /// Resolve a font from the preferences value. `name` can be either:
     ///   - a family name like "Hack Nerd Font Mono" (what the Settings font
     ///     picker stores — it iterates `availableFontFamilies`),
