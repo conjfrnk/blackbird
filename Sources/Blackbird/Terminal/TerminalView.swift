@@ -1800,8 +1800,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             Self.sanitizePasteControls(Data(data))
         )
         let clean = String(decoding: scrubbed, as: UTF8.self)
-        guard !clean.isEmpty else { return }
         let pb = NSPasteboard.general
+        if clean.isEmpty {
+            // Sanitization dropped everything — likely a user who selected
+            // a span that was entirely bidi-overrides / control bytes.
+            // Clear the pasteboard rather than leaving the previous copy
+            // stale; that's more honest UX than ⌘C appearing to succeed
+            // while keeping the last clipboard content intact. Audit
+            // terminal-view-2 F3.
+            pb.clearContents()
+            return
+        }
         pb.clearContents()
         pb.setString(clean, forType: .string)
     }
@@ -1829,10 +1838,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public override func selectAll(_ sender: Any?) {
         guard let snap = currentSnapshot else { return }
-        // "All visible" = top row of the current viewport through bottom row.
-        // Buffer line for the top of the viewport is -displayOffset.
-        let topLine    = -Int32(snap.displayOffset)
-        let bottomLine = Int32(snap.rows - 1) - Int32(snap.displayOffset)
+        // Match Terminal.app: ⌘A selects the full retained buffer —
+        // scrollback history through the bottom visible row. Buffer
+        // lines run from -historySize (oldest retained) through
+        // rows-1 (current live bottom). Audit terminal-view-2 F19.
+        let topLine    = -Int32(clamping: snap.historySize)
+        let bottomLine = Int32(clamping: snap.rows - 1)
         let top = BufferPoint(line: topLine,    col: 0)
         let bot = BufferPoint(line: bottomLine, col: snap.cols - 1)
         selection = Selection(anchor: top, cursor: bot, mode: .character)
