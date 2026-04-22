@@ -189,6 +189,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controllers.removeAll()
     }
 
+    /// macOS 14+ emits a runtime warning on launch when the delegate
+    /// doesn't implement this. Blackbird doesn't use state restoration
+    /// (no Restorable flag on any window), so the answer is simply
+    /// "yes, our zero state is secure by definition." Audit app-entry F2.
+    func applicationSupportsSecureRestorableState(
+        _ app: NSApplication
+    ) -> Bool {
+        true
+    }
+
     @objc func openSettings(_ sender: Any?) {
         // AppKit-hosted settings window — see SettingsWindowController for
         // why we don't rely on SwiftUI's `Settings { … }` scene wiring.
@@ -392,6 +402,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         settingsItem.target = self
         menu.addItem(settingsItem)
+        menu.addItem(.separator())
+        // Services submenu. TerminalView conforms to NSServicesMenuRequestor
+        // so individual services (Dictionary, Open URL, system translate,
+        // third-party text tools) can read the current selection. Without
+        // this item the submenu doesn't get wired up — the protocol
+        // conformance is live but no user-accessible entry point. Audit
+        // app-entry F3. `servicesMenu` is a full NSMenu NSApp owns; we
+        // just need an item to host it.
+        let servicesItem = NSMenuItem(
+            title: "Services",
+            action: nil,
+            keyEquivalent: ""
+        )
+        let servicesSubmenu = NSMenu(title: "Services")
+        servicesItem.submenu = servicesSubmenu
+        menu.addItem(servicesItem)
+        NSApp.servicesMenu = servicesSubmenu
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "Hide Blackbird",
