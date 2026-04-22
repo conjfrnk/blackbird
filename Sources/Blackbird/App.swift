@@ -151,11 +151,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Settings > Updates toggle takes effect without relaunching. No-op
         // when the updater isn't configured (dev builds); the Preferences
         // observer still fires, it just hits a nil controller.
+        //
+        // INFINITE-FEEDBACK-LOOP HAZARD — the reason for the same-value guard
+        // below:
+        //   1. writing `automaticallyChecksForUpdates` calls Sparkle's
+        //      SUHost.setBool:forUserDefaultsKey: → UserDefaults write
+        //   2. the write fires NSUserDefaultsDidChangeNotification (synchronously,
+        //      via CoreFoundation)
+        //   3. SwiftUI's GLOBAL UserDefaultObserver is listening for that
+        //      notification (it backs @AppStorage). It bridges EVERY
+        //      UserDefaults change (not just our `bb.*` keys) into an
+        //      Update.enqueueAction that fires objectWillChange on every
+        //      subscribed ObservableObject — including `Preferences.shared`.
+        //   4. our own sink (this closure) re-fires on Preferences.shared's
+        //      objectWillChange and writes Sparkle again → back to step 1.
+        //
+        // Each iteration allocates a `DispatchQueue.main.async` block; the
+        // main queue piles up enqueue-self blocks until the process OOMs.
+        // This was the real cause of the reported "Settings click freezes
+        // the app / beachballs" — the Settings window wasn't the bug site,
+        // our Sparkle-bridging observer was.
+        //
+        // The guard: only write when Sparkle's current state disagrees with
+        // our desired state. On the first real change (user toggles the
+        // pref) we write once; the re-triggered sink immediately sees the
+        // values match and skips, breaking the loop.
         autoUpdateObserver = Preferences.shared.objectWillChange
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
-                    self?.updaterController?.updater.automaticallyChecksForUpdates
-                        = Preferences.shared.autoUpdateChecks
+                    guard let ctrl = self?.updaterController else { return }
+                    let desired = Preferences.shared.autoUpdateChecks
+                    guard ctrl.updater.automaticallyChecksForUpdates != desired else { return }
+                    ctrl.updater.automaticallyChecksForUpdates = desired
                 }
             }
         // First-launch window has no source session to inherit from, so
