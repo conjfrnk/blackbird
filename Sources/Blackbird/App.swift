@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import QuartzCore
 import Sparkle
 
 /// Traditional AppKit entry point. We don't use a SwiftUI `App` because the
@@ -271,11 +272,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         guard let newWindow = controller.window else { return }
         if let sourceWindow = source?.window {
+            // Wrap the merge in a zero-duration animation context AND a
+            // disabled-actions CATransaction. AppKit otherwise plays an
+            // ~150ms cross-fade / slide animation that transiently shows
+            // its native tab-strip-below-titlebar even though our
+            // titlebar accessory hides it on the next frame. With both
+            // animation paths suppressed the merge becomes a single
+            // synchronous transaction and the native strip never gets a
+            // visible frame.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
             // addTabbedWindow(_:ordered:) orders-front and makes-key as a
             // side effect — no separate showWindow / makeKeyAndOrderFront
             // needed. Doing both was causing a brief standalone-window
             // flash before the merge on some launches.
             sourceWindow.addTabbedWindow(newWindow, ordered: .above)
+            // Hide the native strip immediately on every controller in
+            // the group so the layout pass that finalises the merge
+            // never gets to render the strip's pixels. The KVO-driven
+            // hide path will fire as well, but those fire after the
+            // first paint of the merged window state.
+            for win in sourceWindow.tabGroup?.windows ?? [] {
+                (win.windowController as? MainWindowController)?
+                    .hideNativeTabStripImmediate()
+            }
+            NSAnimationContext.endGrouping()
+            CATransaction.commit()
         } else {
             // No existing Blackbird window — fall back to a standalone.
             controller.showWindow(nil)

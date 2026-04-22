@@ -469,6 +469,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
     }
 
+    /// Public entry point for app-level code (e.g. `App.newWindowForTab`)
+    /// to force-hide the native tab strip on every controller in a group
+    /// before AppKit presents the merge result. Forwards to the private
+    /// walker. See `hideNativeTabStrip` below for the implementation
+    /// rationale.
+    func hideNativeTabStripImmediate() { hideNativeTabStrip() }
+
     private func hideNativeTabStrip() {
         guard let window else { return }
         // NSWindowTabGroup's public API only exposes a read-only
