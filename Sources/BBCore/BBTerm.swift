@@ -5,6 +5,16 @@ import BBCore
 /// freeing on deinit. Not Sendable — must be used from a single serial queue
 /// (the `core` queue in a TerminalSession).
 public final class BBTerm {
+    #if DEBUG
+    /// Re-entrancy latch set while `dispatch(_:)` is running the
+    /// registered event handler. Used by the DEBUG-only assertion in
+    /// `dispatch` to catch any handler that synchronously calls back
+    /// into a `bb_term_*` function — alacritty's `&mut Term` borrow
+    /// would be live while we re-enter, which is UB-adjacent. Release
+    /// builds omit the field entirely so there's no runtime cost.
+    fileprivate var isInsideEventDispatch: Bool = false
+    #endif
+
     public struct Size: Equatable {
         public var cols: UInt16
         public var rows: UInt16
@@ -199,6 +209,25 @@ public final class BBTerm {
 
     private func dispatch(_ ev: BBEvent) {
         guard let handler else { return }
+        #if DEBUG
+        // Re-entrancy guard: if the event handler calls back into a
+        // `bb_term_*` function while we're still inside a dispatch, the
+        // Rust core may re-enter alacritty's `&mut Term` while the prior
+        // call is still holding it. That's UB-adjacent — the borrow
+        // checker can't see across the FFI boundary. Audit ffi-bridge
+        // F11. Debug-only so the release path has zero overhead; any
+        // new call site that accidentally reenters will trip this
+        // during development.
+        if isInsideEventDispatch {
+            assertionFailure(
+                "BBTerm event handler called back into bb_term_* synchronously. "
+                + "Route the call through DispatchQueue.main.async or a later "
+                + "runloop tick instead."
+            )
+        }
+        isInsideEventDispatch = true
+        defer { isInsideEventDispatch = false }
+        #endif
         // BBEventKind is typedef uint32_t in C. ev.kind is UInt32.
         // The BB_EVENT_KIND_* constants are C enum variants; use their integer
         // values directly to avoid Swift 6 cross-module typedef comparison issues.
