@@ -16,13 +16,36 @@ public final class Preferences: ObservableObject {
     // `migrateIfNeeded()` walks the stored version forward to `currentSchemaVersion`,
     // one version at a time, then writes the new version back.
     //
-    // Today's layout is v1 and there's nothing to migrate — the call is a
-    // no-op placeholder that establishes the hook. Future migration work
-    // lands inside the `switch` in `migrateIfNeeded()` so that an upgrading
-    // user's prefs survive rename/type changes instead of silently resetting
-    // to defaults via the enum-rawValue repair pass below. (settings F2)
-    public static let currentSchemaVersion: Int = 1
+    // v1 → v2: moved every key behind a `bb.` prefix so Blackbird's settings no
+    // longer collide with `defaults write -g <key>` writes in NSGlobalDomain
+    // (keys like "theme", "bell", "fontName", "fontSize" are plausibly used by
+    // other apps/tools). The migration copies each legacy unprefixed key into
+    // its prefixed counterpart and removes the original so `defaults read
+    // dev.conjfrnk.blackbird` returns a dump that's self-identifying.
+    // (settings F3)
+    public static let currentSchemaVersion: Int = 2
     private static let schemaVersionKey = "prefsSchemaVersion"
+
+    // MARK: - Key prefix (settings F3)
+    //
+    // Every pref key lands under `bb.` so our reads don't fall through to
+    // NSGlobalDomain for a plain name like `fontSize` that another tool
+    // might have set globally. The `k(_:)` helper is used both in the
+    // `@AppStorage` declarations and in the migration/registration code so
+    // the canonical on-disk form is authored in one place.
+    @inline(__always)
+    private static func k(_ name: String) -> String { "bb.\(name)" }
+
+    /// The unprefixed names we used in schema v1, in the order they appear
+    /// as `@AppStorage` declarations below. Walked by the v1 → v2 migrator
+    /// to copy legacy values forward into `bb.`-prefixed keys. Kept as a
+    /// private static so a future v2 → v3 migration can't accidentally
+    /// reuse these names without reviewing the history.
+    private static let legacyUnprefixedKeys: [String] = [
+        "theme", "themeMode", "fontName", "fontSize", "cursorBlink", "bell",
+        "cursorShape", "optionKey", "confirmClose", "autoUpdateChecks",
+        "osc52Enabled", "colorQueryEnabled", "translucency",
+    ]
 
     public enum ThemeMode: String, CaseIterable, Identifiable {
         case auto, light, dark
@@ -60,10 +83,10 @@ public final class Preferences: ObservableObject {
         }
     }
 
-    @AppStorage("theme")          public var themeRaw: String  = Theme.gruvbox.rawValue
-    @AppStorage("themeMode")      public var themeModeRaw: String = ThemeMode.dark.rawValue
-    @AppStorage("fontName")       public var fontName: String = "Hack Nerd Font Mono"
-    @AppStorage("fontSize")       public var fontSize: Double = 13 {
+    @AppStorage("bb.theme")          public var themeRaw: String  = Theme.gruvbox.rawValue
+    @AppStorage("bb.themeMode")      public var themeModeRaw: String = ThemeMode.dark.rawValue
+    @AppStorage("bb.fontName")       public var fontName: String = "Hack Nerd Font Mono"
+    @AppStorage("bb.fontSize")       public var fontSize: Double = 13 {
         didSet {
             // A tampered plist or a stale UserDefaults key can surface
             // NaN, ±Infinity, negative, or absurdly large sizes.
@@ -75,25 +98,25 @@ public final class Preferences: ObservableObject {
             if clamped != fontSize { fontSize = clamped }
         }
     }
-    @AppStorage("cursorBlink")    public var cursorBlink: Bool = false
-    @AppStorage("bell")           public var bellRaw: String = BellStyle.visual.rawValue
-    @AppStorage("cursorShape")    public var cursorShapeRaw: String = CursorShape.followShell.rawValue
-    @AppStorage("optionKey")      public var optionKeyRaw: String = OptionKey.meta.rawValue
-    @AppStorage("confirmClose")   public var confirmClose: Bool = true
-    @AppStorage("autoUpdateChecks") public var autoUpdateChecks: Bool = false
-    @AppStorage("osc52Enabled")   public var osc52Enabled: Bool = true
+    @AppStorage("bb.cursorBlink")    public var cursorBlink: Bool = false
+    @AppStorage("bb.bell")           public var bellRaw: String = BellStyle.visual.rawValue
+    @AppStorage("bb.cursorShape")    public var cursorShapeRaw: String = CursorShape.followShell.rawValue
+    @AppStorage("bb.optionKey")      public var optionKeyRaw: String = OptionKey.meta.rawValue
+    @AppStorage("bb.confirmClose")   public var confirmClose: Bool = true
+    @AppStorage("bb.autoUpdateChecks") public var autoUpdateChecks: Bool = false
+    @AppStorage("bb.osc52Enabled")   public var osc52Enabled: Bool = true
     /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. Off by default
     /// because the reply (`\e]10;rgb:…\e\\`) is routed back into the PTY
     /// where a misbehaving shell / zsh-vi-mode can interpret it as
     /// commands. Turn on if you want nvim / tmux auto-theming and you
     /// trust your shell's escape-handling. See `terminal_replies.rs`
     /// security test.
-    @AppStorage("colorQueryEnabled") public var colorQueryEnabled: Bool = false
+    @AppStorage("bb.colorQueryEnabled") public var colorQueryEnabled: Bool = false
     /// Combined transparency + blur intensity on a 1…10 scale. 1 = fully
     /// opaque, 10 = maximum transparency with heavy blur. 5 is the
     /// daily-driver default — the lift Connor ended up preferring after
     /// A/B'ing the curve. See `translucencyResolved` for the anchor points.
-    @AppStorage("translucency") public var translucency: Double = 5 {
+    @AppStorage("bb.translucency") public var translucency: Double = 5 {
         didSet {
             // Same NaN / range hygiene as fontSize. `translucencyResolved`
             // below already normalises at read time, but any other caller
@@ -145,14 +168,43 @@ public final class Preferences: ObservableObject {
     }
 
     private init() {
-        // Register the schema version in NSRegistrationDomain so a fresh
-        // install (no key on disk) reads back as v1 — which signals "current
-        // layout" to `migrateIfNeeded()` and skips the migration walk. A
-        // user upgrading from a future-reset build where the key was
-        // removed will also see v1 and be treated as current. (settings F2)
-        UserDefaults.standard.register(defaults: [
-            Preferences.schemaVersionKey: Preferences.currentSchemaVersion
+        // Register defaults in NSRegistrationDomain BEFORE the first
+        // `@AppStorage` read so that `defaults read dev.conjfrnk.blackbird`
+        // surfaces our full pref set even on a fresh install (where no
+        // persistent-domain values exist yet), and so `@AppStorage`'s
+        // default-on-missing-key path matches the registered defaults
+        // exactly. Without this, a tool asking for `bb.fontSize` before
+        // Blackbird has ever written one gets nil instead of `13`.
+        // (settings F7)
+        let defaults = UserDefaults.standard
+        defaults.register(defaults: [
+            Preferences.schemaVersionKey: Preferences.currentSchemaVersion,
+            Preferences.k("theme"):             Theme.gruvbox.rawValue,
+            Preferences.k("themeMode"):         ThemeMode.dark.rawValue,
+            Preferences.k("fontName"):          "Hack Nerd Font Mono",
+            Preferences.k("fontSize"):          13.0,
+            Preferences.k("cursorBlink"):       false,
+            Preferences.k("bell"):              BellStyle.visual.rawValue,
+            Preferences.k("cursorShape"):       CursorShape.followShell.rawValue,
+            Preferences.k("optionKey"):         OptionKey.meta.rawValue,
+            Preferences.k("confirmClose"):      true,
+            Preferences.k("autoUpdateChecks"):  false,
+            Preferences.k("osc52Enabled"):      true,
+            Preferences.k("colorQueryEnabled"): false,
+            Preferences.k("translucency"):      5.0,
         ])
+
+        // Type-guard pass. `@AppStorage<Double>` trusts the KVC getter — a
+        // CLI write like `defaults write dev.conjfrnk.blackbird bb.fontSize
+        // -string "big"` stores a String under the key, and the next
+        // `UserDefaults.standard.double(forKey:)` bridge returns 0 (or, in
+        // some Swift versions, crashes on an Objective-C cast). Remove
+        // wrong-type values for numeric keys so the registered default
+        // below takes effect. Runs before the v1 → v2 migration so a
+        // legacy unprefixed key with a wrong type is removed before the
+        // migrator tries to carry it forward. (settings F7)
+        Preferences.sanitizeStoredTypes(in: defaults)
+
         migrateIfNeeded()
 
         // Migrate legacy PostScript names written by earlier builds
@@ -190,17 +242,50 @@ public final class Preferences: ObservableObject {
         translucency = translucency
     }
 
+    /// Remove wrong-type values from numeric pref keys. `@AppStorage<Double>`
+    /// and `@AppStorage<Bool>` trust the key's KVC getter — if an external
+    /// tool stashed a String under a numeric key, the read returns 0/false
+    /// (or trips a Swift bridge assertion on some toolchain/OS combos).
+    /// Removing the offending value lets the registered default take over.
+    /// Covers both `bb.`-prefixed and legacy unprefixed names, so a user
+    /// upgrading from v0.1.5 with a corrupted legacy key still gets cleaned
+    /// up before the migration copies it forward. (settings F7)
+    private static func sanitizeStoredTypes(in defaults: UserDefaults) {
+        let numericDoubleKeys = ["fontSize", "translucency"]
+        let boolKeys = [
+            "cursorBlink", "confirmClose", "autoUpdateChecks",
+            "osc52Enabled", "colorQueryEnabled",
+        ]
+        for name in numericDoubleKeys {
+            for key in [k(name), name] {
+                if let v = defaults.object(forKey: key), !(v is NSNumber) {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+        for name in boolKeys {
+            for key in [k(name), name] {
+                if let v = defaults.object(forKey: key), !(v is NSNumber) {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
+    }
+
     /// Walk the on-disk schema version forward to `currentSchemaVersion`,
-    /// one step at a time. Today's layout is v1 and this is a no-op — the
-    /// method exists so future pref renames / type changes have a single
-    /// place to land migration logic. (settings F2)
+    /// one step at a time. (settings F2)
+    ///
+    /// v1 → v2 (settings F3): move every pref key behind a `bb.` prefix so
+    /// Blackbird's keys no longer collide with `defaults write -g` writes to
+    /// generic names like `fontSize`/`theme`/`bell`. For each legacy key
+    /// with a value on disk, copy it to the prefixed form and delete the
+    /// original. Runs once per user — idempotent on any subsequent launch
+    /// because the stored version is stamped at `currentSchemaVersion` on
+    /// the way out, and the legacy key is gone.
     ///
     /// Pattern for future migrations:
     /// ```
     /// switch stored {
-    /// case 1: /* migrate 1 → 2: rename key, rewrite enum raws, etc. */
-    ///         stored = 2
-    ///         fallthrough
     /// case 2: /* migrate 2 → 3 … */
     ///         stored = 3
     ///         fallthrough
@@ -209,34 +294,52 @@ public final class Preferences: ObservableObject {
     /// UserDefaults.standard.set(stored, forKey: Preferences.schemaVersionKey)
     /// ```
     private func migrateIfNeeded() {
-        let stored = UserDefaults.standard.integer(forKey: Preferences.schemaVersionKey)
+        let defaults = UserDefaults.standard
+        let stored = defaults.integer(forKey: Preferences.schemaVersionKey)
         // `integer(forKey:)` returns 0 if the key is absent AND no registered
-        // default is in NSRegistrationDomain. We registered v1 above, so a
-        // fresh install reads v1 and skips the walk. A 0 here would mean
-        // registration didn't take (shouldn't happen) — treat as v1 too so
-        // we don't log-spam on every launch.
+        // default is in NSRegistrationDomain. We registered `currentSchemaVersion`
+        // above, so a fresh install reads the current version and skips the
+        // walk. A 0 here would mean registration didn't take (shouldn't
+        // happen) — treat as current too so we don't log-spam on every launch.
         let effective = stored == 0 ? Preferences.currentSchemaVersion : stored
         guard effective < Preferences.currentSchemaVersion else {
             // Already current (or newer, e.g. downgrade). Stamp the current
             // version so a downgrade still leaves the key present for future
             // upgrades to observe.
             if stored != Preferences.currentSchemaVersion {
-                UserDefaults.standard.set(
+                defaults.set(
                     Preferences.currentSchemaVersion,
                     forKey: Preferences.schemaVersionKey
                 )
             }
             return
         }
-        // No migrations yet. Future work lands here, version-by-version.
-        // Example skeleton:
-        //   var v = effective
-        //   if v == 1 { /* migrate v1 → v2 */; v = 2 }
-        //   if v == 2 { /* migrate v2 → v3 */; v = 3 }
-        //   UserDefaults.standard.set(v, forKey: Preferences.schemaVersionKey)
-        UserDefaults.standard.set(
-            Preferences.currentSchemaVersion,
-            forKey: Preferences.schemaVersionKey
-        )
+        var v = effective
+        if v < 2 {
+            migrateV1toV2(defaults: defaults)
+            v = 2
+        }
+        // Future steps slot in here: `if v < 3 { migrateV2toV3(...); v = 3 }` etc.
+        defaults.set(v, forKey: Preferences.schemaVersionKey)
+    }
+
+    /// Copy every legacy unprefixed key into its `bb.`-prefixed counterpart
+    /// and remove the original. No-op for keys that are absent on disk —
+    /// they'll fall through to the registered default transparently. If a
+    /// user somehow has both the legacy key and a prefixed key set (e.g.
+    /// a mid-upgrade crash), the prefixed key wins and the legacy is
+    /// removed. (settings F3)
+    private func migrateV1toV2(defaults: UserDefaults) {
+        for name in Preferences.legacyUnprefixedKeys {
+            let prefixed = Preferences.k(name)
+            let legacy = defaults.object(forKey: name)
+            let alreadyPrefixed = defaults.object(forKey: prefixed)
+            if legacy != nil {
+                if alreadyPrefixed == nil {
+                    defaults.set(legacy, forKey: prefixed)
+                }
+                defaults.removeObject(forKey: name)
+            }
+        }
     }
 }

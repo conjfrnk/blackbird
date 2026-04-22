@@ -66,6 +66,82 @@ final class ThemeResolutionTests: XCTestCase {
         }
     }
 
+    // MARK: - Contrast helpers (settings F6)
+
+    /// Verifies the built-in palettes all clear a 3:1 foreground/background
+    /// contrast floor. `ThemePalette.init` already runs this as a DEBUG
+    /// precondition — the test captures the floor explicitly so a future
+    /// palette edit that drops below the line fails with a named
+    /// assertion rather than a DEBUG-only trap. (settings F6)
+    func test_allBuiltInThemes_meetMinimumForegroundBackgroundContrast() {
+        for theme in Theme.allCases {
+            for dark in [true, false] {
+                let p = theme.palette(dark: dark)
+                let ratio = p.foregroundBackgroundContrast
+                XCTAssertGreaterThanOrEqual(
+                    ratio, 3.0,
+                    "Theme \(theme.rawValue) dark=\(dark) fg/bg contrast "
+                        + "\(ratio) < 3:1 — text would be hard to read"
+                )
+            }
+        }
+    }
+
+    /// Cursor-to-background contrast must be at least 1.25 so the cursor
+    /// isn't invisible. Tight bound because the cursor is a ~1-cell block
+    /// and doesn't need the 4.5:1 WCAG AA text-contrast target. (settings F6)
+    func test_allBuiltInThemes_cursorVisibleAgainstBackground() {
+        for theme in Theme.allCases {
+            for dark in [true, false] {
+                let p = theme.palette(dark: dark)
+                let ratio = p.cursorBackgroundContrast
+                XCTAssertGreaterThanOrEqual(
+                    ratio, 1.25,
+                    "Theme \(theme.rawValue) dark=\(dark) cursor/bg contrast "
+                        + "\(ratio) < 1.25 — cursor would be invisible"
+                )
+            }
+        }
+    }
+
+    /// Rec. 709 luminance helper: exact for pure white (1.0) and pure
+    /// black (0.0), monotonic in between. (settings F6)
+    func test_relativeLuminance_knownEndpoints() {
+        XCTAssertEqual(ThemePalette.relativeLuminance(0xFFFFFF), 1.0, accuracy: 1e-9)
+        XCTAssertEqual(ThemePalette.relativeLuminance(0x000000), 0.0, accuracy: 1e-9)
+        // Pure red / green / blue pick up the Rec. 709 weights directly.
+        let red   = ThemePalette.relativeLuminance(0xFF0000)
+        let green = ThemePalette.relativeLuminance(0x00FF00)
+        let blue  = ThemePalette.relativeLuminance(0x0000FF)
+        XCTAssertEqual(red,   0.2126, accuracy: 1e-4)
+        XCTAssertEqual(green, 0.7152, accuracy: 1e-4)
+        XCTAssertEqual(blue,  0.0722, accuracy: 1e-4)
+    }
+
+    /// Contrast ratio is symmetric (fg/bg and bg/fg give the same number),
+    /// ≥ 1 always, and 21 for the black/white extreme. (settings F6)
+    func test_contrastRatio_endpointsAndSymmetry() {
+        let extreme = ThemePalette.contrastRatio(fg: 0xFFFFFF, bg: 0x000000)
+        XCTAssertEqual(extreme, 21.0, accuracy: 1e-4)
+        let symmetric = ThemePalette.contrastRatio(fg: 0x000000, bg: 0xFFFFFF)
+        XCTAssertEqual(symmetric, 21.0, accuracy: 1e-4)
+        // Identical colours: ratio is exactly 1.
+        XCTAssertEqual(ThemePalette.contrastRatio(fg: 0x808080, bg: 0x808080), 1.0, accuracy: 1e-9)
+    }
+
+    /// `isDark` classifies the darker half of the sRGB cube as dark. Used
+    /// by TerminalView's titlebar-appearance decision; keeping it as a
+    /// palette method means any future consumer gets the same answer
+    /// without duplicating the threshold. (settings F6)
+    func test_isDark_classifiesPalettesByBackground() {
+        XCTAssertTrue(Theme.gruvbox.palette(dark: true).isDark,
+                      "Gruvbox dark background must report isDark=true")
+        XCTAssertFalse(Theme.gruvbox.palette(dark: false).isDark,
+                       "Gruvbox light background must report isDark=false")
+        XCTAssertTrue(Theme.solarized.palette(dark: true).isDark)
+        XCTAssertFalse(Theme.solarized.palette(dark: false).isDark)
+    }
+
     func test_allThemes_colorsFitIn24Bits() {
         for theme in Theme.allCases {
             for dark in [true, false] {

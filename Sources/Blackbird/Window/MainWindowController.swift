@@ -42,6 +42,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// matters. Compare on every `refreshTabBar` and re-subscribe when the
     /// identity changes.
     private var lastObservedTabGroupID: ObjectIdentifier?
+    /// Tab count at the last `refreshTabBar` call. Combined with
+    /// `lastObservedTabGroupID` in `refreshTabBarIfStateChanged` so
+    /// a focus-only transition (⌘-Tab into/out of a single-tab Blackbird
+    /// window) skips the full pill-strip rebuild when nothing actually
+    /// changed. (main-window F3)
+    private var lastObservedTabCount: Int = 0
     private var titleObserver: NSKeyValueObservation?
     private var titleBroadcastObserver: NSObjectProtocol?
 
@@ -87,6 +93,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         )
         window.title = "Blackbird"
         window.isReleasedWhenClosed = false
+        // Opt OUT of NSWindowRestoration explicitly. Blackbird doesn't
+        // implement `encodeRestorableState`/`restoreState` — shell sessions
+        // aren't truly restorable (the child process and its cwd go away
+        // with the PTY), and the `required init?(coder:)` below
+        // fatal-errors, so a restoration attempt would crash on wake.
+        // Setting `isRestorable = false` stops AppKit from emitting the
+        // "Restorable-but-no-state" Console warning on every quit, and
+        // matches the `applicationSupportsSecureRestorableState(true)`
+        // answer in AppDelegate which tells the OS "we have nothing to
+        // restore, and that's intentional." Audit main-window F23.
+        window.isRestorable = false
         if autosaveFrame {
             // Only the first window persists its frame. New tabs/windows use
             // AppKit's tab-group positioning or a cascaded default — having
@@ -202,11 +219,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             )
             // Close the window when the shell exits (typed `exit`, SIGHUP, etc).
             // applicationShouldTerminateAfterLastWindowClosed then quits the app.
+            //
+            // Defer auto-close when an alert / sheet is in flight. With a
+            // modal up, `alert.runModal()` pumps a private runloop mode so
+            // this sink's dispatch is queued but won't drain until the
+            // modal returns. If the shell dies during that deliberation
+            // and the user picks Cancel, we were previously firing
+            // `performClose(nil)` anyway — overriding the user's choice.
+            // Peek at NSApp's modal state; when active, re-queue the auto
+            // close on the next tick so the modal's result handler runs
+            // first. If the modal returned Cancel, `windowWillClose` has
+            // NOT yet fired (window stayed); but the session has died so
+            // we still want to close the window. The re-queue succeeds.
+            // (main-window F4)
             exitCancellable = s.$exitCode
                 .compactMap { $0 }
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] _ in
-                    self?.window?.performClose(nil)
+                    guard let self else { return }
+                    self.deferredAutoCloseIfNeeded()
                 }
             // Bind the macOS proxy icon to the shell's current working
             // directory (via OSC 7). Gives the user a draggable directory
@@ -228,13 +259,72 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                     }
                 }
         } catch {
+            // Shell spawn failed (bad $SHELL, exec permission denied, etc.).
+            // Leave the window up with a diagnostic title and present an
+            // alert offering either "Retry" (another `startSession` pass)
+            // or "Close" so the user isn't stranded with a zombie window
+            // they can only ⌘W out of. (main-window F9)
             window?.title = "Blackbird — failed to start shell: \(error)"
+            presentShellStartFailureAlert(error: error, inView: view)
+        }
+    }
+
+    /// Show a recovery alert after `TerminalSession.start` threw. "Retry"
+    /// re-invokes `startSession(inView:)` on the same TerminalView; the
+    /// view is still a fresh MTKView — it just has no session attached
+    /// yet. "Close" lets the user give up without ⌘W. (main-window F9)
+    private func presentShellStartFailureAlert(error: Error, inView view: TerminalView) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Couldn't start shell"
+        alert.informativeText = """
+            Blackbird couldn't launch the shell:
+            \(error.localizedDescription)
+
+            Try again, or close this window.
+            """
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Close Window")
+        alert.alertStyle = .warning
+        // Route via a sheet so the runloop stays serviceable — a modal
+        // here would trap the user if the alert itself is racing with
+        // some other close path.
+        alert.beginSheetModal(for: window) { [weak self, weak view] response in
+            guard let self, let view else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                self.startSession(inView: view)
+            default:
+                self.window?.performClose(nil)
+            }
         }
     }
 
     func terminateSessions() {
         session?.terminate()
         session = nil
+    }
+
+    /// Auto-close the window once no modal / sheet is blocking it. Called
+    /// from the `$exitCode` Combine sink when the shell dies. Any modal
+    /// (NSAlert.runModal or an attached sheet) drains the runloop in a
+    /// private mode; `performClose` during that window is either queued
+    /// (harmless) or routed at the modal itself (surprising). Re-queue
+    /// until the modal path clears, then fire the close. Bounded by the
+    /// modal's lifetime — the alert is synchronous, the sheet is typically
+    /// short-lived. `isVisible` guard covers the race where the user's
+    /// own ⌘W flow already tore the window down while we were deferring.
+    /// (main-window F4)
+    private func deferredAutoCloseIfNeeded() {
+        guard let win = window, win.isVisible else { return }
+        let appHasModal = NSApp.modalWindow != nil
+        if appHasModal || win.attachedSheet != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.deferredAutoCloseIfNeeded()
+            }
+            return
+        }
+        win.performClose(nil)
     }
 
     // MARK: - NSWindowDelegate
@@ -272,7 +362,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// sprinkling extra notifications.
     func windowDidBecomeKey(_ notification: Notification) {
         session?.focusChanged(true)
-        refreshTabBar()
+        refreshTabBarIfStateChanged()
     }
 
     /// Forward window-focus loss. Paired with `windowDidBecomeKey` above.
@@ -288,6 +378,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// gains focus). Refresh here too so detached-window chrome settles in
     /// every path — cheaper than tracking every edge individually.
     func windowDidBecomeMain(_ notification: Notification) {
+        refreshTabBarIfStateChanged()
+    }
+
+    /// Like `refreshTabBar()`, but only runs when the tab-group identity
+    /// or tab count has changed since the last refresh on this controller.
+    /// The common ⌘-Tab path (focus just returns to an existing single
+    /// Blackbird window) no longer recomputes pill geometry and kicks a
+    /// `setNeedsDisplay` for no reason. Drag-out (tabGroup becomes nil)
+    /// and drag-in (new group identity) still trigger the refresh because
+    /// both paths move `currentGroupID` or change the count.
+    /// (main-window F3)
+    private func refreshTabBarIfStateChanged() {
+        guard let window else { return }
+        let currentGroupID = window.tabGroup.map(ObjectIdentifier.init)
+        let currentCount = window.tabGroup?.windows.count ?? 1
+        if currentGroupID == lastObservedTabGroupID,
+           currentCount == lastObservedTabCount {
+            return
+        }
         refreshTabBar()
     }
 
@@ -321,35 +430,57 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // removes the view's height contribution, so safeAreaInsets.top
         // drops back to the titlebar-only 32pt value.
         if let themeFrame = window.contentView?.superview {
+            #if DEBUG
+            var matches = 0
+            hideTabBarViews(in: themeFrame, matchesFound: &matches)
+            // Log when the walker finds zero TabBar-classed views in a
+            // multi-tab context. That's the canary for a future macOS
+            // that renamed its private view class — our strip-hiding
+            // silently stops working and users see both the native and
+            // the custom strip at once. os.Logger with `.public` so the
+            // message isn't redacted in `log stream`. (main-window F7)
+            let inGroup = (window.tabGroup?.windows.count ?? 1) > 1
+            if inGroup, matches == 0 {
+                Self.tabsLogger.warning("hideNativeTabStrip: 0 'TabBar' views found in a multi-tab window — AppKit may have renamed its private class; pill + native strip may both be visible.")
+            }
+            #else
             hideTabBarViews(in: themeFrame)
+            #endif
         }
     }
 
+    #if DEBUG
+    private func hideTabBarViews(in view: NSView, matchesFound: inout Int) {
+        let className = String(describing: type(of: view))
+        if className.contains("TabBar") {
+            matchesFound += 1
+            view.isHidden = true
+            view.frame = .zero
+        }
+        for sub in view.subviews {
+            hideTabBarViews(in: sub, matchesFound: &matchesFound)
+        }
+    }
+    #else
     private func hideTabBarViews(in view: NSView) {
         let className = String(describing: type(of: view))
-        if className.contains("TabBar") || className == "NSTitlebarView" {
-            // NSTitlebarView itself we KEEP — it holds the traffic lights
-            // and our accessory. Only the subclassed TabBar variants go.
-            if className.contains("TabBar") {
-                view.isHidden = true
-                view.frame = .zero
-            }
+        if className.contains("TabBar") {
+            view.isHidden = true
+            view.frame = .zero
         }
         for sub in view.subviews {
             hideTabBarViews(in: sub)
         }
     }
+    #endif
 
     private func observeTabGroup() {
         tabGroupObservers.removeAll()
-        // Tear down the notification observer on re-registration (e.g., if
-        // we ever re-run observeTabGroup after the tab group changes) so
-        // we don't leak duplicate observers that all fire on every title
-        // change. titleObserver (KVO) auto-invalidates when reassigned.
-        if let old = titleBroadcastObserver {
-            NotificationCenter.default.removeObserver(old)
-            titleBroadcastObserver = nil
-        }
+        // Consolidated tear-down so the three sites (re-subscribe here,
+        // detach path in `refreshTabBar`, deinit) share one place. Handles
+        // both the KVO token (auto-invalidates on reassignment but explicit
+        // is better) and the NotificationCenter token. (main-window F2)
+        teardownTitleObservers()
         guard let group = window?.tabGroup else { return }
         let winObs = group.observe(\.windows, options: [.new]) { [weak self] _, _ in
             DispatchQueue.main.async {
@@ -421,7 +552,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
     }
 
+    /// Consolidated tear-down for the title KVO + title-broadcast
+    /// notification observer. Invoked on (a) re-subscribing via
+    /// `observeTabGroup`, (b) the detach branch in `refreshTabBar` when
+    /// the window leaves its tab group, and (c) controller deinit.
+    /// Before this existed, (b) left both observers alive pointing at a
+    /// now-stale tab group identity — the broadcast observer would then
+    /// post on every title change in any group, and every peer window's
+    /// filter would do the O(N) work to discard it.
+    /// (main-window F2)
+    private func teardownTitleObservers() {
+        titleObserver?.invalidate()
+        titleObserver = nil
+        if let tok = titleBroadcastObserver {
+            NotificationCenter.default.removeObserver(tok)
+            titleBroadcastObserver = nil
+        }
+    }
+
     deinit {
+        // deinit can't call a non-final method safely across all Swift
+        // versions, and we don't need main-actor isolation here — invoke
+        // the cleanup inline so the release-path doesn't retain the
+        // notification token past `self`. (main-window F2, F17)
+        titleObserver?.invalidate()
         if let tok = titleBroadcastObserver {
             NotificationCenter.default.removeObserver(tok)
         }
@@ -438,6 +592,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let currentGroupID = window.tabGroup.map(ObjectIdentifier.init)
         if currentGroupID != lastObservedTabGroupID {
             tabGroupObservers.removeAll()
+            // Drop the title KVO + broadcast observer on detach so a
+            // window dragged out of its group stops re-firing work for
+            // its old peers. `observeTabGroup()` will re-install them
+            // if/when the window joins a new group. (main-window F2)
+            if currentGroupID == nil {
+                teardownTitleObservers()
+            }
             lastObservedTabGroupID = currentGroupID
             #if DEBUG
             let kind = currentGroupID == nil ? "detached" : "new group"
@@ -456,7 +617,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             observeTabGroup()
         }
         let tabCount = window.tabGroup?.windows.count ?? 1
+        lastObservedTabCount = tabCount
         if tabCount <= 1 {
+            // Commit any in-flight inline rename before hiding the strip.
+            // Without this the field survives the transition as a subview
+            // of a hidden view and re-appears — over the wrong pill — the
+            // next time the cohort grows back to ≥2 tabs. The strip itself
+            // guards against stale edits across layout changes (see
+            // `TabStripView.update`) but single-tab transitions skip the
+            // update path entirely; cover it here. (main-window F8)
+            titlebarTabBar?.commitAnyInFlightEdit()
             // Restore the stock single-tab titlebar: title text centered,
             // no custom pill chrome. Hide the accessory view AND collapse
             // its frame to zero so AppKit doesn't keep reserving the strip's

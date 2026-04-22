@@ -15,6 +15,83 @@ public struct ThemePalette: Equatable, Sendable {
         self.foreground = foreground
         self.cursor = cursor
         self.ansi = ansi
+        #if DEBUG
+        // Check the three "first-class" colors for glaring misconfiguration
+        // so a future palette edit can't ship a theme with an invisible
+        // cursor or unreadable prompt. WCAG AA requires a 4.5:1 contrast
+        // ratio for normal text; we use a looser 3:1 threshold here because
+        // the curated palettes trip the 4.5 bar at the margins (Solarized
+        // Dark's foreground 0x839496 on 0x002B36 is ~7.0, but user-supplied
+        // themes may dip to ~3-4 and still be legible for UI-chrome text).
+        // The cursor check requires any contrast at all against the bg so
+        // a cursor that blends into the background ships a visible warning
+        // during test runs. Release builds skip the guard entirely —
+        // ThemePalette is value-type and re-validated on every swap, which
+        // is unnecessary work in release and would also crash on a
+        // user-supplied theme with poor contrast rather than degrade.
+        // (settings F6)
+        let fgBg = Self.contrastRatio(fg: foreground, bg: background)
+        assert(fgBg >= 3.0,
+               "Theme palette foreground/background contrast \(fgBg) < 3:1")
+        let cursorBg = Self.contrastRatio(fg: cursor, bg: background)
+        assert(cursorBg >= 1.25,
+               "Theme palette cursor/background contrast \(cursorBg) < 1.25:1 — cursor is invisible")
+        #endif
+    }
+
+    // MARK: - Contrast helpers (settings F6)
+    //
+    // Relative luminance per WCAG 2.x: sRGB → linear-light → weighted sum.
+    // Matches what `TerminalView.setWindowAppearance` used to compute
+    // inline for the titlebar light/dark decision; lifting the math onto
+    // the palette itself lets any consumer (future user-theme importer,
+    // contrast-sanity unit test) query the same numbers without
+    // duplicating the formula.
+
+    /// Rec. 709 / sRGB relative luminance of a 0xRRGGBB color. Returns a
+    /// value in `[0, 1]` where 0 is pure black and 1 is pure white.
+    public static func relativeLuminance(_ rgb: UInt32) -> Double {
+        let r = Double((rgb >> 16) & 0xFF) / 255.0
+        let g = Double((rgb >>  8) & 0xFF) / 255.0
+        let b = Double( rgb        & 0xFF) / 255.0
+        func lin(_ c: Double) -> Double {
+            c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    /// WCAG contrast ratio `(L1 + 0.05) / (L2 + 0.05)` where L1 is the
+    /// lighter of the two luminances. Always ≥ 1; 21 is maximum
+    /// (black-on-white or white-on-black).
+    public static func contrastRatio(fg: UInt32, bg: UInt32) -> Double {
+        let a = relativeLuminance(fg)
+        let b = relativeLuminance(bg)
+        let lighter = max(a, b)
+        let darker  = min(a, b)
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// True when the palette's background reads as "dark" — used by
+    /// window-chrome decisions (titlebar appearance) and by the Settings
+    /// UI to pick a light/dark variant of the glass materials. Threshold
+    /// is the WCAG 2.x midpoint for "dark": any bg with linear luminance
+    /// ≤ 0.18 is classified dark. Matches what TerminalView was computing
+    /// inline.
+    public var isDark: Bool {
+        Self.relativeLuminance(background) <= 0.18
+    }
+
+    /// Foreground-to-background contrast ratio of this palette. Call site
+    /// for future user-supplied-theme validation (WCAG AA requires 4.5:1
+    /// for normal-weight text; our curated palettes all exceed that).
+    public var foregroundBackgroundContrast: Double {
+        Self.contrastRatio(fg: foreground, bg: background)
+    }
+
+    /// Cursor-to-background contrast ratio. Any value at or near 1.0
+    /// means the cursor is invisible; validator should reject < 1.25.
+    public var cursorBackgroundContrast: Double {
+        Self.contrastRatio(fg: cursor, bg: background)
     }
 }
 

@@ -54,6 +54,16 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
         stripView.beginEditing(pillIndex: idx)
     }
 
+    /// Publish and tear down any in-flight inline rename. Safe to call
+    /// when no edit is in progress (the strip short-circuits internally).
+    /// `MainWindowController.refreshTabBar` invokes this before hiding
+    /// the accessory on the multi-tab → single-tab transition so the
+    /// editing field doesn't survive as a stale subview of the hidden
+    /// strip. (main-window F8)
+    func commitAnyInFlightEdit() {
+        stripView.commitEditIfNeeded()
+    }
+
     required init?(coder: NSCoder) { fatalError("not supported") }
 
     /// Re-read the tab group and re-lay pills. Caller is responsible for
@@ -193,13 +203,14 @@ final class TabStripView: NSView, NSDraggingSource {
 
     func update(tabs: [NSWindow], selected: NSWindow, width: CGFloat) {
         // An in-flight edit targets a specific pill index in the OLD tab
-        // list. If the list shape changes under us (tab closed, window
-        // dragged in, reorder), the field can end up floating over the
-        // wrong pill or off-strip entirely. Safest policy: commit on any
-        // layout-affecting update — preserves the user's work and drops
-        // the field before it becomes confusing. Cancels when there's no
-        // text field (e.g., first call before any edit).
-        if editingPill != nil {
+        // list. Commit only when the LIST SHAPE changes (count or identity),
+        // not on a bare width change — otherwise every live-resize tick at
+        // 120 Hz discards the user's mid-type rename silently. Width-only
+        // updates just re-lay the pill frames and reposition the existing
+        // field below. (main-window F6)
+        let listShapeChanged = self.tabs.count != tabs.count
+            || !zip(self.tabs, tabs).allSatisfy { $0 === $1 }
+        if editingPill != nil, listShapeChanged {
             commitEdit()
         }
         self.tabs = tabs
@@ -207,7 +218,33 @@ final class TabStripView: NSView, NSDraggingSource {
         self.totalWidth = width
         self.frame = NSRect(x: 0, y: 0, width: width, height: Self.height)
         layoutPills()
+        // Width-only update: move the edit field to track the pill's new
+        // x/width so the caret doesn't drift off-pill. Geometry mirrors
+        // `beginEditing`'s field-rect computation.
+        if let idx = editingPill,
+           idx < pillFrames.count,
+           let field = editField {
+            let pill = pillFrames[idx]
+            let closeRect = closeHotspot(in: pill)
+            field.frame = NSRect(
+                x: pill.minX + closeRect.width + 6,
+                y: pill.minY + 2,
+                width: max(0, pill.width - (closeRect.width + 12)),
+                height: pill.height - 4
+            )
+        }
         needsDisplay = true
+    }
+
+    /// Commit the in-flight edit if one is active. No-op otherwise. Used
+    /// by `MainWindowController.refreshTabBar` on the multi-tab →
+    /// single-tab transition so the field doesn't survive as a subview
+    /// of a hidden strip and re-appear on the next grow-back.
+    /// (main-window F8)
+    func commitEditIfNeeded() {
+        if editingPill != nil {
+            commitEdit()
+        }
     }
 
     // MARK: - Accessibility

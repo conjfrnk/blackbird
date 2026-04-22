@@ -90,6 +90,81 @@ final class InlineRenameTests: XCTestCase {
         XCTAssertEqual(commits[1].1, "second")
     }
 
+    /// A width-only `update` call (same tab list, different width — the
+    /// path `windowDidResize` takes every tick at 120 Hz on ProMotion)
+    /// must NOT discard the user's in-flight rename. Pre-fix the strip
+    /// committed on every update, silently dropping any typing the user
+    /// had done between the last frame and the drag release.
+    /// (main-window F6)
+    func test_widthOnlyUpdate_preservesInFlightRename() {
+        let (strip, windows) = makeStripView(titles: ["a", "b"])
+        var commits: [(NSWindow, String)] = []
+        strip.onCommitRename = { commits.append(($0, $1)) }
+
+        strip.beginEditing(pillIndex: 1)
+        strip.perform(NSSelectorFromString("setEditTextForTesting:"),
+                      with: "mid-type")
+        // Simulate a resize tick: SAME tabs + selected, different width.
+        strip.update(tabs: windows, selected: windows[0], width: 400)
+        XCTAssertEqual(commits.count, 0,
+                       "width-only update must not commit an in-flight edit")
+
+        // User hits Enter — the in-flight value survives.
+        strip.perform(NSSelectorFromString("commitEditForTesting"))
+        XCTAssertEqual(commits.count, 1)
+        XCTAssertEqual(commits[0].0, windows[1])
+        XCTAssertEqual(commits[0].1, "mid-type")
+    }
+
+    /// A list-shape change (tab count changes, or the same-count list
+    /// has different window instances from a reorder/merge) still
+    /// commits to protect the edit from the stale-index hazard the
+    /// original `update` guard targeted. (main-window F6)
+    func test_listShapeChange_stillCommitsInFlightEdit() {
+        let (strip, windows) = makeStripView(titles: ["a", "b", "c"])
+        var commits: [(NSWindow, String)] = []
+        strip.onCommitRename = { commits.append(($0, $1)) }
+
+        strip.beginEditing(pillIndex: 2)
+        strip.perform(NSSelectorFromString("setEditTextForTesting:"),
+                      with: "outgoing")
+        // Simulate a tab-close: shorter tab list.
+        strip.update(
+            tabs: Array(windows.prefix(2)),
+            selected: windows[0],
+            width: 600
+        )
+        XCTAssertEqual(commits.count, 1,
+                       "list-shape change must commit the in-flight edit")
+        XCTAssertEqual(commits[0].0, windows[2])
+        XCTAssertEqual(commits[0].1, "outgoing")
+    }
+
+    /// `commitEditIfNeeded` is a no-op when nothing's being edited and
+    /// publishes the current value when an edit is in flight. Exposed
+    /// so `MainWindowController.refreshTabBar` can tear down the
+    /// editing field before hiding the strip on the multi-tab →
+    /// single-tab transition. (main-window F8)
+    func test_commitEditIfNeeded_publishesActiveEdit() {
+        let (strip, windows) = makeStripView(titles: ["a", "b"])
+        var commits: [(NSWindow, String)] = []
+        strip.onCommitRename = { commits.append(($0, $1)) }
+
+        // No edit in progress: no-op.
+        strip.commitEditIfNeeded()
+        XCTAssertEqual(commits.count, 0)
+
+        strip.beginEditing(pillIndex: 0)
+        strip.perform(NSSelectorFromString("setEditTextForTesting:"),
+                      with: "stranded")
+        strip.commitEditIfNeeded()
+
+        XCTAssertEqual(commits.count, 1,
+                       "commitEditIfNeeded must publish the active edit")
+        XCTAssertEqual(commits[0].0, windows[0])
+        XCTAssertEqual(commits[0].1, "stranded")
+    }
+
     func test_applyInlineRename_onController_maps_empty_to_nil() {
         // Contract between strip and MainWindowController: trimmed-empty
         // → override cleared, non-empty → override set.
@@ -109,5 +184,17 @@ final class InlineRenameTests: XCTestCase {
 
         controller.applyInlineRename("")
         XCTAssertNil(controller.session?.titleOverride)
+
+        // Pin main-window F23: every Blackbird window opts out of
+        // NSWindowRestoration explicitly. `required init?(coder:)`
+        // fatal-errors, so a restoration attempt would crash on wake;
+        // setting `isRestorable = false` tells AppKit not to try.
+        // (main-window F23)
+        XCTAssertFalse(
+            controller.window?.isRestorable ?? true,
+            "MainWindowController.window must set isRestorable=false "
+                + "because the class does not implement "
+                + "encodeRestorableState / restoreState."
+        )
     }
 }
