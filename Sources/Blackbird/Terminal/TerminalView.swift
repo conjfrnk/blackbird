@@ -1836,6 +1836,33 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
+    /// Cheap pre-compile gate to catch the standard first-order ReDoS
+    /// shapes (nested quantifiers on a capture group, alternations of
+    /// overlapping branches) before handing the pattern to
+    /// NSRegularExpression. NSRegularExpression has no match timeout API,
+    /// so a pattern like `(a+)+$` on a long row can backtrack for
+    /// seconds on the main thread. These aren't exhaustive — a
+    /// determined adversary can sidestep the substring checks — but they
+    /// knock out the textbook cases without false-positive'ing on
+    /// ordinary find queries. Length cap keeps the find field a
+    /// "substring with options" UI, not a regex playground.
+    /// Audit findbar-selection F2.
+    static func isReasonableRegexPattern(_ pattern: String) -> Bool {
+        if pattern.count > 256 { return false }
+        let dangerous = [
+            "(.*)+", "(.+)+", "(.*)*", "(.+)*",
+            "(a+)+", "(a*)*", "(a+)*", "(a*)+",
+            "([^x]+)+", "([^x]*)*",
+            "(\\w+)+", "(\\w*)*", "(\\d+)+", "(\\d*)*",
+            "(\\s+)+", "(\\s*)*",
+            "(.+)+$", "(.*)+$",
+        ]
+        for shape in dangerous where pattern.contains(shape) {
+            return false
+        }
+        return true
+    }
+
     @objc public override func selectAll(_ sender: Any?) {
         guard let snap = currentSnapshot else { return }
         // Match Terminal.app: ⌘A selects the full retained buffer —
@@ -2083,6 +2110,23 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }()
         let regex: NSRegularExpression?
         if opts.regex {
+            // ReDoS surface: NSRegularExpression over ICU is backtracking,
+            // so nested quantifiers on overlapping alternatives (`(a+)+`,
+            // `(a|a)+`, `(.*)+`) can take exponential time on a
+            // well-crafted haystack. The find bar runs this pattern over
+            // every row in the retained buffer on every keystroke; a
+            // malicious paste into the query field could hang the main
+            // thread for seconds. Two cheap guards: cap the pattern length
+            // (keeps the search input a "find this bit of text" UI, not a
+            // regex playground), and reject obviously-bad shapes before
+            // compilation. Neither is airtight, but both knock out the
+            // standard first-order catastrophic patterns.
+            // Audit findbar-selection F2.
+            guard Self.isReasonableRegexPattern(query) else {
+                findBar?.setMatchCount(0, of: 0)
+                selection = nil
+                return
+            }
             var regexOpts: NSRegularExpression.Options = []
             if !opts.caseSensitive { regexOpts.insert(.caseInsensitive) }
             regex = try? NSRegularExpression(pattern: query, options: regexOpts)
@@ -2577,6 +2621,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
             sel.cursor = bufferPointFromEvent(event)
             selection = sel
+            // F15 (findbar-selection): .word and .line modes set their
+            // endpoints during the mouseDown via `expandSelectionUnderAnchor`.
+            // Without a matching call on every drag, the visual highlight
+            // (renderer uses `selection.normalized`) disagrees with the
+            // copy range (which extends to full-row/full-word boundaries
+            // via `copyRange(for:cols:)`) — a triple-click-and-drag
+            // highlights a ragged prose rectangle while ⌘C grabs clean
+            // whole rows. Re-expand here so the paint and the copy match.
+            if sel.mode == .word || sel.mode == .line {
+                expandSelectionUnderAnchor()
+            }
             return
         }
         // No selection in progress — forward to PTY if the app asked for
@@ -2591,14 +2646,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
         let local = convert(event.locationInWindow, from: nil)
         let snap = currentSnapshot
-        // Pass the text-area height (bounds minus the titlebar inset), since
         // `.fullSizeContentView` means `bounds.height` includes the titlebar
-        // region which the text grid doesn't occupy.
+        // region which the text grid doesn't occupy. `bufferPoint` below does
+        // `viewportHeight - localPoint.y` to derive the display-row Y; if the
+        // click landed inside the titlebar region (AppKit's Y-up coord system
+        // puts the titlebar at the *top* → high y), that subtraction goes
+        // negative and the clamp snaps to row 0 — grid clicks in the text
+        // area work fine because the offset cancels, but a ⌘-drag across the
+        // titlebar would still map to (row 0, col ≈ x/cellWidth). Pre-clamp
+        // y to the text-area range so titlebar-region clicks land on the
+        // first-real-row edge instead of silently re-attributing to row 0.
+        // Audit findbar-selection F13.
+        let textAreaHeight = bounds.height - titlebarOnlyTopInset
+        let clampedY = min(max(0, local.y), max(0, textAreaHeight))
+        let clampedLocal = CGPoint(x: local.x, y: clampedY)
         return bufferPoint(
-            forView: local,
+            forView: clampedLocal,
             cellWidth: metrics.cellWidth,
             cellHeight: metrics.cellHeight,
-            viewportHeight: bounds.height - titlebarOnlyTopInset,
+            viewportHeight: textAreaHeight,
             displayOffset: snap?.displayOffset ?? 0,
             cols: snap?.cols ?? 80,
             rows: snap?.rows ?? 24
@@ -3326,12 +3392,47 @@ extension TerminalView {
         findMatches.removeAll()
         findCurrentIndex = 0
         findBar?.setMatchCount(0, of: 0)
+        // F5: re-run the search after the byte stream has had a chance to
+        // land, so the label reads the live post-replace count (standard
+        // VS Code / TextEdit behaviour).
+        reRunSearchAfterReplace()
+    }
+
+    /// Re-run the current find query on the next runloop tick. Called after
+    /// a successful replace so the match label reflects the edited line
+    /// instead of stale "0/0". Scheduled async so the shell has a moment
+    /// to echo the DEL+replacement bytes back through the render pipeline;
+    /// the snapshot observer (see `currentSnapshot.didSet`) also schedules
+    /// a refresh, so this double-booking is harmless — `performSearch`
+    /// overwrites the match array atomically. Audit findbar-selection F5.
+    fileprivate func reRunSearchAfterReplace() {
+        #if DEBUG
+        // In tests there's no shell to echo bytes; skip the async hop so
+        // assertions against `findMatches` don't race the dispatch.
+        if replaceByteCapture != nil { return }
+        #endif
+        let query = findQuery
+        guard !query.isEmpty, findBar != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.findQuery.isEmpty, self.findBar != nil else { return }
+            self.performSearch(query: query)
+        }
     }
 
     /// Replace all find matches with `replacement`, processing right-to-left so
     /// earlier column indices stay valid as the shell receives each replacement.
     /// Matches not on the live input line are skipped; if any were skipped a
     /// warning is shown in the find bar.
+    ///
+    /// F4 (findbar-selection): when a match sits on the row immediately
+    /// above the cursor AND that row looks soft-wrap-filled (its last cell
+    /// is non-blank — shells fill right up to the wrap column before
+    /// wrapping), refuse with a warning. Without the wrap-flag FFI we
+    /// can't be certain; erring on the side of refusal avoids emitting
+    /// DEL bytes that overshoot into wrapped prior content. Rows with a
+    /// trailing blank are treated as unrelated scrollback and their
+    /// matches are silently skipped, preserving the documented behaviour
+    /// for non-wrapped off-line matches.
     func replaceAllMatches(with replacement: String) {
         let matches = effectiveFindMatches()
         guard !matches.isEmpty else { return }
@@ -3344,6 +3445,21 @@ extension TerminalView {
             findBar?.showTransientMessage("No input-line matches to replace")
             return
         }
+        // Wrap-ambiguity guard: a match on the row immediately above the
+        // cursor *might* be a soft-wrap continuation of the input line.
+        // A shell that's soft-wrapped typically fills right up to the
+        // right edge (last cell non-blank); a scrollback row usually has
+        // trailing blanks. Refuse only when the prior row's last cell is
+        // non-blank AND contains a match — otherwise fall through to the
+        // scrollback-skip path. Audit findbar-selection F4.
+        let priorRow = cursorLine - 1
+        if matches.contains(where: { $0.line == priorRow }),
+           snap.cols > 0,
+           let priorLastCell = snap.character(at: snap.cols - 1, row: Int(priorRow)),
+           !priorLastCell.isWhitespace {
+            findBar?.showTransientMessage("Refusing: matches span a possible wrapped input line")
+            return
+        }
         // Process right-to-left so earlier col indices remain valid.
         for m in inputLineMatches.sorted(by: { $0.startCol > $1.startCol }) {
             sendReplacement(match: m, replacement: replacement)
@@ -3354,6 +3470,14 @@ extension TerminalView {
         findBar?.setMatchCount(0, of: 0)
         if hadOffLine {
             findBar?.showTransientMessage("Replaced input-line matches (scrollback skipped)")
+        } else {
+            // F5: re-run the search so the user sees fresh match counts
+            // against the newly-edited line. Without this, the label reads
+            // "No matches" even though the replacement string may itself
+            // match the query. `performSearch` short-circuits on an empty
+            // query; scheduling is deferred to the next runloop tick so
+            // the shell has time to echo the bytes back.
+            reRunSearchAfterReplace()
         }
     }
 

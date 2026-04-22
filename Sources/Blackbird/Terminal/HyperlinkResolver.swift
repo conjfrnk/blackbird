@@ -54,18 +54,101 @@ enum OSC8URLPolicy {
     /// from the shell.
     static let allowedSchemes: Set<String> = ["http", "https", "ftp", "mailto"]
 
+    /// Schemes that require a host component. `mailto:` is excluded —
+    /// its "host" part is the local address, handled by `isMailtoSafe`.
+    private static let hostRequiredSchemes: Set<String> = ["http", "https", "ftp"]
+
     /// Decide whether an OSC 8 URL is safe to hand to `NSWorkspace`.
     /// Rejects URLs with no scheme (malformed / relative), a scheme
     /// outside the allowlist, or a `mailto:` URL carrying headers that
-    /// could exfiltrate to an attacker. Case-insensitive — RFC 3986
-    /// says scheme is case-insensitive, and browsers canonicalise to
-    /// lowercase.
+    /// could exfiltrate to an attacker. Also rejects host-requiring
+    /// schemes whose host contains non-ASCII characters or looks like a
+    /// punycode-encoded IDN — both are homograph phishing vectors.
+    /// Case-insensitive — RFC 3986 says scheme is case-insensitive, and
+    /// browsers canonicalise to lowercase.
     static func isAllowed(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         guard allowedSchemes.contains(scheme) else { return false }
         if scheme == "mailto" {
             return isMailtoSafe(url)
         }
+        if hostRequiredSchemes.contains(scheme) {
+            // A hostless `https:///` URL parses but has nothing for
+            // NSWorkspace to dispatch meaningfully — belt-and-braces
+            // refusal. Audit cwd-hyperlink F14 (documented under the
+            // same trust boundary as F8).
+            guard let host = url.host, !host.isEmpty else { return false }
+            // Reject homograph hosts — either direct non-ASCII (e.g.
+            // Cyrillic а) or punycode encoding thereof. A hostile remote
+            // emits OSC 8 with href `https://xn--pple-43d.com/` (Cyrillic
+            // "аpple"); the user sees anchor text "apple.com" and clicks.
+            // Browsers apply nuanced mixed-script confusable rules; a
+            // terminal's cost/benefit tilts toward all-ASCII-only because
+            // legitimate IDN traffic via OSC 8 is vanishingly rare.
+            // Audit cwd-hyperlink F8.
+            if hostLooksLikeIDN(host) { return false }
+        }
+        return true
+    }
+
+    /// True when the host contains non-ASCII characters or looks like an
+    /// ACE-encoded (punycode) IDN. Either form is a homograph phishing
+    /// vector on the OSC 8 click path. Case-insensitive — RFC 3986 host
+    /// strings are case-insensitive after scheme normalisation.
+    static func hostLooksLikeIDN(_ host: String) -> Bool {
+        for scalar in host.unicodeScalars {
+            if scalar.value > 0x7F { return true }
+        }
+        // Punycode-encoded labels carry the IDNA ACE prefix "xn--" (case
+        // insensitive). Any label starting with that prefix signals the
+        // host was a non-ASCII IDN before encoding; reject the lot.
+        let lower = host.lowercased()
+        for label in lower.split(separator: ".") {
+            if label.hasPrefix("xn--") { return true }
+        }
+        return false
+    }
+
+    /// True when the OSC 8 anchor text visually claims to be a URL but
+    /// the href's host doesn't match what the anchor suggests. Classic
+    /// OSC 8 phishing shape: anchor reads `https://apple.com/login`,
+    /// href is `https://evil.tld/login`. A quick ⌘-click never gives the
+    /// dwell tooltip a chance to surface the mismatch. This is a
+    /// conservative detector — only fires when the anchor itself contains
+    /// a recognisable URL-shaped token (scheme + host), and that token's
+    /// host differs from the href's host after simple normalisation
+    /// (case-fold, strip trailing dots). False-negatives are fine
+    /// (plain-text anchors like "click here" return false, which is
+    /// expected behaviour); false-positives would block legitimate link
+    /// chrome. Audit cwd-hyperlink F2.
+    static func anchorDivergesFromHost(anchorText: String, url: URL) -> Bool {
+        // No href host → can't compare. The click path already rejects
+        // these via `isAllowed`'s host-required check, so this is belt
+        // and braces.
+        guard let hrefHost = url.host?.lowercased(), !hrefHost.isEmpty else {
+            return false
+        }
+        // Extract a URL-shaped token from the anchor. NSDataDetector is
+        // overkill; a minimal regex suffices: scheme + "://" + host-ish
+        // characters up to the next path/punct boundary.
+        let pattern = #"(?i)(?:https?|ftp)://([A-Za-z0-9.\-]+)"#
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return false }
+        let ns = anchorText as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        guard let match = re.firstMatch(in: anchorText, range: range), match.numberOfRanges >= 2 else {
+            return false
+        }
+        let anchorHostRange = match.range(at: 1)
+        guard anchorHostRange.location != NSNotFound else { return false }
+        var anchorHost = ns.substring(with: anchorHostRange).lowercased()
+        while anchorHost.hasSuffix(".") { anchorHost.removeLast() }
+        var normHref = hrefHost
+        while normHref.hasSuffix(".") { normHref.removeLast() }
+        // Treat a subdomain match as non-divergent — "www.apple.com"
+        // anchor for an "apple.com" href isn't phishing.
+        if anchorHost == normHref { return false }
+        if anchorHost.hasSuffix("." + normHref) { return false }
+        if normHref.hasSuffix("." + anchorHost) { return false }
         return true
     }
 
@@ -118,14 +201,23 @@ protocol HyperlinkResolver: AnyObject {
 /// the snapshot's FFI accessors; regex fallback runs the existing
 /// `URLDetector` against the live grid so behaviour matches the pre-Task-7
 /// ⌘-click path exactly when a cell has no OSC 8 attribution.
+///
+/// Callers that perform multiple queries against the same snapshot (⌘-click
+/// + dwell + context menu can all hit the resolver) should pass a
+/// pre-computed `regexMatches` slice. Constructing without one still works —
+/// the matches are computed lazily on first query — but the hot production
+/// path on `TerminalView` caches the scan in a snapshot-keyed store and
+/// passes the slice in so repeated queries avoid the O(rows × cols) scan.
+/// Audit cwd-hyperlink F7.
 final class SnapshotHyperlinkResolver: HyperlinkResolver {
     let snapshot: BBSnapshot
-    /// Lazily computed so a click that lands on OSC 8 never pays the regex
-    /// scan cost. The full-snapshot scan is ~grid-area work.
-    private lazy var regexMatches: [URLMatch] = URLDetector.scan(snapshot: snapshot)
+    /// Pre-computed regex matches for this snapshot. Nil until first
+    /// consulted (or populated via the caller-supplied initializer).
+    private var cachedMatches: [URLMatch]?
 
-    init(snapshot: BBSnapshot) {
+    init(snapshot: BBSnapshot, regexMatches: [URLMatch]? = nil) {
         self.snapshot = snapshot
+        self.cachedMatches = regexMatches
     }
 
     func osc8URL(row: Int, col: Int) -> URL? {
@@ -138,6 +230,36 @@ final class SnapshotHyperlinkResolver: HyperlinkResolver {
     func regexURL(row: Int, col: Int) -> URL? {
         let bufferLine = Int32(row - snapshot.displayOffset)
         let point = BufferPoint(line: bufferLine, col: col)
-        return URLDetector.match(at: point, in: regexMatches)?.url
+        if cachedMatches == nil {
+            cachedMatches = URLDetector.scan(snapshot: snapshot)
+        }
+        return URLDetector.match(at: point, in: cachedMatches ?? [])?.url
+    }
+
+    /// Read the anchor text rendered under an OSC 8 link id on the
+    /// supplied screen row. Walks contiguous cells at `row` that share
+    /// the same link id as (row, col) and joins their characters into a
+    /// single string. Used by the click-time divergence detector
+    /// (`OSC8URLPolicy.anchorDivergesFromHost`) to flag phishing-shaped
+    /// OSC 8 hyperlinks. Audit cwd-hyperlink F2.
+    func osc8AnchorText(row: Int, col: Int) -> String? {
+        let anchorID = snapshot.linkID(row: row, col: col)
+        guard anchorID != 0 else { return nil }
+        var out = ""
+        // Walk left from (row, col) until the link id changes, then right.
+        var l = col
+        while l > 0 && snapshot.linkID(row: row, col: l - 1) == anchorID {
+            l -= 1
+        }
+        var r = col
+        while r + 1 < snapshot.cols && snapshot.linkID(row: row, col: r + 1) == anchorID {
+            r += 1
+        }
+        for c in l...r {
+            if let ch = snapshot.character(at: c, row: row) {
+                out.append(ch)
+            }
+        }
+        return out.isEmpty ? nil : out
     }
 }

@@ -67,8 +67,19 @@ final class HyperlinkTests: XCTestCase {
     }
 
     func testOsc8UrlSchemeAllowlistAccepts() {
-        for scheme in ["http", "https", "ftp", "mailto", "HTTPS", "Mailto"] {
-            let u = URL(string: "\(scheme):example")!
+        // host-required schemes use explicit host so F14's hostless-URL
+        // rejection doesn't conflict; mailto: is host-less by design
+        // (the "host" is the local-part of the address).
+        let fixtures: [(scheme: String, raw: String)] = [
+            ("http",    "http://example.com/"),
+            ("https",   "https://example.com/"),
+            ("ftp",     "ftp://example.com/"),
+            ("mailto",  "mailto:alice@example.com"),
+            ("HTTPS",   "HTTPS://example.com/"),
+            ("Mailto",  "Mailto:alice@example.com"),
+        ]
+        for (scheme, raw) in fixtures {
+            let u = URL(string: raw)!
             XCTAssertTrue(
                 OSC8URLPolicy.isAllowed(u),
                 "allowlist must accept the canonical safe scheme \(scheme)"
@@ -173,6 +184,146 @@ final class HyperlinkTests: XCTestCase {
                 "scheme from attack string \(raw) must be rejected"
             )
         }
+    }
+
+    // MARK: - F8: IDN / punycode rejection
+
+    /// Audit cwd-hyperlink F8. A punycode-encoded IDN (`xn--…`) is a
+    /// homograph vector — anchor text may read "apple.com" while href is
+    /// a Cyrillic lookalike. Reject host-having schemes with punycode
+    /// hosts before NSWorkspace.open sees them.
+    func testOsc8UrlAllowlistRejectsPunycodeHost() {
+        // xn--pple-43d is the punycode for "аpple" with a Cyrillic а.
+        let attacks = [
+            "https://xn--pple-43d.com/login",
+            "http://xn--e1awd7f.com/",     // "домен"
+            "https://safe.xn--hostname.com/", // mid-label xn-- (belt and braces)
+        ]
+        for raw in attacks {
+            guard let u = URL(string: raw) else { continue }
+            XCTAssertFalse(
+                OSC8URLPolicy.isAllowed(u),
+                "punycode/IDN host must be rejected: \(raw)"
+            )
+        }
+    }
+
+    func testOsc8UrlAllowlistRejectsNonASCIIHost() {
+        // Some URL(string:) implementations accept raw non-ASCII in the
+        // host. Either form is a homograph vector and must be rejected.
+        guard let u = URL(string: "https://аpple.com/") else { return }
+        XCTAssertFalse(
+            OSC8URLPolicy.isAllowed(u),
+            "raw non-ASCII host must be rejected"
+        )
+    }
+
+    func testOsc8UrlAllowlistAcceptsPureASCIIHost() {
+        // Sanity: the all-ASCII path still passes. Verifies the IDN gate
+        // didn't accidentally snag legitimate hosts.
+        for raw in ["https://apple.com/", "http://example.com/path", "ftp://mirror.example.org/"] {
+            guard let u = URL(string: raw) else { continue }
+            XCTAssertTrue(
+                OSC8URLPolicy.isAllowed(u),
+                "plain-ASCII host must still pass: \(raw)"
+            )
+        }
+    }
+
+    func testOsc8UrlAllowlistRejectsHostlessHttpURL() {
+        // F14 (same trust boundary as F8): a hostless https:/// has
+        // nothing for NSWorkspace to meaningfully dispatch.
+        guard let u = URL(string: "https:///path/only") else { return }
+        XCTAssertFalse(
+            OSC8URLPolicy.isAllowed(u),
+            "hostless http(s) URL must be rejected"
+        )
+    }
+
+    // MARK: - F2: anchor / href divergence
+
+    /// Audit cwd-hyperlink F2. Classic OSC 8 phishing: anchor text
+    /// displays one URL, href points elsewhere. Detector fires only when
+    /// the anchor itself looks URL-shaped (contains `scheme://host…`)
+    /// and that host differs from the href's.
+    func testAnchorDivergence_detectsPhishingShape() {
+        let url = URL(string: "https://evil.tld/login")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://apple.com/login",
+                url: url
+            ),
+            "visible apple.com vs. href evil.tld must flag as divergent"
+        )
+    }
+
+    func testAnchorDivergence_plainTextAnchorReturnsFalse() {
+        let url = URL(string: "https://evil.tld/x")!
+        XCTAssertFalse(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "click here to log in",
+                url: url
+            ),
+            "anchor text with no URL-shaped token should not trigger divergence"
+        )
+    }
+
+    func testAnchorDivergence_sameHostReturnsFalse() {
+        let url = URL(string: "https://apple.com/login")!
+        XCTAssertFalse(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://apple.com/login",
+                url: url
+            ),
+            "identical host must not flag"
+        )
+    }
+
+    func testAnchorDivergence_subdomainMatch_notFlagged() {
+        let url = URL(string: "https://apple.com/login")!
+        // Anchor says "www.apple.com", href is "apple.com" — legitimate
+        // same-origin case, not phishing.
+        XCTAssertFalse(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "See https://www.apple.com/login for details",
+                url: url
+            ),
+            "subdomain relationship must not flag as divergent"
+        )
+    }
+
+    // MARK: - F7: resolver cache reuse
+
+    /// Audit cwd-hyperlink F7. The cache is reusable when the caller
+    /// passes pre-computed matches. The resolver should consult the
+    /// caller's slice instead of running a fresh scan.
+    func testResolver_acceptsPreComputedMatches() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        term.input("Visit https://example.com/path for info")
+        let snap = try XCTUnwrap(term.snapshot())
+        // Scan once.
+        let matches = URLDetector.scan(snapshot: snap)
+        XCTAssertFalse(matches.isEmpty, "setup must produce at least one match")
+        // Build a resolver with pre-computed matches — second query
+        // should still find the URL without re-scanning the snapshot
+        // (verified indirectly by feeding a non-empty set).
+        let resolver = SnapshotHyperlinkResolver(snapshot: snap, regexMatches: matches)
+        // Point at a cell inside "https://…" on row 0.
+        let url = resolver.regexURL(row: 0, col: 10)
+        XCTAssertNotNil(url, "cached matches must be consulted for regexURL")
+    }
+
+    func testResolver_anchorTextWalksLinkID() throws {
+        // OSC 8 sequence paints 2 cells under one link id. osc8AnchorText
+        // should return "hi" — the full run, not just the clicked cell.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        term.input("\u{1B}]8;;https://example.com\u{1B}\\hi\u{1B}]8;;\u{1B}\\")
+        let snap = try XCTUnwrap(term.snapshot())
+        let resolver = SnapshotHyperlinkResolver(snapshot: snap)
+        XCTAssertEqual(resolver.osc8AnchorText(row: 0, col: 0), "hi")
+        XCTAssertEqual(resolver.osc8AnchorText(row: 0, col: 1), "hi")
+        XCTAssertNil(resolver.osc8AnchorText(row: 0, col: 5),
+                     "cell with no link id must return nil")
     }
 
     func testCmdClickBlocksJavascriptOsc8() throws {

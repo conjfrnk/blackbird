@@ -225,7 +225,21 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Match label
 
+    /// Monotonic token bumped every time the match label is written. The
+    /// deferred clear scheduled by `showTransientMessage` captures its
+    /// token at schedule time and only wipes the label when the latest
+    /// token still matches — so an A → B → A sequence where the second
+    /// A arrives before the first A's 2 s deadline doesn't get
+    /// prematurely wiped, and a `setMatchCount` between the schedule
+    /// and fire invalidates the clear so the match count survives.
+    /// Audit findbar-selection F6.
+    private var transientMessageToken: UInt64 = 0
+
     public func setMatchCount(_ current: Int, of total: Int) {
+        // Bump the token so any pending `showTransientMessage` clear
+        // doesn't wipe this newly-written match count on its 2 s timer.
+        // Audit findbar-selection F6.
+        transientMessageToken &+= 1
         matchLabel.stringValue = total == 0 ? "No matches" : "\(current + 1) / \(total)"
     }
 
@@ -252,10 +266,16 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     /// 2 seconds. Used by the replace path to surface
     /// "Only input-line matches can be replaced" without a modal alert.
     public func showTransientMessage(_ message: String) {
+        transientMessageToken &+= 1
+        let myToken = transientMessageToken
         matchLabel.stringValue = message
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }
-            if self.matchLabel.stringValue == message {
+            // Only clear when this scheduling is the most recent one. If
+            // another `showTransientMessage` (or any other label write)
+            // landed after us, the token advanced past ours and this work
+            // item is stale. Audit findbar-selection F6.
+            if self.transientMessageToken == myToken {
                 self.matchLabel.stringValue = ""
             }
         }

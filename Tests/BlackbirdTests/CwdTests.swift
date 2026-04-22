@@ -60,6 +60,15 @@ final class CwdTests: XCTestCase {
         XCTAssertEqual(CwdResolver.forNewTab(source: s), "/tmp/somewhere")
     }
 
+    /// Audit cwd-hyperlink F4. The headless test session has no live PTY
+    /// (exitCode path short-circuits differently), so this test pins the
+    /// "no source" contract: resolver returns nil, not a stale cwd from
+    /// a dead session. A fuller test for the fg-child-priority path would
+    /// require a live PTY — deferred to integration.
+    func testForNewTab_nilSource_returnsNil() {
+        XCTAssertNil(CwdResolver.forNewTab(source: nil))
+    }
+
     /// ⌘N: new window is a fresh start (spec §3). The resolver returns
     /// nil, and `PTY.spawn(initialWorkingDirectory: nil)` then falls
     /// through to `$HOME` via its built-in `getpwuid` path. Pinning

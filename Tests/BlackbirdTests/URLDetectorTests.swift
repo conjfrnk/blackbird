@@ -293,6 +293,95 @@ final class URLDetectorTests: XCTestCase {
         )
         XCTAssertEqual(m.url.absoluteString, "https://example.com")
     }
+
+    // MARK: - F6: percent-escape validation
+
+    /// Audit cwd-hyperlink F6. The regex used to accept `%` followed by
+    /// arbitrary characters (the class treated `%` as a literal). A
+    /// pattern like `https://x.com/%zz` would match 19 chars on-screen but
+    /// `URL(string:)` would normalise it to `https://x.com/%25zz` — three
+    /// chars longer, so the span underline pointed at cells the click
+    /// didn't actually hit. New pattern enforces `%HH` only.
+    func test_scan_percentEscapeMustBeHexDigits() throws {
+        // An invalid escape followed by an alpha char: old regex matched
+        // through the `%zz`, producing a URL whose absoluteString differed
+        // from the matched substring. New regex breaks at `%z` so the
+        // match stops at the `/` before it.
+        let snap = try snapshot(from: "https://x.com/valid/%zz/extra")
+        let matches = URLDetector.scan(snapshot: snap)
+        // Either zero matches (the whole thing doesn't match cleanly) or
+        // a match whose absoluteString exactly equals the matched span.
+        // What we disallow: a span that extends through %zz.
+        for m in matches {
+            XCTAssertFalse(
+                m.url.absoluteString.contains("%zz"),
+                "regex matched literal %zz — must reject ill-formed percent escapes"
+            )
+        }
+    }
+
+    /// A well-formed percent escape (two hex digits) should pass.
+    func test_scan_percentEscape_validHex_passes() throws {
+        let snap = try snapshot(from: "https://x.com/hello%20world")
+        let matches = URLDetector.scan(snapshot: snap)
+        XCTAssertEqual(matches.count, 1)
+        XCTAssertEqual(matches.first?.url.absoluteString, "https://x.com/hello%20world")
+    }
+
+    // MARK: - F9: wrapped-URL reconstruction
+
+    /// Audit cwd-hyperlink F9. A URL printed across the right edge of the
+    /// grid should be reconstructed into a single match spanning the
+    /// wrap, not two unparseable fragments. 40-col grid with a URL long
+    /// enough to wrap.
+    func test_scan_wrappedURL_reconstructsIntoSingleMatch() throws {
+        // Fill first 40 cols with the URL head, letting alacritty wrap
+        // the remainder into row 1.
+        let head = "https://long.example.com/some/path-to/"
+        let tail = "a/document?q=1"
+        let cols: UInt16 = 40
+        // head is 39 chars (fits in first row, ends at col 38). Force the
+        // wrap by appending tail with no space — make total length > 40.
+        let full = head + tail   // 53 chars
+        XCTAssertGreaterThan(full.count, Int(cols), "setup: must exceed row width")
+        let snap = try snapshot(from: full, cols: cols, rows: 5)
+        let matches = URLDetector.scan(snapshot: snap)
+        XCTAssertEqual(matches.count, 1, "wrapped URL should produce exactly one match")
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertEqual(m.url.absoluteString, full,
+                       "wrapped URL must reconstruct the full href, not stop at the wrap boundary")
+    }
+
+    /// A URL that happens to end exactly on the last column but is NOT
+    /// followed by URL-safe chars on the next row should NOT falsely join.
+    func test_scan_endsAtRightEdge_nextRowUnrelated_noJoin() throws {
+        let cols: UInt16 = 40
+        // 40-col URL exactly fills the first row, next row is prose.
+        let url = "https://zero.example/col0abcdefghijklmno"  // 40 chars
+        XCTAssertEqual(url.count, Int(cols), "setup: URL fills first row")
+        let line2 = " Next sentence unrelated."
+        let snap = try snapshot(from: url + line2, cols: cols, rows: 5)
+        let matches = URLDetector.scan(snapshot: snap)
+        XCTAssertEqual(matches.count, 1)
+        let m = try XCTUnwrap(matches.first)
+        // `" Next..."` starts with a space → no continuation. URL stays clean.
+        XCTAssertEqual(m.url.absoluteString, url)
+    }
+
+    /// Wrapped URL with trailing prose punctuation on the continuation row
+    /// should trim the punctuation before joining.
+    func test_scan_wrappedURL_trimsTrailingPunctuation() throws {
+        let cols: UInt16 = 40
+        let head = "https://long.example.com/some/path-to-a-"  // 40 chars
+        XCTAssertEqual(head.count, Int(cols))
+        let tail = "doc), rest"
+        let snap = try snapshot(from: head + tail, cols: cols, rows: 5)
+        let matches = URLDetector.scan(snapshot: snap)
+        XCTAssertGreaterThanOrEqual(matches.count, 1)
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertEqual(m.url.absoluteString, head + "doc",
+                       "wrapped URL must strip trailing `)` and `,` from continuation")
+    }
 }
 
 // Allow XCTAssertEqual on [URLMatch] for empty-result tests.
