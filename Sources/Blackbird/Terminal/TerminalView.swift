@@ -962,7 +962,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// Release our refcount, if any. Safe to call more than once — the
     /// `ownsSecureInput` flag prevents a double-release that would under-
     /// counts the global state and disable secure input system-wide.
-    private func disableSecureEventInputIfHeld() {
+    ///
+    /// Audit terminal-view-1 F16: macOS refcounts per-process so the OS
+    /// auto-releases on process exit, but `deinit` isn't guaranteed to
+    /// run during termination and a pending modal (e.g. the close-confirm
+    /// alert) can delay Disable past the next user action. Public so
+    /// AppDelegate can call it from `applicationWillTerminate` as
+    /// defence-in-depth.
+    public func disableSecureEventInputIfHeld() {
         guard ownsSecureInput else { return }
         DisableSecureEventInput()
         ownsSecureInput = false
@@ -995,7 +1002,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let newScale = size.width / bounds.width
         guard newScale > 0 else { return }
         if abs(newScale - renderer.atlas.scale) > 0.01 {
-            renderer.reconfigure(metrics: metrics, scale: newScale)
+            // Check the return value the same way syncFontFromPreferences
+            // does — a failed reconfigure (e.g. MTLDevice couldn't
+            // allocate a bigger atlas texture on a hot-unplugged
+            // display) leaves the renderer in its previous state and
+            // should be surfaced rather than silently eaten. Audit
+            // terminal-view-1 F7.
+            if !renderer.reconfigure(metrics: metrics, scale: newScale) {
+                #if DEBUG
+                Self.fpsLogger.log(
+                    "drawableSizeWillChange reconfigure failed, atlas stays at \(self.renderer.atlas.scale, privacy: .public)x"
+                )
+                #endif
+            }
         }
     }
 
@@ -1107,7 +1126,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // had grown past 0. Only matters if the view ever reuses sessions;
         // still belt-and-braces.
         lastBellCounter = 0
-        guard let session else { return }
+        // Clear the stale snapshot + find-match state BEFORE returning on
+        // a nil session — otherwise the previous session's grid lingers
+        // on screen (rendered from `currentSnapshot`) after `view.session =
+        // nil`, which is the most likely "stale snapshot" footgun. Audit
+        // terminal-view-1 F5.
+        guard let session else {
+            currentSnapshot = nil
+            findMatches.removeAll()
+            findCurrentIndex = 0
+            findQuery = ""
+            setNeedsDisplay(bounds)
+            return
+        }
 
         session.$snapshot.sink { [weak self] snap in
             guard let self, let snap else { return }

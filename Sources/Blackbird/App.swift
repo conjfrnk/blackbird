@@ -172,6 +172,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Release any still-held EnableSecureEventInput refcount before
+        // tearing down sessions. macOS auto-releases on process exit in
+        // the normal path, but a pending alert or slow shell teardown
+        // can keep the process alive past the point where deinit would
+        // run, and secure-input-mode stuck on is painful system-wide
+        // (other apps stop seeing keyboard events until it drains). Walk
+        // every terminal view and explicitly call the disable path.
+        // Audit terminal-view-1 F16.
+        for controller in controllers {
+            if let view = controller.terminalView {
+                view.disableSecureEventInputIfHeld()
+            }
+        }
         controllers.forEach { $0.terminateSessions() }
         controllers.removeAll()
     }
