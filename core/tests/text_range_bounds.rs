@@ -26,7 +26,18 @@ fn text_range_over_primed_grid(
         let out = if raw.is_null() {
             None
         } else {
-            let bytes = std::slice::from_raw_parts((*raw).bytes, (*raw).len);
+            // An empty payload surfaces as `(*raw).bytes == NULL, len == 0`
+            // (the null-ptr invariant from rust-core-4 F1 — so Swift/C
+            // consumers can treat `bytes == NULL ⇔ empty` as load-bearing).
+            // Rust's `slice::from_raw_parts` rejects a null pointer even
+            // when `len == 0` (hardened libstd precondition, debug-panic;
+            // UB in release). Branch on len so this helper tolerates the
+            // documented empty shape without tripping the precondition.
+            let bytes: &[u8] = if (*raw).len == 0 || (*raw).bytes.is_null() {
+                &[]
+            } else {
+                std::slice::from_raw_parts((*raw).bytes, (*raw).len)
+            };
             let s = std::str::from_utf8(bytes)
                 .map(|s| s.to_string())
                 .unwrap_or_default();
