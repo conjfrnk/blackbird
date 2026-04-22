@@ -402,6 +402,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func windowDidBecomeKey(_ notification: Notification) {
         session?.focusChanged(true)
         refreshTabBarIfStateChanged()
+        // Catch the native tab bar as early as possible on freshly-
+        // opened tab windows. The install path defers its first
+        // `hideNativeTabStrip` via `DispatchQueue.main.async` because
+        // `tabGroup` is nil pre-show; by the time this window becomes
+        // key, it has joined the group and AppKit has installed the
+        // native tab bar view — and we're still running on main, before
+        // the next runloop tick that would have hidden it. Hiding here
+        // removes the new-tab flash without depending on the scheduled
+        // async to fire first.
+        hideNativeTabStrip()
     }
 
     /// Forward window-focus loss. Paired with `windowDidBecomeKey` above.
@@ -521,21 +531,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // is better) and the NotificationCenter token. (main-window F2)
         teardownTitleObservers()
         guard let group = window?.tabGroup else { return }
+        // KVO callbacks fire on the thread that mutated the observed
+        // property. `NSWindowTabGroup` mutates on main, so these blocks
+        // run on main already — the `DispatchQueue.main.async` wrappers
+        // used to live here (and inside visObs below) were adding a
+        // runloop tick between AppKit showing the native strip and our
+        // walker hiding it. That one-tick gap is what the user sees as
+        // a flash when opening a new tab: on ⌘T, AppKit inserts the
+        // native tab bar + re-lays the window, our async ran on the
+        // next tick, and the native strip flickered in for ~8ms. Call
+        // the handlers synchronously so the strip is hidden in the
+        // same transaction as AppKit's insert.
         let winObs = group.observe(\.windows, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async {
-                self?.hideNativeTabStrip()
-                self?.refreshTabBar()
-            }
+            self?.hideNativeTabStrip()
+            self?.refreshTabBar()
         }
         let selObs = group.observe(\.selectedWindow, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.refreshTabBar() }
+            self?.refreshTabBar()
         }
         // AppKit re-shows the native strip every time a tab is added. KVO
         // on `isTabBarVisible` lets us flip it back off the moment it
         // happens, before the user ever sees a second tab UI.
         let visObs = group.observe(\.isTabBarVisible, options: [.new]) { [weak self] _, change in
             guard change.newValue == true else { return }
-            DispatchQueue.main.async { self?.hideNativeTabStrip() }
+            self?.hideNativeTabStrip()
         }
         tabGroupObservers = [winObs, selObs, visObs]
 
