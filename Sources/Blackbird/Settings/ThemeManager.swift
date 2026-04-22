@@ -32,16 +32,29 @@ public final class ThemeManager {
     }
     private var registrations: [ObjectIdentifier: Registration] = [:]
 
-    /// Cache of the inputs that actually determine the resolved palette.
+    /// Cache of the inputs `applyTheme(_:)` actually consumes.
     /// `objectWillChange` fires on every `@AppStorage` write (font-size
-    /// slider, cursor-blink toggle, OSC 52 toggle, …), but 90% of those
-    /// don't touch the palette. Compare the tuple on every would-be apply
-    /// and skip the 19× `bbterm.setColor` + renderer push when nothing
-    /// palette-relevant changed. (settings F1)
+    /// slider, OSC 52 toggle, …), but most of those don't change what
+    /// `applyTheme` pushes. Compare the tuple on every would-be apply and
+    /// skip the 19× `bbterm.setColor` + renderer push when nothing
+    /// relevant changed.
+    ///
+    /// Why each field is in the tuple:
+    /// - `themeRaw`, `themeModeRaw`, `appearanceIsDark` — drive which
+    ///   palette is resolved (the core palette swap).
+    /// - `translucency` — consumed by `applyTheme` for `clearColor`
+    ///   alpha, renderer bg opacity, and window blur radius. Must be in
+    ///   the tuple or translucency-slider changes wouldn't propagate
+    ///   live (the palette itself doesn't change when the slider moves).
+    /// - `cursorBlink`, `cursorShapeRaw` — also consumed by
+    ///   `applyTheme`; same liveness requirement. (settings F1)
     private struct PaletteInputs: Equatable {
         let themeRaw: String
         let themeModeRaw: String
         let appearanceIsDark: Bool
+        let translucency: Double
+        let cursorBlink: Bool
+        let cursorShapeRaw: String
     }
     private var lastPaletteInputs: PaletteInputs?
 
@@ -128,7 +141,10 @@ public final class ThemeManager {
         return PaletteInputs(
             themeRaw: p.themeRaw,
             themeModeRaw: p.themeModeRaw,
-            appearanceIsDark: isDark
+            appearanceIsDark: isDark,
+            translucency: p.translucency,
+            cursorBlink: p.cursorBlink,
+            cursorShapeRaw: p.cursorShapeRaw
         )
     }
 
