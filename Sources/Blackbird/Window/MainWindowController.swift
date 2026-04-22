@@ -42,15 +42,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// buttons, non-standard style mask). Audit titlebar-tabs F11.
     private func trafficLightsReservation() -> CGFloat {
         guard let window else { return Self.trafficLightsReservationFallback }
-        // `zoomButton` is the trailing button of the three-light cluster
-        // on standard windows. `superview` is the button container whose
-        // frame holds the full cluster — more accurate than summing the
-        // three individual buttons because Apple occasionally bakes
-        // inter-button padding inside the container's frame.
+        // `zoomButton.frame.maxX` is the trailing edge of the zoom
+        // button in its superview's coordinate space — which is the
+        // titlebar content view, with the button cluster anchored at
+        // x≈7. For a standard window the three buttons run x=7..67,
+        // so `zoom.frame.maxX` ≈ 67. Adding `trafficLightsTrailingPadding`
+        // (8pt) gives ~75, matching the historical constant.
+        //
+        // Earlier iteration queried `zoom.superview?.frame.maxX`, but
+        // the superview on modern macOS is the full titlebar container
+        // (the themeFrame / titlebarContainerView), whose frame spans
+        // the entire window width — yielding a reservation of ~window
+        // width and pushing every tab pill into a tiny sliver on the
+        // right. Stick with the button's OWN frame. Audit
+        // titlebar-tabs F11.
         let reservation: CGFloat
         if let zoom = window.standardWindowButton(.zoomButton) {
-            let maxX = zoom.superview?.frame.maxX ?? zoom.frame.maxX
-            reservation = maxX + Self.trafficLightsTrailingPadding
+            reservation = zoom.frame.maxX + Self.trafficLightsTrailingPadding
         } else {
             reservation = Self.trafficLightsReservationFallback
         }

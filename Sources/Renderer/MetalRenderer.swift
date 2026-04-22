@@ -812,32 +812,33 @@ public final class MetalRenderer {
             return
         }
 
-        // Acquire the drawable + render-pass descriptor BEFORE claiming
-        // a semaphore slot. `currentDrawable` can block for tens of ms
-        // under compositor pressure; if it fails (layer invisible,
-        // drawable pool exhausted) we bail early without having to
-        // balance a wait/signal pair. Audit metal-renderer F20.
+        lastFrameKey = frameKey
+
+        // Lock a slot BEFORE acquiring the drawable. Flipping this order
+        // (drawable-first) was attempted as metal-renderer F20 and
+        // caused full-screen programs (cmatrix, vim, nvim alt-screen)
+        // to glitch: waiting on the semaphore while holding a drawable
+        // starves `CAMetalLayer`'s 3-slot drawable pool, because the
+        // compositor can't hand out a new drawable for the next vsync
+        // while one is pinned to our CPU-side wait. The correct
+        // invariant is: drawable lifetime ≤ encode time, always
+        // shorter than a vsync interval. Audit metal-renderer F20
+        // reverted 2026-04-22.
+        inflightSemaphore.wait()
+        currentSlot = frameIndex
+        frameIndex = (frameIndex + 1) % 3
+        let slot = currentSlot
+
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
               let buffer = commandQueue.makeCommandBuffer(),
               let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
         else {
-            // No drawable or encoder — skip this frame. Do NOT update
-            // `lastFrameKey`: the FrameKey we computed hasn't actually
-            // been drawn, so the next paint must treat its state as new
-            // and re-encode rather than frame-skipping.
+            // Release the slot we just claimed — we're abandoning this
+            // frame without encoding, so the GPU never reads the buffer.
+            inflightSemaphore.signal()
             return
         }
-        lastFrameKey = frameKey
-
-        // Lock a slot before we write to its instance buffer. If all three
-        // slots are in flight on the GPU, wait — the CPU-side write below
-        // would otherwise race the GPU's vertex-fetch on a .storageModeShared
-        // buffer. Advance frameIndex so the next frame picks the next slot.
-        inflightSemaphore.wait()
-        currentSlot = frameIndex
-        frameIndex = (frameIndex + 1) % 3
-        let slot = currentSlot
 
         // Signal the slot free when the GPU finishes reading it. Must be
         // registered before `commit()` so there's no race with an immediate
