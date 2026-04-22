@@ -372,11 +372,64 @@ final class KittyKeyboardProtocolTests: XCTestCase {
                        csiU(13, mod: 2))
     }
 
-    func test_flag8_reportAllKeysAsEsc_doesNotAlterEncoding() {
+    // MARK: - Flag 8: report all keys as CSI u
+
+    func test_flag8_plainLetter_emitsCsiU() {
+        // Plain 'a' press under flag 8: ESC[97u instead of 0x61. Breaks
+        // the default shell contract by design — only TUIs that opt in
+        // see it.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc]
+        XCTAssertEqual(enc.encode(chars: "a", modifiers: [], mode: mode),
+                       csiU(97, mod: 1))
+    }
+
+    func test_flag8_uppercaseLetter_lowercasesBaseEmitsShiftMod() {
+        // Shift+A keyDown should emit ESC[97;2u — Kitty lowercases the
+        // base codepoint so Shift is reported through the mod field.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc]
+        XCTAssertEqual(enc.encode(chars: "A", modifiers: [.shift], mode: mode),
+                       csiU(97, mod: 2))
+    }
+
+    func test_flag8_symbolPassesThrough() {
+        // '/' isn't a letter; scalar value passes through unchanged.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc]
+        XCTAssertEqual(enc.encode(chars: "/", modifiers: [], mode: mode),
+                       csiU(47, mod: 1))
+    }
+
+    func test_flag8_plusFlag1_disambiguationStillWins() {
+        // Flag 8 + Flag 1 together: Shift+Enter must still hit the
+        // disambiguation path with codepoint 13, not the flag-8 path.
         let enc = KeyEncoder()
         let mode: BBTermMode = [.disambiguateEscCodes, .reportAllKeysAsEsc]
-        XCTAssertEqual(enc.encode(chars: "a", modifiers: [], mode: mode),
-                       Data([0x61]))
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
+                       csiU(13, mod: 2))
+    }
+
+    func test_flag8_ctrlC_emitsCsiU_notSigIntByte() {
+        // Under flag 8 alone, Ctrl+C emits ESC[99;5u rather than the
+        // legacy 0x03. SIGINT-at-the-shell is the trade-off the TUI
+        // opted into by pushing flag 8 — users who want both the
+        // progressive protocol AND default shell behaviour combine
+        // flag 1 + application-side bindings.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc]
+        XCTAssertEqual(enc.encode(chars: "c", modifiers: [.control], mode: mode),
+                       csiU(99, mod: 5))
+    }
+
+    func test_flag8_plusFlag2_releaseEmitsCsiU() {
+        // Plain 'a' release under flag 2+8: ESC[97;1:3u.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportEventTypes]
+        XCTAssertEqual(
+            enc.encode(chars: "a", modifiers: [], mode: mode, eventType: .release),
+            Data("\u{1B}[97;1:3u".utf8)
+        )
     }
 
     func test_flag16_reportAssociatedText_doesNotAlterEncoding() {

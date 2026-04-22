@@ -85,6 +85,7 @@ public final class KeyEncoder {
         if modifiers.contains(.command) { return Data() }
 
         let kitty = mode.contains(.disambiguateEscCodes)
+        let allKeys = mode.contains(.reportAllKeysAsEsc)
         let nonCmdMods = modifiers.subtracting(.command)
         // In Native-Option mode the shell should not see Option at all —
         // Option-e produces 'é' and Option+Enter produces a plain CR. Stripping
@@ -98,6 +99,21 @@ public final class KeyEncoder {
         // distinguish Shift+Enter from plain Enter, Option+Esc from plain
         // Esc (which previously leaked as two raw ESCs), etc.
         if kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) {
+            return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
+        }
+
+        // Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u
+        // including plain unmodified keys. Breaks the default shell
+        // contract by design — only TUIs that asked for it see it.
+        // Ctrl+letter still routes through the collider branch below so
+        // the colliders get lowercase-normalized codepoints.
+        if allKeys, let scalar = chars.unicodeScalars.first,
+           ctrlColliderCodepoint(for: scalar) == nil || !modifiers.contains(.control) {
+            // Kitty's "all keys as CSI u" uses the lowercase of a letter
+            // as the base codepoint; Shift is reported via the mod
+            // param. For non-letter scalars the scalar value is used
+            // directly.
+            let cp = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
             return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
         }
 
@@ -172,6 +188,23 @@ public final class KeyEncoder {
         case "[":      return 91
         default:       return nil
         }
+    }
+
+    /// Codepoint to emit under Kitty flag 8 (reportAllKeysAsEsc) for a
+    /// given scalar + shift state. Letters are always lowercased so
+    /// Shift comes through the modifier field; other scalars pass
+    /// through unchanged.
+    private func kittyAllKeysCodepoint(
+        for scalar: UnicodeScalar,
+        shifted: Bool
+    ) -> UInt32 {
+        if scalar.value >= 0x41 && scalar.value <= 0x5A {
+            // Uppercase A-Z → lowercase; Shift is already in the
+            // modifier bits so the CSI-u consumer re-shifts as needed.
+            return scalar.value + 0x20
+        }
+        _ = shifted
+        return scalar.value
     }
 
     /// `CSI <codepoint> ; <modParam>[:<eventType>] u`. Collapses the
