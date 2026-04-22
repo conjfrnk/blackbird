@@ -67,18 +67,25 @@ final class GlyphAtlasTests: XCTestCase {
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128))
 
-        // Narrow glyph first — uvSize.x should equal one slot.
+        // Narrow glyph first — uvSize.x covers one slot minus one
+        // texel of horizontal inset (half from each side) to prevent
+        // linear-sampler bleed into neighbour slots. See shaders F4.
         let narrow = try XCTUnwrap(atlas.lookupOrInsert(scalar: UnicodeScalar("A")))
         XCTAssertFalse(narrow.isWide)
 
-        // Wide glyph next — uvSize.x should be TWICE narrow's.
+        // Wide glyph next — uvSize.x covers two slots minus the SAME
+        // one-texel inset (not 2x the narrow inset), so the relation
+        // is wide = narrow + 1 slot-width, not wide = 2 * narrow.
         let wide = try XCTUnwrap(atlas.lookupOrInsert(scalar: UnicodeScalar(0x65E5)!, wide: true))
         XCTAssertTrue(wide.isWide)
+        let oneSlotFrac = Float(atlas.cellPxWidth) / Float(atlas.texture.width)
         XCTAssertEqual(
-            wide.uvSize.x, narrow.uvSize.x * 2, accuracy: 1e-5,
-            "wide entry must span two slot widths"
+            wide.uvSize.x, narrow.uvSize.x + oneSlotFrac, accuracy: 1e-5,
+            "wide entry must span two slot widths (one-texel inset applied once, not twice)"
         )
-        // But y-extent unchanged (wide glyphs still fit in one row of slots).
+        // But y-extent unchanged (wide glyphs still fit in one row of slots;
+        // inset is horizontal-only — vertical bleed isn't observable
+        // because glyph descent/ascent is empty).
         XCTAssertEqual(
             wide.uvSize.y, narrow.uvSize.y, accuracy: 1e-5,
             "wide entry must not span rows"
@@ -152,10 +159,119 @@ final class GlyphAtlasTests: XCTestCase {
             wide.uvOrigin.y, cellYFrac, accuracy: 1e-5,
             "wide glyph should have wrapped to row 1 instead of splitting"
         )
+        // UV origin X is inset by half a texel so the linear sampler
+        // can't bleed into the slot to the left (audit shaders F4).
+        // At column 0 of row 1 the "inset-corrected zero" is 0.5/texW.
+        let halfTexelX = 0.5 / Float(atlas.texture.width)
         XCTAssertEqual(
-            wide.uvOrigin.x, 0, accuracy: 1e-5,
-            "wide glyph should start at column 0 of the new row"
+            wide.uvOrigin.x, halfTexelX, accuracy: 1e-5,
+            "wide glyph should start at column 0 of the new row (with half-texel inset)"
         )
+    }
+
+    /// Regression for glyph-atlas F4.
+    ///
+    /// The wide-alignment row-skip previously leaked orphan single-slot
+    /// holes that were dead for the atlas's lifetime. The fix parks
+    /// those orphans on a free list and hands them to subsequent
+    /// narrow inserts. Here we force the row-end skip, then insert a
+    /// narrow glyph and verify it lands on the orphaned column (col 2
+    /// of row 0) instead of continuing after the wide glyph.
+    func test_wideRowSkip_reclaimedByNextNarrowInsert() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        // Capacity 9 → slotCols = 3. Insert two narrow so nextSlot = 2
+        // (col 2, the trailing column of row 0). Asking for a wide
+        // glyph there forces the row-end skip: the wide lands at slot
+        // 3 (row 1, col 0), and slot 2 becomes an orphan.
+        let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 9))
+        _ = atlas.lookupOrInsert(scalar: UnicodeScalar("A"))
+        _ = atlas.lookupOrInsert(scalar: UnicodeScalar("B"))
+        _ = atlas.lookupOrInsert(scalar: UnicodeScalar(0x65E5)!, wide: true)
+
+        // Next narrow must land on the parked orphan (row 0, col 2).
+        let reclaimed = try XCTUnwrap(atlas.lookupOrInsert(scalar: UnicodeScalar("C")))
+        // Expected UV origin is col 2 of row 0. With the F4 UV-inset
+        // fix applied, the X coordinate is the slot's left edge plus
+        // half a texel (so linear filtering can't bleed into the
+        // neighbour slot) — use a generous tolerance.
+        let twoColsFrac = Float(2 * atlas.cellPxWidth) / Float(atlas.texture.width)
+        XCTAssertEqual(
+            reclaimed.uvOrigin.x, twoColsFrac, accuracy: 1.0 / Float(atlas.texture.width),
+            "orphan slot from wide-skip was not reclaimed"
+        )
+        XCTAssertEqual(
+            reclaimed.uvOrigin.y, 0, accuracy: 1e-5,
+            "reclaimed slot must stay on row 0 (where the orphan lives)"
+        )
+    }
+
+    /// Regression for glyph-atlas F5.
+    ///
+    /// Pins the current (deliberately limited) behaviour for
+    /// grapheme-cluster shaping: the atlas keys and rasterises on a
+    /// *single* Unicode scalar, so combining marks, ZWJ sequences,
+    /// and regional-indicator flag pairs render as isolated
+    /// codepoints rather than composed graphemes. This is a known
+    /// scope limitation (audit defers the multi-scalar cell as a
+    /// separate feature); the test exists so the behaviour can't
+    /// silently change without somebody updating this doc-comment.
+    func test_combiningMark_isolatedScalarRendersAlone() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 64))
+
+        // U+0301 COMBINING ACUTE ACCENT. In a grapheme-cluster-aware
+        // renderer this would compose with a preceding "e" to draw
+        // "é"; the current atlas simply rasterises the accent on its
+        // own, producing a standalone combining mark glyph. We don't
+        // assert a visual property here — just that the insert
+        // succeeds and gives a distinct entry from "e".
+        let combining = try XCTUnwrap(UnicodeScalar(0x0301))
+        let e = UnicodeScalar("e")
+
+        let entryE = try XCTUnwrap(atlas.lookupOrInsert(scalar: e))
+        let entryCombining = try XCTUnwrap(atlas.lookupOrInsert(scalar: combining))
+
+        // The atlas keys on scalar.value alone (no grapheme cluster
+        // awareness), so "e" and U+0301 occupy distinct slots.
+        XCTAssertNotEqual(
+            entryE.uvOrigin, entryCombining.uvOrigin,
+            "e and U+0301 must occupy distinct atlas slots (no grapheme composition)"
+        )
+    }
+
+    /// Regression for glyph-atlas F6.
+    ///
+    /// Nerd-font private-use-area icons can ship with an advance
+    /// wider than the cell. The rasterise path detects the overshoot
+    /// and compresses X so the icon fits the slot without clipping.
+    /// We can't verify against a real patched font in a unit test
+    /// (the test host's font stack has no Nerd Font), but we can
+    /// confirm the PUA-range code path doesn't crash and the
+    /// returned entry still has valid UVs.
+    func test_nerdFontPuaRange_insertsWithoutCrash() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 64))
+
+        // U+E0B0 — Powerline right-pointing arrow. A plain system
+        // font won't have this glyph, but CoreText returns the
+        // "missing glyph" box, which still rasterises successfully.
+        let powerlineArrow = try XCTUnwrap(UnicodeScalar(0xE0B0))
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: powerlineArrow, wide: false))
+        XCTAssertGreaterThan(entry.uvSize.x, 0)
+        XCTAssertGreaterThan(entry.uvSize.y, 0)
+        XCTAssertFalse(entry.isWide)
     }
 
     func test_insertGlyphProducesNonZeroPixels() throws {

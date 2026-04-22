@@ -85,6 +85,18 @@ fragment float4 fragment_cell(
     VertexOut in [[stage_in]],
     texture2d<float> atlas [[texture(0)]]
 ) {
+    // Colour-space note (audit shaders F1 / metal-renderer F9 / glyph-atlas F10):
+    // every colour flowing into this shader — fg, bg, accent, the
+    // selection tint, and underline unpacks below — is sRGB-encoded as
+    // a normalised float ∈ [0,1]. The render target is `.bgra8Unorm`
+    // (NOT `_srgb`) so `mix()` and the output-merger blend op run in
+    // sRGB-encoded numeric space rather than linear light. That is a
+    // deliberate choice matching Terminal.app / Alacritty / iTerm2's
+    // historical behaviour; the CAMetalLayer colorspace is pinned to
+    // sRGB on the window side so Display P3 panels don't reinterpret
+    // the bytes in wider primaries. Gamma-correct blending would
+    // require switching to `.bgra8Unorm_srgb` and uploading linear
+    // floats — deferred as a future user toggle.
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     float coverage = atlas.sample(s, in.uv).r;
     // Blend fg glyph over bg. coverage = 0 → pure bg, coverage = 1 → pure fg.
@@ -147,14 +159,30 @@ fragment float4 fragment_cell(
                 return ulColor;
             }
         }
-        // Dotted — every other pixel at the baseline, so the band reads
-        // as 1/2-duty dots regardless of cell width.
+        // Dotted — every other *point* at the baseline, so the band
+        // reads as 1/2-duty dots. `localPx` is in points, so at 2x
+        // Retina each point is 2 pixels; dots are therefore 2-pixel
+        // squares on Retina and 1-pixel on 1x displays. That's a
+        // DPI-linked density — bake the behaviour into the comment so
+        // a future "why is this fuzzy at 1x" bug report points here.
+        //
+        // Uses `floor(x)` + integer modulo instead of a raw
+        // `(uint)x` cast. The cast is defined for positive floats
+        // but `x` arrives pixel-centered at half-point offsets
+        // (e.g. 7.5 on the right edge of point 7), so the cast
+        // collapses a full-point phase into the same bucket. `floor`
+        // makes the phase math explicit: a 1/2-duty dot pattern
+        // whose boundaries land on integer point grid lines.
+        // Audit shaders F3.
         if ((flags & BB_ATTR_UNDERLINE_DOTTED) != 0u && distFromBottom <= 1.5) {
-            if (((uint)x & 1u) == 0u) return ulColor;
+            uint phase = uint(floor(x));
+            if ((phase & 1u) == 0u) return ulColor;
         }
-        // Dashed — 2-pixel on, 2-pixel off.
+        // Dashed — 2 points on, 2 points off (same DPI caveat as
+        // dotted: doubles to 4-pixel runs on Retina, 2-pixel on 1x).
         if ((flags & BB_ATTR_UNDERLINE_DASHED) != 0u && distFromBottom <= 1.5) {
-            if (((uint)x % 4u) < 2u) return ulColor;
+            uint phase = uint(floor(x));
+            if ((phase % 4u) < 2u) return ulColor;
         }
     }
 

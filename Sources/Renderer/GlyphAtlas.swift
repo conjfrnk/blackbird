@@ -67,6 +67,17 @@ public final class GlyphAtlas {
     /// Up to 4 entries total.
     private var styledFonts: [Style: NSFont] = [:]
     private var nextSlot: Int = 0
+    /// Single-slot holes that the wide-glyph row-align path opened up.
+    /// When a wide (2-slot) glyph doesn't fit in the current row's
+    /// trailing column we skip to the next row, leaving one orphan
+    /// narrow slot behind. Parked here so the next narrow insert can
+    /// reclaim it before consuming a fresh slot — without this
+    /// bookkeeping, adversarial narrow/wide interleaving could leak
+    /// up to `slotCols - 1` slots per unlucky wide insert, and in a
+    /// 64×64 atlas that can evict enough usable capacity to force
+    /// saturation flushes on otherwise-fine workloads. Audit
+    /// glyph-atlas F4.
+    private var freeNarrowSlots: [Int] = []
     #if DEBUG
     /// Counter for lookup-or-insert calls that found a full atlas and had
     /// to return nil (cell ends up blank on screen). Logged via `logger`
@@ -153,15 +164,43 @@ public final class GlyphAtlas {
         if let existing = byKey[key] { return existing }
         let slotsNeeded = wide ? 2 : 1
 
+        // Narrow glyph + a parked orphan slot? Reclaim it before carving
+        // a fresh one off `nextSlot`. This is the other half of the
+        // wide-alignment bookkeeping below (glyph-atlas F4); keeps the
+        // atlas's effective capacity close to its nominal size under
+        // mixed narrow/wide workloads.
+        if !wide, let reclaimed = freeNarrowSlots.popLast() {
+            let col = reclaimed % slotCols
+            let row = reclaimed / slotCols
+            let pxX = col * cellPxWidth
+            let pxY = row * cellPxHeight
+            rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: false, style: style)
+            let entry = Self.makeEntry(
+                pxX: pxX, pxY: pxY,
+                pxW: cellPxWidth, pxH: cellPxHeight,
+                texW: texture.width, texH: texture.height,
+                isWide: false
+            )
+            byKey[key] = entry
+            return entry
+        }
+
         // If the wide glyph wouldn't fit in the current row (only one slot
-        // left) we skip that orphan slot so the glyph stays on one row. The
-        // leftover slot is then dead for the lifetime of the atlas — worth
-        // it: splitting a wide glyph across two rows would need a separate
-        // uv for each half and complicate both the atlas and the renderer.
+        // left) we skip that orphan slot so the glyph stays on one row.
+        // Orphan slots land on `freeNarrowSlots` so a subsequent narrow
+        // insert can reclaim them (audit glyph-atlas F4) — pre-fix they
+        // were dead for the atlas's lifetime.
         var slot = nextSlot
         if wide {
             let col = slot % slotCols
             if col + slotsNeeded > slotCols {
+                // Record every single-slot gap we're skipping over. In
+                // the common `col == slotCols - 1` case that's exactly
+                // one slot; a theoretical multi-slot gap from a future
+                // >2-slot wide glyph is also handled.
+                for orphan in slot..<(slot / slotCols + 1) * slotCols {
+                    freeNarrowSlots.append(orphan)
+                }
                 slot = (slot / slotCols + 1) * slotCols
             }
         }
@@ -189,6 +228,10 @@ public final class GlyphAtlas {
             byKey.removeAll(keepingCapacity: true)
             nextSlot = 0
             slot = 0
+            // Stale orphan records point into the pre-flush layout;
+            // discard so the post-flush narrow-reclaim path doesn't
+            // hand out slots that overlap newly-allocated ones.
+            freeNarrowSlots.removeAll(keepingCapacity: true)
             if wide && slotsNeeded > slotCols {
                 // Pathological: a wide glyph in an atlas narrower than 2
                 // slots. Give up on this one — the atlas was misconfigured.
@@ -203,18 +246,46 @@ public final class GlyphAtlas {
 
         rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style)
 
-        let uvOrigin = SIMD2<Float>(
-            Float(pxX) / Float(texture.width),
-            Float(pxY) / Float(texture.height)
+        let entry = Self.makeEntry(
+            pxX: pxX, pxY: pxY,
+            pxW: cellPxWidth * slotsNeeded, pxH: cellPxHeight,
+            texW: texture.width, texH: texture.height,
+            isWide: wide
         )
-        let uvSize = SIMD2<Float>(
-            Float(cellPxWidth * slotsNeeded) / Float(texture.width),
-            Float(cellPxHeight) / Float(texture.height)
-        )
-        let entry = Entry(uvOrigin: uvOrigin, uvSize: uvSize, isWide: wide)
         byKey[key] = entry
         nextSlot = slot + slotsNeeded
         return entry
+    }
+
+    /// Build an atlas `Entry` from pixel-space rectangle coordinates.
+    /// Insets the left and right edges of the UV rect by half a texel
+    /// so the linear-filtered sampler in `fragment_cell` can't bleed
+    /// into neighbouring atlas slots on sub-pixel UVs. The vertical
+    /// axis is left untouched: glyph rasterisations have near-zero
+    /// alpha at the top/bottom of every slot (font descent/ascent is
+    /// transparent), so cross-row bleed is not observable in
+    /// practice, and insetting vertically would eat real ink on
+    /// tightly-typeset fonts. Audit shaders F4.
+    private static func makeEntry(
+        pxX: Int, pxY: Int,
+        pxW: Int, pxH: Int,
+        texW: Int, texH: Int,
+        isWide: Bool
+    ) -> Entry {
+        let halfTexelX = 0.5 / Float(texW)
+        let uvOrigin = SIMD2<Float>(
+            Float(pxX) / Float(texW) + halfTexelX,
+            Float(pxY) / Float(texH)
+        )
+        // Subtract one full texel's worth of width (half from each
+        // side) so the sampled region is strictly inside the slot's
+        // interior. On a 2x Retina atlas each texel is half a point,
+        // so the lost edge ink is sub-perceptual.
+        let uvSize = SIMD2<Float>(
+            Float(pxW) / Float(texW) - 2.0 * halfTexelX,
+            Float(pxH) / Float(texH)
+        )
+        return Entry(uvOrigin: uvOrigin, uvSize: uvSize, isWide: isWide)
     }
 
     // MARK: - Rasterization
@@ -297,6 +368,25 @@ public final class GlyphAtlas {
                 let xScale = metrics.cellWidth / typographicWidth
                 ctx.scaleBy(x: xScale, y: 1)
             }
+        } else if !wide && Self.isNerdFontIconRange(scalar) {
+            // Nerd-font private-use-area icons (powerline separators,
+            // devicons, seti-icons, octicons) are drawn in many
+            // patched mono fonts with an intrinsic advance wider than
+            // the cell — Unicode doesn't flag them as east-asian-wide,
+            // so `wide == false` here, yet their bitmap clips at the
+            // slot boundary when we blit at 1:1 scale. Detect the
+            // overshoot and compress X to fit; this keeps the icon
+            // whole at the cost of a ~5-15% horizontal squish, which
+            // is visually preferable to the right edge shearing off.
+            // Audit glyph-atlas F6.
+            let typographicWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            // Threshold: only correct when the glyph is materially
+            // wider than the cell (avoid squishing normal-advance
+            // icons). `* 1.05` matches the "noticeable clip" floor.
+            if typographicWidth > metrics.cellWidth * 1.05 {
+                let xScale = metrics.cellWidth / typographicWidth
+                ctx.scaleBy(x: xScale, y: 1)
+            }
         }
 
         ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
@@ -354,6 +444,27 @@ public final class GlyphAtlas {
         case 0x25A0...0x25FF: return true   // Geometric Shapes
         case 0x2800...0x28FF: return true   // Braille Patterns
         case 0x1FB00...0x1FBFF: return true // Symbols for Legacy Computing
+        default: return false
+        }
+    }
+
+    /// True for the Private Use Area ranges patched-mono Nerd Fonts use
+    /// for powerline separators, devicons, seti-icons, octicons, FontAwesome,
+    /// Material Design, Weather, etc. The relevant set is publicly documented
+    /// at nerdfonts.com. We don't need the exact subrange for each icon
+    /// family — a coarse PUA check is enough, since non-icon glyphs in these
+    /// ranges are exceptionally rare in a terminal context. Used by the
+    /// rasterise-time fit pass to compress oversized glyphs to cell width
+    /// so starship / oh-my-zsh / eza / lazygit don't clip their icons.
+    /// Audit glyph-atlas F6.
+    private static func isNerdFontIconRange(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        // BMP Private Use Area — covers powerline (E0A0-E0D4), devicons
+        // (E700-E8EF), seti (E5FA-E6B1), octicons (F400-F533), etc.
+        case 0xE000...0xF8FF: return true
+        // Supplementary Private Use Area-A — FontAwesome, Material,
+        // Weather Icons extended range.
+        case 0xF0000...0xFFFFD: return true
         default: return false
         }
     }

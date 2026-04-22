@@ -29,6 +29,25 @@ public protocol GPUDeviceProperties: AnyObject {
 ///    default. We don't try to second-guess beyond step 1 — a Mac
 ///    Pro / iMac Pro may have multiple discrete GPUs and the system
 ///    default is correct there.
+///
+/// **Platform behaviour notes** (audit glyph-atlas F11):
+///  - Apple Silicon: reports the SoC GPU as non-low-power, so step 1
+///    yields nil and we land on `MTLCreateSystemDefaultDevice()`,
+///    which is the same device. Expected.
+///  - Intel MacBook Pro with discrete Radeon: picks the Iris / UHD
+///    integrated GPU for lower battery draw.
+///  - Mac Pro / iMac Pro with multiple dGPUs and no iGPU: step 1
+///    yields nil; fallback to the system default, which Apple picks
+///    per the display the window is on. This is correct for
+///    rendering but contradicts the "prefer integrated" statement —
+///    the contradiction is intentional (no iGPU to prefer).
+///  - External GPU (`isRemovable == true`): always skipped, regardless
+///    of low-power status, so an eGPU hot-unplug during a terminal
+///    session cannot invalidate our `MTLDevice`. A future "pick GPU
+///    in Settings" feature that honours user overrides would need to
+///    register for `MTLDeviceRemovalRequestedNotification` +
+///    `MTLDeviceWasRemovedNotification` and tear down / rebuild the
+///    renderer; for now the skip keeps us safe without wiring.
 public func chooseGPU<D: GPUDeviceProperties>(from devices: [D]) -> D? {
     devices.first(where: { $0.isLowPower && !$0.isRemovable })
 }

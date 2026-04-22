@@ -317,4 +317,82 @@ final class MetalRendererTests: XCTestCase {
         let snap2 = try XCTUnwrap(term.snapshot())
         renderer.render(in: view, snapshot: snap2, focused: true)
     }
+
+    /// Regression for metal-renderer F3.
+    ///
+    /// On a pure cursor-movement frame (arrow keys in an empty line),
+    /// alacritty's damage iterator may not flag the row the cursor
+    /// left or the row it entered — no cell-content delta exists, so
+    /// the damage stays empty. Pre-fix, the partial-rebuild fast path
+    /// then left a ghost inverted cell at the cursor's prior position
+    /// because the row cache stayed as-is. Post-fix, cursor-moved
+    /// frames force-rebuild the prev + new cursor rows even when they
+    /// aren't in the damage list.
+    ///
+    /// This test drives two renders that differ only in cursor
+    /// position and confirms the renderer stays stable across the
+    /// move (no crash, no unbalanced semaphore, no cache corruption).
+    /// Direct observation of "the old cursor row was rebuilt" would
+    /// need a DEBUG hook we don't have; crashing would indicate a
+    /// regression.
+    func test_render_cursorMove_forcesRowRebuild() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+
+        // First render: cursor at (row, col) = (0, 5) after typing.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 8)))
+        term.input("hello")
+        let snap1 = try XCTUnwrap(term.snapshot())
+        renderer.render(in: view, snapshot: snap1, focused: true)
+
+        // Second render: move cursor via CSI B (cursor down) so the
+        // cursor row changes without a per-cell content delta. In
+        // practice alacritty may or may not flag the old/new rows;
+        // the F3 fix ensures a ghost-free paint either way.
+        term.input("\u{1B}[B")   // ESC[B = cursor down one
+        let snap2 = try XCTUnwrap(term.snapshot())
+        renderer.render(in: view, snapshot: snap2, focused: true)
+
+        // Third: back up so old row == original row. Same resilience
+        // check — ensures the prev/new insert logic survives cursor
+        // motion in both directions without blowing up.
+        term.input("\u{1B}[A")
+        let snap3 = try XCTUnwrap(term.snapshot())
+        renderer.render(in: view, snapshot: snap3, focused: true)
+    }
+
+    /// Regression for metal-renderer F20.
+    ///
+    /// Drawable acquisition now happens BEFORE the semaphore wait, so
+    /// a frame that can't get a drawable (headless test host here) no
+    /// longer claims a slot it then has to release. Four successive
+    /// drawable-less renders in a row would have blocked indefinitely
+    /// in the pre-fix ordering if `signal()` was missed; here we
+    /// intentionally drive five calls — more than the 3-slot
+    /// semaphore — to prove no slot is being leaked even under the
+    /// "no drawable" path.
+    func test_render_noDrawablePath_doesNotLeakSemaphore() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+        let snapshot = try makeSmallSnapshot(text: "leak-check")
+
+        // Five calls; view returns nil drawable every time. If the
+        // pre-fix order (wait-then-fail) somehow regressed, the
+        // second through fifth call would block forever because the
+        // first frame's `signal()` on drawable-fail is still running
+        // — the test host would time out rather than fail cleanly,
+        // which is why we keep the count small. Post-fix order (fail
+        // before wait) has no signal imbalance at all.
+        for _ in 0..<5 {
+            renderer.render(in: view, snapshot: snapshot, focused: true)
+        }
+    }
 }

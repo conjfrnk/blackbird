@@ -60,8 +60,19 @@ struct CellInstance {
     var quadSizePx: SIMD2<Float>  //  8 bytes
     var uvOrigin: SIMD2<Float>    //  8 bytes — glyph UV in atlas
     var uvSize: SIMD2<Float>      //  8 bytes
-    var fgColor: SIMD4<Float>     // 16 bytes — RGBA foreground
-    var bgColor: SIMD4<Float>     // 16 bytes — RGBA background
+    /// **Colour space:** sRGB-encoded, alpha linear. The bytes are uploaded
+    /// straight into a `.bgra8Unorm` render target (not `_srgb`) so the
+    /// fragment shader's `mix()` / premultiplied-alpha blend happens in
+    /// sRGB-encoded numeric space. Mathematically this produces slightly
+    /// heavier glyph edges than a linear-light blend — matches
+    /// Terminal.app / Alacritty / iTerm2's behaviour. The CAMetalLayer
+    /// colorspace is pinned to sRGB so Display P3 panels don't
+    /// reinterpret the bytes in wider primaries. If a future change
+    /// flips the pipeline to `_srgb` + linear shader math, callers must
+    /// upload linear floats here. Audit glyph-atlas F10 / metal-renderer
+    /// F9 / shaders F1.
+    var fgColor: SIMD4<Float>     // 16 bytes — sRGB-encoded RGB + linear A
+    var bgColor: SIMD4<Float>     // 16 bytes — sRGB-encoded RGB + linear A
     /// Attribute bitmask + packed underline-color. See struct header.
     var attrs: SIMD4<UInt32>      // 16 bytes
 }

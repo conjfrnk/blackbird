@@ -280,6 +280,23 @@ public final class MetalRenderer {
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = vertexFn
         desc.fragmentFunction = fragmentFn
+        // `.bgra8Unorm` (NOT `_srgb`) is a deliberate choice: every color
+        // flowing through the shader — theme fg/bg, accent, selection
+        // tint, cursor — is uploaded as sRGB-encoded u8→f32 (see
+        // `rgbToSIMD`) and blended numerically in that space. The
+        // CAMetalLayer colorspace is pinned to sRGB on the window side
+        // (TerminalView:348-359), which tells macOS's compositor to
+        // interpret the written bytes as sRGB-encoded without an extra
+        // decode pass. Net result matches Terminal.app / Alacritty /
+        // iTerm2 (pre-rework) — a mathematically-approximate blend that
+        // is mildly gamma-incorrect at anti-aliased glyph edges but
+        // perceptually consistent across themes and displays.
+        //
+        // Switching to `.bgra8Unorm_srgb` with linear shader math would
+        // produce correct-by-physics blending (heavier-looking glyph
+        // edges on light-on-dark text) but would require updating every
+        // upload path to write linear floats; deferred as a future
+        // toggle. Audit metal-renderer F9 / shaders F1 / glyph-atlas F10.
         desc.colorAttachments[0].pixelFormat = .bgra8Unorm
         desc.colorAttachments[0].isBlendingEnabled = true
         desc.colorAttachments[0].rgbBlendOperation = .add
@@ -377,22 +394,29 @@ public final class MetalRenderer {
         self.rowInstanceCache = []
     }
 
-    /// Rebuild instances for a single visible row into an output Vec,
-    /// consulting snapshot cells, selection, hover, and cursor-inversion
-    /// state. Pure — does not touch GPU buffers or cache state. Called by
-    /// `buildInstances` for every row on a full rebuild, or only for the
-    /// damaged rows on a partial rebuild.
+    /// Rebuild instances for a single visible row into `out`, consulting
+    /// snapshot cells, selection, hover, and cursor-inversion state. Pure
+    /// apart from the output parameter — does not touch GPU buffers or
+    /// cache state. Called by `buildInstances` for every row on a full
+    /// rebuild, or only for the damaged rows on a partial rebuild.
     ///
-    /// Returns a `[CellInstance]` because rows emit a variable count of
-    /// instances (blank cells contribute nothing; wide-glyph rows emit
-    /// fewer than cols; selection/link-hover may push to 1-per-cell). The
-    /// caller concatenates these into the GPU buffer each frame.
+    /// Appends to `out` in place (pre-cleared by the caller with
+    /// `removeAll(keepingCapacity: true)`) instead of returning a fresh
+    /// `[CellInstance]`: rows emit a variable count of instances (blank
+    /// cells contribute nothing; wide-glyph rows emit fewer than cols;
+    /// selection/link-hover may push to 1-per-cell), and on a partial
+    /// rebuild the caller would otherwise free the prior array's storage
+    /// and allocate a new one each frame. Keeping the backing buffer
+    /// eliminates up to 80 heap alloc/free pairs per full rebuild, which
+    /// at 120 Hz is ~9 600 heap operations/sec off the CPU. Audit
+    /// metal-renderer F5.
     private func buildRowInstances(
         snapshot: BBSnapshot,
         row: Int,
         isSelected: (Int32, Int) -> Bool,
-        blockCursorCell: (row: Int, col: Int)?
-    ) -> [CellInstance] {
+        blockCursorCell: (row: Int, col: Int)?,
+        into out: inout [CellInstance]
+    ) {
         let selectionTint = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)
         let cellW = Float(metrics.cellWidth)
         let cellH = Float(metrics.cellHeight)
@@ -400,8 +424,8 @@ public final class MetalRenderer {
         let cols = snapshot.cols
         let hoveredID = hoveredLinkID
         // Upper bound: every cell emits at most one instance. Reserve so
-        // the common case avoids growing the Vec.
-        var out: [CellInstance] = []
+        // the common case avoids growing the array — a no-op when `out`
+        // already has >= cols capacity from the prior frame.
         out.reserveCapacity(cols)
 
         for col in 0..<cols {
@@ -587,7 +611,6 @@ public final class MetalRenderer {
                 ))
             }
         }
-        return out
     }
 
     /// Orchestrates per-row rebuild + GPU buffer flatten using the
@@ -622,22 +645,31 @@ public final class MetalRenderer {
             // Iterate a sorted copy so we never hit the same row twice
             // if a future source deduplicates imperfectly.
             for row in damaged where row >= 0 && row < rows {
-                rowInstanceCache[row] = buildRowInstances(
+                // `removeAll(keepingCapacity: true)` reuses the prior
+                // frame's backing buffer — we keep up to `cols` worth of
+                // allocated slots, which is exactly the reserve size
+                // `buildRowInstances` asks for. No heap traffic in the
+                // steady state.
+                rowInstanceCache[row].removeAll(keepingCapacity: true)
+                buildRowInstances(
                     snapshot: snapshot,
                     row: row,
                     isSelected: isSelected,
-                    blockCursorCell: blockCursorCell
+                    blockCursorCell: blockCursorCell,
+                    into: &rowInstanceCache[row]
                 )
             }
         } else {
             // Full rebuild — cache key changed, first frame, or damage
             // exceeded the partial threshold.
             for row in 0..<rows {
-                rowInstanceCache[row] = buildRowInstances(
+                rowInstanceCache[row].removeAll(keepingCapacity: true)
+                buildRowInstances(
                     snapshot: snapshot,
                     row: row,
                     isSelected: isSelected,
-                    blockCursorCell: blockCursorCell
+                    blockCursorCell: blockCursorCell,
+                    into: &rowInstanceCache[row]
                 )
             }
         }
@@ -709,11 +741,28 @@ public final class MetalRenderer {
         )
     }
 
+    /// `1.0 / 255.0` precomputed so `rgbToSIMD` can multiply instead of
+    /// dividing. Called up to `2 * cols * rows` times per full rebuild
+    /// (fg + bg per cell) — at 200x80 that's 32 000 calls/frame. FP-div
+    /// is ~15 cycles on modern cores; multiplying by a constant is ~4.
+    /// Audit metal-renderer F6.
+    private static let inv255: Float = 1.0 / 255.0
+
     private static func rgbToSIMD(_ rgb: UInt32) -> SIMD4<Float> {
-        let r = Float((rgb >> 16) & 0xFF) / 255.0
-        let g = Float((rgb >> 8) & 0xFF) / 255.0
-        let b = Float(rgb & 0xFF) / 255.0
-        return SIMD4<Float>(r, g, b, 1.0)
+        // Unpack the 24-bit colour into a 4-lane SIMD so the float
+        // conversion and scaling are vectorised as a single op. `1.0`
+        // in the alpha lane lands in the default fully-opaque result;
+        // callers that need a different alpha (e.g. background-opacity
+        // plumbing) mutate `.w` after the call.
+        let bytes = SIMD4<UInt32>(
+            (rgb >> 16) & 0xFF,
+            (rgb >> 8) & 0xFF,
+            rgb & 0xFF,
+            0
+        )
+        var result = SIMD4<Float>(bytes) * Self.inv255
+        result.w = 1.0
+        return result
     }
 
     public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
@@ -762,6 +811,23 @@ public final class MetalRenderer {
             // a slot, so we don't signal back.
             return
         }
+
+        // Acquire the drawable + render-pass descriptor BEFORE claiming
+        // a semaphore slot. `currentDrawable` can block for tens of ms
+        // under compositor pressure; if it fails (layer invisible,
+        // drawable pool exhausted) we bail early without having to
+        // balance a wait/signal pair. Audit metal-renderer F20.
+        guard let drawable = view.currentDrawable,
+              let descriptor = view.currentRenderPassDescriptor,
+              let buffer = commandQueue.makeCommandBuffer(),
+              let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
+        else {
+            // No drawable or encoder — skip this frame. Do NOT update
+            // `lastFrameKey`: the FrameKey we computed hasn't actually
+            // been drawn, so the next paint must treat its state as new
+            // and re-encode rather than frame-skipping.
+            return
+        }
         lastFrameKey = frameKey
 
         // Lock a slot before we write to its instance buffer. If all three
@@ -772,17 +838,6 @@ public final class MetalRenderer {
         currentSlot = frameIndex
         frameIndex = (frameIndex + 1) % 3
         let slot = currentSlot
-
-        guard let drawable = view.currentDrawable,
-              let descriptor = view.currentRenderPassDescriptor,
-              let buffer = commandQueue.makeCommandBuffer(),
-              let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
-        else {
-            // Release the slot we just claimed — we're abandoning this frame
-            // without encoding, so the GPU never reads the buffer.
-            inflightSemaphore.signal()
-            return
-        }
 
         // Signal the slot free when the GPU finishes reading it. Must be
         // registered before `commit()` so there's no race with an immediate
@@ -866,7 +921,14 @@ public final class MetalRenderer {
             // grid-coordinate space (cursorRow/Col), not screen row.
             let curRow = Int32(snap.cursorRow)
             let curCol = Int32(snap.cursorCol)
-            if curRow != lastCursorRow || curCol != lastCursorCol {
+            // Capture the prior cursor position BEFORE overwriting
+            // `lastCursorRow` — the partial-rebuild path below needs it
+            // to force-rebuild the row the cursor just vacated. Audit
+            // metal-renderer F3.
+            let prevCursorRow = lastCursorRow
+            let prevCursorCol = lastCursorCol
+            let cursorMoved = curRow != lastCursorRow || curCol != lastCursorCol
+            if cursorMoved {
                 lastCursorRow = curRow
                 lastCursorCol = curCol
                 blinkPhaseStart = CACurrentMediaTime()
@@ -933,7 +995,28 @@ public final class MetalRenderer {
                 if damaged.isEmpty || damaged.count >= (snap.rows + 1) / 2 {
                     return nil
                 }
-                return Set(damaged)
+                var rows = Set(damaged)
+                // Force-rebuild the row the cursor just left AND the row
+                // it moved to, even when alacritty's damage iterator did
+                // not flag them. The partial-rebuild fast path would
+                // otherwise leave a ghost inverted cell in the old row
+                // (and occasionally miss painting the new one) whenever
+                // pure cursor motion happens without a content delta — a
+                // common case in empty-prompt arrow-key editing. Cheap
+                // insurance; at most two extra row rebuilds per frame.
+                // Audit metal-renderer F3.
+                if cursorMoved {
+                    let prevScreenRow = Int(prevCursorRow) + Int(snap.displayOffset)
+                    if prevScreenRow >= 0 && prevScreenRow < snap.rows {
+                        rows.insert(prevScreenRow)
+                    }
+                    let newScreenRow = Int(curRow) + Int(snap.displayOffset)
+                    if newScreenRow >= 0 && newScreenRow < snap.rows {
+                        rows.insert(newScreenRow)
+                    }
+                    _ = prevCursorCol // silence unused warning; col-level precision not needed
+                }
+                return rows
             }()
 
             let instanceCount = buildInstances(
