@@ -59,6 +59,22 @@ public final class ThemeManager {
     private var lastPaletteInputs: PaletteInputs?
 
     private init() {
+        // ⚠ FEEDBACK-LOOP HAZARD — DO NOT WRITE USERDEFAULTS HERE.
+        //
+        // Subscribers to `Preferences.shared.objectWillChange` must NOT perform
+        // a `UserDefaults.standard.set(…)` or any call that transitively writes
+        // UserDefaults (e.g. Sparkle's `automaticallyChecksForUpdates =`).
+        // Every UserDefaults write fires `NSUserDefaultsDidChangeNotification`,
+        // which SwiftUI's global `UserDefaultObserver` bridges back into
+        // `objectWillChange` on every ObservableObject holding an @AppStorage —
+        // including `Preferences.shared`. That re-fires this sink, which
+        // writes again, and the main queue piles up `main.async` blocks until
+        // the process OOMs (see commit 982b719 / AppDelegate.autoUpdateObserver
+        // for the fix pattern). If a UserDefaults write is unavoidable, add a
+        // same-value guard before the write so the self-re-entry short-circuits.
+        //
+        // This closure is safe: it only pushes palette/state into TerminalSession
+        // (Rust) and TerminalView (Metal/AppKit). No UserDefaults writes.
         observers.append(
             Preferences.shared.objectWillChange
                 .sink { [weak self] _ in

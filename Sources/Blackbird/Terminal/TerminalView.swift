@@ -415,6 +415,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         //       work when none of the three observed keys actually moved.
         //       Cuts NSFont lookups from "one per unrelated pref" to
         //       "one per real font/option change".
+        //
+        // ⚠ FEEDBACK-LOOP HAZARD — DO NOT WRITE USERDEFAULTS HERE. Any write
+        // to UserDefaults (directly or via a framework like Sparkle) fires
+        // NSUserDefaultsDidChangeNotification, which SwiftUI's global
+        // UserDefaultObserver bridges back into Preferences.objectWillChange,
+        // re-firing THIS sink indefinitely. See commit 982b719 for the
+        // manifest of that hazard in AppDelegate. This closure is safe: it
+        // only reads prefs and pushes into CellMetrics / renderer / encoder.
         prefsCancellable = Preferences.shared.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in

@@ -623,6 +623,13 @@ public final class TerminalSession: ObservableObject {
         coreQueue.async { [bbterm] in
             bbterm.setColorQueryEnabled(Preferences.shared.colorQueryEnabled)
         }
+        // ⚠ FEEDBACK-LOOP HAZARD — DO NOT WRITE USERDEFAULTS HERE. Any write
+        // to UserDefaults from this closure fires NSUserDefaultsDidChange-
+        // Notification, which SwiftUI's global UserDefaultObserver bridges
+        // back into Preferences.objectWillChange, re-firing this sink
+        // indefinitely and OOMing the main queue (commit 982b719). This
+        // closure is safe: it only forwards the colorQueryEnabled flag into
+        // the Rust core via coreQueue.async.
         preferencesSubscription = Preferences.shared.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in

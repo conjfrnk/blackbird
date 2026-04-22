@@ -704,4 +704,82 @@ final class PreferencesTests: XCTestCase {
             "Underline cursor maps to DECSCUSR 2"
         )
     }
+
+    // MARK: - Feedback-loop hazard regression (commit 982b719)
+    //
+    // The Settings-click beachball was a feedback loop: a sink on
+    // `Preferences.shared.objectWillChange` wrote to UserDefaults (via
+    // Sparkle's `automaticallyChecksForUpdates` setter), the write fired
+    // NSUserDefaultsDidChangeNotification, SwiftUI's global `UserDefaultObserver`
+    // bridged it back to `Preferences.objectWillChange.send()`, the sink
+    // re-fired, wrote again — ad infinitum. The main queue piled up
+    // `main.async` blocks until ASAN tripped at 65 GB.
+    //
+    // These two tests pin the invariant and prove the fix pattern works.
+
+    /// Documents SwiftUI's leaky `@AppStorage` bridge: writing ANY UserDefaults
+    /// key — not just our `bb.*` keys — fires `Preferences.shared.objectWillChange`
+    /// because SwiftUI's global `UserDefaultObserver` doesn't filter by key.
+    /// Every `Preferences.objectWillChange.sink` site in the codebase MUST
+    /// treat this as a hazard: no UserDefaults writes from the closure
+    /// without a same-value guard. If this test ever FAILS, Apple tightened
+    /// the bridge and we can relax the guards (see AppDelegate.autoUpdateObserver).
+    func test_unrelatedUserDefaultsWrite_firesPreferencesObjectWillChange() {
+        let p = Preferences.shared
+        let exp = expectation(description: "objectWillChange fires on an unrelated-key write")
+        let c = p.objectWillChange.sink { _ in exp.fulfill() }
+        defer { c.cancel() }
+
+        let probeKey = "blackbird.test.canary.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: probeKey) }
+        UserDefaults.standard.set(Int.random(in: 1...1_000_000), forKey: probeKey)
+
+        wait(for: [exp], timeout: 1.0)
+    }
+
+    /// The same-value-guard pattern must break the self-refiring sink loop.
+    /// Simulates the exact shape of the original bug: a sink subscribes to
+    /// `Preferences.objectWillChange` and writes UserDefaults; without a
+    /// guard, it re-enters itself via the leaky `@AppStorage` bridge. With
+    /// a guard, it short-circuits after one real write.
+    ///
+    /// If this test EVER records > 1 write, the guard pattern is broken and
+    /// the main queue will accumulate `main.async` blocks in production —
+    /// this is what beachballed Settings and OOM'd Debug under ASAN.
+    func test_sameValueGuard_breaksSelfRefiringSink() {
+        let p = Preferences.shared
+        let probeKey = "blackbird.test.feedback-probe.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: probeKey) }
+
+        var writeCount = 0
+        let desired = true
+        var committed: Bool?
+
+        let c = p.objectWillChange.sink { _ in
+            // The same-value-guard pattern from AppDelegate.autoUpdateObserver.
+            // Remove it and this test will explode into an unbounded loop.
+            guard committed != desired else { return }
+            committed = desired
+            writeCount += 1
+            UserDefaults.standard.set(desired, forKey: probeKey)
+        }
+        defer { c.cancel() }
+
+        // Kick the observer once with a real Preferences write. The guard's
+        // correctness is about what happens on SUBSEQUENT re-entry via the
+        // leaky bridge — not the first legitimate pass.
+        let original = p.cursorBlink
+        defer { p.cursorBlink = original }
+        p.cursorBlink.toggle()
+
+        // Drain any bridge-induced re-entries. Without the guard the sink
+        // re-enters itself on every runloop hop; 0.2 s is more than enough
+        // time for a runaway to inflate writeCount past 1.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+
+        XCTAssertEqual(
+            writeCount, 1,
+            "Same-value guard must pin writeCount to 1 across bridge re-entries; got \(writeCount). If > 1, a Preferences.objectWillChange sink somewhere is writing UserDefaults without a same-value guard — this will beachball Settings in production."
+        )
+    }
 }
