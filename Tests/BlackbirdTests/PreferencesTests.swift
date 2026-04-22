@@ -29,6 +29,26 @@ final class PreferencesTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    /// Regression for swift-tests-prefs F3: if a test crashes between
+    /// `setUp` and `tearDown`, the last tampered value stays in the
+    /// shared UserDefaults.standard suite on disk — polluting the
+    /// developer's own prefs and the next test-run's baseline. A
+    /// class-level tearDown re-synchronises the saved-known-good baseline
+    /// at the end of the whole class run, so even a mid-class crash only
+    /// leaks one test's worth of pollution (the one that crashed), not
+    /// all subsequent tests' cumulative damage. A true fix (suiteName
+    /// UserDefaults) would require a production-side testability
+    /// refactor the audit rules out; this is the belt-and-braces
+    /// middle ground.
+    override class func tearDown() {
+        // `synchronize()` is deprecated on modern macOS but still forces
+        // an immediate commit, which matters here — the test host may
+        // exit via `exit(0)` (TestHostTermination) before AppKit would
+        // normally flush the defaults cache.
+        UserDefaults.standard.synchronize()
+        super.tearDown()
+    }
+
     override func setUp() {
         super.setUp()
         let p = Preferences.shared
@@ -499,10 +519,189 @@ final class PreferencesTests: XCTestCase {
                           "Legacy PostScript name 'HackNerdFontMono-Regular' must have been migrated at init")
     }
 
+    /// Regression for swift-tests-prefs F4: the legacy-font-name switch
+    /// in `Preferences.init` is inherently init-only so the positive
+    /// migration path (legacy stored value → new family name) cannot be
+    /// retriggered from the test body with the singleton already alive.
+    /// We can still pin the *source-level* mapping by reading the
+    /// migration switch from Preferences.swift and asserting both legacy
+    /// names map to the expected family. This detects drift if someone
+    /// rewrites the two migration targets without updating the audit
+    /// doc; it does NOT replace F4's suggested fix (extract the
+    /// migration to a pure function) which is out of scope (tests only).
+    func test_fontName_migration_sourceMapping() throws {
+        let fileManager = FileManager.default
+        var dir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+        var prefsURL: URL?
+        for _ in 0..<8 {
+            let candidate = dir
+                .appendingPathComponent("Sources/Blackbird/Settings/Preferences.swift")
+            if fileManager.fileExists(atPath: candidate.path) {
+                prefsURL = candidate
+                break
+            }
+            dir.deleteLastPathComponent()
+        }
+        guard let prefsURL else {
+            throw XCTSkip("Preferences.swift not reachable from test CWD")
+        }
+        let src = try String(contentsOf: prefsURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains(#"case "SFMono-Regular":"#)
+                && src.contains(#"fontName = "SF Mono""#),
+            "Migration from 'SFMono-Regular' → 'SF Mono' must remain in place"
+        )
+        XCTAssertTrue(
+            src.contains(#"case "HackNerdFontMono-Regular":"#)
+                && src.contains(#"fontName = "Hack Nerd Font Mono""#),
+            "Migration from 'HackNerdFontMono-Regular' → 'Hack Nerd Font Mono' must remain in place"
+        )
+    }
+
     // Assignments to fontName are untouched by migration (migration is init-only),
     // so an arbitrary string survives round-trip.
     func test_fontName_setter_roundTrip_forArbitraryValue() {
         Preferences.shared.fontName = "Menlo"
         XCTAssertEqual(Preferences.shared.fontName, "Menlo")
+    }
+
+    // MARK: - fontSize clamp coverage (audit swift-tests-prefs F7)
+
+    /// Regression for swift-tests-prefs F7: `fontSize.didSet` clamps NaN,
+    /// below-9, and above-64 values. `test_scalarProperties_roundTrip`
+    /// only exercises an in-range write (13.5) so the clamp code would
+    /// silently regress. These assertions pin every branch of the
+    /// `let normalised = fontSize.isFinite ? fontSize : 13` guard and the
+    /// `max(9, min(64, normalised))` envelope.
+    func test_fontSize_clampsBelowNine() {
+        let p = Preferences.shared
+        p.fontSize = 3.0
+        XCTAssertEqual(
+            p.fontSize, 9.0, accuracy: 1e-9,
+            "fontSize below 9 must clamp up to 9 — matches the UI bump floor"
+        )
+    }
+
+    func test_fontSize_clampsAboveSixtyFour() {
+        let p = Preferences.shared
+        p.fontSize = 999.0
+        XCTAssertEqual(
+            p.fontSize, 64.0, accuracy: 1e-9,
+            "fontSize above 64 must clamp down to 64 — Settings UI ceiling"
+        )
+    }
+
+    func test_fontSize_nanFallsBackToThirteen() {
+        let p = Preferences.shared
+        p.fontSize = .nan
+        XCTAssertTrue(
+            p.fontSize.isFinite,
+            "fontSize.didSet must reject NaN before it lands on disk"
+        )
+        XCTAssertEqual(
+            p.fontSize, 13.0, accuracy: 1e-9,
+            "NaN fontSize must fall back to the 13 default"
+        )
+    }
+
+    func test_fontSize_infinityFallsBackToThirteen() {
+        let p = Preferences.shared
+        p.fontSize = .infinity
+        XCTAssertTrue(p.fontSize.isFinite)
+        XCTAssertEqual(p.fontSize, 13.0, accuracy: 1e-9)
+        p.fontSize = -.infinity
+        XCTAssertTrue(p.fontSize.isFinite)
+        XCTAssertEqual(p.fontSize, 13.0, accuracy: 1e-9)
+    }
+
+    func test_fontSize_negativeClampsToNine() {
+        // A negative finite value isn't NaN/infinity so the `isFinite`
+        // branch doesn't fire — it instead collides with the `max(9, …)`
+        // envelope. Pins that path separately from the NaN fallback.
+        let p = Preferences.shared
+        p.fontSize = -5.0
+        XCTAssertEqual(
+            p.fontSize, 9.0, accuracy: 1e-9,
+            "Negative finite fontSize must clamp to 9 via max(9, …)"
+        )
+    }
+
+    // MARK: - CursorShape parsing + fallback (audit swift-tests-prefs F16)
+
+    /// Regression for swift-tests-prefs F16: `cursorShapeRaw` is already
+    /// snapshotted/restored but there were no tests pinning the parsing
+    /// or the init-repair fallback. Mirror the BellStyle / OptionKey
+    /// pattern — allCases / id / rawValues / fallback / rendererOverride.
+    func test_cursorShape_allCases_exactlyFollowBlockUnderlineBar() {
+        XCTAssertEqual(
+            Preferences.CursorShape.allCases,
+            [.followShell, .block, .underline, .bar]
+        )
+    }
+
+    func test_cursorShape_idMatchesRawValue() {
+        for shape in Preferences.CursorShape.allCases {
+            XCTAssertEqual(shape.id, shape.rawValue,
+                           "CursorShape.\(shape).id should match rawValue")
+        }
+    }
+
+    func test_cursorShape_rawValues() {
+        XCTAssertEqual(Preferences.CursorShape.followShell.rawValue, "Follow Shell")
+        XCTAssertEqual(Preferences.CursorShape.block.rawValue,       "Block")
+        XCTAssertEqual(Preferences.CursorShape.underline.rawValue,   "Underline")
+        XCTAssertEqual(Preferences.CursorShape.bar.rawValue,         "Bar")
+    }
+
+    func test_cursorShape_unknownRaw_fallsBackToFollowShell() {
+        // The derived `cursorShape` getter surfaces .followShell when the
+        // stored raw doesn't match any enum case. Preferences.init runs a
+        // disk-side repair via `if CursorShape(rawValue: cursorShapeRaw)
+        // == nil`; the getter is the runtime safety net that also fires
+        // when a concurrent write somehow slips past init's sanitise pass.
+        Preferences.shared.cursorShapeRaw = "Totally-Not-A-Shape"
+        XCTAssertEqual(
+            Preferences.shared.cursorShape, .followShell,
+            "Unknown cursorShapeRaw must yield .followShell"
+        )
+    }
+
+    func test_cursorShape_emptyRaw_fallsBackToFollowShell() {
+        Preferences.shared.cursorShapeRaw = ""
+        XCTAssertEqual(Preferences.shared.cursorShape, .followShell)
+    }
+
+    func test_cursorShape_validRaw_roundTrips() {
+        // Every declared rawValue resolves back to its enum case.
+        for shape in Preferences.CursorShape.allCases {
+            Preferences.shared.cursorShapeRaw = shape.rawValue
+            XCTAssertEqual(
+                Preferences.shared.cursorShape, shape,
+                "cursorShapeRaw=\(shape.rawValue) must resolve to .\(shape)"
+            )
+        }
+    }
+
+    /// `rendererOverride` steers the renderer's cursor glyph selection.
+    /// Regression hazard: a refactor that re-numbered the DECSCUSR codes
+    /// would silently change the on-screen cursor for users with a
+    /// non-"Follow Shell" preference. Pin the exact mapping.
+    func test_cursorShape_rendererOverride_mapping() {
+        XCTAssertNil(
+            Preferences.CursorShape.followShell.rendererOverride,
+            "Follow Shell must defer to the snapshot's DECSCUSR code"
+        )
+        XCTAssertEqual(
+            Preferences.CursorShape.block.rendererOverride, 0,
+            "Block cursor maps to DECSCUSR 0"
+        )
+        XCTAssertEqual(
+            Preferences.CursorShape.bar.rendererOverride, 1,
+            "Bar/Beam cursor maps to DECSCUSR 1"
+        )
+        XCTAssertEqual(
+            Preferences.CursorShape.underline.rendererOverride, 2,
+            "Underline cursor maps to DECSCUSR 2"
+        )
     }
 }

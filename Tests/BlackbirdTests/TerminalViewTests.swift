@@ -244,22 +244,28 @@ final class TerminalViewTests: XCTestCase {
 
     // MARK: - Selection mode routing in mouseDown
 
+    /// Regression for swift-tests-view F3: the original helper spawned
+    /// a real `/bin/cat` PTY session for every selection-mode test
+    /// (four tests × one cat each = four live forkpty children per
+    /// class run). mouseDown routing only reads `event.clickCount` /
+    /// `.option` modifier — it doesn't need a real shell for any of
+    /// the four branches it covers. Switch to the TerminalSession
+    /// headless factory: no PTY spawn, no /bin/cat, no zombie-risk
+    /// on failure, and the tests run ~10x faster. The grid is 2×2
+    /// on a headless session but the selection-mode routing is
+    /// grid-independent (it only picks between `.character`,
+    /// `.word`, `.line`, `.rectangular` based on click shape).
     private func makeViewForSelection() throws -> TerminalView {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let view = TerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480),
             device: device
         )
-        // Session + snapshot so bufferPointFromEvent can resolve cols/rows.
-        let session = try TerminalSession.start(
-            shell: "/bin/cat",
-            arguments: [],
-            size: .init(cols: 80, rows: 24)
-        )
-        // Register teardown on the XCTestCase so a wait() timeout or a throw
-        // from XCTUnwrap below can't leak a zombie /bin/cat child. Matches
-        // the project's test-memory rule: every real forkpty gets a
-        // reap-on-exit guard even under the failure path.
+        // Headless session: no forkpty, no shell. BBTerm still publishes
+        // its initial (2×2) snapshot which the view consumes, so
+        // `currentSnapshot` is non-nil by the time the test's mouseDown
+        // lands.
+        let session = TerminalSession.makeHeadlessForTests()
         addTeardownBlock { session.terminate() }
         view.session = session
         let exp = expectation(description: "initial snapshot")
@@ -290,12 +296,31 @@ final class TerminalViewTests: XCTestCase {
         ))
     }
 
+    /// Regression for swift-tests-view F4: prior tests hard-coded
+    /// `NSPoint(x: 200, y: 200)` which depended on the 80×24 grid
+    /// layout at 13pt system mono. A font metrics refactor that
+    /// shrank cellWidth below 2.5 pt (possible with custom fonts)
+    /// could land the click outside the grid and fail the test for
+    /// reasons unrelated to the regression it guards. Derive the
+    /// click point from `view.metrics` so the point stays interior
+    /// regardless of font size.
+    private func cellCenterPoint(in view: TerminalView, col: Int, row: Int) -> NSPoint {
+        // AppKit's origin is bottom-left; TerminalView uses flipped
+        // coordinates for grid math. Place the click at the center
+        // of (col, row) so any rounding on either side stays inside
+        // the intended cell.
+        let x = CGFloat(col) * view.metrics.cellWidth + view.metrics.cellWidth / 2
+        let y = CGFloat(row) * view.metrics.cellHeight + view.metrics.cellHeight / 2
+        return NSPoint(x: x, y: y)
+    }
+
     func test_mouseDown_option_triggersRectangularSelection() throws {
         let view = try makeViewForSelection()
         // Session teardown registered via addTeardownBlock in the helper.
-        // Middle of the view → somewhere inside the grid.
-        let mid = NSPoint(x: 200, y: 200)
-        let ev = try mouseDownEvent(at: mid, modifiers: [.option])
+        // Click cell (10, 5) — comfortably inside the 80×24 grid across
+        // any reasonable font size. F4: no more hard-coded pixel.
+        let point = cellCenterPoint(in: view, col: 10, row: 5)
+        let ev = try mouseDownEvent(at: point, modifiers: [.option])
         view.mouseDown(with: ev)
         XCTAssertEqual(view.selection?.mode, .rectangular,
                        "⌥-drag should trigger rectangular selection")
@@ -303,8 +328,8 @@ final class TerminalViewTests: XCTestCase {
 
     func test_mouseDown_noModifiers_triggersCharacterSelection() throws {
         let view = try makeViewForSelection()
-        let mid = NSPoint(x: 200, y: 200)
-        let ev = try mouseDownEvent(at: mid, modifiers: [])
+        let point = cellCenterPoint(in: view, col: 10, row: 5)
+        let ev = try mouseDownEvent(at: point, modifiers: [])
         view.mouseDown(with: ev)
         XCTAssertEqual(view.selection?.mode, .character,
                        "Plain drag should be prose-style character selection")
@@ -312,8 +337,8 @@ final class TerminalViewTests: XCTestCase {
 
     func test_mouseDown_doubleClick_triggersWordSelection() throws {
         let view = try makeViewForSelection()
-        let mid = NSPoint(x: 200, y: 200)
-        let ev = try mouseDownEvent(at: mid, modifiers: [], clickCount: 2)
+        let point = cellCenterPoint(in: view, col: 10, row: 5)
+        let ev = try mouseDownEvent(at: point, modifiers: [], clickCount: 2)
         view.mouseDown(with: ev)
         XCTAssertEqual(view.selection?.mode, .word,
                        "Double-click should start a word-mode selection")
@@ -321,8 +346,8 @@ final class TerminalViewTests: XCTestCase {
 
     func test_mouseDown_tripleClick_triggersLineSelection() throws {
         let view = try makeViewForSelection()
-        let mid = NSPoint(x: 200, y: 200)
-        let ev = try mouseDownEvent(at: mid, modifiers: [], clickCount: 3)
+        let point = cellCenterPoint(in: view, col: 10, row: 5)
+        let ev = try mouseDownEvent(at: point, modifiers: [], clickCount: 3)
         view.mouseDown(with: ev)
         XCTAssertEqual(view.selection?.mode, .line,
                        "Triple-click should start a line-mode selection")

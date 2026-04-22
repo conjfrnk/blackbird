@@ -7,6 +7,15 @@ import BBCore
 /// `.damagedRows` accessors return sensible shape for common scenarios.
 final class DamageTrackingTests: XCTestCase {
 
+    override class func setUp() {
+        super.setUp()
+        // Regression for swift-tests-core F1: register the host-
+        // termination observer so solo `--filter DamageTrackingTests`
+        // runs exit cleanly. Singleton-guarded so the full-suite
+        // path is unaffected.
+        TestHostTermination.shared.register()
+    }
+
     func test_firstSnapshot_isFullDamage() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 3)))
         let snap = try XCTUnwrap(term.snapshot())

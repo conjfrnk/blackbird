@@ -8,6 +8,15 @@ import BBCore
 /// and that the payload arrives intact for kind D.
 final class OSC133Tests: XCTestCase {
 
+    override class func setUp() {
+        super.setUp()
+        // Regression for swift-tests-core F1: registering
+        // TestHostTermination ensures solo `--filter OSC133Tests`
+        // runs don't leave a zombie SwiftUI test host alive. The
+        // singleton guard keeps the full-suite path idempotent.
+        TestHostTermination.shared.register()
+    }
+
     /// Helper: feed a sequence through BBTerm, capture the first
     /// `.promptMark(...)` event that fires synchronously on the core
     /// thread before `input(_:)` returns.

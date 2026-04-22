@@ -240,4 +240,54 @@ final class SelectionModeTests: XCTestCase {
         XCTAssertEqual(start, BufferPoint(line: 2, col: 3))
         XCTAssertEqual(end, BufferPoint(line: 5, col: 10))
     }
+
+    // MARK: - Unicode / grapheme-cluster coverage
+    // (audit swift-tests-core F6)
+    //
+    // `copyRange` and `Selection.normalized` are pure buffer-point
+    // arithmetic — they take `cols: Int` and produce (BufferPoint,
+    // BufferPoint) pairs. Neither function reads snapshot text, so
+    // neither cares about the Unicode content at those cells. Pin
+    // that invariant: feeding identical BufferPoints that happen to
+    // represent Unicode positions (wide CJK, emoji, combining) must
+    // yield the same range as the ASCII equivalent. If a future
+    // refactor accidentally threads snapshot-aware logic into
+    // copyRange, these tests surface it.
+
+    /// Regression for swift-tests-core F6: `.line` mode's copyRange
+    /// always extends to cols 0...(cols-1) regardless of what Unicode
+    /// lives in those cells. A bug that aligned the endpoints to
+    /// grapheme boundaries would alter endCol and break this test.
+    func test_copyRange_lineMode_isUnicodeAgnostic() {
+        // Selection represents "click somewhere on a line containing
+        // CJK characters". copyRange takes only the (line, col) pair
+        // and the cols parameter — it never peeks at snapshot content.
+        // Same result as ASCII, as required.
+        let cjkSel = Selection(
+            anchor: BufferPoint(line: 3, col: 7),
+            cursor: BufferPoint(line: 3, col: 2),
+            mode: .line
+        )
+        let (a, b) = TerminalView.copyRange(for: cjkSel, cols: 80)
+        XCTAssertEqual(a, BufferPoint(line: 3, col: 0))
+        XCTAssertEqual(b, BufferPoint(line: 3, col: 79))
+    }
+
+    /// Regression for swift-tests-core F6: rectangular mode's
+    /// bounding-rect normalisation treats all column indices
+    /// identically. Wide CJK cells in the grid don't split the
+    /// selection rect (because the rect is col-index-defined, not
+    /// grapheme-defined).
+    func test_copyRange_rectangularMode_isUnicodeAgnostic() {
+        let sel = Selection(
+            anchor: BufferPoint(line: 2, col: 15),
+            cursor: BufferPoint(line: 5, col: 3),
+            mode: .rectangular
+        )
+        let (a, b) = TerminalView.copyRange(for: sel, cols: 80)
+        // Expected: top-left (2,3) → bottom-right (5,15). Pure
+        // buffer-point math — no content inspection.
+        XCTAssertEqual(a, BufferPoint(line: 2, col: 3))
+        XCTAssertEqual(b, BufferPoint(line: 5, col: 15))
+    }
 }

@@ -80,4 +80,56 @@ final class KeyEncoderTests: XCTestCase {
         let encoder = KeyEncoder()
         XCTAssertEqual(encoder.encode(chars: "", modifiers: []), Data())
     }
+
+    /// Regression for swift-tests-input F7: `controlByte(for:)` has five
+    /// branches — 0x40-0x5F (@...?), 0x61-0x7A (a..z), 0x20→NUL, 0x3F→DEL,
+    /// default→nil. The existing tests only hit a few interior cells. This
+    /// sweep pins the edges that matter for shell usability.
+    func test_ctrlBoundaryCases_fullCoverage() {
+        let encoder = KeyEncoder()
+        // Ctrl+A uppercase — 0x41 - 0x40 = 0x01. Parallels the lowercase
+        // path in `test_ctrlPrintable` but ensures the 0x41-0x5A portion
+        // of the 0x40-0x5F range is pinned.
+        XCTAssertEqual(encoder.encode(chars: "A", modifiers: [.control]),
+                       Data([0x01]), "Ctrl+A (uppercase) → 0x01")
+        // Ctrl+[ — 0x5B - 0x40 = 0x1B = ESC. Documents the intentional
+        // collision with plain Escape. Kitty disambiguation, when active,
+        // remaps this via `ctrlColliderCodepoint`; in legacy mode below
+        // it is indistinguishable from pressing Escape — and that is the
+        // documented, compatible behaviour every terminfo knows.
+        XCTAssertEqual(encoder.encode(chars: "[", modifiers: [.control]),
+                       Data([0x1B]), "Ctrl+[ → ESC (0x1B)")
+        // Ctrl+\ — 0x5C - 0x40 = 0x1C = SIGQUIT. Critical for shell users
+        // — silently mapping this to anything else would break every
+        // runaway process kill.
+        XCTAssertEqual(encoder.encode(chars: "\\", modifiers: [.control]),
+                       Data([0x1C]), "Ctrl+\\ → 0x1C (SIGQUIT trigger)")
+        // Ctrl+] — 0x5D - 0x40 = 0x1D. telnet escape, Emacs `C-]`.
+        XCTAssertEqual(encoder.encode(chars: "]", modifiers: [.control]),
+                       Data([0x1D]), "Ctrl+] → 0x1D")
+        // Ctrl+^ — 0x5E - 0x40 = 0x1E. rare; readline's `character-
+        // search-backward` bind.
+        XCTAssertEqual(encoder.encode(chars: "^", modifiers: [.control]),
+                       Data([0x1E]), "Ctrl+^ → 0x1E")
+        // Ctrl+_ — 0x5F - 0x40 = 0x1F. Emacs undo binding.
+        XCTAssertEqual(encoder.encode(chars: "_", modifiers: [.control]),
+                       Data([0x1F]), "Ctrl+_ → 0x1F")
+    }
+
+    /// Regression for swift-tests-input F7: characters outside the
+    /// `controlByte` ranges (digits, common prose punctuation) fall
+    /// through to the Option-Meta / UTF-8 tail. With default
+    /// `optionIsMeta=true` and `.control` only (no `.option`), Ctrl+digit
+    /// encodes as the plain digit byte — matches every legacy terminal.
+    func test_ctrlDigitsAndPunctuation_fallThroughToPlainByte() {
+        let encoder = KeyEncoder()
+        // Ctrl+1 — digit 0x31 has no controlByte mapping. Encoder falls
+        // through and emits the plain digit so readline's undo-on-digit
+        // keybindings work as expected.
+        XCTAssertEqual(encoder.encode(chars: "1", modifiers: [.control]),
+                       Data([0x31]), "Ctrl+1 falls through to plain '1'")
+        // Ctrl+. — 0x2E also has no mapping. Emit the period unchanged.
+        XCTAssertEqual(encoder.encode(chars: ".", modifiers: [.control]),
+                       Data([0x2E]), "Ctrl+. falls through to plain '.'")
+    }
 }

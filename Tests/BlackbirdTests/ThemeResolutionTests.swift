@@ -20,6 +20,17 @@ final class ThemeResolutionTests: XCTestCase {
     override func tearDown() {
         Preferences.shared.themeRaw = savedThemeRaw
         Preferences.shared.themeModeRaw = savedThemeModeRaw
+        // Regression for swift-tests-prefs F8: every `themeRaw` /
+        // `themeModeRaw` write fires `Preferences.objectWillChange`,
+        // which `ThemeManager.shared` observes. Its sink schedules
+        // `applyToAll` on the main queue (see ThemeManager.swift ~22).
+        // Without an explicit drain here those queued blocks run during
+        // the *next* test's body, producing surprising interleavings.
+        // RunLoop.main.run(until:) flushes the one-tick backlog before
+        // the next test starts. Short duration — most of the theme
+        // tests queue a single applyToAll, so 0.05 s is well over the
+        // drain time.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
         super.tearDown()
     }
 

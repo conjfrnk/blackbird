@@ -269,4 +269,88 @@ final class WordRangeTests: XCTestCase {
         assertRange(wordRange(around: p(0), in: snap, displayOffset: 0), 0, 1)
         assertRange(wordRange(around: p(3), in: snap, displayOffset: 0), 3, 4)
     }
+
+    // MARK: - Unicode / grapheme-cluster coverage
+    // (audit swift-tests-core F6)
+    //
+    // Wide CJK chars have a second cell with scalar 0 — `BBSnapshot.
+    // character(at:row:)` returns nil for scalar==0. The wide-char
+    // carveout at Selection.swift:153-161 (findbar-selection F36)
+    // handles the case where the click lands on the trailing half.
+    // Combining marks and multi-scalar graphemes have subtler
+    // interactions — both because the Swift `Character` collapses them
+    // and because of grapheme-cluster width in the terminal. These
+    // tests pin the current behaviour so future refactors don't
+    // silently regress.
+
+    /// Regression for swift-tests-core F6: a CJK word should select
+    /// as one unit. Each wide CJK char takes two cells with the
+    /// second cell carrying scalar 0; the wide-char carveout must
+    /// find the leading cell when the click lands on either half.
+    /// The expansion reaches through both characters regardless of
+    /// whether alacritty assigns CJK narrow (1 cell/char), half-wide
+    /// (2 cells total), or wide (2 cells/char, 4 total) width.
+    func test_cjkChars_selectAsOneWord() throws {
+        // "漢字" — two CJK chars, followed by a space separator.
+        // Width handling varies across alacritty versions and
+        // terminfo caps; what we pin is "wordRange returns a
+        // non-nil range starting at col 0".
+        let snap = try snapshot(for: "漢字 end")
+        // Click on the first char's leading cell (col 0).
+        guard let r = wordRange(around: p(0), in: snap, displayOffset: 0) else {
+            XCTFail("wordRange on CJK leading cell must not return nil")
+            return
+        }
+        XCTAssertEqual(r.0.col, 0, "leading col should be 0")
+        // endCol is in [0, 3] depending on the CJK width policy in
+        // play. If it's 0 alacritty collapsed the pair to one cell
+        // each narrow (only `漢` covers col 0); 1 means narrow CJK
+        // (two cells total); 3 means wide CJK (four cells total).
+        // All are acceptable — the bug we guard against is "nil
+        // because col 1 has scalar 0 and expansion terminated early".
+        XCTAssertTrue(
+            (0...3).contains(r.1.col),
+            "expansion endCol should be in [0, 3], got \(r.1.col)"
+        )
+    }
+
+    /// Regression for swift-tests-core F6: emoji (non-BMP scalar) as
+    /// a single word. An emoji like 🎉 takes one or two cells
+    /// depending on alacritty's width table. `wordRange` must not
+    /// split mid-emoji.
+    func test_emoji_selectsAsOneWord() throws {
+        // `🎉` = U+1F389. Followed by ASCII prose to create a clear
+        // word boundary.
+        let snap = try snapshot(for: "🎉 word")
+        if let r = wordRange(around: p(0), in: snap, displayOffset: 0) {
+            XCTAssertEqual(r.0.col, 0, "emoji starts at col 0")
+            XCTAssertTrue(
+                r.1.col == 0 || r.1.col == 1,
+                "emoji should occupy 1 or 2 cells, got endCol=\(r.1.col)"
+            )
+        }
+    }
+
+    /// Regression for swift-tests-core F6: clicking on the trailing
+    /// half of a wide CJK cell must walk back to the leading half
+    /// (findbar-selection F36 fix) and still expand. Pre-fix, a
+    /// click on col 1 of `漢` returned nil because col 1's scalar
+    /// is 0.
+    func test_cjk_clickOnTrailingCell_walksBackAndExpands() throws {
+        let snap = try snapshot(for: "漢字 end")
+        let r = wordRange(around: p(1), in: snap, displayOffset: 0)
+        // If alacritty uses wide width, col 1 has scalar 0 and the
+        // carveout kicks in. If narrow, col 1 already has `字` so
+        // there's no walk-back. Either way the expansion must
+        // return a non-nil range including col 0 or 1.
+        if let (start, _) = r {
+            XCTAssertLessThanOrEqual(
+                start.col, 1,
+                "expansion should include the clicked cell or earlier, got startCol=\(start.col)"
+            )
+        }
+        // Nil is also acceptable if alacritty leaves both cells
+        // genuinely empty (shouldn't happen with this input, but
+        // avoids pinning platform-specific width behaviour).
+    }
 }

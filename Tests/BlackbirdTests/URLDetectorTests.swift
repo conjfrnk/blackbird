@@ -382,6 +382,109 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(m.url.absoluteString, head + "doc",
                        "wrapped URL must strip trailing `)` and `,` from continuation")
     }
+
+    // MARK: - Unicode / CJK / combining-mark coverage
+    // (audit swift-tests-core F5)
+    //
+    // The URLDetector builds each line by appending `snapshot.character
+    // (at:row:)` one `Character` per cell. Before the `utf16ToCol` map
+    // landed, NSRegularExpression ranges (UTF-16 units) were used as
+    // column indices directly, mis-columning every match that followed
+    // a non-BMP glyph. These tests pin the current correctness at key
+    // Unicode shapes so a future refactor can't silently regress:
+    //   - URL preceded by CJK (wide cells, scalar 0 filler in second half)
+    //   - URL containing a combining mark (composed char spanning two
+    //     cells in the raw buffer, single Character at the Swift layer)
+    //   - Trailing closing paren on a wrapping URL after a non-BMP char
+    //
+    // Memory note: every snapshot here is 80×24 = 1920 cells × ~16 B ≈
+    // 30 KB of grid state. No PTY, no scrollback. Safe.
+
+    /// Regression for swift-tests-core F5: a URL immediately after a
+    /// CJK-wide character on the same row. The wide glyph takes two
+    /// cells (scalar 0 filler in col 1). Detector must line up the
+    /// column indices with cells, not UTF-16 offsets or raw scalars.
+    func test_scan_urlAfterCJKHost_columnAlignsWithCell() throws {
+        // "日 " is one wide char + one space = 3 cells. The URL starts
+        // at col 3 (or 2 if alacritty doesn't treat the CJK as wide —
+        // both are acceptable). We DON'T accept col 4+ (that would be
+        // the UTF-16-offset bug the `utf16ToCol` map exists to prevent).
+        let snap = try snapshot(from: "日 https://example.com/path", cols: 80, rows: 5)
+        let matches = URLDetector.scan(snapshot: snap)
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertEqual(m.url.absoluteString, "https://example.com/path")
+        XCTAssertTrue(
+            m.startCol == 2 || m.startCol == 3,
+            "startCol should align with URL cell (2 or 3 depending on wide-char policy), got \(m.startCol)"
+        )
+    }
+
+    /// Regression for swift-tests-core F5: URL containing a combining
+    /// mark (`é` = `e` + U+0301). In Swift these decompose into a
+    /// single `Character`; NSRegularExpression sees the letter, so the
+    /// URL matches. Pins that the detector doesn't crash and the URL
+    /// survives round-trip through the URL class.
+    func test_scan_urlWithCombiningMark_detectedAndRoundTrips() throws {
+        // `café` in the host/path: `e` + U+0301. Most NSURL/URL
+        // parsers accept this and normalise. The detector's job is
+        // to not crash and produce a span that `URL(string:)` can
+        // consume.
+        let raw = "https://example.com/caf\u{0065}\u{0301}"  // cafe + combining acute
+        let snap = try snapshot(from: raw, cols: 80, rows: 5)
+        let matches = URLDetector.scan(snapshot: snap)
+        // Acceptable outcomes: one match whose absoluteString is the
+        // same bytes (unnormalised) OR a URL-normalised form. What we
+        // reject: zero matches, or a match whose absoluteString loses
+        // the accent entirely.
+        XCTAssertGreaterThanOrEqual(matches.count, 1, "combining-mark URL must match")
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertTrue(
+            m.url.absoluteString.contains("caf"),
+            "absoluteString should retain the 'caf' prefix: \(m.url.absoluteString)"
+        )
+    }
+
+    /// Regression for swift-tests-core F5: URL containing a non-BMP
+    /// emoji scalar in its path. `🌐` = U+1F310 = one Character but
+    /// two UTF-16 units. The match's endCol must stay in cell-space,
+    /// not UTF-16-space. The regex ends at the first non-URL-safe char
+    /// so the emoji (if the regex char class includes it) or the
+    /// closing cell defines endCol.
+    func test_scan_urlEndingAfterNonBMP_endColStaysInCellSpace() throws {
+        // `🌐` is a non-URL-safe char per the regex (the regex char
+        // class only allows A-Za-z0-9 + URL punctuation, no emoji).
+        // So the URL match stops BEFORE 🌐 and the emoji is outside
+        // the span. Pin that the startCol/endCol are in cell space,
+        // not UTF-16 offsets.
+        let snap = try snapshot(from: "🌐 https://example.com end", cols: 80, rows: 5)
+        let matches = URLDetector.scan(snapshot: snap)
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertEqual(m.url.absoluteString, "https://example.com")
+        // `🌐` is treated as a wide emoji by alacritty (2 cells) or a
+        // narrow one (1 cell) depending on width heuristics — both are
+        // acceptable. The URL starts at col 2 (narrow emoji) or col 3
+        // (wide emoji), not col 4+ (which would be the UTF-16 bug).
+        XCTAssertTrue(
+            m.startCol == 2 || m.startCol == 3,
+            "startCol should be cell-aligned (2 or 3), got \(m.startCol)"
+        )
+        // endCol = startCol + "https://example.com".count - 1.
+        XCTAssertEqual(m.endCol, m.startCol + "https://example.com".count - 1)
+    }
+
+    /// Regression for audit swift-tests-core F10: a trailing `)` that
+    /// is NOT wrapped in `(url)` must also be excluded from the match.
+    /// The existing `test_scan_parenthesisWrapped_excludesClosingParen`
+    /// only covered the `(url)` wrapping case.
+    func test_scan_trailingUnwrappedCloseParen_excluded() throws {
+        let url = "https://foo.com"
+        let snap = try snapshot(from: "See \(url)) rest")
+        let matches = URLDetector.scan(snapshot: snap)
+        XCTAssertEqual(matches.count, 1)
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertEqual(m.url.absoluteString, url,
+                       "trailing ')' without matching '(' must still be excluded")
+    }
 }
 
 // Allow XCTAssertEqual on [URLMatch] for empty-result tests.

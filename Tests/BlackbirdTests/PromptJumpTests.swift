@@ -9,6 +9,15 @@ import BBCore
 /// from `jumpToPreviousPrompt` / `jumpToNextPrompt` behaviour.
 final class PromptJumpTests: XCTestCase {
 
+    override class func setUp() {
+        super.setUp()
+        // Regression for swift-tests-core F1: register the host-
+        // termination observer so solo `--filter PromptJumpTests`
+        // runs exit cleanly. Singleton-guarded: full-suite no-op
+        // when some other class registered first.
+        TestHostTermination.shared.register()
+    }
+
     /// Build a session with no PTY. The session's scroll / snapshot
     /// paths still work because they go through bbterm; only `send(_:)`
     /// (which is PTY-bound) is a no-op.

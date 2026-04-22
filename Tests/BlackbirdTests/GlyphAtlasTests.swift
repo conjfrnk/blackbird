@@ -274,6 +274,147 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertFalse(entry.isWide)
     }
 
+    // MARK: - Prewarm coverage (audit swift-tests-render F10)
+
+    /// Regression for swift-tests-render F10: `prewarmCommonGlyphs()`
+    /// runs on every `MetalRenderer.init` and `reconfigure` but has no
+    /// direct coverage. The cost of a regression here (e.g. an infinite
+    /// loop if `Unicode.Scalar(value)` returns unexpectedly for
+    /// `0x20..0x7E`) hits first-keystroke cold-start latency, which is
+    /// the worst kind of regression to debug after the fact.
+    ///
+    /// Memory/time pre-flight per MEMORY:
+    ///   Prewarm inserts 95 ASCII + 128 box-drawing = 223 glyphs. At
+    ///   capacity 512 with 13pt/1× scale (~8×18 px) the texture is
+    ///   ~300 KB. Well under the 320 MB budget enforced across the
+    ///   suite.
+    func test_prewarm_insertsAsciiAndBoxDrawing() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 512)
+        )
+        atlas.prewarmCommonGlyphs()
+
+        // ASCII printable range (0x20..0x7E inclusive) — 95 glyphs.
+        // Asking for any of them after prewarm must succeed with a valid
+        // entry; the cache-hit path is implicit via lookupOrInsert.
+        for value in 0x20...0x7E {
+            let scalar = try XCTUnwrap(UnicodeScalar(UInt32(value)))
+            XCTAssertNotNil(
+                atlas.lookupOrInsert(scalar: scalar),
+                "prewarm should have made ASCII codepoint U+\(String(value, radix: 16, uppercase: true)) available"
+            )
+        }
+
+        // Box drawing (U+2500..U+257F) — 128 glyphs. Used by tree /
+        // htop / btop / less -N / git log graph.
+        for value in 0x2500...0x257F {
+            let scalar = try XCTUnwrap(UnicodeScalar(UInt32(value)))
+            XCTAssertNotNil(
+                atlas.lookupOrInsert(scalar: scalar),
+                "prewarm should have made box-drawing U+\(String(value, radix: 16, uppercase: true)) available"
+            )
+        }
+    }
+
+    /// Prewarm is idempotent — calling it twice must not double-allocate
+    /// slots or grow the texture. We observe this indirectly by checking
+    /// that a glyph inserted pre-prewarm keeps the same UV origin
+    /// post-prewarm (if prewarm allocated new slots it would have
+    /// re-inserted 'A' at a different position).
+    func test_prewarm_isIdempotent() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 512)
+        )
+
+        // First prewarm fills slots for ASCII + box-drawing.
+        atlas.prewarmCommonGlyphs()
+        let entryA_first = try XCTUnwrap(
+            atlas.lookupOrInsert(scalar: UnicodeScalar("A"))
+        )
+        let originA_first = entryA_first.uvOrigin
+
+        // Second prewarm: every insert should be a cache hit. If the
+        // cache layer is broken, the second call would shift 'A' to a
+        // new slot (old slot becomes orphan) and the UV would move.
+        atlas.prewarmCommonGlyphs()
+        let entryA_second = try XCTUnwrap(
+            atlas.lookupOrInsert(scalar: UnicodeScalar("A"))
+        )
+        XCTAssertEqual(
+            entryA_second.uvOrigin, originA_first,
+            "prewarm must be idempotent — already-inserted glyphs keep their slot"
+        )
+    }
+
+    /// Regression for swift-tests-render F10: atlas at Retina scale
+    /// (2.0) produces cells sized at `ceil(cellWidth * 2)` pixels
+    /// wide / tall. Only `scale: 1` was previously exercised; a bug
+    /// in the non-integer-scale path would land on every first-launch
+    /// on a Retina Mac.
+    ///
+    /// Memory pre-flight: 128 slots at ~32x70 px ≈ ~280 KB texture.
+    func test_scale_twoProducesLargerCellPixelDimensions() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas1 = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128, scale: 1)
+        )
+        let atlas2 = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128, scale: 2)
+        )
+        // At 2× scale, each cell's px footprint is roughly doubled. The
+        // `.rounded(.up)` in the source can introduce ±1 px depending on
+        // fractional metrics; accept any value strictly greater than 1×
+        // (the only real regression mode would be 1× or less, meaning
+        // scale didn't apply).
+        XCTAssertGreaterThan(
+            atlas2.cellPxWidth, atlas1.cellPxWidth,
+            "2x scale must produce wider cells than 1x"
+        )
+        XCTAssertGreaterThan(
+            atlas2.cellPxHeight, atlas1.cellPxHeight,
+            "2x scale must produce taller cells than 1x"
+        )
+        // Loose bound: 2x scale shouldn't exceed 3x the 1x dimension
+        // (would indicate scale applied twice). Gives headroom for
+        // the rounding.
+        XCTAssertLessThan(atlas2.cellPxWidth,  atlas1.cellPxWidth  * 3)
+        XCTAssertLessThan(atlas2.cellPxHeight, atlas1.cellPxHeight * 3)
+    }
+
+    /// Non-integer fractional scales (e.g. 1.5 on an older Retina mode)
+    /// must also produce a valid atlas without trapping in the pixel
+    /// rounding. Pins the `.rounded(.up)` path at a non-clean boundary.
+    func test_scale_fractional_stillValid() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 64, scale: 1.5)
+        )
+        XCTAssertGreaterThan(atlas.cellPxWidth, 0)
+        XCTAssertGreaterThan(atlas.cellPxHeight, 0)
+        // Insertion still succeeds at fractional scale.
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: UnicodeScalar("a")))
+        XCTAssertGreaterThan(entry.uvSize.x, 0)
+        XCTAssertGreaterThan(entry.uvSize.y, 0)
+    }
+
     func test_insertGlyphProducesNonZeroPixels() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("no Metal device")

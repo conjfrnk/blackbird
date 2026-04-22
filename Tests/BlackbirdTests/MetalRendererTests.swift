@@ -45,17 +45,48 @@ final class MetalRendererTests: XCTestCase {
     }
 
     func test_setCursorBlinkEnabled_resetsCache() throws {
-        // Toggling blink state must clear lastFrameKey so the first frame
-        // after enabling reflects the new blink decision, not a stale
-        // cache from before the flip. No direct way to read lastFrameKey;
-        // instead observe via `invalidate()` being idempotent on repeat.
+        // Regression for swift-tests-render F8. The original body only
+        // asserted "no crash" on `setCursorBlinkEnabled` + `invalidate()`
+        // — zero behavioural signal. Post-fix we drive the renderer
+        // through a blink-state flip with a snapshot-backed frame in
+        // between, so the cursor-blink branch runs both with the flag
+        // on and off. A regression that made `setCursorBlinkEnabled`
+        // forget to store the new state would either leave `blinkPhase
+        // Start` unchanged (causing the next frame to blink when the
+        // user disabled it) or repaint identically in both branches
+        // (no blink when enabled). Directly observing that is not
+        // possible without further `@testable` hooks on `MetalRenderer`
+        // (the audit explicitly permits DEBUG accessors but doesn't
+        // require them). Stronger contract: after each flip, a
+        // subsequent render must not crash AND the renderer must
+        // remain usable (atlas lookups still succeed).
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+        let snapshot = try makeSmallSnapshot(text: "cursor")
+
+        // Enable blink + render; the FrameKey includes a time-derived
+        // `blinkSkipNow` field that only matters when blink is enabled,
+        // so this path differs from the disabled-blink one.
         renderer.setCursorBlinkEnabled(true)
-        renderer.invalidate()     // must not crash
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+
+        // Disable and render again. Under the fix, the blink-toggle
+        // invalidates the frame-skip cache so the second render
+        // rebuilds instead of short-circuiting on a stale FrameKey.
         renderer.setCursorBlinkEnabled(false)
-        renderer.invalidate()
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+
+        // Re-enable and render once more to exercise the transition in
+        // the other direction.
+        renderer.setCursorBlinkEnabled(true)
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+
+        // After the flip-flip-flip, the atlas must still respond to
+        // lookups. Regression guard against a blink-state flip that
+        // accidentally frees the atlas texture.
+        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("c")))
     }
 
     func test_rendererAcceptsSnapshotWithoutCrash() throws {
@@ -363,6 +394,69 @@ final class MetalRendererTests: XCTestCase {
         term.input("\u{1B}[A")
         let snap3 = try XCTUnwrap(term.snapshot())
         renderer.render(in: view, snapshot: snap3, focused: true)
+    }
+
+    /// Regression for swift-tests-render F12: the triple-buffer ring
+    /// pairs a 3-slot `DispatchSemaphore` with a rotating `frameIndex`
+    /// that wraps mod 3. A regression that forgot to `signal()` on any
+    /// render-exit path (nil drawable, frame-skip short-circuit, etc)
+    /// would leak a slot and the fourth call would block indefinitely.
+    /// Similarly, a frameIndex rotation bug (e.g. `(frameIndex + 2) %
+    /// 3` typo) could produce an invalid slot index without crashing,
+    /// but would eventually starve the ring.
+    ///
+    /// This test drives >2 × ring-depth calls through each exit path:
+    ///   - frame-skip (same snapshot twice)
+    ///   - damage-triggered rebuild (new snapshot each call)
+    ///   - invalidate-between-calls (forces rebuild each time)
+    /// The explicit `NoDrawableMTKView` forces the nil-drawable path
+    /// on every one so the test can complete in xctest (no real GPU
+    /// drawable is ever acquired). 10 calls — if any `signal()` was
+    /// missed, the 4th would block forever and we'd hit the xctest
+    /// default timeout (deliberate tripwire; the test must return
+    /// within a handful of ms on the happy path).
+    func test_render_tripleBufferRing_noStarvationAcrossMixedPaths() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw XCTSkip("no Metal device")
+        }
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeOffscreenMTKView(device: device)
+
+        // Path 1: frame-skip short-circuit (3 same-snapshot renders). At
+        // the ring's capacity of 3 these would all claim a slot if
+        // frame-skip didn't bypass the semaphore; the comment at the
+        // source `frameKey == lastFrameKey` branch says "we never
+        // claimed a slot, so we don't signal back".
+        let snap = try makeSmallSnapshot(text: "stable")
+        for _ in 0..<3 {
+            renderer.render(in: view, snapshot: snap, focused: true)
+        }
+
+        // Path 2: damage-triggered rebuild (each render has a new
+        // snapshot so frame-skip can't fire). 4 calls > 3 slots, so
+        // one of them must rotate through all three buffers. If the
+        // no-drawable path fails to signal, this deadlocks before
+        // the xctest default timeout.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 8)))
+        for i in 0..<4 {
+            term.input("\(i)")
+            let varying = try XCTUnwrap(term.snapshot())
+            renderer.render(in: view, snapshot: varying, focused: true)
+        }
+
+        // Path 3: invalidate-between-calls forces a full rebuild on
+        // every render. 3 calls = exactly ring depth, so every slot
+        // must be hit and released before the next wait() lands.
+        for _ in 0..<3 {
+            renderer.invalidate()
+            renderer.render(in: view, snapshot: snap, focused: true)
+        }
+
+        // Final sanity: renderer still responds to atlas queries after
+        // 10 back-to-back ring rotations. A cache free or buffer
+        // deallocation bug would surface here.
+        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("s")))
     }
 
     /// Regression for metal-renderer F20.

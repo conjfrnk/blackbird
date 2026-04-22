@@ -37,8 +37,14 @@ final class InlineRenameTests: XCTestCase {
 
         strip.beginEditing(pillIndex: 1)
         // Simulate the user typing with leading/trailing space.
-        strip.perform(NSSelectorFromString("setEditTextForTesting:"), with: "  My Tab  ")
-        strip.perform(NSSelectorFromString("commitEditForTesting"))
+        // Regression for swift-tests-view F6: call the internal DEBUG
+        // hook directly so a rename drift breaks compilation, not CI
+        // after silent no-op. `setEditTextForTesting`, `commitEditFor
+        // Testing`, `cancelEditForTesting` are declared `@objc func`
+        // with default (internal) visibility — `@testable import
+        // Blackbird` exposes them for direct call.
+        strip.setEditTextForTesting("  My Tab  ")
+        strip.commitEditForTesting()
 
         XCTAssertEqual(captured?.0, windows[1])
         XCTAssertEqual(captured?.1, "My Tab")
@@ -53,8 +59,9 @@ final class InlineRenameTests: XCTestCase {
         strip.onCommitRename = { captured = ($0, $1) }
 
         strip.beginEditing(pillIndex: 0)
-        strip.perform(NSSelectorFromString("setEditTextForTesting:"), with: "   ")
-        strip.perform(NSSelectorFromString("commitEditForTesting"))
+        // See F6 note above — direct call, not perform(_:).
+        strip.setEditTextForTesting("   ")
+        strip.commitEditForTesting()
 
         XCTAssertEqual(captured?.0, windows[0])
         XCTAssertEqual(captured?.1, "")
@@ -66,8 +73,9 @@ final class InlineRenameTests: XCTestCase {
         strip.onCommitRename = { _, _ in called = true }
 
         strip.beginEditing(pillIndex: 0)
-        strip.perform(NSSelectorFromString("setEditTextForTesting:"), with: "will-be-cancelled")
-        strip.perform(NSSelectorFromString("cancelEditForTesting"))
+        // See F6 note above — direct call, not perform(_:).
+        strip.setEditTextForTesting("will-be-cancelled")
+        strip.cancelEditForTesting()
 
         XCTAssertFalse(called, "cancel must not publish a rename")
     }
@@ -78,10 +86,10 @@ final class InlineRenameTests: XCTestCase {
         strip.onCommitRename = { commits.append(($0, $1)) }
 
         strip.beginEditing(pillIndex: 0)
-        strip.perform(NSSelectorFromString("setEditTextForTesting:"), with: "first")
+        strip.setEditTextForTesting("first")
         strip.beginEditing(pillIndex: 1)
-        strip.perform(NSSelectorFromString("setEditTextForTesting:"), with: "second")
-        strip.perform(NSSelectorFromString("commitEditForTesting"))
+        strip.setEditTextForTesting("second")
+        strip.commitEditForTesting()
 
         XCTAssertEqual(commits.count, 2)
         XCTAssertEqual(commits[0].0, windows[0])
@@ -102,15 +110,14 @@ final class InlineRenameTests: XCTestCase {
         strip.onCommitRename = { commits.append(($0, $1)) }
 
         strip.beginEditing(pillIndex: 1)
-        strip.perform(NSSelectorFromString("setEditTextForTesting:"),
-                      with: "mid-type")
+        strip.setEditTextForTesting("mid-type")
         // Simulate a resize tick: SAME tabs + selected, different width.
         strip.update(tabs: windows, selected: windows[0], width: 400)
         XCTAssertEqual(commits.count, 0,
                        "width-only update must not commit an in-flight edit")
 
         // User hits Enter — the in-flight value survives.
-        strip.perform(NSSelectorFromString("commitEditForTesting"))
+        strip.commitEditForTesting()
         XCTAssertEqual(commits.count, 1)
         XCTAssertEqual(commits[0].0, windows[1])
         XCTAssertEqual(commits[0].1, "mid-type")
@@ -126,8 +133,7 @@ final class InlineRenameTests: XCTestCase {
         strip.onCommitRename = { commits.append(($0, $1)) }
 
         strip.beginEditing(pillIndex: 2)
-        strip.perform(NSSelectorFromString("setEditTextForTesting:"),
-                      with: "outgoing")
+        strip.setEditTextForTesting("outgoing")
         // Simulate a tab-close: shorter tab list.
         strip.update(
             tabs: Array(windows.prefix(2)),
@@ -155,8 +161,7 @@ final class InlineRenameTests: XCTestCase {
         XCTAssertEqual(commits.count, 0)
 
         strip.beginEditing(pillIndex: 0)
-        strip.perform(NSSelectorFromString("setEditTextForTesting:"),
-                      with: "stranded")
+        strip.setEditTextForTesting("stranded")
         strip.commitEditIfNeeded()
 
         XCTAssertEqual(commits.count, 1,
@@ -165,9 +170,40 @@ final class InlineRenameTests: XCTestCase {
         XCTAssertEqual(commits[0].1, "stranded")
     }
 
+    /// Regression for swift-tests-view F5: the applyInlineRename logic
+    /// on the controller is `session?.titleOverride = trimmed.isEmpty
+    /// ? nil : trimmed` — pure logic that doesn't need a real login
+    /// shell. Exercising it against a `TerminalSession.makeHeadless
+    /// ForTests()` avoids the heavy login-shell startup and its
+    /// side effects (rc files sourced, which vary per developer).
+    func test_applyInlineRename_logic_mapsEmptyToNilViaHeadlessSession() {
+        // Pure logic against a session that never launched a shell.
+        let session = TerminalSession.makeHeadlessForTests()
+        session.applyOscTitle("from-shell")
+        // Non-empty → override set.
+        let nonEmpty = "Custom".trimmingCharacters(in: .whitespacesAndNewlines)
+        session.titleOverride = nonEmpty.isEmpty ? nil : nonEmpty
+        XCTAssertEqual(session.titleOverride, "Custom")
+        // Empty / whitespace-only → override cleared; session resumes
+        // the OSC-reported title.
+        let empty = "".trimmingCharacters(in: .whitespacesAndNewlines)
+        session.titleOverride = empty.isEmpty ? nil : empty
+        XCTAssertNil(session.titleOverride)
+        // Teardown: headless session has no shell to reap, but the
+        // BBTerm Rust state still needs a terminate() to free its ring.
+        session.terminate()
+    }
+
     func test_applyInlineRename_onController_maps_empty_to_nil() {
-        // Contract between strip and MainWindowController: trimmed-empty
-        // → override cleared, non-empty → override set.
+        // Retained as a single end-to-end test: exercises the controller's
+        // real init path (which spawns $SHELL -il once) so the
+        // `isRestorable` invariant (main-window F23) can be asserted
+        // against a real NSWindow. The logic invariant itself is now
+        // covered by the faster headless test above (swift-tests-view
+        // F5), so keeping this one is only about the window-side
+        // contract. See memory note `feedback_test_real_shell_
+        // controllers` — exactly ONE real controller per class remains
+        // the invariant.
         let controller = MainWindowController(
             initialWorkingDirectory: nil,
             autosaveFrame: false
