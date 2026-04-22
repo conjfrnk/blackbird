@@ -137,6 +137,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Replace Sparkle's verbose "up to date" alert before any updater
         // session can spin up (scheduled check, menu action, etc.).
         SparkleAlertOverride.install()
+        // Optional main-thread hang detector. Off unless BB_HANG_WATCHDOG=1.
+        // When set, any main-thread hang ≥ 0.5 s writes a sampled stack to
+        // /tmp/bb-hang-<timestamp>.txt so we can see WHAT the app was doing
+        // during a UI beachball instead of guessing. Used for field repro
+        // of issues like the Settings-click freeze.
+        if ProcessInfo.processInfo.environment["BB_HANG_WATCHDOG"] == "1" {
+            MainThreadWatchdog.install()
+        }
         installMainMenu()
         installSparkleMenuItem()
         // Live-toggle Sparkle's auto-check when the pref changes, so the
