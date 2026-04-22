@@ -182,6 +182,23 @@ public final class MetalRenderer {
     }
     private var lastCacheKey: CacheKey?
 
+    /// Sequence id of the snapshot that drove the most-recent `render(in:)`
+    /// call. Used to detect coalesced intermediate snapshots: if a render
+    /// receives a snapshot whose `sequenceID` jumped by more than 1, the
+    /// main-queue coalescer in `TerminalSession.publishPendingSnapshot`
+    /// dropped one or more intermediate snapshots on the floor, along
+    /// with their damage sets. Alacritty's damage tracking reset on each
+    /// `bb_term_take_snapshot`, so the latest snapshot's `damagedRows`
+    /// only covers the delta since the *most recent* take — rows that
+    /// changed in the skipped snapshots but not in the latest one would
+    /// stay at their stale cached content on a partial rebuild.
+    /// Full screen programs (cmatrix, vim, nvim alt-screen) expose this
+    /// as tearing streams because they write hundreds of cells per
+    /// mainloop tick while the main queue is still running the last
+    /// render. Detecting the gap and forcing a full rebuild trades a
+    /// tiny bit of CPU work for visual correctness under redraw load.
+    private var lastRenderedSnapshotSeq: UInt64 = 0
+
     /// Per-row instance cache. Index i holds the CellInstances emitted by
     /// buildRowInstances for visible row i under the current CacheKey.
     /// Reused across frames when CacheKey is stable; only damaged rows
@@ -378,6 +395,12 @@ public final class MetalRenderer {
         self.lastFrameKey = nil
         self.lastCacheKey = nil
         self.rowInstanceCache = []
+        // Treat the atlas reconfigure as a fresh renderer: a seq the
+        // caller used before the atlas swap is no longer meaningful,
+        // and keeping the old value here would let a pre-reconfigure
+        // seq trip the `snap.sequenceID > lastRenderedSnapshotSeq + 1`
+        // coalesced-snapshot guard on what is really a clean start.
+        self.lastRenderedSnapshotSeq = 0
         return true
     }
 
@@ -392,6 +415,7 @@ public final class MetalRenderer {
         self.lastFrameKey = nil
         self.lastCacheKey = nil
         self.rowInstanceCache = []
+        self.lastRenderedSnapshotSeq = 0
     }
 
     /// Rebuild instances for a single visible row into `out`, consulting
@@ -989,9 +1013,26 @@ public final class MetalRenderer {
                 && lastCacheKey == newCacheKey
                 && rowInstanceCache.count == snap.rows
 
+            // Detect coalesced snapshots: `TerminalSession.publishPending
+            // Snapshot` coalesces rapid core snapshots into a single main-
+            // thread handoff, dropping intermediate damage info on the
+            // floor. `BBSnapshot.sequenceID` is a monotonic per-allocation
+            // counter incremented on every `bb_term_take_snapshot`, so a
+            // jump of >1 between the previous rendered snapshot and this
+            // one means ≥1 intermediate was skipped. The partial-rebuild
+            // path keys off `damagedRows`, which alacritty resets on each
+            // snapshot take — the skipped rows' damage is gone. Force a
+            // full rebuild in that case; the cache's CacheKey stays
+            // valid, we just re-walk every row's cells once to catch the
+            // lost deltas. Fixes cmatrix / vim / nvim streaming artifacts.
+            let snapshotCoalesced: Bool =
+                lastRenderedSnapshotSeq > 0
+                && snap.sequenceID > lastRenderedSnapshotSeq + 1
+
             let partialRows: Set<Int>? = {
                 guard cacheCompatible else { return nil }
                 guard !snap.damageIsFull else { return nil }
+                guard !snapshotCoalesced else { return nil }
                 let damaged = snap.damagedRows
                 if damaged.isEmpty || damaged.count >= (snap.rows + 1) / 2 {
                     return nil
@@ -1027,6 +1068,13 @@ public final class MetalRenderer {
                 partialRowsOnly: partialRows
             )
             lastCacheKey = newCacheKey
+            // Record the snapshot seq we just rendered. `lastRenderedSnapshot
+            // Seq` drives the coalesced-snapshot detection on the next
+            // render; updating it HERE (after the row cache is in sync
+            // with `snap`) means a subsequent skipped-frame detection
+            // measures gap from the last successful paint, not from an
+            // aborted mid-encode state.
+            lastRenderedSnapshotSeq = snap.sequenceID
             if instanceCount > 0 {
                 var uniforms = FrameUniforms(
                     viewportPx: viewportPoints,
