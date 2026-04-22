@@ -28,6 +28,8 @@
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Blackbird uses Apple Events to coordinate with scripts you run from a terminal session.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Connor Frank. MIT License.</string>
 	<key>NSSupportsAutomaticTermination</key>

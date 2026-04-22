@@ -1,3 +1,11 @@
+# project.yml is the authoritative source for Blackbird.xcodeproj.
+# `scripts/build-core.sh` and CI re-run `xcodegen generate` on every
+# invocation, and CI fails if the regeneration produces a pbxproj diff
+# (xcode-project F1 gate). Never edit Blackbird.xcodeproj/project.pbxproj
+# by hand — your change will be overwritten on the next generate pass.
+# To add a source file, resource, target, or build setting, edit this
+# file and re-run `xcodegen generate`.
+
 name: Blackbird
 options:
   bundleIdPrefix: dev.conjfrnk
@@ -18,6 +26,18 @@ settings:
     ENABLE_HARDENED_RUNTIME: YES
     ARCHS: "arm64 x86_64"
     DEAD_CODE_STRIPPING: YES
+    # Targeted strict-concurrency surfaces Sendable warnings on code that
+    # has explicit @Sendable / actor annotations (MainWindowController,
+    # PTY read pumps, ThemeManager) without screaming at every legacy
+    # call site. `complete` is a later bar; `minimal` (the Xcode default)
+    # silenced actual races in the past. Audit xcode-project F8.
+    SWIFT_STRICT_CONCURRENCY: targeted
+    # scripts/build-core.sh (the preBuildScripts entry below) `cd`s out of
+    # SRCROOT and invokes cargo, which the script sandbox blocks. Explicit
+    # NO with a comment is better than leaving the key unset — Xcode
+    # otherwise logs a recommendation on every generate that ends up in
+    # CI logs. Audit xcode-project F9.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 targets:
   Blackbird:
@@ -89,6 +109,14 @@ targets:
         # to 256, which Stage Manager resolved over the catalog and rendered
         # as a generic tile when asking for 512+. A prebuilt full .icns sidesteps it.
         CFBundleIconFile: AppIcon
+        # Terminal emulators are common AppleScript / osascript targets;
+        # macOS 11+ under the hardened runtime requires this key to be
+        # present or TCC silently blocks all Apple Events with
+        # errAEEventNotPermitted (-1743). No Apple Events code exists in
+        # the tree today, but the string is present so a future
+        # tab-scripting / CLI-helper addition doesn't need to touch
+        # Info.plist. Audit xcode-project F5.
+        NSAppleEventsUsageDescription: "Blackbird uses Apple Events to coordinate with scripts you run from a terminal session."
         SUFeedURL: https://blackbird-terminal.com/appcast.xml
         SUPublicEDKey: c0owV2OCS9djxEodLrUloctbMw+qQl52pVkZDuT8fV4=
         SUEnableAutomaticChecks: false
@@ -108,6 +136,17 @@ targets:
           - $(SRCROOT)/core/include
         LIBRARY_SEARCH_PATHS:
           - $(SRCROOT)/core/target/universal/release
+        # Pin manual Developer-ID signing so Archive from Xcode's UI
+        # behaves the same as `scripts/release.sh`. Without this the
+        # Archive action attempts automatic signing against whatever
+        # Apple Developer account is logged into Xcode — fine for local
+        # dev but surprising for a contributor expecting the UI path to
+        # produce a notarizable build. scripts/release.sh still overrides
+        # CODE_SIGN_IDENTITY with "$DEVELOPER_ID" on the command line,
+        # which takes precedence. Audit xcode-project F11.
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: F2B95Q4CT8
+        CODE_SIGN_IDENTITY: "Developer ID Application"
     dependencies:
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
