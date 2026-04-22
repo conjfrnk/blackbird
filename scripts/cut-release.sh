@@ -74,7 +74,19 @@ if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; the
     exit 1
 fi
 
-CURRENT="$(grep -E 'CFBundleShortVersionString:' project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+# Accept either `CFBundleShortVersionString: "0.1.4"` or the YAML
+# plain-scalar form `CFBundleShortVersionString: 0.1.4` — xcodegen
+# writes the quoted form today but an editor autoformat or merge
+# conflict resolution can strip the quotes and the old `"[^"]+"`
+# regex would silently no-op on the sed pass below. Audit
+# scripts-release F7.
+extract_yaml_value() {
+    local key="$1"
+    grep -E "^ *${key}:" project.yml \
+        | head -1 \
+        | sed -E "s/^ *${key}: *\"?([^\"]+)\"? *$/\\1/"
+}
+CURRENT="$(extract_yaml_value CFBundleShortVersionString)"
 if [[ "$CURRENT" == "$VERSION" ]]; then
     echo "!! project.yml already declares version $VERSION — nothing to bump." >&2
     exit 1
@@ -85,7 +97,7 @@ fi
 # short-version bump so that every release is strictly "newer" than the
 # one before it, even when Sparkle is comparing a display version like
 # "0.1.2" against an installed CFBundleVersion of "3".
-CURRENT_BUILD="$(grep -E '^ *CFBundleVersion:' project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+CURRENT_BUILD="$(extract_yaml_value CFBundleVersion)"
 if ! [[ "$CURRENT_BUILD" =~ ^[0-9]+$ ]]; then
     echo "!! CFBundleVersion in project.yml isn't a plain integer (got '$CURRENT_BUILD')." >&2
     echo "   cut-release.sh only knows how to increment monotonic integers." >&2
@@ -96,8 +108,11 @@ NEW_BUILD=$((CURRENT_BUILD + 1))
 echo "==> Bumping $CURRENT → $VERSION (build $CURRENT_BUILD → $NEW_BUILD)"
 
 # macOS sed requires an empty arg for -i; keep portable.
-sed -i '' -E "s/(CFBundleShortVersionString: )\"[^\"]+\"/\\1\"${VERSION}\"/" project.yml
-sed -i '' -E "s/(CFBundleVersion: )\"[^\"]+\"/\\1\"${NEW_BUILD}\"/" project.yml
+# Match quoted OR unquoted values; always rewrite to the quoted form
+# so the xcodegen-output invariant is restored regardless of how the
+# file got edited in between releases.
+sed -i '' -E "s/(CFBundleShortVersionString: *)\"?[^\"[:space:]]+\"?/\\1\"${VERSION}\"/" project.yml
+sed -i '' -E "s/(CFBundleVersion: *)\"?[^\"[:space:]]+\"?/\\1\"${NEW_BUILD}\"/" project.yml
 
 if ! command -v xcodegen >/dev/null 2>&1; then
     echo "!! xcodegen not found — install via 'brew install xcodegen'" >&2

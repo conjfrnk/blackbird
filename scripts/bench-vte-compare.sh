@@ -21,7 +21,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BENCH_ROOT="/tmp/bb-bench"
+# Per-user bench-root under $TMPDIR (macOS gives each user a private
+# sandboxed /var/folders/.../T/ dir) so a second user on the same box
+# can't symlink-clobber us at /tmp/bb-bench. Audit scripts-release F5.
+# Override with BB_BENCH_ROOT=/some/path for CI or cross-user runs.
+BENCH_ROOT="${BB_BENCH_ROOT:-${TMPDIR:-/tmp}bb-bench}"
+BENCH_ROOT="${BENCH_ROOT%/}"
 VTEBENCH_REPO="$BENCH_ROOT/vtebench"
 VTEBENCH_BIN="$VTEBENCH_REPO/target/release/vtebench"
 # Patched benchmarks: vtebench's stock scripts use `tput cols`/`tput lines`

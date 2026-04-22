@@ -96,7 +96,10 @@ fi
 
 # sign_update emits a line like:
 #   sparkle:edSignature="abc…" length="123456"
-SIG_LINE="$($SIGN_UPDATE_PATH "$DMG")"
+# Quote SIGN_UPDATE_PATH so a path containing spaces (e.g. a macOS
+# developer whose home dir has spaces) still resolves to the executable
+# rather than splitting into argv. Audit scripts-release F8.
+SIG_LINE="$("$SIGN_UPDATE_PATH" "$DMG")"
 
 # PubDate in RFC 822 format, as Sparkle expects.
 PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"

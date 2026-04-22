@@ -125,12 +125,17 @@ PREDICATE='subsystem == "dev.conjfrnk.blackbird" OR subsystem == "com.conjfrnk.b
 echo "==> Streaming filtered unified log. Ctrl-C to stop."
 echo "---------------------------------------------------------------"
 
+# `exec /usr/bin/log stream …` replaces the shell image, which throws
+# away the `trap cleanup EXIT INT TERM` set above — Ctrl-C then tears
+# down log stream without killing Blackbird, leaving the launched app
+# orphaned. Drop the `exec` so the shell stays live and the trap fires.
+# Audit scripts-release F19.
 if [[ "$mode" == "all" ]]; then
   # Unfiltered — every log line from the app's subsystems. Verbose.
-  exec /usr/bin/log stream --predicate "$PREDICATE" --info --debug --style syslog
+  /usr/bin/log stream --predicate "$PREDICATE" --info --debug --style syslog
 else
   # Curated: fps heartbeat (confirms renderer alive), latency flush
   # (probe p50/p99 once ring fills), and any crash signatures.
-  exec /usr/bin/log stream --predicate "$PREDICATE" --info --debug --style syslog \
+  /usr/bin/log stream --predicate "$PREDICATE" --info --debug --style syslog \
     | grep --line-buffered -E 'fps\]|latency\]|ERROR|Fatal|assert|crash|SIGABRT|EXC_'
 fi

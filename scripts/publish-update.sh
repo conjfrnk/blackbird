@@ -37,10 +37,22 @@ RAW_VERSION="$1"
 VERSION="${RAW_VERSION#v}"
 TAG="v${VERSION}"
 
-echo "==> Verifying release $TAG exists on GitHub"
+echo "==> Verifying release $TAG exists on GitHub with an attached DMG"
 if ! gh release view "$TAG" >/dev/null 2>&1; then
     echo "!! No GH release found for $TAG. Has CI finished?" >&2
     echo "   gh run list --workflow=release.yml --limit 3" >&2
+    exit 1
+fi
+# `gh release view` passes as soon as the release object exists, but the
+# DMG upload happens AFTER the release is created — a publish that races
+# past the upload step would download a 404 and write a zero-byte DMG.
+# Verify the asset is actually listed before proceeding. Audit
+# scripts-release F4.
+EXPECTED_DMG="Blackbird-${VERSION}.dmg"
+if ! gh release view "$TAG" --json assets --jq '.assets[].name' | \
+     grep -Fxq "$EXPECTED_DMG"; then
+    echo "!! Release $TAG exists but $EXPECTED_DMG isn't attached yet." >&2
+    echo "   CI may still be uploading; retry in a minute." >&2
     exit 1
 fi
 

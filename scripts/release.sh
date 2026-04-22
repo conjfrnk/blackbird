@@ -67,10 +67,19 @@ rm -rf "$APP_DST"
 cp -R "$APP_SRC" "$APP_DST"
 
 echo "==> Verifying code signature"
-codesign --verify --strict --deep --verbose=2 "$APP_DST" 2>&1 | tail -3 || {
-    echo "!! Code signature verification failed."
+# Capture the full codesign diagnostic before truncating. `tail -3` at the
+# end of a pipe hid the critical "file modified in transit" / "resource fork
+# ... missing" messages when signatures failed; on failure, dump the full
+# log so the operator can actually see what's wrong. Audit scripts-release
+# F6.
+CODESIGN_LOG="$(codesign --verify --strict --deep --verbose=2 "$APP_DST" 2>&1)"
+CODESIGN_STATUS=$?
+if [[ $CODESIGN_STATUS -ne 0 ]]; then
+    echo "!! Code signature verification failed (exit $CODESIGN_STATUS)."
+    echo "$CODESIGN_LOG" >&2
     exit 1
-}
+fi
+printf '%s\n' "$CODESIGN_LOG" | tail -3
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DST/Contents/Info.plist" 2>/dev/null || echo "0.0.0")"
 DMG_NAME="Blackbird-${VERSION}.dmg"
