@@ -1,9 +1,7 @@
 import Foundation
 import Combine
 import AppKit
-#if DEBUG
 import os
-#endif
 
 /// Owns a PTY and a BBTerm. Wires PTY output into the VT parser, publishes
 /// snapshots of the grid to observers.
@@ -31,6 +29,25 @@ public final class TerminalSession: ObservableObject {
     private static let osc52Logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                             category: "osc52")
     #endif
+
+    /// Always-on latency-diagnostic logger. Readable in Release via
+    ///   log stream --predicate 'subsystem == "dev.conjfrnk.blackbird" AND category == "startup"'
+    /// Used to pin where the "why is my prompt slow" time is going —
+    /// shell spawn, first PTY byte, first snapshot delivered to main.
+    /// `privacy: .public` on every emit so Console doesn't redact.
+    private static let startupLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                              category: "startup")
+    /// Absolute time the session's PTY was spawned. First-byte and
+    /// first-snapshot timestamps reference this baseline so the log
+    /// reads as "spawn → first byte N ms" instead of raw clock.
+    private var spawnedAt: CFTimeInterval = 0
+    /// Set once when the first PTY byte arrives so the read path stops
+    /// re-logging on every chunk. Session-local: each new tab starts its
+    /// own clock.
+    private var loggedFirstByte = false
+    /// Set once the first snapshot lands on the main queue. Protected by
+    /// `publishLock` because `publishPendingSnapshot` is the only writer.
+    private var publishedFirstSnapshot = false
 
     @Published public private(set) var snapshot: BBSnapshot?
     /// Effective, observable title for UI binding. Always equals `displayTitle`
@@ -193,9 +210,11 @@ public final class TerminalSession: ObservableObject {
         size: Size,
         initialWorkingDirectory: String? = nil
     ) throws -> TerminalSession {
+        let t0 = CACurrentMediaTime()
         guard let bb = BBTerm(size: .init(cols: size.cols, rows: size.rows)) else {
             throw SessionError.coreInitFailed
         }
+        let tCore = CACurrentMediaTime()
         let pty = try PTY.spawn(
             executable: shell,
             arguments: arguments,
@@ -203,7 +222,15 @@ public final class TerminalSession: ObservableObject {
             size: size,
             initialWorkingDirectory: initialWorkingDirectory
         )
-        return TerminalSession(bbterm: bb, pty: pty)
+        let tSpawn = CACurrentMediaTime()
+        let s = TerminalSession(bbterm: bb, pty: pty)
+        s.spawnedAt = tSpawn
+        let coreMs = (tCore - t0) * 1000
+        let ptyMs = (tSpawn - tCore) * 1000
+        Self.startupLogger.log(
+            "start shell=\(shell, privacy: .public) core_init=\(coreMs, format: .fixed(precision: 1), privacy: .public)ms pty_spawn=\(ptyMs, format: .fixed(precision: 1), privacy: .public)ms"
+        )
+        return s
     }
 
     public enum SessionError: Error {
@@ -715,6 +742,18 @@ public final class TerminalSession: ObservableObject {
         }
         publishLock.unlock()
 
+        // First-byte marker: the time from `spawnedAt` to this point is
+        // dominated by the user's shell startup (rc-file loading + prompt
+        // computation). Logged once per session so we can distinguish
+        // "our spawn path is slow" from "the shell is slow".
+        if !loggedFirstByte {
+            loggedFirstByte = true
+            let dt = (CACurrentMediaTime() - spawnedAt) * 1000
+            Self.startupLogger.log(
+                "first PTY byte \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn (bytes=\(data.count, privacy: .public))"
+            )
+        }
+
         let bytes = [UInt8](data)
         bbterm.input(bytes)
         guard let snap = bbterm.snapshot() else { return }
@@ -745,12 +784,20 @@ public final class TerminalSession: ObservableObject {
             self.pendingSnapshot = nil
             self.snapshotDispatchScheduled = false
             let terminated = self.isTerminated
+            let wasFirst = !self.publishedFirstSnapshot
+            if wasFirst, latest != nil { self.publishedFirstSnapshot = true }
             self.publishLock.unlock()
             // F11: if the session terminated between schedule and fire,
             // don't write to `@Published` — the consumer may already be
             // tearing down and we'd waste a downstream render cycle.
             guard !terminated, let latest else { return }
             self.snapshot = latest
+            if wasFirst {
+                let dt = (CACurrentMediaTime() - self.spawnedAt) * 1000
+                Self.startupLogger.log(
+                    "first snapshot on main \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn"
+                )
+            }
         }
     }
 }

@@ -1,7 +1,9 @@
 import SwiftUI
 import AppKit
 import Combine
+import QuartzCore
 import Sparkle
+import os
 
 /// Traditional AppKit entry point. We don't use a SwiftUI `App` because the
 /// only scene we'd declare is `Settings { … }` — and that scene registers a
@@ -21,6 +23,14 @@ enum BlackbirdMain {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+
+    /// Always-on latency logger. Mirrors `TerminalSession.startupLogger`
+    /// so the ⌘T / shell-spawn / first-byte / first-snapshot timeline
+    /// reads as a single continuous thread in
+    ///   log stream --predicate 'category == "startup"'
+    fileprivate static let startupLogger = Logger(
+        subsystem: "dev.conjfrnk.blackbird", category: "startup"
+    )
 
     private var controllers: [MainWindowController] = []
 
@@ -264,10 +274,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// inherit the previous tab's cwd so ⌘T inside `~/projects/foo` lands
     /// in `~/projects/foo`, matching Terminal.app / iTerm2.
     @objc func newWindowForTab(_ sender: Any?) {
+        let t0 = CACurrentMediaTime()
         let source = activeTerminalController
         let controller = createTerminalController(
             cwd: CwdResolver.forNewTab(source: source?.session),
             autosaveFrame: false   // tabs use the group's position
+        )
+        let tCreate = CACurrentMediaTime()
+        Self.startupLogger.log(
+            "newWindowForTab: controller_init=\(((tCreate - t0) * 1000), format: .fixed(precision: 1), privacy: .public)ms"
         )
         guard let newWindow = controller.window else { return }
         if let sourceWindow = source?.window {
