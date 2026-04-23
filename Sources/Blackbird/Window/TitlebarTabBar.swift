@@ -87,7 +87,7 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
 /// Equal-width pill strip with a trailing `+` button. Each pill shows its
 /// window title; hovering reveals an `×` close button on the left of the
 /// pill. Designed to live inside an `NSTitlebarAccessoryViewController`.
-final class TabStripView: NSView, NSDraggingSource {
+final class TabStripView: NSView {
 
     /// Full titlebar-row height. The grid's top inset is computed from
     /// the style-mask-derived titlebar height (not `safeAreaInsets`), so
@@ -136,55 +136,11 @@ final class TabStripView: NSView, NSDraggingSource {
     /// titlebar-tabs F4.
     private var focusedPill: Int? = nil
 
-    // MARK: - Drag-to-reorder state
-
-    /// Set by `mouseDown` when a click lands on a pill body (outside the
-    /// close hotspot and outside an in-flight rename). If the user drags
-    /// past `dragActivationDistance`, we transition into a full drag
-    /// session and the pill rides with the cursor until dropped on a new
-    /// position (reorder) or outside the bar entirely (tear-off). Audit
-    /// titlebar-tabs F1 / F2.
-    private var pendingDragPillIndex: Int?
-    /// Location of the originating `mouseDown` in TabStripView coordinates.
-    /// Used to compute drag activation distance.
-    private var pendingDragStartPoint: NSPoint?
-    /// Minimum pixels the cursor must move from mouseDown before a
-    /// dragging session kicks in. Matches AppKit's default list-row
-    /// drag threshold; smaller values fire the drag on jitter from
-    /// trackpad clicks.
-    private static let dragActivationDistance: CGFloat = 4.0
-    /// Pasteboard type that carries the dragged tab's identity. Payload
-    /// is the source `NSWindow`'s `windowNumber` as a UTF-8 decimal
-    /// string — stable for the duration of the session, uniquely
-    /// identifies the window across the current app instance, and can't
-    /// be round-tripped from another process (which would risk leaking
-    /// a pointer to a foreign window).
-    static let tabPasteboardType = NSPasteboard.PasteboardType(
-        "dev.conjfrnk.blackbird.tab"
-    )
-    /// True while a drag originating from THIS strip is in flight. Used
-    /// by `draggingEntered` / `draggingUpdated` to decide whether to
-    /// paint a drop indicator (reorder within our own bar) vs leave it
-    /// to AppKit's default tab-in drop gesture (merging windows from
-    /// another app instance).
-    private var isLocalDragInFlight = false
-    /// Proposed drop index during an active drag. Rendered as a vertical
-    /// blue rule between pills when set. Nil when the drop would land
-    /// outside the bar (tear-off preview).
-    private var dropIndicatorIndex: Int?
-
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = .clear
         updateTrackingAreas()
-        // Accept drops of our own tab pasteboard type. Used for
-        // drag-to-reorder (drops landing on another pill position) and
-        // drag-into-this-window (drops from a different Blackbird
-        // window's strip). Drops of unrelated types return `[]` from
-        // `draggingEntered`, so the registration is safe to widen in
-        // the future without breaking drag-from-other-apps behaviour.
-        registerForDraggedTypes([Self.tabPasteboardType])
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
@@ -591,30 +547,6 @@ final class TabStripView: NSView, NSDraggingSource {
             x: addButtonFrame.midX - psize.width / 2,
             y: addButtonFrame.midY - psize.height / 2 - 1
         ))
-
-        // Drop indicator: a vertical accent-coloured rule at the proposed
-        // insertion position, drawn above everything else so it's visible
-        // on hovered / selected pills. Shown only while a local drag is
-        // in flight and the cursor is inside the bar.
-        if let dropIdx = dropIndicatorIndex {
-            let x: CGFloat
-            if dropIdx == 0, let first = pillFrames.first {
-                x = first.minX - Self.pillSpacing / 2
-            } else if dropIdx >= pillFrames.count, let last = pillFrames.last {
-                x = last.maxX + Self.pillSpacing / 2
-            } else if dropIdx > 0 && dropIdx <= pillFrames.count {
-                let leading = pillFrames[dropIdx - 1]
-                let trailing = pillFrames[dropIdx]
-                x = (leading.maxX + trailing.minX) / 2
-            } else {
-                x = 0
-            }
-            let indicatorRect = NSRect(
-                x: x - 1.5, y: 2, width: 3, height: Self.height - 4
-            )
-            ctx.setFillColor(NSColor.controlAccentColor.cgColor)
-            ctx.fill(indicatorRect)
-        }
     }
 
     private func truncatedString(_ s: String, fitting width: CGFloat) -> String {
@@ -696,44 +628,9 @@ final class TabStripView: NSView, NSDraggingSource {
                 onCloseWindow?(tabs[i])
             } else {
                 onSelectWindow?(tabs[i])
-                // Arm drag-to-reorder. If the user drags past the
-                // activation distance before releasing, mouseDragged
-                // transitions into a drag session. Selection has
-                // already fired above so even a non-drag click stays
-                // responsive.
-                pendingDragPillIndex = i
-                pendingDragStartPoint = p
             }
             return
         }
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let startIdx = pendingDragPillIndex,
-              let startPoint = pendingDragStartPoint,
-              startIdx < tabs.count,
-              startIdx < pillFrames.count
-        else {
-            super.mouseDragged(with: event)
-            return
-        }
-        let here = convert(event.locationInWindow, from: nil)
-        let dx = here.x - startPoint.x
-        let dy = here.y - startPoint.y
-        guard (dx * dx + dy * dy) >= (Self.dragActivationDistance * Self.dragActivationDistance) else {
-            return
-        }
-        // Transition to a full drag session. Clear tracking so a second
-        // drag activation doesn't fire off the same mouseDown.
-        pendingDragPillIndex = nil
-        pendingDragStartPoint = nil
-        beginTabDrag(pillIndex: startIdx, event: event)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        pendingDragPillIndex = nil
-        pendingDragStartPoint = nil
-        super.mouseUp(with: event)
     }
 
     // MARK: - Keyboard focus (titlebar-tabs F4)
@@ -838,238 +735,6 @@ final class TabStripView: NSView, NSDraggingSource {
         guard let idx = focusedPill, idx < tabs.count else { return }
         onSelectWindow?(tabs[idx])
     }
-
-    // MARK: - Drag session: source
-
-    private func beginTabDrag(pillIndex: Int, event: NSEvent) {
-        guard pillIndex < tabs.count, pillIndex < pillFrames.count else { return }
-        let sourceWindow = tabs[pillIndex]
-        let pillRect = pillFrames[pillIndex]
-        // Stash BEFORE the session starts — `draggingSession(_:willBeginAt:)`
-        // fires asynchronously and the pending-drag tracking is already
-        // cleared by `mouseDragged`.
-        lastDraggedSourceWindow = sourceWindow
-
-        // Custom pasteboard payload: the source window's windowNumber as
-        // a UTF-8 decimal. See pasteboard-type doc for why.
-        let item = NSPasteboardItem()
-        item.setString(String(sourceWindow.windowNumber),
-                       forType: Self.tabPasteboardType)
-        let dragItem = NSDraggingItem(pasteboardWriter: item)
-        // Snapshot the pill so the dragged glyph carries visible identity
-        // instead of the generic system drag-cursor flag. Render into an
-        // NSImage at 1x — the compositor scales for Retina.
-        let snapshot = snapshotImage(of: pillRect)
-        dragItem.setDraggingFrame(pillRect, contents: snapshot)
-
-        isLocalDragInFlight = true
-        beginDraggingSession(with: [dragItem], event: event, source: self)
-    }
-
-    /// Render the pill region to an NSImage. Used as the drag feedback
-    /// image so the cursor carries a visual duplicate of the grabbed
-    /// pill during the session.
-    private func snapshotImage(of rect: NSRect) -> NSImage {
-        let image = NSImage(size: rect.size)
-        image.lockFocus()
-        let ctx = NSGraphicsContext.current?.cgContext
-        ctx?.translateBy(x: -rect.minX, y: -rect.minY)
-        if isFlipped {
-            // Canvas is bottom-up; flip so our top-down draw routine paints
-            // the right way.
-            ctx?.translateBy(x: 0, y: rect.height + rect.minY * 2)
-            ctx?.scaleBy(x: 1, y: -1)
-        }
-        draw(rect)
-        image.unlockFocus()
-        return image
-    }
-
-    // MARK: - Drag session: destination (drop on this strip = reorder)
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingSource as? TabStripView === self else {
-            // Drags from other apps / other strips are handled via AppKit's
-            // built-in tab merge gesture, not by us.
-            return []
-        }
-        updateDropIndicator(for: sender)
-        return .move
-    }
-
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingSource as? TabStripView === self else { return [] }
-        updateDropIndicator(for: sender)
-        return .move
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        if dropIndicatorIndex != nil {
-            dropIndicatorIndex = nil
-            needsDisplay = true
-        }
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard sender.draggingSource as? TabStripView === self,
-              let dropIndex = insertionIndex(for: sender),
-              let sourceWindow = sourceWindowFromPasteboard(sender.draggingPasteboard)
-        else {
-            dropIndicatorIndex = nil
-            needsDisplay = true
-            return false
-        }
-        dropIndicatorIndex = nil
-        needsDisplay = true
-        return reorderSourceWindow(sourceWindow, toIndex: dropIndex)
-    }
-
-    /// Update the stored drop-indicator index based on the cursor's
-    /// current position, triggering a redraw when it changes.
-    private func updateDropIndicator(for sender: NSDraggingInfo) {
-        let newIndex = insertionIndex(for: sender)
-        if newIndex != dropIndicatorIndex {
-            dropIndicatorIndex = newIndex
-            needsDisplay = true
-        }
-    }
-
-    /// Compute the insertion index (0..=tabs.count) for a drop at the
-    /// cursor's current x coordinate. Returns nil when the drop lands
-    /// outside the bar's vertical bounds (tear-off territory — handled
-    /// by draggingSession endedAt).
-    private func insertionIndex(for sender: NSDraggingInfo) -> Int? {
-        let location = convert(sender.draggingLocation, from: nil)
-        if !bounds.insetBy(dx: -4, dy: -4).contains(location) {
-            return nil
-        }
-        // Walk the pill midpoints: if the cursor is past the midpoint of
-        // pill N, insertion goes AFTER N.
-        for (i, rect) in pillFrames.enumerated() {
-            if location.x < rect.midX { return i }
-        }
-        return pillFrames.count
-    }
-
-    /// Resolve the source window for a drag by its windowNumber payload.
-    /// Returns nil if the window is no longer in our tab group (rare —
-    /// requires a concurrent close during the drag).
-    private func sourceWindowFromPasteboard(_ pb: NSPasteboard) -> NSWindow? {
-        guard let s = pb.string(forType: Self.tabPasteboardType),
-              let windowNumber = Int(s) else { return nil }
-        return tabs.first { $0.windowNumber == windowNumber }
-    }
-
-    /// Reorder `source` within the tab group so it ends up at `newIndex`.
-    /// NSWindowTabGroup.windows is read-only, so we detach + re-insert:
-    /// detach source to standalone, then `addTabbedWindow` from the new
-    /// anchor in the tab group's current order.
-    private func reorderSourceWindow(_ source: NSWindow, toIndex newIndex: Int) -> Bool {
-        guard let group = source.tabGroup else { return false }
-        // Snapshot the current order BEFORE detach; group.windows changes
-        // the moment we move the window out.
-        let currentOrder = group.windows
-        guard let currentIndex = currentOrder.firstIndex(of: source) else { return false }
-        if currentIndex == newIndex || currentIndex == newIndex - 1 {
-            return true // no-op drop (on self or adjacent gap)
-        }
-        // Compute the post-removal anchor. After detaching `source`, the
-        // order collapses. The destination anchor is the window at
-        // (newIndex - 1) in the collapsed order — or use the window at
-        // newIndex with `.above` if that's simpler.
-        let remaining = currentOrder.filter { $0 !== source }
-        let clampedIndex = max(0, min(newIndex, remaining.count))
-
-        // Detach: moveTabToNewWindow removes `source` from the tab group.
-        // The window stays visible at its original screen position.
-        source.perform(#selector(NSWindow.moveTabToNewWindow(_:)), with: nil)
-
-        if clampedIndex == remaining.count, let last = remaining.last {
-            last.addTabbedWindow(source, ordered: .above)
-        } else if clampedIndex == 0, let first = remaining.first {
-            first.addTabbedWindow(source, ordered: .below)
-        } else if clampedIndex > 0 {
-            let anchor = remaining[clampedIndex - 1]
-            anchor.addTabbedWindow(source, ordered: .above)
-        } else if let first = remaining.first {
-            first.addTabbedWindow(source, ordered: .below)
-        }
-        source.makeKeyAndOrderFront(nil)
-        return true
-    }
-
-    // MARK: - Drag session end: tear-off detection
-
-    func draggingSession(
-        _ session: NSDraggingSession,
-        endedAt screenPoint: NSPoint,
-        operation: NSDragOperation
-    ) {
-        isLocalDragInFlight = false
-        dropIndicatorIndex = nil
-        needsDisplay = true
-        guard operation == [] else {
-            // Drop was accepted by a destination (our own strip, or a
-            // different Blackbird window's strip) — reorder / merge is
-            // already done. Nothing more to do.
-            return
-        }
-        // Drop landed on the void. Tear the source window off its tab
-        // group and place it at the drop point. Matches the Safari /
-        // Chrome / iTerm2 "drag a tab out into its own window" gesture.
-        guard let sourceWindow = lastDraggedSourceWindow,
-              sourceWindow.tabGroup != nil,
-              (sourceWindow.tabGroup?.windows.count ?? 0) > 1
-        else {
-            lastDraggedSourceWindow = nil
-            return
-        }
-        sourceWindow.perform(
-            #selector(NSWindow.moveTabToNewWindow(_:)),
-            with: nil
-        )
-        // Reposition so the torn-off window's titlebar centres near the
-        // drop point — makes the origin of the new window clear.
-        var frame = sourceWindow.frame
-        frame.origin.x = screenPoint.x - frame.width / 2
-        frame.origin.y = screenPoint.y - (TabStripView.height + 10)
-        sourceWindow.setFrame(frame, display: true, animate: false)
-        sourceWindow.makeKeyAndOrderFront(nil)
-        lastDraggedSourceWindow = nil
-    }
-
-    func draggingSession(
-        _ session: NSDraggingSession,
-        sourceOperationMaskFor context: NSDraggingContext
-    ) -> NSDragOperation {
-        // .move for both within-app (our own bar) and outside-app (the
-        // void, which turns into tear-off in our session-end handler).
-        .move
-    }
-
-    func draggingSession(
-        _ session: NSDraggingSession,
-        willBeginAt screenPoint: NSPoint
-    ) {
-        // Remember which window the session started with so the tear-off
-        // path can reach it without re-reading the pasteboard after the
-        // session ends. Pasteboard is the source of truth during the
-        // drag; this stash is only used when the session ends outside a
-        // destination that would have read it.
-        if let idx = pendingDragPillIndex ?? hoveredPill,
-           idx < tabs.count {
-            lastDraggedSourceWindow = tabs[idx]
-        } else if let mostRecentSource = tabs.first(where: { win in
-            win === selectedTab
-        }) {
-            lastDraggedSourceWindow = mostRecentSource
-        }
-    }
-
-    /// Stash of the window the current drag session started with, so
-    /// `draggingSession(_:endedAt:)` can reach it without re-parsing
-    /// the pasteboard. Cleared after session end.
-    private weak var lastDraggedSourceWindow: NSWindow?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
