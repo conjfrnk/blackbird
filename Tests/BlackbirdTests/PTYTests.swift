@@ -222,14 +222,24 @@ final class PTYTests: XCTestCase {
             }
             lock.unlock()
         }
-        wait(for: [initial], timeout: 3.0)
+        // 10 s (not the 3 s used by the simpler PTY tests above) because
+        // this path is heavier: fork + /bin/sh exec + `stty size` + trap
+        // registration before `initial` can fulfill, and TIOCSWINSZ →
+        // kernel signal scheduling → shell trap fire + `stty size` again
+        // before `resized` can fulfill. On GHA macos-14 runners under
+        // ASan+UBSan the whole pipeline can exceed 3 s even on a green
+        // run — d5d3b23's CI hit `Exceeded timeout of 3 seconds` on the
+        // resized wait without any real bug. 10 s is comfortable without
+        // masking a genuine SIGWINCH hang (a broken trap still fails
+        // within 10 s, just slower to surface).
+        wait(for: [initial], timeout: 10.0)
 
         // Drive the actual resize. TIOCSWINSZ updates the kernel winsize and
         // posts SIGWINCH to the tty's foreground pgroup; the shell trap
         // reads the new size and prints it.
         pty.resize(to: .init(cols: 120, rows: 40))
 
-        wait(for: [resized], timeout: 3.0)
+        wait(for: [resized], timeout: 10.0)
         lock.lock()
         let line = String(data: out, encoding: .utf8) ?? ""
         lock.unlock()
