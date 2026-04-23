@@ -34,6 +34,7 @@
 		4D998CBEB54F5EBA512EE58F /* TerminalView+IME.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */; };
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
 		66BDCBF186346C6913023FC5 /* DamageTrackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */; };
+		6733787F66C34604391376B8 /* AppDelegate+Menu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 652F3910146BA23469557490 /* AppDelegate+Menu.swift */; };
 		6A4A848FAF8BE625DC512F81 /* FindReplaceIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */; };
 		6D27ABAFB174297CCD622E1D /* TabRenameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0F474A7AF422E5AD4E5502 /* TabRenameTests.swift */; };
 		6D6EBC162B5879A358F88431 /* CmdHoverHighlightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47D8320188E16491EEB26A58 /* CmdHoverHighlightTests.swift */; };
@@ -140,6 +141,7 @@
 		5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
 		5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+IME.swift"; sourceTree = "<group>"; };
 		6160AD20DD99CBE80ABC5C40 /* AccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityTests.swift; sourceTree = "<group>"; };
+		652F3910146BA23469557490 /* AppDelegate+Menu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+Menu.swift"; sourceTree = "<group>"; };
 		673FE2E71DCD08F9286D5C60 /* kitty.terminfo */ = {isa = PBXFileReference; path = kitty.terminfo; sourceTree = "<group>"; };
 		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
 		6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+Dragging.swift"; sourceTree = "<group>"; };
@@ -302,6 +304,7 @@
 			isa = PBXGroup;
 			children = (
 				AA3C166E3043F25B8791103E /* App.swift */,
+				652F3910146BA23469557490 /* AppDelegate+Menu.swift */,
 				DACE89CC5DC7A082BAF6BF37 /* Info.plist */,
 				0B018D13660AC5582DF7042E /* SparkleAlertOverride.swift */,
 				BC563B552C1105D7EA9558F5 /* StartupTelemetry.swift */,
@@ -540,6 +543,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C99A80AB4B22D7FE65C71CFB /* App.swift in Sources */,
+				6733787F66C34604391376B8 /* AppDelegate+Menu.swift in Sources */,
 				B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */,
 				BF0ADDAAD252C3F8D7FD3F79 /* CellInstance.swift in Sources */,
 				2B00CBAD39BA9D79D29F1CEE /* CwdResolver.swift in Sources */,
