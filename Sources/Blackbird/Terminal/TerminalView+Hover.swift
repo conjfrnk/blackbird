@@ -455,52 +455,10 @@ extension TerminalView {
         hoverTooltipPanel?.orderOut(nil)
     }
 
-    /// Grow the current `.word` or `.line` selection outward from `anchor`.
-    /// `.word` uses the shared `wordRange(around:in:displayOffset:)` helper;
-    /// `.line` selects the entire grid line.
-    func expandSelectionUnderAnchor() {
-        guard var sel = selection, let snap = currentSnapshot else { return }
-        switch sel.mode {
-        case .word:
-            if let (a, b) = wordRange(around: sel.anchor, in: snap, displayOffset: snap.displayOffset) {
-                sel.anchor = a
-                sel.cursor = b
-                selection = sel
-            }
-        case .line:
-            sel.anchor = BufferPoint(line: sel.anchor.line, col: 0)
-            sel.cursor = BufferPoint(line: sel.cursor.line, col: snap.cols - 1)
-            selection = sel
-        default:
-            break
-        }
-    }
-
-    func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool, session: TerminalSession) {
-        let loc = convert(event.locationInWindow, from: nil)
-        // Paranoia. `event.locationInWindow` is a CGFloat; a misbehaving
-        // input device or a bridged NaN / Infinity can slip through, and
-        // `Int(NaN)` / `Int(±Inf)` trap. Guard before the cast rather
-        // than after — the scrollWheel path already uses this pattern.
-        guard loc.x.isFinite, loc.y.isFinite else { return }
-        let rowY = (bounds.height - titlebarOnlyTopInset - loc.y) / metrics.cellHeight
-        let colX = loc.x / metrics.cellWidth
-        // Clamp to a sane cell range so oversized coordinates (user
-        // scrolled the window off the right edge of a 200k-col display)
-        // don't overflow Int32 when encodeMouseReport stringifies them.
-        // Division of a finite by a positive cellWidth/Height is finite,
-        // so no second isFinite check is needed.
-        let maxCol = 10_000, maxRow = 10_000
-        let col = max(0, min(maxCol, Int(colX)))
-        let row = max(0, min(maxRow, Int(rowY)))
-        guard let bytes = Self.encodeMouseReport(
-            sgr: sgrMouseEnabled(),
-            button: button,
-            press: press,
-            col: col,
-            row: row
-        ) else { return }
-        session.send(bytes)
-    }
+    // `expandSelectionUnderAnchor()` and `sendMouseEvent(...)` moved to
+    // `TerminalView+Mouse.swift`. Those helpers had no intra-Hover
+    // callers except this file's DEC 1003 any-event report (which
+    // still calls `sendMouseEvent` cross-file via its internal
+    // visibility there).
 
 }
