@@ -130,6 +130,11 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         matchLabel.translatesAutoresizingMaskIntoConstraints = false
         matchLabel.font = .systemFont(ofSize: 11)
         matchLabel.textColor = .secondaryLabelColor
+        // VoiceOver reads the count out when the query changes (Terminal.app
+        // and Safari both do this). Without a label the `NSTextField` is
+        // read as a plain string; with it the screen reader announces
+        // "Find results: 3 of 12" when the text updates.
+        matchLabel.setAccessibilityLabel("Find results")
 
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.bezelStyle = .inline
@@ -240,7 +245,24 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         // doesn't wipe this newly-written match count on its 2 s timer.
         // Audit findbar-selection F6.
         transientMessageToken &+= 1
-        matchLabel.stringValue = total == 0 ? "No matches" : "\(current + 1) / \(total)"
+        let text = total == 0 ? "No matches" : "\(current + 1) / \(total)"
+        // Skip the AppKit round-trip (and the VoiceOver announcement)
+        // when nothing actually changed — the search path re-publishes
+        // the same count whenever the snapshot sequence ticks, even if
+        // the content didn't move.
+        guard matchLabel.stringValue != text else { return }
+        matchLabel.stringValue = text
+        // Post an announcement so VoiceOver surfaces the new count
+        // immediately; without it the user has to explicitly rotor-focus
+        // the label. Matches Terminal.app / Safari's find-bar behaviour.
+        NSAccessibility.post(
+            element: matchLabel as Any,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: text,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+            ]
+        )
     }
 
     /// Fires the replace-current delegate callback with the current replacement

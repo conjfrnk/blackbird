@@ -13,6 +13,17 @@ import SwiftUI
 /// SwiftUI-hosted controller path — specifically, after the window is
 /// closed, a subsequent `showWindow` sometimes orphans the hosted view
 /// tree. Managing the window directly keeps the state machine tiny.
+/// NSWindow subclass that intercepts ESC (the canonical AppKit
+/// `cancelOperation:`) and closes the window. Without this, Settings
+/// has no keyboard escape — ⌘W works, but most users expect ESC on a
+/// modal-feeling "Preferences" surface. Matches System Settings and
+/// the settings dialogs in Xcode, Safari, and Finder.
+final class SettingsWindow: NSWindow {
+    override func cancelOperation(_ sender: Any?) {
+        performClose(sender)
+    }
+}
+
 final class SettingsWindowController {
     static let shared = SettingsWindowController()
 
@@ -71,7 +82,7 @@ final class SettingsWindowController {
     }
 
     private func makeWindow() -> NSWindow {
-        let w = NSWindow(
+        let w = SettingsWindow(
             contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
