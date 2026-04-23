@@ -18,6 +18,7 @@
 //! no-OSC-8 path, this test fails by timeout. The correct response is
 //! to re-restore the short-circuit, not to raise the budget.
 
+#[cfg(not(debug_assertions))]
 use std::time::Instant;
 
 // Release-only: debug-mode allocation bookkeeping (overflow checks,
