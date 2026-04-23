@@ -426,6 +426,10 @@ final class TabStripView: NSView {
     @objc func commitEditForTesting() { commitEdit() }
     /// Test hook — explicitly cancels the in-flight edit.
     @objc func cancelEditForTesting() { cancelEdit() }
+    /// Test hook — current pill count. Lets stress tests assert pill
+    /// geometry tracks the tab list without exposing the internal
+    /// `pillFrames` array publicly.
+    var pillCountForTesting: Int { pillFrames.count }
     #endif
 
     // MARK: - Drawing
