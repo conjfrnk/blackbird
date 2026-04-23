@@ -22,7 +22,7 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 - **Tabs.** Native `NSWindow` tab groups, per-tab shell session, confirmation before closing multi-tab windows.
 - **Input.** Full IME support for CJK, dead keys, trackpad pinch-to-zoom.
 - **Find.** ⌘F with scrollback search.
-- **URLs.** ⌘-click opens `http`/`https`/`ftp`/`mailto`. Other schemes are blocked for safety. OSC 8 hyperlinks supported.
+- **URLs.** ⌘-click opens `http`/`https`/`ftp`/`mailto`. `file://` and other schemes are intentionally blocked — terminal output shouldn't be one click away from executing a local path. OSC 8 hyperlinks supported.
 - **Clipboard.** ⌘C/⌘V with paste scrubbing (strips C0 controls and Unicode bidi overrides). OSC 52 remote writes supported, capped at 1 MiB, toggleable.
 - **Themes.** Default, Gruvbox, Solarized, Catppuccin. Light/dark auto-follows the system.
 - **Shell integration (opt-in).** Bundled OSC 133 snippets for bash/zsh/fish enable prompt-jumping with ⌘⇧↑/⌘⇧↓.
@@ -81,6 +81,11 @@ The Debug scheme enables ASan and UBSan. A cargo-fuzz target for the parser live
 CI gates on parser throughput (`plain_text` ≥ 25 MiB/s, `binary_garbage` ≥ 15 MiB/s, `ansi_log` ≥ 30 MiB/s over 64 MiB payloads) and long-session memory stability. Dev-machine numbers typically run 2–3× the floors.
 
 See [`docs/benchmarks/vtebench-2026-04-20.md`](docs/benchmarks/vtebench-2026-04-20.md) for a cross-terminal throughput comparison (Terminal.app, iTerm2, Ghostty, Alacritty, Blackbird).
+
+## Security and known issues
+
+Vulnerability reporting and threat model: [`SECURITY.md`](SECURITY.md).
+Known polish items deliberately deferred: [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
 
 ## License
 

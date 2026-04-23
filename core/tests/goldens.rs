@@ -1,3 +1,11 @@
+// NOTE (rust-tests F13): the goldens themselves are intentionally trivial
+// (`plain_ascii.golden`, `csi_box.golden` are 2–3 lines each). That is a
+// *consequence* of `render_grid` below — it strips styles, colors, wide-cell
+// state, hyperlinks, and everything else from the grid and returns only the
+// visible glyphs. Beefing up the goldens without first enriching render_grid
+// to preserve SGR/URL/width data adds no signal, only churn. If you're here
+// to improve golden coverage: extend render_grid (or add a parallel
+// render_styles / render_layout renderer), THEN expand the goldens to match.
 use std::fs;
 use std::path::PathBuf;
 
