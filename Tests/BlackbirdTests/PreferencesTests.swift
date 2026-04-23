@@ -85,34 +85,37 @@ final class PreferencesTests: XCTestCase {
         super.tearDown()
     }
 
+    /// Resolve `Sources/Blackbird/Settings/Preferences.swift` via the
+    /// compile-time-embedded path of THIS file (`#filePath`). The CWD
+    /// under xcodebuild sits inside DerivedData and never contains the
+    /// source tree, so the old walk-up-from-CWD approach always skipped
+    /// the three source-parsing tests. `#filePath` is the absolute path
+    /// of this source file as seen by the compiler at build time; the
+    /// repo root is exactly three components up (`Tests/BlackbirdTests/
+    /// PreferencesTests.swift` → `Tests/BlackbirdTests/` → `Tests/` →
+    /// repo root). If the file layout ever changes, the XCTSkip below
+    /// still keeps the suite green while flagging what moved.
+    fileprivate static func locatePreferencesSwift(
+        file: String = #filePath
+    ) throws -> URL {
+        let url = URL(fileURLWithPath: file)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Blackbird/Settings/Preferences.swift")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("Preferences.swift not found at \(url.path)")
+        }
+        return url
+    }
+
     /// Mechanical coupling between the test's snapshot/restore set and
     /// Preferences.swift. A new @AppStorage must be mirrored in the
     /// saved* / setUp / tearDown block above, or this test fails. Without
     /// this gate, a mutation-testing test could silently leak the new
     /// pref across the whole test run.
     func test_snapshotCoversAllAppStorage() throws {
-        // Locate Preferences.swift by walking up from CWD to the repo
-        // root. Xcode's test CWD is unpredictable; the file lives at a
-        // stable relative path once we find the repo.
-        let fileManager = FileManager.default
-        var dir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-        var prefsURL: URL?
-        for _ in 0..<8 {
-            let candidate = dir
-                .appendingPathComponent("Sources/Blackbird/Settings/Preferences.swift")
-            if fileManager.fileExists(atPath: candidate.path) {
-                prefsURL = candidate
-                break
-            }
-            dir.deleteLastPathComponent()
-        }
-        guard let prefsURL else {
-            // CI runs with a tmp CWD that doesn't contain the source tree —
-            // skip rather than fail. This branch is reached only when the
-            // test host is booted outside its repo, which matters for the
-            // local-run gate below.
-            throw XCTSkip("Preferences.swift not reachable from test CWD")
-        }
+        let prefsURL = try Self.locatePreferencesSwift()
         let src = try String(contentsOf: prefsURL, encoding: .utf8)
         // Regex captures every `@AppStorage("key")` — Preferences.swift
         // doesn't use any other AppStorage form.
@@ -402,21 +405,7 @@ final class PreferencesTests: XCTestCase {
     /// writes to NSGlobalDomain. Bails if `Preferences.swift` isn't
     /// reachable from the test CWD (CI path).
     func test_allAppStorageKeys_prefixedWithBB() throws {
-        let fileManager = FileManager.default
-        var dir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-        var prefsURL: URL?
-        for _ in 0..<8 {
-            let candidate = dir
-                .appendingPathComponent("Sources/Blackbird/Settings/Preferences.swift")
-            if fileManager.fileExists(atPath: candidate.path) {
-                prefsURL = candidate
-                break
-            }
-            dir.deleteLastPathComponent()
-        }
-        guard let prefsURL else {
-            throw XCTSkip("Preferences.swift not reachable from test CWD")
-        }
+        let prefsURL = try Self.locatePreferencesSwift()
         let src = try String(contentsOf: prefsURL, encoding: .utf8)
         let re = try NSRegularExpression(pattern: #"@AppStorage\("([^"]+)"\)"#)
         let range = NSRange(src.startIndex..<src.endIndex, in: src)
@@ -530,21 +519,7 @@ final class PreferencesTests: XCTestCase {
     /// doc; it does NOT replace F4's suggested fix (extract the
     /// migration to a pure function) which is out of scope (tests only).
     func test_fontName_migration_sourceMapping() throws {
-        let fileManager = FileManager.default
-        var dir = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-        var prefsURL: URL?
-        for _ in 0..<8 {
-            let candidate = dir
-                .appendingPathComponent("Sources/Blackbird/Settings/Preferences.swift")
-            if fileManager.fileExists(atPath: candidate.path) {
-                prefsURL = candidate
-                break
-            }
-            dir.deleteLastPathComponent()
-        }
-        guard let prefsURL else {
-            throw XCTSkip("Preferences.swift not reachable from test CWD")
-        }
+        let prefsURL = try Self.locatePreferencesSwift()
         let src = try String(contentsOf: prefsURL, encoding: .utf8)
         XCTAssertTrue(
             src.contains(#"case "SFMono-Regular":"#)
