@@ -3,13 +3,10 @@ import XCTest
 
 /// Tests for `wordRange(around:in:displayOffset:)`.
 ///
-/// The contract under test says the "word character" set is the union of
-/// alphanumerics, `_`, `.`, `/`, `-`, `:`. Cases that rely on `.`, `/`, `:`
-/// being word chars are currently expected to disagree with the shipped
-/// implementation (which treats those as word breakers, matching the
-/// Terminal.app / iTerm2 defaults). Those disagreements are surfaced via
-/// XCTSkip rather than silently inverted so the owner can decide which
-/// side is buggy.
+/// The shipped word-character set excludes alphanumerics, `_`, `.`, `/`,
+/// `-`, `:`, and shell sigils (`$`, `@`, `=`, `#`, `&`, `|`, `<`, `>`).
+/// Prose punctuation (`,`, `;`, `?`) and bracket pairs remain breakers.
+/// See `wordBreakers` in Selection.swift. Audit findbar-selection F14.
 final class WordRangeTests: XCTestCase {
 
     override class func setUp() {
@@ -73,14 +70,7 @@ final class WordRangeTests: XCTestCase {
     func test_helloWorld_pointOnSpace_returnsNil() throws {
         let snap = try snapshot(for: "hello world")
         let r = wordRange(around: p(5), in: snap, displayOffset: 0)
-        if r != nil {
-            throw XCTSkip(
-                "contract mismatch: point on a space should yield nil, but " +
-                "shipped implementation returns a zero-width range \(String(describing: r)) " +
-                "on the space cell"
-            )
-        }
-        XCTAssertNil(r)
+        XCTAssertNil(r, "expansion on a word-break character must return nil")
     }
 
     // MARK: - 3. "hello world" — point inside "world"
@@ -104,38 +94,16 @@ final class WordRangeTests: XCTestCase {
     func test_dottedPath_configIni_selectedAsOneWord() throws {
         let snap = try snapshot(for: "config.ini ")
         let r = wordRange(around: p(3), in: snap, displayOffset: 0)
-        guard let gotRange = r,
-              gotRange.0 == p(0),
-              gotRange.1 == p(9)
-        else {
-            throw XCTSkip(
-                "contract mismatch: '.' is treated as a word breaker by the " +
-                "shipped implementation, so 'config.ini' splits into 'config' " +
-                "and 'ini' rather than selecting as one word. " +
-                "Got: \(String(describing: r))"
-            )
-        }
         assertRange(r, 0, 9)
     }
 
     // MARK: - 6. Path-like "/usr/local/bin" — contract says `/` is a word char
 
     func test_pathLike_selectedAsOneWord() throws {
-        // Add a trailing space so we have a clear word terminator and don't
-        // collide with a cursor-position edge case.
+        // Trailing space ensures a clear word terminator.
         let snap = try snapshot(for: "/usr/local/bin ")
         // Probe a letter inside the path ("l" of "local" is at col 5).
         let r = wordRange(around: p(5), in: snap, displayOffset: 0)
-        guard let gotRange = r,
-              gotRange.0 == p(0),
-              gotRange.1 == p(13)
-        else {
-            throw XCTSkip(
-                "contract mismatch: '/' is treated as a word breaker by the " +
-                "shipped implementation, so '/usr/local/bin' breaks into " +
-                "separate words. Got: \(String(describing: r))"
-            )
-        }
         assertRange(r, 0, 13)
     }
 
@@ -144,16 +112,6 @@ final class WordRangeTests: XCTestCase {
     func test_hostnameWithPort_selectedAsOneWord() throws {
         let snap = try snapshot(for: "example.com:8080 ")
         let r = wordRange(around: p(3), in: snap, displayOffset: 0)
-        guard let gotRange = r,
-              gotRange.0 == p(0),
-              gotRange.1 == p(15)
-        else {
-            throw XCTSkip(
-                "contract mismatch: '.' and ':' are treated as word breakers " +
-                "by the shipped implementation, so 'example.com:8080' does " +
-                "not select as a single word. Got: \(String(describing: r))"
-            )
-        }
         assertRange(r, 0, 15)
     }
 
@@ -169,25 +127,13 @@ final class WordRangeTests: XCTestCase {
     func test_openParen_itselfIsNotAWord() throws {
         let snap = try snapshot(for: "(hello) ")
         let r = wordRange(around: p(0), in: snap, displayOffset: 0)
-        if r != nil {
-            throw XCTSkip(
-                "contract mismatch: point on '(' should yield nil, but shipped " +
-                "implementation returns a zero-width range \(String(describing: r))"
-            )
-        }
-        XCTAssertNil(r)
+        XCTAssertNil(r, "'(' is a word-break character and must return nil")
     }
 
     func test_closeParen_itselfIsNotAWord() throws {
         let snap = try snapshot(for: "(hello) ")
         let r = wordRange(around: p(6), in: snap, displayOffset: 0)
-        if r != nil {
-            throw XCTSkip(
-                "contract mismatch: point on ')' should yield nil, but shipped " +
-                "implementation returns a zero-width range \(String(describing: r))"
-            )
-        }
-        XCTAssertNil(r)
+        XCTAssertNil(r, "')' is a word-break character and must return nil")
     }
 
     // MARK: - 9. Empty cells break words
@@ -197,14 +143,7 @@ final class WordRangeTests: XCTestCase {
         // (ch == 0). Empty cells must not be part of any word.
         let snap = try snapshot(for: "hi")
         let r = wordRange(around: p(10), in: snap, displayOffset: 0)
-        if r != nil {
-            throw XCTSkip(
-                "contract mismatch: empty cell (ch == 0) at col 10 should yield " +
-                "nil, but shipped implementation returns a zero-width range " +
-                "\(String(describing: r))"
-            )
-        }
-        XCTAssertNil(r)
+        XCTAssertNil(r, "empty cell (ch == 0) must not expand")
     }
 
     func test_typedSpaceBreaksWords() throws {
@@ -215,14 +154,7 @@ final class WordRangeTests: XCTestCase {
         assertRange(wordRange(around: p(3), in: snap, displayOffset: 0), 3, 4)
         // Probe the space at col 2.
         let r = wordRange(around: p(2), in: snap, displayOffset: 0)
-        if r != nil {
-            throw XCTSkip(
-                "contract mismatch: point on a typed space (0x20) at col 2 " +
-                "should yield nil, but shipped implementation returns a " +
-                "zero-width range \(String(describing: r))"
-            )
-        }
-        XCTAssertNil(r)
+        XCTAssertNil(r, "typed space (0x20) must not expand")
     }
 
     // MARK: - Shell / source sigils (audit findbar-selection F14)

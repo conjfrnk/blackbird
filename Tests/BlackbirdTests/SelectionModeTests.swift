@@ -128,26 +128,18 @@ final class SelectionModeTests: XCTestCase {
 
     // MARK: - 9. .rectangular normalized: (line=2,col=10) and (line=5,col=3) -> ((2,3),(5,10))
 
-    func test_rectangularMode_normalizesToBoundingRect_crossLine() throws {
+    func test_rectangularMode_normalizesToBoundingRect_crossLine() {
+        // .rectangular normalized returns the bounding-rect corners:
+        // start = (min line, min col); end = (max line, max col). This
+        // is the invariant the Rust copy path relies on (`s_col <=
+        // e_col` for rect mode); line-major ordering would produce an
+        // empty copy for diagonals like (2,10) → (5,3).
         let anchor = BufferPoint(line: 2, col: 10)
         let cursor = BufferPoint(line: 5, col: 3)
         let sel = Selection(anchor: anchor, cursor: cursor, mode: .rectangular)
-        let (first, second) = sel.normalized
-
-        // Expected bounding-rect: top-left = (min line, min col); bottom-right = (max line, max col)
-        let expectedTopLeft = BufferPoint(line: 2, col: 3)
-        let expectedBottomRight = BufferPoint(line: 5, col: 10)
-
-        if first == expectedTopLeft && second == expectedBottomRight {
-            XCTAssertEqual(first, expectedTopLeft)
-            XCTAssertEqual(second, expectedBottomRight)
-        } else if first == anchor && second == cursor {
-            throw XCTSkip("Selection.normalized for .rectangular returns line-major (anchor, cursor) = ((2,10),(5,3)) rather than bounding-rect top-left/bottom-right.")
-        } else if first == BufferPoint(line: 2, col: 10) && second == BufferPoint(line: 5, col: 3) {
-            throw XCTSkip("Selection.normalized for .rectangular returns plain line-major min/max ((2,10),(5,3)) rather than bounding-rect top-left/bottom-right.")
-        } else {
-            XCTFail("Unexpected rectangular normalization: got (\(first), \(second)); expected (\(expectedTopLeft), \(expectedBottomRight))")
-        }
+        let (start, end) = sel.normalized
+        XCTAssertEqual(start, BufferPoint(line: 2, col: 3))
+        XCTAssertEqual(end, BufferPoint(line: 5, col: 10))
     }
 
     // MARK: - 10. .rectangular normalized: same line, swapped cols -> smaller col first
@@ -168,18 +160,15 @@ final class SelectionModeTests: XCTestCase {
 
     // MARK: - 11. .rectangular normalized: already top-left / bottom-right -> unchanged
 
-    func test_rectangularMode_alreadyTopLeftBottomRight_isUnchanged() throws {
+    func test_rectangularMode_alreadyTopLeftBottomRight_isUnchanged() {
+        // Idempotence: normalizing an already-canonical (top-left,
+        // bottom-right) pair must return the same pair unchanged.
         let anchor = BufferPoint(line: 2, col: 3)   // top-left
         let cursor = BufferPoint(line: 5, col: 10)  // bottom-right
         let sel = Selection(anchor: anchor, cursor: cursor, mode: .rectangular)
-        let (first, second) = sel.normalized
-
-        if first == anchor && second == cursor {
-            XCTAssertEqual(first, anchor)
-            XCTAssertEqual(second, cursor)
-        } else {
-            throw XCTSkip("Selection.normalized for .rectangular did not preserve already-ordered top-left/bottom-right: got (\(first), \(second)).")
-        }
+        let (start, end) = sel.normalized
+        XCTAssertEqual(start, anchor)
+        XCTAssertEqual(end, cursor)
     }
 
     // MARK: - TerminalView.copyRange mode fixups
