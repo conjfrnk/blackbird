@@ -106,7 +106,7 @@ extension TerminalView {
         clearHover()
     }
 
-    func updateHover(screenRow: Int, col: Int, locationInWindow: NSPoint) {
+    private func updateHover(screenRow: Int, col: Int, locationInWindow: NSPoint) {
         // Resolve the OSC 8 link id for the cell under the pointer. A
         // test-supplied fake may override; otherwise consult the live
         // snapshot directly. `linkID` bounds-checks internally, so an
@@ -180,7 +180,7 @@ extension TerminalView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
-    func clearHover() {
+    private func clearHover() {
         lastHoverCell = nil
         cancelHoverTooltip()
         clearHoveredLink()

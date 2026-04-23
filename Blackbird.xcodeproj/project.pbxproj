@@ -63,6 +63,7 @@
 		95D6A4034F6872A29F1474AF /* PowerAwareRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28AC18E4DFA1B4F34FA78C71 /* PowerAwareRendering.swift */; };
 		A25F8643DAD775E8251392EC /* FocusEventsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */; };
 		A2A3F1C9087CDA86E7A2B1A8 /* TerminalView+Paste.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2D7C60D8EDCD6659DD9161 /* TerminalView+Paste.swift */; };
+		A867066B7521F3033D1766D7 /* TerminalView+Mouse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CC2349BAF9EB4C640D5A38F /* TerminalView+Mouse.swift */; };
 		AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6E41D23703A7FE0195559D6 /* KeyEncoder.swift */; };
 		B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE9625B30620C23E398A2EB /* BBTerm.swift */; };
 		B5C08008A69925EA6A53F6C5 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = E4B31AE0836F0D3000C219D2 /* Fonts */; };
@@ -157,6 +158,7 @@
 		7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetectorTests.swift; sourceTree = "<group>"; };
 		7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollIndicator.swift; sourceTree = "<group>"; };
 		7B564C4A000FDF2585662F14 /* SessionShutdownBarrierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionShutdownBarrierTests.swift; sourceTree = "<group>"; };
+		7CC2349BAF9EB4C640D5A38F /* TerminalView+Mouse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+Mouse.swift"; sourceTree = "<group>"; };
 		7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYTests.swift; sourceTree = "<group>"; };
 		82C57C6702E92EB2488AC798 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		83BD7639AA0AD9A74DDB61B6 /* SelectionModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionModeTests.swift; sourceTree = "<group>"; };
@@ -340,6 +342,7 @@
 				6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */,
 				A63A76F263480E65000641F6 /* TerminalView+Hover.swift */,
 				5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */,
+				7CC2349BAF9EB4C640D5A38F /* TerminalView+Mouse.swift */,
 				9A2D7C60D8EDCD6659DD9161 /* TerminalView+Paste.swift */,
 				EC1D8A560291CE5E7A0CAD11 /* URLDetector.swift */,
 			);
@@ -580,6 +583,7 @@
 				C069AA35BA0D585A12C68B98 /* TerminalView+Dragging.swift in Sources */,
 				E96E578E30F4A7D2324BE88A /* TerminalView+Hover.swift in Sources */,
 				4D998CBEB54F5EBA512EE58F /* TerminalView+IME.swift in Sources */,
+				A867066B7521F3033D1766D7 /* TerminalView+Mouse.swift in Sources */,
 				A2A3F1C9087CDA86E7A2B1A8 /* TerminalView+Paste.swift in Sources */,
 				CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */,
 				8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */,

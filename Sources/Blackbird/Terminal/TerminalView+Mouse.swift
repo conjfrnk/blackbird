@@ -1,0 +1,527 @@
+import AppKit
+import Foundation
+import BBCore
+
+/// Mouse event handling for `TerminalView`:
+///
+///   - **Selection gestures** — click / drag / shift-click, rectangular
+///     (option-drag) mode, word-expand on double-click, line-expand on
+///     triple-click, edge-autoscroll while dragging past the viewport.
+///   - **Mouse reporting** — DEC modes 1000 / 1002 / 1003 (click /
+///     motion / any-event) with SGR 1006 and X10 fallback encodings;
+///     the TUI receives `CSI < button ; col ; row M/m`. Release-button
+///     handling, wheel reporting (buttons 64/65), middle-mouse, and
+///     the option-modifier escape hatch that lets users bypass
+///     reporting when a TUI captures the wheel.
+///   - **⌘-drag window move / resize** — with the app's `.command`
+///     modifier held, left-drag moves the window and right-drag
+///     resizes from the nearest corner. Matches Amethyst-style tiling
+///     workflows and Blackbird's own keybinding table.
+///
+/// Stored state (`isDragging`, `selection`, `selectionAutoscrollTimer`,
+/// `selectionAutoscrollDirection`, `resizeContext`,
+/// `lastReportedMotionCell`) lives on the class body —
+/// `TerminalView.swift` — because Swift requires stored properties on
+/// the declaring type. Hover / cmd-hover helpers
+/// (`sendMouseEvent`, `expandSelectionUnderAnchor`,
+/// `cancelHoverTooltip`, `clearHoveredLink`, `clearCmdHoverURLMatch`)
+/// live in `TerminalView+Hover.swift` and are called from here; their
+/// visibility was bumped to internal during the extraction.
+extension TerminalView {
+
+    // MARK: - Mouse reporting
+
+    func mouseReportingEnabled() -> Bool {
+        guard let mode = currentSnapshot?.termMode else { return false }
+        return mode.contains(.mouseReportClick) || mode.contains(.mouseMotion) || mode.contains(.mouseDrag)
+    }
+
+    func sgrMouseEnabled() -> Bool {
+        currentSnapshot?.termMode.contains(.sgrMouse) ?? false
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        // ⌘-click on a URL → open it. Runs before mouse-reporting and
+        // selection so TUIs can't swallow the gesture. Restricted to
+        // non-mouse-reporting context (or ⌥-held inside a TUI) so that
+        // vim's own <C-click> binding still works when the TUI asks for
+        // the click.
+        //
+        // If no URL is under the click, ⌘-drag acts like a titlebar drag
+        // and moves the window (matches iTerm2 "⌘-drag to move"). Any view
+        // can initiate window drag by calling `performDrag(with:)`; the
+        // call blocks until the mouse is released, so this returns cleanly
+        // without triggering the selection path below.
+        if event.modifierFlags.contains(.command) {
+            let underlyingOption = event.modifierFlags.contains(.option)
+            if !mouseReportingEnabled() || underlyingOption {
+                let p = bufferPointFromEvent(event)
+                // Buffer-relative line → screen row. OSC 8 attribution is
+                // keyed on screen-space cells since the snapshot only carries
+                // the visible viewport. When the user is scrolled back into
+                // history the regex path still honours buffer coordinates
+                // (URLDetector output uses buffer lines).
+                let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
+                if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
+                    urlOpener.open(url)
+                    return
+                }
+            }
+            // No URL under the click — treat as window drag.
+            window?.performDrag(with: event)
+            return
+        }
+        let optionHeld = event.modifierFlags.contains(.option)
+        if mouseReportingEnabled() && !optionHeld, let session {
+            sendMouseEvent(event, button: 0, press: true, session: session)
+            return
+        }
+        let point = bufferPointFromEvent(event)
+        // Shift-click extends the current selection from its ANCHOR to the
+        // click point — the standard macOS / iTerm2 gesture for precise
+        // selection adjustment. Without it, shift-click would start a new
+        // zero-width selection, discarding whatever the user just carefully
+        // selected. Audit findbar-selection F17.
+        if event.clickCount == 1,
+           event.modifierFlags.contains(.shift),
+           let existing = selection {
+            selection = Selection(anchor: existing.anchor, cursor: point, mode: existing.mode)
+            isDragging = true
+            return
+        }
+        let mode: Selection.Mode
+        switch event.clickCount {
+        case 3: mode = .line
+        case 2: mode = .word
+        default:
+            // ⌥-drag for rectangular (column-block) selection — iTerm2 /
+            // Terminal.app default. ⌘ is reserved for URL-open / window-drag
+            // and never reaches here (the .command branch above returns).
+            mode = event.modifierFlags.contains(.option) ? .rectangular : .character
+        }
+        selection = Selection(anchor: point, cursor: point, mode: mode)
+        isDragging = true
+        if mode == .word || mode == .line {
+            expandSelectionUnderAnchor()
+        }
+    }
+
+    public override func mouseUp(with event: NSEvent) {
+        if isDragging {
+            isDragging = false
+            // Tear down the edge-autoscroll timer armed during the
+            // drag. If the release happened while still inside the
+            // edge band the timer may still be ticking; stopping it
+            // here prevents a stray scroll after `mouseUp` returns.
+            // Audit terminal-view-2 F2.
+            stopSelectionAutoscroll()
+            // A zero-width selection means the user clicked without
+            // dragging — no content to show, so clear. Applies to every
+            // mode: .character clicks leave anchor == cursor directly;
+            // .word / .line clicks that landed on non-word cells also
+            // leave anchor == cursor (expandSelectionUnderAnchor is a
+            // no-op there); .rectangular clicks start at anchor == cursor
+            // and only grow during the drag.
+            if let s = selection, s.anchor == s.cursor {
+                selection = nil
+            }
+            return
+        }
+        let optionHeld = event.modifierFlags.contains(.option)
+        if mouseReportingEnabled() && !optionHeld, let session {
+            sendMouseEvent(event, button: 0, press: false, session: session)
+        }
+    }
+
+    /// Arm, re-arm, or tear down the selection-drag autoscroll timer based
+    /// on the cursor's current edge-band status. `direction`:
+    ///   +1 = top edge (reveal older rows),
+    ///   -1 = bottom edge (reveal newer rows),
+    ///    0 = inside the viewport (stop autoscroll).
+    /// Audit terminal-view-2 F2.
+    private func updateSelectionAutoscroll(direction: Int32) {
+        if direction == 0 {
+            stopSelectionAutoscroll()
+            return
+        }
+        if selectionAutoscrollDirection == direction,
+           selectionAutoscrollTimer != nil {
+            // Already running in the correct direction — nothing to do.
+            // Keep the timer tick as the sole driver; the user's
+            // `mouseDragged` landing in the same band just confirms the
+            // existing direction.
+            return
+        }
+        selectionAutoscrollDirection = direction
+        selectionAutoscrollTimer?.invalidate()
+        // ~60 Hz cadence: fast enough that holding at the edge feels
+        // responsive, slow enough to avoid 120 Hz Metal-pressure storms
+        // on ProMotion. The timer does one `session.scroll(delta:)` per
+        // tick; the new snapshot propagates through the normal
+        // Combine→render path.
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self, self.isDragging else {
+                self?.stopSelectionAutoscroll()
+                return
+            }
+            // Re-derive the selection cursor from the current mouse
+            // location so the selection keeps growing as the
+            // viewport scrolls under a stationary pointer. Without
+            // this the selection would freeze to whatever bufferPoint
+            // the last `mouseDragged` recorded.
+            self.session?.scroll(delta: self.selectionAutoscrollDirection)
+            if var sel = self.selection,
+               let mouseWindow = self.window?.mouseLocationOutsideOfEventStream {
+                let local = self.convert(mouseWindow, from: nil)
+                let fakePoint = self.bufferPointFromLocalPoint(local)
+                sel.cursor = fakePoint
+                self.selection = sel
+                if sel.mode == .word || sel.mode == .line {
+                    self.expandSelectionUnderAnchor()
+                }
+            }
+        }
+        // Install into the main runloop in common mode so the timer
+        // keeps firing during tracking runloops (menu bar, dropdowns,
+        // live resize). Default mode would stall the timer inside
+        // those, which defeats the point — users might trigger one of
+        // those UIs mid-drag via the Edit menu's "Select All" or
+        // similar.
+        RunLoop.main.add(timer, forMode: .common)
+        selectionAutoscrollTimer = timer
+    }
+
+    /// Stop any in-flight selection autoscroll timer. Safe to call when
+    /// no timer is running. Audit terminal-view-2 F2.
+    private func stopSelectionAutoscroll() {
+        selectionAutoscrollTimer?.invalidate()
+        selectionAutoscrollTimer = nil
+        selectionAutoscrollDirection = 0
+    }
+
+    /// Same math as `bufferPointFromEvent` but takes an already-converted
+    /// local point so the autoscroll timer — which doesn't have an
+    /// `NSEvent` to pass — can derive a selection cursor from the raw
+    /// mouse location. Audit terminal-view-2 F2.
+    private func bufferPointFromLocalPoint(_ local: CGPoint) -> BufferPoint {
+        let snap = currentSnapshot
+        let textAreaHeight = bounds.height - titlebarOnlyTopInset
+        let clampedY = min(max(0, local.y), max(0, textAreaHeight))
+        let clampedLocal = CGPoint(x: local.x, y: clampedY)
+        return bufferPoint(
+            forView: clampedLocal,
+            cellWidth: metrics.cellWidth,
+            cellHeight: metrics.cellHeight,
+            viewportHeight: textAreaHeight,
+            displayOffset: snap?.displayOffset ?? 0,
+            cols: snap?.cols ?? 80,
+            rows: snap?.rows ?? 24
+        )
+    }
+
+    public override func rightMouseDown(with event: NSEvent) {
+        // ⌘ + right-drag → resize the window from the corner nearest the
+        // click. Matches the borderless-window idiom from apps like iTerm2
+        // and VS Code: ⌘-drag moves, ⌘-right-drag resizes. Anchor the
+        // OPPOSITE corner so dragging from (say) the top-right pulls the
+        // top-right while bottom-left stays pinned.
+        if event.modifierFlags.contains(.command), let win = window {
+            let local = convert(event.locationInWindow, from: nil)
+            let left = local.x < bounds.width / 2
+            // AppKit's Y-axis points up, so "below the midline" = smaller y.
+            let lower = local.y < bounds.height / 2
+            let corner: ResizeCorner = switch (left, lower) {
+                case (true,  true):  .bottomLeft
+                case (false, true):  .bottomRight
+                case (true,  false): .topLeft
+                case (false, false): .topRight
+            }
+            resizeContext = ResizeContext(
+                corner: corner,
+                startMouseGlobal: NSEvent.mouseLocation,
+                startFrame: win.frame
+            )
+            return
+        }
+        // ⌥+right-click escapes a TUI's mouse capture just like ⌥+left-click
+        // and ⌥+scroll do elsewhere. Without this, vim / tmux / htop eat
+        // every right-click and the Copy/Paste context menu is unreachable.
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session else {
+            super.rightMouseDown(with: event)
+            return
+        }
+        sendMouseEvent(event, button: 2, press: true, session: session)
+    }
+
+    public override func rightMouseDragged(with event: NSEvent) {
+        if let ctx = resizeContext, let win = window {
+            let now = NSEvent.mouseLocation
+            let dx = now.x - ctx.startMouseGlobal.x
+            let dy = now.y - ctx.startMouseGlobal.y
+            var frame = ctx.startFrame
+            switch ctx.corner {
+            case .topLeft:
+                frame.origin.x    += dx
+                frame.size.width  -= dx
+                frame.size.height += dy
+            case .topRight:
+                frame.size.width  += dx
+                frame.size.height += dy
+            case .bottomLeft:
+                frame.origin.x    += dx
+                frame.size.width  -= dx
+                frame.origin.y    += dy
+                frame.size.height -= dy
+            case .bottomRight:
+                frame.size.width  += dx
+                frame.origin.y    += dy
+                frame.size.height -= dy
+            }
+            // Clamp to contentMinSize (set by MainWindowController). When the
+            // dragged corner would shrink the window below the minimum, pin
+            // its corresponding edge instead of letting the opposite corner
+            // drift.
+            let minContent = win.contentMinSize
+            let chrome = win.frame.height - (win.contentView?.bounds.height ?? win.frame.height)
+            let minWidth  = max(minContent.width, 200)
+            let minHeight = max(minContent.height + chrome, 120)
+            if frame.size.width < minWidth {
+                if ctx.corner == .topLeft || ctx.corner == .bottomLeft {
+                    frame.origin.x = ctx.startFrame.maxX - minWidth
+                }
+                frame.size.width = minWidth
+            }
+            if frame.size.height < minHeight {
+                if ctx.corner == .bottomLeft || ctx.corner == .bottomRight {
+                    frame.origin.y = ctx.startFrame.maxY - minHeight
+                }
+                frame.size.height = minHeight
+            }
+            win.setFrame(frame, display: true)
+            return
+        }
+        super.rightMouseDragged(with: event)
+    }
+
+    public override func rightMouseUp(with event: NSEvent) {
+        if resizeContext != nil {
+            resizeContext = nil
+            return
+        }
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session else {
+            super.rightMouseUp(with: event)
+            return
+        }
+        sendMouseEvent(event, button: 2, press: false, session: session)
+    }
+
+    // MARK: - Middle-mouse button reporting
+    //
+    // xterm mouse protocol: button 1 = middle. Many TUIs (nvim, less,
+    // tmux) expect middle-click to paste or to trigger a custom binding;
+    // without these hooks the event never reaches the shell. Mirrors the
+    // left/right handlers: ⌥ escapes reporting so the user can still
+    // paste locally over a TUI. Audit terminal-view-2 F9.
+
+    public override func otherMouseDown(with event: NSEvent) {
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session else {
+            super.otherMouseDown(with: event)
+            return
+        }
+        sendMouseEvent(event, button: 1, press: true, session: session)
+    }
+
+    public override func otherMouseDragged(with event: NSEvent) {
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session,
+              anyEventMouseEnabled() || dragReportingEnabled() else {
+            super.otherMouseDragged(with: event)
+            return
+        }
+        // xterm motion reporting: button + 32 for drag-with-button-held.
+        sendMouseEvent(event, button: 1 + 32, press: true, session: session)
+    }
+
+    public override func otherMouseUp(with event: NSEvent) {
+        let optionHeld = event.modifierFlags.contains(.option)
+        guard mouseReportingEnabled() && !optionHeld, let session else {
+            super.otherMouseUp(with: event)
+            return
+        }
+        sendMouseEvent(event, button: 1, press: false, session: session)
+    }
+
+    /// True when the TUI enabled DEC mode 1003 (any-event tracking —
+    /// cursor motion without a button). Implied by the SGR mouse mode
+    /// bit being set alongside motion; narrower predicate than
+    /// `mouseReportingEnabled` so we only fire no-button motion
+    /// reports when explicitly asked. Audit terminal-view-2 F14.
+    func anyEventMouseEnabled() -> Bool {
+        guard let mode = currentSnapshot?.termMode else { return false }
+        return mode.contains(.mouseMotion)
+    }
+
+    private func dragReportingEnabled() -> Bool {
+        guard let mode = currentSnapshot?.termMode else { return false }
+        return mode.contains(.mouseDrag)
+    }
+
+    // `ResizeCorner`, `ResizeContext`, and `resizeContext` are declared
+    // on the class body in `TerminalView.swift`. Swift disallows
+    // stored properties on extensions; the nested types move too so
+    // this extension can still name them (`ResizeContext(corner:
+    // ...)`).
+
+    public override func scrollWheel(with event: NSEvent) {
+        // Scrolling moves the grid beneath the pointer — the cell the
+        // user was dwelling on now has different content, so any pending
+        // tooltip would pop up with a stale URL. Cancel both the pending
+        // reveal and the accent underline; the next mouseMoved delivery
+        // will repaint them against the fresh cell if appropriate.
+        cancelHoverTooltip()
+        clearHoveredLink()
+        // Drop the ⌘-hover highlight for the same reason: the renderer's
+        // range is keyed on buffer line, but the *pointer* is still at a
+        // fixed (row, col) pair whose buffer line flipped with the scroll.
+        // Leaving the range intact paints the old URL at a cell the user
+        // is no longer over until the next mouseMoved repaints.
+        clearCmdHoverURLMatch()
+        // The cached hover cell is also stale once the grid moved, so the
+        // next mouseMoved will re-resolve the link id even if the pointer
+        // hasn't physically moved a pixel between the scroll and the next
+        // delivery (otherwise updateHover would early-return on the same
+        // (row, col) and leave hoveredLinkID at zero).
+        lastHoverCell = nil
+        guard let session else { super.scrollWheel(with: event); return }
+        // ⌥-scroll bypasses mouse reporting so the user can always reach
+        // scrollback locally, even inside a TUI that captured the wheel.
+        // Matches the ⌥-click escape on mouseDown.
+        let optionHeld = event.modifierFlags.contains(.option)
+        if mouseReportingEnabled() && !optionHeld {
+            // Mouse mode: forward as SGR/X10 scroll events.
+            // Wheel up = button 64, wheel down = button 65.
+            if event.scrollingDeltaY > 0 {
+                sendMouseEvent(event, button: 64, press: true, session: session)
+            } else if event.scrollingDeltaY < 0 {
+                sendMouseEvent(event, button: 65, press: true, session: session)
+            }
+        } else {
+            // Normal mode: scroll the display through scrollback history.
+            // Two input types to reconcile:
+            //
+            //   Trackpad / Magic Mouse (hasPreciseScrollingDeltas == true):
+            //     scrollingDeltaY is in points. Scaling by cellHeight gives
+            //     pixel-accurate scrolling (move the pointer one row's worth
+            //     of points → scroll one row). Multiply by 2 so a casual
+            //     two-finger flick covers ~2 screenfuls, matching Terminal.app
+            //     feel.
+            //
+            //   Classic wheel (hasPreciseScrollingDeltas == false):
+            //     scrollingDeltaY is ~1 per physical click. 3 lines per click
+            //     is the common terminal-emulator default (alacritty, kitty).
+            //
+            // Rounding away from zero ensures tiny trackpad flicks register
+            // at least one line instead of truncating to 0. Clamp before
+            // casting to Int32 — a misbehaving input device or a NaN delta
+            // would otherwise trap the app in `Int32(Double)` on overflow.
+            let delta = event.scrollingDeltaY
+            let rawUnclamped: Double = event.hasPreciseScrollingDeltas
+                ? Double(delta) / Double(metrics.cellHeight) * 2.0
+                : Double(delta) * 3.0
+            let raw = rawUnclamped.isFinite ? rawUnclamped : 0
+            let clamped = min(Double(Int32.max), max(Double(Int32.min), raw))
+            let lines = Int32(clamped.rounded(.toNearestOrAwayFromZero))
+            if lines != 0 {
+                session.scroll(delta: lines)
+            }
+        }
+    }
+
+    public override func mouseDragged(with event: NSEvent) {
+        if isDragging, var sel = selection {
+            // Autoscroll when dragging past the viewport edges so the user
+            // can select into scrollback / future output.
+            //
+            // scroll(delta:) follows alacritty's convention:
+            //   positive → show older (scrollback), negative → show newer.
+            // AppKit coords place y=0 at the visual bottom, so:
+            //   - cursor near the TOP (high y)    → reveal older content → +1
+            //   - cursor near the BOTTOM (low y) → reveal newer content → -1
+            // The previous signs were swapped, so autoscroll fought the drag.
+            let local = convert(event.locationInWindow, from: nil)
+            // Top edge is `titlebarOnlyTopInset` below the raw view top because
+            // the titlebar sits in the upper inset under fullSizeContentView.
+            //
+            // Audit terminal-view-2 F2. AppKit stops delivering
+            // `mouseDragged` the moment the pointer stops moving, so a
+            // user who drags to the edge and holds still would see
+            // autoscroll stop until they wiggled the pointer. Arm a
+            // repeating timer while inside an edge band; the timer
+            // drives the actual `session.scroll` so selection extension
+            // continues even on a stationary hold. `mouseUp` /
+            // `mouseExited` tear the timer down.
+            let direction: Int32
+            if local.y > bounds.height - titlebarOnlyTopInset - metrics.cellHeight {
+                direction = 1
+            } else if local.y < metrics.cellHeight {
+                direction = -1
+            } else {
+                direction = 0
+            }
+            updateSelectionAutoscroll(direction: direction)
+            sel.cursor = bufferPointFromEvent(event)
+            selection = sel
+            // F15 (findbar-selection): .word and .line modes set their
+            // endpoints during the mouseDown via `expandSelectionUnderAnchor`.
+            // Without a matching call on every drag, the visual highlight
+            // (renderer uses `selection.normalized`) disagrees with the
+            // copy range (which extends to full-row/full-word boundaries
+            // via `copyRange(for:cols:)`) — a triple-click-and-drag
+            // highlights a ragged prose rectangle while ⌘C grabs clean
+            // whole rows. Re-expand here so the paint and the copy match.
+            if sel.mode == .word || sel.mode == .line {
+                expandSelectionUnderAnchor()
+            }
+            return
+        }
+        // No selection in progress — forward to PTY if the app asked for
+        // motion/drag reporting.
+        if let mode = currentSnapshot?.termMode,
+           (mode.contains(.mouseMotion) || mode.contains(.mouseDrag)),
+           let session {
+            sendMouseEvent(event, button: 32, press: true, session: session)
+        }
+    }
+
+    func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
+        let local = convert(event.locationInWindow, from: nil)
+        let snap = currentSnapshot
+        // `.fullSizeContentView` means `bounds.height` includes the titlebar
+        // region which the text grid doesn't occupy. `bufferPoint` below does
+        // `viewportHeight - localPoint.y` to derive the display-row Y; if the
+        // click landed inside the titlebar region (AppKit's Y-up coord system
+        // puts the titlebar at the *top* → high y), that subtraction goes
+        // negative and the clamp snaps to row 0 — grid clicks in the text
+        // area work fine because the offset cancels, but a ⌘-drag across the
+        // titlebar would still map to (row 0, col ≈ x/cellWidth). Pre-clamp
+        // y to the text-area range so titlebar-region clicks land on the
+        // first-real-row edge instead of silently re-attributing to row 0.
+        // Audit findbar-selection F13.
+        let textAreaHeight = bounds.height - titlebarOnlyTopInset
+        let clampedY = min(max(0, local.y), max(0, textAreaHeight))
+        let clampedLocal = CGPoint(x: local.x, y: clampedY)
+        return bufferPoint(
+            forView: clampedLocal,
+            cellWidth: metrics.cellWidth,
+            cellHeight: metrics.cellHeight,
+            viewportHeight: textAreaHeight,
+            displayOffset: snap?.displayOffset ?? 0,
+            cols: snap?.cols ?? 80,
+            rows: snap?.rows ?? 24
+        )
+    }
+
+}
