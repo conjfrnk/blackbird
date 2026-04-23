@@ -158,7 +158,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// path goes through this fake instead of building a
     /// `SnapshotHyperlinkResolver` from `currentSnapshot`. Production leaves
     /// it nil.
-    private var hyperlinkResolverOverride: HyperlinkResolver?
+    // `internal` so `TerminalView+Hover.swift` / `TerminalView+...
+    // .swift` can read (and tests via installHyperlinkSnapshotForTests
+    // can write) across file boundaries. Production never mutates this
+    // — the DEBUG guard keeps the member out of release builds.
+    var hyperlinkResolverOverride: HyperlinkResolver?
     #endif
 
     /// Hook for opening a URL on ⌘-click. Production hands the URL to
@@ -171,25 +175,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// Buffer row under the cursor on the last `mouseMoved` delivery, used
     /// to cancel the dwell timer as soon as the pointer leaves the current
     /// cell. `nil` means the pointer is outside the grid.
-    private var lastHoverCell: (row: Int, col: Int)?
+    var lastHoverCell: (row: Int, col: Int)?       // internal for TerminalView+Hover.swift
     /// Link id under the pointer right now, or 0 when the hovered cell has
     /// no OSC 8 attribution. The renderer reads this each frame to draw
     /// the accent underline on every cell sharing the id.
-    private var hoveredLinkID: UInt32 = 0
+    var hoveredLinkID: UInt32 = 0                 // internal for TerminalView+Hover.swift
 
     /// Latched ⌘-modifier state. Updated via `flagsChanged`, reconciled
     /// against `NSEvent.modifierFlags` on every `mouseMoved` (so a key
     /// release missed during a focus switch is caught on the next
     /// mouse movement), and force-cleared on `didResignKeyNotification`
     /// so a stale "⌘ held" can't survive a tab or window switch.
-    private var cmdModifierHeld: Bool = false
+    var cmdModifierHeld: Bool = false             // internal for TerminalView+Hover.swift
 
     /// While ⌘ is held and the pointer rests on a regex-detected URL,
     /// this holds the match so `clearHover`, the cursor updater, and
     /// the renderer can coordinate without re-running the scan. Cleared
     /// when ⌘ releases, the pointer leaves the match, or the view loses
     /// focus.
-    private var cmdHoverURLMatch: URLMatch?
+    var cmdHoverURLMatch: URLMatch?               // internal for TerminalView+Hover.swift
 
     /// Lazily computed URL match list for the current snapshot. Rebuilt
     /// only when `snapshot.sequenceID` changes so trackpad-cadence
@@ -201,8 +205,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// compare equal and skip a legitimate scan. BBSnapshot's allocator
     /// today starts at 1 (see BBTerm.allocateSequence) but we don't want
     /// correctness to depend on that.
-    private var cachedURLMatches: [URLMatch] = []
-    private var cachedURLMatchesSeq: UInt64?
+    var cachedURLMatches: [URLMatch] = []         // internal for TerminalView+Hover.swift
+    var cachedURLMatchesSeq: UInt64?              // internal for TerminalView+Hover.swift
     /// Trackpad pinch gesture accumulator. Magnification events deliver
     /// fractional deltas; we wait until the running sum crosses ±0.15
     /// before bumping `Preferences.shared.fontSize`. Without the accumulator
@@ -211,15 +215,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var pinchAccumulator: CGFloat = 0
     /// Scheduled tooltip reveal. Cancelled on pointer movement, scroll,
     /// keydown, or view teardown.
-    private var hoverTooltipItem: DispatchWorkItem?
+    var hoverTooltipItem: DispatchWorkItem?       // internal for TerminalView+Hover.swift
     /// Lightweight panel that shows the resolved URL after the 500 ms dwell.
     /// Kept around between shows so repeated hovers don't thrash NSPanel
     /// allocation; hidden when not in use.
-    private var hoverTooltipPanel: NSPanel?
-    private var hoverTooltipLabel: NSTextField?
+    var hoverTooltipPanel: NSPanel?               // internal for TerminalView+Hover.swift
+    var hoverTooltipLabel: NSTextField?           // internal for TerminalView+Hover.swift
     /// Tracking area that delivers `mouseMoved` / `mouseExited`. Rebuilt on
     /// bounds changes via `updateTrackingAreas`.
-    private var hoverTrackingArea: NSTrackingArea?
+    var hoverTrackingArea: NSTrackingArea?        // internal for TerminalView+Hover.swift
+
+    /// Paired coordinate used by DEC 1003 any-event mouse tracking to
+    /// dedupe repeated motion reports on the same cell.
+    /// `lastReportedMotionCell` lives here because extensions cannot
+    /// declare stored properties; both the mouse-reporting section
+    /// (which reads the termMode bits) and the hover extension (which
+    /// fires the report from `mouseMoved`) share it.
+    struct BBXYPoint: Equatable { let col: Int; let row: Int }
+    var lastReportedMotionCell: BBXYPoint?
+
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
 
@@ -273,7 +287,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }()
     private var lastBellCounter: UInt64 = 0
 
-    public private(set) var selection: Selection? {
+    // Public read; writer is `internal` so the mouse / hover extension
+    // files can update the selection. External Blackbird callers should
+    // go through `setSelectionForTests(_:)` (DEBUG) or leave selection
+    // to the view's own gestures.
+    public internal(set) var selection: Selection? {
         didSet {
             if oldValue != selection { setNeedsDisplay(bounds) }
         }
@@ -356,7 +374,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// to log near-misses (cache populated, match lookup returned nil) so
     /// a column-mapping or wrap-join regression is discoverable via
     /// `log stream --predicate 'category == "hover"'`. Off the hot path.
-    fileprivate static let hoverLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+    static let hoverLogger = Logger(subsystem: "dev.conjfrnk.blackbird",  // internal for TerminalView+Hover.swift
                                                 category: "hover")
     #endif
 
@@ -2199,12 +2217,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     // MARK: - Mouse reporting
 
-    private func mouseReportingEnabled() -> Bool {
+    func mouseReportingEnabled() -> Bool {
         guard let mode = currentSnapshot?.termMode else { return false }
         return mode.contains(.mouseReportClick) || mode.contains(.mouseMotion) || mode.contains(.mouseDrag)
     }
 
-    private func sgrMouseEnabled() -> Bool {
+    func sgrMouseEnabled() -> Bool {
         currentSnapshot?.termMode.contains(.sgrMouse) ?? false
     }
 
@@ -2527,7 +2545,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// bit being set alongside motion; narrower predicate than
     /// `mouseReportingEnabled` so we only fire no-button motion
     /// reports when explicitly asked. Audit terminal-view-2 F14.
-    private func anyEventMouseEnabled() -> Bool {
+    func anyEventMouseEnabled() -> Bool {
         guard let mode = currentSnapshot?.termMode else { return false }
         return mode.contains(.mouseMotion)
     }
@@ -2666,7 +2684,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    private func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
+    func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
         let local = convert(event.locationInWindow, from: nil)
         let snap = currentSnapshot
         // `.fullSizeContentView` means `bounds.height` includes the titlebar
@@ -2724,479 +2742,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let resolver = SnapshotHyperlinkResolver(snapshot: snap)
         if let u = allow(resolver.osc8URL(row: screenRow, col: col)) { return u }
         return allow(resolver.regexURL(row: screenRow, col: col))
-    }
-
-    // MARK: - Hover dwell tooltip + accent underline
-
-    /// Install a full-bounds tracking area that delivers `mouseMoved` even
-    /// when no buttons are down. Recreated on every bounds change; the
-    /// `.inVisibleRect` option makes AppKit re-resolve the rect on each
-    /// delivery so tab splits / window resizes don't leave a stale region.
-    public override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let existing = hoverTrackingArea {
-            removeTrackingArea(existing)
-            hoverTrackingArea = nil
-        }
-        let ta = NSTrackingArea(
-            rect: .zero,
-            options: [
-                .mouseMoved,
-                .mouseEnteredAndExited,
-                // `.cursorUpdate` is what drives AppKit's dispatch of
-                // `cursorUpdate(with:)`. Without it the override is dead
-                // code — pointer style stays the default `.iBeam` even
-                // while the pointer is over a clickable OSC 8 / ⌘-hover
-                // URL. With it, AppKit queries us whenever the pointer
-                // crosses in or when `invalidateCursorRects` is called.
-                .cursorUpdate,
-                .activeInKeyWindow,
-                .inVisibleRect,
-            ],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(ta)
-        hoverTrackingArea = ta
-    }
-
-    public override func mouseMoved(with event: NSEvent) {
-        super.mouseMoved(with: event)
-        // Reconcile ⌘-held state with the live event flags. `flagsChanged`
-        // doesn't fire when a key release happens while another window is
-        // key (Cmd-Tab release case), so a ⌘-up missed during focus loss
-        // would otherwise leave us painting the highlight forever.
-        let cmdChanged = syncCmdModifierHeld(fromEventFlags: event.modifierFlags)
-        let point = bufferPointFromEvent(event)
-        let screenRow = Int(point.line) + (currentSnapshot?.displayOffset ?? 0)
-        let col = point.col
-        updateHover(screenRow: screenRow, col: col, locationInWindow: event.locationInWindow)
-        // Run the ⌘-hover pass when either the modifier flipped OR the
-        // hover cell moved. `updateHover` already updates `lastHoverCell`
-        // before returning, so we see the new cell here.
-        if cmdChanged || cmdModifierHeld {
-            reevaluateCmdHoverHighlight()
-        }
-        // DEC mode 1003 — any-event tracking. When the TUI has asked for
-        // motion reports (without requiring a button), emit a motion
-        // event even in the no-button case. xterm uses button 35 (32 +
-        // 3 "release", which the protocol uses to mean "no button
-        // currently pressed"). Fires only when the hover cell actually
-        // changed so we don't flood the PTY at pointer-update cadence.
-        // Audit terminal-view-2 F14.
-        if let session, mouseReportingEnabled(), anyEventMouseEnabled(),
-           !event.modifierFlags.contains(.option),
-           lastReportedMotionCell != BBXYPoint(col: col, row: screenRow) {
-            lastReportedMotionCell = BBXYPoint(col: col, row: screenRow)
-            sendMouseEvent(event, button: 35, press: true, session: session)
-        }
-    }
-
-    private struct BBXYPoint: Equatable { let col: Int; let row: Int }
-    /// Last (col, row) reported via DEC 1003 any-event tracking, for
-    /// per-cell deduplication. Reset by leaving the view.
-    private var lastReportedMotionCell: BBXYPoint?
-
-    public override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        clearHover()
-    }
-
-    private func updateHover(screenRow: Int, col: Int, locationInWindow: NSPoint) {
-        // Resolve the OSC 8 link id for the cell under the pointer. A
-        // test-supplied fake may override; otherwise consult the live
-        // snapshot directly. `linkID` bounds-checks internally, so an
-        // out-of-grid coordinate just returns 0 (which clears the hover).
-        //
-        // Gate on `OSC8URLPolicy` so cells whose OSC 8 target fails the
-        // scheme allowlist (javascript:, data:, custom handlers) don't
-        // paint a hover underline or fire a tooltip. The click path is
-        // already blocked upstream — showing an affordance for a no-op
-        // click would be misleading.
-        let newLinkID: UInt32 = {
-            #if DEBUG
-            if let override = hyperlinkResolverOverride {
-                // Fakes answer via osc8URL — collapse URL presence into a
-                // stable non-zero id so the renderer underline path still
-                // fires without us needing a real link-id table in tests.
-                return override.osc8URL(row: screenRow, col: col) != nil ? UInt32(bitPattern: Int32(-1)) : 0
-            }
-            #endif
-            guard let snap = currentSnapshot else { return 0 }
-            let id = snap.linkID(row: screenRow, col: col)
-            guard id != 0,
-                  let raw = snap.linkURL(id: id),
-                  let url = URL(string: raw),
-                  OSC8URLPolicy.isAllowed(url)
-            else { return 0 }
-            return id
-        }()
-
-        // Same cell as last move → nothing to update except the tooltip
-        // position is already correct. Bail to avoid timer churn.
-        if let last = lastHoverCell, last.row == screenRow, last.col == col {
-            return
-        }
-        lastHoverCell = (row: screenRow, col: col)
-
-        if newLinkID != hoveredLinkID {
-            hoveredLinkID = newLinkID
-            // Redraw so the accent underline picks up / drops off the cells
-            // sharing the new hovered id.
-            needsDisplay = true
-        }
-
-        // Reset any pending tooltip when the pointer moves to a different
-        // cell. Production matches VS Code / iTerm2 feel: tooltip appears
-        // only after a steady dwell.
-        hoverTooltipItem?.cancel()
-        hoverTooltipItem = nil
-        dismissHoverTooltip()
-
-        guard newLinkID != 0 else { return }
-
-        // Resolve the URL so the tooltip shows the href, not just "there is
-        // a link here". For the test fake this goes through osc8URL; for
-        // production it's the snapshot's link table.
-        let resolvedURLString: String? = {
-            #if DEBUG
-            if let override = hyperlinkResolverOverride {
-                return override.osc8URL(row: screenRow, col: col)?.absoluteString
-            }
-            #endif
-            return currentSnapshot?.linkURL(id: newLinkID)
-        }()
-        guard let urlString = resolvedURLString else { return }
-
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.showHoverTooltip(urlString: urlString, anchor: locationInWindow)
-        }
-        hoverTooltipItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
-    }
-
-    private func clearHover() {
-        lastHoverCell = nil
-        cancelHoverTooltip()
-        clearHoveredLink()
-        clearCmdHoverURLMatch()
-    }
-
-    // MARK: - ⌘-held regex URL highlight
-
-    /// Drop the ⌘-hover underline and tell the renderer so the next frame
-    /// repaints cleanly. Separate from `clearHoveredLink` (OSC 8 hover)
-    /// because the two states live independently — an OSC 8 cell under
-    /// the pointer keeps its underline even when ⌘ is released, and vice
-    /// versa.
-    ///
-    /// Unconditionally calls through to `setCmdHoverRange` even when the
-    /// local `cmdHoverURLMatch` is already nil: the renderer's dedup
-    /// guard makes the no-op free, and skipping the call would trap a
-    /// renderer-state desync if our local state ever drifted (e.g., a
-    /// direct test setter). Only the `needsDisplay` nudge is gated on
-    /// "something actually changed locally".
-    private func clearCmdHoverURLMatch() {
-        let wasSet = cmdHoverURLMatch != nil
-        cmdHoverURLMatch = nil
-        renderer.setCmdHoverRange(bufferLine: 0, startCol: -1, endCol: -1)
-        if wasSet { needsDisplay = true }
-    }
-
-    /// Refresh the regex-URL match cache when the current snapshot has a
-    /// new sequence id. Called only on the ⌘-hover fast path so the O(rows
-    /// × cols) scan runs at most once per snapshot instead of once per
-    /// `mouseMoved` delivery. Audit cwd-hyperlink F7.
-    private func refreshURLMatchCacheIfNeeded() {
-        guard let snap = currentSnapshot else {
-            cachedURLMatches = []
-            cachedURLMatchesSeq = nil
-            return
-        }
-        if cachedURLMatchesSeq != snap.sequenceID {
-            cachedURLMatches = URLDetector.scan(snapshot: snap)
-            cachedURLMatchesSeq = snap.sequenceID
-        }
-    }
-
-    /// Resolve the regex URL under the current hover cell (if any) and push
-    /// its cell range to the renderer as a ⌘-hover highlight. OSC 8 wins
-    /// on cells with an explicit link id — the existing hover underline
-    /// and tooltip already handle those, and re-painting them here would
-    /// double the redraw work.
-    ///
-    /// Called whenever the hover cell, current snapshot, or
-    /// `cmdModifierHeld` changes. Safe to call with no snapshot, no
-    /// hover cell, or no window focus — it only pushes updates to the
-    /// renderer when the resolved range differs from what the renderer
-    /// already knows.
-    private func reevaluateCmdHoverHighlight() {
-        guard cmdModifierHeld,
-              let last = lastHoverCell,
-              let snap = currentSnapshot
-        else {
-            clearCmdHoverURLMatch()
-            return
-        }
-        // OSC 8 cells already carry their own hover affordance; skip the
-        // regex overlay so we don't paint two underlines on the same run.
-        if snap.linkID(row: last.row, col: last.col) != 0 {
-            clearCmdHoverURLMatch()
-            return
-        }
-        refreshURLMatchCacheIfNeeded()
-        let bufferLine = Int32(last.row - snap.displayOffset)
-        let point = BufferPoint(line: bufferLine, col: last.col)
-        guard let match = URLDetector.match(at: point, in: cachedURLMatches) else {
-            #if DEBUG
-            // Diagnosability: this branch silently clears. If the cache
-            // is populated for this buffer line but no match covers the
-            // pointer cell, the user experience is "highlight flickers
-            // off for no apparent reason" — log the near-miss so a
-            // future column-mapping or wrap-join regression is
-            // observable instead of invisible.
-            if !cachedURLMatches.isEmpty,
-               cachedURLMatches.contains(where: { $0.line == bufferLine }) {
-                Self.hoverLogger.debug(
-                    "cmd-hover: cache populated for line \(bufferLine, privacy: .public) but match(at:) miss at col \(last.col, privacy: .public)"
-                )
-            }
-            #endif
-            clearCmdHoverURLMatch()
-            return
-        }
-        guard OSC8URLPolicy.isAllowed(match.url) else {
-            // Policy reject (non-http/https/ftp/mailto). Intentional —
-            // don't log; matches `resolveClickURL`'s silent drop.
-            clearCmdHoverURLMatch()
-            return
-        }
-        // Same cell range as last time → nothing to push. Prevents
-        // needsDisplay churn on every intra-URL pointer move.
-        if let existing = cmdHoverURLMatch,
-           existing.line == match.line,
-           existing.startCol == match.startCol,
-           existing.endCol == match.endCol {
-            return
-        }
-        cmdHoverURLMatch = match
-        renderer.setCmdHoverRange(
-            bufferLine: match.line,
-            startCol: Int32(match.startCol),
-            endCol: Int32(match.endCol)
-        )
-        needsDisplay = true
-    }
-
-    /// Sync `cmdModifierHeld` with the latest modifier state. Called from
-    /// `flagsChanged` (fast path) and from `mouseMoved` (reconcile path —
-    /// `flagsChanged` doesn't fire if the key release happened while
-    /// another window was key). Returns `true` when the state actually
-    /// changed so callers can drive re-evaluation.
-    @discardableResult
-    private func syncCmdModifierHeld(fromEventFlags flags: NSEvent.ModifierFlags) -> Bool {
-        let nowHeld = flags.contains(.command)
-        guard nowHeld != cmdModifierHeld else { return false }
-        cmdModifierHeld = nowHeld
-        return true
-    }
-
-    public override func flagsChanged(with event: NSEvent) {
-        super.flagsChanged(with: event)
-        guard syncCmdModifierHeld(fromEventFlags: event.modifierFlags) else { return }
-        reevaluateCmdHoverHighlight()
-        // Cursor should refresh immediately when the modifier changes
-        // (AppKit's cursorUpdate normally fires on mouse movement).
-        window?.invalidateCursorRects(for: self)
-    }
-
-    /// AppKit queries this when the pointer crosses into the view's
-    /// cursor rect or when `invalidateCursorRects` is called. Return
-    /// `pointingHand` whenever the pointer is over something clickable —
-    /// an OSC 8 link (always) or a regex URL while ⌘ is held. That gives
-    /// the user a consistent affordance matching the underline state.
-    public override func cursorUpdate(with event: NSEvent) {
-        if hoveredLinkID != 0 || cmdHoverURLMatch != nil {
-            NSCursor.pointingHand.set()
-        } else {
-            super.cursorUpdate(with: event)
-        }
-    }
-
-    /// Clear all modifier / hover state. Called when the window resigns
-    /// key (tab switch, Cmd-Tab to another app) so stale "⌘ held" state
-    /// from a missed flagsChanged can't survive focus boundaries. Also
-    /// drops `lastHoverCell` and the URL-match cache so the next
-    /// `mouseMoved` after focus regain re-resolves from scratch (the
-    /// view may have missed several snapshots during focus loss).
-    private func resetModifierAndHoverState() {
-        cmdModifierHeld = false
-        lastHoverCell = nil
-        cachedURLMatches = []
-        cachedURLMatchesSeq = nil
-        clearCmdHoverURLMatch()
-        clearHoveredLink()
-        cancelHoverTooltip()
-    }
-
-    /// Cancel any pending tooltip reveal and drop the tooltip panel if it's
-    /// up. Does NOT clear the accent underline / hovered-link id — that
-    /// belongs to `clearHoveredLink()`. Called from keyDown so typing
-    /// dismisses the dwell tooltip without simultaneously stripping the
-    /// underline off the link the user is still hovering. (Previously this
-    /// did clear the link id too, so a single keystroke killed the underline
-    /// until the pointer physically moved off and back onto the link.)
-    private func cancelHoverTooltip() {
-        hoverTooltipItem?.cancel()
-        hoverTooltipItem = nil
-        dismissHoverTooltip()
-    }
-
-    /// Drop the accent underline + hovered-link id and force a repaint.
-    /// Called from `clearHover` (mouseExited / scroll-invalidates-cache) and
-    /// `deinit`. Decoupled from the tooltip so keyDown can dismiss the
-    /// tooltip alone without disturbing the underline.
-    private func clearHoveredLink() {
-        guard hoveredLinkID != 0 else { return }
-        hoveredLinkID = 0
-        // Push the cleared id straight to the renderer so the next frame
-        // drops the underline even before the usual draw-path plumbing runs.
-        renderer.setHoveredLinkID(0)
-        needsDisplay = true
-    }
-
-    private func showHoverTooltip(urlString: String, anchor: NSPoint) {
-        guard let window else { return }
-        let panel: NSPanel
-        let label: NSTextField
-        if let existingPanel = hoverTooltipPanel, let existingLabel = hoverTooltipLabel {
-            panel = existingPanel
-            label = existingLabel
-        } else {
-            // .nonactivatingPanel keeps the terminal's key-window / first-
-            // responder state intact while the tooltip is visible, so a
-            // hover-peek doesn't disrupt typing.
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 200, height: 20),
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered,
-                defer: true
-            )
-            panel.isFloatingPanel = true
-            panel.hidesOnDeactivate = true
-            panel.hasShadow = true
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-            panel.ignoresMouseEvents = true
-
-            let container = NSView(frame: .zero)
-            container.wantsLayer = true
-            container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-            container.layer?.cornerRadius = 4
-            container.layer?.borderWidth = 0.5
-            container.layer?.borderColor = NSColor.separatorColor.cgColor
-
-            let lbl = NSTextField(labelWithString: "")
-            lbl.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            lbl.textColor = .labelColor
-            lbl.lineBreakMode = .byTruncatingMiddle
-            lbl.maximumNumberOfLines = 1
-            container.addSubview(lbl)
-            panel.contentView = container
-
-            hoverTooltipPanel = panel
-            hoverTooltipLabel = lbl
-            label = lbl
-        }
-        // Clamp the displayed URL. A misbehaving remote could stuff
-        // megabytes of OSC 8 target into the link table; sizing an
-        // NSTextField against it would hang the UI and push the panel
-        // off-screen. 512 chars covers every realistic URL; anything
-        // over that gets an ellipsis so the user still sees the origin.
-        let maxDisplay = 512
-        label.stringValue = urlString.count > maxDisplay
-            ? String(urlString.prefix(maxDisplay)) + "…"
-            : urlString
-        label.sizeToFit()
-        let padX: CGFloat = 8, padY: CGFloat = 4
-        let labelFrame = NSRect(
-            x: padX, y: padY,
-            width: min(label.frame.width, 600),
-            height: label.frame.height
-        )
-        label.frame = labelFrame
-        let panelSize = NSSize(
-            width: labelFrame.width + padX * 2,
-            height: labelFrame.height + padY * 2
-        )
-        panel.contentView?.frame = NSRect(origin: .zero, size: panelSize)
-
-        // Anchor just below the pointer. Convert the view-local anchor to
-        // screen space via the window's coordinate system.
-        let windowPoint = anchor
-        let screenPoint = window.convertPoint(toScreen: windowPoint)
-        let origin = NSPoint(
-            x: screenPoint.x + 12,
-            y: screenPoint.y - panelSize.height - 12
-        )
-        panel.setFrame(
-            NSRect(origin: origin, size: panelSize),
-            display: true
-        )
-        panel.orderFront(nil)
-    }
-
-    private func dismissHoverTooltip() {
-        hoverTooltipPanel?.orderOut(nil)
-    }
-
-    /// Grow the current `.word` or `.line` selection outward from `anchor`.
-    /// `.word` uses the shared `wordRange(around:in:displayOffset:)` helper;
-    /// `.line` selects the entire grid line.
-    private func expandSelectionUnderAnchor() {
-        guard var sel = selection, let snap = currentSnapshot else { return }
-        switch sel.mode {
-        case .word:
-            if let (a, b) = wordRange(around: sel.anchor, in: snap, displayOffset: snap.displayOffset) {
-                sel.anchor = a
-                sel.cursor = b
-                selection = sel
-            }
-        case .line:
-            sel.anchor = BufferPoint(line: sel.anchor.line, col: 0)
-            sel.cursor = BufferPoint(line: sel.cursor.line, col: snap.cols - 1)
-            selection = sel
-        default:
-            break
-        }
-    }
-
-    private func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool, session: TerminalSession) {
-        let loc = convert(event.locationInWindow, from: nil)
-        // Paranoia. `event.locationInWindow` is a CGFloat; a misbehaving
-        // input device or a bridged NaN / Infinity can slip through, and
-        // `Int(NaN)` / `Int(±Inf)` trap. Guard before the cast rather
-        // than after — the scrollWheel path already uses this pattern.
-        guard loc.x.isFinite, loc.y.isFinite else { return }
-        let rowY = (bounds.height - titlebarOnlyTopInset - loc.y) / metrics.cellHeight
-        let colX = loc.x / metrics.cellWidth
-        // Clamp to a sane cell range so oversized coordinates (user
-        // scrolled the window off the right edge of a 200k-col display)
-        // don't overflow Int32 when encodeMouseReport stringifies them.
-        // Division of a finite by a positive cellWidth/Height is finite,
-        // so no second isFinite check is needed.
-        let maxCol = 10_000, maxRow = 10_000
-        let col = max(0, min(maxCol, Int(colX)))
-        let row = max(0, min(maxRow, Int(rowY)))
-        guard let bytes = Self.encodeMouseReport(
-            sgr: sgrMouseEnabled(),
-            button: button,
-            press: press,
-            col: col,
-            row: row
-        ) else { return }
-        session.send(bytes)
     }
 
     // MARK: - NSAccessibility -------------------------------------------
