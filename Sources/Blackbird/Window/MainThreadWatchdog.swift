@@ -3,22 +3,21 @@ import Darwin
 import QuartzCore
 import os
 
-/// Debug-only main-thread hang detector.
+/// Main-thread hang detector.
 ///
-/// Pings main at `pingInterval`; if main doesn't respond within `hangThreshold`,
-/// snapshots ALL threads (via `task_threads` + `thread_get_state`) and appends
-/// a stack trace to `/tmp/bb-hang-<timestamp>.txt`. This gives us actual
-/// evidence of what the app was doing during a UI beachball, rather than
-/// having to guess or catch the freeze with an external `sample` command at
-/// exactly the right moment.
+/// Pings main at `pingInterval`; if main doesn't respond within
+/// `hangThreshold`, shells out to `/usr/bin/sample` with our own pid and
+/// writes a symbolicated stack trace to
+/// `~/Library/Logs/Blackbird/hang-<timestamp>.txt`. This gives us
+/// actual evidence of what the app was doing during a UI beachball
+/// rather than having to guess or catch the freeze with an external
+/// `sample` run at exactly the right moment.
 ///
-/// Enable by setting `BB_HANG_WATCHDOG=1` in the environment. Off by default
-/// — the probe thread itself costs ~0.1% CPU when idle and only does real
-/// work during a detected hang, but we don't need it on in normal builds.
-///
-/// NOT shipped in release; the `guard` on the env var + DEBUG gating are both
-/// belt-and-braces so a production user doesn't accidentally get a diagnostic
-/// they didn't ask for.
+/// Default-on in Debug (set `BB_HANG_WATCHDOG=0` to suppress), off in
+/// Release unless `BB_HANG_WATCHDOG=1` is set explicitly by someone
+/// trying to repro a beachball. The probe thread costs ~0.1 % CPU when
+/// idle; real work only happens on a detected hang. Production users
+/// should not accumulate diagnostics they didn't ask for.
 enum MainThreadWatchdog {
 
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "watchdog")
@@ -80,15 +79,22 @@ enum MainThreadWatchdog {
         t.start()
     }
 
-    /// Write a brief hang report to `/tmp/bb-hang-<wall-time>.txt`. Shells out
-    /// to `/usr/bin/sample` with our own PID — that's the cleanest way to get
-    /// a symbolicated trace of every thread from inside the same process;
-    /// `Thread.callStackSymbols` only gives us the CALLING thread's stack
-    /// (i.e., the watchdog thread's), which isn't what we want.
+    /// Write a brief hang report to `~/Library/Logs/Blackbird/hang-<wall-time>.txt`.
+    /// Shells out to `/usr/bin/sample` with our own PID — that's the
+    /// cleanest way to get a symbolicated trace of every thread from
+    /// inside the same process; `Thread.callStackSymbols` only gives us
+    /// the CALLING thread's stack (i.e., the watchdog thread's), which
+    /// isn't what we want.
+    ///
+    /// `~/Library/Logs/Blackbird/` over `/tmp`: matches Apple's
+    /// convention (Console.app reads this location automatically),
+    /// survives reboots so post-hoc investigation works, and doesn't
+    /// race with `/tmp` cleaners on very long sessions.
     private static func captureHangReport(age: Double) {
         let ts = Int(Date().timeIntervalSince1970)
         let pid = getpid()
-        let file = "/tmp/bb-hang-\(ts).txt"
+        let dir = logDirectory()
+        let file = "\(dir)/hang-\(ts).txt"
         logger.warning("main-thread hang \(age, format: .fixed(precision: 2), privacy: .public)s — writing \(file, privacy: .public)")
 
         // 2 seconds of sampling at default granularity — enough to catch
@@ -108,5 +114,23 @@ enum MainThreadWatchdog {
         } catch {
             logger.error("sample(1) invocation failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Return (and create on demand) `~/Library/Logs/Blackbird/`. Falls
+    /// back to `/tmp` only if the real directory can't be created — a
+    /// hang report in `/tmp` is still better than dropping the sample
+    /// on the floor.
+    private static func logDirectory() -> String {
+        let fm = FileManager.default
+        if let lib = fm.urls(for: .libraryDirectory, in: .userDomainMask).first {
+            let dir = lib.appendingPathComponent("Logs/Blackbird", isDirectory: true)
+            do {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                return dir.path
+            } catch {
+                logger.error("could not create \(dir.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return "/tmp"
     }
 }

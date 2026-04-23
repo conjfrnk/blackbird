@@ -422,15 +422,18 @@ public final class MetalRenderer {
         // first-paint. Safe: this is a plain call into `lookupOrInsert`,
         // which is idempotent.
         //
-        // Logged for latency diagnosis — `startup` category so the user
-        // can see it alongside shell-spawn / first-byte timings via
+        // Logged under the shared startup telemetry gate so users can
+        // see it alongside shell-spawn / first-byte timings via
         //   log stream --predicate 'category == "startup"'
+        // Release builds stay silent unless BLACKBIRD_STARTUP_LOG=1.
         let t0 = CACurrentMediaTime()
         atlas.prewarmCommonGlyphs()
-        let dt = (CACurrentMediaTime() - t0) * 1000
-        Self.logger.log(
-            "atlas prewarm \(dt, format: .fixed(precision: 1), privacy: .public)ms"
-        )
+        if StartupTelemetry.isEnabled {
+            let dt = (CACurrentMediaTime() - t0) * 1000
+            StartupTelemetry.logger.log(
+                "atlas prewarm \(dt, format: .fixed(precision: 1), privacy: .public)ms"
+            )
+        }
     }
 
     /// Rebuild metrics + atlas for a new font size. Safe to call from the

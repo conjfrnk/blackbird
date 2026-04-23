@@ -30,13 +30,10 @@ public final class TerminalSession: ObservableObject {
                                             category: "osc52")
     #endif
 
-    /// Always-on latency-diagnostic logger. Readable in Release via
-    ///   log stream --predicate 'subsystem == "dev.conjfrnk.blackbird" AND category == "startup"'
-    /// Used to pin where the "why is my prompt slow" time is going —
-    /// shell spawn, first PTY byte, first snapshot delivered to main.
-    /// `privacy: .public` on every emit so Console doesn't redact.
-    private static let startupLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
-                                              category: "startup")
+    /// Shorthand. Routed through `StartupTelemetry.isEnabled` at each
+    /// call site so Release builds don't emit diagnostic chatter unless
+    /// the user opted in with `BLACKBIRD_STARTUP_LOG=1`.
+    private static var startupLogger: Logger { StartupTelemetry.logger }
     /// Absolute time the session's PTY was spawned. First-byte and
     /// first-snapshot timestamps reference this baseline so the log
     /// reads as "spawn → first byte N ms" instead of raw clock.
@@ -227,9 +224,11 @@ public final class TerminalSession: ObservableObject {
         s.spawnedAt = tSpawn
         let coreMs = (tCore - t0) * 1000
         let ptyMs = (tSpawn - tCore) * 1000
-        Self.startupLogger.log(
-            "start shell=\(shell, privacy: .public) core_init=\(coreMs, format: .fixed(precision: 1), privacy: .public)ms pty_spawn=\(ptyMs, format: .fixed(precision: 1), privacy: .public)ms"
-        )
+        if StartupTelemetry.isEnabled {
+            Self.startupLogger.log(
+                "start shell=\(shell, privacy: .public) core_init=\(coreMs, format: .fixed(precision: 1), privacy: .public)ms pty_spawn=\(ptyMs, format: .fixed(precision: 1), privacy: .public)ms"
+            )
+        }
         return s
     }
 
@@ -790,10 +789,12 @@ public final class TerminalSession: ObservableObject {
         // "our spawn path is slow" from "the shell is slow".
         if !loggedFirstByte {
             loggedFirstByte = true
-            let dt = (CACurrentMediaTime() - spawnedAt) * 1000
-            Self.startupLogger.log(
-                "first PTY byte \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn (bytes=\(data.count, privacy: .public))"
-            )
+            if StartupTelemetry.isEnabled {
+                let dt = (CACurrentMediaTime() - spawnedAt) * 1000
+                Self.startupLogger.log(
+                    "first PTY byte \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn (bytes=\(data.count, privacy: .public))"
+                )
+            }
         }
 
         let bytes = [UInt8](data)
@@ -834,7 +835,7 @@ public final class TerminalSession: ObservableObject {
             // tearing down and we'd waste a downstream render cycle.
             guard !terminated, let latest else { return }
             self.snapshot = latest
-            if wasFirst {
+            if wasFirst, StartupTelemetry.isEnabled {
                 let dt = (CACurrentMediaTime() - self.spawnedAt) * 1000
                 Self.startupLogger.log(
                     "first snapshot on main \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn"

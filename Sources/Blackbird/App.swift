@@ -24,14 +24,6 @@ enum BlackbirdMain {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
-    /// Always-on latency logger. Mirrors `TerminalSession.startupLogger`
-    /// so the ⌘T / shell-spawn / first-byte / first-snapshot timeline
-    /// reads as a single continuous thread in
-    ///   log stream --predicate 'category == "startup"'
-    fileprivate static let startupLogger = Logger(
-        subsystem: "dev.conjfrnk.blackbird", category: "startup"
-    )
-
     private var controllers: [MainWindowController] = []
 
     /// Sparkle updater — present ONLY when the app is properly configured
@@ -137,14 +129,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Replace Sparkle's verbose "up to date" alert before any updater
         // session can spin up (scheduled check, menu action, etc.).
         SparkleAlertOverride.install()
-        // Optional main-thread hang detector. Off unless BB_HANG_WATCHDOG=1.
-        // When set, any main-thread hang ≥ 0.5 s writes a sampled stack to
-        // /tmp/bb-hang-<timestamp>.txt so we can see WHAT the app was doing
-        // during a UI beachball instead of guessing. Used for field repro
-        // of issues like the Settings-click freeze.
-        if ProcessInfo.processInfo.environment["BB_HANG_WATCHDOG"] == "1" {
-            MainThreadWatchdog.install()
-        }
+        // Main-thread hang detector. Only the DEFAULT flips between
+        // build flavours — the env var's meaning is consistent across
+        // both: "1" forces on, "0" forces off, unset falls back to the
+        // build default. Debug = default-on (devs want the signal);
+        // Release = default-off (production users shouldn't quietly
+        // gather diagnostics). Any main-thread hang ≥ 0.5 s writes a
+        // sampled stack under `~/Library/Logs/Blackbird/hang-<ts>.txt`.
+        let hangEnv = ProcessInfo.processInfo.environment["BB_HANG_WATCHDOG"]
+        #if DEBUG
+        let installWatchdog = (hangEnv != "0")
+        #else
+        let installWatchdog = (hangEnv == "1")
+        #endif
+        if installWatchdog { MainThreadWatchdog.install() }
         installMainMenu()
         installSparkleMenuItem()
         // Live-toggle Sparkle's auto-check when the pref changes, so the
@@ -316,9 +314,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             autosaveFrame: false   // tabs use the group's position
         )
         let tCreate = CACurrentMediaTime()
-        Self.startupLogger.log(
-            "newWindowForTab: controller_init=\(((tCreate - t0) * 1000), format: .fixed(precision: 1), privacy: .public)ms"
-        )
+        if StartupTelemetry.isEnabled {
+            StartupTelemetry.logger.log(
+                "newWindowForTab: controller_init=\(((tCreate - t0) * 1000), format: .fixed(precision: 1), privacy: .public)ms"
+            )
+        }
         guard let newWindow = controller.window else { return }
         if let sourceWindow = source?.window {
             // addTabbedWindow(_:ordered:) orders-front and makes-key as a
