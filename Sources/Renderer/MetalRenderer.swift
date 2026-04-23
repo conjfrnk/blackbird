@@ -68,6 +68,14 @@ public final class MetalRenderer {
     /// attribute bit. Zero means "no hovered link" — the renderer skips
     /// the underline branch entirely.
     private var hoveredLinkID: UInt16 = 0
+    /// Optional "⌘-held, regex URL under pointer" range. Carries a buffer
+    /// line (not screen row — survives scrolling) and an inclusive column
+    /// range. The renderer applies the same `linkHover` accent underline
+    /// to matching cells. `cmdHoverStartCol < 0` is the sentinel for "no
+    /// range" and disables the branch entirely.
+    private var cmdHoverBufferLine: Int32 = 0
+    private var cmdHoverStartCol: Int32 = -1
+    private var cmdHoverEndCol: Int32 = -1
     /// When a cell's resolved bg equals this value, we treat it as "default
     /// background" and skip drawing a bg quad. That lets the transparent
     /// clearColor show through — the window-level transparency effect.
@@ -144,8 +152,24 @@ public final class MetalRenderer {
         let accentColor: SIMD4<Float>     // Equatable; avoids collision risk
         let cursorColor: SIMD4<Float>
         let blinkSkip: Bool
+        /// ⌘-held regex URL range under pointer. Bundled into FrameKey so
+        /// the frame-skip optimisation correctly repaints when the
+        /// highlighted run changes without a new snapshot arriving.
+        let cmdHoverBufferLine: Int32
+        let cmdHoverStartCol: Int32
+        let cmdHoverEndCol: Int32
     }
     private var lastFrameKey: FrameKey?
+    #if DEBUG
+    /// Observable frame-skip signal for tests. `true` when the most
+    /// recent `render(in:snapshot:focused:selection:)` call short-
+    /// circuited on `frameKey == lastFrameKey`; `false` on any path
+    /// that actually touched the encode pipeline. Never read in
+    /// production — DEBUG-only seam for regression tests that need to
+    /// assert "this render was not skipped." Not thread-safe; tests
+    /// should read it from the same queue as the `render` call.
+    public private(set) var didFrameSkipLastRender: Bool = false
+    #endif
 
     /// Strict subset of FrameKey fields that decide whether a prior frame's
     /// per-row cache is still visually correct: everything in FrameKey
@@ -179,6 +203,12 @@ public final class MetalRenderer {
         let accentColor: SIMD4<Float>
         let cursorColor: SIMD4<Float>
         let blinkSkip: Bool
+        /// ⌘-held regex URL range (same fields as FrameKey). A change to
+        /// the range alone — no new snapshot — must invalidate the
+        /// per-row cache since linkHover flags on those cells flip.
+        let cmdHoverBufferLine: Int32
+        let cmdHoverStartCol: Int32
+        let cmdHoverEndCol: Int32
     }
     private var lastCacheKey: CacheKey?
 
@@ -286,6 +316,35 @@ public final class MetalRenderer {
     /// highlight.
     public func setHoveredLinkID(_ id: UInt16) {
         hoveredLinkID = id
+    }
+
+    /// Set the cell range for a ⌘-held regex URL under the pointer. The
+    /// next frame applies the accent underline to every cell in
+    /// `bufferLine` between `startCol` and `endCol` inclusive. Pass
+    /// `startCol < 0` to clear.
+    ///
+    /// Buffer-line (not screen-row) keying means the highlight survives
+    /// scrollback motion without the caller having to re-resolve the
+    /// pointer cell on every snapshot. `lastCacheKey` is invalidated on
+    /// any change so the per-row cache doesn't stick.
+    ///
+    /// IMPORTANT: callers must force a redraw on their own (`needsDisplay
+    /// = true` on the MTKView) after calls that change the range. The
+    /// renderer invalidates its per-frame cache but does not schedule a
+    /// repaint on its own. Pattern mirrors `setHoveredLinkID`. Skipping
+    /// the redraw leaves the cache invalidated but unpainted — the next
+    /// unrelated frame will look correct, but interim frames show stale
+    /// pixels.
+    public func setCmdHoverRange(bufferLine: Int32, startCol: Int32, endCol: Int32) {
+        if cmdHoverBufferLine == bufferLine
+            && cmdHoverStartCol == startCol
+            && cmdHoverEndCol == endCol {
+            return
+        }
+        cmdHoverBufferLine = bufferLine
+        cmdHoverStartCol = startCol
+        cmdHoverEndCol = endCol
+        lastCacheKey = nil
     }
 
     public init?(device: MTLDevice, metrics: CellMetrics, scale: CGFloat = 2.0) {
@@ -456,6 +515,13 @@ public final class MetalRenderer {
         let cellsPtr = snapshot.cellsPointer
         let cols = snapshot.cols
         let hoveredID = hoveredLinkID
+        // Row in *buffer* space (scrollback-adjusted) — the ⌘-hover range
+        // is keyed on buffer line so the underline survives scrolling
+        // without the caller re-resolving the pointer on every snapshot.
+        let rowBufferLine = Int32(row - snapshot.displayOffset)
+        let cmdHoverActiveOnThisRow =
+            cmdHoverStartCol >= 0
+            && cmdHoverBufferLine == rowBufferLine
         // Upper bound: every cell emits at most one instance. Reserve so
         // the common case avoids growing the array — a no-op when `out`
         // already has >= cols capacity from the prior frame.
@@ -475,6 +541,16 @@ public final class MetalRenderer {
                 var flags: UInt32 = 0
                 if hoveredID != 0 && cell.link_id == hoveredID {
                     flags |= CellAttributeMask.linkHover.rawValue
+                }
+                // ⌘-held regex URL highlight: the same accent underline
+                // the OSC 8 hover uses, but gated on a buffer-line range
+                // instead of a link id. Applies only when the cell falls
+                // inside the active range on the active buffer line.
+                if cmdHoverActiveOnThisRow {
+                    let c = Int32(col)
+                    if c >= cmdHoverStartCol && c <= cmdHoverEndCol {
+                        flags |= CellAttributeMask.linkHover.rawValue
+                    }
                 }
                 // Translate cell_flags bits that the shader needs to
                 // render into our flat renderer-side bitset. Cell flags
@@ -833,7 +909,10 @@ public final class MetalRenderer {
             keepBgOpaque: keepBgOpaque,
             accentColor: accentColor,
             cursorColor: cursorColor,
-            blinkSkip: blinkSkipNow
+            blinkSkip: blinkSkipNow,
+            cmdHoverBufferLine: cmdHoverBufferLine,
+            cmdHoverStartCol: cmdHoverStartCol,
+            cmdHoverEndCol: cmdHoverEndCol
         )
         if !frameSkipDisabled, frameKey == lastFrameKey {
             // Nothing that affects pixels has changed since the last
@@ -842,8 +921,14 @@ public final class MetalRenderer {
             // compositor keeps displaying the previously-presented frame.
             // Semaphore NOT touched on the skip path: we never claimed
             // a slot, so we don't signal back.
+            #if DEBUG
+            didFrameSkipLastRender = true
+            #endif
             return
         }
+        #if DEBUG
+        didFrameSkipLastRender = false
+        #endif
 
         lastFrameKey = frameKey
 
@@ -1016,7 +1101,10 @@ public final class MetalRenderer {
                 keepBgOpaque: keepBgOpaque,
                 accentColor: accentColor,
                 cursorColor: cursorColor,
-                blinkSkip: blinkSkipNow
+                blinkSkip: blinkSkipNow,
+                cmdHoverBufferLine: cmdHoverBufferLine,
+                cmdHoverStartCol: cmdHoverStartCol,
+                cmdHoverEndCol: cmdHoverEndCol
             )
             let cacheCompatible = !dirtyRowsDisabled
                 && lastCacheKey == newCacheKey

@@ -172,6 +172,33 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// no OSC 8 attribution. The renderer reads this each frame to draw
     /// the accent underline on every cell sharing the id.
     private var hoveredLinkID: UInt32 = 0
+
+    /// Latched ⌘-modifier state. Updated via `flagsChanged`, reconciled
+    /// against `NSEvent.modifierFlags` on every `mouseMoved` (so a key
+    /// release missed during a focus switch is caught on the next
+    /// mouse movement), and force-cleared on `didResignKeyNotification`
+    /// so a stale "⌘ held" can't survive a tab or window switch.
+    private var cmdModifierHeld: Bool = false
+
+    /// While ⌘ is held and the pointer rests on a regex-detected URL,
+    /// this holds the match so `clearHover`, the cursor updater, and
+    /// the renderer can coordinate without re-running the scan. Cleared
+    /// when ⌘ releases, the pointer leaves the match, or the view loses
+    /// focus.
+    private var cmdHoverURLMatch: URLMatch?
+
+    /// Lazily computed URL match list for the current snapshot. Rebuilt
+    /// only when `snapshot.sequenceID` changes so trackpad-cadence
+    /// `mouseMoved` with ⌘ held costs O(1) lookups, not an O(rows × cols)
+    /// scan per move. Audit cwd-hyperlink F7.
+    ///
+    /// `cachedURLMatchesSeq` is `Optional<UInt64>` rather than a `0`
+    /// sentinel: "never scanned" and "scanned at seq 0" would otherwise
+    /// compare equal and skip a legitimate scan. BBSnapshot's allocator
+    /// today starts at 1 (see BBTerm.allocateSequence) but we don't want
+    /// correctness to depend on that.
+    private var cachedURLMatches: [URLMatch] = []
+    private var cachedURLMatchesSeq: UInt64?
     /// Trackpad pinch gesture accumulator. Magnification events deliver
     /// fractional deltas; we wait until the running sum crosses ±0.15
     /// before bumping `Preferences.shared.fontSize`. Without the accumulator
@@ -317,6 +344,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// keeps the keystroke trail visible in Console.
     private static let keyLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                           category: "keyboard")
+    /// Diagnostic channel for the hover/cmd-URL-highlight path. Used only
+    /// to log near-misses (cache populated, match lookup returned nil) so
+    /// a column-mapping or wrap-join regression is discoverable via
+    /// `log stream --predicate 'category == "hover"'`. Off the hot path.
+    fileprivate static let hoverLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                                category: "hover")
     #endif
 
     public init(frame frameRect: NSRect, device: MTLDevice) {
@@ -745,6 +778,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let wasFocusMode = currentSnapshot?.termMode.contains(.focusInOut) ?? false
         let nowFocusMode = snapshot.termMode.contains(.focusInOut)
         self.currentSnapshot = snapshot
+        // If ⌘ is held while the grid reshapes under the pointer (scrolling
+        // output, screen clear), re-resolve the regex URL at the current
+        // hover cell. `mouseMoved` wouldn't fire — the pointer didn't
+        // physically move — but the row/col under the pointer now maps to
+        // a different buffer line. Without this call the renderer keeps
+        // painting the previous URL's range even though the URL itself
+        // scrolled away. Gated on `cmdModifierHeld` so the scan cache
+        // stays cold when the feature isn't engaged.
+        if cmdModifierHeld {
+            reevaluateCmdHoverHighlight()
+        }
         // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.
         // Scroll indicator consumes the same snapshot — keep it in lockstep
         // with the grid so a sudden `clear` or big output reshapes the thumb
@@ -845,6 +889,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         ) { [weak self] _ in
             self?.sendFocusEventIfNeeded(gained: true)
             self?.enableSecureEventInputIfNeeded()
+            // If the user switched INTO this tab while already holding
+            // ⌘ (Cmd-Tab, or Cmd-` within the group), `flagsChanged`
+            // didn't fire — modifier events only route to the key
+            // window's first responder. Sync from the current global
+            // state so the next hover evaluation sees the right flag.
+            // Re-evaluation itself is deferred to the next mouseMoved:
+            // we don't know the pointer's current cell on the new tab
+            // until it reports in.
+            self?.syncCmdModifierHeld(fromEventFlags: NSEvent.modifierFlags)
         })
         focusObservers.append(center.addObserver(
             forName: NSWindow.didResignKeyNotification,
@@ -857,6 +910,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // can't commit into the next-focused terminal on Cmd-Tab. See
             // `discardCompositionOnResignKey()` for the rationale.
             self?.discardCompositionOnResignKey()
+            // Wipe modifier + hover state so a missed ⌘-release during
+            // focus loss (flagsChanged fires only for the key window)
+            // doesn't leave a stale ⌘-hover highlight painted into the
+            // next focus cycle. mouseMoved will sync back as soon as the
+            // pointer moves over the view again.
+            self?.resetModifierAndHoverState()
         })
         #if DEBUG
         // Window-attach logging (above) fires once per view⇄window pairing,
@@ -2732,6 +2791,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // will repaint them against the fresh cell if appropriate.
         cancelHoverTooltip()
         clearHoveredLink()
+        // Drop the ⌘-hover highlight for the same reason: the renderer's
+        // range is keyed on buffer line, but the *pointer* is still at a
+        // fixed (row, col) pair whose buffer line flipped with the scroll.
+        // Leaving the range intact paints the old URL at a cell the user
+        // is no longer over until the next mouseMoved repaints.
+        clearCmdHoverURLMatch()
         // The cached hover cell is also stale once the grid moved, so the
         // next mouseMoved will re-resolve the link id even if the pointer
         // hasn't physically moved a pixel between the scroll and the next
@@ -2916,6 +2981,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             options: [
                 .mouseMoved,
                 .mouseEnteredAndExited,
+                // `.cursorUpdate` is what drives AppKit's dispatch of
+                // `cursorUpdate(with:)`. Without it the override is dead
+                // code — pointer style stays the default `.iBeam` even
+                // while the pointer is over a clickable OSC 8 / ⌘-hover
+                // URL. With it, AppKit queries us whenever the pointer
+                // crosses in or when `invalidateCursorRects` is called.
+                .cursorUpdate,
                 .activeInKeyWindow,
                 .inVisibleRect,
             ],
@@ -2928,10 +3000,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
+        // Reconcile ⌘-held state with the live event flags. `flagsChanged`
+        // doesn't fire when a key release happens while another window is
+        // key (Cmd-Tab release case), so a ⌘-up missed during focus loss
+        // would otherwise leave us painting the highlight forever.
+        let cmdChanged = syncCmdModifierHeld(fromEventFlags: event.modifierFlags)
         let point = bufferPointFromEvent(event)
         let screenRow = Int(point.line) + (currentSnapshot?.displayOffset ?? 0)
         let col = point.col
         updateHover(screenRow: screenRow, col: col, locationInWindow: event.locationInWindow)
+        // Run the ⌘-hover pass when either the modifier flipped OR the
+        // hover cell moved. `updateHover` already updates `lastHoverCell`
+        // before returning, so we see the new cell here.
+        if cmdChanged || cmdModifierHeld {
+            reevaluateCmdHoverHighlight()
+        }
         // DEC mode 1003 — any-event tracking. When the TUI has asked for
         // motion reports (without requiring a button), emit a motion
         // event even in the no-button case. xterm uses button 35 (32 +
@@ -3035,6 +3118,164 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         lastHoverCell = nil
         cancelHoverTooltip()
         clearHoveredLink()
+        clearCmdHoverURLMatch()
+    }
+
+    // MARK: - ⌘-held regex URL highlight
+
+    /// Drop the ⌘-hover underline and tell the renderer so the next frame
+    /// repaints cleanly. Separate from `clearHoveredLink` (OSC 8 hover)
+    /// because the two states live independently — an OSC 8 cell under
+    /// the pointer keeps its underline even when ⌘ is released, and vice
+    /// versa.
+    ///
+    /// Unconditionally calls through to `setCmdHoverRange` even when the
+    /// local `cmdHoverURLMatch` is already nil: the renderer's dedup
+    /// guard makes the no-op free, and skipping the call would trap a
+    /// renderer-state desync if our local state ever drifted (e.g., a
+    /// direct test setter). Only the `needsDisplay` nudge is gated on
+    /// "something actually changed locally".
+    private func clearCmdHoverURLMatch() {
+        let wasSet = cmdHoverURLMatch != nil
+        cmdHoverURLMatch = nil
+        renderer.setCmdHoverRange(bufferLine: 0, startCol: -1, endCol: -1)
+        if wasSet { needsDisplay = true }
+    }
+
+    /// Refresh the regex-URL match cache when the current snapshot has a
+    /// new sequence id. Called only on the ⌘-hover fast path so the O(rows
+    /// × cols) scan runs at most once per snapshot instead of once per
+    /// `mouseMoved` delivery. Audit cwd-hyperlink F7.
+    private func refreshURLMatchCacheIfNeeded() {
+        guard let snap = currentSnapshot else {
+            cachedURLMatches = []
+            cachedURLMatchesSeq = nil
+            return
+        }
+        if cachedURLMatchesSeq != snap.sequenceID {
+            cachedURLMatches = URLDetector.scan(snapshot: snap)
+            cachedURLMatchesSeq = snap.sequenceID
+        }
+    }
+
+    /// Resolve the regex URL under the current hover cell (if any) and push
+    /// its cell range to the renderer as a ⌘-hover highlight. OSC 8 wins
+    /// on cells with an explicit link id — the existing hover underline
+    /// and tooltip already handle those, and re-painting them here would
+    /// double the redraw work.
+    ///
+    /// Called whenever the hover cell, current snapshot, or
+    /// `cmdModifierHeld` changes. Safe to call with no snapshot, no
+    /// hover cell, or no window focus — it only pushes updates to the
+    /// renderer when the resolved range differs from what the renderer
+    /// already knows.
+    private func reevaluateCmdHoverHighlight() {
+        guard cmdModifierHeld,
+              let last = lastHoverCell,
+              let snap = currentSnapshot
+        else {
+            clearCmdHoverURLMatch()
+            return
+        }
+        // OSC 8 cells already carry their own hover affordance; skip the
+        // regex overlay so we don't paint two underlines on the same run.
+        if snap.linkID(row: last.row, col: last.col) != 0 {
+            clearCmdHoverURLMatch()
+            return
+        }
+        refreshURLMatchCacheIfNeeded()
+        let bufferLine = Int32(last.row - snap.displayOffset)
+        let point = BufferPoint(line: bufferLine, col: last.col)
+        guard let match = URLDetector.match(at: point, in: cachedURLMatches) else {
+            #if DEBUG
+            // Diagnosability: this branch silently clears. If the cache
+            // is populated for this buffer line but no match covers the
+            // pointer cell, the user experience is "highlight flickers
+            // off for no apparent reason" — log the near-miss so a
+            // future column-mapping or wrap-join regression is
+            // observable instead of invisible.
+            if !cachedURLMatches.isEmpty,
+               cachedURLMatches.contains(where: { $0.line == bufferLine }) {
+                Self.hoverLogger.debug(
+                    "cmd-hover: cache populated for line \(bufferLine, privacy: .public) but match(at:) miss at col \(last.col, privacy: .public)"
+                )
+            }
+            #endif
+            clearCmdHoverURLMatch()
+            return
+        }
+        guard OSC8URLPolicy.isAllowed(match.url) else {
+            // Policy reject (non-http/https/ftp/mailto). Intentional —
+            // don't log; matches `resolveClickURL`'s silent drop.
+            clearCmdHoverURLMatch()
+            return
+        }
+        // Same cell range as last time → nothing to push. Prevents
+        // needsDisplay churn on every intra-URL pointer move.
+        if let existing = cmdHoverURLMatch,
+           existing.line == match.line,
+           existing.startCol == match.startCol,
+           existing.endCol == match.endCol {
+            return
+        }
+        cmdHoverURLMatch = match
+        renderer.setCmdHoverRange(
+            bufferLine: match.line,
+            startCol: Int32(match.startCol),
+            endCol: Int32(match.endCol)
+        )
+        needsDisplay = true
+    }
+
+    /// Sync `cmdModifierHeld` with the latest modifier state. Called from
+    /// `flagsChanged` (fast path) and from `mouseMoved` (reconcile path —
+    /// `flagsChanged` doesn't fire if the key release happened while
+    /// another window was key). Returns `true` when the state actually
+    /// changed so callers can drive re-evaluation.
+    @discardableResult
+    private func syncCmdModifierHeld(fromEventFlags flags: NSEvent.ModifierFlags) -> Bool {
+        let nowHeld = flags.contains(.command)
+        guard nowHeld != cmdModifierHeld else { return false }
+        cmdModifierHeld = nowHeld
+        return true
+    }
+
+    public override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        guard syncCmdModifierHeld(fromEventFlags: event.modifierFlags) else { return }
+        reevaluateCmdHoverHighlight()
+        // Cursor should refresh immediately when the modifier changes
+        // (AppKit's cursorUpdate normally fires on mouse movement).
+        window?.invalidateCursorRects(for: self)
+    }
+
+    /// AppKit queries this when the pointer crosses into the view's
+    /// cursor rect or when `invalidateCursorRects` is called. Return
+    /// `pointingHand` whenever the pointer is over something clickable —
+    /// an OSC 8 link (always) or a regex URL while ⌘ is held. That gives
+    /// the user a consistent affordance matching the underline state.
+    public override func cursorUpdate(with event: NSEvent) {
+        if hoveredLinkID != 0 || cmdHoverURLMatch != nil {
+            NSCursor.pointingHand.set()
+        } else {
+            super.cursorUpdate(with: event)
+        }
+    }
+
+    /// Clear all modifier / hover state. Called when the window resigns
+    /// key (tab switch, Cmd-Tab to another app) so stale "⌘ held" state
+    /// from a missed flagsChanged can't survive focus boundaries. Also
+    /// drops `lastHoverCell` and the URL-match cache so the next
+    /// `mouseMoved` after focus regain re-resolves from scratch (the
+    /// view may have missed several snapshots during focus loss).
+    private func resetModifierAndHoverState() {
+        cmdModifierHeld = false
+        lastHoverCell = nil
+        cachedURLMatches = []
+        cachedURLMatchesSeq = nil
+        clearCmdHoverURLMatch()
+        clearHoveredLink()
+        cancelHoverTooltip()
     }
 
     /// Cancel any pending tooltip reveal and drop the tooltip panel if it's
