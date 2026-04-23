@@ -724,17 +724,28 @@ final class PreferencesTests: XCTestCase {
     /// treat this as a hazard: no UserDefaults writes from the closure
     /// without a same-value guard. If this test ever FAILS, Apple tightened
     /// the bridge and we can relax the guards (see AppDelegate.autoUpdateObserver).
+    ///
+    /// Uses a simple counter rather than XCTestExpectation — the sink runs
+    /// on the SAME singleton that every other test touches, and an
+    /// XCTestExpectation over-fulfill propagating out of our sink would
+    /// fail unrelated tests (CI catch, 2026-04-22).
     func test_unrelatedUserDefaultsWrite_firesPreferencesObjectWillChange() {
         let p = Preferences.shared
-        let exp = expectation(description: "objectWillChange fires on an unrelated-key write")
-        let c = p.objectWillChange.sink { _ in exp.fulfill() }
+        var fireCount = 0
+        let c = p.objectWillChange.sink { _ in fireCount += 1 }
         defer { c.cancel() }
 
         let probeKey = "blackbird.test.canary.\(UUID().uuidString)"
         defer { UserDefaults.standard.removeObject(forKey: probeKey) }
         UserDefaults.standard.set(Int.random(in: 1...1_000_000), forKey: probeKey)
 
-        wait(for: [exp], timeout: 1.0)
+        // Let the synchronous-or-next-tick bridge settle.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        XCTAssertGreaterThanOrEqual(
+            fireCount, 1,
+            "SwiftUI's global UserDefaultObserver must bridge unrelated UserDefaults writes into Preferences.objectWillChange — the same-value guards across the codebase rely on this hazard being real. If this test fails, Apple tightened @AppStorage and the guards can be relaxed (AppDelegate.autoUpdateObserver, etc.)."
+        )
     }
 
     /// The same-value-guard pattern must break the self-refiring sink loop.
