@@ -65,7 +65,14 @@ public final class BBTerm {
         weak var owner: BBTerm?
     }
 
-    public init?(size: Size, scrollback: UInt32 = 10_000) {
+    public init?(size: Size, scrollback: UInt32 = 100_000) {
+        // 100k lines covers dense Claude Code / build-log / `cargo
+        // build` sessions without users needing to think about the cap.
+        // Alacritty's scrollback is lazily allocated, so a fresh BBTerm
+        // with scrollback=100_000 uses the same memory as one with
+        // scrollback=10_000 — the extra headroom only materialises when
+        // output actually scrolls off. Capped at 200k by the Rust side
+        // (see bb_term_new).
         guard let ptr = bb_term_new(size.cols, size.rows, scrollback) else { return nil }
         self.handle = ptr
 

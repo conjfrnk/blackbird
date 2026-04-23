@@ -18,7 +18,7 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 ## Highlights
 
 - **Rendering.** Metal GPU renderer hitting native 120 Hz on ProMotion. Per-row caching redraws only what changed.
-- **Terminal compatibility.** 24-bit color, Kitty keyboard protocol, synchronized output, bracketed paste, mouse reporting, focus events, 10k-line scrollback. Five underline styles with independent colors (LSP squigglies work).
+- **Terminal compatibility.** 24-bit color, Kitty keyboard protocol, synchronized output, bracketed paste, mouse reporting, focus events, 100k-line scrollback (lazily allocated). Five underline styles with independent colors (LSP squigglies work).
 - **Tabs.** Native `NSWindow` tab groups, per-tab shell session, confirmation before closing multi-tab windows.
 - **Input.** Full IME support for CJK, dead keys, trackpad pinch-to-zoom.
 - **Find.** ⌘F with scrollback search.

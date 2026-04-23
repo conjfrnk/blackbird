@@ -37,6 +37,39 @@ public enum URLDetector {
         return try! NSRegularExpression(pattern: pattern)
     }()
 
+    // Bare email → `mailto:` URL detection. Conservative by design:
+    //
+    //   - Local part: one or more of A–Z / a–z / 0–9 / `.` / `_` / `+` / `-`.
+    //     RFC 5321 allows more, but we stay within the common-case ASCII
+    //     set to minimise false positives in shell / log output. SSH URLs
+    //     like `user@host:path` can't match because `host` lacks a TLD.
+    //     Edge cases (leading-hyphen local part, leading-dot local part,
+    //     trailing-dot local part) are accepted by the regex and then
+    //     either pass or fail `URL(string:)`; we favour lenient detection
+    //     with the click-time `OSC8URLPolicy.isAllowed` gate as the
+    //     authoritative trust boundary.
+    //   - Domain: at least one label, each label starting with an alnum,
+    //     followed by optional alnum/`-`; the final label is a literal
+    //     `.` + two-or-more-letter TLD. `.` alone isn't enough.
+    //
+    // **Performance note:** this pattern has O(n²) worst-case backtracking
+    // on inputs like `a@aaaaa…aaaa` (one `@`, long run of alphanumerics,
+    // no `.`). `scan` gates invocation behind an `@`-AND-`.`-present
+    // pre-check, which is O(n) and eliminates the adversarial case — a
+    // malicious remote can paste thousands of `a`s after `@`, but the
+    // regex never runs without a `.` elsewhere on the line. Lines that
+    // do contain both characters are already linear in practice because
+    // a valid domain is bounded in length.
+    //
+    // Emails that land inside an already-matched `http(s)://…@…` URL
+    // are filtered out after the scan (see `scan(snapshot:)`), so
+    // `https://user:pass@host.com` produces one match (the https URL),
+    // not two.
+    private static let emailRegex: NSRegularExpression = {
+        let pattern = #"[A-Za-z0-9._+\-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}"#
+        return try! NSRegularExpression(pattern: pattern)
+    }()
+
     /// Heuristic: does the cell at `col` on `row` hold a character that's
     /// valid inside a URL? Mirrors the regex character class minus the
     /// scheme — used to reconstruct soft-wrapped URLs (F9). Returns false
@@ -101,6 +134,10 @@ public enum URLDetector {
                 }
                 return nsLine.length
             }()
+            // Column ranges of http/ftp URLs matched on THIS row — used to
+            // suppress email matches that fall inside a URL (e.g. the
+            // `user@host.com` substring of `https://user:pass@host.com`).
+            var urlColRangesThisRow: [(startCol: Int, endCol: Int)] = []
             regex.enumerateMatches(
                 in: line,
                 range: NSRange(location: searchStartUTF16, length: nsLine.length - searchStartUTF16)
@@ -196,6 +233,57 @@ public enum URLDetector {
                     startCol: startCol,
                     endCol: endCol
                 ))
+                urlColRangesThisRow.append((startCol: startCol, endCol: endCol))
+            }
+            // Email pass — runs after the URL pass so we can suppress
+            // emails inside URL matches (the `user@host.com` substring of
+            // `https://user:pass@host.com`).
+            //
+            // Pre-check: the emailRegex has O(n²) worst-case backtracking
+            // on `@`-present/`.`-absent input. Require both chars on the
+            // line before invoking the regex. Both `contains` calls are
+            // O(n) — cheap — and they eliminate the adversarial no-TLD
+            // shape entirely.
+            //
+            // Also respect `consumedNextRowPrefix[row]` — when the
+            // previous row's URL wrap-joined into our leading cells, the
+            // email regex must skip those same cells so a string like
+            // `bob@corp.com/path` in the consumed prefix of a wrapped
+            // http URL doesn't emit a duplicate mailto match.
+            if !utf16ToCol.isEmpty,
+               line.contains("@"), line.contains(".") {
+                emailRegex.enumerateMatches(
+                    in: line,
+                    range: NSRange(location: searchStartUTF16, length: nsLine.length - searchStartUTF16)
+                ) { result, _, _ in
+                    guard let r = result?.range, r.length > 0 else { return }
+                    let substring = nsLine.substring(with: r)
+                    let bufferLine = Int32(row - snapshot.displayOffset)
+                    let startIdx = min(max(0, r.location), utf16ToCol.count - 1)
+                    let endIdx = min(r.location + r.length - 1, utf16ToCol.count - 1)
+                    let startCol = utf16ToCol[startIdx]
+                    let endCol = utf16ToCol[endIdx]
+                    // Drop emails that fall inside a URL match on the same
+                    // row. Overlap test: any cell shared between the two
+                    // ranges disqualifies the email.
+                    let overlaps = urlColRangesThisRow.contains { range in
+                        startCol <= range.endCol && endCol >= range.startCol
+                    }
+                    if overlaps { return }
+                    // Policy filtering (scheme allowlist, IDN/punycode
+                    // defence, mailto header defence) is applied at
+                    // click/hover time in `TerminalView.resolveClickURL`
+                    // and `reevaluateCmdHoverHighlight`. URLDetector
+                    // stays a pure detector to match the existing
+                    // http/ftp path.
+                    guard let url = URL(string: "mailto:\(substring)") else { return }
+                    out.append(URLMatch(
+                        url: url,
+                        line: bufferLine,
+                        startCol: startCol,
+                        endCol: endCol
+                    ))
+                }
             }
         }
         return out

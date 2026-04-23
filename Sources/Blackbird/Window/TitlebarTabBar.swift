@@ -140,6 +140,17 @@ final class TabStripView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = .clear
+        // Suppress AppKit's default blue system focus ring around the whole
+        // strip when a pill is clicked. The keyboard-driven focus
+        // indicator (titlebar-tabs F4) is custom-drawn in `draw(_:)`
+        // gated on `focusedPill`, which is only set by the arrow-key
+        // handlers below — click routes through `mouseDown` and doesn't
+        // touch `focusedPill`, so there's no legitimate focus to signal
+        // via the system ring when the user mouse-clicks a pill. Keeping
+        // the system ring off at all times means clicks are clean and
+        // keyboard users still see the explicit pill ring drawn in
+        // draw(_:). User-reported 2026-04-23.
+        focusRingType = .none
         updateTrackingAreas()
     }
 
@@ -580,6 +591,14 @@ final class TabStripView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        // Mouse interaction retires the keyboard focus-ring state — a
+        // stale ring from a prior arrow-key session shouldn't linger on
+        // a different pill after the user mouse-clicks. The next arrow
+        // key press will re-establish `focusedPill` from scratch.
+        if focusedPill != nil {
+            focusedPill = nil
+            needsDisplay = true
+        }
 
         // While a pill is being renamed, a click inside the edit field
         // belongs to the field editor — we shouldn't see it here at all
@@ -647,9 +666,23 @@ final class TabStripView: NSView {
 
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
-        // Default focus to the currently-selected pill so Tab->strip
-        // lands on the user's active tab rather than always column 0.
-        if focusedPill == nil, !tabs.isEmpty {
+        // Only auto-set `focusedPill` (which drives the custom keyboard
+        // focus ring) when the promotion to first responder came from a
+        // keyboard event — Tab / Shift-Tab. A mouse-click promotion
+        // leaves `focusedPill = nil` so the user just sees their tab
+        // selected with no extra focus-ring decoration. Arrow keys and
+        // Space still work afterward: the first arrow press sets
+        // `focusedPill` via `moveLeft` / `moveRight` and the ring then
+        // paints from that point forward.
+        //
+        // Why this matters: before this gate, clicking a pill would
+        // become first responder → `focusedPill` defaulted to the
+        // selected tab → the custom ring painted around that pill. User
+        // feedback: looked like a stuck blue outline. Mouse clicks are
+        // already a clear focus cue (the tab highlights); the ring is
+        // keyboard-only affordance.
+        let viaKeyboard = NSApp.currentEvent?.type == .keyDown
+        if viaKeyboard, focusedPill == nil, !tabs.isEmpty {
             if let sel = selectedTab,
                let idx = tabs.firstIndex(where: { $0 === sel }) {
                 focusedPill = idx

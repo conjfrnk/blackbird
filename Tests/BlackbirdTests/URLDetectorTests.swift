@@ -485,6 +485,173 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(m.url.absoluteString, url,
                        "trailing ')' without matching '(' must still be excluded")
     }
+
+    // MARK: - Bare email detection
+    //
+    // New feature: `URLDetector.scan` also detects bare email addresses
+    // and surfaces them as URLMatch values whose url is `mailto:<addr>`.
+    // The span in cell space must cover exactly the email local-part +
+    // `@` + domain, with no trailing sentence punctuation and no
+    // overlap with http URLs that happen to embed an `@` (userinfo).
+
+    /// Bare email on a prose line emits a `mailto:` match with startCol
+    /// at the first char of the local part and endCol inclusive on the
+    /// final char of the TLD.
+    func test_scan_bareEmail_detectedAsMailto() throws {
+        let prefix = "Contact: "
+        let email = "foo.bar@example.com"
+        let suffix = " for details."
+        let snap = try snapshot(from: "\(prefix)\(email)\(suffix)")
+
+        let matches = URLDetector.scan(snapshot: snap)
+        // A `mailto:` match must be present. The detector may or may
+        // not also emit other matches on this line (prose has none),
+        // but this email must show up exactly once.
+        let mailtos = matches.filter { $0.url.absoluteString.hasPrefix("mailto:") }
+        XCTAssertEqual(mailtos.count, 1, "expected exactly one mailto match, got \(matches.map { $0.url.absoluteString })")
+        let m = try XCTUnwrap(mailtos.first)
+        XCTAssertEqual(m.url.absoluteString, "mailto:\(email)")
+        XCTAssertEqual(m.startCol, prefix.count, "startCol must land on the `f` of `foo`")
+        XCTAssertEqual(m.endCol, prefix.count + email.count - 1,
+                       "endCol must be inclusive on the `m` of `.com`")
+    }
+
+    /// Sentence-trailing `.` is dropped from the match, same as the
+    /// existing http-URL trimming.
+    func test_scan_bareEmail_trailingPeriodExcluded() throws {
+        let prefix = "Ping me: "
+        let email = "alice@example.com"
+        let snap = try snapshot(from: "\(prefix)\(email).")
+
+        let matches = URLDetector.scan(snapshot: snap)
+        let mailtos = matches.filter { $0.url.absoluteString.hasPrefix("mailto:") }
+        XCTAssertEqual(mailtos.count, 1)
+        let m = try XCTUnwrap(mailtos.first)
+        XCTAssertEqual(m.url.absoluteString, "mailto:\(email)",
+                       "trailing '.' must NOT appear in the mailto URL")
+        XCTAssertEqual(m.endCol, prefix.count + email.count - 1,
+                       "endCol should point at the `m` of `.com`, not the trailing period")
+    }
+
+    /// An http URL that contains `user:pass@host` must not cause the
+    /// email scanner to emit a second match for `pass@host.com`. The
+    /// http URL wins, exactly once.
+    func test_scan_httpURLWithUserinfo_noDoubleEmailMatch() throws {
+        let url = "https://user:pass@host.com/path"
+        let snap = try snapshot(from: url)
+
+        let matches = URLDetector.scan(snapshot: snap)
+        XCTAssertEqual(matches.count, 1,
+                       "http URL with userinfo must not produce an extra email match, got \(matches.map { $0.url.absoluteString })")
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertEqual(m.url.absoluteString, url,
+                       "the one match must be the full https URL")
+        XCTAssertFalse(m.url.absoluteString.hasPrefix("mailto:"),
+                       "the surviving match must not be a mailto")
+    }
+
+    /// TLD validation: the domain after `@` must end in `.<2+ alpha>`.
+    /// Inputs without a valid TLD emit zero matches; `.co` is a valid
+    /// 2-char TLD and must match.
+    func test_scan_bareEmail_requiresValidTLD() throws {
+        // Each row: input -> expected number of mailto matches.
+        let cases: [(String, Int)] = [
+            ("foo@bar",    0),   // no dot
+            ("foo@bar.",   0),   // dot but empty TLD
+            ("foo@bar.x",  0),   // 1-char TLD rejected
+            ("foo@bar.co", 1),   // 2-char TLD accepted
+        ]
+        for (input, expected) in cases {
+            let snap = try snapshot(from: input)
+            let matches = URLDetector.scan(snapshot: snap)
+            let mailtos = matches.filter { $0.url.absoluteString.hasPrefix("mailto:") }
+            XCTAssertEqual(
+                mailtos.count, expected,
+                "for input '\(input)': expected \(expected) mailto match(es), got \(mailtos.map { $0.url.absoluteString })"
+            )
+            if expected == 1 {
+                XCTAssertEqual(mailtos.first?.url.absoluteString, "mailto:\(input)",
+                               "valid-TLD input must round-trip verbatim into mailto:")
+            }
+        }
+    }
+
+    /// Local-part may include `.`, `+`, `_`, `-`. All four must be
+    /// accepted in a single contiguous match.
+    func test_scan_bareEmail_localPartPunctuation() throws {
+        let email = "a.b+c_d-e@example.com"
+        let snap = try snapshot(from: email)
+        let matches = URLDetector.scan(snapshot: snap)
+        let mailtos = matches.filter { $0.url.absoluteString.hasPrefix("mailto:") }
+        XCTAssertEqual(mailtos.count, 1,
+                       "expected one match for full local-part; got \(matches.map { $0.url.absoluteString })")
+        let m = try XCTUnwrap(mailtos.first)
+        XCTAssertEqual(m.url.absoluteString, "mailto:\(email)")
+        XCTAssertEqual(m.startCol, 0)
+        XCTAssertEqual(m.endCol, email.count - 1)
+    }
+
+    /// Two bare emails on the same line produce two matches in order,
+    /// with correct per-email spans.
+    func test_scan_bareEmail_twoOnSameLine() throws {
+        let a = "alice@a.com"
+        let b = "bob@b.com"
+        let prefix = "from "
+        let mid = " to "
+        let line = "\(prefix)\(a)\(mid)\(b)"
+        let snap = try snapshot(from: line)
+
+        let matches = sorted(URLDetector.scan(snapshot: snap))
+        let mailtos = matches.filter { $0.url.absoluteString.hasPrefix("mailto:") }
+        XCTAssertEqual(mailtos.count, 2,
+                       "expected two mailto matches, got \(matches.map { $0.url.absoluteString })")
+
+        let startA = prefix.count
+        let startB = prefix.count + a.count + mid.count
+        XCTAssertEqual(mailtos[0].url.absoluteString, "mailto:\(a)")
+        XCTAssertEqual(mailtos[0].startCol, startA)
+        XCTAssertEqual(mailtos[0].endCol, startA + a.count - 1)
+        XCTAssertEqual(mailtos[1].url.absoluteString, "mailto:\(b)")
+        XCTAssertEqual(mailtos[1].startCol, startB)
+        XCTAssertEqual(mailtos[1].endCol, startB + b.count - 1)
+    }
+
+    /// DoS regression: the email regex has O(n²) worst-case backtracking
+    /// on `@`-present/`.`-absent strings. `scan` must gate the regex on
+    /// both characters being present so a hostile remote printing a
+    /// thousand `a`s after `@` does NOT hang the scan. Generous time
+    /// budget — if the guard were missing, this would take seconds to
+    /// minutes; within budget means the guard is in place.
+    func test_scan_bareEmail_noDotPayload_completesInstantly() throws {
+        // 400 chars (comfortably fits our 200-col default test grid when
+        // wrapped) with `@` but no `.` — without the pre-check this
+        // triggers quadratic backtracking.
+        let malicious = "a@" + String(repeating: "a", count: 398)
+        let snap = try snapshot(from: malicious, cols: 200, rows: 4)
+        let deadline = Date(timeIntervalSinceNow: 1.0)
+        _ = URLDetector.scan(snapshot: snap)
+        XCTAssertLessThan(Date(), deadline,
+                          "scan on @-present, .-absent payload must not quadratically backtrack")
+    }
+
+    /// An email preceded by `:` (or `/`) but NOT inside an http URL
+    /// still matches — the http-URL exclusion is scoped to actual http
+    /// URLs, not to any `:` on the line.
+    func test_scan_bareEmail_afterColonSeparator_stillMatches() throws {
+        let prefix = "Subject: "
+        let email = "owner@acme.com"
+        let suffix = " today"
+        let snap = try snapshot(from: "\(prefix)\(email)\(suffix)")
+
+        let matches = URLDetector.scan(snapshot: snap)
+        let mailtos = matches.filter { $0.url.absoluteString.hasPrefix("mailto:") }
+        XCTAssertEqual(mailtos.count, 1,
+                       "email after '<word>: ' must still match, got \(matches.map { $0.url.absoluteString })")
+        let m = try XCTUnwrap(mailtos.first)
+        XCTAssertEqual(m.url.absoluteString, "mailto:\(email)")
+        XCTAssertEqual(m.startCol, prefix.count, "startCol must land on `o` of `owner`")
+        XCTAssertEqual(m.endCol, prefix.count + email.count - 1)
+    }
 }
 
 // Allow XCTAssertEqual on [URLMatch] for empty-result tests.
