@@ -60,9 +60,7 @@ final class GlyphAtlasTests: XCTestCase {
     // MARK: - Wide (CJK / emoji) glyphs rasterise at 2x cell width
 
     func test_wideGlyphConsumesTwoAtlasSlots() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128))
@@ -93,9 +91,7 @@ final class GlyphAtlasTests: XCTestCase {
     }
 
     func test_wideGlyphRendersInkAcrossBothSlots() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128))
@@ -139,9 +135,7 @@ final class GlyphAtlasTests: XCTestCase {
     }
 
     func test_wideGlyphSkipsOrphanSlotAtRowEnd() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         // Capacity 9 → slotCols ≈ 3. Insert two narrow glyphs so nextSlot=2,
@@ -178,9 +172,7 @@ final class GlyphAtlasTests: XCTestCase {
     /// narrow glyph and verify it lands on the orphaned column (col 2
     /// of row 0) instead of continuing after the wide glyph.
     func test_wideRowSkip_reclaimedByNextNarrowInsert() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         // Capacity 9 → slotCols = 3. Insert two narrow so nextSlot = 2
@@ -220,9 +212,7 @@ final class GlyphAtlasTests: XCTestCase {
     /// separate feature); the test exists so the behaviour can't
     /// silently change without somebody updating this doc-comment.
     func test_combiningMark_isolatedScalarRendersAlone() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 64))
@@ -257,9 +247,7 @@ final class GlyphAtlasTests: XCTestCase {
     /// confirm the PUA-range code path doesn't crash and the
     /// returned entry still has valid UVs.
     func test_nerdFontPuaRange_insertsWithoutCrash() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 64))
@@ -289,9 +277,7 @@ final class GlyphAtlasTests: XCTestCase {
     ///   ~300 KB. Well under the 320 MB budget enforced across the
     ///   suite.
     func test_prewarm_insertsAsciiAndBoxDrawing() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(
@@ -327,9 +313,7 @@ final class GlyphAtlasTests: XCTestCase {
     /// post-prewarm (if prewarm allocated new slots it would have
     /// re-inserted 'A' at a different position).
     func test_prewarm_isIdempotent() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(
@@ -364,9 +348,7 @@ final class GlyphAtlasTests: XCTestCase {
     ///
     /// Memory pre-flight: 128 slots at ~32x70 px ≈ ~280 KB texture.
     func test_scale_twoProducesLargerCellPixelDimensions() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas1 = try XCTUnwrap(
@@ -399,9 +381,7 @@ final class GlyphAtlasTests: XCTestCase {
     /// must also produce a valid atlas without trapping in the pixel
     /// rounding. Pins the `.rounded(.up)` path at a non-clean boundary.
     func test_scale_fractional_stillValid() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(
@@ -416,9 +396,7 @@ final class GlyphAtlasTests: XCTestCase {
     }
 
     func test_insertGlyphProducesNonZeroPixels() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128))

@@ -116,7 +116,15 @@ public final class LatencyProbe {
         let p50 = sorted[sorted.count / 2]
         let p99Index = min(sorted.count - 1, (sorted.count * 99) / 100)
         let p99 = sorted[p99Index]
-        log.info("latency n=\(snapshot.count, privacy: .public) p50=\(p50, format: .fixed(precision: 2), privacy: .public)ms p99=\(p99, format: .fixed(precision: 2), privacy: .public)ms")
+        // `log(...)` rather than `info(...)`: .info level is NOT persisted
+        // to OSLogStore by default on macOS (only streamed to live
+        // listeners), which makes the format-pin test unable to find the
+        // line and silently skip. `log(...)` writes at .default level,
+        // which is persisted, so the test reliably reads the line back.
+        // The probe is env-gated (BB_LATENCY_PROBE=1 or
+        // `_forceEnableForTests`), so production users never see these
+        // emissions regardless of level.
+        log.log("latency n=\(snapshot.count, privacy: .public) p50=\(p50, format: .fixed(precision: 2), privacy: .public)ms p99=\(p99, format: .fixed(precision: 2), privacy: .public)ms")
     }
 
     /// For tests: inject samples without going through the timing path.

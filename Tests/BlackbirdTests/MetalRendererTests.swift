@@ -11,9 +11,7 @@ final class MetalRendererTests: XCTestCase {
     }
 
     func test_rendererInitializesWithSystemDevice() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = MetalRenderer(device: device, metrics: metrics)
         XCTAssertNotNil(renderer)
@@ -21,9 +19,7 @@ final class MetalRendererTests: XCTestCase {
     }
 
     func test_rendererPipelineStateLoads() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let device = try requireMetalDevice()
         // If init returns non-nil, both the library and the pipeline state loaded.
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = MetalRenderer(device: device, metrics: metrics)
@@ -34,7 +30,7 @@ final class MetalRendererTests: XCTestCase {
         // Regen the atlas for a different font size. Reconfigure returns
         // true on success and invalidates the frame-skip cache so the
         // next render() can't show stale pixels at the old resolution.
-        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        let device = try requireMetalDevice()
         let metrics1 = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics1))
         let metrics2 = CellMetrics(font: .monospacedSystemFont(ofSize: 20, weight: .regular))
@@ -60,7 +56,7 @@ final class MetalRendererTests: XCTestCase {
         // require them). Stronger contract: after each flip, a
         // subsequent render must not crash AND the renderer must
         // remain usable (atlas lookups still succeed).
-        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal") }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -90,9 +86,7 @@ final class MetalRendererTests: XCTestCase {
     }
 
     func test_rendererAcceptsSnapshotWithoutCrash() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         // Create a BBTerm directly, feed bytes, take snapshot. No MTKView
@@ -113,9 +107,7 @@ final class MetalRendererTests: XCTestCase {
         // count traps the process. Deinit commits a no-op command buffer
         // and waits for completion — this test verifies the release path
         // doesn't crash and that the object is actually freed.
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         weak var weakRef: MetalRenderer?
         autoreleasepool {
@@ -196,9 +188,7 @@ final class MetalRendererTests: XCTestCase {
         // blink-phase computation, builds a FrameKey with default values,
         // takes a slot, then exits because the drawable is nil.
         // Verifies semaphore balancing on the no-snapshot early-return.
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -217,9 +207,7 @@ final class MetalRendererTests: XCTestCase {
         // encoder/commit — which is fine for coverage purposes. The
         // branches we're actually pinning (frame-skip compare, slot
         // rotation, instance count) all run before the drawable check.
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -234,9 +222,7 @@ final class MetalRendererTests: XCTestCase {
         // `lastFrameKey` directly without further test hooks, but we
         // can assert the path is stable (no crash, no unbalanced
         // semaphore, no deadlock) across many identical calls.
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -258,9 +244,7 @@ final class MetalRendererTests: XCTestCase {
         // rebuild from outside directly — but we can verify the call
         // order doesn't crash and leaves the renderer in a sane state
         // by reaching for the atlas afterwards.
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -282,9 +266,7 @@ final class MetalRendererTests: XCTestCase {
         // branch runs. Exact observability requires DEBUG-only hooks
         // we don't have; this test pins "it doesn't crash and the
         // renderer remains usable".
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -309,9 +291,7 @@ final class MetalRendererTests: XCTestCase {
         // because there's no exposed hook; the smoke test catches
         // crashes in the branches that depend on `focused` (cursor
         // fill flag, block-cursor inversion).
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -330,9 +310,7 @@ final class MetalRendererTests: XCTestCase {
         // reports after we push a second chunk of input. The partial-
         // rebuild path runs unless damage >= rows/2, which is unlikely
         // for a single-line append.
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -367,9 +345,7 @@ final class MetalRendererTests: XCTestCase {
     /// need a DEBUG hook we don't have; crashing would indicate a
     /// regression.
     func test_render_cursorMove_forcesRowRebuild() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -416,9 +392,7 @@ final class MetalRendererTests: XCTestCase {
     /// default timeout (deliberate tripwire; the test must return
     /// within a handful of ms on the happy path).
     func test_render_tripleBufferRing_noStarvationAcrossMixedPaths() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)
@@ -470,9 +444,7 @@ final class MetalRendererTests: XCTestCase {
     /// semaphore — to prove no slot is being leaked even under the
     /// "no drawable" path.
     func test_render_noDrawablePath_doesNotLeakSemaphore() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenMTKView(device: device)

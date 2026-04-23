@@ -144,9 +144,7 @@ final class CmdHoverHighlightTests: XCTestCase {
     /// (e.g. `#if DEBUG public var didFrameSkipLastRender: Bool`); see
     /// the report accompanying this file.
     func test_setCmdHoverRange_updatesFrameKeyFieldsAcrossFlip() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenView(device: device)
@@ -222,9 +220,7 @@ final class CmdHoverHighlightTests: XCTestCase {
     /// Together with (1) above this covers the three-field contract
     /// across both keys to the extent observable in headless xctest.
     func test_CacheKey_invalidationOnFlip_safe() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
         let view = makeOffscreenView(device: device)

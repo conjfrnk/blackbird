@@ -151,8 +151,8 @@ final class PowerAwareRenderingTests: XCTestCase {
     /// The window is intentionally tiny (1x1) and offscreen — no
     /// drawable needed, no visible UI. `isReleasedWhenClosed = false`
     /// lets the test caller manage the lifetime deterministically.
-    private func makeWindowedView() -> (window: NSWindow, view: TerminalView)? {
-        guard let device = MTLCreateSystemDefaultDevice() else { return nil }
+    private func makeWindowedView() throws -> (window: NSWindow, view: TerminalView) {
+        let device = try requireMetalDevice()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
             styleMask: [.titled],
@@ -180,9 +180,7 @@ final class PowerAwareRenderingTests: XCTestCase {
         // cap alone (nominal) or changes it. Either way, the handler
         // must not crash, and the `_testOnly_currentFrameRateCap` hook
         // must still return a sane value afterward.
-        guard let (window, view) = makeWindowedView() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let (window, view) = try makeWindowedView()
         defer { window.close() }
 
         // Baseline: seeded by viewDidMoveToWindow.
@@ -207,9 +205,7 @@ final class PowerAwareRenderingTests: XCTestCase {
         // thermal test — we can't toggle `isLowPowerModeEnabled` from
         // the test process, so we verify the observer fires without
         // crashing and the cap stays sane.
-        guard let (window, view) = makeWindowedView() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let (window, view) = try makeWindowedView()
         defer { window.close() }
 
         NotificationCenter.default.post(
@@ -225,9 +221,7 @@ final class PowerAwareRenderingTests: XCTestCase {
         // Audit F16: window occlusion observer. Occlusion is bound to
         // `object: window`, so the post must carry the same window
         // instance or the observer won't fire.
-        guard let (window, view) = makeWindowedView() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let (window, view) = try makeWindowedView()
         defer { window.close() }
 
         NotificationCenter.default.post(
@@ -246,9 +240,7 @@ final class PowerAwareRenderingTests: XCTestCase {
         // a short session that never sees a notification would stay at
         // MTKView's default (60 fps unpaused) regardless of current
         // low-power / thermal state.
-        guard let (window, view) = makeWindowedView() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let (window, view) = try makeWindowedView()
         defer { window.close() }
 
         // A valid cap is either 0 (paused) or a positive fps value.
@@ -264,9 +256,7 @@ final class PowerAwareRenderingTests: XCTestCase {
         // pure re-read: calling it twice in a row with no state
         // change must produce the same cap. This pins that the
         // function doesn't accumulate any hidden state.
-        guard let (window, view) = makeWindowedView() else {
-            throw XCTSkip("no Metal device available")
-        }
+        let (window, view) = try makeWindowedView()
         defer { window.close() }
 
         view._testOnly_applyPowerAwareFrameRate()
