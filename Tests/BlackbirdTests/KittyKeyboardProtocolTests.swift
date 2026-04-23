@@ -365,11 +365,37 @@ final class KittyKeyboardProtocolTests: XCTestCase {
         XCTAssertEqual(out, Data("\u{1B}[13;2:2u".utf8))
     }
 
-    func test_flag4_reportAlternateKeys_doesNotAlterEncoding() {
+    func test_flag4_reportAlternateKeys_controlChars_unchanged() {
+        // Disambiguation keys (Enter/Esc/Tab/Backspace) have no shifted
+        // alternate form. Flag 4 is a no-op on them; the on-wire shape
+        // stays `ESC[13;2u` for Shift+Enter.
         let enc = KeyEncoder()
         let mode: BBTermMode = [.disambiguateEscCodes, .reportAlternateKeys]
         XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
                        csiU(13, mod: 2))
+    }
+
+    func test_flag4_reportAlternateKeys_shiftLetterEmitsShifted() {
+        // Flag 4 + Flag 8 + Shift+A: `ESC[97:0:65;2u`.
+        //   - base codepoint 97 (lowercase 'a')
+        //   - alternate 0 (macOS doesn't expose a true alt-layout slot)
+        //   - shifted 65 (uppercase 'A')
+        //   - modifier 2 (shift)
+        // Flag 4 without flag 8 wouldn't emit CSI-u for plain letters at
+        // all, so the natural test exercises the combined mode.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
+        XCTAssertEqual(enc.encode(chars: "A", modifiers: [.shift], mode: mode),
+                       Data("\u{1B}[97:0:65;2u".utf8))
+    }
+
+    func test_flag4_reportAlternateKeys_plainLetterNoShiftedPayload() {
+        // No shift → no shifted form to report. Plain "a" under flag
+        // 8+4 still emits the same `ESC[97u` as flag 8 alone.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
+        XCTAssertEqual(enc.encode(chars: "a", modifiers: [], mode: mode),
+                       csiU(97, mod: 1))
     }
 
     // MARK: - Flag 8: report all keys as CSI u
@@ -432,11 +458,46 @@ final class KittyKeyboardProtocolTests: XCTestCase {
         )
     }
 
-    func test_flag16_reportAssociatedText_doesNotAlterEncoding() {
+    func test_flag16_reportAssociatedText_controlChars_unchanged() {
+        // Control characters (Enter/Esc/Tab/Backspace) produce no
+        // visible text on their own; the base codepoint already
+        // carries the key identity. Flag 16 elides the text section
+        // for these, so Shift+Enter stays `ESC[13;2u`.
         let enc = KeyEncoder()
         let mode: BBTermMode = [.disambiguateEscCodes, .reportAssociatedText]
         XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
                        csiU(13, mod: 2))
+    }
+
+    func test_flag16_reportAssociatedText_shiftLetterEmitsText() {
+        // Flag 8+16 + Shift+A: base is 'a' (97, lowercased), modifier
+        // carries Shift, text carries the actually-produced 'A' (65).
+        // Shape: `ESC[97;2;65u`.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAssociatedText]
+        XCTAssertEqual(enc.encode(chars: "A", modifiers: [.shift], mode: mode),
+                       Data("\u{1B}[97;2;65u".utf8))
+    }
+
+    func test_flag16_reportAssociatedText_plainLetterElidesText() {
+        // Plain "a" under flag 8+16: base == produced text, so the
+        // text section is elided (parser already knows text=base when
+        // absent). Shape stays `ESC[97u`.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAssociatedText]
+        XCTAssertEqual(enc.encode(chars: "a", modifiers: [], mode: mode),
+                       csiU(97, mod: 1))
+    }
+
+    func test_flag4_plus_flag16_combined() {
+        // Flag 8+4+16 + Shift+A: all three sections.
+        //   base=97 : alt=0 : shifted=65 ; mod=2 ; text=65
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [
+            .reportAllKeysAsEsc, .reportAlternateKeys, .reportAssociatedText,
+        ]
+        XCTAssertEqual(enc.encode(chars: "A", modifiers: [.shift], mode: mode),
+                       Data("\u{1B}[97:0:65;2;65u".utf8))
     }
 
     func test_allFlagsTogether_doNotAlterEncoding() {

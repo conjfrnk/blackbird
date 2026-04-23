@@ -94,6 +94,8 @@ public final class KeyEncoder {
 
         let kitty = mode.contains(.disambiguateEscCodes)
         let allKeys = mode.contains(.reportAllKeysAsEsc)
+        let alternateKeys = mode.contains(.reportAlternateKeys)
+        let associatedText = mode.contains(.reportAssociatedText)
         let nonCmdMods = modifiers.subtracting(.command)
         // In Native-Option mode the shell should not see Option at all —
         // Option-e produces 'é' and Option+Enter produces a plain CR. Stripping
@@ -107,7 +109,20 @@ public final class KeyEncoder {
         // distinguish Shift+Enter from plain Enter, Option+Esc from plain
         // Esc (which previously leaked as two raw ESCs), etc.
         if kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) {
-            return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
+            // Flag 16 adds the actual text the key would have produced
+            // as a `;<utf32>` trailing section. Disambiguation keys
+            // (Enter/Esc/Tab/Backspace) don't produce visible text on
+            // their own, so associatedText stays empty and the on-wire
+            // shape is unchanged. `.shift` on these keys also doesn't
+            // produce a distinct shifted codepoint — Shift+Enter is
+            // still Enter, just with the mod bit — so flag 4 similarly
+            // adds nothing on this path.
+            return csiU(
+                codepoint: cp,
+                modifiers: effectiveMods,
+                eventType: eventType,
+                associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
+            )
         }
 
         // Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u
@@ -122,7 +137,24 @@ public final class KeyEncoder {
             // param. For non-letter scalars the scalar value is used
             // directly.
             let cp = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
-            return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
+            // Flag 4: surface the shifted form (uppercase of the base
+            // letter) when the user is actually shifting. `alt=0` in
+            // the payload since macOS doesn't expose a true alternate
+            // layout per key.
+            let shifted: UInt32? = {
+                guard alternateKeys, modifiers.contains(.shift),
+                      let shiftedCp = shiftedCodepointForLetter(scalar) else {
+                    return nil
+                }
+                return shiftedCp
+            }()
+            return csiU(
+                codepoint: cp,
+                shiftedCodepoint: shifted,
+                modifiers: effectiveMods,
+                eventType: eventType,
+                associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
+            )
         }
 
         // Ctrl+printable: only the first character is transformed.
@@ -215,20 +247,90 @@ public final class KeyEncoder {
         return scalar.value
     }
 
-    /// `CSI <codepoint> ; <modParam>[:<eventType>] u`. Collapses the
-    /// modifier field when modParam == 1 AND eventType == .press (the
-    /// kitty spec says the entire `;M` can be omitted then). When
-    /// eventType is non-press the modifier field is always emitted so
-    /// the `:N` sub-parameter parses correctly.
+    /// Flag 4 (`reportAlternateKeys`) shifted-form codepoint for an
+    /// ASCII letter. `'A'..'Z'` → themselves (already shifted);
+    /// `'a'..'z'` → uppercase (which is what Shift produces). `nil`
+    /// for non-letters — we don't have a reliable shifted form for
+    /// symbols without layout context that `NSEvent` doesn't expose.
+    private func shiftedCodepointForLetter(_ scalar: UnicodeScalar) -> UInt32? {
+        if scalar.value >= 0x41 && scalar.value <= 0x5A { return scalar.value }
+        if scalar.value >= 0x61 && scalar.value <= 0x7A { return scalar.value - 0x20 }
+        return nil
+    }
+
+    /// Flag 16 (`reportAssociatedText`) text payload for a key.
+    /// Control characters (ESC, Tab, CR, DEL) don't have meaningful
+    /// visible text — the CSI-u codepoint already carries the key
+    /// identity and a redundant text repeat would just bloat the
+    /// stream. For visible characters we emit the actual UTF-32
+    /// codepoints from `chars`, which may differ from `codepoint`
+    /// after dead-key or IME composition.
+    ///
+    /// Returns empty when the text equals the base codepoint (saves
+    /// on-wire bytes for the common "no IME, no dead key" case, which
+    /// any conforming parser resolves by treating "text absent" as
+    /// "text = base").
+    private func textCodepoints(_ chars: String, codepoint: UInt32) -> [UInt32] {
+        let values = chars.unicodeScalars.map { $0.value }
+        // Control chars: no associated text. Covers \r, \t, \u{1B}, \u{7F}.
+        if values.count == 1, values[0] < 0x20 || values[0] == 0x7F {
+            return []
+        }
+        // Redundant: single scalar matching the base codepoint means
+        // the parser can already infer text = base.
+        if values == [codepoint] { return [] }
+        return values
+    }
+
+    /// `CSI <codepoint>[:<alt>:<shifted>] ; <modParam>[:<eventType>][;<text>...] u`.
+    ///
+    /// Collapses the modifier field when modParam == 1 AND eventType ==
+    /// .press AND there is no alt/shifted/text payload — the kitty spec
+    /// says the entire `;M` can be omitted in that case. When
+    /// eventType is non-press, flag 4 provides a `shiftedCodepoint`, or
+    /// flag 16 provides `associatedText`, the modifier field is always
+    /// emitted so later sub-parameters parse correctly.
+    ///
+    /// `shiftedCodepoint` lights the Kitty flag 4 (`reportAlternateKeys`)
+    /// output — we emit `base:0:shifted` where 0 indicates "no alternate
+    /// layout code", since macOS's `NSEvent` doesn't expose a
+    /// keyboard-layout alternate. That's the smallest useful quantum of
+    /// the spec: TUIs that care about shifted-vs-base disambiguation
+    /// (most commonly tmux, kakoune) get it; TUIs that wanted a true
+    /// alt-layout see the 0 and fall back to base. Only set by callers
+    /// that have actually derived a distinct shifted form (e.g. Shift+A
+    /// → base=97 shifted=65); control chars have no shifted form and
+    /// pass `nil`.
+    ///
+    /// `associatedText` lights Kitty flag 16 (`reportAssociatedText`).
+    /// Carries the UTF-32 codepoints the key would actually produce —
+    /// same as the base codepoint for most keys, but differs for dead
+    /// keys / IME / compose. Each codepoint is appended as `;N`.
     private func csiU(
         codepoint: UInt32,
+        shiftedCodepoint: UInt32? = nil,
         modifiers: Modifiers,
-        eventType: EventType = .press
+        eventType: EventType = .press,
+        associatedText: [UInt32] = []
     ) -> Data {
         let mod = modifierParam(modifiers)
         var bytes: [UInt8] = [0x1B, 0x5B]                 // ESC [
         bytes.append(contentsOf: Array(String(codepoint).utf8))
-        let includeMod = mod > 1 || eventType != .press
+        // Flag 4 alternate-keys payload: `:0:<shifted>` appended to the
+        // base codepoint. `0` (not omitted) for the alternate slot —
+        // parsers that split on `:` see three fields and know the
+        // middle is empty. Kitty spec allows `:<shifted>` with no
+        // alternate, but `0` is more conservative cross-parser.
+        if let shifted = shiftedCodepoint {
+            bytes.append(0x3A)                            // :
+            bytes.append(0x30)                            // 0 (alternate absent)
+            bytes.append(0x3A)                            // :
+            bytes.append(contentsOf: Array(String(shifted).utf8))
+        }
+        let includeMod = mod > 1
+            || eventType != .press
+            || !associatedText.isEmpty
+            || shiftedCodepoint != nil
         if includeMod {
             bytes.append(0x3B)                            // ;
             bytes.append(contentsOf: Array(String(mod).utf8))
@@ -236,6 +338,13 @@ public final class KeyEncoder {
                 bytes.append(0x3A)                        // :
                 bytes.append(contentsOf: Array(String(eventType.rawValue).utf8))
             }
+        }
+        // Flag 16 associated-text payload: one `;<codepoint>` per text
+        // character. Empty array emits nothing — keeps the plain
+        // "CSI 13;2u" shape for unmodified / no-text keys.
+        for cp in associatedText {
+            bytes.append(0x3B)                            // ;
+            bytes.append(contentsOf: Array(String(cp).utf8))
         }
         bytes.append(0x75)                                // u
         return Data(bytes)
