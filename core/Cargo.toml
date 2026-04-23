@@ -3,6 +3,8 @@ name = "blackbird_core"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license = "MIT"
+description = "Rust VT parser core for the Blackbird terminal emulator."
 
 [lib]
 name = "blackbird_core"

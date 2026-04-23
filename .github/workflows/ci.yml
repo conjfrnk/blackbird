@@ -59,6 +59,19 @@ jobs:
           cargo install cargo-audit --locked --version "^0.22" || true
           cargo audit --deny warnings
 
+      - name: deny (license + dep policy)
+        # `cargo deny` complements `cargo audit`. Audit catches KNOWN
+        # vulnerabilities; deny catches license drift, unknown-source
+        # deps (git-URLs, private registries), and accidental dep
+        # duplication. Config in deny.toml. `bans licenses sources`
+        # only — advisories are already covered by cargo-audit, and
+        # the advisory DB's CVSS v4 entries aren't parseable by this
+        # version of cargo-deny. Pinned to 0.18.3 for rust 1.85
+        # toolchain; bump when rust-version.workspace bumps.
+        run: |
+          cargo install cargo-deny --locked --version "=0.18.3" || true
+          cargo deny check bans licenses sources
+
   xcode:
     name: Xcode — build + test
     runs-on: macos-14
@@ -113,6 +126,13 @@ jobs:
             -destination "platform=macOS,arch=arm64" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
+
+      - name: Test-quality lint (ratchet)
+        # Flags low-signal `XCTAssertNotNil(singleObject)` / Rust
+        # `.is_some()` assertions that tend to pass for the wrong
+        # reason. Ratchets against `.test-lint-baseline` so we can't
+        # add new ones without explicit justification. Audit K5.
+        run: scripts/lint-tests.sh
 
       - name: Upload test logs on failure
         if: failure()
