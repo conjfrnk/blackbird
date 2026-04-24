@@ -401,21 +401,24 @@ final class PreferencesMigrationTests: XCTestCase {
         // Force singleton init so registration domain is populated.
         _ = Preferences.shared
 
-        // Read via standard.object(_:) — this returns the registered
-        // default if no user-domain value is set, which is the
-        // contract `register(defaults:)` provides.
-        let d = UserDefaults.standard
-        let registered = d.object(forKey: "bb.osc52Enabled")
+        // Read the REGISTRATION domain specifically — UserDefaults.standard
+        // merges user + registered values, which means a developer who has
+        // explicitly opted into OSC 52 via the Settings UI would see `true`
+        // here even though the shipped default is `false`. Going through
+        // `volatileDomain(forName:registrationDomain)` returns only the
+        // values set via `register(defaults:)`.
+        let regDomain = UserDefaults.standard.volatileDomain(forName: UserDefaults.registrationDomain)
+        let registered = regDomain["bb.osc52Enabled"]
         XCTAssertNotNil(
             registered,
-            "F-S7-010: bb.osc52Enabled has no registered default; OSC 52 readers will see false implicitly without a user-explicit choice."
+            "SEC-001: bb.osc52Enabled has no registered default; register(defaults:) must include the key."
         )
 
         // The registered default must be a Bool (NSNumber under the
         // hood) — anything else means a sanitize-pass regression.
         guard let boolish = registered as? NSNumber else {
             XCTFail(
-                "F-S7-010: bb.osc52Enabled registered default has wrong type \(type(of: registered as Any)) — expected NSNumber/Bool."
+                "SEC-001: bb.osc52Enabled registered default has wrong type \(type(of: registered as Any)) — expected NSNumber/Bool."
             )
             return
         }
