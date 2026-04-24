@@ -257,14 +257,23 @@ extension TerminalView: NSTextInputClient {
         let clamped = NSRange(location: loc, length: len)
         actualRange?.pointee = clamped
 
-        // Cell-count offset from the composition's left edge. `length == 0`
-        // is an insertion point (caret-style anchor): use a one-cell-wide
-        // rect so the candidate window gets a non-zero hit box.
-        let widthCells = max(1, clamped.length)
+        // Cell-count offset from the composition's left edge. UTF-16
+        // length is wrong — an astral-plane emoji (😀 = 2 UTF-16 units,
+        // 1 or 2 cells depending on wide-glyph status) would otherwise
+        // place the candidate popover two cells to the right of where
+        // the emoji renders (F-S5-012). Convert both the leading offset
+        // AND the span width through `terminalCellWidth` so the mapping
+        // stays grapheme-aware. `characterIndex(for:)` already walks
+        // cells the same way.
+        let plain = c.attributedText.string as NSString
+        let leadingSubstring = plain.substring(with: NSRange(location: 0, length: clamped.location))
+        let spanSubstring = plain.substring(with: clamped)
+        let leadingCells = Self.terminalCellWidth(of: leadingSubstring)
+        let spanCells = max(1, Self.terminalCellWidth(of: spanSubstring))
         let offsetRect = NSRect(
-            x: cellRect.minX + CGFloat(clamped.location) * cellWidth,
+            x: cellRect.minX + CGFloat(leadingCells) * cellWidth,
             y: cellRect.minY,
-            width: CGFloat(widthCells) * cellWidth,
+            width: CGFloat(spanCells) * cellWidth,
             height: cellRect.height
         )
         return toScreen(offsetRect)
@@ -526,10 +535,22 @@ extension TerminalView: NSTextInputClient {
     /// zero-width joiners. Good enough for preedit overlay sizing;
     /// exact glyph metrics would require a CoreText pass per composition
     /// update which is too slow for per-keystroke refreshes.
+    ///
+    /// Walks `Character` (grapheme clusters), not `UnicodeScalar` — a ZWJ
+    /// sequence like 👨‍👩‍👧 is one grapheme that renders as one wide
+    /// glyph, so it must count as 2 cells, not 2+0+2+0+2=6. Per-grapheme
+    /// we take the max scalar width (ignoring ZWJ / VS / combiners which
+    /// would otherwise mask the real width-contributing scalar).
     static func terminalCellWidth(of string: String) -> Int {
         var total = 0
-        for scalar in string.unicodeScalars {
-            total += cellWidth(for: scalar)
+        for grapheme in string {
+            var widest = 0
+            for scalar in grapheme.unicodeScalars {
+                widest = max(widest, cellWidth(for: scalar))
+            }
+            // A grapheme that's purely zero-width (e.g. an isolated
+            // combining mark) still occupies no cells.
+            total += widest
         }
         return total
     }
