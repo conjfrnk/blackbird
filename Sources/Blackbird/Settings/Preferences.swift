@@ -104,7 +104,14 @@ public final class Preferences: ObservableObject {
     @AppStorage("bb.optionKey")      public var optionKeyRaw: String = OptionKey.meta.rawValue
     @AppStorage("bb.confirmClose")   public var confirmClose: Bool = true
     @AppStorage("bb.autoUpdateChecks") public var autoUpdateChecks: Bool = false
-    @AppStorage("bb.osc52Enabled")   public var osc52Enabled: Bool = true
+    /// Default off (v0.1.10): arbitrary PTY output can overwrite the system
+    /// clipboard up to 1 MiB without user consent when on. The scrub
+    /// pipeline blocks raw C0/C1/bidi bytes, but cross-app paste into a
+    /// password field or bank-transfer IBAN is still trivial once a
+    /// hostile remote can emit OSC 52. Users who want auto-clipboard
+    /// integration (helix, some nvim clipboard providers) can opt in
+    /// explicitly via Settings. See `SEC-001` in the v0.1.9 sweep triage.
+    @AppStorage("bb.osc52Enabled")   public var osc52Enabled: Bool = false
     /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. Off by default
     /// because the reply (`\e]10;rgb:…\e\\`) is routed back into the PTY
     /// where a misbehaving shell / zsh-vi-mode can interpret it as
@@ -189,7 +196,7 @@ public final class Preferences: ObservableObject {
             Preferences.k("optionKey"):         OptionKey.meta.rawValue,
             Preferences.k("confirmClose"):      true,
             Preferences.k("autoUpdateChecks"):  false,
-            Preferences.k("osc52Enabled"):      true,
+            Preferences.k("osc52Enabled"):      false,
             Preferences.k("colorQueryEnabled"): false,
             Preferences.k("translucency"):      5.0,
         ])
