@@ -80,7 +80,12 @@ public final class KeyEncoder {
         // AND the key would have gone through the CSI-u path. Everything
         // else drops the release — legacy TUIs get confused by post-key
         // traffic they didn't ask for.
-        if eventType == .release && !mode.contains(.reportEventTypes) {
+        // Non-press events (release, repeat) only leave the encoder
+        // when the TUI has opted into `reportEventTypes` (Kitty flag 2).
+        // Every other protocol path expects press-only traffic; the CSI u
+        // / CSI 27 / legacy shapes have no way to distinguish repeat from
+        // press otherwise.
+        if eventType != .press && !mode.contains(.reportEventTypes) {
             return Data()
         }
         guard !chars.isEmpty else { return Data() }
@@ -159,47 +164,39 @@ public final class KeyEncoder {
 
         // xterm `modifyOtherKeys` — `CSI 27 ; <mod> ; <cp> ~`.
         //
-        // Precedence: Kitty flags win when active; this branch only
-        // fires in the Kitty-absent case. Matches the consensus of
-        // WezTerm / Ghostty / tmux (industry-wide, though xterm's spec
-        // leaves the interaction undefined). Scope is the 80/20:
+        // Precedence: Kitty flags win when active (matches the WezTerm /
+        // Ghostty / tmux consensus even though xterm's own spec leaves
+        // the interaction undefined). A TUI that pushed any Kitty bit is
+        // telling us it prefers the Kitty protocol, so modifyOtherKeys
+        // stays suppressed.
         //
-        //   - Any printable with a modifier (Shift+Enter, Ctrl+.,
-        //     Ctrl+,, etc.) where Cocoa already gave us the intended
-        //     codepoint in `chars`. The codepoint is
-        //     `chars.unicodeScalars.first!.value` verbatim — Cocoa
-        //     applied Shift/Option already, so Shift+2 arrives as "@"
-        //     (or "2" for layouts where 2 is unshifted), matching the
-        //     unshifted-printable rule.
-        //
-        // Known limitation: Ctrl+letter cases where Cocoa pre-converts
-        // to the C0 byte (e.g. Ctrl+i → "\t") emit `CSI 27 ; 5 ; 9 ~`
-        // instead of the level-2-correct `CSI 27 ; 5 ; 105 ~`. Emacs
-        // inside a terminal normally uses level 2 with Kitty as the
-        // primary transport anyway; users who want pixel-perfect
-        // modifyOtherKeys-only Ctrl+letter output should enable
-        // Kitty flag 8 as well. Document in KNOWN_ISSUES.md.
+        // Ctrl+letter cases arriving here come from TerminalView's
+        // keyDown fast-path deferring to the encoder once it sees
+        // `.modifyOtherKeys` in the current mode; they carry the letter
+        // in `chars` (not the C0 byte) so CSI 27 emission uses the
+        // letter's codepoint as expected by Emacs / tmux / nvim with
+        // `extended-keys on` (F-S3-002).
         let kittyAnyActive = kitty || allKeys || alternateKeys || associatedText
             || mode.contains(.reportEventTypes)
         if !kittyAnyActive,
            mode.contains(.modifyOtherKeys),
            hasMods,
            let scalar = chars.unicodeScalars.first {
-            if eventType == .release { return Data() }
             return csi27(codepoint: scalar.value, modifiers: effectiveMods)
         }
 
         // Ctrl+printable: only the first character is transformed.
         if modifiers.contains(.control), let scalar = chars.unicodeScalars.first {
-            // Kitty disambiguation: Ctrl+{i,m,[,h} legacy-alias Tab/Enter/Esc/
-            // Backspace. Under flag 1, any modifier combination including
-            // these collider letters emits CSI u so the TUI can tell them
-            // apart from the unmodified Tab/Enter/Esc/Backspace they alias.
-            // The codepoint is normalized to the lowercase collider so Shift
-            // reports via the mod param instead of by changing the base key.
-            // Other Ctrl+letter combinations stay as their C0 byte so shells'
-            // SIGINT / SIGQUIT / word-motion bindings keep working.
-            if kitty, let cp = ctrlColliderCodepoint(for: scalar) {
+            // Kitty disambiguation: Ctrl+{i,m,[,h,?} legacy-alias Tab/Enter/
+            // Esc/Backspace/DEL. Under flag 1 OR flag 8 (both contracted to
+            // "every key as CSI u"), any modifier combination including these
+            // collider letters emits CSI u so the TUI can tell them apart
+            // from the unmodified C0 byte they alias. The codepoint is
+            // normalized to the lowercase collider so Shift reports via the
+            // mod param instead of by changing the base key. Other Ctrl+letter
+            // combinations in the flag-1-only case stay as their C0 byte so
+            // shells' SIGINT / SIGQUIT / word-motion bindings keep working.
+            if (kitty || allKeys), let cp = ctrlColliderCodepoint(for: scalar) {
                 return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
             }
             if eventType == .release {
@@ -254,10 +251,11 @@ public final class KeyEncoder {
     /// '[' has no case. Returns nil for any non-collider.
     private func ctrlColliderCodepoint(for scalar: UnicodeScalar) -> UInt32? {
         switch scalar {
-        case "i", "I": return 105
-        case "m", "M": return 109
-        case "h", "H": return 104
-        case "[":      return 91
+        case "i", "I": return 105   // Ctrl+I → Tab (0x09)
+        case "m", "M": return 109   // Ctrl+M → CR (0x0D)
+        case "h", "H": return 104   // Ctrl+H → BS (0x08)
+        case "[":      return 91    // Ctrl+[ → ESC (0x1B)
+        case "?":      return 63    // Ctrl+? → DEL (0x7F) — same byte as Backspace
         default:       return nil
         }
     }

@@ -1459,15 +1459,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             #if DEBUG
             Self.keyLogger.debug("keyDown: Control modifier detected")
             #endif
-            let kittyActive = currentSnapshot?.termMode.contains(.disambiguateEscCodes) ?? false
-            let baseLetter = event.charactersIgnoringModifiers?.lowercased().first
-            let collidesWithC0: Bool = {
-                guard let c = baseLetter else { return false }
-                return c == "i" || c == "m" || c == "[" || c == "h"
-            }()
-            if kittyActive && collidesWithC0 {
-                // Fall through — encoder will emit CSI u for the four
-                // C0-aliasing letters under kitty disambiguation.
+            let termModeForCtrl = currentSnapshot?.termMode ?? []
+            let kittyActive = termModeForCtrl.contains(.disambiguateEscCodes)
+                || termModeForCtrl.contains(.reportAllKeysAsEsc)
+            let modifyOther = termModeForCtrl.contains(.modifyOtherKeys)
+            // Route Ctrl+letter through the encoder whenever a TUI opted
+            // into a protocol that expects CSI-u or CSI 27 shape for
+            // Ctrl-combinations: Kitty flag 1, Kitty flag 8, or xterm
+            // modifyOtherKeys (Emacs, tmux extended-keys, nvim auto-
+            // request). Without this, the fast path would send a bare
+            // 0x01 for Ctrl+A even though the TUI asked for the
+            // protocol-framed form (F-S3-002).
+            if kittyActive || modifyOther {
+                // Fall through — encoder picks the right protocol and
+                // handles Ctrl + C0-aliasing letters too.
             } else if let chars = event.characters,
                let scalar = chars.unicodeScalars.first,
                scalar.value >= 1, scalar.value <= 0x1F {
