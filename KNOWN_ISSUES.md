@@ -15,17 +15,19 @@ Small list of deliberately-deferred polish items. If you hit one of these, it's 
 
 Two previous attempts to suppress the AppKit animation (`43f5356`, `dd4bd96`) were reverted (`1c9a68f`, `3e58665`) after causing regressions — one beach-balled ⌘T.
 
-**Status:** Lives in [`.claude/memory/project_tab_bar_flash.md`](../.claude) as a decision record. Re-opening this should be a dedicated PR, not incremental polish.
+**Status: won't-fix (2026-04-24).** Two careful attempts — `43f5356` (CATransaction + `NSAnimationContext` suppression) and `dd4bd96` (three-layer suppression + `toggleTabBar` inside the merge transaction) — triggered a beachball hang on ⌘T and were reverted. Neither Option 1 (ghost tab) nor Option 2 (custom tabs without `NSWindowTabGroup`) is worth the trade:
 
-## Color emoji render as monochrome silhouettes
+- Ghost-tab forces every single-tab window to show the 36pt band permanently, trading a one-frame flash for a full-session visual regression.
+- Custom tabs is a full-day refactor with real IME / responder-chain coupling risk; a broken IME is a worse regression than the flash.
+- No new macOS 14–15 API exposes a way to collapse the 36pt reservation or suppress the merge animation.
 
-**Symptom:** 🎉 shows as a gray wedge-shape, not the party popper you expected.
+The flash is documented rather than fixed. If Apple ships a suppression API in a future macOS, revisit.
 
-**Root cause:** The glyph atlas is a single `r8Unorm` texture rasterized through a DeviceGray CGContext. That pipeline can't carry color — Apple Color Emoji's bitmap data is discarded during rasterization.
+## Color emoji — shipped 2026-04-24
 
-**Why it's deferred:** The proper fix is a second `bgra8Unorm` texture alongside the mono atlas, with per-glyph path selection (`CTFontCopyTraits` → `kCTFontTraitColorGlyphs`). That touches `GlyphAtlas.swift`, `CellInstance.swift`, `MetalRenderer.swift`, and `Shaders.metal` — a reasonably-sized refactor with real shader-testing risk. A broken emoji pipeline (double-draws, wrong premultiplication, leaking alpha) is more jarring than the current grayscale fallback, so we take the time to do it right rather than rush it in a polish pass.
+Glyphs from fonts that report `CTFontSymbolicTraits.colorGlyphs` (Apple Color Emoji, Noto Color Emoji, any third-party COLRv1 / sbix / CBDT font) now rasterize into a dedicated `bgra8Unorm` atlas alongside the mono coverage atlas. The fragment shader branches on `BB_ATTR_IS_COLOR_GLYPH` (bit 7 of `CellInstance.attrs.x`) to sample the correct texture.
 
-**Status:** Tracked in the audit's `glyph-atlas F2` finding. Picking this up is its own dedicated session with visual regression testing.
+Not supported: ZWJ sequences like 👨‍👩‍👧 (family) still render as the base 👨 scalar because atlas keys are single `UnicodeScalar`. Proper grapheme-cluster keying is future work — a rare enough case that it stayed out of v1.
 
 ## xterm `modifyOtherKeys` / Kitty flags 4/16 partial
 
