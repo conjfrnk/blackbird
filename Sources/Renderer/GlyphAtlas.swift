@@ -207,12 +207,14 @@ public final class GlyphAtlas {
         if let existing = byKey[key] { return existing }
         let slotsNeeded = wide ? 2 : 1
 
-        // Decide mono vs color up front so both allocator branches below
-        // route to the right rasterization path. The trait check is
-        // O(1) and cached inside CoreText per font; `styledFont(for:)`
-        // already memoizes the resolved NSFont per style variant.
+        // Decide mono vs color up front so both allocator branches
+        // below route to the right rasterization path. Per-scalar
+        // detection: the user's configured terminal font is rarely
+        // itself a color font, but CoreText substitutes Apple Color
+        // Emoji (or another color font) for emoji scalars at draw
+        // time. We mirror that substitution to decide the path.
         let font = styledFont(for: style)
-        let colorPath = Self.shouldRasterizeAsColor(font: font)
+        let colorPath = Self.shouldRasterizeAsColor(base: font, scalar: scalar)
 
         // Narrow glyph + a parked orphan slot? Reclaim it before carving
         // a fresh one off `nextSlot`. This is the other half of the
@@ -309,27 +311,36 @@ public final class GlyphAtlas {
         return entry
     }
 
-    /// Font-level color-glyph detection. Returns true iff `font`'s
-    /// symbolic traits include `.colorGlyphs` — the CoreText-sanctioned
-    /// signal that the font is a color variant (Apple Color Emoji, Noto
-    /// Color Emoji, Twemoji Mozilla, third-party COLRv1 fonts). See
-    /// <https://developer.apple.com/documentation/coretext/ctfontsymbolictraits/traitcolorglyphs>.
+    /// Per-scalar color-glyph detection. The key insight: the user's
+    /// configured terminal font (SF Mono, Hack Nerd Font Mono, …) is
+    /// almost never a color font, so a font-level
+    /// `CTFontGetSymbolicTraits(baseFont).contains(.colorGlyphs)`
+    /// check always returns false — and every emoji routes to the
+    /// mono path as a gray silhouette. What actually happens when
+    /// you type 🎉: CoreText's cascade list substitutes Apple Color
+    /// Emoji for the scalar at render time. We mirror that cascade:
+    /// ask "which font will render THIS scalar?" via
+    /// `CTFontCreateForString`, then check THAT font's traits.
     ///
-    /// Trade-off: a color font that contains both color and mono glyphs
-    /// (BabelStone Shapes, some emoji-variant Symbols fonts) still
-    /// routes every glyph through the color path — produces correct
-    /// output, consumes one BGRA atlas slot per glyph instead of one
-    /// mono slot. Users on those fonts see slightly higher atlas
-    /// pressure; nobody sees incorrect pixels.
+    /// Trade-off: `CTFontCreateForString` allocates on every insert
+    /// (no public caching API). Acceptable because inserts are
+    /// per-new-glyph, not per-frame: the insert cache (`byKey`)
+    /// absorbs every hit after the first. 4096-glyph atlas, one
+    /// allocation per entry insert — budget we already pay for
+    /// CTLineCreateWithAttributedString in the rasterizer.
     ///
-    /// Does NOT use font-name heuristics (`"AppleColorEmoji"`) —
-    /// those would miss third-party color fonts. Does NOT inspect the
-    /// glyph tables (sbix / COLR / SVG) because that cost accrues per
-    /// insert; the symbolic-traits lookup is cached inside CoreText
-    /// and costs a single atomic-read per call on a warm font.
-    fileprivate static func shouldRasterizeAsColor(font: NSFont) -> Bool {
-        let traits = CTFontGetSymbolicTraits(font as CTFont)
-        return traits.contains(.traitColorGlyphs)
+    /// Fonts that contain both color and mono glyphs (rare — mostly
+    /// emoji-variant Symbols fonts) route per-glyph correctly:
+    /// CoreText picks the right substitute, we ask that substitute
+    /// for its traits, and the bit reflects reality.
+    fileprivate static func shouldRasterizeAsColor(
+        base: NSFont,
+        scalar: UnicodeScalar
+    ) -> Bool {
+        let str = String(scalar) as NSString
+        let range = CFRange(location: 0, length: str.length)
+        let resolved = CTFontCreateForString(base as CTFont, str as CFString, range)
+        return CTFontGetSymbolicTraits(resolved).contains(.traitColorGlyphs)
     }
 
     /// Build an atlas `Entry` from pixel-space rectangle coordinates.

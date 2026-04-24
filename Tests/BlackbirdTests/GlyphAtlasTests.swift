@@ -464,6 +464,42 @@ final class GlyphAtlasTests: XCTestCase {
         )
     }
 
+    /// Regression: real users configure a monospace font (SF Mono, Hack
+    /// Nerd Font Mono, etc.), NOT Apple Color Emoji, as their terminal
+    /// font. Emoji reach the screen because CoreText's cascade
+    /// substitutes a color font per-scalar at render time. Before the
+    /// fix (2026-04-24), `shouldRasterizeAsColor` checked only the
+    /// user's base font — which is never a color font — so every emoji
+    /// routed to the mono path and rendered as a gray silhouette.
+    ///
+    /// This test mirrors the real production setup: monospace base
+    /// font + emoji scalar. If `shouldRasterizeAsColor` regresses to
+    /// font-level detection, the assertion fails.
+    func test_emojiWithMonospaceBase_usesColorPath() throws {
+        let device = try requireMetalDevice()
+        let mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        // Sanity: the base font itself is NOT a color font. This is
+        // the condition that fooled the old implementation.
+        let monoTraits = CTFontGetSymbolicTraits(mono as CTFont)
+        XCTAssertFalse(
+            monoTraits.contains(.traitColorGlyphs),
+            "monospaced system font must not itself be a color font "
+                + "(test premise requires CoreText cascade to kick in)"
+        )
+        let metrics = CellMetrics(font: mono)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+        let party = try XCTUnwrap(UnicodeScalar(0x1F389))  // 🎉
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: party, wide: true))
+        XCTAssertTrue(
+            entry.isColor,
+            "🎉 with monospace base font must route through per-scalar "
+                + "font substitution to the color path — if this fails, "
+                + "every emoji renders as a gray silhouette in production"
+        )
+    }
+
     /// Color emoji rasterises into `colorTexture`; the same slot in the
     /// mono `texture` stays zeroed. If either half of the split is
     /// wrong — mono bytes written for a color glyph, or color texture
