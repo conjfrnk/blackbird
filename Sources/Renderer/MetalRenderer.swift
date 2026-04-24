@@ -697,6 +697,16 @@ public final class MetalRenderer {
                 if let us = Unicode.Scalar(scalar),
                    let entry = atlas.lookupOrInsert(
                        scalar: us, wide: isWide, style: glyphStyle) {
+                    // Tell the fragment shader to sample the color
+                    // atlas (texture 1) instead of the mono coverage
+                    // atlas (texture 0) for this cell. Emoji + other
+                    // CTFont `colorGlyphs`-reporting families land
+                    // here. Atlas `Entry.isColor` is the single source
+                    // of truth; the shader branches on this bit.
+                    var colorAttrs = attrs
+                    if entry.isColor {
+                        colorAttrs.x |= CellAttributeMask.isColorGlyph.rawValue
+                    }
                     out.append(CellInstance(
                         cellPosPx: SIMD2<Float>(xPx, yPx),
                         quadSizePx: quadSize,
@@ -704,7 +714,7 @@ public final class MetalRenderer {
                         uvSize: entry.uvSize,
                         fgColor: fg,
                         bgColor: effectiveBg,
-                        attrs: attrs
+                        attrs: colorAttrs
                     ))
                 }
             } else if effectiveHasBg || attrs.x != 0 {
@@ -1185,6 +1195,11 @@ public final class MetalRenderer {
                 encoder.setVertexBuffer(instanceBuffers[slot], offset: 0, index: 0)
                 encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
                 encoder.setFragmentTexture(atlas.texture, index: 0)
+                // Color atlas bound unconditionally. Fragment shader
+                // branches on `BB_ATTR_IS_COLOR_GLYPH` to pick which
+                // texture to sample; Metal requires both bindings to be
+                // addressable for the shader to compile.
+                encoder.setFragmentTexture(atlas.colorTexture, index: 1)
                 encoder.drawPrimitives(
                     type: .triangle,
                     vertexStart: 0,

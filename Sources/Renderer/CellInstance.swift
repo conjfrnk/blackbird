@@ -31,6 +31,12 @@ struct CellAttributeMask: OptionSet {
     static let underlineDotted = CellAttributeMask(rawValue: 1 << 5)
     /// Bit 6: SGR 4:5 dashed underline.
     static let underlineDashed = CellAttributeMask(rawValue: 1 << 6)
+    /// Bit 7: this cell's glyph lives in the color atlas (BGRA premultiplied)
+    /// rather than the mono coverage atlas. Set by the renderer when the
+    /// resolved font reports `.colorGlyphs` via `CTFontGetSymbolicTraits`.
+    /// Shader branches on this to sample the color texture directly and skip
+    /// the `mix(bg, fg, coverage)` tinting that normal cells use.
+    static let isColorGlyph = CellAttributeMask(rawValue: 1 << 7)
 
     /// Mask covering every "paint a line under the glyph" bit. Shader uses
     /// this to short-circuit the underline composite when none is set.

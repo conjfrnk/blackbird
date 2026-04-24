@@ -395,6 +395,200 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertGreaterThan(entry.uvSize.y, 0)
     }
 
+    // MARK: - Color emoji atlas path
+    //
+    // Regression coverage for the second-texture color-emoji path:
+    //   1) GlyphAtlas.colorTexture is a .bgra8Unorm companion to the
+    //      .r8Unorm mono texture, sized identically so UV coords drawn
+    //      from Entry.uvOrigin/uvSize can address either texture.
+    //   2) Entry.isColor flips iff the font reports .colorGlyphs for
+    //      the scalar; the renderer reads that flag to mirror it onto
+    //      CellAttributeMask.isColorGlyph (bit 7) in the cell attrs
+    //      packet so the shader can branch.
+    //
+    // Memory pre-flight (MEMORY rule): at capacity 128 with 13pt/1x
+    // scale, each texture is roughly ~300 KB. Two textures ~600 KB
+    // per atlas — well inside the 320 MB suite budget.
+    //
+    // Font-substitution note (spec rule): CTFontCreateCopyWithSymbolicTraits
+    // does not substitute per-scalar, so to reliably exercise the
+    // color-glyph path we build the atlas with an AppleColorEmoji
+    // CellMetrics. That font is always installed on macOS, but if it
+    // is unavailable in the test host we XCTSkip rather than weaken
+    // the assertion.
+    //
+    // Note: tests in this section intentionally avoid reading the
+    // implementation (GlyphAtlas.swift, MetalRenderer.swift,
+    // Shaders.metal, the new isColor field on CellInstance) — they are
+    // written to the spec so a wrong-but-self-consistent impl can't
+    // pass them.
+
+    /// ASCII letters are always monochrome — they must rasterise to
+    /// the mono atlas and report `Entry.isColor == false` so the
+    /// renderer takes the fast mono-sampling path.
+    func test_asciiLetterIsNotColor() throws {
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: UnicodeScalar("a")))
+        XCTAssertFalse(
+            entry.isColor,
+            "ASCII 'a' rasterised from a monospaced font must not be flagged as a color glyph"
+        )
+    }
+
+    /// Emoji rasterised from a color-emoji font must set `Entry.isColor`.
+    /// The atlas is built from `AppleColorEmoji` directly because
+    /// CoreText doesn't substitute per-scalar when rasterising a given
+    /// glyph run on the test font — driving the color-glyph path
+    /// reliably requires a font that already reports `.colorGlyphs`.
+    func test_emojiIsColor() throws {
+        let device = try requireMetalDevice()
+        guard let emojiFont = NSFont(name: "AppleColorEmoji", size: 13) else {
+            throw XCTSkip(
+                "AppleColorEmoji font unavailable in test host — can't exercise color-glyph path"
+            )
+        }
+        let metrics = CellMetrics(font: emojiFont)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+        let party = try XCTUnwrap(UnicodeScalar(0x1F389))  // 🎉
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: party, wide: true))
+        XCTAssertTrue(
+            entry.isColor,
+            "🎉 rasterised from AppleColorEmoji must be flagged as a color glyph"
+        )
+    }
+
+    /// Color emoji rasterises into `colorTexture`; the same slot in the
+    /// mono `texture` stays zeroed. If either half of the split is
+    /// wrong — mono bytes written for a color glyph, or color texture
+    /// left blank — the shader's color-branch draws the wrong pixels.
+    func test_colorEntryLandsInColorTexture() throws {
+        let device = try requireMetalDevice()
+        guard let emojiFont = NSFont(name: "AppleColorEmoji", size: 13) else {
+            throw XCTSkip(
+                "AppleColorEmoji font unavailable in test host — can't exercise color-glyph path"
+            )
+        }
+        let metrics = CellMetrics(font: emojiFont)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+        let party = try XCTUnwrap(UnicodeScalar(0x1F389))
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: party, wide: true))
+        XCTAssertTrue(entry.isColor, "precondition: entry must be color for this test to be meaningful")
+
+        // Derive the pixel-space rectangle for this entry's slot from
+        // the normalised UV coordinates. Both textures share the same
+        // dimensions (see test_colorAtlasSizeMatchesMonoAtlas) so the
+        // same rect samples the same slot in either texture.
+        let colorTex = atlas.colorTexture
+        let monoTex = atlas.texture
+        let texW = colorTex.width
+        let texH = colorTex.height
+        let originX = Int((entry.uvOrigin.x * Float(texW)).rounded(.down))
+        let originY = Int((entry.uvOrigin.y * Float(texH)).rounded(.down))
+        let sizeW = max(1, Int((entry.uvSize.x * Float(texW)).rounded(.up)))
+        let sizeH = max(1, Int((entry.uvSize.y * Float(texH)).rounded(.up)))
+        // Clamp to texture bounds so getBytes can't walk off the edge
+        // if the UV-inset math pushes the rect by a texel.
+        let clampedW = min(sizeW, texW - originX)
+        let clampedH = min(sizeH, texH - originY)
+        XCTAssertGreaterThan(clampedW, 0, "entry UVs produced an empty width")
+        XCTAssertGreaterThan(clampedH, 0, "entry UVs produced an empty height")
+        let region = MTLRegionMake2D(originX, originY, clampedW, clampedH)
+
+        // Color read-back: .bgra8Unorm = 4 bytes/pixel.
+        let colorBytesPerRow = clampedW * 4
+        var colorBuf = [UInt8](repeating: 0, count: clampedW * clampedH * 4)
+        colorBuf.withUnsafeMutableBytes { ptr in
+            colorTex.getBytes(
+                ptr.baseAddress!,
+                bytesPerRow: colorBytesPerRow,
+                from: region,
+                mipmapLevel: 0
+            )
+        }
+        let anyColorInk = colorBuf.contains(where: { $0 > 0 })
+        XCTAssertTrue(
+            anyColorInk,
+            "colorTexture at the emoji's slot had no non-zero bytes — color rasterisation failed"
+        )
+
+        // Mono read-back: .r8Unorm = 1 byte/pixel. The emoji must not
+        // have leaked ink into the mono texture at the same slot.
+        let monoBytesPerRow = clampedW
+        var monoBuf = [UInt8](repeating: 0xFF, count: clampedW * clampedH)
+        monoBuf.withUnsafeMutableBytes { ptr in
+            monoTex.getBytes(
+                ptr.baseAddress!,
+                bytesPerRow: monoBytesPerRow,
+                from: region,
+                mipmapLevel: 0
+            )
+        }
+        let monoInk = monoBuf.contains(where: { $0 > 0 })
+        XCTAssertFalse(
+            monoInk,
+            "mono texture at the emoji's slot had ink — color glyph leaked into the mono path"
+        )
+    }
+
+    /// UV coordinates are normalised to [0,1] and are the same for the
+    /// mono and color textures; a dimension mismatch would make the
+    /// shader sample a different slot depending on which texture it
+    /// reads. Pin the invariant.
+    func test_colorAtlasSizeMatchesMonoAtlas() throws {
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+        XCTAssertEqual(
+            atlas.colorTexture.width, atlas.texture.width,
+            "color atlas width must equal mono atlas width — UVs are shared"
+        )
+        XCTAssertEqual(
+            atlas.colorTexture.height, atlas.texture.height,
+            "color atlas height must equal mono atlas height — UVs are shared"
+        )
+    }
+
+    /// Color atlas must be `.bgra8Unorm` so CoreGraphics's premultiplied
+    /// BGRA rasteriser can blit straight in and the shader can sample
+    /// RGB channels directly. A mismatched format would silently swap
+    /// red/blue or clamp precision.
+    func test_colorAtlasPixelFormat() throws {
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+        XCTAssertEqual(
+            atlas.colorTexture.pixelFormat, .bgra8Unorm,
+            "colorTexture must be .bgra8Unorm for CoreGraphics BGRA rasterisation"
+        )
+    }
+
+    /// Contract pin: `CellAttributeMask.isColorGlyph` must be bit 7.
+    /// The shader reads this exact bit — if somebody renumbers the
+    /// OptionSet, the shader would switch to the color path on a
+    /// coincidental neighbour bit (strike, underline*, etc.) and
+    /// corrupt the terminal's rendering until the mismatch was caught.
+    func test_isColorGlyphBitHasExpectedValue() {
+        XCTAssertEqual(
+            CellAttributeMask.isColorGlyph.rawValue, UInt32(1 << 7),
+            "isColorGlyph must live at bit 7 — shaders read this bit by raw value"
+        )
+    }
+
     func test_insertGlyphProducesNonZeroPixels() throws {
         let device = try requireMetalDevice()
         let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -423,5 +617,103 @@ final class GlyphAtlasTests: XCTestCase {
         }
         let nonZero = raw.contains(where: { $0 > 0 })
         XCTAssertTrue(nonZero, "Atlas texture had no ink — glyph rasterization failed")
+    }
+
+    /// Byte-order pin for the color atlas.
+    ///
+    /// The color atlas is `.bgra8Unorm`, which means CPU-readable bytes
+    /// for each pixel land in memory order as (B, G, R, A). When Metal
+    /// samples `.bgra8Unorm` and returns `float4`, `.r` carries red,
+    /// `.g` green, `.b` blue — but *only* if the bytes were stored in
+    /// BGRA order to begin with. A premultiplied-BGRA rasteriser (the
+    /// one CoreGraphics uses) writes pixels in that exact order; a
+    /// RGBA-premultiplied rasteriser would silently swap red/blue and
+    /// the shader would draw blue where red should be.
+    ///
+    /// We pick 🟥 (U+1F7E5 RED SQUARE) — a big, saturated, red-dominant
+    /// emoji — rasterise it into the color atlas, read back the slot,
+    /// find the densest-ink pixel (max alpha), and assert that at that
+    /// pixel the R byte (index 2) dominates the B byte (index 0) and
+    /// the G byte (index 1). If the bytes were accidentally stored as
+    /// RGBA the index-0 byte would be R, the index-2 byte would be B,
+    /// and R > B would fail.
+    func test_colorAtlasByteOrderIsBGRA() throws {
+        let device = try requireMetalDevice()
+        guard let emojiFont = NSFont(name: "AppleColorEmoji", size: 16) else {
+            throw XCTSkip(
+                "AppleColorEmoji font unavailable in test host — can't exercise color byte-order path"
+            )
+        }
+        let metrics = CellMetrics(font: emojiFont)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+        let redSquare = try XCTUnwrap(UnicodeScalar(0x1F7E5))
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: redSquare, wide: true))
+        XCTAssertTrue(
+            entry.isColor,
+            "precondition: 🟥 rasterised from AppleColorEmoji must be a color glyph"
+        )
+
+        // Derive the pixel-space slot rectangle from the normalised UV
+        // coordinates. Color and mono textures share dimensions, so the
+        // same rect addresses either texture.
+        let colorTex = atlas.colorTexture
+        let texW = colorTex.width
+        let texH = colorTex.height
+        let originX = Int((entry.uvOrigin.x * Float(texW)).rounded(.down))
+        let originY = Int((entry.uvOrigin.y * Float(texH)).rounded(.down))
+        let sizeW = max(1, Int((entry.uvSize.x * Float(texW)).rounded(.up)))
+        let sizeH = max(1, Int((entry.uvSize.y * Float(texH)).rounded(.up)))
+        let clampedW = min(sizeW, texW - originX)
+        let clampedH = min(sizeH, texH - originY)
+        XCTAssertGreaterThan(clampedW, 0, "entry UVs produced an empty width")
+        XCTAssertGreaterThan(clampedH, 0, "entry UVs produced an empty height")
+        let region = MTLRegionMake2D(originX, originY, clampedW, clampedH)
+
+        // .bgra8Unorm = 4 bytes/pixel.
+        let bytesPerRow = clampedW * 4
+        var bytes = [UInt8](repeating: 0, count: clampedW * clampedH * 4)
+        bytes.withUnsafeMutableBytes { ptr in
+            colorTex.getBytes(
+                ptr.baseAddress!,
+                bytesPerRow: bytesPerRow,
+                from: region,
+                mipmapLevel: 0
+            )
+        }
+
+        // Find the index of the pixel with the highest alpha byte — the
+        // densest-ink pixel. For a premultiplied emoji, the fully-inked
+        // interior pixels will all share max alpha; we just need one.
+        var maxAlpha: UInt8 = 0
+        var maxAlphaIndex: Int = 0
+        for pixel in 0..<(clampedW * clampedH) {
+            let alpha = bytes[pixel * 4 + 3]
+            if alpha > maxAlpha {
+                maxAlpha = alpha
+                maxAlphaIndex = pixel * 4
+            }
+        }
+        XCTAssertGreaterThan(
+            maxAlpha, 0,
+            "color texture slot had no non-zero alpha — rasterisation failed or wrote to the wrong slot"
+        )
+
+        // At the densest-ink pixel, the BGRA layout puts B at offset 0,
+        // G at offset 1, R at offset 2, A at offset 3. For a red
+        // emoji, R must dominate both B and G.
+        XCTAssertGreaterThan(
+            bytes[maxAlphaIndex + 2], bytes[maxAlphaIndex + 0],
+            "red byte (index 2) must exceed blue byte (index 0) for a red-dominant emoji"
+        )
+        XCTAssertGreaterThan(
+            bytes[maxAlphaIndex + 2], bytes[maxAlphaIndex + 1],
+            "red byte (index 2) must exceed green byte (index 1)"
+        )
+        XCTAssertGreaterThan(
+            bytes[maxAlphaIndex + 3], 200,
+            "alpha byte should be near opaque for the densest ink pixel"
+        )
     }
 }

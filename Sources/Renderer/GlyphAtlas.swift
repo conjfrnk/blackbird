@@ -47,9 +47,25 @@ public final class GlyphAtlas {
         /// atlas slots (CJK, wide emoji). The renderer must draw it at double
         /// cell width so the glyph's right half isn't clipped.
         public let isWide: Bool
+        /// True when the glyph was rasterised into the color atlas (BGRA
+        /// premultiplied) rather than the mono coverage atlas. The shader
+        /// samples a different texture and skips the fg/bg coverage blend
+        /// for color cells — see `Shaders.metal` `BB_ATTR_IS_COLOR_GLYPH`.
+        public let isColor: Bool
     }
 
+    /// Mono coverage atlas (`r8Unorm`) — every ASCII / CJK / box-drawing
+    /// glyph lands here. Shader reads `coverage = atlas.sample(uv).r` and
+    /// mixes the cell's fg / bg colors by it.
     public let texture: MTLTexture
+    /// Color atlas (`bgra8Unorm`, premultiplied alpha) — emoji and any
+    /// other glyphs from fonts that CoreText reports as color-bearing
+    /// (`CTFontSymbolicTraits.colorGlyphs`). Empty until the first
+    /// color glyph insertion; callers always bind it to fragment
+    /// texture index 1 so the shader branch at `BB_ATTR_IS_COLOR_GLYPH`
+    /// is addressable. Never grows or shrinks — same slot layout as
+    /// `texture`, just wider byte depth per pixel.
+    public let colorTexture: MTLTexture
     public let metrics: CellMetrics
     public let capacityGlyphs: Int
     public let slotCols: Int
@@ -127,7 +143,24 @@ public final class GlyphAtlas {
         guard let tex = device.makeTexture(descriptor: desc) else { return nil }
         self.texture = tex
 
-        // Zero the texture initially. baseAddress can't be nil because
+        // Parallel color atlas. Same grid (slotCols × slotRows) so a
+        // color glyph at slot N lands at the same pixel rectangle as a
+        // mono glyph at the same slot — UVs are interchangeable. Bytes
+        // per pixel differ (4 vs 1); memory cost is 5× the mono atlas
+        // but lazy — only non-empty rows get written on first color
+        // insertion.
+        let colorDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: texW,
+            height: texH,
+            mipmapped: false
+        )
+        colorDesc.usage = [.shaderRead]
+        colorDesc.storageMode = .shared
+        guard let colorTex = device.makeTexture(descriptor: colorDesc) else { return nil }
+        self.colorTexture = colorTex
+
+        // Zero both textures initially. baseAddress can't be nil because
         // `count: texW * texH` is positive for any valid atlas (init bails
         // earlier on zero-dim textures via MTLTextureDescriptor).
         let zero = [UInt8](repeating: 0, count: texW * texH)
@@ -138,6 +171,16 @@ public final class GlyphAtlas {
                 mipmapLevel: 0,
                 withBytes: base,
                 bytesPerRow: texW
+            )
+        }
+        let zeroColor = [UInt8](repeating: 0, count: texW * texH * 4)
+        zeroColor.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            colorTex.replace(
+                region: MTLRegionMake2D(0, 0, texW, texH),
+                mipmapLevel: 0,
+                withBytes: base,
+                bytesPerRow: texW * 4
             )
         }
     }
@@ -164,6 +207,13 @@ public final class GlyphAtlas {
         if let existing = byKey[key] { return existing }
         let slotsNeeded = wide ? 2 : 1
 
+        // Decide mono vs color up front so both allocator branches below
+        // route to the right rasterization path. The trait check is
+        // O(1) and cached inside CoreText per font; `styledFont(for:)`
+        // already memoizes the resolved NSFont per style variant.
+        let font = styledFont(for: style)
+        let colorPath = Self.shouldRasterizeAsColor(font: font)
+
         // Narrow glyph + a parked orphan slot? Reclaim it before carving
         // a fresh one off `nextSlot`. This is the other half of the
         // wide-alignment bookkeeping below (glyph-atlas F4); keeps the
@@ -174,12 +224,13 @@ public final class GlyphAtlas {
             let row = reclaimed / slotCols
             let pxX = col * cellPxWidth
             let pxY = row * cellPxHeight
-            rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: false, style: style)
+            rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: false, style: style, color: colorPath)
             let entry = Self.makeEntry(
                 pxX: pxX, pxY: pxY,
                 pxW: cellPxWidth, pxH: cellPxHeight,
                 texW: texture.width, texH: texture.height,
-                isWide: false
+                isWide: false,
+                isColor: colorPath
             )
             byKey[key] = entry
             return entry
@@ -244,17 +295,41 @@ public final class GlyphAtlas {
         let pxX = col * cellPxWidth
         let pxY = row * cellPxHeight
 
-        rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style)
+        rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style, color: colorPath)
 
         let entry = Self.makeEntry(
             pxX: pxX, pxY: pxY,
             pxW: cellPxWidth * slotsNeeded, pxH: cellPxHeight,
             texW: texture.width, texH: texture.height,
-            isWide: wide
+            isWide: wide,
+            isColor: colorPath
         )
         byKey[key] = entry
         nextSlot = slot + slotsNeeded
         return entry
+    }
+
+    /// Font-level color-glyph detection. Returns true iff `font`'s
+    /// symbolic traits include `.colorGlyphs` — the CoreText-sanctioned
+    /// signal that the font is a color variant (Apple Color Emoji, Noto
+    /// Color Emoji, Twemoji Mozilla, third-party COLRv1 fonts). See
+    /// <https://developer.apple.com/documentation/coretext/ctfontsymbolictraits/traitcolorglyphs>.
+    ///
+    /// Trade-off: a color font that contains both color and mono glyphs
+    /// (BabelStone Shapes, some emoji-variant Symbols fonts) still
+    /// routes every glyph through the color path — produces correct
+    /// output, consumes one BGRA atlas slot per glyph instead of one
+    /// mono slot. Users on those fonts see slightly higher atlas
+    /// pressure; nobody sees incorrect pixels.
+    ///
+    /// Does NOT use font-name heuristics (`"AppleColorEmoji"`) —
+    /// those would miss third-party color fonts. Does NOT inspect the
+    /// glyph tables (sbix / COLR / SVG) because that cost accrues per
+    /// insert; the symbolic-traits lookup is cached inside CoreText
+    /// and costs a single atomic-read per call on a warm font.
+    fileprivate static func shouldRasterizeAsColor(font: NSFont) -> Bool {
+        let traits = CTFontGetSymbolicTraits(font as CTFont)
+        return traits.contains(.traitColorGlyphs)
     }
 
     /// Build an atlas `Entry` from pixel-space rectangle coordinates.
@@ -270,7 +345,8 @@ public final class GlyphAtlas {
         pxX: Int, pxY: Int,
         pxW: Int, pxH: Int,
         texW: Int, texH: Int,
-        isWide: Bool
+        isWide: Bool,
+        isColor: Bool
     ) -> Entry {
         let halfTexelX = 0.5 / Float(texW)
         let uvOrigin = SIMD2<Float>(
@@ -285,7 +361,7 @@ public final class GlyphAtlas {
             Float(pxW) / Float(texW) - 2.0 * halfTexelX,
             Float(pxH) / Float(texH)
         )
-        return Entry(uvOrigin: uvOrigin, uvSize: uvSize, isWide: isWide)
+        return Entry(uvOrigin: uvOrigin, uvSize: uvSize, isWide: isWide, isColor: isColor)
     }
 
     // MARK: - Rasterization
@@ -320,8 +396,13 @@ public final class GlyphAtlas {
         scalar: UnicodeScalar,
         intoSlotAt origin: (x: Int, y: Int),
         wide: Bool = false,
-        style: Style = .regular
+        style: Style = .regular,
+        color: Bool = false
     ) {
+        if color {
+            rasterizeColor(scalar: scalar, intoSlotAt: origin, wide: wide, style: style)
+            return
+        }
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
         let cs = CGColorSpaceCreateDeviceGray()
@@ -398,6 +479,89 @@ public final class GlyphAtlas {
             mipmapLevel: 0,
             withBytes: bytes,
             bytesPerRow: w
+        )
+    }
+
+    /// Color-glyph rasterization path. Writes a premultiplied-BGRA bitmap
+    /// into `colorTexture` at the slot's pixel origin.
+    ///
+    /// Byte-order invariant: `premultipliedFirst | byteOrder32Little` makes
+    /// the CGBitmapContext emit bytes in memory as B, G, R, A — which is
+    /// exactly what Metal's `.bgra8Unorm` texture format samples. The
+    /// shader's color-glyph branch reads the sample as a `float4` in
+    /// natural (R, G, B, A) color component order; Metal handles the byte-
+    /// → component mapping.
+    ///
+    /// Alpha invariant: `CTFontDrawGlyphs` into a **cleared (transparent)**
+    /// context leaves the RGB channels holding premultiplied color and the
+    /// A channel holding the glyph's coverage. Filling the context opaque
+    /// (as the mono path does) would produce an always-100%-alpha square
+    /// with the emoji composited onto it — the classic Apple Dev Forum
+    /// bug. Explicit `ctx.clear` is load-bearing here.
+    ///
+    /// ZWJ sequences (👨‍👩‍👧) are not supported by this path: atlas keys are
+    /// single `UnicodeScalar`. A ZWJ-joined family emoji will render as its
+    /// base scalar (e.g. the first 👨 of the sequence). This is the same
+    /// behaviour current mono rendering produces; proper grapheme-cluster
+    /// keying is documented as future work in KNOWN_ISSUES.md.
+    private func rasterizeColor(
+        scalar: UnicodeScalar,
+        intoSlotAt origin: (x: Int, y: Int),
+        wide: Bool,
+        style: Style
+    ) {
+        let w = cellPxWidth * (wide ? 2 : 1)
+        let h = cellPxHeight
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)
+            ?? CGColorSpaceCreateDeviceRGB()
+        // premultipliedFirst + byteOrder32Little = BGRA bytes in memory,
+        // pre-multiplied RGB. Matches Metal `.bgra8Unorm` exactly. See
+        // Alacritty's `crossfont` darwin module + Apple Developer Forum
+        // thread 51515 for the canonical derivation.
+        let bitmapInfo: UInt32 = CGImageAlphaInfo.premultipliedFirst.rawValue
+            | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let ctx = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w * 4,
+            space: cs,
+            bitmapInfo: bitmapInfo
+        ) else { return }
+
+        // Transparent background. The emoji's own colors come from
+        // CTFontDrawGlyphs; we must NOT pre-fill with an opaque color
+        // (Apple Dev Forum 51515 — CTFontDrawGlyphs composites glyphs
+        // onto whatever's already there, including opaque black).
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.setShouldAntialias(true)
+        ctx.setAllowsFontSmoothing(true)
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.textMatrix = .identity
+
+        let str = String(scalar)
+        let font = styledFont(for: style)
+        // Use the line/attributed-string path so CoreText does font
+        // substitution + fallback. `CTFontDrawGlyphs` directly works
+        // too, but it requires pre-shaping via CTFontGetGlyphsForCharacters,
+        // which duplicates work CTLine does for free. Foreground color
+        // is ignored for color fonts — the font's own bitmap tables
+        // supply the pixels.
+        let attr = NSAttributedString(
+            string: str,
+            attributes: [.font: font]
+        )
+        let line = CTLineCreateWithAttributedString(attr)
+        ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
+        CTLineDraw(line, ctx)
+
+        guard let bytes = ctx.data else { return }
+        colorTexture.replace(
+            region: MTLRegionMake2D(origin.x, origin.y, w, h),
+            mipmapLevel: 0,
+            withBytes: bytes,
+            bytesPerRow: w * 4
         )
     }
 

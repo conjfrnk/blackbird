@@ -75,6 +75,9 @@ constant uint BB_ATTR_UNDERLINE_DOUBLE   = 1u << 3;
 constant uint BB_ATTR_UNDERCURL          = 1u << 4;
 constant uint BB_ATTR_UNDERLINE_DOTTED   = 1u << 5;
 constant uint BB_ATTR_UNDERLINE_DASHED   = 1u << 6;
+// Cell's glyph lives in the color atlas (BGRA premultiplied) rather than
+// the coverage-mono atlas. See `GlyphAtlas.colorTexture`.
+constant uint BB_ATTR_IS_COLOR_GLYPH     = 1u << 7;
 constant uint BB_ATTR_ANY_UNDERLINE      = BB_ATTR_UNDERLINE
                                          | BB_ATTR_UNDERLINE_DOUBLE
                                          | BB_ATTR_UNDERCURL
@@ -83,7 +86,8 @@ constant uint BB_ATTR_ANY_UNDERLINE      = BB_ATTR_UNDERLINE
 
 fragment float4 fragment_cell(
     VertexOut in [[stage_in]],
-    texture2d<float> atlas [[texture(0)]]
+    texture2d<float> atlas [[texture(0)]],
+    texture2d<float> colorAtlas [[texture(1)]]
 ) {
     // Colour-space note (audit shaders F1 / metal-renderer F9 / glyph-atlas F10):
     // every colour flowing into this shader — fg, bg, accent, the
@@ -98,11 +102,45 @@ fragment float4 fragment_cell(
     // require switching to `.bgra8Unorm_srgb` and uploading linear
     // floats — deferred as a future user toggle.
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-    float coverage = atlas.sample(s, in.uv).r;
-    // Blend fg glyph over bg. coverage = 0 → pure bg, coverage = 1 → pure fg.
-    float4 base = mix(in.bgColor, in.fgColor, coverage);
-
     uint flags = in.flags;
+    float4 base;
+    if ((flags & BB_ATTR_IS_COLOR_GLYPH) != 0u) {
+        // Color emoji path. The color atlas stores premultiplied BGRA
+        // bytes written by a CGBitmapContext with
+        // `premultipliedFirst | byteOrder32Little` + transparent-cleared
+        // background (see GlyphAtlas.rasterizeColor). Metal samples the
+        // texture as `bgra8Unorm`, which maps the memory bytes to the
+        // float4's color components in natural RGBA order.
+        //
+        // De-premultiply so the existing straight-alpha blend op
+        // (`.sourceAlpha` / `.oneMinusSourceAlpha`) composites the emoji
+        // correctly without double-multiplying alpha. `1.0/255.0` is the
+        // smallest representable non-zero 8-bit alpha — any sampled texel
+        // is either ≥ that or exactly zero, and the zero case falls into
+        // the else branch below.
+        float4 sample = colorAtlas.sample(s, in.uv);
+        if (sample.a > 0.0) {
+            base = float4(sample.rgb / max(sample.a, 1.0 / 255.0), sample.a);
+        } else {
+            // Empty texel (flushed atlas slot, rasterization failure, or
+            // sampled outside the glyph's ink). Returning float4(0) would
+            // leave the framebuffer's previous contents visible — wrong
+            // over a cell that declared a non-default background
+            // (selection highlight, vim status line, link-hover accent).
+            // Falling back to `in.bgColor` matches the mono path's
+            // zero-coverage behaviour exactly: the cell's own bg paints,
+            // same as `mix(bg, fg, 0)`.
+            base = in.bgColor;
+        }
+    } else {
+        float coverage = atlas.sample(s, in.uv).r;
+        // Blend fg glyph over bg. coverage = 0 → pure bg, coverage = 1 → pure fg.
+        base = mix(in.bgColor, in.fgColor, coverage);
+    }
+
+    // The rest of the function overlays strike/underline/undercurl on top of
+    // `base`, same code path for both mono and color glyphs (you can still
+    // underline an emoji).
     float distFromBottom = in.quadSizePx.y - in.localPx.y;
     float x = in.localPx.x;
 
