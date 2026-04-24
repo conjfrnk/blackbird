@@ -697,11 +697,15 @@ public final class TerminalSession: ObservableObject {
                     // session.
                     guard Preferences.shared.osc52Enabled else { break }
                     if text.utf8.count > Self.osc52MaxBytes {
-                        #if DEBUG
-                        Self.osc52Logger.log(
+                        // SFH-005: log in Release. OSC 52 oversize is a security
+                        // boundary — a hostile remote trying to stuff a
+                        // DoS-class payload into NSPasteboard must produce a
+                        // unified-log breadcrumb so field users can answer
+                        // "why didn't my clipboard update?" and "is my
+                        // terminal under attack?".
+                        Self.osc52Logger.info(
                             "OSC 52 payload \(text.utf8.count, privacy: .public) bytes exceeds \(Self.osc52MaxBytes, privacy: .public) cap — dropping"
                         )
-                        #endif
                         break
                     }
                     // Scrub C0/C1 controls + bidi overrides before handing

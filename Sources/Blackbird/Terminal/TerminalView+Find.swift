@@ -201,9 +201,11 @@ extension TerminalView {
             if !opts.caseSensitive { regexOpts.insert(.caseInsensitive) }
             regex = try? NSRegularExpression(pattern: query, options: regexOpts)
             if regex == nil {
-                // Invalid pattern — show 0 matches, no crash. User sees
-                // the counter stay at 0/0 while they fix the expression.
+                // Invalid pattern — show 0 matches, no crash. Surface a
+                // transient banner so "0/0" doesn't look identical to
+                // "valid pattern with no hits" (SFH-006).
                 findBar?.setMatchCount(0, of: 0)
+                findBar?.showTransientMessage("Invalid regex pattern")
                 selection = nil
                 return
             }

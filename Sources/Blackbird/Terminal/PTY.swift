@@ -98,12 +98,6 @@ public final class PTY {
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "pty")
 
-    #if DEBUG
-    /// Backwards-compatible alias for the write-failure diagnostics added
-    /// in commit 7628afe. Kept DEBUG-only until F11 lands.
-    private static let writeLogger = logger
-    #endif
-
     private func shouldKeepRunning() -> Bool {
         stateQueue.sync { _isRunning }
     }
@@ -545,12 +539,16 @@ public final class PTY {
                     usleep(200)
                     continue
                 }
-                #if DEBUG
+                // SFH-001: log in Release too. A PTY write that fails with
+                // EPIPE / EIO / ENOSPC silently vanishes a user keystroke or
+                // IME commit — the user sees no shell response and no
+                // diagnostic trail. `log stream --predicate 'subsystem ==
+                // "dev.conjfrnk.blackbird"'` now surfaces the errno in
+                // production.
                 let savedErrno = errno
-                Self.writeLogger.log(
+                Self.logger.error(
                     "PTY.write FAILED after \(offset, privacy: .public)/\(rawBuf.count, privacy: .public) bytes errno=\(savedErrno, privacy: .public) fd=\(fd, privacy: .public)"
                 )
-                #endif
                 delivered = false
                 break
             }
