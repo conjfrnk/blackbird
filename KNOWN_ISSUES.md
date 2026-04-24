@@ -29,13 +29,13 @@ Glyphs from fonts that report `CTFontSymbolicTraits.colorGlyphs` (Apple Color Em
 
 Not supported: ZWJ sequences like 👨‍👩‍👧 (family) still render as the base 👨 scalar because atlas keys are single `UnicodeScalar`. Proper grapheme-cluster keying is future work — a rare enough case that it stayed out of v1.
 
-## xterm `modifyOtherKeys` / Kitty flags 4/16 partial
+## Kitty flag 4 / 16 — US-layout only
 
-**Flag 4 (`reportAlternateKeys`)** emits the shifted-form codepoint for ASCII letters — Shift+A produces `ESC[97:0:65;2u` under flags 1+4+8. Flag 4 for symbols with unusual keyboard layouts (German ß on a QWERTZ layout, etc.) requires NSEvent keyboard-layout context not currently plumbed through.
+**Flag 4 (`reportAlternateKeys`)** emits `base:0:shifted` for every ASCII letter and for the 21 US-layout shifted symbols (`!`→`1`, `@`→`2`, …, `|`→`\`). Non-US layouts (German QWERTZ, Dvorak, BÉPO, …) still see only the shifted char with no alt-layout slot — the reverse lookup would need Carbon's `UCKeyTranslate` + current-layout plumbing, deferred to a dedicated session.
 
-**Flag 16 (`reportAssociatedText`)** emits the produced text as a trailing `;<utf32>` section — differs from the base codepoint under Shift and (eventually) IME composition. Dead-key / multi-scalar IME text is currently limited to the single-scalar fast path.
+**Flag 16 (`reportAssociatedText`)** emits the produced text as a trailing `;<utf32>` section for the single-key press case, elided when the text equals the base codepoint (saves bytes; spec says parsers treat "absent" as "text=base"). IME-committed multi-scalar text (e.g. Chinese pinyin commits, ZWJ emoji composed via input methods) goes through `insertText` directly and doesn't synthesize a flag-16-style key event — Kitty's spec doesn't define IME commit as a keystroke, so no reasonable TUI expects it.
 
-**xterm `modifyOtherKeys` (CSI > 4 ; N m + CSI 27;mod;cp~)** is not implemented. Requires Rust-side private-mode parser changes in `core/src/lib.rs`, a new `BBTermMode` bit, and a new encoder branch. Scope warranted a dedicated session; the Kitty flags give Claude Code / nvim the modifier-disambiguation they actually need.
+**xterm `modifyOtherKeys` — shipped 2026-04-24.** `CSI > 4 ; N m` toggles the mode (level 1 or 2 both light the bit); `CSI 27 ; <mod> ; <cp> ~` emission kicks in for modified printables when no Kitty flag is active. Precedence: Kitty > modifyOtherKeys > legacy. Emacs, tmux `extended-keys on`, neovim auto-request all covered.
 
 ## `file://` URLs are intentionally not clickable
 

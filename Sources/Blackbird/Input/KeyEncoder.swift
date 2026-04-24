@@ -262,31 +262,94 @@ public final class KeyEncoder {
         }
     }
 
-    /// Codepoint to emit under Kitty flag 8 (reportAllKeysAsEsc) for a
-    /// given scalar + shift state. Letters are always lowercased so
-    /// Shift comes through the modifier field; other scalars pass
-    /// through unchanged.
+    /// Codepoint to emit under Kitty flag 8 (`reportAllKeysAsEsc`) for a
+    /// given scalar + shift state. Collapses the received (shifted)
+    /// form to its *unshifted* base so Shift comes through the
+    /// modifier field rather than by swapping the base key:
+    ///
+    ///   - Uppercase ASCII letter → lowercase.
+    ///   - US-layout shifted symbol (`@`, `!`, `_`, `+`, etc.) →
+    ///     unshifted counterpart (`2`, `1`, `-`, `=`, etc.) when
+    ///     `shifted == true`. Without the Shift-held gate we'd
+    ///     clobber cases where a user typed the shifted form via a
+    ///     different route (Option combinations, macro replay) on a
+    ///     layout where the symbol is unshifted.
+    ///   - Anything else → pass through unchanged.
+    ///
+    /// Per-layout coverage is US-only; this table won't help German
+    /// QWERTZ (Shift+2 → `"`) or Dvorak. Full layout fidelity needs
+    /// Carbon's `UCKeyTranslate`, tracked separately.
     private func kittyAllKeysCodepoint(
         for scalar: UnicodeScalar,
         shifted: Bool
     ) -> UInt32 {
         if scalar.value >= 0x41 && scalar.value <= 0x5A {
-            // Uppercase A-Z → lowercase; Shift is already in the
-            // modifier bits so the CSI-u consumer re-shifts as needed.
             return scalar.value + 0x20
         }
-        _ = shifted
+        if shifted, let base = Self.usLayoutUnshiftedSymbol(scalar) {
+            return base
+        }
         return scalar.value
     }
 
-    /// Flag 4 (`reportAlternateKeys`) shifted-form codepoint for an
-    /// ASCII letter. `'A'..'Z'` → themselves (already shifted);
-    /// `'a'..'z'` → uppercase (which is what Shift produces). `nil`
-    /// for non-letters — we don't have a reliable shifted form for
-    /// symbols without layout context that `NSEvent` doesn't expose.
+    /// US-layout reverse map: given a shifted symbol the user just
+    /// pressed (e.g. `@`), return the unshifted key codepoint (`2`).
+    /// Returns nil for characters that either aren't ASCII symbols or
+    /// aren't on the shift-row of a US layout. Letters are handled
+    /// separately via the `'A'..'Z'` range check above.
+    ///
+    /// The `fileprivate static` makes the table a fixed compile-time
+    /// cost, reachable from tests without re-declaring.
+    fileprivate static func usLayoutUnshiftedSymbol(_ scalar: UnicodeScalar) -> UInt32? {
+        switch scalar.value {
+        case 0x21: return 0x31   // ! ← 1
+        case 0x40: return 0x32   // @ ← 2
+        case 0x23: return 0x33   // # ← 3
+        case 0x24: return 0x34   // $ ← 4
+        case 0x25: return 0x35   // % ← 5
+        case 0x5E: return 0x36   // ^ ← 6
+        case 0x26: return 0x37   // & ← 7
+        case 0x2A: return 0x38   // * ← 8
+        case 0x28: return 0x39   // ( ← 9
+        case 0x29: return 0x30   // ) ← 0
+        case 0x5F: return 0x2D   // _ ← -
+        case 0x2B: return 0x3D   // + ← =
+        case 0x7B: return 0x5B   // { ← [
+        case 0x7D: return 0x5D   // } ← ]
+        case 0x3A: return 0x3B   // : ← ;
+        case 0x22: return 0x27   // " ← '
+        case 0x3C: return 0x2C   // < ← ,
+        case 0x3E: return 0x2E   // > ← .
+        case 0x3F: return 0x2F   // ? ← /
+        case 0x7E: return 0x60   // ~ ← `
+        case 0x7C: return 0x5C   // | ← \
+        default: return nil
+        }
+    }
+
+    /// Flag 4 (`reportAlternateKeys`) shifted-form codepoint for the
+    /// scalar the user just pressed. The scalar arrives post-Shift
+    /// from `NSEvent.charactersIgnoringModifiers`, so:
+    ///
+    ///   - ASCII letters: `'A'..'Z'` is already the shifted form
+    ///     (return as-is); `'a'..'z'` upcases.
+    ///   - US-layout shifted symbols (`@`, `!`, etc.): scalar IS the
+    ///     shifted form, so return it directly.
+    ///   - Anything else: nil — the shifted form isn't derivable
+    ///     without a keyboard-layout lookup we don't do yet.
+    ///
+    /// Non-US layouts still miss. Full layout fidelity requires
+    /// `UCKeyTranslate`; tracked as follow-up.
     private func shiftedCodepointForLetter(_ scalar: UnicodeScalar) -> UInt32? {
         if scalar.value >= 0x41 && scalar.value <= 0x5A { return scalar.value }
         if scalar.value >= 0x61 && scalar.value <= 0x7A { return scalar.value - 0x20 }
+        // Shifted ASCII symbol: the scalar itself IS the shifted form.
+        // `usLayoutUnshiftedSymbol` returns non-nil iff the scalar is a
+        // known US-layout shift-row glyph; reuse that membership test
+        // to decide whether to emit a shifted slot.
+        if Self.usLayoutUnshiftedSymbol(scalar) != nil {
+            return scalar.value
+        }
         return nil
     }
 

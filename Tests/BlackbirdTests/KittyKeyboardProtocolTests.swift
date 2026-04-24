@@ -398,6 +398,55 @@ final class KittyKeyboardProtocolTests: XCTestCase {
                        csiU(97, mod: 1))
     }
 
+    // MARK: - Flag 4: US-layout symbols
+
+    func test_flag4_shiftDigit2_emitsUnshiftedBaseWithShiftedAlt() {
+        // Canonical shifted-symbol case: Shift+2 on US layout produces "@".
+        // Flag 4 reverse-lookup must resolve the unshifted base ('2' = 50)
+        // and report the typed symbol ('@' = 64) in the alternate slot.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
+        XCTAssertEqual(enc.encode(chars: "@", modifiers: [.shift], mode: mode),
+                       Data("\u{1B}[50:0:64;2u".utf8))
+    }
+
+    func test_flag4_shiftHyphenToUnderscore() {
+        // Shift+'-' → '_'. Base 45, shifted 95.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
+        XCTAssertEqual(enc.encode(chars: "_", modifiers: [.shift], mode: mode),
+                       Data("\u{1B}[45:0:95;2u".utf8))
+    }
+
+    func test_flag4_shiftSlashToQuestion() {
+        // Shift+'/' → '?'. Base 47, shifted 63.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
+        XCTAssertEqual(enc.encode(chars: "?", modifiers: [.shift], mode: mode),
+                       Data("\u{1B}[47:0:63;2u".utf8))
+    }
+
+    func test_flag4_unshiftedSymbol_noShiftPayload() {
+        // Without Shift, there's no shifted alternate to report. Plain "1"
+        // under flag 8+4 must emit the same `ESC[49u` as flag 8 alone — the
+        // reverse-lookup only fires when Shift is held.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
+        XCTAssertEqual(enc.encode(chars: "1", modifiers: [], mode: mode),
+                       csiU(49, mod: 1))
+    }
+
+    func test_flag4_nonAsciiSymbol_noShiftedPayload() {
+        // Shift+É isn't a US-layout letter or a known shifted ASCII symbol,
+        // so the reverse-lookup must fail gracefully — no `:0:` section, no
+        // invented base codepoint. Falls back to flag-8 single-codepoint
+        // output with the shift modifier bit set.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
+        XCTAssertEqual(enc.encode(chars: "É", modifiers: [.shift], mode: mode),
+                       csiU(0xC9, mod: 2))
+    }
+
     // MARK: - Flag 8: report all keys as CSI u
 
     func test_flag8_plainLetter_emitsCsiU() {
