@@ -668,6 +668,14 @@ impl OscScanner<'_> {
         if std::str::from_utf8(&decoded).is_err() {
             return;
         }
+        // Reject embedded NUL bytes. `%00` is valid UTF-8 and slips past
+        // the str::from_utf8 gate, but a pathname containing NUL is
+        // nonsense at the OS level (C string terminator) and lets a
+        // hostile payload truncate what downstream consumers see when
+        // they cast through a C API. TST-S1-014.
+        if decoded.contains(&0) {
+            return;
+        }
 
         let ev = BBEvent {
             kind: BBEventKind::CwdChanged,
