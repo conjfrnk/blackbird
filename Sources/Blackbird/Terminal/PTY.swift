@@ -563,23 +563,32 @@ public final class PTY {
     /// prompt, the fg pgroup equals the shell pgroup and this returns
     /// false.
     public func hasForegroundChild() -> Bool {
-        let fg = tcgetpgrp(masterFD)
-        guard fg > 0 else { return false }
-        let shellPgid = getpgid(childPID)
-        if shellPgid <= 0 {
-            // ECHILD typically — means the shell process is gone. No
-            // foreground child to report; return false so callers don't
-            // block on a dead session. Audit pty F5.
-            return false
+        // F-S5-001: serialise the `masterFD` read against the read-loop's
+        // close. Without this, a `tcgetpgrp` call that races a close can
+        // hit a kernel-recycled fd belonging to another subsystem
+        // (network socket, log fd, another PTY master) and return a
+        // bogus pgroup. When the PTY is already stopped there's nothing
+        // to report — skip the syscall entirely.
+        return stateQueue.sync {
+            guard _isRunning else { return false }
+            let fg = tcgetpgrp(masterFD)
+            guard fg > 0 else { return false }
+            let shellPgid = getpgid(childPID)
+            if shellPgid <= 0 {
+                // ECHILD typically — means the shell process is gone. No
+                // foreground child to report; return false so callers don't
+                // block on a dead session. Audit pty F5.
+                return false
+            }
+            // Normal case: the shell's pgid equals its pid, and
+            // `fg != shellPgid` means some other process group is the
+            // foreground (a command running under the shell). If the shell
+            // has deliberately `setpgid`'d to a different pgroup — rare, but
+            // legal — this comparison is the right one: we're asking "is
+            // the FOREGROUND tty-reader different from the SHELL pgroup?",
+            // which is what close-confirm and cwd-inheritance actually need.
+            return fg != shellPgid
         }
-        // Normal case: the shell's pgid equals its pid, and
-        // `fg != shellPgid` means some other process group is the
-        // foreground (a command running under the shell). If the shell
-        // has deliberately `setpgid`'d to a different pgroup — rare, but
-        // legal — this comparison is the right one: we're asking "is
-        // the FOREGROUND tty-reader different from the SHELL pgroup?",
-        // which is what close-confirm and cwd-inheritance actually need.
-        return fg != shellPgid
     }
 
     /// Current working directory of the tty's foreground process. Reads via
@@ -589,11 +598,19 @@ public final class PTY {
     /// This matches what Terminal.app / iTerm2 inherit when you hit ⌘T.
     /// Returns nil on any syscall failure.
     public func foregroundWorkingDirectory() -> String? {
-        let fg = tcgetpgrp(masterFD)
-        let targetPID: pid_t = fg > 0 ? fg : childPID
+        // F-S5-001: same fd-close race as `hasForegroundChild`. Capture
+        // the target PID under the state lock, then do the out-of-lock
+        // `proc_pidinfo` syscall so we don't hold the lock across kernel
+        // work.
+        let targetPID: pid_t? = stateQueue.sync {
+            guard _isRunning else { return nil }
+            let fg = tcgetpgrp(masterFD)
+            return fg > 0 ? fg : childPID
+        }
+        guard let pid = targetPID else { return nil }
         var info = proc_vnodepathinfo()
         let bytes = proc_pidinfo(
-            targetPID,
+            pid,
             PROC_PIDVNODEPATHINFO,
             0,
             &info,
@@ -614,9 +631,17 @@ public final class PTY {
     /// in its termios settings. `tcgetpgrp` returns the foreground pgroup of
     /// the slave side; `kill(-pgrp, sig)` targets the whole group.
     public func sendSignalToForeground(_ sig: Int32) {
-        let pgrp = tcgetpgrp(masterFD)
+        // F-S5-001: serialise against the read-loop close. `kill(-pgrp)`
+        // stays outside the lock so we don't hold it across a signal-
+        // delivery syscall.
+        let pgrp: pid_t = stateQueue.sync {
+            guard _isRunning else { return 0 }
+            return tcgetpgrp(masterFD)
+        }
         if pgrp > 0 {
             kill(-pgrp, sig)
+        } else {
+            Self.logger.warning("sendSignalToForeground: tcgetpgrp returned \(pgrp, privacy: .public) errno=\(errno, privacy: .public)")
         }
     }
 
@@ -640,13 +665,20 @@ public final class PTY {
             ws_row: size.rows, ws_col: size.cols,
             ws_xpixel: 0, ws_ypixel: 0
         )
-        let result = withUnsafeMutablePointer(to: &winsize) { ptr in
-            ioctl(masterFD, TIOCSWINSZ, ptr)
+        // F-S5-001: serialise against the read-loop close. `ioctl` on a
+        // freshly-recycled fd belonging to another subsystem is exactly
+        // the TOCTOU the review flagged. When the PTY has stopped there
+        // is no-one to send SIGWINCH to, so the ioctl is a no-op; skip.
+        let result: Int32 = stateQueue.sync {
+            guard _isRunning else { return 0 }
+            return withUnsafeMutablePointer(to: &winsize) { ptr in
+                ioctl(masterFD, TIOCSWINSZ, ptr)
+            }
         }
         if result != 0 {
             let savedErrno = errno
             Self.logger.log(
-                "PTY.resize TIOCSWINSZ failed errno=\(savedErrno, privacy: .public) fd=\(self.masterFD, privacy: .public)"
+                "PTY.resize TIOCSWINSZ failed errno=\(savedErrno, privacy: .public)"
             )
         }
     }
