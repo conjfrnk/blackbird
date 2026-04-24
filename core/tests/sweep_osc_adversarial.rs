@@ -113,7 +113,11 @@ fn osc_133_d_long_exit_code_truncates_to_16_bytes() {
 
     let events = drive(&seq);
     let marks = prompt_marks(&events);
-    assert_eq!(marks.len(), 1, "expected one PromptMark event; got {marks:?}");
+    assert_eq!(
+        marks.len(),
+        1,
+        "expected one PromptMark event; got {marks:?}"
+    );
     let (kind, bytes) = &marks[0];
     assert_eq!(*kind, 4, "kind must be D=4");
     assert!(
@@ -263,9 +267,7 @@ fn osc7_percent_00_embedded_nul_is_filtered_or_silenced() {
     let events = drive(seq);
     let cwd: Vec<_> = events
         .iter()
-        .filter(|(k, b, _)| {
-            *k == bc::BBEventKind::CwdChanged as u32 && b.contains(&0u8)
-        })
+        .filter(|(k, b, _)| *k == bc::BBEventKind::CwdChanged as u32 && b.contains(&0u8))
         .collect();
     assert!(
         cwd.is_empty(),

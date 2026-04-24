@@ -16,10 +16,12 @@
 //! deterministic PRNG.
 //!
 //! Pre-flight summary:
-//!   - throughput soak: 6 MiB in-RAM payload, ~3 s (default
-//!     `WALL_BUDGET_MS`); peak resident < 50 MiB.
-//!   - parser-state soak: 50,000 mixed FFI calls, ~30 s; peak resident
-//!     < 50 MiB.
+//!
+//! - throughput soak: 6 MiB in-RAM payload, ~3 s (default
+//!   `WALL_BUDGET_MS`); peak resident < 50 MiB.
+//! - parser-state soak: 50,000 mixed FFI calls, ~30 s; peak resident
+//!   < 50 MiB.
+//!
 //! NOT a 60-second wall-clock sweep — that would add brittle CI
 //! variance. The shape is "do enough work to surface a leak"; if the
 //! caller wants longer, they can multiply the loop counts.
@@ -163,7 +165,7 @@ fn soak_50k_mixed_ffi_calls_remain_consistent() {
         b"\x1b[2J",
         b"\x1b[?25l",
         b"\x1b[?25h",
-        b"\x1b[c", // DA1
+        b"\x1b[c",           // DA1
         b"\xF0\x9F\x98\x80", // emoji
         b"\x1b[>4;2m",       // modifyOtherKeys on
         b"\x1b[>4;0m",       // modifyOtherKeys off
@@ -176,7 +178,7 @@ fn soak_50k_mixed_ffi_calls_remain_consistent() {
         for i in 0..ITERATIONS {
             let r = next(&mut state);
             match r % 7 {
-                0 | 1 | 2 => {
+                0..=2 => {
                     // Most-frequent op: feed a small chunk.
                     let chunk = chunks[(r / 7) as usize % chunks.len()];
                     bc::bb_term_input(term, chunk.as_ptr(), chunk.len());
@@ -215,7 +217,7 @@ fn soak_50k_mixed_ffi_calls_remain_consistent() {
                 let cols = (*snap).cols;
                 let rows = (*snap).rows;
                 assert!(
-                    cols >= 2 && cols <= 1000 && rows >= 2 && rows <= 1000,
+                    (2..=1000).contains(&cols) && (2..=1000).contains(&rows),
                     "dims must stay within bounds at iter {i}: {cols}×{rows}"
                 );
                 let cells_len = (*snap).cells_len;

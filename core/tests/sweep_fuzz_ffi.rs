@@ -29,10 +29,7 @@ unsafe extern "C" fn capture_cb(ev: bc::BBEvent, ctx: *mut c_void) {
     let cap = unsafe { &*(ctx as *const Mutex<Captured>) };
     let mut guard = cap.lock().unwrap();
     guard.events.push(ev.kind as u32);
-    if ev.kind as u32 == bc::BBEventKind::PtyWrite as u32
-        && !ev.payload.is_null()
-        && ev.len > 0
-    {
+    if ev.kind as u32 == bc::BBEventKind::PtyWrite as u32 && !ev.payload.is_null() && ev.len > 0 {
         let bytes = unsafe { std::slice::from_raw_parts(ev.payload, ev.len) };
         guard.pty_writes.push(bytes.to_vec());
     }
@@ -518,8 +515,7 @@ fn damage_rows_writes_to_unaligned_out_buffer() {
         // the FFI promise that bytes-wise copy works.
         let mut backing = [0u8; 32];
         let unaligned_out = backing.as_mut_ptr().add(1) as *mut u16;
-        let total =
-            bc::bb_snap_damage_rows(s1, unaligned_out, /*out_cap=*/ 4);
+        let total = bc::bb_snap_damage_rows(s1, unaligned_out, /*out_cap=*/ 4);
         // No assertion on the EXACT total — alacritty's damage policy
         // is implementation-defined for a 1-char write — only that
         // calling with an unaligned out doesn't trap and returns a
