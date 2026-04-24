@@ -509,6 +509,77 @@ final class KittyKeyboardProtocolTests: XCTestCase {
                        csiU(13, mod: 2))
     }
 
+    // MARK: - xterm modifyOtherKeys (CSI 27 ; mod ; cp ~)
+
+    // Emacs and other TUIs ask for xterm's `modifyOtherKeys` level 2
+    // encoding via `CSI > 4 ; 2 m`, which lights BBTermMode.modifyOtherKeys.
+    // The encoder's contract when that bit is on — and none of the Kitty
+    // flags are set — is `CSI 27 ; <mod> ; <cp> ~` for any modified key,
+    // with `<mod>` = 1 + (shift?1:0) + (option?2:0) + (ctrl?4:0) and
+    // `<cp>` the raw codepoint Cocoa delivered in `chars`.
+
+    func test_modifyOtherKeys_shiftEnter_emitsCsi27() {
+        // Shift's mod bit = 1, plus base 1 = 2. `\r` codepoint = 13.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: [.modifyOtherKeys]),
+                       Data("\u{1B}[27;2;13~".utf8))
+    }
+
+    func test_modifyOtherKeys_ctrlPeriod_emitsCsi27() {
+        // Emacs canonical test — Ctrl+. is unreachable via legacy byte
+        // encoding, which is the whole reason modifyOtherKeys exists.
+        // Ctrl's mod bit = 4, plus base 1 = 5. `.` codepoint = 46.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: ".", modifiers: [.control], mode: [.modifyOtherKeys]),
+                       Data("\u{1B}[27;5;46~".utf8))
+    }
+
+    func test_modifyOtherKeys_plainKey_usesLegacyPath() {
+        // Zero modifiers → no CSI 27 branch. Plain "a" must still hit the
+        // legacy printable path so the default shell contract holds.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: "a", modifiers: [], mode: [.modifyOtherKeys]),
+                       Data("a".utf8))
+    }
+
+    func test_modifyOtherKeys_shiftLetter_emitsUppercaseCodepoint() {
+        // Cocoa applies Shift for us: chars comes in as "A" (cp=65), not
+        // lowercased "a" like the Kitty flag-8 path. modifyOtherKeys uses
+        // the raw codepoint from chars verbatim.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: "A", modifiers: [.shift], mode: [.modifyOtherKeys]),
+                       Data("\u{1B}[27;2;65~".utf8))
+    }
+
+    func test_modifyOtherKeys_kittyPrecedence_kittyWins() {
+        // When both modifyOtherKeys and a Kitty flag are lit, the Kitty
+        // path wins. Pins the precedence rule so a future refactor can't
+        // accidentally flip them.
+        let enc = KeyEncoder()
+        let mode: BBTermMode = [.disambiguateEscCodes, .modifyOtherKeys]
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [.shift], mode: mode),
+                       csiU(13, mod: 2))
+    }
+
+    func test_modifyOtherKeys_releaseReturnsEmpty() {
+        // Release traffic drops — xterm's modifyOtherKeys has no paired
+        // release event, unlike Kitty's flag 2.
+        let enc = KeyEncoder()
+        let out = enc.encode(
+            chars: "\r", modifiers: [.shift], mode: [.modifyOtherKeys], eventType: .release
+        )
+        XCTAssertEqual(out, Data())
+    }
+
+    func test_modifyOtherKeys_shiftCtrlAlt_combinedMod() {
+        // All three mod bits present: shift=1 + alt=2 + ctrl=4 + base 1 = 8.
+        let enc = KeyEncoder()
+        XCTAssertEqual(
+            enc.encode(chars: ".", modifiers: [.shift, .control, .option], mode: [.modifyOtherKeys]),
+            Data("\u{1B}[27;8;46~".utf8)
+        )
+    }
+
     // MARK: - End-to-end: round-trip with real BBTerm
 
     func test_endToEnd_kittyProtocolLightsBitAndFlipsEncoder() {

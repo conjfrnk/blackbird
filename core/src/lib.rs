@@ -426,6 +426,11 @@ struct OscScanner<'a> {
     /// the chunk, replacing the old byte-level augmentation that corrupted
     /// OSC/DCS payloads (rust-core-2 F1).
     saw_ed_all: &'a mut bool,
+    /// xterm `modifyOtherKeys` level bucket. `csi_dispatch` updates this
+    /// when it sees `CSI > 4 ; N m`. 0 = off, 1 / 2 = level. Writer
+    /// into `BBTerm.modify_other_keys`; downstream code reads the same
+    /// field and maps non-zero to `bb_mode::MODIFY_OTHER_KEYS`.
+    modify_other_keys: &'a mut u8,
 }
 
 impl Perform for OscScanner<'_> {
@@ -453,6 +458,26 @@ impl Perform for OscScanner<'_> {
                 if first.first().copied() == Some(2) {
                     *self.saw_ed_all = true;
                 }
+            }
+        }
+
+        // xterm `modifyOtherKeys`: `CSI > 4 ; N m`. `>` is the only
+        // intermediate; first param == 4; second param == 0 (off), 1
+        // (level 1), or 2 (level 2). We also accept `CSI > 4 m` (no
+        // second param) as the reset form, matching xterm's manpage.
+        // alacritty_terminal 0.26.0 does not handle this sequence —
+        // we own the entire parse path for it.
+        if action == 'm' && intermediates == [b'>'] {
+            let mut it = params.iter();
+            let first = it.next().and_then(|p| p.first().copied());
+            if first == Some(4) {
+                let level = it.next().and_then(|p| p.first().copied()).unwrap_or(0);
+                let clamped: u8 = match level {
+                    0 => 0,
+                    1 | 2 => level as u8,
+                    _ => return, // unknown level — ignore, don't poison state
+                };
+                *self.modify_other_keys = clamped;
             }
         }
     }
@@ -809,6 +834,13 @@ pub struct BBTerm {
     /// `hook`/`put`/`unhook` and `core/tests/xtgettcap.rs`.
     in_xtgettcap: bool,
     xtgettcap_buf: Vec<u8>,
+    /// xterm `modifyOtherKeys` current level. `0` = off, `1` = level 1
+    /// (encode colliders + "unmapped" Ctrl combos), `2` = level 2
+    /// (encode every modified printable, overriding legacy byte
+    /// mappings). Driven by parser observations of `CSI > 4 ; N m`.
+    /// Swift-side KeyEncoder reads this indirectly via
+    /// `bb_mode::MODIFY_OTHER_KEYS` (any non-zero level → bit set).
+    modify_other_keys: u8,
     callback: Arc<CallbackCell>,
     /// Persistent OSC 8 URI intern store (rust-core-3 F1). Maps URI string →
     /// shared `Arc<CStr>`; entries survive across snapshots so the same URI
@@ -1023,6 +1055,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             callback,
             uri_cstr_cache: std::collections::HashMap::new(),
             uri_cache_bytes: 0,
+            modify_other_keys: 0,
         });
         Box::into_raw(bb)
     })
@@ -1129,6 +1162,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     in_xtgettcap: &mut bb.in_xtgettcap,
                     xtgettcap_buf: &mut bb.xtgettcap_buf,
                     saw_ed_all: &mut saw_ed_all,
+                    modify_other_keys: &mut bb.modify_other_keys,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
@@ -1165,6 +1199,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             in_xtgettcap: &mut bb.in_xtgettcap,
             xtgettcap_buf: &mut bb.xtgettcap_buf,
             saw_ed_all: &mut saw_ed_all,
+            modify_other_keys: &mut bb.modify_other_keys,
         };
         bb.osc_parser.advance(&mut osc, slice);
         // Emit the scrollback-erase AFTER the chunk was consumed so any
@@ -1340,6 +1375,19 @@ pub mod bb_mode {
     pub const REPORT_ALTERNATE_KEYS: u32 = 1 << 13;
     pub const REPORT_ALL_KEYS_AS_ESC: u32 = 1 << 14;
     pub const REPORT_ASSOCIATED_TEXT: u32 = 1 << 15;
+    /// xterm `modifyOtherKeys` level ≥ 1 is active. Enabled by
+    /// `CSI > 4 ; 1 m` or `CSI > 4 ; 2 m`; cleared by `CSI > 4 ; 0 m`.
+    /// Blackbird treats both non-zero levels as "on" — Emacs asks for
+    /// level 2; level 1's gating table is historical and rarely requested
+    /// in practice. When on, the KeyEncoder emits
+    /// `CSI 27 ; <mod> ; <cp> ~` for modified printables + control-code
+    /// colliders (Tab/Enter/Esc/Backspace) instead of raw bytes. See
+    /// <https://invisible-island.net/xterm/modified-keys.html>.
+    ///
+    /// Precedence: Kitty flags (if any set) take priority over
+    /// modifyOtherKeys. A TUI that pushes Kitty gets Kitty output;
+    /// Emacs without Kitty gets modifyOtherKeys output.
+    pub const MODIFY_OTHER_KEYS: u32 = 1 << 16;
 }
 
 /// Immutable snapshot of terminal grid state. Ref-counted via `bb_snap_retain` /
@@ -1804,6 +1852,19 @@ fn extract_mode(term_mode: &TermMode) -> u32 {
     m
 }
 
+/// Like `extract_mode` but also folds in the `modifyOtherKeys` bit
+/// sourced from `BBTerm.modify_other_keys` (any non-zero level → bit
+/// set). Kept separate from `extract_mode` so the pure
+/// `TermMode → u32` mapping (exposed to callers that only see the
+/// alacritty mode) stays argument-clean.
+fn extract_mode_with_extras(bb: &BBTerm) -> u32 {
+    let mut m = extract_mode(bb.term.mode());
+    if bb.modify_other_keys > 0 {
+        m |= bb_mode::MODIFY_OTHER_KEYS;
+    }
+    m
+}
+
 /// Take an immutable snapshot of the current grid state.
 ///
 /// # Safety
@@ -1995,7 +2056,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         bb.uri_cstr_cache = uri_cache;
         bb.uri_cache_bytes = uri_cache_bytes;
         let term_mode = bb.term.mode();
-        let mode = extract_mode(term_mode);
+        let mode = extract_mode_with_extras(bb);
         // DECTCEM (ESC [ ? 25 h/l) toggles SHOW_CURSOR. Previously we
         // hardcoded true, so a TUI asking for a hidden cursor (less in
         // page view, fzf, nvim during paint) would still get drawn by
@@ -2176,7 +2237,7 @@ pub unsafe extern "C" fn bb_term_current_mode(term: *mut BBTerm) -> u32 {
             return 0;
         }
         let bb = &*term;
-        extract_mode(bb.term.mode())
+        extract_mode_with_extras(bb)
     })
 }
 

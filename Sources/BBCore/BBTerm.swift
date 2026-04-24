@@ -299,6 +299,14 @@ public struct BBTermMode: OptionSet {
     public static let reportAlternateKeys  = BBTermMode(rawValue: 1 << 13)
     public static let reportAllKeysAsEsc   = BBTermMode(rawValue: 1 << 14)
     public static let reportAssociatedText = BBTermMode(rawValue: 1 << 15)
+    /// xterm `modifyOtherKeys` level ≥ 1. Set when the TUI pushes
+    /// `CSI > 4 ; 1 m` or `CSI > 4 ; 2 m`. The encoder emits
+    /// `CSI 27 ; <mod> ; <cp> ~` for modified printables + control-code
+    /// colliders (Tab / Enter / Esc / Backspace) so Emacs-family
+    /// programs receive unambiguous bytes for keys like Ctrl+. /
+    /// Ctrl+, / Shift+Return that the legacy encoding can't express.
+    /// Kitty protocol flags take precedence when any Kitty bit is set.
+    public static let modifyOtherKeys = BBTermMode(rawValue: 1 << 16)
 }
 
 /// Immutable snapshot of the grid. Holds a ref until deinit.

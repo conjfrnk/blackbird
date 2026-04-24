@@ -114,6 +114,22 @@
 #define REPORT_ASSOCIATED_TEXT (1 << 15)
 
 /**
+ * xterm `modifyOtherKeys` level ≥ 1 is active. Enabled by
+ * `CSI > 4 ; 1 m` or `CSI > 4 ; 2 m`; cleared by `CSI > 4 ; 0 m`.
+ * Blackbird treats both non-zero levels as "on" — Emacs asks for
+ * level 2; level 1's gating table is historical and rarely requested
+ * in practice. When on, the KeyEncoder emits
+ * `CSI 27 ; <mod> ; <cp> ~` for modified printables + control-code
+ * colliders (Tab/Enter/Esc/Backspace) instead of raw bytes. See
+ * <https://invisible-island.net/xterm/modified-keys.html>.
+ *
+ * Precedence: Kitty flags (if any set) take priority over
+ * modifyOtherKeys. A TUI that pushes Kitty gets Kitty output;
+ * Emacs without Kitty gets modifyOtherKeys output.
+ */
+#define MODIFY_OTHER_KEYS (1 << 16)
+
+/**
  * Kind of terminal event forwarded to the C caller.
  */
 enum BBEventKind

@@ -157,6 +157,38 @@ public final class KeyEncoder {
             )
         }
 
+        // xterm `modifyOtherKeys` — `CSI 27 ; <mod> ; <cp> ~`.
+        //
+        // Precedence: Kitty flags win when active; this branch only
+        // fires in the Kitty-absent case. Matches the consensus of
+        // WezTerm / Ghostty / tmux (industry-wide, though xterm's spec
+        // leaves the interaction undefined). Scope is the 80/20:
+        //
+        //   - Any printable with a modifier (Shift+Enter, Ctrl+.,
+        //     Ctrl+,, etc.) where Cocoa already gave us the intended
+        //     codepoint in `chars`. The codepoint is
+        //     `chars.unicodeScalars.first!.value` verbatim — Cocoa
+        //     applied Shift/Option already, so Shift+2 arrives as "@"
+        //     (or "2" for layouts where 2 is unshifted), matching the
+        //     unshifted-printable rule.
+        //
+        // Known limitation: Ctrl+letter cases where Cocoa pre-converts
+        // to the C0 byte (e.g. Ctrl+i → "\t") emit `CSI 27 ; 5 ; 9 ~`
+        // instead of the level-2-correct `CSI 27 ; 5 ; 105 ~`. Emacs
+        // inside a terminal normally uses level 2 with Kitty as the
+        // primary transport anyway; users who want pixel-perfect
+        // modifyOtherKeys-only Ctrl+letter output should enable
+        // Kitty flag 8 as well. Document in KNOWN_ISSUES.md.
+        let kittyAnyActive = kitty || allKeys || alternateKeys || associatedText
+            || mode.contains(.reportEventTypes)
+        if !kittyAnyActive,
+           mode.contains(.modifyOtherKeys),
+           hasMods,
+           let scalar = chars.unicodeScalars.first {
+            if eventType == .release { return Data() }
+            return csi27(codepoint: scalar.value, modifiers: effectiveMods)
+        }
+
         // Ctrl+printable: only the first character is transformed.
         if modifiers.contains(.control), let scalar = chars.unicodeScalars.first {
             // Kitty disambiguation: Ctrl+{i,m,[,h} legacy-alias Tab/Enter/Esc/
@@ -517,6 +549,25 @@ public final class KeyEncoder {
             _ = hasMods // keypad modifier encoding is TUI-specific; omit.
             return Data([legacy])
         }
+    }
+
+    /// xterm `modifyOtherKeys` emit — `CSI 27 ; <mod> ; <cp> ~`. Uses
+    /// the same 1+bits modifier encoding as CSI u; the tilde final
+    /// byte distinguishes from CSI u's `u`. Emacs, tmux `extended-keys
+    /// on`, neovim auto-request, and the Julia/IPython REPLs all read
+    /// this shape. `formatOtherKeys=1` would use `u` instead — not
+    /// implemented; Emacs defaults to `~` so every real consumer is
+    /// covered.
+    private func csi27(codepoint: UInt32, modifiers: Modifiers) -> Data {
+        let mod = modifierParam(modifiers)
+        var bytes: [UInt8] = [0x1B, 0x5B]    // ESC [
+        bytes.append(contentsOf: Array("27".utf8))
+        bytes.append(0x3B)                    // ;
+        bytes.append(contentsOf: Array(String(mod).utf8))
+        bytes.append(0x3B)                    // ;
+        bytes.append(contentsOf: Array(String(codepoint).utf8))
+        bytes.append(0x7E)                    // ~
+        return Data(bytes)
     }
 
     /// xterm-style modifier parameter: 1 + (shift|alt|ctrl|meta bits).
