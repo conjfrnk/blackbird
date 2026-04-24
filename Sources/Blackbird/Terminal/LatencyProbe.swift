@@ -16,7 +16,7 @@ import os
 public final class LatencyProbe {
     public static let shared = LatencyProbe()
 
-    private let log = os.Logger(subsystem: "com.conjfrnk.blackbird", category: "latency")
+    private let log = os.Logger(subsystem: "dev.conjfrnk.blackbird", category: "latency")
 
     /// CFTimeInterval from `CACurrentMediaTime()` at the most recent keystroke
     /// dispatch. Zero means "no keystroke pending" — `markPresented()` is a

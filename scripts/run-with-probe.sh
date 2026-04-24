@@ -121,7 +121,7 @@ trap cleanup EXIT INT TERM
 # Stream the unified log. /usr/bin/log disambiguates from zsh's builtin,
 # which takes a different argument shape.
 # ---------------------------------------------------------------------------
-PREDICATE='subsystem == "dev.conjfrnk.blackbird" OR subsystem == "com.conjfrnk.blackbird"'
+PREDICATE='subsystem == "dev.conjfrnk.blackbird"'
 echo "==> Streaming filtered unified log. Ctrl-C to stop."
 echo "---------------------------------------------------------------"
 

@@ -111,7 +111,7 @@ final class LatencyHarnessTests: XCTestCase {
         let start = store.position(date: Date(timeIntervalSinceNow: -60))
         let predicate = NSPredicate(
             format: "subsystem == %@ AND category == %@",
-            "com.conjfrnk.blackbird", "latency"
+            "dev.conjfrnk.blackbird", "latency"
         )
         guard let entries = try? store.getEntries(at: start, matching: predicate) else {
             return nil

@@ -10,7 +10,7 @@
 # The test drives 50 synthetic markKeystroke→markPresented pairs under
 # BB_LATENCY_PROBE=1, forces a flush, and the probe logs:
 #   latency n=50 p50=<x>ms p99=<y>ms
-# to the unified log (subsystem com.conjfrnk.blackbird, category latency).
+# to the unified log (subsystem dev.conjfrnk.blackbird, category latency).
 # This script parses that line and asserts thresholds.
 set -euo pipefail
 
@@ -40,7 +40,7 @@ sleep 2
 LOG_OUT="$TMPDIR_WORK/log_show.txt"
 log show \
   --last 60s \
-  --predicate 'subsystem == "com.conjfrnk.blackbird" && category == "latency"' \
+  --predicate 'subsystem == "dev.conjfrnk.blackbird" && category == "latency"' \
   --info > "$LOG_OUT" 2>/dev/null || true
 
 echo "--- unified log entries (latency category, last 60s) ---"
