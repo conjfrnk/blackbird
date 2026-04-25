@@ -1193,31 +1193,55 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // later chunk. Set the latch so subsequent ESC-free chunks still
         // reach the parser.
         bb.osc_possibly_pending = true;
-        // Feed the chunk to the main processor in one pass. The old
-        // byte-level split on `\x1b[2J` is gone — see the comment above.
-        bb.processor.advance(&mut bb.term, slice);
-        // Drive the parallel OSC parser across the whole chunk. It is
-        // stateful across `bb_term_input` calls so fragmented OSC
-        // sequences (e.g. one byte per PTY read) still resolve to a
-        // single event. `saw_ed_all` is set via OscScanner::csi_dispatch
-        // exactly when the parser observes a top-level `CSI 2 J`.
-        let mut saw_ed_all = false;
-        let mut osc = OscScanner {
-            cell: &bb.callback,
-            in_xtgettcap: &mut bb.in_xtgettcap,
-            xtgettcap_buf: &mut bb.xtgettcap_buf,
-            saw_ed_all: &mut saw_ed_all,
-            modify_other_keys: &mut bb.modify_other_keys,
-        };
-        bb.osc_parser.advance(&mut osc, slice);
-        // Emit the scrollback-erase AFTER the chunk was consumed so any
-        // prior CSI ops in the same chunk execute first. One 3J per chunk
-        // is enough: repeated ED-alls in a single chunk still land on a
-        // clean viewport + scrollback once the 3J runs. The 3J is a short,
-        // fixed constant so we skip the parallel parser for it.
-        if saw_ed_all {
-            bb.processor.advance(&mut bb.term, b"\x1b[3J");
+        // Drive the parallel OSC parser BYTE-BY-BYTE so we know the exact
+        // offset of any top-level `CSI 2 J` dispatch within the chunk.
+        // The previous "advance whole chunk + inject ESC[3J at end"
+        // approach corrupted the main processor's state when the chunk
+        // ended with a parked ESC byte (e.g. `…\x1b[2J\x1b`): the
+        // injected ESC reset the parker, and the next chunk's
+        // `[<params><final>` got treated as printable text — visible to
+        // users running ratatui-style spinners (Claude Code, htop,
+        // fzf). With byte-precise positions we can inject `\x1b[3J`
+        // immediately after the dispatching `J` byte, while the main
+        // processor is provably in Ground state. Repro pinned in
+        // `core/tests/csi_fragmentation_repro.rs`.
+        // Allocation only happens if the chunk actually contains a top-
+        // level ED-all (rare); the common ESC-bearing chunk produces an
+        // empty `Vec` whose capacity stays at 0.
+        let mut ed_all_positions: Vec<usize> = Vec::new();
+        for (i, &byte) in slice.iter().enumerate() {
+            let mut saw_ed_all = false;
+            {
+                // Rebuild OscScanner each iteration so the borrow on
+                // `saw_ed_all` releases between bytes; otherwise we
+                // can't read the latch without dropping `osc`. The
+                // OscScanner itself is just a few borrowed pointers,
+                // so reconstruction is essentially free.
+                let mut osc = OscScanner {
+                    cell: &bb.callback,
+                    in_xtgettcap: &mut bb.in_xtgettcap,
+                    xtgettcap_buf: &mut bb.xtgettcap_buf,
+                    saw_ed_all: &mut saw_ed_all,
+                    modify_other_keys: &mut bb.modify_other_keys,
+                };
+                bb.osc_parser.advance(&mut osc, &[byte]);
+            }
+            if saw_ed_all {
+                ed_all_positions.push(i);
+            }
         }
+        // Drive the main processor in segments, injecting `\x1b[3J`
+        // between each segment that ends with a matching ED-all `J`
+        // byte. When `ed_all_positions` is empty (the common case
+        // for ESC-bearing chunks) this collapses to a single
+        // whole-chunk advance — same shape as before.
+        let mut start = 0;
+        for &end in &ed_all_positions {
+            bb.processor.advance(&mut bb.term, &slice[start..=end]);
+            bb.processor.advance(&mut bb.term, b"\x1b[3J");
+            start = end + 1;
+        }
+        bb.processor.advance(&mut bb.term, &slice[start..]);
         drain_color_requests(bb);
     })
 }
