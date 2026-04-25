@@ -119,23 +119,20 @@ jobs:
       # violation as a test failure, and xcodebuild test exits non-zero on any
       # failure, so this job is *also* the ASan/UBSan gate — do not weaken.
       #
-      # MallocNanoZone=0: macOS's nano-malloc reserves a fixed VM region for
-      # small allocations and exhausts it once ASan's shadow + a 900+-test
-      # cumulative allocation footprint ("nano zone abandoned…") tips the
-      # ceiling. Disabling nano falls back to the scalable allocator — no
-      # measurable test-time impact, no VM wall.
+      # Why two invocations: the v0.1.9 hardening sweep brought the suite to
+      # 900+ tests. Running them all in one xctest process under ASan +
+      # UBSan exhausts macos-14 GHA's VM-mapping ceiling mid-run ("nano
+      # zone abandoned due to inability to reserve vm space" → xctest
+      # restart loop). The host has plenty of physical memory; the wall
+      # is the per-process virtual-mapping limit. Splitting alphabetically
+      # at "L" gives each invocation a fresh VM space (~28 + ~27 classes
+      # per half) and keeps the same tests under the same sanitizers.
+      # Adds ~30 s of overhead per CI run for re-launching xcodebuild.
       #
-      # ASAN_OPTIONS:
-      # - quarantine_size_mb=16 (default 256): ASan's freed-allocation
-      #   quarantine retains memory before letting it be reused; 256 MB
-      #   accumulates fast under 900 tests' churn. 16 MB is plenty for
-      #   double-free / use-after-free detection on small allocs.
-      # - max_redzone=16 (default 2048): redzone padding around each alloc.
-      #   2 KiB × millions of allocs = serious overhead. 16 B catches
-      #   adjacent-byte overflows just as well for our workload.
-      # - allocator_release_to_os_interval_ms=100: aggressive page release
-      #   so freed memory comes back to the OS, not just to ASan's pool.
-      - name: xcodebuild build + test (ASan + UBSan gated)
+      # MallocNanoZone=0 + ASAN_OPTIONS tuning are belt-and-braces — they
+      # reduce per-process allocator + sanitiser footprint so we have
+      # margin even after the split.
+      - name: xcodebuild build + test (ASan + UBSan gated, batch 1 of 2)
         env:
           MallocNanoZone: "0"
           ASAN_OPTIONS: "quarantine_size_mb=16:max_redzone=16:allocator_release_to_os_interval_ms=100"
@@ -144,6 +141,72 @@ jobs:
             -project Blackbird.xcodeproj \
             -scheme Blackbird \
             -destination "platform=macOS,arch=arm64" \
+            -skip-testing:BlackbirdTests/LatencyHarnessTests \
+            -skip-testing:BlackbirdTests/LatencyProbeTests \
+            -skip-testing:BlackbirdTests/MainThreadWatchdogTests \
+            -skip-testing:BlackbirdTests/MainWindowControllerLifetimeTests \
+            -skip-testing:BlackbirdTests/MenuValidationTests \
+            -skip-testing:BlackbirdTests/MetalDeviceSelectionTests \
+            -skip-testing:BlackbirdTests/MetalRendererTests \
+            -skip-testing:BlackbirdTests/OSC133Tests \
+            -skip-testing:BlackbirdTests/PTYLifetimeRaceTests \
+            -skip-testing:BlackbirdTests/PTYTests \
+            -skip-testing:BlackbirdTests/PaletteInputsEqualityTests \
+            -skip-testing:BlackbirdTests/PowerAwareRenderingTests \
+            -skip-testing:BlackbirdTests/PreferencesMigrationTests \
+            -skip-testing:BlackbirdTests/PreferencesTests \
+            -skip-testing:BlackbirdTests/PromptJumpTests \
+            -skip-testing:BlackbirdTests/SelectionModeTests \
+            -skip-testing:BlackbirdTests/SessionShutdownBarrierTests \
+            -skip-testing:BlackbirdTests/SnapshotCoalescingTests \
+            -skip-testing:BlackbirdTests/TabRenameTests \
+            -skip-testing:BlackbirdTests/TabStripStressTests \
+            -skip-testing:BlackbirdTests/TerminalSessionAdversarialTests \
+            -skip-testing:BlackbirdTests/TerminalSessionTests \
+            -skip-testing:BlackbirdTests/TerminalViewTests \
+            -skip-testing:BlackbirdTests/ThemeResolutionTests \
+            -skip-testing:BlackbirdTests/TranslucencyCurveTests \
+            -skip-testing:BlackbirdTests/URLDetectorTests \
+            -skip-testing:BlackbirdTests/WordRangeTests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: xcodebuild build + test (ASan + UBSan gated, batch 2 of 2)
+        env:
+          MallocNanoZone: "0"
+          ASAN_OPTIONS: "quarantine_size_mb=16:max_redzone=16:allocator_release_to_os_interval_ms=100"
+        run: |
+          xcodebuild test \
+            -project Blackbird.xcodeproj \
+            -scheme Blackbird \
+            -destination "platform=macOS,arch=arm64" \
+            -only-testing:BlackbirdTests/LatencyHarnessTests \
+            -only-testing:BlackbirdTests/LatencyProbeTests \
+            -only-testing:BlackbirdTests/MainThreadWatchdogTests \
+            -only-testing:BlackbirdTests/MainWindowControllerLifetimeTests \
+            -only-testing:BlackbirdTests/MenuValidationTests \
+            -only-testing:BlackbirdTests/MetalDeviceSelectionTests \
+            -only-testing:BlackbirdTests/MetalRendererTests \
+            -only-testing:BlackbirdTests/OSC133Tests \
+            -only-testing:BlackbirdTests/PTYLifetimeRaceTests \
+            -only-testing:BlackbirdTests/PTYTests \
+            -only-testing:BlackbirdTests/PaletteInputsEqualityTests \
+            -only-testing:BlackbirdTests/PowerAwareRenderingTests \
+            -only-testing:BlackbirdTests/PreferencesMigrationTests \
+            -only-testing:BlackbirdTests/PreferencesTests \
+            -only-testing:BlackbirdTests/PromptJumpTests \
+            -only-testing:BlackbirdTests/SelectionModeTests \
+            -only-testing:BlackbirdTests/SessionShutdownBarrierTests \
+            -only-testing:BlackbirdTests/SnapshotCoalescingTests \
+            -only-testing:BlackbirdTests/TabRenameTests \
+            -only-testing:BlackbirdTests/TabStripStressTests \
+            -only-testing:BlackbirdTests/TerminalSessionAdversarialTests \
+            -only-testing:BlackbirdTests/TerminalSessionTests \
+            -only-testing:BlackbirdTests/TerminalViewTests \
+            -only-testing:BlackbirdTests/ThemeResolutionTests \
+            -only-testing:BlackbirdTests/TranslucencyCurveTests \
+            -only-testing:BlackbirdTests/URLDetectorTests \
+            -only-testing:BlackbirdTests/WordRangeTests \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
 
