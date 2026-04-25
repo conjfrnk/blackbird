@@ -348,6 +348,11 @@ public final class MetalRenderer {
     }
 
     public init?(device: MTLDevice, metrics: CellMetrics, scale: CGFloat = 2.0) {
+        // Pin CellInstance's stride / alignment contract with the shader
+        // BEFORE we touch any GPU state. `precondition` so Release builds
+        // crash here on layout drift rather than rendering scrambled UVs.
+        // F-S4-001 — the test-target call site never ran in production.
+        _pinCellInstanceLayout()
         guard let queue = device.makeCommandQueue() else { return nil }
         guard let library = device.makeDefaultLibrary() else { return nil }
         guard let vertexFn = library.makeFunction(name: "vertex_cell"),

@@ -93,17 +93,23 @@ struct CellInstance {
 /// If this fires after a deliberate field change: update Shaders.metal's
 /// mirror struct to match, rebuild, and only then update this constant.
 private let _cellInstanceLayoutPinned: Void = {
-    assert(MemoryLayout<CellInstance>.stride == 80,
-           "CellInstance stride drifted from the 80-byte contract mirrored "
-           + "in Shaders.metal — update the shader struct BEFORE widening "
-           + "this number.")
-    assert(MemoryLayout<CellInstance>.alignment == 16,
-           "CellInstance alignment must match Metal's natural 16-byte "
-           + "alignment for SIMD4 types.")
+    // `precondition` (not `assert`) because the layout contract is a hard
+    // wire-level invariant with `Shaders.metal` — a Release build on a
+    // host with a drifted stride would scramble UVs / colors silently.
+    // Better to crash on first render than to ship pixels that look
+    // 'almost right'. F-S4-001.
+    precondition(MemoryLayout<CellInstance>.stride == 80,
+                 "CellInstance stride drifted from the 80-byte contract mirrored "
+                 + "in Shaders.metal — update the shader struct BEFORE widening "
+                 + "this number.")
+    precondition(MemoryLayout<CellInstance>.alignment == 16,
+                 "CellInstance alignment must match Metal's natural 16-byte "
+                 + "alignment for SIMD4 types.")
 }()
 
 /// Forces evaluation of `_cellInstanceLayoutPinned` at module load so the
-/// assertion fires during unit tests / debug runs rather than only when a
-/// particular code path touches the constant.
+/// precondition fires during unit tests / debug runs and during the first
+/// `MetalRenderer.init` on Release builds — catching layout drift before
+/// any frame is drawn.
 @inline(never)
 func _pinCellInstanceLayout() { _ = _cellInstanceLayoutPinned }
