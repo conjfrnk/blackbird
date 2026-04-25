@@ -479,7 +479,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // removes the view's height contribution, so safeAreaInsets.top
         // drops back to the titlebar-only 32pt value.
         if let themeFrame = window.contentView?.superview {
-            #if DEBUG
             var matches = 0
             hideTabBarViews(in: themeFrame, matchesFound: &matches)
             // Log when the walker finds zero TabBar-classed views in a
@@ -492,13 +491,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             if inGroup, matches == 0 {
                 Self.tabsLogger.warning("hideNativeTabStrip: 0 'TabBar' views found in a multi-tab window — AppKit may have renamed its private class; pill + native strip may both be visible.")
             }
-            #else
-            hideTabBarViews(in: themeFrame)
-            #endif
         }
     }
 
-    #if DEBUG
+    /// Recursively hide AppKit-private "TabBar" views so they don't
+    /// stack on top of our pill strip. `matchesFound` lets the caller
+    /// log a canary when the walker turns up empty in a multi-tab
+    /// window (a future macOS renaming the private class).
     private func hideTabBarViews(in view: NSView, matchesFound: inout Int) {
         let className = String(describing: type(of: view))
         if className.contains("TabBar") {
@@ -510,18 +509,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             hideTabBarViews(in: sub, matchesFound: &matchesFound)
         }
     }
-    #else
-    private func hideTabBarViews(in view: NSView) {
-        let className = String(describing: type(of: view))
-        if className.contains("TabBar") {
-            view.isHidden = true
-            view.frame = .zero
-        }
-        for sub in view.subviews {
-            hideTabBarViews(in: sub)
-        }
-    }
-    #endif
 
     private func observeTabGroup() {
         tabGroupObservers.removeAll()
