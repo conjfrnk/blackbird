@@ -487,10 +487,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // silently stops working and users see both the native and
             // the custom strip at once. os.Logger with `.public` so the
             // message isn't redacted in `log stream`. (main-window F7)
+            //
+            // The logger itself is DEBUG-only (developer canary; we
+            // don't surface this in Release because the user can't act
+            // on it), so the call site is gated to match.
+            #if DEBUG
             let inGroup = (window.tabGroup?.windows.count ?? 1) > 1
             if inGroup, matches == 0 {
                 Self.tabsLogger.warning("hideNativeTabStrip: 0 'TabBar' views found in a multi-tab window — AppKit may have renamed its private class; pill + native strip may both be visible.")
             }
+            #else
+            _ = matches
+            #endif
         }
     }
 
