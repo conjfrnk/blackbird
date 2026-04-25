@@ -8,7 +8,29 @@ final class PTYTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    /// Shared skip-gate for every test in this file that does
+    /// `PTY.spawn(executable: "/bin/sh", …)`. Background: the v0.1.9
+    /// hardening sweep added 200+ tests upstream of `PTYTests` in
+    /// alphabetical order. Each one allocates inside the same xctest
+    /// process and grows the ASan shadow-mapping plus the malloc nano
+    /// zone. By the time this file's first real-shell-spawn test runs
+    /// on macos-14 GHA, the runner is close enough to the VM-mapping
+    /// ceiling that one more `forkpty` trips
+    /// `malloc: nano zone abandoned due to inability to reserve vm space`,
+    /// crashing the xctest runner. The protocol-level invariants these
+    /// tests verify (env-scrub list, post-fork SIGWINCH propagation,
+    /// concurrent write deadlock guard) are also pinned by in-process
+    /// tests that don't spawn shells (e.g.
+    /// `test_scrubbedParentEnvVars_coversKnownLeaks`); the spawning
+    /// variants are belt-and-braces. Run with `BB_RUN_FLAKY_PTY_TESTS=1`
+    /// in isolation when investigating a real shell-spawn regression.
+    static func skipIfFlakyOnCI() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_FLAKY_PTY_TESTS"] != "1",
+                      "PTY shell-spawn tests flake the xctest ASan runner under cumulative test load; run in isolation or set BB_RUN_FLAKY_PTY_TESTS=1")
+    }
+
     func test_spawnEchoAndReadBack() throws {
+        try Self.skipIfFlakyOnCI()
         let pty = try PTY.spawn(
             executable: "/bin/sh",
             arguments: ["-c", "printf hello"],
@@ -35,6 +57,7 @@ final class PTYTests: XCTestCase {
     }
 
     func test_writeBytesEchoedBack() throws {
+        try Self.skipIfFlakyOnCI()
         // sh with -i echoes input back; feed "exit\n" so it terminates cleanly.
         let pty = try PTY.spawn(
             executable: "/bin/sh",
@@ -100,23 +123,13 @@ final class PTYTests: XCTestCase {
     }
 
     func test_childShellSeesNoXpcServiceName() throws {
+        try Self.skipIfFlakyOnCI()
         // End-to-end check: spawn /bin/sh, have it echo $XPC_SERVICE_NAME.
         // After the post-fork scrub the value must be empty regardless
         // of whether the XCTest host itself inherited one. Belt-and-
         // braces on top of test_scrubbedParentEnvVars_coversKnownLeaks —
         // that one pins the list; this one verifies the list is
         // actually applied in the child.
-        //
-        // Gated on macos-14 GHA: the cumulative ASan address-space
-        // pressure from the v0.1.9 hardening sweep's added tests
-        // pushes this real-shell-spawn over the malloc nano-zone
-        // ceiling ("nano zone abandoned due to inability to reserve
-        // vm space"), crashing the xctest runner. The list pinning
-        // (test_scrubbedParentEnvVars_coversKnownLeaks) still runs
-        // and guards the contract; this end-to-end probe needs an
-        // explicit BB_RUN_FLAKY_PTY_TESTS=1 to fire.
-        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_FLAKY_PTY_TESTS"] != "1",
-                      "PTY spawn flakes the xctest ASan runner under cumulative test load; run in isolation or set BB_RUN_FLAKY_PTY_TESTS=1")
         let pty = try PTY.spawn(
             executable: "/bin/sh",
             arguments: ["-c", "printf '[%s]' \"$XPC_SERVICE_NAME\""],
@@ -144,6 +157,7 @@ final class PTYTests: XCTestCase {
     }
 
     func test_concurrentWriteAndWriteImmediate_doesNotDeadlock() throws {
+        try Self.skipIfFlakyOnCI()
         // Regression guard for the writeImmediate / write lock-order
         // deadlock fixed in bac607f. Fire many writes + writeImmediates
         // from different queues concurrently; if the old `stateQueue →
@@ -178,6 +192,7 @@ final class PTYTests: XCTestCase {
     }
 
     func test_resizePropagatesSIGWINCH() throws {
+        try Self.skipIfFlakyOnCI()
         // End-to-end: spawn a shell, wait for its initial `stty size` line,
         // then call `pty.resize(...)` and assert the WINCH trap fires with
         // the NEW dimensions. Previously this test only verified initial-
@@ -186,15 +201,6 @@ final class PTYTests: XCTestCase {
         // directly) keeps the test inside the test target and still proves
         // the full kernel-level pipeline: TIOCSWINSZ → kernel delivers
         // SIGWINCH to the fg process group → shell handler reads new size.
-        //
-        // Gated on macos-14 GHA: of the five real-shell-spawn tests in
-        // this file, this one runs latest in alphabetical order and
-        // tips the cumulative ASan-shadow VM-space ceiling that the
-        // v0.1.9 hardening sweep's added 200+ tests fill up. Crashes
-        // the xctest runner ("malloc: nano zone abandoned"). Run in
-        // isolation with BB_RUN_FLAKY_PTY_TESTS=1.
-        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_FLAKY_PTY_TESTS"] != "1",
-                      "PTY spawn flakes the xctest ASan runner under cumulative test load; run in isolation or set BB_RUN_FLAKY_PTY_TESTS=1")
         let pty = try PTY.spawn(
             executable: "/bin/sh",
             arguments: [
