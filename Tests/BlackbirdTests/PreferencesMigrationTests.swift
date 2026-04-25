@@ -314,7 +314,16 @@ final class PreferencesMigrationTests: XCTestCase {
     /// Specifically: after 500 cursorBlink toggles, the same-value-guard
     /// sink should record exactly 500 effective writes (one per change),
     /// not 500 × N for some N > 1 caused by the SwiftUI bridge re-firing.
-    func test_appStorageBridge_underBindingsStress_doesNotLoop() {
+    func test_appStorageBridge_underBindingsStress_doesNotLoop() throws {
+        // Same cumulative-ASan VM-pressure caveat as
+        // PaletteInputsEqualityTests' 1000-iteration tests — the
+        // 500-toggle bindings churn here is heavy enough to push
+        // macos-14 GHA's xctest host over the malloc nano-zone wall
+        // when it runs after the rest of the suite. The static F-S7-002
+        // pin (source-scan for the `objectWillChange` sink invariant)
+        // still runs in default CI; this runtime probe is gated.
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "500-iteration bindings stress flakes under cumulative ASan; set BB_RUN_STRESS_TESTS=1")
         let p = Preferences.shared
         let original = p.cursorBlink
         defer { p.cursorBlink = original }
