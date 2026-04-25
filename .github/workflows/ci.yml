@@ -144,12 +144,20 @@ jobs:
       # nightly job with a curated subset.
       - name: xcodebuild build + test
         run: |
+          # ENABLE_ADDRESS_SANITIZER=NO overrides the scheme's ASan
+          # setting at the BUILD step (the -enableAddressSanitizer
+          # xcodebuild flag only governs the test action's runtime,
+          # not what's baked into the binary). Without this the linker
+          # still emits `-fsanitize=address` and the test-host launches
+          # with ASan instrumentation regardless of the runtime flag.
           xcodebuild test \
             -project Blackbird.xcodeproj \
             -scheme Blackbird \
             -destination "platform=macOS,arch=arm64" \
             -enableAddressSanitizer NO \
             -enableUndefinedBehaviorSanitizer NO \
+            ENABLE_ADDRESS_SANITIZER=NO \
+            ENABLE_UNDEFINED_BEHAVIOR_SANITIZER=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
 
