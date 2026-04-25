@@ -23,12 +23,12 @@ public final class TerminalSession: ObservableObject {
     /// and code-paste workflows.
     public static let osc52MaxBytes: Int = 1 * 1024 * 1024
 
-    #if DEBUG
     /// `os.Logger` (not `NSLog`) so OSC 52 cap diagnostics survive the
     /// unified-log redaction NSLog incurs at runtime-format time.
+    /// Declaration ungated (matching the call site, which logs in
+    /// Release per SFH-005) — see commit 017275c.
     private static let osc52Logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                             category: "osc52")
-    #endif
 
     /// Shorthand. Routed through `StartupTelemetry.isEnabled` at each
     /// call site so Release builds don't emit diagnostic chatter unless
