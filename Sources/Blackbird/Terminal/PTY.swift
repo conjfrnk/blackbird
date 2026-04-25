@@ -299,8 +299,12 @@ public final class PTY {
                     continue
                 }
                 if v.contains("\0") {
+                    // SEC-015: env-key NAMES can themselves be sensitive
+                    // (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`). Hash
+                    // the key so unified-log readers see a stable
+                    // identifier without the literal name.
                     Self.logger.log(
-                        "PTY.spawn rejecting envOverride for key=\(k, privacy: .public): value contains NUL"
+                        "PTY.spawn rejecting envOverride for key=\(k, privacy: .private(mask: .hash)): value contains NUL"
                     )
                     continue
                 }
