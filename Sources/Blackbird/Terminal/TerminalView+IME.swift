@@ -302,21 +302,27 @@ extension TerminalView: NSTextInputClient {
         guard dx >= 0 else { return 0 }
         let cellOffset = Int((dx / cw).rounded(.down))
         // Walk graphemes summing width until we reach cellOffset.
+        // Per-grapheme width is the MAX scalar width within the cluster
+        // (mirrors `terminalCellWidth(of:)` after commit 89f6e41) so a
+        // ZWJ family emoji counts as one wide cell rather than the sum
+        // of its component scalars' widths.
         var consumed = 0
         var utf16Index = 0
         for cluster in composition.attributedText.string {
-            let clusterCells = cluster.unicodeScalars.reduce(0) {
-                $0 + Self.cellWidth(for: $1)
-            }
+            let clusterCells = cluster.unicodeScalars
+                .map { Self.cellWidth(for: $0) }
+                .max() ?? 0
             if consumed + clusterCells > cellOffset {
-                return 0 + utf16Index
+                return utf16Index
             }
             consumed += clusterCells
             utf16Index += String(cluster).utf16.count
         }
-        // Past the composition's end → clamp to the last valid index.
-        let length = composition.attributedText.length
-        return max(0, length - 1)
+        // Past the composition's end → clamp to the LAST VALID INSERTION
+        // POINT (= length, AppKit convention), not length-1 which would
+        // place the caret one UTF-16 unit before the end of an astral
+        // grapheme.
+        return composition.attributedText.length
     }
 
     /// NSTextInputClient routes editing keys that aren't printable through
