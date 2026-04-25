@@ -65,11 +65,12 @@ public struct CellMetrics {
     }
 }
 
-/// MTKView that renders a BBSnapshot via Metal and forwards keyboard input
-/// through a KeyEncoder to a TerminalSession.
-///
-/// Plan 3 Task 1: clears to solid black via MetalRenderer. Task 2+ adds
-/// shader pipeline, glyph atlas, and per-cell instancing for 120Hz performance.
+/// MTKView that renders a BBSnapshot via Metal (`MetalRenderer` +
+/// `GlyphAtlas` + per-cell instancing) and forwards keyboard input
+/// through `KeyEncoder` to a `TerminalSession`. ProMotion 120 Hz is
+/// achieved via `CAMetalLayer.maximumDrawableCount = 3` (the comment
+/// further down in `setupTerminalView` explains the coalescer
+/// interaction).
 public final class TerminalView: MTKView, MTKViewDelegate {
 
     public weak var session: TerminalSession? {
@@ -420,17 +421,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         self.isPaused = false
         self.enableSetNeedsDisplay = false
         // MTKView's internal CVDisplayLink drives `draw(in:)` at the screen's
-        // vblank rate. On a 60 Hz display that's 60 fps; on a ProMotion panel
-        // we'd *like* 120 fps but empirically macOS's coalescer refuses to
-        // promote the display for this workload no matter which API we use
-        // to request it — `preferredFramesPerSecond = 120`, `NSView.
-        // displayLink` / `NSWindow.displayLink` / `NSScreen.displayLink`
-        // with `preferredFrameRateRange = (80,120,120)` (or strict
-        // (120,120,120)) all fire every *other* vblank on the built-in
-        // Liquid Retina XDR (8.33 ms link.duration, 16.67 ms actual spacing).
-        // The DEBUG fps diagnostic below is a standing regression sensor:
-        // if a future macOS or a config change ever does promote us, we'll
-        // see mean interval drop to ~8.3 ms without code changes here.
+        // vblank rate. On a 60 Hz display that's 60 fps; on a ProMotion
+        // panel macOS's display coalescer promotes us to 120 fps once
+        // the drawable pool size is set to 3 (see below) — verified
+        // 8.40 ms steady-state on a built-in Liquid Retina XDR. A
+        // 2-deep pool flagged the workload as not-keeping-up and capped
+        // at 60 fps even with this hint set. Keep the DEBUG fps
+        // diagnostic below as a standing sensor for future regressions.
         self.preferredFramesPerSecond = 120
         // Drawable-pool sizing. Apple's default is 3. An earlier iteration
         // set this to 2 on the theory that fewer drawables = lower latency,

@@ -727,7 +727,13 @@ public final class TerminalSession: ObservableObject {
                         pb.setString(clean, forType: .string)
                     }
                 case .cursorShape:
-                    break  // Plan 5/3 will surface cursor shape.
+                    // Cursor shape is pinned by `Preferences.shared.cursorShape`
+                    // (Settings → Cursor) and resolved into the renderer via
+                    // `MetalRenderer.setCursorShapeOverride`. Shell-driven
+                    // DECSCUSR is intentionally ignored when an override is
+                    // active so the user's preference wins over a TUI's
+                    // assumptions about the host terminal.
+                    break
                 case .cwdChanged(let path):
                     // Rust core already gates on scheme=file and validates
                     // UTF-8; the payload is a ready-to-use filesystem path.
@@ -748,14 +754,15 @@ public final class TerminalSession: ObservableObject {
                         self.recordPromptStart()
                     }
                 case .fatal(let msg):
-                    // Surface as a title prefix for visibility; Plan 7 adds a
-                    // dedicated diagnostics channel. Fatal should display
-                    // regardless of any user-set override AND must not let a
-                    // stale override resurface later. Clear the override and
-                    // route through the state machine so the
-                    // oscTitle/titleOverride/displayTitle invariant holds —
-                    // single writer, no divergence between `title` and
-                    // `displayTitle`.
+                    // Surface as a title prefix for visibility — the unified
+                    // log carries the full message via os.Logger, but a title
+                    // prefix is the only diagnostic surface most users
+                    // notice. Fatal must display regardless of any user-set
+                    // override AND must not let a stale override resurface
+                    // later. Clear the override and route through the state
+                    // machine so the oscTitle / titleOverride / displayTitle
+                    // invariant holds — single writer, no divergence between
+                    // `title` and `displayTitle`.
                     self.titleOverride = nil
                     self.applyOscTitle("[fatal] core panic: \(msg)")
                 }

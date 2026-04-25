@@ -52,7 +52,9 @@ public final class KeyEncoder {
 
     /// If true, Option modifier produces ESC+char (traditional Meta behavior).
     /// If false, Option produces the character the OS assigned (e.g., Option-e -> accent).
-    /// Plan 5 will surface this as a setting; for now hardcoded true.
+    /// Resolved from `Preferences.shared.optionKey` at construction; the
+    /// encoder is rebuilt by `TerminalView.syncEncoderFromPreferences()`
+    /// when the user toggles "Option Key" in Settings.
     public let optionIsMeta: Bool
 
     public init(optionIsMeta: Bool = true) {

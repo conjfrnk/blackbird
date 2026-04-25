@@ -130,9 +130,9 @@ extension AppDelegate {
 
     private func buildEditMenu() -> NSMenu {
         let menu = NSMenu(title: "Edit")
-        // Selectors route to first responder. TerminalView will wire these
-        // in Plan 6 (selection + copy/paste). Present now so Mac users see
-        // the expected menu items.
+        // Selectors route to the first responder; TerminalView implements
+        // copy(_:), paste(_:), and selectAll(_:), plus validateMenuItem
+        // gating on whether a selection / clipboard payload exists.
         menu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
         menu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
         menu.addItem(.separator())
