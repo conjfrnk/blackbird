@@ -407,7 +407,11 @@ jobs:
       # by measuring RSS via mach_task_basic_info. An actual leak shows up
       # as RSS growth scaling with iterations; this gate catches that.
       - name: Run long-session memory gate
-        run: cargo test -p blackbird_core --test long_session_memory --release -- --ignored --nocapture
+        # --test-threads=1: tests share process RSS; parallel execution
+        # cross-contaminates measurements (false 100% leak signal). Serial
+        # makes the absolute 32 MiB cap + delta-of-deltas ratio gate
+        # deterministic.
+        run: cargo test -p blackbird_core --test long_session_memory --release -- --ignored --nocapture --test-threads=1
 
   security-posture:
     name: Security posture — entitlements + hardened runtime
