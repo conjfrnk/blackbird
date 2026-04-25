@@ -120,15 +120,25 @@ jobs:
       # failure, so this job is *also* the ASan/UBSan gate — do not weaken.
       #
       # MallocNanoZone=0: macOS's nano-malloc reserves a fixed VM region for
-      # small allocations. ASan's shadow mapping plus 700+ tests' cumulative
-      # allocations exhaust nano's reserved space mid-suite ("nano zone
-      # abandoned due to inability to reserve vm space"), which crashes the
-      # xctest runner. Disabling nano falls back to the scalable allocator
-      # — slightly slower per small alloc but no VM-mapping wall under
-      # cumulative ASan. Doesn't affect ASan's bug-detection.
+      # small allocations and exhausts it once ASan's shadow + a 900+-test
+      # cumulative allocation footprint ("nano zone abandoned…") tips the
+      # ceiling. Disabling nano falls back to the scalable allocator — no
+      # measurable test-time impact, no VM wall.
+      #
+      # ASAN_OPTIONS:
+      # - quarantine_size_mb=16 (default 256): ASan's freed-allocation
+      #   quarantine retains memory before letting it be reused; 256 MB
+      #   accumulates fast under 900 tests' churn. 16 MB is plenty for
+      #   double-free / use-after-free detection on small allocs.
+      # - max_redzone=16 (default 2048): redzone padding around each alloc.
+      #   2 KiB × millions of allocs = serious overhead. 16 B catches
+      #   adjacent-byte overflows just as well for our workload.
+      # - allocator_release_to_os_interval_ms=100: aggressive page release
+      #   so freed memory comes back to the OS, not just to ASan's pool.
       - name: xcodebuild build + test (ASan + UBSan gated)
         env:
           MallocNanoZone: "0"
+          ASAN_OPTIONS: "quarantine_size_mb=16:max_redzone=16:allocator_release_to_os_interval_ms=100"
         run: |
           xcodebuild test \
             -project Blackbird.xcodeproj \
