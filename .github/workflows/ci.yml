@@ -118,7 +118,17 @@ jobs:
       # both set to true (project.yml:119-120). Xcode reports any sanitizer
       # violation as a test failure, and xcodebuild test exits non-zero on any
       # failure, so this job is *also* the ASan/UBSan gate — do not weaken.
+      #
+      # MallocNanoZone=0: macOS's nano-malloc reserves a fixed VM region for
+      # small allocations. ASan's shadow mapping plus 700+ tests' cumulative
+      # allocations exhaust nano's reserved space mid-suite ("nano zone
+      # abandoned due to inability to reserve vm space"), which crashes the
+      # xctest runner. Disabling nano falls back to the scalable allocator
+      # — slightly slower per small alloc but no VM-mapping wall under
+      # cumulative ASan. Doesn't affect ASan's bug-detection.
       - name: xcodebuild build + test (ASan + UBSan gated)
+        env:
+          MallocNanoZone: "0"
         run: |
           xcodebuild test \
             -project Blackbird.xcodeproj \
