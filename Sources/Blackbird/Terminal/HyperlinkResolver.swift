@@ -132,7 +132,8 @@ enum OSC8URLPolicy {
         // overkill; a minimal regex suffices: scheme + "://" + host-ish
         // characters up to the next path/punct boundary.
         let pattern = #"(?i)(?:https?|ftp)://([A-Za-z0-9.\-]+)"#
-        guard let re = try? NSRegularExpression(pattern: pattern) else { return false }
+        // Pattern is a constant; force-try so a bad edit fails loudly.
+        let re = try! NSRegularExpression(pattern: pattern)
         let ns = anchorText as NSString
         let range = NSRange(location: 0, length: ns.length)
         guard let match = re.firstMatch(in: anchorText, range: range), match.numberOfRanges >= 2 else {
