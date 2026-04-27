@@ -486,6 +486,39 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // removes the new-tab flash without depending on the scheduled
         // async to fire first.
         hideNativeTabStrip()
+        // When AppKit promotes a sibling tab on close (⌘W or `exit`
+        // typed in the shell), the survivor's first responder doesn't
+        // always carry through the transition — the user sees
+        // keystrokes hit nothing (NSBeep) until they click the window.
+        // Drive the responder back to the TerminalView ourselves on
+        // every key transition. The helper preserves an already-
+        // sensible first responder (the TerminalView itself, or a
+        // descendant like the FindBar's text field), so this is
+        // idempotent on the common case and respects an active find.
+        restoreTerminalFirstResponderIfNeeded()
+    }
+
+    /// Set the TerminalView back as the window's first responder when
+    /// the current first responder isn't already a sensible target.
+    /// Two subtrees own first-responder state we must NOT trample:
+    ///
+    ///   - `terminalView` itself and its descendants — the FindBar lives
+    ///     inside it, so an in-progress find's text field is preserved.
+    ///   - `titlebarTabBar?.view` and its descendants — the inline tab
+    ///     rename `NSTextField` lives here. A user who's mid-rename and
+    ///     ⌘-Tabs to another app and back would otherwise have their
+    ///     edit silently destroyed when this fires on `windowDidBecomeKey`.
+    ///
+    /// All other states — nil, the window itself, an unrelated view, a
+    /// non-`NSView` responder — trigger a restore.
+    private func restoreTerminalFirstResponderIfNeeded() {
+        guard let win = window, let view = terminalView else { return }
+        let protectedRoots: [NSView] = [view, titlebarTabBar?.view].compactMap { $0 }
+        guard shouldRestoreFirstResponder(
+            currentFirstResponder: win.firstResponder,
+            preserveDescendantsOf: protectedRoots
+        ) else { return }
+        win.makeFirstResponder(view)
     }
 
     /// Forward window-focus loss. Paired with `windowDidBecomeKey` above.
@@ -891,6 +924,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     @objc func resetActiveTabTitle(_ sender: Any?) {
         session?.titleOverride = nil
     }
+}
+
+// MARK: - First-responder restore decision
+
+/// Pure decision function for `restoreTerminalFirstResponderIfNeeded`.
+/// Returns `true` when the caller SHOULD override the first responder,
+/// `false` when the current responder is already in a sensible place —
+/// any view that's a descendant of (or identical to) one of the
+/// `protectedRoots`.
+///
+/// Multiple roots support the case where focus can legitimately live
+/// in either of two unrelated subtrees: the TerminalView (covers the
+/// FindBar text field — a TerminalView subview) and the titlebar tab
+/// strip (covers the inline rename text field — a titlebar accessory,
+/// NOT under TerminalView). Either deserves to keep focus through a
+/// `windowDidBecomeKey` callback.
+///
+/// Pure: takes `NSResponder?` and `[NSView]` rather than reaching into
+/// a window so unit tests can drive every case (nil, a member of one
+/// root's subtree, a sibling under a non-protected parent, a non-NSView
+/// responder, multi-root preservation) without instantiating an NSWindow
+/// or a MainWindowController. Internal (not private) so the test target
+/// can reach it via `@testable import Blackbird`.
+internal func shouldRestoreFirstResponder(
+    currentFirstResponder: NSResponder?,
+    preserveDescendantsOf protectedRoots: [NSView]
+) -> Bool {
+    guard let view = currentFirstResponder as? NSView else { return true }
+    return !protectedRoots.contains { view.isDescendant(of: $0) }
 }
 
 // MARK: - Off-screen frame nudging
