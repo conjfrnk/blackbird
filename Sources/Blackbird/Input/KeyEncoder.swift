@@ -184,6 +184,10 @@ public final class KeyEncoder {
            mode.contains(.modifyOtherKeys),
            hasMods,
            let scalar = chars.unicodeScalars.first {
+            // CSI 27 carries one codepoint — multi-scalar input falls back to UTF-8 to avoid silent truncation.
+            if chars.unicodeScalars.count > 1 {
+                return Data(chars.utf8)
+            }
             return csi27(codepoint: scalar.value, modifiers: effectiveMods)
         }
 

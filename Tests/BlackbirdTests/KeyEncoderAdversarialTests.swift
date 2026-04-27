@@ -409,6 +409,30 @@ final class KeyEncoderAdversarialTests: XCTestCase {
         )
     }
 
+    /// xterm CSI 27 carries exactly one codepoint per sequence, so
+    /// multi-scalar input (decomposed `e` + U+0301 from IME, Vietnamese
+    /// Telex composition, etc.) cannot be encoded that way without
+    /// silently dropping the trailing scalars. The encoder must fall
+    /// back to plain UTF-8 emission — same as the legacy fallback at
+    /// the bottom of `encode` — so tmux/Emacs/nvim with
+    /// `extended-keys on` see the full composed text.
+    func test_multiScalar_modifyOtherKeys_fallsBackToUtf8() {
+        let enc = KeyEncoder()
+        let composed = "e\u{0301}"  // decomposed é
+        let out = enc.encode(
+            chars: composed,
+            modifiers: [.shift],
+            mode: [.modifyOtherKeys]
+        )
+        XCTAssertEqual(out, Data(composed.utf8),
+                       "Multi-scalar modifyOtherKeys input must fall back to UTF-8")
+        // Negative: the output must NOT be a CSI 27 sequence (which
+        // would imply only the first scalar survived).
+        let csi27Prefix: [UInt8] = [0x1B, 0x5B] + Array("27;".utf8)
+        XCTAssertFalse(Array(out).starts(with: csi27Prefix),
+                       "Multi-scalar modifyOtherKeys must NOT emit a CSI 27 sequence")
+    }
+
     // MARK: - Helpers
 
     /// Returns true if `haystack` contains `needle` as a contiguous
