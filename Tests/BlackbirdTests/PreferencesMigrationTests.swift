@@ -313,10 +313,17 @@ final class PreferencesMigrationTests: XCTestCase {
         }
         defer { suite.removePersistentDomain(forName: suiteName) }
 
+        // NSRegistrationDomain is process-global, so `suite.object(forKey:)`
+        // reads through to Preferences.swift's `defaults.register(defaults:)`
+        // call (line 187) and returns the registered default. To assert
+        // "no persistent write happened" we must look at the suite's
+        // persistent domain directly, which only contains values that
+        // were actually `set(_:forKey:)`-d on the suite — registration
+        // defaults don't leak in.
         let schemaKey = "prefsSchemaVersion"
         XCTAssertNil(
-            suite.object(forKey: schemaKey),
-            "Test pre-condition: fresh suite must not already have a schema key"
+            suite.persistentDomain(forName: suiteName)?[schemaKey],
+            "Test pre-condition: fresh suite must have no persistent value"
         )
 
         Preferences.migrateIfNeeded(in: suite)
@@ -326,7 +333,7 @@ final class PreferencesMigrationTests: XCTestCase {
         // the missing-key case. If a future refactor unconditionally
         // stamps the version, this test will catch the drift.
         XCTAssertNil(
-            suite.object(forKey: schemaKey),
+            suite.persistentDomain(forName: suiteName)?[schemaKey],
             """
             Migration on a fresh suite wrote a schema version key.
             The current contract is: rely on the registered default for
