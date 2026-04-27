@@ -458,11 +458,24 @@ public final class TerminalSession: ObservableObject {
         // at 2×2; a UInt16.max request allocates hundreds of GB in the
         // grid. Keeping PTY + grid in lockstep avoids off-by-one cursor
         // / wrap bugs after the mismatch.
+        //
+        // Order matters (Bug #9): apply the grid resize FIRST and capture
+        // the actually-applied dims via `bb_term_resize2`, THEN call
+        // `pty.resize` with those post-clamp dims. Reversing the order
+        // opens a window where the shell can read its new winsize via
+        // `stty size` / `tput cols` and start emitting at the new width
+        // before the grid has reflowed — content past the old grid edge
+        // gets dropped. Doing pty AFTER bbterm closes that window: the
+        // SIGWINCH the shell reacts to lands on a grid that's already
+        // sized correctly. And feeding `pty.resize` the
+        // bbterm-actually-applied dims (Bug #3) prevents the shell from
+        // being told a width the renderer can't actually display, which
+        // would cause text past the clamp ceiling to wrap into oblivion.
         let clamped = Self.clampResize(size)
         var newSnap: BBSnapshot?
         coreQueue.sync {
-            self.pty?.resize(to: clamped)
-            self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows))
+            let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows))
+            self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
             newSnap = self.bbterm.snapshot()
         }
         guard let newSnap else { return }
@@ -486,8 +499,10 @@ public final class TerminalSession: ObservableObject {
         let clamped = Self.clampResize(size)
         coreQueue.async { [weak self] in
             guard let self else { return }
-            self.pty?.resize(to: clamped)
-            self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows))
+            // Same Bug #3/#9 ordering as the sync `resize(to:)`: bbterm
+            // first, then pty with the actually-applied (post-clamp) dims.
+            let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows))
+            self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
             guard let snap = self.bbterm.snapshot() else { return }
             self.publishPendingSnapshot(snap)
         }

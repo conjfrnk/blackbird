@@ -200,6 +200,59 @@ final class TerminalSessionTests: XCTestCase {
         session.terminate()
     }
 
+    /// Bug #3 + Bug #9 regression: an oversized resize request must reach
+    /// the PTY's TIOCSWINSZ as the clamped dims (≤ 1000), not as the raw
+    /// request. We can't hook the ioctl directly from a unit test, but
+    /// `stty size` reads winsize from the PTY slave and prints
+    /// "rows cols" — that's the shell's view of what TerminalSession
+    /// told the kernel. If the shell reports a number > 1000, the bug
+    /// is back: TIOCSWINSZ was fed the unclamped request.
+    ///
+    /// Memory budget: 1000×1000 grid (post-clamp) at 32B/cell ≈ 32 MB,
+    /// plus alacritty's reflow scratch — well within budget. We never
+    /// allocate at the requested 1500×1500 because the clamp catches
+    /// the request before reflow.
+    func test_oversizedResize_pty_seesClampedDims_notRequested() throws {
+        let session = try TerminalSession.start(
+            shell: "/bin/sh",
+            arguments: ["-c", "sleep 0.2; stty size"],
+            size: .init(cols: 80, rows: 24)
+        )
+
+        // Request 1500×1500 — well past the 1000×1000 clamp ceiling.
+        // After the fix, both the grid AND the PTY's winsize must report
+        // 1000×1000, not 1500×1500. `stty size` prints "rows cols".
+        session.resize(to: .init(cols: 1500, rows: 1500))
+
+        let exp = expectation(description: "stty reports clamped 1000 1000")
+        var c: AnyCancellable?
+        c = session.$snapshot
+            .compactMap { $0 }
+            .sink { snap in
+                var row0 = ""
+                for col in 0..<snap.cols {
+                    if let ch = snap.character(at: col, row: 0) {
+                        row0.append(ch)
+                    }
+                }
+                // Pre-fix this would print "1500 1500" because TIOCSWINSZ
+                // got the unclamped request. Post-fix the shell sees the
+                // clamped 1000×1000. Anything else (especially 1500) is
+                // a regression.
+                if row0.contains("1000 1000") {
+                    c?.cancel()
+                    exp.fulfill()
+                } else if row0.contains("1500") {
+                    XCTFail("PTY received unclamped winsize: stty saw '\(row0)'")
+                    c?.cancel()
+                    exp.fulfill()
+                }
+            }
+
+        wait(for: [exp], timeout: 5.0)
+        session.terminate()
+    }
+
     func test_resizePropagatesToCoreAndPty() throws {
         let session = try TerminalSession.start(
             shell: "/bin/sh",

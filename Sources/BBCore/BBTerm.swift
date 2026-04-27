@@ -109,9 +109,25 @@ public final class BBTerm {
         input(Array(string.utf8))
     }
 
-    public func resize(to size: Size) {
-        guard let h = handle else { return }
-        bb_term_resize(h, size.cols, size.rows)
+    /// Resize the grid to `size`, returning the dimensions actually applied
+    /// after the Rust core's `[2, 1000]` clamp on each axis. Callers that
+    /// drive a PTY's `TIOCSWINSZ` MUST use the returned dims, not the
+    /// requested ones — telling the shell it has 1500 columns when the grid
+    /// only has 1000 makes the shell wrap text past the visible viewport
+    /// (rust-core-3 F4 / Bug #3). For a no-op (null handle, or zero in
+    /// either dim) the returned size equals the input request, since the
+    /// grid was untouched.
+    @discardableResult
+    public func resize(to size: Size) -> Size {
+        guard let h = handle else { return size }
+        let result = bb_term_resize2(h, size.cols, size.rows)
+        // bb_term_resize2 returns (0, 0, 0) on no-op (zero in either dim);
+        // treat that as "no resize happened" and report the request back
+        // unchanged so callers don't drive a PTY to 0×0.
+        if result.applied_cols == 0 || result.applied_rows == 0 {
+            return size
+        }
+        return Size(cols: result.applied_cols, rows: result.applied_rows)
     }
 
     public func scroll(delta: Int32) {

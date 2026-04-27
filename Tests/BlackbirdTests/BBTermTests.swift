@@ -35,6 +35,44 @@ final class BBTermTests: XCTestCase {
         XCTAssertEqual(snap.rows, 40)
     }
 
+    /// pre-flight: Memory budget for this test is bounded by the 1000×1000
+    /// clamp ceiling Rust enforces (`bb_term_resize2`). On the 32-byte
+    /// cell layout that's ~32 MB resident for the grid plus alacritty's
+    /// reflow temporaries — well under any per-test budget. We never
+    /// allocate at the requested 1500×1500 because the clamp short-
+    /// circuits before reflow, which is the entire point of the fix.
+    ///
+    /// Bug #3 regression: callers (TerminalSession.resize) used to call
+    /// `bb_term_resize` (void) and feed the unclamped request straight to
+    /// `pty.resize` for TIOCSWINSZ. The shell got a width the renderer
+    /// couldn't draw and emitted text past the visible grid — content
+    /// silently dropped. Asserting that `bbterm.resize(to:)` returns the
+    /// clamp-applied dims back to the caller pins the contract that
+    /// downstream wiring depends on.
+    func test_oversizedResize_returnsClampedDims_notRequested() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        let applied = term.resize(to: .init(cols: 1500, rows: 1500))
+        XCTAssertEqual(applied.cols, 1000, "applied cols must reflect the clamp ceiling, not the request")
+        XCTAssertEqual(applied.rows, 1000, "applied rows must reflect the clamp ceiling, not the request")
+        // And the snapshot must agree — defence in depth: the returned
+        // dims describe the same grid the renderer is going to paint.
+        let snap = try XCTUnwrap(term.snapshot())
+        XCTAssertEqual(snap.cols, 1000)
+        XCTAssertEqual(snap.rows, 1000)
+    }
+
+    /// Floor side of Bug #3: a degenerate 1×1 request must come back as
+    /// 2×2 (the documented floor in `bb_term_resize2`). If a caller is
+    /// going to drive `TIOCSWINSZ` from this return value, telling the
+    /// shell it has 1×1 when the grid is 2×2 corrupts cursor math
+    /// the same way as the oversized case, in the opposite direction.
+    func test_undersizedResize_returnsFlooredDims_notRequested() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        let applied = term.resize(to: .init(cols: 1, rows: 1))
+        XCTAssertEqual(applied.cols, 2, "applied cols must reflect the floor clamp")
+        XCTAssertEqual(applied.rows, 2, "applied rows must reflect the floor clamp")
+    }
+
     func test_character_atRowColumn_rejectsNegativeIndices() throws {
         // Regression guard for e66f383: character(at:row:) previously
         // only bounded the upper end. A caller passing negative coords
