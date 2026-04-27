@@ -322,6 +322,29 @@ extension AppDelegate {
         prevTab.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(prevTab)
 
+        // Terminal-app convention: ⌃⇥ / ⌃⇧⇥ also cycle tabs (matches
+        // iTerm2, Terminal.app, browser tabs, and most TUIs that rebind
+        // these inside the terminal — but ours wins because the menu
+        // item swallows the key event before it reaches the PTY).
+        // Same `selectNextTab(_:)` / `selectPreviousTab(_:)` actions as
+        // the ⌘⇧] / ⌘⇧[ items above; AppKit picks the right item from
+        // the modifier mask.
+        let nextTabCtrl = NSMenuItem(
+            title: "Show Next Tab",
+            action: #selector(NSWindow.selectNextTab(_:)),
+            keyEquivalent: "\t"
+        )
+        nextTabCtrl.keyEquivalentModifierMask = [.control]
+        menu.addItem(nextTabCtrl)
+
+        let prevTabCtrl = NSMenuItem(
+            title: "Show Previous Tab",
+            action: #selector(NSWindow.selectPreviousTab(_:)),
+            keyEquivalent: "\t"
+        )
+        prevTabCtrl.keyEquivalentModifierMask = [.control, .shift]
+        menu.addItem(prevTabCtrl)
+
         menu.addItem(.separator())
 
         // ⌘1-9 jump to a specific tab by position.
