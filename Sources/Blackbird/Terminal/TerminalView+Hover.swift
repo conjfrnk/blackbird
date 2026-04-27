@@ -223,21 +223,30 @@ extension TerminalView {
             return
         }
         if cachedURLMatchesSeq != snap.sequenceID {
+            // Capture whether we had a populated cache before — only a
+            // *replacement* invalidates the previously-baked hover row,
+            // not the initial population on a fresh view (where mouseMoved
+            // may have already primed lastHoverCell against this very
+            // snapshot before any cmd-hover refresh ran).
+            let cacheWasPopulated = (cachedURLMatchesSeq != nil)
             cachedURLMatches = URLDetector.scan(snapshot: snap)
             cachedURLMatchesSeq = snap.sequenceID
-            // `lastHoverCell.row` is screen-space — it was baked with the
-            // PREVIOUS snapshot's `displayOffset` at mouseMoved time
-            // (see line ~76). When the snapshot identity changes, that
-            // baked offset goes stale: any successor whose displayOffset
-            // shifted (output between mouseMoved and reevaluate, alt-
-            // screen toggle, scroll) makes `last.row - snap.displayOffset`
-            // resolve to a buffer line one or more rows off, and the
-            // cmd-hover underline lands on the wrong row. The next real
-            // mouseMoved will repopulate this against the live snapshot;
-            // dropping it here is the safe fallback for the in-between
-            // reevaluate calls (flagsChanged, snapshot updates) that
-            // don't pass a fresh event.
-            lastHoverCell = nil
+            if cacheWasPopulated {
+                // `lastHoverCell.row` is screen-space — it was baked
+                // against the PREVIOUS snapshot's displayOffset at
+                // mouseMoved time. When the snapshot identity changes,
+                // that baked offset goes stale: any successor whose
+                // displayOffset shifted (output between mouseMoved and
+                // reevaluate, alt-screen toggle, scroll) makes
+                // `last.row - snap.displayOffset` resolve to a buffer
+                // line one or more rows off, and the cmd-hover underline
+                // lands on the wrong row. The next real mouseMoved will
+                // repopulate this against the live snapshot; dropping
+                // it here is the safe fallback for the in-between
+                // reevaluate calls (flagsChanged, snapshot updates) that
+                // don't pass a fresh event.
+                lastHoverCell = nil
+            }
         }
     }
 
