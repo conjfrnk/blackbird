@@ -349,4 +349,97 @@ final class CmdHoverHighlightTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - (4) Stale hover-cell guard on snapshot transition
+
+    /// Pins the fix for the screen-space `lastHoverCell` going stale across
+    /// a snapshot identity bump.
+    ///
+    /// The bug:
+    ///   - `mouseMoved` stores `lastHoverCell` in SCREEN space (buffer line +
+    ///     `displayOffset` at move time, see TerminalView+Hover.swift ~L76).
+    ///   - `reevaluateCmdHoverHighlight` later subtracts the CURRENT
+    ///     snapshot's `displayOffset` to translate back into buffer space
+    ///     (~L253).
+    ///   - When output / scroll / alt-screen toggle bumps `sequenceID` AND
+    ///     shifts `displayOffset` between the move and the reevaluate,
+    ///     `last.row - snap.displayOffset` resolves to the wrong buffer
+    ///     line. The cmd-hover URL underline lands one or more rows off.
+    ///
+    /// The fix nils `lastHoverCell` inside the cache-invalidation branch of
+    /// `refreshURLMatchCacheIfNeeded`, so the next real `mouseMoved` against
+    /// the live snapshot rebakes a fresh screen-space row before any
+    /// reevaluate can mistranslate. This test exercises that branch by
+    /// driving two snapshots whose `sequenceID`s differ (every
+    /// `BBTerm.snapshot()` call allocates a new monotonic id) and asserts
+    /// that the second `reevaluateCmdHoverHighlight` clears `lastHoverCell`.
+    ///
+    /// Memory pre-flight: a single 40×6 BBTerm (≈ 4 KB of cells) and one
+    /// TerminalView. No PTY, no real session, no GPU submission. <50 ms.
+    func test_snapshotChange_clearsStaleHoverCell() throws {
+        let device = try requireMetalDevice()
+        let view = TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 192),
+            device: device
+        )
+
+        // Snapshot 1: empty grid, displayOffset = 0. Establish the "we've
+        // already scanned this snapshot" cache state.
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 40, rows: 6)))
+        let snap1 = try XCTUnwrap(term.snapshot())
+        view.currentSnapshot = snap1
+
+        // Stand in for a mouseMoved at row=2,col=3 (screen-space because
+        // snap1.displayOffset == 0; the math is identity here). The
+        // production path reaches this assignment via TerminalView+Hover's
+        // `updateHover`; the test seam mirrors that without spinning up a
+        // real NSEvent / tracking area.
+        view.lastHoverCell = (row: 2, col: 3)
+        view.cmdModifierHeld = true
+
+        // First reevaluate primes `cachedURLMatchesSeq` with snap1's id.
+        // The snapshot has no detected URLs, so reevaluate falls through
+        // to `clearCmdHoverURLMatch()` after the cache scan. Crucially, it
+        // does NOT clear `lastHoverCell` on this pass — same sequenceID,
+        // no invalidation.
+        view.reevaluateCmdHoverHighlight()
+        XCTAssertNotNil(
+            view.lastHoverCell,
+            "no-op reevaluate against the same snapshot must not drop the hover cell"
+        )
+
+        // Snapshot 2: bump the snapshot identity. `BBTerm.snapshot()`
+        // allocates a fresh monotonic `sequenceID` on every call, which is
+        // the trigger condition the fix keys off of. Drive a real
+        // `displayOffset` shift on top so the test reflects the production
+        // failure mode, not just the seq-only path: feed enough rows to
+        // build scrollback, then scroll up by one line.
+        for _ in 0..<10 { term.input("\n") }
+        term.scroll(delta: 1)
+        let snap2 = try XCTUnwrap(term.snapshot())
+        XCTAssertNotEqual(
+            snap1.sequenceID, snap2.sequenceID,
+            "BBTerm.snapshot() must hand out a fresh sequenceID per call"
+        )
+        XCTAssertGreaterThan(
+            snap2.displayOffset, 0,
+            "scroll-up must produce a non-zero displayOffset; without that "
+            + "shift the buggy translation would happen to land on the right "
+            + "row by accident"
+        )
+        view.currentSnapshot = snap2
+
+        // Drive the cache invalidation. Because `snap2.sequenceID !=
+        // snap1.sequenceID`, the fix clears `lastHoverCell` here. Pre-fix
+        // code left it in place and the next render translated through a
+        // stale screen row.
+        view.reevaluateCmdHoverHighlight()
+
+        XCTAssertNil(
+            view.lastHoverCell,
+            "snapshot identity change must clear the stale screen-space "
+            + "lastHoverCell — its row was baked against the previous "
+            + "displayOffset and would mistranslate against snap2"
+        )
+    }
 }

@@ -216,11 +216,28 @@ extension TerminalView {
         guard let snap = currentSnapshot else {
             cachedURLMatches = []
             cachedURLMatchesSeq = nil
+            // Snapshot disappeared — drop the hover cell too. Its row was
+            // computed against the now-vanished snapshot's displayOffset
+            // and would mis-translate against any successor.
+            lastHoverCell = nil
             return
         }
         if cachedURLMatchesSeq != snap.sequenceID {
             cachedURLMatches = URLDetector.scan(snapshot: snap)
             cachedURLMatchesSeq = snap.sequenceID
+            // `lastHoverCell.row` is screen-space — it was baked with the
+            // PREVIOUS snapshot's `displayOffset` at mouseMoved time
+            // (see line ~76). When the snapshot identity changes, that
+            // baked offset goes stale: any successor whose displayOffset
+            // shifted (output between mouseMoved and reevaluate, alt-
+            // screen toggle, scroll) makes `last.row - snap.displayOffset`
+            // resolve to a buffer line one or more rows off, and the
+            // cmd-hover underline lands on the wrong row. The next real
+            // mouseMoved will repopulate this against the live snapshot;
+            // dropping it here is the safe fallback for the in-between
+            // reevaluate calls (flagsChanged, snapshot updates) that
+            // don't pass a fresh event.
+            lastHoverCell = nil
         }
     }
 
