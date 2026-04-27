@@ -58,4 +58,105 @@ final class DragDropTests: XCTestCase {
             "'/only/one.txt'"
         )
     }
+
+    // MARK: - Drop integration regressions
+    //
+    // Bug #19 / #20 / #21 cover the `performDragOperation` glue, not the
+    // pure `shellQuote` / `joinedDroppedPaths` formatters above. The view
+    // exposes `performDropOfPaths` as a test seam (NSDraggingInfo isn't
+    // mockable: AppKit treats it specially and synthesised conformers
+    // crash on the framework's internal `_concreteDraggingInfo` lookup),
+    // and `pasteTextRecorderForTests` captures the pre-encoding string
+    // the paste pipeline saw so we can assert quoting end-to-end.
+
+    /// Bug #19: a drop while the shell has an active foreground child
+    /// (running command) must be refused — not pasted into the
+    /// running process's stdin where it would corrupt the running
+    /// program's protocol.
+    func test_drop_duringForegroundCommand_refused() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let session = TerminalSession.makeHeadlessForTests()
+        session._testForegroundChildOverride = true
+        view.session = session
+        var pastes: [String] = []
+        view.pasteTextRecorderForTests = { pastes.append($0) }
+
+        let accepted = view.performDropOfPaths(["/tmp/example.txt"])
+
+        XCTAssertFalse(accepted, "drop must be refused while a command is running")
+        XCTAssertTrue(pastes.isEmpty,
+                      "no bytes should reach the paste pipeline when a command is running")
+        XCTAssertNotNil(view.findBar,
+                        "transient banner should have surfaced via FindBar")
+    }
+
+    /// Bug #19 baseline: with no foreground child, the same drop is
+    /// accepted. Sanity check that the gate isn't over-tripping.
+    func test_drop_withoutForegroundCommand_accepted() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let session = TerminalSession.makeHeadlessForTests()
+        session._testForegroundChildOverride = false
+        view.session = session
+        var pastes: [String] = []
+        view.pasteTextRecorderForTests = { pastes.append($0) }
+
+        let accepted = view.performDropOfPaths(["/tmp/example.txt"])
+
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(pastes, ["'/tmp/example.txt'"])
+    }
+
+    /// Bug #20: paths with shell metacharacters (spaces, $, backticks,
+    /// quotes) must be single-quote-wrapped before reaching the shell.
+    /// This is the integration check on top of `testShellQuoteWithSpaces`
+    /// — verifies the wrapping happens through the drop entry point too,
+    /// not just in the pure helper.
+    func test_drop_quotesPathWithSpaces() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let session = TerminalSession.makeHeadlessForTests()
+        view.session = session
+        var pastes: [String] = []
+        view.pasteTextRecorderForTests = { pastes.append($0) }
+
+        view.performDropOfPaths(["/tmp/has spaces.txt"])
+
+        XCTAssertEqual(pastes, ["'/tmp/has spaces.txt'"])
+    }
+
+    /// Bug #20 hardening: a path containing a single quote round-trips
+    /// through the POSIX `'\''` recipe so the shell parses it as one
+    /// argument, not two.
+    func test_drop_quotesPathWithEmbeddedSingleQuote() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let session = TerminalSession.makeHeadlessForTests()
+        view.session = session
+        var pastes: [String] = []
+        view.pasteTextRecorderForTests = { pastes.append($0) }
+
+        view.performDropOfPaths(["/tmp/don't.txt"])
+
+        XCTAssertEqual(pastes, ["'/tmp/don'\\''t.txt'"])
+    }
+
+    /// Bug #21: a drop must clear any in-flight IME composition before
+    /// the path bytes leave for the PTY. Otherwise the preedit overlay
+    /// hangs over the freshly-pasted text and the next IME keystroke
+    /// commits the stale composition on top of the path.
+    func test_drop_cancelsActiveIMEComposition() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let session = TerminalSession.makeHeadlessForTests()
+        view.session = session
+        // Install a preedit composition the way a real IME would —
+        // setMarkedText is the sanctioned entry point and sets up
+        // `view.composition` plus the overlay subview.
+        view.setMarkedText("か",
+                           selectedRange: NSRange(location: 1, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText(), "precondition: composition is active")
+
+        view.performDropOfPaths(["/tmp/file.txt"])
+
+        XCTAssertFalse(view.hasMarkedText(),
+                       "drop must clear the IME preedit before pasting bytes")
+    }
 }

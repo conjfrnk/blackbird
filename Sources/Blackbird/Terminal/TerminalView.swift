@@ -281,6 +281,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// Lets integration tests assert the exact DEL×N + replacement byte
     /// sequence without a real PTY.
     var replaceByteCapture: ((Data) -> Void)?
+    /// Optional capture closure for `pasteText(_:)`. Fires with the pre-
+    /// encoding string the paste pipeline received, before CRLF /
+    /// control / bracketed-paste sanitisation. Used by `DragDropTests`
+    /// to assert that the drop integration produces the right shell-
+    /// quoted command-line — the sanitisers have their own coverage.
+    var pasteTextRecorderForTests: ((String) -> Void)?
     /// Test-only snapshot override for the replace path. When set, replace
     /// helpers read cursor position from this value instead of `currentSnapshot`.
     var replaceSnapshotForTests: BBSnapshot?
@@ -337,6 +343,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     var findMatches: [(line: Int32, startCol: Int, endCol: Int)] = []   // internal for TerminalView+Find.swift
     var findCurrentIndex: Int = 0                                       // internal for TerminalView+Find.swift
     var findQuery: String = ""                                          // internal for TerminalView+Find.swift
+    /// `BBSnapshot.sequenceID` of the snapshot `findMatches` was scanned
+    /// against. `nil` when no scan has run yet (or the cache was just
+    /// cleared). Used by `advanceFind` / `highlightCurrentMatch` to
+    /// detect that output arrived between `performSearch` and the user
+    /// pressing ⌘G — in that case the stored (line, col) tuples may
+    /// reference cells that now hold different text, so we re-run
+    /// `performSearch` against the live snapshot before advancing.
+    /// Same `Optional<UInt64>` shape as `cachedURLMatchesSeq` (above) so
+    /// "never scanned" and "scanned at seq 0" don't collide. Audit
+    /// findbar-selection F11.
+    var findMatchesSeq: UInt64?                                         // internal for TerminalView+Find.swift
     /// Monotonic ID assigned to each background regex scan. The latest
     /// scan's ID is `activeRegexSearchID`; when a scan publishes
     /// results, it sets `regexSearchCompletedID = mySearchID` so the
@@ -825,6 +842,39 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     public func render(snapshot: BBSnapshot) {
         let wasFocusMode = currentSnapshot?.termMode.contains(.focusInOut) ?? false
         let nowFocusMode = snapshot.termMode.contains(.focusInOut)
+        // Bugs #14 + #15: invalidate the active selection on snapshot
+        // transitions that move the cells its BufferPoints address.
+        //
+        //  - #14 (column reflow): `Selection.anchor` / `cursor` are
+        //    `BufferPoint(line, col)` pinned to the pre-reflow grid. When
+        //    the user shrinks the window's cols (alacritty's wrapped
+        //    scrollback re-wraps on column changes — *not* on row-only
+        //    changes), the buffer line/col those points named now refer
+        //    to a different cell. Re-mapping is impossible without
+        //    retaining the original byte stream, so the safe choice is to
+        //    drop the selection. We compare against the previous
+        //    snapshot's `cols` so a row-only resize (no scrollback
+        //    reflow) preserves the selection — typical e.g. when the
+        //    user drags only the bottom edge of the window.
+        //
+        //  - #15 (alt-screen exit/enter): `CSI ?1049h` swaps the visible
+        //    grid for a fresh alt-screen and `?1049l` restores the prior
+        //    main-screen content; either edge means the lines the
+        //    selection points into have been replaced. `BBSnapshot.termMode`
+        //    surfaces the `.altScreen` bit (see BBTerm.swift), so detect
+        //    the toggle and clear.
+        //
+        // Both checks are gated on a non-nil prior snapshot so the very
+        // first render() (where `currentSnapshot` is still nil) doesn't
+        // misfire — there's no live selection at session start anyway.
+        if selection != nil, let prev = currentSnapshot {
+            let colsChanged = prev.cols != snapshot.cols
+            let altScreenChanged = prev.termMode.contains(.altScreen)
+                != snapshot.termMode.contains(.altScreen)
+            if colsChanged || altScreenChanged {
+                selection = nil
+            }
+        }
         self.currentSnapshot = snapshot
         // If ⌘ is held while the grid reshapes under the pointer (scrolling
         // output, screen clear), re-resolve the regex URL at the current
@@ -1324,6 +1374,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         guard let session else {
             currentSnapshot = nil
             findMatches.removeAll()
+            findMatchesSeq = nil
             findCurrentIndex = 0
             findQuery = ""
             setNeedsDisplay(bounds)
@@ -2226,6 +2277,7 @@ extension TerminalView: FindBarDelegate {
         // F10: wipe match state so ⌘G after close doesn't cycle stale
         // coordinates against a mutated buffer or a new (yet-unissued) query.
         findMatches.removeAll()
+        findMatchesSeq = nil
         findCurrentIndex = 0
         findQuery = ""
         // F30: deliberately preserve `selection` so Esc-then-⌘C on a found
@@ -2283,6 +2335,7 @@ extension TerminalView {
         // line has now shifted or vanished. Drop the cache so find-next
         // doesn't scroll to a stale coordinate.
         findMatches.removeAll()
+        findMatchesSeq = nil
         findCurrentIndex = 0
         findBar?.setMatchCount(0, of: 0)
         // F5: re-run the search after the byte stream has had a chance to
@@ -2359,6 +2412,7 @@ extension TerminalView {
         }
         // All input-line matches have been spliced; invalidate the cache.
         findMatches.removeAll()
+        findMatchesSeq = nil
         findCurrentIndex = 0
         findBar?.setMatchCount(0, of: 0)
         if hadOffLine {

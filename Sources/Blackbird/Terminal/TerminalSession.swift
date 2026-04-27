@@ -305,10 +305,26 @@ public final class TerminalSession: ObservableObject {
     }
 
     /// Whether the shell currently has a foreground child process (anything
-    /// other than the shell itself). Used to gate the confirm-close prompt.
+    /// other than the shell itself). Used to gate the confirm-close prompt
+    /// and the drag-drop "command is running" refusal (Bug #19).
     public func hasForegroundChild() -> Bool {
-        pty?.hasForegroundChild() ?? false
+        #if DEBUG
+        if let override = _testForegroundChildOverride {
+            return override
+        }
+        #endif
+        return pty?.hasForegroundChild() ?? false
     }
+
+    #if DEBUG
+    /// Test-only override for `hasForegroundChild()`. The real
+    /// implementation calls `tcgetpgrp` on the master fd, which a
+    /// headless test session (`makeHeadlessForTests` — `pty == nil`)
+    /// can't drive. Setting this to `true` lets `DragDropTests`
+    /// exercise the Bug #19 refusal branch without forking a child
+    /// process. Cleared with `nil` to fall back to the real path.
+    var _testForegroundChildOverride: Bool?
+    #endif
 
     /// Current working directory of the foreground process — inherited by
     /// new tabs / windows created via ⌘T / ⌘N.
@@ -411,6 +427,15 @@ public final class TerminalSession: ObservableObject {
     /// Internal accessor exposing the otherwise-private cycle index so
     /// tests can assert exact walk behaviour.
     internal var _testPromptCursor: Int? { promptCursor }
+
+    /// Exposes the Preferences Combine subscription so the
+    /// `test_terminate_cancelsPreferencesSubscription` regression can
+    /// assert it goes nil after `terminate()`. Internal-only — production
+    /// callers must not retain or null this; lifecycle is owned by
+    /// `wire()` / `terminate()`.
+    internal var _testPreferencesSubscription: AnyCancellable? {
+        preferencesSubscription
+    }
 
     /// Compute and apply the scroll delta that places a given mark near
     /// the top of the current viewport.
@@ -617,6 +642,16 @@ public final class TerminalSession: ObservableObject {
         // work item will observe `isTerminated` and bail before assigning.
         pendingSnapshot = nil
         publishLock.unlock()
+        // Bug #24: tear down the Preferences sink. Without this, a session
+        // that's been terminated (window closed, child reaped) keeps a
+        // strong reference into Preferences.shared.objectWillChange and
+        // continues to react to pref changes — small but real per-session
+        // leak that compounds across long-lived app processes that spawn
+        // many tabs/windows. `preferencesSubscription` is the only Combine
+        // store on this class today; `cancel()` then nil so `deinit` is
+        // a no-op when terminate() ran first.
+        preferencesSubscription?.cancel()
+        preferencesSubscription = nil
         pty?.terminate()
     }
 

@@ -50,6 +50,9 @@ final class BBTermTests: XCTestCase {
     /// clamp-applied dims back to the caller pins the contract that
     /// downstream wiring depends on.
     func test_oversizedResize_returnsClampedDims_notRequested() throws {
+        try requireTestFitsInBudget(
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+        )
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
         let applied = term.resize(to: .init(cols: 1500, rows: 1500))
         XCTAssertEqual(applied.cols, 1000, "applied cols must reflect the clamp ceiling, not the request")

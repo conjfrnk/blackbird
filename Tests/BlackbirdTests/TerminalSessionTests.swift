@@ -18,7 +18,12 @@ final class TerminalSessionTests: XCTestCase {
         //
         // Memory budget: 1000 × max(1000, 10 000 scrollback) × 32B ≈
         // 320 MB allocation under alacritty reflow — well within a dev
-        // machine's RAM. The test's pre-flight check: sanity on this.
+        // machine's RAM. The pre-flight guard trips BEFORE we allocate
+        // anything, mechanising Connor's post-OOM rule (a single bad
+        // resize test once forced a 100+ GB alloc and froze the host).
+        try requireTestFitsInBudget(
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+        )
         let session = try TerminalSession.start(
             shell: "/bin/cat",
             arguments: [],
@@ -213,6 +218,9 @@ final class TerminalSessionTests: XCTestCase {
     /// allocate at the requested 1500×1500 because the clamp catches
     /// the request before reflow.
     func test_oversizedResize_pty_seesClampedDims_notRequested() throws {
+        try requireTestFitsInBudget(
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+        )
         let session = try TerminalSession.start(
             shell: "/bin/sh",
             arguments: ["-c", "sleep 0.2; stty size"],
@@ -395,6 +403,32 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertEqual(
             postTerminateCount.pointee, 0,
             "feeds after terminate() must not publish snapshots"
+        )
+    }
+
+    /// Bug #24: `preferencesSubscription` is set up in `wire()` and was
+    /// never cancelled in `terminate()`/`deinit`, leaking a Combine
+    /// subscription per session that kept reacting to Preferences changes
+    /// for the lifetime of the app process. After `terminate()` the
+    /// subscription must be cancelled and nilled so neither the closure
+    /// nor its captured `bbterm` reference stay reachable through the
+    /// Preferences publisher.
+    func test_terminate_cancelsPreferencesSubscription() {
+        let session = TerminalSession.makeHeadlessForTests()
+
+        // After `wire()` (run from init via the headless factory) the
+        // Preferences sink must be in place — otherwise this test would
+        // pass vacuously.
+        XCTAssertNotNil(
+            session._testPreferencesSubscription,
+            "wire() should have installed preferencesSubscription"
+        )
+
+        session.terminate()
+
+        XCTAssertNil(
+            session._testPreferencesSubscription,
+            "terminate() must cancel + nil the preferencesSubscription (Bug #24)"
         )
     }
 }

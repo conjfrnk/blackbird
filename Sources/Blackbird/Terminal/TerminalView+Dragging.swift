@@ -45,11 +45,77 @@ extension TerminalView {
         // Keep only file-scheme URLs. `readObjects(forClasses: [NSURL.self])`
         // can also return https: URLs from a web-browser drag; those would
         // turn into garbage arguments if we blindly `path`-stringified them.
+        //
+        // Bug #20: NSPasteboard's URL reader can hand back a URL whose
+        // backing string was already symlink-resolved by the kernel
+        // (Finder favorites pointing at /etc, network-mount aliases that
+        // were canonicalised at NSURL bookmark resolution time). Drop a
+        // symlink that targets `/etc/passwd` and the shell's history
+        // would record the resolved target rather than the link the
+        // user actually dragged. We can't recover the link string in the
+        // leaky case (kernel-side lookup is destructive), but we *can*
+        // guarantee we never double-resolve here. `standardizedFileURL`
+        // and `resolvingSymlinksInPath` are intentionally NOT used: both
+        // eagerly call `realpath`, which IS the bug. Using `url.path`
+        // directly preserves the link path on healthy drags.
         let paths = items.compactMap { url -> String? in
             guard url.isFileURL else { return nil }
             return url.path
         }
+        return performDropOfPaths(paths)
+    }
+
+    /// Test seam for `performDragOperation`. Splits the
+    /// gate-and-paste decision from the NSDraggingInfo decoding so unit
+    /// tests can drive the same behaviour without constructing an
+    /// `NSDraggingInfo` fake (the protocol is non-trivially mockable —
+    /// AppKit treats it specially and synthesised conformers crash on
+    /// the framework's internal `_concreteDraggingInfo` lookup).
+    ///
+    /// Returns whether bytes reached the session: false when the drop
+    /// was refused (foreground child running, empty payload) or no
+    /// session was wired, true when a paste was issued. Invariants:
+    /// - `paths` is the already-shell-quote-input list (link strings,
+    ///   not realpath-resolved targets) — caller is responsible for
+    ///   the symlink-leak guard.
+    /// - On refusal, no bytes are written to the PTY recorder or the
+    ///   session.
+    /// - On accept, IME composition is cleared *before* paste so the
+    ///   preedit overlay can't render over the dropped path (Bug #21).
+    @discardableResult
+    func performDropOfPaths(_ paths: [String]) -> Bool {
+        // Bug #19: refuse the drop while the shell has a foreground child
+        // (cat / ssh / vim / running command). Without this, the bytes go
+        // straight to the running process's stdin instead of the shell —
+        // either corrupting its protocol (ssh, vim) or just landing in a
+        // surprising place (cat). Matches Terminal.app behaviour. The
+        // `hasForegroundChild()` syscall is `tcgetpgrp` + `getpgid`, both
+        // microsecond-level — safe to call on the main thread directly,
+        // no async hop needed (and a hop would race the drop's lifetime
+        // and starve the user of feedback).
+        if let session, session.hasForegroundChild() {
+            // Surface a transient banner via the existing FindBar
+            // mechanism so the user knows why nothing happened. Lazily
+            // install the bar if it wasn't already up — closing it again
+            // is a single click, and a drop attempt is itself an explicit
+            // action so a brief UI surfacing is appropriate.
+            if findBar == nil { installFindBar() }
+            findBar?.showTransientMessage("Cannot drop: command is running")
+            return false
+        }
         guard !paths.isEmpty else { return false }
+
+        // Bug #21: drop any pending IME composition before the path bytes
+        // hit the PTY. Otherwise the preedit overlay (a CALayer-backed
+        // subview at the cursor) keeps rendering above the freshly-pasted
+        // text — visual confusion, and the next IME keystroke commits the
+        // stale preedit on top of the path. `discardCompositionOnResignKey`
+        // is the existing helper that pairs
+        // `inputContext?.discardMarkedText()` with our own `unmarkText()`,
+        // so the system input context and our local `composition` slot
+        // stay in sync.
+        discardCompositionOnResignKey()
+
         pasteText(Self.joinedDroppedPaths(paths))
         return true
     }

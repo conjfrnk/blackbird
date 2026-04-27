@@ -29,6 +29,17 @@ extension TerminalView {
     /// drag-and-drop code path (file URLs are shell-quoted into a single
     /// string which is then fed through here).
     func pasteText(_ text: String) {
+        #if DEBUG
+        // Test seam: DragDropTests captures the *pre-encoding* pasted
+        // string here so it can assert that drop integration produces
+        // the expected shell-quoted command-line text. Real PTY bytes
+        // are encoded later (CRLF normalisation, control sanitisation,
+        // bracketed-paste wrap) — those have separate sanitiser tests;
+        // the drop integration only needs the text-level invariant.
+        if let recorder = pasteTextRecorderForTests {
+            recorder(text)
+        }
+        #endif
         guard let session else { return }
         if (currentSnapshot?.displayOffset ?? 0) > 0 {
             session.scrollToBottom()

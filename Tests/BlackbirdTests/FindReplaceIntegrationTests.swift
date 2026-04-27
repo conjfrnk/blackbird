@@ -3,6 +3,7 @@ import AppKit
 import Metal
 import Combine
 @testable import Blackbird
+import BBCore
 
 /// Integration-level tests for the replace path: verifies that
 /// `replaceCurrentMatch` / `replaceAllMatches` emit the expected byte sequences
@@ -182,3 +183,164 @@ extension TerminalView {
     }
 }
 #endif
+
+// MARK: - Bug #16: stale findMatches against the live snapshot
+
+/// Regression coverage for Bug #16 (findbar-selection F11): when output
+/// arrives between `performSearch` and ⌘G, `findMatches` holds (line, col)
+/// tuples that were computed against the OLD snapshot. Cycling those
+/// stale coordinates jumps the highlight to a row that no longer holds
+/// the match — the user sees the selection land on an unrelated line, or
+/// scroll into off-screen scrollback.
+///
+/// The fix stamps `findMatchesSeq` with the snapshot's `sequenceID` at
+/// scan time, then `advanceFind` checks whether the current snapshot has
+/// moved on before cycling. If it has, `performSearch` is rerun
+/// synchronously against the live grid.
+///
+/// These tests pin the seq-stamp + stale-detection contract directly,
+/// without spinning up a full session — the behaviour is deterministic
+/// and has no async hops to wait on.
+final class FindStaleMatchInvalidationTests: XCTestCase {
+
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
+    /// pre-flight: 1 TerminalView (lightweight; just an MTKView wrapper)
+    /// + 2 BBTerm instances at 20×4 (< 5 KB each, no scrollback growth).
+    /// No PTY, no session subscription. Wall < 100 ms.
+    private func makeView() throws -> TerminalView {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        return TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 480),
+            device: device
+        )
+    }
+
+    /// Distinct snapshots from a single BBTerm bump `sequenceID` on every
+    /// `snapshot()` call (allocator is monotonic). That gives us two
+    /// snapshots whose grids agree but whose identities differ — exactly
+    /// the shape of "output arrived, snapshot swapped" without needing
+    /// to drive PTY traffic.
+    private func twoFreshSnapshots() throws -> (BBSnapshot, BBSnapshot) {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 4)))
+        term.input("alpha")
+        let s1 = try XCTUnwrap(term.snapshot())
+        // Mutate the grid so s2 is meaningfully newer (and re-snapshot
+        // bumps the seq counter).
+        term.input("\r\nbeta")
+        let s2 = try XCTUnwrap(term.snapshot())
+        XCTAssertNotEqual(
+            s1.sequenceID, s2.sequenceID,
+            "test setup: BBTerm.snapshot() must allocate a fresh sequenceID"
+        )
+        return (s1, s2)
+    }
+
+    /// `performSearch` must clear `findMatchesSeq` whenever it discards
+    /// the prior match list. If a stale seq survived a clear, the next
+    /// `advanceFind` would compare against the OLD stamp and could either
+    /// false-skip a rescan (seq accidentally still matches a future
+    /// snapshot) or false-trigger one (extra work). Both directions are
+    /// regressions, so we pin the clear-path explicitly.
+    func test_performSearch_resetsFindMatchesSeq_onClear() throws {
+        let view = try makeView()
+        let (s1, _) = try twoFreshSnapshots()
+        view.currentSnapshot = s1
+        // Pre-populate state as if a previous search had run.
+        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findMatchesSeq = 99
+        view.findQuery = "alpha"
+        // Empty query → performSearch enters its bail-out branch which
+        // clears findMatches; the seq must clear in lockstep so
+        // refreshFindMatchesIfStale doesn't gate the next rescan on a
+        // stale (and now meaningless) stamp.
+        view.performSearch(query: "")
+        XCTAssertNil(
+            view.findMatchesSeq,
+            "performSearch must clear findMatchesSeq when it clears "
+            + "findMatches so the two stay coupled. Bug #16."
+        )
+    }
+
+    /// The core invariant: when `currentSnapshot.sequenceID` differs from
+    /// `findMatchesSeq`, `advanceFind` must re-run `performSearch`. We
+    /// detect the rerun by the side-effect: with no session wired, the
+    /// rerun path nils-out findMatchesSeq and clears findMatches (the
+    /// guard-let session/snapshot branch). If advanceFind had skipped the
+    /// rerun, both pieces of state would survive untouched.
+    func test_advanceFind_rerunsSearch_whenSnapshotSeqChanged() throws {
+        let view = try makeView()
+        let (s1, s2) = try twoFreshSnapshots()
+
+        // Simulate: performSearch was run against s1 and found one match.
+        view.currentSnapshot = s1
+        view.findQuery = "alpha"
+        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findMatchesSeq = s1.sequenceID
+        view.findCurrentIndex = 0
+
+        // Output arrives → snapshot swaps. (The didSet's
+        // scheduleFindRefresh is debounced via DispatchQueue.main.async,
+        // so it has NOT fired yet on this same runloop turn.)
+        view.currentSnapshot = s2
+
+        // ⌘G fires while findMatches still holds the stale s1-tuples.
+        view.advanceFind(direction: .forward)
+
+        // The stale-cache path took over and called performSearch. With
+        // no session wired, performSearch hits its session/snapshot guard
+        // and nils findMatchesSeq + clears findMatches. Either side-effect
+        // is sufficient evidence the rerun happened.
+        XCTAssertNil(
+            view.findMatchesSeq,
+            "advanceFind must rerun performSearch when currentSnapshot's "
+            + "sequenceID differs from findMatchesSeq; the rerun cleared "
+            + "the seq stamp via the session-less guard. Bug #16."
+        )
+        XCTAssertTrue(
+            view.findMatches.isEmpty,
+            "Stale findMatches from the prior snapshot must be discarded "
+            + "before advanceFind cycles, so the highlight can't land on "
+            + "a row that no longer holds the match. Bug #16."
+        )
+    }
+
+    /// Counter-test: when the snapshot hasn't changed, advanceFind MUST
+    /// keep cycling the existing matches — the staleness check must not
+    /// false-positive on every press. Without this guard, each ⌘G would
+    /// rerun the full scan and reset findCurrentIndex, breaking the cycle.
+    func test_advanceFind_preservesMatches_whenSnapshotSeqUnchanged() throws {
+        let view = try makeView()
+        let (s1, _) = try twoFreshSnapshots()
+
+        view.currentSnapshot = s1
+        view.findQuery = "alpha"
+        view.findMatches = [
+            (line: 0, startCol: 0, endCol: 4),
+            (line: 1, startCol: 5, endCol: 9),
+        ]
+        view.findMatchesSeq = s1.sequenceID
+        view.findCurrentIndex = 0
+
+        // No snapshot swap. ⌘G should advance to index 1.
+        view.advanceFind(direction: .forward)
+
+        XCTAssertEqual(
+            view.findCurrentIndex, 1,
+            "advanceFind must cycle to the next match when matches are "
+            + "still valid against the live snapshot — the stale-check "
+            + "cannot fire on a snapshot that hasn't moved on."
+        )
+        XCTAssertEqual(
+            view.findMatches.count, 2,
+            "Existing matches must survive a same-seq advanceFind"
+        )
+        XCTAssertEqual(
+            view.findMatchesSeq, s1.sequenceID,
+            "findMatchesSeq must remain stamped to the live snapshot"
+        )
+    }
+}

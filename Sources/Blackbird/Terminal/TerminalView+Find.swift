@@ -151,6 +151,14 @@ extension TerminalView {
     }
 
     func advanceFind(direction: FindBar.Direction) {
+        // Audit findbar-selection F11: the snapshot may have advanced
+        // between performSearch and ⌘G — output arriving scrolls history
+        // and overwrites rows, so the cached (line, col) tuples can now
+        // reference cells holding different text. Re-scan synchronously
+        // against the live snapshot before cycling. The async refresh in
+        // currentSnapshot.didSet is debounced via DispatchQueue.main.async
+        // and may not have fired yet when ⌘G runs in the same runloop turn.
+        refreshFindMatchesIfStale()
         guard !findMatches.isEmpty else { return }
         switch direction {
         case .forward:  findCurrentIndex = (findCurrentIndex + 1) % findMatches.count
@@ -160,9 +168,33 @@ extension TerminalView {
         highlightCurrentMatch()
     }
 
+    /// Rerun the active search if the cached `findMatches` were computed
+    /// against an earlier snapshot than the live one. No-op when the
+    /// query is empty (nothing to refresh) or the snapshot's sequenceID
+    /// matches the cached one (matches still valid).
+    ///
+    /// The substring path stamps `findMatchesSeq` synchronously inside
+    /// `performSearch`; the regex path stamps it from the main-thread
+    /// publish in `runRegexSearchAsync`. Either way, by the time we
+    /// observe `findMatchesSeq == snap.sequenceID` the matches are
+    /// known-good against `snap`.
+    /// Audit findbar-selection F11.
+    private func refreshFindMatchesIfStale() {
+        guard !findQuery.isEmpty else { return }
+        guard let snap = currentSnapshot else { return }
+        if findMatchesSeq != snap.sequenceID {
+            performSearch(query: findQuery)
+        }
+    }
+
     func performSearch(query: String) {
         findQuery = query
         findMatches.removeAll()
+        // Clear the seq stamp now; the substring path below stamps it
+        // post-scan, and the regex async path stamps it on the main-queue
+        // publish. Leaving an old seq here would let `advanceFind` skip
+        // a stale-cache rerun against the new (empty) match set.
+        findMatchesSeq = nil
         findCurrentIndex = 0
         guard let session, let snap = currentSnapshot, !query.isEmpty else {
             findBar?.setMatchCount(0, of: 0)
@@ -249,6 +281,10 @@ extension TerminalView {
                 if findMatches.count >= findMatchLimit { break outer }
             }
         }
+        // Stamp the seq the matches were computed against; advanceFind
+        // checks this before cycling so a snapshot swap between now and
+        // ⌘G triggers a re-scan instead of jumping to a stale row.
+        findMatchesSeq = snap.sequenceID
         findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
         highlightCurrentMatch()
     }
@@ -289,6 +325,10 @@ extension TerminalView {
                 rows.append((line: ln, hay: hay))
             }
         }
+        // Capture the snapshot's seq at scan-submit time so the publish
+        // can stamp `findMatchesSeq` with the snapshot the rows actually
+        // came from — even if `currentSnapshot` advances during the scan.
+        let scanSeq = currentSnapshot?.sequenceID
 
         let mySearchID = nextRegexSearchID()
         activeRegexSearchID = mySearchID
@@ -334,6 +374,12 @@ extension TerminalView {
                 guard self.activeRegexSearchID == mySearchID else { return }
                 self.regexSearchCompletedID = mySearchID
                 self.findMatches = matches
+                // Stamp the seq the regex scanned against (NOT the live
+                // currentSnapshot at publish time, which may have moved
+                // on while the scan ran). On the next ⌘G, advanceFind
+                // sees the cached seq trail the live one and re-runs the
+                // search before cycling.
+                self.findMatchesSeq = scanSeq
                 self.findCurrentIndex = 0
                 self.findBar?.setMatchCount(self.findCurrentIndex, of: self.findMatches.count)
                 self.highlightCurrentMatch()

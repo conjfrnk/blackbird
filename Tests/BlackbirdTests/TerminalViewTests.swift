@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import Metal
 @testable import Blackbird
+import BBCore
 
 final class TerminalViewTests: XCTestCase {
 
@@ -920,5 +921,135 @@ final class TerminalViewTests: XCTestCase {
         }
         wait(for: [exp], timeout: 3.0)
         timer.invalidate()
+    }
+
+    // MARK: - Bug #14 / #15: selection invalidation on reflow / alt-screen toggle
+    //
+    // `Selection.anchor` and `cursor` are `BufferPoint(line, col)` pinned
+    // to the pre-reflow grid. Two snapshot transitions move the cells
+    // those points address out from under the selection:
+    //   - Bug #14: column shrink → alacritty re-wraps scrollback so
+    //     the (line, col) addresses now point at different cells.
+    //     Row-only resizes don't reflow; selection should survive.
+    //   - Bug #15: alt-screen enter/exit (CSI ?1049h/l) swaps the
+    //     visible grid; the buffer lines the selection points into are
+    //     replaced.
+    // Both fixes live in `TerminalView.render(snapshot:)`. These tests
+    // drive a real BBTerm directly so we can synthesize the snapshot
+    // sequence without the timing variability of a session+shell.
+
+    /// Construct a TerminalView wired to a fresh BBTerm. The view's
+    /// `session` is left nil — these tests drive snapshots into
+    /// `render(snapshot:)` synchronously, no Combine sink involved.
+    private func makeViewForRenderInvalidation() throws -> (TerminalView, BBTerm) {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let view = TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 480),
+            device: device
+        )
+        let bb = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        return (view, bb)
+    }
+
+    func test_columnShrinkResize_clearsActiveSelection() throws {
+        let (view, bb) = try makeViewForRenderInvalidation()
+        // Establish the prior snapshot so the next render() has a `prev`
+        // to compare cols against. Without a prior, the gate is skipped
+        // (no live selection at session start).
+        let s1 = try XCTUnwrap(bb.snapshot())
+        view.render(snapshot: s1)
+
+        // Drive scrollback so the selection has somewhere meaningful to
+        // anchor. Feed a few hundred lines so the buffer wraps off the
+        // visible viewport — irrelevant to the invalidation logic itself
+        // but matches the bug's user-visible scenario.
+        var lines = ""
+        for i in 0..<500 { lines += "row \(i) padding to fill out the line\n" }
+        bb.input(lines)
+        let s2 = try XCTUnwrap(bb.snapshot())
+        view.render(snapshot: s2)
+
+        // User starts a selection in scrollback.
+        view.selection = Selection(
+            anchor: BufferPoint(line: -50, col: 5),
+            cursor: BufferPoint(line: -50, col: 30),
+            mode: .character
+        )
+        XCTAssertNotNil(view.selection)
+
+        // Shrink columns 80 → 40. alacritty reflows wrapped scrollback so
+        // the (line, col) coordinates now address different cells.
+        bb.resize(to: .init(cols: 40, rows: 24))
+        let s3 = try XCTUnwrap(bb.snapshot())
+        XCTAssertEqual(s3.cols, 40, "sanity: column shrink applied")
+        view.render(snapshot: s3)
+
+        XCTAssertNil(view.selection,
+                     "column shrink must clear the active selection (Bug #14)")
+    }
+
+    func test_rowOnlyResize_preservesSelection() throws {
+        let (view, bb) = try makeViewForRenderInvalidation()
+        let s1 = try XCTUnwrap(bb.snapshot())
+        view.render(snapshot: s1)
+
+        var lines = ""
+        for i in 0..<200 { lines += "row \(i)\n" }
+        bb.input(lines)
+        let s2 = try XCTUnwrap(bb.snapshot())
+        view.render(snapshot: s2)
+
+        let sel = Selection(
+            anchor: BufferPoint(line: -10, col: 0),
+            cursor: BufferPoint(line: -10, col: 5),
+            mode: .character
+        )
+        view.selection = sel
+
+        // Resize ROWS only — alacritty doesn't reflow scrollback on row
+        // changes, so the selection's (line, col) coordinates still
+        // address the same cells.
+        bb.resize(to: .init(cols: 80, rows: 12))
+        let s3 = try XCTUnwrap(bb.snapshot())
+        XCTAssertEqual(s3.cols, 80, "sanity: cols unchanged")
+        XCTAssertEqual(s3.rows, 12, "sanity: rows shrunk")
+        view.render(snapshot: s3)
+
+        XCTAssertEqual(view.selection, sel,
+                       "row-only resize must preserve selection (Bug #14)")
+    }
+
+    func test_altScreenExit_clearsSelection() throws {
+        let (view, bb) = try makeViewForRenderInvalidation()
+        let s1 = try XCTUnwrap(bb.snapshot())
+        view.render(snapshot: s1)
+
+        // Enter alt-screen via CSI ?1049h. BBSnapshot.termMode.altScreen
+        // flips on. Render that as the prior snapshot so the alt-screen
+        // bit is the baseline for the next render().
+        bb.input("\u{1B}[?1049h")
+        let sAlt = try XCTUnwrap(bb.snapshot())
+        XCTAssertTrue(sAlt.termMode.contains(.altScreen),
+                      "sanity: ?1049h enabled alt-screen")
+        view.render(snapshot: sAlt)
+
+        // User starts a selection while in alt-screen (e.g. inside vim).
+        view.selection = Selection(
+            anchor: BufferPoint(line: 2, col: 1),
+            cursor: BufferPoint(line: 2, col: 8),
+            mode: .character
+        )
+        XCTAssertNotNil(view.selection)
+
+        // Exit alt-screen. The lines the selection points into are
+        // discarded — copy would return garbage.
+        bb.input("\u{1B}[?1049l")
+        let sMain = try XCTUnwrap(bb.snapshot())
+        XCTAssertFalse(sMain.termMode.contains(.altScreen),
+                       "sanity: ?1049l restored main screen")
+        view.render(snapshot: sMain)
+
+        XCTAssertNil(view.selection,
+                     "alt-screen exit must clear the active selection (Bug #15)")
     }
 }
