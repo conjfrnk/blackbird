@@ -144,7 +144,13 @@ public final class MetalRenderer {
         let cursorCol: Int32
         let cursorShape: UInt8
         let cursorVisible: Bool
-        let displayOffset: UInt16
+        /// Widened from UInt16 to UInt32: default scrollback is 100 000 lines
+        /// and the Rust core caps at 200 000, both well past UInt16.max
+        /// (65 535). A truncating narrowing here would silently wrap once
+        /// the user scrolled past row 65 535, leaving the frame-skip path
+        /// unable to distinguish two visually-different scroll positions
+        /// and dragging hover/selection/cursor uniforms out of alignment.
+        let displayOffset: UInt32
         let topInsetPoints: Float
         let defaultBgRgb: UInt32
         let backgroundOpacity: Float
@@ -160,16 +166,18 @@ public final class MetalRenderer {
         let cmdHoverEndCol: Int32
     }
     private var lastFrameKey: FrameKey?
-    #if DEBUG
-    /// Observable frame-skip signal for tests. `true` when the most
-    /// recent `render(in:snapshot:focused:selection:)` call short-
-    /// circuited on `frameKey == lastFrameKey`; `false` on any path
-    /// that actually touched the encode pipeline. Never read in
-    /// production — DEBUG-only seam for regression tests that need to
-    /// assert "this render was not skipped." Not thread-safe; tests
-    /// should read it from the same queue as the `render` call.
+    /// Observable frame-skip signal. `true` when the most recent
+    /// `render(in:snapshot:focused:selection:)` call short-circuited on
+    /// `frameKey == lastFrameKey` (or otherwise returned without
+    /// presenting a drawable); `false` on any path that actually touched
+    /// the encode pipeline through `commit()`. Promoted from a DEBUG-only
+    /// test seam to public-readable in all builds because TerminalView
+    /// needs it to gate `LatencyProbe.shared.markPresented()` — calling
+    /// `markPresented()` after a skipped render records phantom zero-
+    /// latency samples, dragging p50/p99 metrics artificially low.
+    /// Not thread-safe; readers must observe it from the same queue as
+    /// the `render` call (today: main).
     public private(set) var didFrameSkipLastRender: Bool = false
-    #endif
 
     /// Strict subset of FrameKey fields that decide whether a prior frame's
     /// per-row cache is still visually correct: everything in FrameKey
@@ -195,7 +203,11 @@ public final class MetalRenderer {
         /// the current snapshot shape still repaints exactly once.
         let cursorShape: UInt8
         let cursorVisible: Bool
-        let displayOffset: UInt16
+        /// Same UInt16 → UInt32 widening as `FrameKey.displayOffset`. See
+        /// the rationale on that field; a stale per-row cache from a
+        /// truncated scroll position would let scrollback rows render
+        /// against the wrong selection / hover state.
+        let displayOffset: UInt32
         let topInsetPoints: Float
         let defaultBgRgb: UInt32
         let backgroundOpacity: Float
@@ -920,7 +932,7 @@ public final class MetalRenderer {
             cursorCol: Int32(snapshot?.cursorCol ?? -1),
             cursorShape: cursorShapeOverride ?? UInt8(snapshot?.cursorShape ?? 3),
             cursorVisible: snapshot?.cursorVisible ?? false,
-            displayOffset: UInt16(snapshot?.displayOffset ?? 0),
+            displayOffset: UInt32(snapshot?.displayOffset ?? 0),
             topInsetPoints: topInsetPoints,
             defaultBgRgb: defaultBgRgb,
             backgroundOpacity: backgroundOpacity,
@@ -939,14 +951,10 @@ public final class MetalRenderer {
             // compositor keeps displaying the previously-presented frame.
             // Semaphore NOT touched on the skip path: we never claimed
             // a slot, so we don't signal back.
-            #if DEBUG
             didFrameSkipLastRender = true
-            #endif
             return
         }
-        #if DEBUG
         didFrameSkipLastRender = false
-        #endif
 
         lastFrameKey = frameKey
 
@@ -973,6 +981,12 @@ public final class MetalRenderer {
             // Release the slot we just claimed — we're abandoning this
             // frame without encoding, so the GPU never reads the buffer.
             inflightSemaphore.signal()
+            // No drawable was presented on this path either: tell
+            // callers gating side effects (LatencyProbe.markPresented)
+            // that the GPU did not actually paint a frame, so they
+            // don't record a phantom zero-latency sample for the
+            // pending keystroke.
+            didFrameSkipLastRender = true
             return
         }
 
@@ -1112,7 +1126,7 @@ public final class MetalRenderer {
                 focused: focused,
                 cursorShape: effectiveShape,
                 cursorVisible: snap.cursorVisible,
-                displayOffset: UInt16(snap.displayOffset),
+                displayOffset: UInt32(snap.displayOffset),
                 topInsetPoints: topInsetPoints,
                 defaultBgRgb: defaultBgRgb,
                 backgroundOpacity: backgroundOpacity,

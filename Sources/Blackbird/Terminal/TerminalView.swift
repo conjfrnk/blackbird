@@ -1237,10 +1237,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         // Any frame after a keystroke counts as "the keystroke landed on
-        // screen" for probe purposes. The renderer's frame-skip path returns
-        // early on unchanged state, so we only reach here on presented frames
-        // — close enough to true input→pixel for a diagnostic probe.
-        LatencyProbe.shared.markPresented()
+        // screen" for probe purposes. The renderer can short-circuit
+        // (frameKey unchanged → no encode, no present; drawable
+        // unavailable → semaphore released without paint), and on those
+        // paths nothing reached the screen. Reading
+        // `didFrameSkipLastRender` filters those out so we don't record
+        // phantom zero-latency samples that drag p50/p99 down. When the
+        // skip flag is set the pending keystroke timestamp stays armed
+        // and the next *real* presented frame consumes it.
+        if !renderer.didFrameSkipLastRender {
+            LatencyProbe.shared.markPresented()
+        }
         #if DEBUG
         // Count draws and sample the interval between consecutive calls so
         // the periodic log can distinguish "N fps with 16.67ms spacing" (60 Hz
@@ -2106,7 +2113,8 @@ final class FakeHyperlinkSnapshot: HyperlinkResolver {
         // semantics match. The regex is rebuilt per call — fine for tests,
         // the grid is tiny.
         let pattern = #"(?i)(?:https?|ftp|file)://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        // Pattern is a constant; force-try so a bad edit fails loudly.
+        let regex = try! NSRegularExpression(pattern: pattern)
         let range = NSRange(location: 0, length: nsLine.length)
         var found: URL?
         regex.enumerateMatches(in: line, range: range) { result, _, stop in
