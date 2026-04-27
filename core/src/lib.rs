@@ -324,6 +324,36 @@ struct RoutingListener {
     color_queue: Arc<ColorRequestQueue>,
 }
 
+/// Strip C0 controls (U+0000..=U+001F), DEL (U+007F), and C1 controls
+/// (U+0080..=U+009F) from an OSC 0/1/2 window-title payload. Bug #18: a
+/// hostile stream sets the title to `before\x1b[31mafter`; downstream
+/// loggers / accessibility consumers misinterpret the embedded controls
+/// even though NSWindow sanitizes for display.
+///
+/// Codepoint-wise filter so C1 (UTF-8 `0xC2 0x80..=0xC2 0x9F`) drops by
+/// a single `c <= '\u{9F}'` check rather than a fragile byte sweep that
+/// would corrupt multi-byte UTF-8.
+///
+/// Allocation note: alacritty hands us a `&String`; a clean (no-control)
+/// title is the common case. We could short-circuit when no control char
+/// is present, but the title path fires once per OSC 0/2 dispatch — at
+/// most a few times per second even for animated TUIs — so a single
+/// always-allocate keeps the code obvious.
+fn scrub_title_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let cp = c as u32;
+        let is_c0 = cp <= 0x1F;
+        let is_del = cp == 0x7F;
+        let is_c1 = (0x80..=0x9F).contains(&cp);
+        if is_c0 || is_del || is_c1 {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 impl EventListener for RoutingListener {
     fn send_event(&self, event: Event) {
         // SAFETY: `cell` and `color_queue` remain live for as long as any
@@ -340,10 +370,24 @@ impl EventListener for RoutingListener {
                     });
                 }
                 Event::Title(ref s) => {
+                    // Bug #18: strip C0 (0x00..=0x1F), DEL (0x7F), and C1
+                    // (U+0080..=U+009F) controls from the title before
+                    // firing. A malicious shell or remote SSH session may
+                    // emit `\x1b]2;before\x1b[31mafter\x07`; alacritty hands
+                    // us the raw payload and downstream consumers (Swift
+                    // NSWindow.title, telemetry, accessibility) treat the
+                    // String literally. Display sanitizes, but stored /
+                    // logged copies misinterpret embedded controls.
+                    //
+                    // Filter codepoint-wise so the C1 case (encoded as
+                    // 0xC2 0x80..=0xC2 0x9F in UTF-8) is handled by char
+                    // semantics rather than a fragile byte filter.
+                    let scrubbed = scrub_title_controls(s);
+                    let bytes = scrubbed.as_bytes();
                     self.cell.fire(BBEvent {
                         kind: BBEventKind::Title,
-                        payload: s.as_ptr(),
-                        len: s.len(),
+                        payload: bytes.as_ptr(),
+                        len: bytes.len(),
                         i32_arg: 0,
                     });
                 }
@@ -450,6 +494,16 @@ struct PromptMarkRateState {
 
 const PROMPT_MARK_PER_SECOND: u32 = 16;
 const PROMPT_MARK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// OSC 10/11/12 color-query reply rate limit (audit synthesis bug #17).
+/// `ColorRequestQueue::push` already caps at 256 entries per `bb_term_input`
+/// chunk, but a hostile shell can split queries across many tight chunks to
+/// bypass that per-call cap and amplify replies through the PTY. This
+/// sliding-window cap covers the cross-chunk case using the same pattern as
+/// `PromptMarkRateState`. 32/sec is generous (legitimate apps probe at most
+/// a handful per second); excess replies are dropped silently.
+const COLOR_QUERY_REPLY_PER_SECOND: u32 = 32;
+const COLOR_QUERY_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl PromptMarkRateState {
     fn new() -> Self {
@@ -931,6 +985,15 @@ pub struct BBTerm {
     /// the sliding window covers prompt marks that arrive in different
     /// PTY chunks.
     prompt_mark_rate: PromptMarkRateState,
+    /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
+    /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
+    /// 256+ allocations, but a hostile stream can fan replies across many
+    /// chunks. Gating each `PtyWrite` reply in `drain_color_requests` by
+    /// this 1-second window with `COLOR_QUERY_REPLY_PER_SECOND` cap makes
+    /// the rate limit total, not per-call. Persisted across
+    /// `bb_term_input` calls for the same reason as `prompt_mark_rate`.
+    color_query_reply_window_start: std::time::Instant,
+    color_query_reply_window_count: u32,
     callback: Arc<CallbackCell>,
     /// Persistent OSC 8 URI intern store (rust-core-3 F1). Maps URI string →
     /// shared `Arc<CStr>`; entries survive across snapshots so the same URI
@@ -1147,6 +1210,8 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             uri_cache_bytes: 0,
             modify_other_keys: 0,
             prompt_mark_rate: PromptMarkRateState::new(),
+            color_query_reply_window_start: std::time::Instant::now(),
+            color_query_reply_window_count: 0,
         });
         Box::into_raw(bb)
     })
@@ -1297,6 +1362,22 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
     // surface can emit, but future widenings must not panic into
     // `BBEventKind::Fatal` (rust-core-2 F2).
     for entry in entries {
+        // Bug #17 sliding-window gate: cap PtyWrite replies at
+        // COLOR_QUERY_REPLY_PER_SECOND across the rolling
+        // COLOR_QUERY_REPLY_WINDOW. The per-chunk
+        // ColorRequestQueue cap stops in-call amplification; this
+        // covers the cross-chunk case.
+        let now = std::time::Instant::now();
+        if now.duration_since(bb.color_query_reply_window_start) >= COLOR_QUERY_REPLY_WINDOW {
+            bb.color_query_reply_window_start = now;
+            bb.color_query_reply_window_count = 0;
+        }
+        if bb.color_query_reply_window_count >= COLOR_QUERY_REPLY_PER_SECOND {
+            // Drop silently — matching the PromptMarkRateState pattern.
+            continue;
+        }
+        bb.color_query_reply_window_count += 1;
+
         let slot: Option<alacritty_terminal::vte::ansi::Rgb> =
             if entry.index < alacritty_terminal::term::color::COUNT {
                 palette[entry.index]
@@ -4754,5 +4835,195 @@ mod tests {
 
             bb_term_free(term);
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Bug #17 — OSC 10/11/12 color-query reply rate limit (cross-call)
+    // -------------------------------------------------------------------
+
+    /// Bug #17: a hostile shell spamming OSC 10 color queries must not
+    /// amplify replies through the PTY. Within one rolling 1-second
+    /// window the core dispatches at most COLOR_QUERY_REPLY_PER_SECOND
+    /// (32) PtyWrite events; the rest drop silently.
+    ///
+    /// Drives the full path (alacritty's OSC 10 dispatch → ColorRequest
+    /// → ColorRequestQueue → drain_color_requests) with replies enabled
+    /// so the gate inside drain is actually exercised.
+    #[test]
+    fn osc_color_query_rate_limit_drops_excess() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            count: Mutex<usize>,
+        }
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            if matches!(ev.kind, BBEventKind::PtyWrite) {
+                let sink = &*(ctx as *const Sink);
+                *sink.count.lock().unwrap() += 1;
+            }
+        }
+
+        let sink = Sink {
+            count: Mutex::new(0),
+        };
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+            bb_term_set_color_query_enabled(term, 1);
+
+            // 200 separate OSC 10 queries, fed across 200 distinct
+            // bb_term_input chunks so the per-call ColorRequestQueue cap
+            // (256) does NOT come into play — this isolates the new
+            // sliding-window gate as the only line of defense.
+            let one_query = b"\x1b]10;?\x1b\\";
+            for _ in 0..200 {
+                bb_term_input(term, one_query.as_ptr(), one_query.len());
+            }
+
+            let writes = *sink.count.lock().unwrap();
+            assert!(
+                writes <= COLOR_QUERY_REPLY_PER_SECOND as usize,
+                "expected at most {} color-query replies within one window, got {}",
+                COLOR_QUERY_REPLY_PER_SECOND,
+                writes
+            );
+
+            bb_term_free(term);
+        }
+    }
+
+    /// Bug #17: after the 1-second window expires the counter resets.
+    /// Fire the cap (32), sleep just past the boundary, fire one more —
+    /// total replies must be 33.
+    #[test]
+    fn osc_color_query_rate_limit_window_resets() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            count: Mutex<usize>,
+        }
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            if matches!(ev.kind, BBEventKind::PtyWrite) {
+                let sink = &*(ctx as *const Sink);
+                *sink.count.lock().unwrap() += 1;
+            }
+        }
+
+        let sink = Sink {
+            count: Mutex::new(0),
+        };
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+            bb_term_set_color_query_enabled(term, 1);
+
+            let one_query = b"\x1b]10;?\x1b\\";
+            for _ in 0..COLOR_QUERY_REPLY_PER_SECOND {
+                bb_term_input(term, one_query.as_ptr(), one_query.len());
+            }
+            assert_eq!(
+                *sink.count.lock().unwrap(),
+                COLOR_QUERY_REPLY_PER_SECOND as usize,
+                "first window must accept exactly the cap"
+            );
+
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+
+            bb_term_input(term, one_query.as_ptr(), one_query.len());
+            assert_eq!(
+                *sink.count.lock().unwrap(),
+                COLOR_QUERY_REPLY_PER_SECOND as usize + 1,
+                "post-sleep query must dispatch once the window resets"
+            );
+
+            bb_term_free(term);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Bug #18 — OSC 0/1/2 window-title control-character scrubbing
+    // -------------------------------------------------------------------
+
+    /// Bug #18 (unit): direct test of `scrub_title_controls`. Pins the
+    /// strip behaviour for every C0 byte (0x00..=0x1F), DEL (0x7F), and
+    /// every C1 codepoint (U+0080..=U+009F). Printable ASCII and
+    /// non-control multi-byte UTF-8 must pass through untouched.
+    #[test]
+    fn scrub_title_controls_strips_c0_del_c1() {
+        // C0: NUL, BEL, ESC, plus a CSI-like sequence.
+        let c0 = "a\x00b\x07c\x1bd\x1b[31me";
+        assert_eq!(scrub_title_controls(c0), "abcd[31me");
+
+        // DEL.
+        assert_eq!(scrub_title_controls("a\x7fb"), "ab");
+
+        // C1: U+0085 (NEL), U+009B (CSI).
+        assert_eq!(scrub_title_controls("a\u{0085}b\u{009b}c"), "abc");
+
+        // Non-control multi-byte UTF-8 unchanged.
+        assert_eq!(scrub_title_controls("café 日本語"), "café 日本語");
+
+        // Empty string.
+        assert_eq!(scrub_title_controls(""), "");
+    }
+
+    /// Bug #18 (integration): feed the canonical attack payload
+    /// `\x1b]2;before\x1b[31mafter\x07` through the full input path. The
+    /// emitted Title event must contain no ESC (0x1B) and no `[` byte
+    /// from a CSI tail; `scrub_title_controls` plus vte's own
+    /// OSC-string state machine together guarantee the C0 bytes are
+    /// gone before the listener sees them.
+    #[test]
+    fn osc_title_strips_c0_controls() {
+        let seq = b"\x1b]2;before\x1b[31mafter\x07";
+        let events = drive_events(seq);
+        let titles: Vec<&Vec<u8>> = events
+            .iter()
+            .filter(|(k, _)| *k == BBEventKind::Title as u32)
+            .map(|(_, p)| p)
+            .collect();
+        assert!(
+            !titles.is_empty(),
+            "expected at least one Title event, got: {events:?}"
+        );
+        for title in &titles {
+            assert!(
+                !title.contains(&0x1B),
+                "Title payload must not contain ESC (0x1B); got {:?}",
+                String::from_utf8_lossy(title)
+            );
+            // Defense in depth: every byte must be non-C0 / non-DEL /
+            // non-C1 (single-byte form). Multi-byte UTF-8 leading bytes
+            // are >= 0xC2 so this filter does not snag them.
+            for &b in title.iter() {
+                assert!(
+                    !(b <= 0x1F || b == 0x7F),
+                    "Title payload contains C0/DEL byte 0x{b:02X}: {:?}",
+                    String::from_utf8_lossy(title)
+                );
+            }
+        }
+    }
+
+    /// Bug #18 (integration): C1 controls in UTF-8 (U+0085 → 0xC2 0x85)
+    /// survive vte's OSC-string filter (which only drops single-byte
+    /// C0). Our `scrub_title_controls` codepoint filter must catch them.
+    #[test]
+    fn osc_title_strips_c1_controls() {
+        // U+0085 (NEL) between 'a' and 'b'.
+        let seq = b"\x1b]2;a\xc2\x85b\x07";
+        let events = drive_events(seq);
+        let title = events
+            .iter()
+            .find(|(k, _)| *k == BBEventKind::Title as u32)
+            .expect("expected Title event");
+        assert_eq!(
+            title.1.as_slice(),
+            b"ab",
+            "C1 control U+0085 must be stripped from title; got {:?}",
+            String::from_utf8_lossy(&title.1)
+        );
     }
 }
