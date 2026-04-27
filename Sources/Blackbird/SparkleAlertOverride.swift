@@ -1,4 +1,5 @@
 import AppKit
+import OSLog
 import Sparkle
 import ObjectiveC.runtime
 
@@ -10,6 +11,11 @@ import ObjectiveC.runtime
 /// ever one instance, so the behaviour is equivalent.
 @MainActor
 enum SparkleAlertOverride {
+    fileprivate static let logger = Logger(
+        subsystem: "com.blackbird.terminal",
+        category: "SparkleAlertOverride"
+    )
+
     /// Invoked once during app launch. Idempotent — `method_setImplementation`
     /// is safe to call repeatedly with the same block.
     static func install() {
@@ -28,6 +34,37 @@ enum SparkleAlertOverride {
             alert.informativeText = "\(name) \(version) is the latest version."
             alert.alertStyle = .informational
             alert.addButton(withTitle: "OK")
+
+            // Audit #23: avoid stacking modals. A blocking `runModal()` here
+            // can deadlock the quit flow if Sparkle fires this during
+            // `applicationShouldTerminate(_:)` while a window-modal sheet
+            // (e.g. "Save changes?") is already up. Prefer a sheet attached
+            // to the key/main window; fall back to `runModal()` only when no
+            // other modal is active and the app is foreground; otherwise
+            // drop the alert (the user can re-trigger via Check for Updates).
+            //
+            // Modal interactions are not unit-testable in headless CI, so
+            // there's no regression test for this — see audit ID #23.
+            // TODO(audit #23): revisit if SUUpdater grows a non-blocking API.
+            let parentWindow = NSApp.keyWindow ?? NSApp.mainWindow
+            if let window = parentWindow,
+               window.attachedSheet == nil,
+               NSApp.modalWindow == nil,
+               NSApp.isActive {
+                alert.beginSheetModal(for: window) { _ in
+                    ack()
+                }
+                return
+            }
+
+            if NSApp.modalWindow != nil || !NSApp.isActive {
+                logger.warning(
+                    "Sparkle 'up to date' alert dropped: another modal is active or app is not foreground"
+                )
+                ack()
+                return
+            }
+
             _ = alert.runModal()
             ack()
         }
