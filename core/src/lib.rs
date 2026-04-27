@@ -421,6 +421,58 @@ struct OscScanner<'a> {
     /// into `BBTerm.modify_other_keys`; downstream code reads the same
     /// field and maps non-zero to `bb_mode::MODIFY_OTHER_KEYS`.
     modify_other_keys: &'a mut u8,
+    /// Sliding-window state for OSC 133 A/B/C rate limiting (audit
+    /// synthesis #10 — prompt-mark forgery DoS / phishing). Persisted
+    /// on `BBTerm` and threaded in via `&mut` because the scanner is
+    /// rebuilt per `bb_term_input` call.
+    prompt_mark_rate: &'a mut PromptMarkRateState,
+}
+
+/// Per-terminal sliding-window rate limiter for OSC 133 prompt marks.
+///
+/// Mitigates audit synthesis bug #10: an attacker emitting `OSC 133;A`
+/// thousands of times per second floods Swift's `recordPromptStart` ring
+/// (cap 200) and rotates legitimate prompt marks out, so ⌘↑/⌘↓ navigation
+/// lands on attacker-authored "fake prompts" — a phishing primitive.
+///
+/// Policy: at most `PROMPT_MARK_PER_SECOND` A/B/C dispatches per rolling
+/// 1-second window; D (command-end with exit code) is exempt because it
+/// is paired 1:1 with a real C dispatch the user already accepted.
+///
+/// The window resets when `Instant::now()` is more than 1 second past
+/// `window_start`. Excess fires within an active window are dropped
+/// silently.
+#[derive(Clone, Copy)]
+struct PromptMarkRateState {
+    window_start: std::time::Instant,
+    window_count: u32,
+}
+
+const PROMPT_MARK_PER_SECOND: u32 = 16;
+const PROMPT_MARK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl PromptMarkRateState {
+    fn new() -> Self {
+        Self {
+            window_start: std::time::Instant::now(),
+            window_count: 0,
+        }
+    }
+
+    /// Returns true if the dispatch is allowed; false if the window cap
+    /// has been hit and the caller should drop the event.
+    fn allow(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.window_start) >= PROMPT_MARK_WINDOW {
+            self.window_start = now;
+            self.window_count = 0;
+        }
+        if self.window_count >= PROMPT_MARK_PER_SECOND {
+            return false;
+        }
+        self.window_count += 1;
+        true
+    }
 }
 
 impl Perform for OscScanner<'_> {
@@ -642,9 +694,9 @@ impl OscScanner<'_> {
         // The event's payload contract in `BBEventKind::CwdChanged` is
         // UTF-8 bytes — Swift wraps the pointer in a Swift String which
         // assumes UTF-8 validity.
-        if std::str::from_utf8(&decoded).is_err() {
+        let Ok(decoded_str) = std::str::from_utf8(&decoded) else {
             return;
-        }
+        };
         // Reject embedded NUL bytes. `%00` is valid UTF-8 and slips past
         // the str::from_utf8 gate, but a pathname containing NUL is
         // nonsense at the OS level (C string terminator) and lets a
@@ -653,6 +705,42 @@ impl OscScanner<'_> {
         if decoded.contains(&0) {
             return;
         }
+        // Audit synthesis #13 — path-traversal via percent-encoded `..`.
+        // An attacker can emit `OSC 7;file:///%2e%2e/%2e%2e/etc/`. After
+        // percent-decode the path is `../../../../etc/`; downstream
+        // consumers (titlebar proxy icon, "Open in Finder", new-tab cwd
+        // inheritance) all use the raw value via NSWorkspace. Drop the
+        // event silently on any `..` segment OR any non-absolute path.
+        // OSC 7 specifies an absolute path; relative paths are illegal
+        // by spec.
+        if !decoded_str.starts_with('/') {
+            return;
+        }
+        for component in std::path::Path::new(decoded_str).components() {
+            match component {
+                // The standard parent-dir component.
+                std::path::Component::ParentDir => return,
+                // Defensive paranoia for the `\..` shape on
+                // case-insensitive HFS+ / APFS — a literal `Normal`
+                // component whose bytes equal `..` would mean some
+                // higher layer mis-parsed components, but we'd still
+                // refuse it.
+                std::path::Component::Normal(s) if s.as_encoded_bytes() == b".." => {
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Audit synthesis #4 (SSH-trust gap): when the user is SSH'd to a
+        // remote host, the remote shell can emit OSC 7 and Blackbird's
+        // titlebar proxy icon will then point at the LOCAL filesystem
+        // path with the same name. Click → Finder opens the local path.
+        // The terminal core can't see the foreground process tree, so a
+        // proper fix is a Swift-side `CwdResolver` check that walks the
+        // PTY foreground process for an `ssh`/`mosh-client` child and
+        // distrusts OSC 7 while one is alive. Tracked as deferred work in
+        // KNOWN_ISSUES.md ("OSC 7 trust over SSH").
+        // TODO(audit synthesis #4): wire CwdResolver SSH-trust gate.
 
         let ev = BBEvent {
             kind: BBEventKind::CwdChanged,
@@ -693,6 +781,18 @@ impl OscScanner<'_> {
             b'D' => BBPromptMarkKind::D as u8,
             _ => return, // unknown sub-kind — silently ignore rather than crash.
         };
+
+        // Audit synthesis #10 — OSC 133 prompt-mark forgery DoS / phishing.
+        // Rate-limit the *navigable* mark kinds (A = prompt start, B =
+        // command start, C = command output) at PROMPT_MARK_PER_SECOND
+        // per rolling 1-second window. D (command end with exit code)
+        // is exempt: it's tied 1:1 to a real C the user already accepted,
+        // and dropping D would leave Swift's prompt-ring with dangling
+        // half-open commands. Excess fires within an active window are
+        // dropped silently.
+        if matches!(kind_byte, b'A' | b'B' | b'C') && !self.prompt_mark_rate.allow() {
+            return;
+        }
 
         // Cap exit-code payload at 16 bytes. A well-behaved shell emits
         // at most 3–4 digits; anything longer is either malicious spam or
@@ -826,6 +926,11 @@ pub struct BBTerm {
     /// Swift-side KeyEncoder reads this indirectly via
     /// `bb_mode::MODIFY_OTHER_KEYS` (any non-zero level → bit set).
     modify_other_keys: u8,
+    /// OSC 133 A/B/C rate-limit window (audit synthesis #10). See
+    /// `PromptMarkRateState`. Persisted across `bb_term_input` calls so
+    /// the sliding window covers prompt marks that arrive in different
+    /// PTY chunks.
+    prompt_mark_rate: PromptMarkRateState,
     callback: Arc<CallbackCell>,
     /// Persistent OSC 8 URI intern store (rust-core-3 F1). Maps URI string →
     /// shared `Arc<CStr>`; entries survive across snapshots so the same URI
@@ -1041,6 +1146,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             uri_cstr_cache: std::collections::HashMap::new(),
             uri_cache_bytes: 0,
             modify_other_keys: 0,
+            prompt_mark_rate: PromptMarkRateState::new(),
         });
         Box::into_raw(bb)
     })
@@ -1133,6 +1239,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     in_xtgettcap: &mut bb.in_xtgettcap,
                     xtgettcap_buf: &mut bb.xtgettcap_buf,
                     modify_other_keys: &mut bb.modify_other_keys,
+                    prompt_mark_rate: &mut bb.prompt_mark_rate,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
@@ -1154,6 +1261,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             in_xtgettcap: &mut bb.in_xtgettcap,
             xtgettcap_buf: &mut bb.xtgettcap_buf,
             modify_other_keys: &mut bb.modify_other_keys,
+            prompt_mark_rate: &mut bb.prompt_mark_rate,
         };
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);
@@ -4474,6 +4582,177 @@ mod tests {
             // memory.
             drop(cell_arc);
             drop(queue_arc);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Audit synthesis #13 — OSC 7 path traversal via percent-encoded `..`
+    // -------------------------------------------------------------------
+
+    /// Helper: run a single byte slice through a fresh BBTerm and return
+    /// the captured (kind, payload) events. Mirrors the integration-test
+    /// `drive` helper but stays inside `mod tests` so unit-only `cargo
+    /// test --lib` runs cover these cases.
+    fn drive_events(bytes: &[u8]) -> Vec<(u32, Vec<u8>)> {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            events: Mutex<Vec<(u32, Vec<u8>)>>,
+        }
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let sink = &*(ctx as *const Sink);
+            let bytes = if ev.len == 0 {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(ev.payload, ev.len).to_vec()
+            };
+            sink.events.lock().unwrap().push((ev.kind as u32, bytes));
+        }
+
+        let sink = Sink {
+            events: Mutex::new(Vec::new()),
+        };
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+            bb_term_input(term, bytes.as_ptr(), bytes.len());
+            bb_term_free(term);
+        }
+        sink.events.into_inner().unwrap()
+    }
+
+    /// Audit synthesis #13: percent-encoded `..` segments must be rejected
+    /// before the CwdChanged fires. Without this gate, an attacker emits
+    /// `\x1b]7;file:///%2e%2e/etc\x07` and Blackbird's titlebar / Open in
+    /// Finder / new-tab cwd inheritance lands at `../etc` (i.e. anywhere
+    /// reachable from the prior cwd via `..`).
+    #[test]
+    fn osc7_rejects_percent_encoded_parent_dir() {
+        let seq = b"\x1b]7;file:///%2e%2e/etc\x07";
+        let events = drive_events(seq);
+        assert!(
+            events
+                .iter()
+                .all(|(k, _)| *k != BBEventKind::CwdChanged as u32),
+            "%2e%2e (../) must drop the OSC 7 silently — got events: {events:?}"
+        );
+    }
+
+    /// Audit synthesis #13: OSC 7 specifies an absolute path; the URI
+    /// `file://hostname/relative/path` decodes to a host-authority + path
+    /// where the path bytes don't start with `/`. Reject without firing.
+    #[test]
+    fn osc7_rejects_relative_path() {
+        // `file://hostname/relative` — `hostname` is a non-localhost
+        // authority; the OSC 7 handler already drops non-local hosts,
+        // but a pure `relative/path` (no scheme structure with leading
+        // `/`) must also be rejected. Easiest reproduction of the
+        // "no leading slash after percent-decode" path: a bare
+        // `file://relative` (rest = `relative`) is neither slash-prefix
+        // nor `localhost`-prefix → returns at the strip stage.
+        let seq = b"\x1b]7;file://relative/path\x07";
+        let events = drive_events(seq);
+        assert!(
+            events
+                .iter()
+                .all(|(k, _)| *k != BBEventKind::CwdChanged as u32),
+            "relative path must drop the OSC 7 silently — got events: {events:?}"
+        );
+    }
+
+    /// Audit synthesis #13: legitimate absolute path still fires. Pin
+    /// the happy path so the new traversal guard doesn't over-block.
+    #[test]
+    fn osc7_accepts_legitimate_path() {
+        let seq = b"\x1b]7;file:///Users/foo/proj\x07";
+        let events = drive_events(seq);
+        let cwd = events
+            .iter()
+            .find(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+            .expect("expected CwdChanged event for a clean absolute path");
+        assert_eq!(&cwd.1, b"/Users/foo/proj");
+    }
+
+    // -------------------------------------------------------------------
+    // Audit synthesis #10 — OSC 133 prompt-mark rate limiting
+    // -------------------------------------------------------------------
+
+    /// Audit synthesis #10: an attacker spamming `OSC 133;A` must not
+    /// flood the prompt-mark stream. Within a single 1-second window the
+    /// Rust core dispatches at most PROMPT_MARK_PER_SECOND (16) of the
+    /// navigable kinds (A/B/C); the rest are dropped silently.
+    #[test]
+    fn osc133_rate_limit_drops_excess_marks() {
+        let mut buf = Vec::with_capacity(7 * 100);
+        for _ in 0..100 {
+            buf.extend_from_slice(b"\x1b]133;A\x07");
+        }
+        let events = drive_events(&buf);
+        let prompt_marks = events
+            .iter()
+            .filter(|(k, _)| *k == BBEventKind::PromptMark as u32)
+            .count();
+        assert!(
+            prompt_marks <= PROMPT_MARK_PER_SECOND as usize,
+            "expected at most {} prompt marks within one window, got {}",
+            PROMPT_MARK_PER_SECOND,
+            prompt_marks
+        );
+    }
+
+    /// Audit synthesis #10: after the 1-second window expires the
+    /// counter resets. Sleeping just past the window boundary and
+    /// firing one more A must dispatch — so total events from
+    /// (16 spam + sleep + 1 spam) is 17, not stuck at 16.
+    #[test]
+    fn osc133_rate_limit_window_resets_after_one_second() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            count: Mutex<usize>,
+        }
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            if matches!(ev.kind, BBEventKind::PromptMark) {
+                let sink = &*(ctx as *const Sink);
+                *sink.count.lock().unwrap() += 1;
+            }
+        }
+
+        let sink = Sink {
+            count: Mutex::new(0),
+        };
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+
+            // Fire exactly the cap (16) inside the first window.
+            let mut buf = Vec::with_capacity(7 * PROMPT_MARK_PER_SECOND as usize);
+            for _ in 0..PROMPT_MARK_PER_SECOND {
+                buf.extend_from_slice(b"\x1b]133;A\x07");
+            }
+            bb_term_input(term, buf.as_ptr(), buf.len());
+            assert_eq!(
+                *sink.count.lock().unwrap(),
+                PROMPT_MARK_PER_SECOND as usize,
+                "first window must accept exactly the cap"
+            );
+
+            // Sleep past the 1-second window boundary so the counter
+            // resets. Total test wall-clock stays under 2 s.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+
+            let one_more = b"\x1b]133;A\x07";
+            bb_term_input(term, one_more.as_ptr(), one_more.len());
+
+            assert_eq!(
+                *sink.count.lock().unwrap(),
+                PROMPT_MARK_PER_SECOND as usize + 1,
+                "post-sleep mark must dispatch once the window resets"
+            );
+
+            bb_term_free(term);
         }
     }
 }

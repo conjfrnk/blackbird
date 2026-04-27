@@ -43,6 +43,22 @@ The scrollback URL detector matches `http(s)://` and `ftp://` only. `mailto:` is
 
 If you actually want to open a local path, drag the file into the terminal or use `open path/to/file` in the shell.
 
+## OSC 7 trust over SSH (audit synthesis #4)
+
+**Symptom:** When the user SSHs from Blackbird to a remote host and the remote shell emits `OSC 7;file:///root/.ssh`, Blackbird's titlebar proxy icon and the "Open in Finder" affordance follow that path against the LOCAL filesystem. A click opens the local user's `.ssh` directory instead of (correctly) ignoring an OSC 7 the local cwd hasn't actually changed to.
+
+**Root cause:** The Rust core (`core/src/lib.rs::handle_osc7`) sees only the byte stream — it cannot distinguish "this OSC 7 came from my local zsh" from "this OSC 7 came from a remote shell I'm SSH'd into via a local zsh". From the terminal's perspective every byte is local.
+
+**Why it's deferred:** The fix belongs in Swift's `CwdResolver`, not the parser. The right approach walks `proc_pidinfo` for the PTY foreground process and distrusts OSC 7 while any descendant's `argv[0]` matches `ssh`/`mosh-client`. A pure Rust-side heuristic ("watch for `ssh ` at line start") was considered and rejected as leaky — it misses `ssh foo cat /`, redirected variants, aliases, and gives false confidence.
+
+**Mitigations already in core (audit synthesis #13, shipped 2026-04-27):**
+- `..` segments (raw or percent-encoded `%2e%2e`) drop the OSC 7 silently
+- Non-absolute paths drop the OSC 7 silently
+- Embedded NUL bytes drop the OSC 7 silently
+- Non-UTF-8 percent-decoded paths drop the OSC 7 silently
+
+**Status: deferred.** Tracked as a TODO in `handle_osc7`. The proper Swift-side process-tree gate is a separate followup.
+
 ## v0.1.9 hardening-sweep deferrals (2026-04-24)
 
 A multi-agent review + blind-test pass surfaced 67 unique findings. The critical / high-severity items shipped across commits `f18d00e..53c17a7`; the items below are legitimately deferred because they touch public API shape, require architectural changes, or need test-host seams that don't exist yet.
