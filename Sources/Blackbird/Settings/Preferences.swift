@@ -301,7 +301,35 @@ public final class Preferences: ObservableObject {
     /// UserDefaults.standard.set(stored, forKey: Preferences.schemaVersionKey)
     /// ```
     private func migrateIfNeeded() {
-        let defaults = UserDefaults.standard
+        Preferences.migrateIfNeeded(in: UserDefaults.standard)
+    }
+
+    /// Testable seam for `migrateIfNeeded()`. Drives the same migration
+    /// machinery against any `UserDefaults` instance so we can exercise
+    /// downgrade / upgrade pathways in isolated suites without touching
+    /// `UserDefaults.standard`. Keep this `internal`, not `public` —
+    /// production code should always go through the no-arg instance method.
+    /// (F-S7-003 regression seam)
+    ///
+    /// F-S7-003 fix — DOWNGRADE-SAFETY INVARIANT
+    /// =========================================
+    /// Bug: previously, when a user ran a future schema (say v3) and
+    /// downgraded to a build whose `currentSchemaVersion` is v2, the
+    /// "already current or newer" branch unconditionally STAMPED the
+    /// stored key down to v2. The on-disk record then said "this user
+    /// is at v2" while the data on disk was actually v3-shaped. A
+    /// subsequent upgrade back to v3 would observe `stored=2 < current=3`
+    /// and re-run the v2→v3 migration against ALREADY v3-shaped data,
+    /// corrupting it.
+    ///
+    /// Fix: on downgrade (`stored > currentSchemaVersion`), do NOT touch
+    /// the stored version key. The disk keeps the high-water mark intact,
+    /// so a future re-upgrade observes `stored == intended` and correctly
+    /// skips the no-op migration. The older build's read paths already
+    /// tolerate unknown keys via the registered-default + enum-fallback
+    /// machinery (`Theme(rawValue:) ?? .defaultTheme`, etc.), so leaving
+    /// a higher version number on disk is safe.
+    internal static func migrateIfNeeded(in defaults: UserDefaults) {
         let stored = defaults.integer(forKey: Preferences.schemaVersionKey)
         // `integer(forKey:)` returns 0 if the key is absent AND no registered
         // default is in NSRegistrationDomain. We registered `currentSchemaVersion`
@@ -310,15 +338,17 @@ public final class Preferences: ObservableObject {
         // happen) — treat as current too so we don't log-spam on every launch.
         let effective = stored == 0 ? Preferences.currentSchemaVersion : stored
         guard effective < Preferences.currentSchemaVersion else {
-            // Already current (or newer, e.g. downgrade). Stamp the current
-            // version so a downgrade still leaves the key present for future
-            // upgrades to observe.
-            if stored != Preferences.currentSchemaVersion {
-                defaults.set(
-                    Preferences.currentSchemaVersion,
-                    forKey: Preferences.schemaVersionKey
-                )
-            }
+            // Already current (stored == current) or NEWER (downgrade).
+            //
+            // Downgrade case (stored > current): leave the key alone. See
+            // the F-S7-003 invariant comment above — clobbering the high-
+            // water mark would cause a future re-upgrade to re-run already-
+            // applied migrations and corrupt v(N+1)-shaped data.
+            //
+            // Equal case (stored == current): nothing to do. We deliberately
+            // do NOT re-stamp here either, because the registered default
+            // already covers a `stored == 0` (registration-domain miss) and
+            // a real persistent-domain `stored == current` needs no rewrite.
             return
         }
         var v = effective
@@ -336,7 +366,7 @@ public final class Preferences: ObservableObject {
     /// user somehow has both the legacy key and a prefixed key set (e.g.
     /// a mid-upgrade crash), the prefixed key wins and the legacy is
     /// removed. (settings F3)
-    private func migrateV1toV2(defaults: UserDefaults) {
+    private static func migrateV1toV2(defaults: UserDefaults) {
         for name in Preferences.legacyUnprefixedKeys {
             let prefixed = Preferences.k(name)
             let legacy = defaults.object(forKey: name)

@@ -220,6 +220,123 @@ final class PreferencesMigrationTests: XCTestCase {
         )
     }
 
+    // MARK: - F-S7-003 runtime regression test (uses internal seam)
+
+    /// Drives `Preferences.migrateIfNeeded(in:)` against an isolated
+    /// `UserDefaults` suite so we don't touch the shared singleton's
+    /// state. Pre-writes a schema version > `currentSchemaVersion`
+    /// (simulating a future-schema → older-binary downgrade), runs
+    /// the migration code path, and asserts the older binary did NOT
+    /// clobber the high-water mark.
+    ///
+    /// Why this matters (re-statement of the bug fixed by the new
+    /// `internal static func migrateIfNeeded(in:)`):
+    ///   1. User runs v(N+1) which writes schemaVersion = N+1.
+    ///   2. User downgrades to vN (currentSchemaVersion = N).
+    ///   3. Old code took `stored=N+1 > current=N`, ran the early-
+    ///      return, but UNCONDITIONALLY stamped the key down to N.
+    ///   4. The data on disk is still v(N+1)-shaped, but the version
+    ///      record says N.
+    ///   5. User re-upgrades to v(N+1). `stored=N < current=N+1`, so
+    ///      the code re-runs the N→N+1 migration against already-v(N+1)
+    ///      data, possibly corrupting it.
+    /// The fix: on downgrade, leave the key alone. This test pins it.
+    func test_downgradeFromFutureSchema_doesNotStampOlderVersion() throws {
+        // Use an isolated suite — never `UserDefaults.standard` — so the
+        // shared `Preferences.shared` singleton (and every other test in
+        // the process) is untouched.
+        let suiteName = "blackbird.tests.migration.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer {
+            // `removePersistentDomain` clears every key we wrote in the
+            // suite so a crashing test can't leak state into ~/Library.
+            suite.removePersistentDomain(forName: suiteName)
+        }
+
+        // Same key the production code uses. Match the source-of-truth
+        // string exactly — if Preferences.swift renames it, this test
+        // (and any user with a stored version) will need a migration of
+        // its own.
+        let schemaKey = "prefsSchemaVersion"
+
+        // Stamp a "future" schema version: currentSchemaVersion + 1.
+        // currentSchemaVersion is `public static let`, so we can read it
+        // here without exposing internals.
+        let futureVersion = Preferences.currentSchemaVersion + 1
+        suite.set(futureVersion, forKey: schemaKey)
+
+        // Drive the migration code path against the isolated suite.
+        Preferences.migrateIfNeeded(in: suite)
+
+        // The high-water mark must survive. The fix says: on downgrade,
+        // leave the key alone. So we expect EXACTLY `futureVersion` back.
+        let after = suite.integer(forKey: schemaKey)
+        XCTAssertEqual(
+            after, futureVersion,
+            """
+            F-S7-003 regression: downgrade from a future schema clobbered
+            the high-water mark. Stored \(futureVersion) before migration,
+            read \(after) after. The migration MUST be a no-op when
+            stored > currentSchemaVersion — clobbering causes a future
+            re-upgrade to re-run migrations against already-migrated data.
+            """
+        )
+
+        // Belt-and-braces: the value must specifically NOT be the
+        // currentSchemaVersion (the bug's signature).
+        XCTAssertNotEqual(
+            after, Preferences.currentSchemaVersion,
+            """
+            F-S7-003 regression: downgrade path stamped
+            currentSchemaVersion (\(Preferences.currentSchemaVersion))
+            over the higher stored version (\(futureVersion)). This is
+            the exact corruption pathway the fix closes.
+            """
+        )
+    }
+
+    /// Companion test: a fresh suite (no schema key on disk) must NOT
+    /// gain a stamped key from the migration path either, because the
+    /// registered default already covers the missing-key case via the
+    /// `stored == 0 ? currentSchemaVersion : stored` branch in
+    /// `migrateIfNeeded(in:)`. Pins the equal/missing branch as a
+    /// no-op so future refactors don't accidentally re-introduce the
+    /// downgrade-stamp by way of an "always stamp" simplification.
+    func test_freshSuite_migrationDoesNotStampSchemaVersion() throws {
+        let suiteName = "blackbird.tests.migration.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        let schemaKey = "prefsSchemaVersion"
+        XCTAssertNil(
+            suite.object(forKey: schemaKey),
+            "Test pre-condition: fresh suite must not already have a schema key"
+        )
+
+        Preferences.migrateIfNeeded(in: suite)
+
+        // After running migration on an empty suite, we expect NO
+        // persistent-domain write — the registration domain alone covers
+        // the missing-key case. If a future refactor unconditionally
+        // stamps the version, this test will catch the drift.
+        XCTAssertNil(
+            suite.object(forKey: schemaKey),
+            """
+            Migration on a fresh suite wrote a schema version key.
+            The current contract is: rely on the registered default for
+            missing keys; only persist a version after a real walk-forward.
+            If the contract changes, update both this test and the
+            F-S7-003 invariant comment in Preferences.swift together.
+            """
+        )
+    }
+
     // MARK: - F-S7-004: fontSize ceiling consistency
 
     /// F-S7-004 documents three competing fontSize ceilings:
