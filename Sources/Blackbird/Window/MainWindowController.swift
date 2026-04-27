@@ -147,8 +147,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // Only the first window persists its frame. New tabs/windows use
             // AppKit's tab-group positioning or a cascaded default — having
             // every window share one autosave name would race them.
-            window.center()
+            //
+            // ORDER MATTERS: install the autosave name FIRST so AppKit reads
+            // the saved frame from defaults and applies it to the window.
+            // Calling `.center()` before `.setFrameAutosaveName` is a no-op
+            // for the persisted frame — autosave restoration overwrites it
+            // — but a previously-saved off-screen frame (e.g. a window the
+            // user had on an external display that's now unplugged) would
+            // then leave the window invisible at relaunch. After autosave
+            // applies, validate that the frame actually intersects a visible
+            // screen by a usable amount; recenter on the main screen
+            // otherwise. (Bug #22 — window restored off-screen on display
+            // unplug.) Cascade for new tabs/windows is a separate path
+            // (the `else` branch below) and doesn't need this guard.
             window.setFrameAutosaveName("BlackbirdMainWindow")
+            let nudged = nudgeFrameOntoVisibleScreen(
+                window.frame,
+                against: NSScreen.screens
+            )
+            if nudged != window.frame {
+                window.setFrame(nudged, display: false)
+            }
         } else {
             // Cascade new standalone windows so they don't stack exactly.
             // Tabs don't need this — AppKit positions them within the group.
@@ -802,4 +821,70 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     @objc func resetActiveTabTitle(_ sender: Any?) {
         session?.titleOverride = nil
     }
+}
+
+// MARK: - Off-screen frame nudging
+
+/// Minimum on-screen overlap (in points, in BOTH dimensions) we require
+/// before considering an autosaved window frame "reachable" by the user.
+/// 100×100 was picked to ensure the traffic-light cluster (≈75pt wide)
+/// plus a little of the title bar are always grabbable — anything tighter
+/// risks a window the user can't drag back. (Bug #22)
+private let minimumOnScreenOverlap: CGFloat = 100
+
+/// Production overload: thin shim that extracts `visibleFrame` from each
+/// `NSScreen` and forwards to the pure rect-only helper. Keeps the call
+/// site in `MainWindowController.init` readable and the testable core
+/// free of any AppKit screen-enumeration coupling.
+func nudgeFrameOntoVisibleScreen(
+    _ frame: NSRect,
+    against screens: [NSScreen]
+) -> NSRect {
+    nudgeFrameOntoVisibleScreen(
+        frame,
+        visibleFrames: screens.map(\.visibleFrame)
+    )
+}
+
+/// Pure helper used by `MainWindowController.init` to validate the frame
+/// AppKit just restored from `setFrameAutosaveName`. If the saved frame
+/// lands mostly off every connected screen — typical after the user
+/// unplugs an external display the window was last positioned on — we
+/// recenter on the first ("main") screen instead of letting AppKit show
+/// an invisible window. (Bug #22)
+///
+/// Pure: takes `[NSRect]` rather than `[NSScreen]` so unit tests can
+/// drive it with synthetic visibleFrames without the NSScreen
+/// instantiation problem (NSScreen has no public initializer).
+///
+/// - Parameter frame: the window frame to validate, in global screen
+///   coordinates (origin bottom-left, AppKit convention).
+/// - Parameter visibleFrames: each screen's `visibleFrame`. Pass
+///   `NSScreen.screens.map(\.visibleFrame)` in production. Order
+///   matters: the FIRST entry is treated as the "main" screen for
+///   recentering when the input is off-screen.
+/// - Returns: `frame` unchanged when its intersection with the union
+///   of `visibleFrames` is at least `minimumOnScreenOverlap` in BOTH
+///   dimensions. Otherwise a frame of the same size centered on the
+///   first screen's visibleFrame. Empty `visibleFrames` (truly
+///   headless / disconnected display) returns `frame` unchanged
+///   because there's no reasonable target to recenter onto.
+func nudgeFrameOntoVisibleScreen(
+    _ frame: NSRect,
+    visibleFrames: [NSRect]
+) -> NSRect {
+    guard let primary = visibleFrames.first else { return frame }
+    // `NSRect.zero.union(other)` includes the origin (0,0), which on a
+    // single-screen Mac whose visibleFrame doesn't touch (0,0) would
+    // wrongly enlarge the union. Seed with the first visibleFrame.
+    let visibleUnion = visibleFrames.dropFirst().reduce(primary) { $0.union($1) }
+    let onScreen = frame.intersection(visibleUnion)
+    if onScreen.width >= minimumOnScreenOverlap,
+       onScreen.height >= minimumOnScreenOverlap {
+        return frame
+    }
+    let centeredX = primary.minX + (primary.width  - frame.width)  / 2
+    let centeredY = primary.minY + (primary.height - frame.height) / 2
+    return NSRect(x: centeredX, y: centeredY,
+                  width: frame.width, height: frame.height)
 }
