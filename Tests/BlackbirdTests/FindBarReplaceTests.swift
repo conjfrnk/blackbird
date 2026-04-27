@@ -377,6 +377,88 @@ final class FindRegexGuardTests: XCTestCase {
             "over-length pattern must be rejected"
         )
     }
+
+    // MARK: - Bypass shapes the original substring guard missed.
+    //
+    // The first iteration of the gate only checked a hardcoded list of
+    // dangerous substrings. Trivial wrappers around the same nested
+    // quantifier (extra parens, non-capturing groups, alternation in a
+    // quantified group) defeated that match. These regression tests pin
+    // the wider net introduced by the heuristic-strengthening pass.
+    // Audit findbar-selection F2.
+
+    func test_isReasonableRegexPattern_rejectsNestedQuantifierWithExtraGrouping() {
+        // `(((a+)))+$` — extra grouping defeats the literal substring
+        // check. The fix iterates redundant `((` / `))` collapses before
+        // re-running the dangerous-shape match.
+        XCTAssertFalse(
+            TerminalView.isReasonableRegexPattern("(((a+)))+$"),
+            "extra-grouping wrappers around (a+)+ must be rejected"
+        )
+    }
+
+    func test_isReasonableRegexPattern_rejectsNonCapturingNestedQuantifier() {
+        // `(?:a+)+` — non-capturing group prefix evades the
+        // substring list. The fix normalises `(?:` → `(` before
+        // checking.
+        XCTAssertFalse(
+            TerminalView.isReasonableRegexPattern("(?:a+)+"),
+            "non-capturing group around (a+)+ must be rejected"
+        )
+    }
+
+    func test_isReasonableRegexPattern_rejectsAlternationInQuantifiedGroup() {
+        // `(a|aa)+b` — overlapping alternatives inside a quantified
+        // group is the second textbook ReDoS shape. The fix detects
+        // any `(...|...)` followed by `+` or `*`.
+        XCTAssertFalse(
+            TerminalView.isReasonableRegexPattern("(a|aa)+b"),
+            "alternation inside a quantified group must be rejected"
+        )
+    }
+
+    func test_isReasonableRegexPattern_rejectsAlternationInQuantifiedNonCapturingGroup() {
+        // Composition test: non-capturing group AND alternation in the
+        // same pattern. Either rule is sufficient to reject.
+        XCTAssertFalse(
+            TerminalView.isReasonableRegexPattern("(?:a|aa)*"),
+            "alternation inside a quantified non-capturing group must be rejected"
+        )
+    }
+
+    func test_isReasonableRegexPattern_rejectsExcessiveQuantifierCount() {
+        // Defensive cap: more than 6 quantifiers in one query is a
+        // strong "this isn't a legitimate find" signal.
+        XCTAssertFalse(
+            TerminalView.isReasonableRegexPattern("a*b*c*d*e*f*g*"),
+            "patterns with > 6 quantifiers must be rejected"
+        )
+    }
+
+    func test_isReasonableRegexPattern_acceptsAlternationWithoutQuantifier() {
+        // `(cat|dog|fish)` is a perfectly fine find query — alternation
+        // alone is not dangerous, only alternation INSIDE a quantified
+        // group (`(...|...)+`) overlaps catastrophically.
+        XCTAssertTrue(
+            TerminalView.isReasonableRegexPattern("(cat|dog|fish)"),
+            "plain alternation without a trailing quantifier must pass"
+        )
+    }
+
+    func test_isReasonableRegexPattern_acceptsRealisticQueriesUnderQuantifierCap() {
+        // Sanity: queries a real user might type stay under the cap.
+        for pattern in [
+            "e[mn]ail",
+            "https?://\\S+",
+            "TODO|FIXME|HACK",
+            "\\b\\w+@\\w+\\.\\w+\\b",
+        ] {
+            XCTAssertTrue(
+                TerminalView.isReasonableRegexPattern(pattern),
+                "realistic query must pass: \(pattern)"
+            )
+        }
+    }
 }
 
 /// Audit findbar-selection F6. The transient-message deferred clear uses

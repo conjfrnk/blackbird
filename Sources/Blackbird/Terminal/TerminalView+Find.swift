@@ -178,7 +178,12 @@ extension TerminalView {
             if !opts.caseSensitive { s.insert(.caseInsensitive) }
             return s
         }()
-        let regex: NSRegularExpression?
+        // Search the entire retained buffer: from -historySize through rows-1.
+        let topLine: Int32 = -Int32(clamping: snap.historySize)
+        let bottomLine = Int32(clamping: snap.rows - 1)
+        if topLine > bottomLine { return }
+        let findMatchLimit = 10_000
+
         if opts.regex {
             // ReDoS surface: NSRegularExpression over ICU is backtracking,
             // so nested quantifiers on overlapping alternatives (`(a+)+`,
@@ -186,21 +191,23 @@ extension TerminalView {
             // well-crafted haystack. The find bar runs this pattern over
             // every row in the retained buffer on every keystroke; a
             // malicious paste into the query field could hang the main
-            // thread for seconds. Two cheap guards: cap the pattern length
-            // (keeps the search input a "find this bit of text" UI, not a
-            // regex playground), and reject obviously-bad shapes before
-            // compilation. Neither is airtight, but both knock out the
-            // standard first-order catastrophic patterns.
+            // thread for seconds. Three layers of defence:
+            //   (1) heuristic pattern gate (cheap, catches textbook shapes)
+            //   (2) length cap (keeps the field a "find this text" UI)
+            //   (3) 250 ms background-execution timeout — the only
+            //       backstop that's actually airtight against a determined
+            //       adversary, since NSRegularExpression has no match
+            //       timeout API.
             // Audit findbar-selection F2.
             guard Self.isReasonableRegexPattern(query) else {
                 findBar?.setMatchCount(0, of: 0)
+                findBar?.showTransientMessage("Regex too complex")
                 selection = nil
                 return
             }
             var regexOpts: NSRegularExpression.Options = []
             if !opts.caseSensitive { regexOpts.insert(.caseInsensitive) }
-            regex = try? NSRegularExpression(pattern: query, options: regexOpts)
-            if regex == nil {
+            guard let regex = try? NSRegularExpression(pattern: query, options: regexOpts) else {
                 // Invalid pattern — show 0 matches, no crash. Surface a
                 // transient banner so "0/0" doesn't look identical to
                 // "valid pattern with no hits" (SFH-006).
@@ -209,14 +216,23 @@ extension TerminalView {
                 selection = nil
                 return
             }
-        } else {
-            regex = nil
+            // Reflect the cleared-match state in the label immediately
+            // so users get a visible response while the background scan
+            // runs. The async result will overwrite this if matches are
+            // found, or the timeout will replace it with a "too complex"
+            // banner if the scan exceeds 250 ms.
+            findBar?.setMatchCount(0, of: 0)
+            runRegexSearchAsync(
+                regex: regex,
+                topLine: topLine,
+                bottomLine: bottomLine,
+                cols: snap.cols,
+                limit: findMatchLimit
+            )
+            return
         }
-        // Search the entire retained buffer: from -historySize through rows-1.
-        let topLine: Int32 = -Int32(clamping: snap.historySize)
-        let bottomLine = Int32(clamping: snap.rows - 1)
-        if topLine > bottomLine { return }
-        let findMatchLimit = 10_000
+        // Substring (non-regex) path stays synchronous. `String.range(of:)`
+        // is bounded by the haystack length and can't catastrophic-backtrack.
         outer: for ln in topLine...bottomLine {
             let hay = session.textRange(
                 from: BufferPoint(line: ln, col: 0),
@@ -224,37 +240,150 @@ extension TerminalView {
                 rectangular: false
             )
             guard !hay.isEmpty else { continue }
-            if let re = regex {
-                let ns = hay as NSString
-                re.enumerateMatches(
-                    in: hay,
-                    options: [],
-                    range: NSRange(location: 0, length: ns.length)
-                ) { result, _, stop in
-                    guard let r = result?.range, r.length > 0 else { return }
-                    // Translate UTF-16 range to grapheme-cell positions
-                    // the same way URLDetector does; simple 1:1 holds for
-                    // ASCII (the dominant case) but keeps correct counts
-                    // for non-BMP scalars appearing in the haystack.
-                    let startCol = r.location
-                    let endCol = r.location + r.length - 1
-                    findMatches.append((line: ln, startCol: startCol, endCol: endCol))
-                    if findMatches.count >= findMatchLimit { stop.pointee = true }
-                }
+            var cursor = hay.startIndex
+            while let r = hay.range(of: query, options: stringOptions, range: cursor..<hay.endIndex) {
+                let startCol = hay.distance(from: hay.startIndex, to: r.lowerBound)
+                let endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
+                findMatches.append((line: ln, startCol: startCol, endCol: endCol))
+                cursor = r.upperBound
                 if findMatches.count >= findMatchLimit { break outer }
-            } else {
-                var cursor = hay.startIndex
-                while let r = hay.range(of: query, options: stringOptions, range: cursor..<hay.endIndex) {
-                    let startCol = hay.distance(from: hay.startIndex, to: r.lowerBound)
-                    let endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
-                    findMatches.append((line: ln, startCol: startCol, endCol: endCol))
-                    cursor = r.upperBound
-                    if findMatches.count >= findMatchLimit { break outer }
-                }
             }
         }
         findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
         highlightCurrentMatch()
+    }
+
+    /// Runs the regex scan on a background queue with a hard 250 ms
+    /// deadline. Cancels the scan and surfaces a "Regex too complex"
+    /// banner if the deadline fires. Stale results from earlier searches
+    /// (user typed another keystroke before this one finished) are
+    /// dropped via a monotonic search ID.
+    ///
+    /// The heavy work here is `enumerateMatches` over each row's text;
+    /// observing the cancel flag inside the per-row loop lets the
+    /// timeout actually take effect mid-scan instead of waiting for the
+    /// regex engine to exhaust its backtracking budget on every row.
+    /// Worst-case latency on a single row is still bounded by
+    /// NSRegularExpression's own per-row work, but pre-gating with
+    /// `isReasonableRegexPattern` keeps that bounded in practice.
+    /// Audit findbar-selection F2.
+    private func runRegexSearchAsync(
+        regex: NSRegularExpression,
+        topLine: Int32,
+        bottomLine: Int32,
+        cols: Int,
+        limit: Int
+    ) {
+        guard let session else { return }
+        // Snapshot rows on the main thread — `session.textRange` reads
+        // from the BBTerm grid which lives on the main actor.
+        var rows: [(line: Int32, hay: String)] = []
+        rows.reserveCapacity(Int(bottomLine - topLine + 1))
+        for ln in topLine...bottomLine {
+            let hay = session.textRange(
+                from: BufferPoint(line: ln, col: 0),
+                to:   BufferPoint(line: ln, col: cols - 1),
+                rectangular: false
+            )
+            if !hay.isEmpty {
+                rows.append((line: ln, hay: hay))
+            }
+        }
+
+        let mySearchID = nextRegexSearchID()
+        activeRegexSearchID = mySearchID
+
+        // Cooperative cancellation via a heap-allocated atomic-ish flag.
+        // We can't use `DispatchWorkItem.isCancelled` from inside the
+        // work item closure without forming a self-referential capture
+        // dance; a class wrapping a Bool gives us a stable reference
+        // both the timeout and the worker can read/write. Reads in the
+        // worker happen on a single thread; writes from the timeout
+        // happen on the main thread. Per-row checks are racy but
+        // harmless — worst case we run one extra row.
+        let cancelFlag = AtomicFlag()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            var matches: [(line: Int32, startCol: Int, endCol: Int)] = []
+            for row in rows {
+                if cancelFlag.value { break }
+                let ns = row.hay as NSString
+                regex.enumerateMatches(
+                    in: row.hay,
+                    options: [],
+                    range: NSRange(location: 0, length: ns.length)
+                ) { result, _, stop in
+                    guard let r = result?.range, r.length > 0 else { return }
+                    let startCol = r.location
+                    let endCol = r.location + r.length - 1
+                    matches.append((line: row.line, startCol: startCol, endCol: endCol))
+                    if matches.count >= limit { stop.pointee = true }
+                }
+                if matches.count >= limit { break }
+            }
+            // If we were cancelled, the timeout already published its
+            // banner — don't overwrite it with stale results.
+            if cancelFlag.value { return }
+            // Hop back to main to publish results — UI state and
+            // findMatches storage are main-thread-only.
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // Stale-result guard: a newer search has started (user
+                // typed another character, or toggled options); drop
+                // this batch so it doesn't overwrite the live scan.
+                guard self.activeRegexSearchID == mySearchID else { return }
+                self.regexSearchCompletedID = mySearchID
+                self.findMatches = matches
+                self.findCurrentIndex = 0
+                self.findBar?.setMatchCount(self.findCurrentIndex, of: self.findMatches.count)
+                self.highlightCurrentMatch()
+            }
+        }
+
+        let queue = DispatchQueue.global(qos: .userInitiated)
+        queue.async(execute: workItem)
+
+        // Hard timeout. If the work item hasn't finished in 250 ms,
+        // flip the cancel flag and surface a banner. Cancellation is
+        // cooperative — the per-row loop re-checks `cancelFlag.value`
+        // so a long-running enumerateMatches on a single row can still
+        // run to completion, but it can't block subsequent rows.
+        //
+        // The success path sets `regexSearchCompletedID = mySearchID`
+        // when it publishes results on the main queue. Because both the
+        // success-path publish AND this timeout fire on the main queue,
+        // they're serialised: by the time we observe
+        // `regexSearchCompletedID == mySearchID` the publish has fully
+        // landed and there's nothing for us to do.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            // Already published successfully — nothing to do.
+            if self.regexSearchCompletedID == mySearchID { return }
+            // Stale (newer search started) — let the in-flight work
+            // item finish on its own; its results are discarded by the
+            // search ID guard at publish time. Still flip the flag so
+            // the worker bails out promptly rather than scanning the
+            // whole buffer for a result that will be discarded.
+            cancelFlag.value = true
+            guard self.activeRegexSearchID == mySearchID else { return }
+            self.findBar?.setMatchCount(0, of: 0)
+            self.findBar?.showTransientMessage("Regex too complex")
+            self.selection = nil
+        }
+    }
+
+    /// Heap-allocated mutable Bool used as a poor man's cancellation
+    /// token between the regex worker and the timeout. Writes are
+    /// confined to the main thread (timeout); reads happen on a
+    /// background thread (worker). Reading a stale value just delays
+    /// cancellation by one row, which is acceptable.
+    private final class AtomicFlag {
+        var value: Bool = false
+    }
+
+    private func nextRegexSearchID() -> UInt64 {
+        regexSearchIDCounter &+= 1
+        return regexSearchIDCounter
     }
 
     private func highlightCurrentMatch() {
