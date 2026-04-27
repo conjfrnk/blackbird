@@ -109,6 +109,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ThemeManager.shared.attach(toApp: NSApp)
 
+        // Ignore SIGPIPE process-wide. Without this, a write() racing PTY
+        // slave close (or any closed pipe) delivers SIGPIPE → SIG_DFL →
+        // app death. The child resets SIGPIPE to SIG_DFL for itself in
+        // PTY.swift after fork, so subprocesses retain default semantics.
+        signal(SIGPIPE, SIG_IGN)
+
         let underTest =
             ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
             || ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] != nil
