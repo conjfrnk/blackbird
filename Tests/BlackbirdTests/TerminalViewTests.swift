@@ -970,12 +970,14 @@ final class TerminalViewTests: XCTestCase {
         view.render(snapshot: s2)
 
         // User starts a selection in scrollback.
-        view.selection = Selection(
+        let sel = Selection(
             anchor: BufferPoint(line: -50, col: 5),
             cursor: BufferPoint(line: -50, col: 30),
             mode: .character
         )
-        XCTAssertNotNil(view.selection)
+        view.selection = sel
+        XCTAssertEqual(view.selection, sel,
+                       "pre-condition: selection assigned before resize")
 
         // Shrink columns 80 → 40. alacritty reflows wrapped scrollback so
         // the (line, col) coordinates now address different cells.
@@ -1034,12 +1036,14 @@ final class TerminalViewTests: XCTestCase {
         view.render(snapshot: sAlt)
 
         // User starts a selection while in alt-screen (e.g. inside vim).
-        view.selection = Selection(
+        let sel = Selection(
             anchor: BufferPoint(line: 2, col: 1),
             cursor: BufferPoint(line: 2, col: 8),
             mode: .character
         )
-        XCTAssertNotNil(view.selection)
+        view.selection = sel
+        XCTAssertEqual(view.selection, sel,
+                       "pre-condition: selection assigned before alt-screen exit")
 
         // Exit alt-screen. The lines the selection points into are
         // discarded — copy would return garbage.
