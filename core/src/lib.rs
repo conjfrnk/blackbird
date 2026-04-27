@@ -4104,7 +4104,8 @@ mod tests {
 
             let after = bb_term_take_snapshot(term);
             assert_eq!(
-                (*after).history_size, 0,
+                (*after).history_size,
+                0,
                 "bb_term_clear_all must erase scrollback"
             );
             bb_snap_release(after);
