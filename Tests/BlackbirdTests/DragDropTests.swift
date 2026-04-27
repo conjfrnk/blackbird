@@ -69,11 +69,14 @@ final class DragDropTests: XCTestCase {
     // and `pasteTextRecorderForTests` captures the pre-encoding string
     // the paste pipeline saw so we can assert quoting end-to-end.
 
-    /// Bug #19: a drop while the shell has an active foreground child
-    /// (running command) must be refused — not pasted into the
-    /// running process's stdin where it would corrupt the running
-    /// program's protocol.
-    func test_drop_duringForegroundCommand_refused() throws {
+    /// Regression: a drop while the shell has an active foreground
+    /// child (claude, python, psql, vim, …) must be forwarded to that
+    /// child, not refused. An earlier revision (Bug #19) gated drops on
+    /// `hasForegroundChild()` and broke every interactive REPL — most
+    /// painfully Claude Code, where dragging in an image path is a
+    /// primary workflow. Terminal.app and iTerm2 both forward; we do
+    /// too.
+    func test_drop_duringForegroundCommand_accepted() throws {
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         let session = TerminalSession.makeHeadlessForTests()
         session._testForegroundChildOverride = true
@@ -83,15 +86,14 @@ final class DragDropTests: XCTestCase {
 
         let accepted = view.performDropOfPaths(["/tmp/example.txt"])
 
-        XCTAssertFalse(accepted, "drop must be refused while a command is running")
-        XCTAssertTrue(pastes.isEmpty,
-                      "no bytes should reach the paste pipeline when a command is running")
-        XCTAssertNotNil(view.findBar,
-                        "transient banner should have surfaced via FindBar")
+        XCTAssertTrue(accepted, "drop must be forwarded to the running command")
+        XCTAssertEqual(pastes, ["'/tmp/example.txt'"],
+                       "the quoted path should reach the paste pipeline regardless of foreground child state")
     }
 
-    /// Bug #19 baseline: with no foreground child, the same drop is
-    /// accepted. Sanity check that the gate isn't over-tripping.
+    /// Baseline: with no foreground child, the drop is accepted by the
+    /// shell. Pairs with the regression above — verifies behaviour is
+    /// identical whether or not a child is running.
     func test_drop_withoutForegroundCommand_accepted() throws {
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         let session = TerminalSession.makeHeadlessForTests()

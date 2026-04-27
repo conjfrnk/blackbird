@@ -305,8 +305,9 @@ public final class TerminalSession: ObservableObject {
     }
 
     /// Whether the shell currently has a foreground child process (anything
-    /// other than the shell itself). Used to gate the confirm-close prompt
-    /// and the drag-drop "command is running" refusal (Bug #19).
+    /// other than the shell itself). Used by App quit / window close
+    /// confirm prompts and by `CwdResolver` to inherit the child's cwd
+    /// for new tabs.
     public func hasForegroundChild() -> Bool {
         #if DEBUG
         if let override = _testForegroundChildOverride {
@@ -320,9 +321,10 @@ public final class TerminalSession: ObservableObject {
     /// Test-only override for `hasForegroundChild()`. The real
     /// implementation calls `tcgetpgrp` on the master fd, which a
     /// headless test session (`makeHeadlessForTests` — `pty == nil`)
-    /// can't drive. Setting this to `true` lets `DragDropTests`
-    /// exercise the Bug #19 refusal branch without forking a child
-    /// process. Cleared with `nil` to fall back to the real path.
+    /// can't drive. Setting this to `true` lets tests simulate a
+    /// running command (e.g. `DragDropTests` asserting a drop is
+    /// still forwarded to claude / python / vim) without forking a
+    /// child process. Cleared with `nil` to fall back to the real path.
     var _testForegroundChildOverride: Bool?
     #endif
 

@@ -72,37 +72,26 @@ extension TerminalView {
     /// AppKit treats it specially and synthesised conformers crash on
     /// the framework's internal `_concreteDraggingInfo` lookup).
     ///
-    /// Returns whether bytes reached the session: false when the drop
-    /// was refused (foreground child running, empty payload) or no
-    /// session was wired, true when a paste was issued. Invariants:
+    /// Returns whether bytes reached the session: false when `paths`
+    /// is empty, true when a paste was issued. Invariants:
     /// - `paths` is the already-shell-quote-input list (link strings,
     ///   not realpath-resolved targets) — caller is responsible for
     ///   the symlink-leak guard.
-    /// - On refusal, no bytes are written to the PTY recorder or the
-    ///   session.
+    /// - On the empty-paths early return, no bytes are written to the
+    ///   PTY recorder or the session.
     /// - On accept, IME composition is cleared *before* paste so the
     ///   preedit overlay can't render over the dropped path (Bug #21).
     @discardableResult
     func performDropOfPaths(_ paths: [String]) -> Bool {
-        // Bug #19: refuse the drop while the shell has a foreground child
-        // (cat / ssh / vim / running command). Without this, the bytes go
-        // straight to the running process's stdin instead of the shell —
-        // either corrupting its protocol (ssh, vim) or just landing in a
-        // surprising place (cat). Matches Terminal.app behaviour. The
-        // `hasForegroundChild()` syscall is `tcgetpgrp` + `getpgid`, both
-        // microsecond-level — safe to call on the main thread directly,
-        // no async hop needed (and a hop would race the drop's lifetime
-        // and starve the user of feedback).
-        if let session, session.hasForegroundChild() {
-            // Surface a transient banner via the existing FindBar
-            // mechanism so the user knows why nothing happened. Lazily
-            // install the bar if it wasn't already up — closing it again
-            // is a single click, and a drop attempt is itself an explicit
-            // action so a brief UI surfacing is appropriate.
-            if findBar == nil { installFindBar() }
-            findBar?.showTransientMessage("Cannot drop: command is running")
-            return false
-        }
+        // The drop is forwarded to whoever owns the TTY — shell at a
+        // prompt, or a running foreground child like claude / python /
+        // psql / irb / vim insert mode. This matches Terminal.app and
+        // iTerm2: the user explicitly initiated the drop, so route the
+        // bytes to the active reader and let the user judge fit. An
+        // earlier version of this method (Bug #19) refused drops while
+        // any foreground child existed — that broke every interactive
+        // REPL, including Claude Code itself, where dragging in an
+        // image path is a primary workflow.
         guard !paths.isEmpty else { return false }
 
         // Bug #21: drop any pending IME composition before the path bytes
