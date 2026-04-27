@@ -511,7 +511,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     ///
     /// All other states — nil, the window itself, an unrelated view, a
     /// non-`NSView` responder — trigger a restore.
-    private func restoreTerminalFirstResponderIfNeeded() {
+    ///
+    /// Internal so the `selectedWindow` KVO observer can call this on the
+    /// destination controller after a tab swap. Tab-group-internal swaps
+    /// (mouse-pill click; some `selectNextTab` paths) don't reliably fire
+    /// `windowDidBecomeKey` on the new tab, so the KVO is the unified hook
+    /// that catches every selection change.
+    func restoreTerminalFirstResponderIfNeeded() {
         guard let win = window, let view = terminalView else { return }
         let protectedRoots: [NSView] = [view, titlebarTabBar?.view].compactMap { $0 }
         guard shouldRestoreFirstResponder(
@@ -648,8 +654,31 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             self?.hideNativeTabStrip()
             self?.refreshTabBar()
         }
-        let selObs = group.observe(\.selectedWindow, options: [.new]) { [weak self] _, _ in
+        let selObs = group.observe(\.selectedWindow, options: [.new]) { [weak self] _, change in
             self?.refreshTabBar()
+            // Drive focus to this tab's TerminalView when WE are the
+            // newly-selected tab. Unified focus-restore site for all
+            // tab-switch paths: mouse-pill click, ⌘1–9, ⌃⇥ / ⌃⇧⇥, AppKit
+            // ⌘⇧] / ⌘⇧[, drag-tab-out / drag-tab-in.
+            // `windowDidBecomeKey` covers cross-window-group transitions
+            // but does NOT reliably fire on tab-group-internal swaps:
+            // AppKit treats the group's representative as still-key and
+            // just swaps the underlying NSWindow on display. Without
+            // this hook, mouse-pill clicks leave first responder on the
+            // source strip view and keystrokes ring NSBeep until the
+            // user clicks the content area.
+            //
+            // Each controller in the group runs its own observer; the
+            // identity check below means only the destination's
+            // controller fires the restore (instead of every sibling).
+            // `change.newValue` is `NSWindow??` (KVO outer optionality
+            // plus the property's own `NSWindow?` type) — `flatMap`
+            // flattens both layers.
+            guard let self,
+                  let newWindow = change.newValue.flatMap({ $0 }),
+                  newWindow === self.window
+            else { return }
+            self.restoreTerminalFirstResponderIfNeeded()
         }
         // AppKit re-shows the native strip every time a tab is added. KVO
         // on `isTabBarVisible` lets us flip it back off the moment it
