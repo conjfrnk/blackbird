@@ -416,16 +416,6 @@ struct OscScanner<'a> {
     cell: &'a CallbackCell,
     in_xtgettcap: &'a mut bool,
     xtgettcap_buf: &'a mut Vec<u8>,
-    /// Set to `true` when the parser sees a top-level `CSI 2 J` (ED All —
-    /// erase the visible screen) via `csi_dispatch`. Because `csi_dispatch`
-    /// only fires when the vte parser reaches CSI final from ground state,
-    /// this is inherently state-aware: an `ESC [ 2 J`-shaped byte sequence
-    /// appearing inside an OSC/DCS payload stays inert (it's a `put` byte,
-    /// not a CSI). `bb_term_input` uses this flag to emit a trailing
-    /// `ESC [ 3 J` (erase scrollback) AFTER the main processor has consumed
-    /// the chunk, replacing the old byte-level augmentation that corrupted
-    /// OSC/DCS payloads (rust-core-2 F1).
-    saw_ed_all: &'a mut bool,
     /// xterm `modifyOtherKeys` level bucket. `csi_dispatch` updates this
     /// when it sees `CSI > 4 ; N m`. 0 = off, 1 / 2 = level. Writer
     /// into `BBTerm.modify_other_keys`; downstream code reads the same
@@ -448,19 +438,6 @@ impl Perform for OscScanner<'_> {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        // Detect the top-level `CSI 2 J` (ED All). Intermediates must be
-        // empty — `CSI ? 2 J` is DECSED, a DEC private variant we don't
-        // augment. Any `2` in the first param slot (including `02`,
-        // `2;0`, etc.) counts as the ED-all form, matching what the old
-        // byte-match accepted before state-awareness.
-        if action == 'J' && intermediates.is_empty() {
-            if let Some(first) = params.iter().next() {
-                if first.first().copied() == Some(2) {
-                    *self.saw_ed_all = true;
-                }
-            }
-        }
-
         // xterm `modifyOtherKeys`: `CSI > 4 ; N m`. `>` is the only
         // intermediate; first param == 4; second param == 0 (off), 1
         // (level 1), or 2 (level 2). We also accept `CSI > 4 m` (no
@@ -1109,33 +1086,20 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         }
         let bb = &mut *term;
         let slice = std::slice::from_raw_parts(bytes, len);
-        // State-aware `CSI 2 J` (ED All) augmentation: append a trailing
-        // `CSI 3 J` (ED Saved — erase scrollback) when the chunk contains a
-        // top-level ED-all. `clear(1)` on macOS only emits 2J (xterm-256color
-        // terminfo); users expect scrollback to vanish too, matching iTerm2
-        // and `clear -x`.
-        //
-        // Earlier revisions did a byte-level `\x1b[2J` memmem match on the
-        // slice and injected `\x1b[3J` after every hit. That misfired when
-        // the bytes appeared inside an OSC/DCS payload (e.g., a shell-
-        // integration snippet embedding a CSI in a string literal, or a
-        // program echoing a captured log): vte was mid-OSC and wouldn't
-        // execute the 2J, but the injected ESC[3J pushed vte out of OSC and
-        // corrupted the enclosing sequence — rust-core-2 F1.
-        //
-        // The fix routes detection through the parallel `OscScanner`'s
-        // `csi_dispatch`, which only fires at top-level CSI (ground state).
-        // We feed the chunk to both parsers; if `saw_ed_all` is set
-        // afterwards, emit a single `\x1b[3J` to the main processor. This
-        // means scrollback-erase fires AFTER the entire chunk is consumed
-        // (rather than interleaved with each occurrence). That's fine —
-        // `clear(1)` sends ED-all at most once per chunk and any reasonable
-        // TUI emits `2J` sparsely; the ordering is preserved relative to
-        // downstream bytes in the same chunk.
+        // `CSI 2 J` (ED All — erase visible viewport) is NOT augmented with
+        // `CSI 3 J` (erase scrollback). A previous revision auto-injected 3J
+        // on every top-level 2J so `clear(1)` would also wipe scrollback,
+        // matching `clear -x` / iTerm2's optional behavior. That heuristic
+        // misfired in the field: TUIs (Claude Code's Ink renderer, ratatui
+        // spinners, fzf full-screen redraws) emit 2J on every redraw cycle,
+        // and the injected 3J wiped the user's scrollback on each frame.
+        // Users now have ⌘K (`bb_term_clear_all`) for the explicit
+        // viewport+scrollback wipe; `clear(1)` is viewport-only, matching
+        // xterm / Alacritty / Terminal.app.
         //
         // Fast path: if the chunk contains no ESC byte at all, we can't have
-        // any CSI sequence, so neither augmentation nor OSC-parser work is
-        // required unless a prior chunk left an OSC/DCS pending.
+        // any CSI sequence, so the OSC-parser is only needed when a prior
+        // chunk left one pending.
         if memchr::memchr(0x1B, slice).is_none() {
             bb.processor.advance(&mut bb.term, slice);
             // OSC parser skip: pure-text chunks don't need the parallel
@@ -1164,26 +1128,15 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             // this branch because `osc_possibly_pending` stays true from
             // the DCS's opening ESC; kept as a safety belt.
             if bb.osc_possibly_pending || has_bel || bb.in_xtgettcap {
-                let mut saw_ed_all = false;
                 let mut osc = OscScanner {
                     cell: &bb.callback,
                     in_xtgettcap: &mut bb.in_xtgettcap,
                     xtgettcap_buf: &mut bb.xtgettcap_buf,
-                    saw_ed_all: &mut saw_ed_all,
                     modify_other_keys: &mut bb.modify_other_keys,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
                     bb.osc_possibly_pending = false;
-                }
-                // ED-all CAN fire here when a prior chunk opened the CSI
-                // mid-parameter (e.g. one chunk is `\x1b[2`, the next is
-                // `J`). The parallel parser's state is persistent, so we
-                // catch the completion in the ESC-free chunk and emit the
-                // scrollback-clear right after the main processor finished
-                // consuming `J`. Same ordering as the ESC-present path.
-                if saw_ed_all {
-                    bb.processor.advance(&mut bb.term, b"\x1b[3J");
                 }
             }
             drain_color_requests(bb);
@@ -1193,55 +1146,17 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // later chunk. Set the latch so subsequent ESC-free chunks still
         // reach the parser.
         bb.osc_possibly_pending = true;
-        // Drive the parallel OSC parser BYTE-BY-BYTE so we know the exact
-        // offset of any top-level `CSI 2 J` dispatch within the chunk.
-        // The previous "advance whole chunk + inject ESC[3J at end"
-        // approach corrupted the main processor's state when the chunk
-        // ended with a parked ESC byte (e.g. `…\x1b[2J\x1b`): the
-        // injected ESC reset the parker, and the next chunk's
-        // `[<params><final>` got treated as printable text — visible to
-        // users running ratatui-style spinners (Claude Code, htop,
-        // fzf). With byte-precise positions we can inject `\x1b[3J`
-        // immediately after the dispatching `J` byte, while the main
-        // processor is provably in Ground state. Repro pinned in
-        // `core/tests/csi_fragmentation_repro.rs`.
-        // Allocation only happens if the chunk actually contains a top-
-        // level ED-all (rare); the common ESC-bearing chunk produces an
-        // empty `Vec` whose capacity stays at 0.
-        let mut ed_all_positions: Vec<usize> = Vec::new();
-        for (i, &byte) in slice.iter().enumerate() {
-            let mut saw_ed_all = false;
-            {
-                // Rebuild OscScanner each iteration so the borrow on
-                // `saw_ed_all` releases between bytes; otherwise we
-                // can't read the latch without dropping `osc`. The
-                // OscScanner itself is just a few borrowed pointers,
-                // so reconstruction is essentially free.
-                let mut osc = OscScanner {
-                    cell: &bb.callback,
-                    in_xtgettcap: &mut bb.in_xtgettcap,
-                    xtgettcap_buf: &mut bb.xtgettcap_buf,
-                    saw_ed_all: &mut saw_ed_all,
-                    modify_other_keys: &mut bb.modify_other_keys,
-                };
-                bb.osc_parser.advance(&mut osc, &[byte]);
-            }
-            if saw_ed_all {
-                ed_all_positions.push(i);
-            }
-        }
-        // Drive the main processor in segments, injecting `\x1b[3J`
-        // between each segment that ends with a matching ED-all `J`
-        // byte. When `ed_all_positions` is empty (the common case
-        // for ESC-bearing chunks) this collapses to a single
-        // whole-chunk advance — same shape as before.
-        let mut start = 0;
-        for &end in &ed_all_positions {
-            bb.processor.advance(&mut bb.term, &slice[start..=end]);
-            bb.processor.advance(&mut bb.term, b"\x1b[3J");
-            start = end + 1;
-        }
-        bb.processor.advance(&mut bb.term, &slice[start..]);
+        // Drive the parallel OSC parser whole-chunk: it watches for OSC 7,
+        // OSC 133, and the modify-other-keys CSI. None of those need byte-
+        // precise dispatch positions, so a single `advance` is enough.
+        let mut osc = OscScanner {
+            cell: &bb.callback,
+            in_xtgettcap: &mut bb.in_xtgettcap,
+            xtgettcap_buf: &mut bb.xtgettcap_buf,
+            modify_other_keys: &mut bb.modify_other_keys,
+        };
+        bb.osc_parser.advance(&mut osc, slice);
+        bb.processor.advance(&mut bb.term, slice);
         drain_color_requests(bb);
     })
 }
@@ -2404,9 +2319,10 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
 }
 
 /// Clear the visible screen AND the scrollback, moving the cursor to the
-/// top-left. Implemented by feeding the VT sequences directly to the
-/// parser (same path a shell's `clear` would take), so the rest of the
-/// terminal state (palette, cursor color, etc.) is untouched.
+/// top-left. Equivalent to `clear -x` (BSD) / iTerm2's "⌘K" wipe — NOT
+/// what `clear(1)` emits, which is viewport-only (a plain `\x1b[H\x1b[2J`
+/// that leaves scrollback intact). The rest of the terminal state
+/// (palette, cursor color, etc.) is untouched.
 ///
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null is a no-op.
@@ -4061,19 +3977,17 @@ mod tests {
         }
     }
 
-    /// Regression for rust-core-2 F1: state-aware `CSI 2 J` augmentation
-    /// correctly handles sequences SPLIT across `bb_term_input` calls.
-    /// The old byte-level memmem match required a contiguous 4-byte
-    /// `\x1b[2J` inside one slice; if the sequence was split (two bytes
-    /// in one PTY read, two in the next), the augmentation never fired
-    /// and `clear(1)` left scrollback intact. The parallel vte parser
-    /// that drives `saw_ed_all` is persistent across input calls, so the
-    /// detection is now correct regardless of chunk boundaries.
+    /// `CSI 2 J` (ED All — erase visible viewport) MUST NOT touch the
+    /// scrollback buffer. A previous revision auto-injected `CSI 3 J`
+    /// after every top-level 2J so `clear(1)` would also wipe scrollback,
+    /// but that wiped users' scrollback on every TUI redraw (Claude Code's
+    /// Ink renderer, ratatui spinners, fzf full-screen redraws all emit
+    /// 2J on each frame). Scrollback wipe is now reserved for the
+    /// explicit `bb_term_clear_all` (⌘K) entry point.
     #[test]
-    fn esc_2j_split_across_chunks_still_clears_scrollback() {
+    fn esc_2j_split_across_chunks_preserves_scrollback() {
         unsafe {
             let term = bb_term_new(10, 2, 100);
-            // Populate scrollback so the clear is observable.
             for _ in 0..20 {
                 bb_term_input(term, b"xx\r\n".as_ptr(), 4);
             }
@@ -4082,48 +3996,116 @@ mod tests {
             bb_snap_release(before);
             assert!(before_hist > 0, "precondition: scrollback populated");
 
-            // Split `\x1b[H\x1b[2J` across three tiny chunks so no
-            // single call holds the contiguous `\x1b[2J` 4-byte needle.
+            // Split `\x1b[H\x1b[2J` across two tiny chunks so the
+            // dispatching `J` arrives separately from the introducer.
             bb_term_input(term, b"\x1b[H\x1b[2".as_ptr(), 6);
             bb_term_input(term, b"J".as_ptr(), 1);
 
+            // 2J erases the visible viewport; alacritty may archive the
+            // soon-to-be-cleared row as it scrolls, so history can grow
+            // by a small constant. The contract we care about is "2J
+            // does not WIPE scrollback", not exact count preservation.
             let after = bb_term_take_snapshot(term);
-            assert_eq!(
-                (*after).history_size,
-                0,
-                "split-chunk ESC[2J must still clear scrollback \
-                 (rust-core-2 F1 regression)"
-            );
+            let after_hist = (*after).history_size;
             bb_snap_release(after);
+            assert!(
+                after_hist >= before_hist,
+                "split-chunk ESC[2J must NOT shrink scrollback; \
+                 before={before_hist} after={after_hist}"
+            );
             bb_term_free(term);
         }
     }
 
-    /// Counter-check for rust-core-2 F1: a top-level `ESC[2J` (the
-    /// `clear(1)` case) STILL triggers scrollback erase. This is the
-    /// behaviour that made `clear` feel right in the terminal;
-    /// state-aware detection must preserve it.
+    /// Top-level `ESC[2J` (the `clear(1)` case) erases the visible
+    /// viewport but leaves scrollback intact. Users wanting both wiped
+    /// invoke `bb_term_clear_all` directly (⌘K).
     #[test]
-    fn top_level_esc_2j_still_clears_scrollback() {
+    fn top_level_esc_2j_preserves_scrollback() {
         unsafe {
             let term = bb_term_new(10, 2, 100);
             for _ in 0..20 {
                 bb_term_input(term, b"yy\r\n".as_ptr(), 4);
             }
             let before = bb_term_take_snapshot(term);
-            assert!((*before).history_size > 0);
+            let before_hist = (*before).history_size;
+            assert!(before_hist > 0);
             bb_snap_release(before);
 
-            // Canonical clear(1): move home, ED-all. State-aware path
-            // augments with ED-Saved.
             let clear_seq = b"\x1b[H\x1b[2J";
             bb_term_input(term, clear_seq.as_ptr(), clear_seq.len());
 
             let after = bb_term_take_snapshot(term);
+            let after_hist = (*after).history_size;
+            bb_snap_release(after);
+            assert!(
+                after_hist >= before_hist,
+                "top-level ESC[2J must NOT shrink scrollback; \
+                 before={before_hist} after={after_hist}"
+            );
+            bb_term_free(term);
+        }
+    }
+
+    /// Repeated 2J frames (the actual TUI redraw pattern that surfaced
+    /// the original bug) must leave scrollback monotonically non-
+    /// decreasing. A naive re-introduction of the augmentation is
+    /// already caught by the single-frame tests; this test catches the
+    /// subtler case of a *conditional* injection (e.g. "inject after
+    /// every Nth 2J") that would slip past single-frame coverage.
+    #[test]
+    fn repeated_esc_2j_frames_never_shrink_scrollback() {
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            // Build up real scrollback content.
+            for i in 0..200 {
+                let line = format!("scrollback-line-{i}\n");
+                bb_term_input(term, line.as_ptr(), line.len());
+            }
+            let pre = bb_term_take_snapshot(term);
+            let pre_hist = (*pre).history_size;
+            bb_snap_release(pre);
+            assert!(pre_hist > 0, "precondition: scrollback populated");
+
+            // Simulate 50 frames of TUI redraw spam — exactly the
+            // pattern that wiped the user's scrollback continuously.
+            let frame = b"\x1b[H\x1b[2J\x1b[1;1HSPINNER";
+            let mut min_hist = pre_hist;
+            for _ in 0..50 {
+                bb_term_input(term, frame.as_ptr(), frame.len());
+                let snap = bb_term_take_snapshot(term);
+                let h = (*snap).history_size;
+                bb_snap_release(snap);
+                min_hist = min_hist.min(h);
+            }
+            assert!(
+                min_hist >= pre_hist,
+                "TUI redraw loop must not shrink scrollback; \
+                 pre={pre_hist} min_during_loop={min_hist}"
+            );
+            bb_term_free(term);
+        }
+    }
+
+    /// `bb_term_clear_all` (⌘K) is the explicit "wipe everything"
+    /// entry point and DOES erase scrollback.
+    #[test]
+    fn bb_term_clear_all_erases_scrollback() {
+        unsafe {
+            let term = bb_term_new(10, 2, 100);
+            for _ in 0..20 {
+                bb_term_input(term, b"zz\r\n".as_ptr(), 4);
+            }
+            let before = bb_term_take_snapshot(term);
+            assert!((*before).history_size > 0);
+            bb_snap_release(before);
+
+            bb_term_clear_all(term);
+
+            let after = bb_term_take_snapshot(term);
             assert_eq!(
-                (*after).history_size,
-                0,
-                "top-level ESC[2J must still clear scrollback"
+                (*after).history_size, 0,
+                "bb_term_clear_all must erase scrollback"
             );
             bb_snap_release(after);
             bb_term_free(term);

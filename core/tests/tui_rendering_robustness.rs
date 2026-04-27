@@ -27,9 +27,11 @@
 //!  10. Scroll region (DECSTBM `\x1b[5;20r`) under fragmentation.
 //!  11. CHA (Cursor Horizontal Absolute, `\x1b[<col>G`) — used heavily
 //!      by ratatui spinners — under fragmentation.
-//!  12. Save-cursor + ED-all-injection interaction: now that we inject
-//!      `\x1b[3J` mid-chunk, does it clobber a saved cursor / SGR
-//!      state set up before the 2J?
+//!  12. Save-cursor + ED-all interaction: a 2J between DECSC and DECRC
+//!      must not clobber the saved cursor / SGR state. (The historical
+//!      ED-all augmentation that injected `\x1b[3J` mid-chunk has been
+//!      removed because it wiped scrollback on every TUI redraw; this
+//!      test stays as a regression probe for save/restore around 2J.)
 //!  13. Modify-other-keys negotiation under fragmentation (sister to
 //!      the existing `modify_other_keys.rs::split_chunk_delivery`,
 //!      but exhaustive).
@@ -843,16 +845,15 @@ fn cha_split_at_every_offset_lands_at_correct_column() {
 fn save_cursor_around_ed_all_does_not_clobber_saved_state() {
     // pre-flight: ~120 KiB × multiple chunk shapes, ~10 ms.
     //
-    // The new ED-all-injection logic emits `\x1b[3J` mid-chunk after
-    // the dispatching `J` byte. Concern: if a save-cursor (DECSC) was
-    // active and the saved-state is tied to the processor's current
-    // cursor, does the injection accidentally bump it?
+    // Save/restore (DECSC/DECRC) bracketing a 2J. Concern: any state-
+    // machine drift around the ED-all dispatch (parser reset, scroll-
+    // region recompute, etc.) could leak into the saved cursor / SGR.
     //
     // Sequence:
     //   ESC[5;5H        cursor to (5,5)
     //   ESC[31m         set FG red
     //   ESC 7           save (cursor + SGR are part of saved state)
-    //   ESC[2J          ED-all (triggers 3J injection)
+    //   ESC[2J          ED-all (erase visible viewport)
     //   ESC[1;1H        cursor home
     //   ESC[39m         reset FG
     //   ESC 8           restore — must put cursor back at (5,5) with red FG
@@ -865,8 +866,7 @@ fn save_cursor_around_ed_all_does_not_clobber_saved_state() {
     let payload: &[u8] = b"\x1b[5;5H\x1b[31m\x1b7\x1b[2J\x1b[1;1H\x1b[39m\x1b8X";
     let shapes: &[Vec<&[u8]>] = &[
         vec![payload],
-        // split right after ED-all dispatching J — this is exactly
-        // where the 3J injection happens
+        // split right after the ED-all dispatching `J`
         vec![&payload[..15], &payload[15..]],
         // boundary inside ED-all params
         vec![&payload[..14], &payload[14..]],
@@ -1043,20 +1043,19 @@ fn common_sequences_survive_1_2_4_16_64_byte_chunks() {
 // ===========================================================================
 
 #[test]
-fn ed_all_injection_after_save_cursor_split_boundary() {
+fn ed_all_split_boundary_preserves_scrollback_and_lands_cup() {
     // pre-flight: ~120 KiB, ~10 ms.
     //
-    // Targeted regression for the ED-all + injection path. The fix
-    // commit (6fdd331) walked byte-by-byte to find the exact ED-all
-    // dispatch position and inject `\x1b[3J` only there. We pin that
-    // a chunk ending JUST BEFORE the dispatching 'J' (so the 'J'
-    // arrives in the next chunk) still injects correctly and doesn't
-    // double-inject or miss.
+    // Regression for the dogfooding bug where Claude Code's TUI redraws
+    // wiped all scrollback on every frame: a chunk-split ED-all followed
+    // by CUP + write must (a) NOT touch scrollback, and (b) still leave
+    // the CUP-positioned cell intact (no parser corruption around the
+    // chunk boundary).
     //
     // Test: feed scrollback-builder lines, then ED-all in two chunks
-    // splitting RIGHT BEFORE the 'J'. After the feed, scrollback
-    // history_size should be at most ~zero (3J cleared it). Then a
-    // CUP + write should land cleanly without leaked params.
+    // splitting RIGHT BEFORE the 'J'. Scrollback history_size must
+    // equal its pre-2J value, and a subsequent CUP + write must land
+    // cleanly without leaked params.
     unsafe {
         let term = bc::bb_term_new(80, 24, 100);
         for i in 0..100 {
@@ -1079,9 +1078,9 @@ fn ed_all_injection_after_save_cursor_split_boundary() {
         let history_after = (*snap).history_size;
         let cell = *((*snap).cells.add(0));
         bc::bb_snap_release(snap);
-        assert_eq!(
-            history_after, 0,
-            "ED-all split at boundary must still inject 3J and clear history; \
+        assert!(
+            history_after >= history_before,
+            "ED-all split at boundary must NOT shrink scrollback; \
              before={history_before} after={history_after}"
         );
         assert_eq!(

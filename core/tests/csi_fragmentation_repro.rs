@@ -6,9 +6,12 @@
 //!      state-recovery edge case where `ESC[<params>` is split across two
 //!      `bb_term_input` calls and the parser drops the prefix but writes
 //!      params as text.
-//!   2. The OSC `[2J` ED-all augmentation (`bb_term_input` injects
-//!      `\x1b[3J` after seeing top-level `\x1b[2J`) interferes with a
-//!      subsequent CSI sequence.
+//!   2. (historical) The OSC `[2J` ED-all augmentation that injected
+//!      `\x1b[3J` after seeing top-level `\x1b[2J` interfered with the
+//!      subsequent CSI. The augmentation has been removed (it wiped
+//!      scrollback on every TUI redraw); this hypothesis no longer
+//!      applies but the chunk-shape coverage is kept as a regression
+//!      probe for any future state-machine drift around 2J.
 //!   3. A CUP whose row exceeds the grid height (e.g. row 53 on a 30-row
 //!      viewport) causes a broken state where alacritty silently accepts
 //!      the bytes as text rather than as a control sequence.
@@ -404,9 +407,9 @@ fn cup_split_at_every_internal_offset() {
     //
     // try every possible 2-way split point. Each split feeds the two
     // halves through separate `bb_term_input` calls. The parser MUST
-    // arrive at the same final grid shape (modulo the timing of `\x1b[3J`
-    // injection) for every split; in particular, no split may produce a
-    // grid containing any CSI param substring.
+    // arrive at the same final grid shape for every split; in
+    // particular, no split may produce a grid containing any CSI
+    // param substring.
     //
     // This is the sharpest possible probe of hypothesis 1 — every
     // boundary-position is exhausted.

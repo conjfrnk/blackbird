@@ -102,10 +102,10 @@ fn throughput_binary_garbage() {
 // what `cargo build`, `grc tail`, and most TUI logs generate. Measured
 // ~70 MiB/s on M2 Pro → floor 30 MiB/s.
 //
-// NOT benchmarked here: pathological full-screen clear spam. Augmenting ESC[2J
-// with ESC[3J (scrollback wipe, intentional for `clear(1)` parity) means frame
-// redraws are O(scrollback_size). Real apps clear at ~60 Hz; a synthetic test
-// clearing at multi-MHz would measure the augmentation cost, not real use.
+// NOT benchmarked here: pathological full-screen clear spam. ESC[2J on its
+// own is cheap (alacritty just walks the visible grid), so a synthetic test
+// clearing at multi-MHz would measure the parser overhead rather than any
+// realistic workload.
 // ---------------------------------------------------------------------------
 
 #[test]
