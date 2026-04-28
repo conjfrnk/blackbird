@@ -327,6 +327,16 @@ public final class PTY {
             //  3. $HOME fallback if passwd lookup somehow fails.
             // Apps launched from Finder inherit cwd=`/` from launchd, which
             // would otherwise start the shell in /.
+            //
+            // Triple-failure abort (audit M8): if every candidate fails
+            // to chdir, exit 127 BEFORE execv runs. Otherwise the shell
+            // starts at whatever cwd the post-fork inherited (typically
+            // `/` under launchd, the working directory the user just
+            // left under cmd-T), which is silently wrong and confuses
+            // shell prompt / git / project tooling. _exit(127) matches
+            // the execv-failed path below; the parent sees a child that
+            // exited with 127 and surfaces the same UI as a missing
+            // shell binary.
             var chdired = false
             if let cwd = initialWorkingDirectory, !cwd.isEmpty {
                 var st = stat()
@@ -334,12 +344,27 @@ public final class PTY {
                     if chdir(cwd) == 0 { chdired = true }
                 }
             }
+            if !chdired,
+               let pw = getpwuid(getuid()), pw.pointee.pw_dir != nil,
+               chdir(pw.pointee.pw_dir) == 0 {
+                chdired = true
+            }
+            if !chdired,
+               let home = getenv("HOME"),
+               chdir(home) == 0 {
+                chdired = true
+            }
             if !chdired {
-                if let pw = getpwuid(getuid()), pw.pointee.pw_dir != nil {
-                    _ = chdir(pw.pointee.pw_dir)
-                } else if let home = getenv("HOME") {
-                    _ = chdir(home)
+                // Final defense: try /tmp before giving up entirely. A
+                // shell starting in /tmp is unusual but harmless; a
+                // shell starting at `/` (launchd inheritance) is the
+                // pre-M8 silent failure we're avoiding here.
+                if chdir("/tmp") == 0 {
+                    chdired = true
                 }
+            }
+            if !chdired {
+                _exit(127)
             }
             // Build argv
             let cArgv: [UnsafeMutablePointer<CChar>?] =
