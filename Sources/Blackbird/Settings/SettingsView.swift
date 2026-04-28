@@ -34,6 +34,18 @@ public struct SettingsView: View {
         return short == build ? short : "\(short) (\(build))"
     }()
 
+    /// Section-footer helper text. Without an explicit
+    /// `frame(maxWidth: .infinity, alignment: .leading)` SwiftUI's grouped
+    /// Form on macOS sizes footer Text to its content and centers it under
+    /// the section, producing a narrow, ragged column drifting toward the
+    /// middle of the window. Forcing leading alignment at full width makes
+    /// the text wrap against the same right edge as the controls above.
+    private static func footer(_ text: String) -> some View {
+        Text(text)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     public init() {}
 
     public var body: some View {
@@ -123,7 +135,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Window")
             } footer: {
-                Text("Higher values make the window background more translucent and apply a stronger blur.")
+                Self.footer("Higher values make the window background more translucent and apply a stronger blur.")
             }
         }
         .formStyle(.grouped)
@@ -159,7 +171,7 @@ public struct SettingsView: View {
                 // so one combined footer keeps the UI dense without losing the
                 // explanatory nuance each toggle needs. Blank line separates
                 // the two paragraphs.
-                Text("OSC 52 lets remote shells write text to your Mac clipboard. Disable it on untrusted servers.\n\nOSC 10/11/12 lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors. Off by default — the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
+                Self.footer("OSC 52 lets remote shells write text to your Mac clipboard. Disable it on untrusted servers.\n\nOSC 10/11/12 lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors. Off by default — the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
             }
         }
         .formStyle(.grouped)
@@ -184,7 +196,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Automatic updates")
             } footer: {
-                Text("Check the release feed at launch and notify when a new version is available.")
+                Self.footer("Check the release feed at launch and notify when a new version is available.")
             }
 
             if AppDelegate.isUpdaterConfigured {
