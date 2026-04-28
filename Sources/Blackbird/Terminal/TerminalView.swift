@@ -4,9 +4,11 @@ import CoreText
 import Combine
 import Metal
 import MetalKit
-#if DEBUG
+// `os.Logger` is used by `securityLogger` (Release-visible, audit
+// channel) and by the DEBUG-only fpsLogger / keyLogger / hoverLogger.
+// The audit-H1 fix moved security logging out of the DEBUG block, so
+// the import must follow.
 import os
-#endif
 
 /// Fixed-cell metrics derived from a monospaced font.
 public struct CellMetrics {

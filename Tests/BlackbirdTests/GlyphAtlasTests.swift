@@ -62,23 +62,23 @@ final class GlyphAtlasTests: XCTestCase {
         // Fill to capacity — no flush yet, so generation stays 0.
         for cp: UInt32 in 0x41...0x44 {
             let s = try XCTUnwrap(UnicodeScalar(cp))
-            XCTAssertNotNil(atlas.lookupOrInsert(scalar: s))
+            _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: s))
         }
         XCTAssertEqual(atlas.generation, 0,
                        "filling without overflow must NOT bump generation")
         // Overflow forces saturation flush → generation bumps once.
         let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
-        XCTAssertNotNil(atlas.lookupOrInsert(scalar: overflow))
+        _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: overflow))
         XCTAssertEqual(atlas.generation, 1,
                        "saturation flush must bump generation by 1")
         // Fill the post-flush atlas (slot 0..3 reused), then overflow
         // a second time → generation bumps again.
         for cp: UInt32 in 0x46...0x48 {
             let s = try XCTUnwrap(UnicodeScalar(cp))
-            XCTAssertNotNil(atlas.lookupOrInsert(scalar: s))
+            _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: s))
         }
         let overflow2 = try XCTUnwrap(UnicodeScalar(0x49 as UInt32))
-        XCTAssertNotNil(atlas.lookupOrInsert(scalar: overflow2))
+        _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: overflow2))
         XCTAssertEqual(atlas.generation, 2,
                        "second saturation flush must bump generation again")
     }
