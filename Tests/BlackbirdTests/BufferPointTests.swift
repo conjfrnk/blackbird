@@ -279,4 +279,89 @@ final class BufferPointTests: XCTestCase {
         XCTAssertEqual(a, anchor)
         XCTAssertEqual(b, cursor)
     }
+
+    // MARK: - M11: lower-clamp against -historySize
+
+    /// User has scrolled to the top of retained scrollback (display
+    /// offset = historySize) and drags off the top edge. Pre-fix the
+    /// helper's lower clamp was unbounded, so the result was a buffer
+    /// line below `-historySize` — Rust core's `text_range` returned
+    /// empty bytes for that line and copy yielded "" silently. With
+    /// `historySize: 100` passed in, the line clamps to -100 (the
+    /// oldest retained line) so the selection lands on real content.
+    /// Audit M11.
+    func test_dragOffTop_atFullHistory_clampsToOldestLine() {
+        // displayOffset = 100 (scrolled all the way back), drag to the
+        // very top of the view (y = viewportH means displayRow 0).
+        let p = bufferPoint(
+            forView: CGPoint(x: 0, y: viewportH - 0.5),
+            cellWidth: cellW,
+            cellHeight: cellH,
+            viewportHeight: viewportH,
+            displayOffset: 100,
+            cols: cols,
+            rows: rows,
+            historySize: 100
+        )
+        // displayRow=0 - displayOffset=100 = rawLine -100. Clamps to
+        // -historySize = -100 (the oldest retained line). Without the
+        // clamp this was -100 anyway in this case; the next test
+        // covers the genuine over-the-edge case.
+        XCTAssertEqual(p.line, -100)
+        XCTAssertEqual(p.col, 0)
+    }
+
+    func test_dragOffTop_pastHistory_clampsToOldestLine() {
+        // Drag y past the top edge (above the view) while scrolled to
+        // top. rawLine would be < -historySize without the clamp.
+        let p = bufferPoint(
+            forView: CGPoint(x: 0, y: viewportH + 200),  // way above
+            cellWidth: cellW,
+            cellHeight: cellH,
+            viewportHeight: viewportH,
+            displayOffset: 100,
+            cols: cols,
+            rows: rows,
+            historySize: 100
+        )
+        // Y above the view → safeY clamped → displayRow = 0.
+        // rawLine = 0 - 100 = -100, clamped to max(-100, -100) = -100.
+        XCTAssertEqual(p.line, -100)
+    }
+
+    func test_dragOffTop_pastHistorySize_clampsToHistorySize() {
+        // Now the rawLine genuinely exceeds -historySize. Construct a
+        // displayOffset > historySize so rawLine = 0 - displayOffset
+        // is more negative than -historySize. (In real life
+        // displayOffset is bounded by historySize, but the helper
+        // takes them as independent params and must defend against
+        // misuse.)
+        let p = bufferPoint(
+            forView: CGPoint(x: 0, y: viewportH - 0.5),  // displayRow 0
+            cellWidth: cellW,
+            cellHeight: cellH,
+            viewportHeight: viewportH,
+            displayOffset: 999,
+            cols: cols,
+            rows: rows,
+            historySize: 100
+        )
+        // rawLine = -999, clamps to -100.
+        XCTAssertEqual(p.line, -100)
+    }
+
+    func test_historySizeNil_preservesPreM11Behaviour() {
+        // Default historySize=nil: no lower clamp (matches every
+        // existing call site that doesn't have a snapshot).
+        let p = bufferPoint(
+            forView: CGPoint(x: 0, y: viewportH - 0.5),
+            cellWidth: cellW,
+            cellHeight: cellH,
+            viewportHeight: viewportH,
+            displayOffset: 999,
+            cols: cols,
+            rows: rows
+        )
+        XCTAssertEqual(p.line, -999, "nil historySize must NOT lower-clamp")
+    }
 }

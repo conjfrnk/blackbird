@@ -222,7 +222,8 @@ extension TerminalView {
             viewportHeight: textAreaHeight,
             displayOffset: snap?.displayOffset ?? 0,
             cols: snap?.cols ?? 80,
-            rows: snap?.rows ?? 24
+            rows: snap?.rows ?? 24,
+            historySize: snap?.historySize
         )
     }
 
@@ -527,7 +528,8 @@ extension TerminalView {
             viewportHeight: textAreaHeight,
             displayOffset: snap?.displayOffset ?? 0,
             cols: snap?.cols ?? 80,
-            rows: snap?.rows ?? 24
+            rows: snap?.rows ?? 24,
+            historySize: snap?.historySize
         )
     }
 

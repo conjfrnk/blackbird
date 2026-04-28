@@ -68,9 +68,12 @@ public struct Selection: Equatable {
 /// display row.
 ///
 /// Columns clamp to `[0, cols-1]`. `line` clamps upward at `rows - 1`
-/// (so clicks below the last grid row snap to it) and downward into the
-/// caller's history — we don't clamp negatively here because the caller
-/// (TerminalView) knows `historySize` at call time.
+/// (so clicks below the last grid row snap to it). When `historySize`
+/// is supplied, `line` also clamps downward at `-historySize` — a
+/// drag that overshoots the top of retained scrollback lands on the
+/// oldest visible line instead of producing an unreachable negative
+/// line that copies as empty. `historySize: nil` (default) preserves
+/// pre-M11 behaviour: no lower clamp. Audit M11.
 public func bufferPoint(
     forView localPoint: CGPoint,
     cellWidth: CGFloat,
@@ -78,7 +81,8 @@ public func bufferPoint(
     viewportHeight: CGFloat,
     displayOffset: Int,
     cols: Int,
-    rows: Int
+    rows: Int,
+    historySize: Int? = nil
 ) -> BufferPoint {
     // Guard against two trap classes at Int(Double):
     //   1. NaN / ±Infinity — a stray Core Animation value through
@@ -95,8 +99,15 @@ public func bufferPoint(
     let displayRow = max(0, Int((safeVH - safeY) / cellHeight))
     let col = max(0, min(cols - 1, Int(safeX / cellWidth)))
     let rawLine = displayRow - displayOffset
-    // Clamp upward at rows-1; callers may clamp downward against -historySize.
-    let clampedLine = min(rows - 1, rawLine)
+    // Clamp upward at rows-1; conditionally downward at -historySize.
+    let upper = rows - 1
+    let upperClamped = min(upper, rawLine)
+    let clampedLine: Int
+    if let hist = historySize {
+        clampedLine = max(-hist, upperClamped)
+    } else {
+        clampedLine = upperClamped
+    }
     return BufferPoint(line: Int32(clampedLine), col: col)
 }
 
