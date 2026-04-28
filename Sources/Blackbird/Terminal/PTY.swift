@@ -75,6 +75,17 @@ public final class PTY {
 
     private let masterFD: Int32
     private let childPID: pid_t
+    /// BSD start time of `childPID` captured at spawn. Used by
+    /// `terminate()` to detect PID reuse before escalating to SIGKILL.
+    /// Format: (tv_sec, tv_usec) since the system epoch — uniquely
+    /// identifies a process even if its pid is later recycled. Nil
+    /// means the start-time read failed at spawn (rare on a healthy
+    /// system); the SIGKILL escalation falls back to the pre-M9
+    /// behaviour in that case.
+    ///
+    /// Both fields are `UInt64` because that's what `proc_bsdinfo`'s
+    /// `pbi_start_tvsec` / `pbi_start_tvusec` deliver on Darwin.
+    private let childStartTime: (sec: UInt64, usec: UInt64)?
     private let readQueue = DispatchQueue(label: "blackbird.pty.read", qos: .userInitiated)
     private let writeQueue = DispatchQueue(label: "blackbird.pty.write", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "blackbird.pty.state")
@@ -168,6 +179,21 @@ public final class PTY {
             return false
         }
         return task.terminationStatus == 0
+    }
+
+    /// Read the BSD start time of `pid` via `proc_pidinfo` /
+    /// `PROC_PIDTBSDINFO`. Returns the (sec, usec) pair from the
+    /// process's `pbi_start_tvsec` / `pbi_start_tvusec` fields, which
+    /// uniquely identify a process across PID reuse — kernel
+    /// guarantees the start time is set at fork() and never modified.
+    /// Returns nil if proc_pidinfo fails (process doesn't exist yet,
+    /// permission denied, or kernel-info unavailable). Audit M9.
+    private static func bsdProcessStartTime(pid: pid_t) -> (sec: UInt64, usec: UInt64)? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.stride)
+        let n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
+        guard n == size else { return nil }
+        return (sec: info.pbi_start_tvsec, usec: info.pbi_start_tvusec)
     }
 
     /// Spawn a child process attached to a new PTY. `initialWorkingDirectory`
@@ -381,6 +407,13 @@ public final class PTY {
     private init(masterFD: Int32, childPID: pid_t) {
         self.masterFD = masterFD
         self.childPID = childPID
+        // Capture the child's BSD start time at spawn so the SIGKILL
+        // escalation in `terminate()` can detect PID reuse: if the
+        // 200ms grace window outlives our child AND macOS recycles
+        // the PID for an unrelated process, `kill(pid, 0)` returns
+        // success on the recycled PID even though it isn't ours.
+        // Comparing start times rules out that race. Audit M9.
+        self.childStartTime = Self.bsdProcessStartTime(pid: childPID)
         self.startReading()
     }
 
@@ -744,6 +777,7 @@ public final class PTY {
         // `pid` (a value type) and calls `kill` directly; no shared
         // state is accessed.
         let pid = childPID
+        let originalStartTime = childStartTime
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + .milliseconds(200)
         ) {
@@ -752,6 +786,22 @@ public final class PTY {
             // means ESRCH (already exited) or EPERM (impossible here
             // since we're the parent); either way, don't escalate.
             guard kill(pid, 0) == 0 else { return }
+            // PID-reuse guard (audit M9): macOS may have recycled the
+            // pid for an unrelated process if our original child
+            // exited inside the 200ms grace window AND another
+            // process spawned and got the same pid. Compare the
+            // current process's BSD start time against the value we
+            // captured at spawn — if they differ, the kernel has
+            // handed this pid to a different process and we MUST NOT
+            // SIGKILL it.
+            if let original = originalStartTime,
+               let current = Self.bsdProcessStartTime(pid: pid),
+               current != original {
+                Self.logger.log(
+                    "PTY.terminate skipped SIGKILL: pid=\(pid, privacy: .public) reused by another process"
+                )
+                return
+            }
             _ = kill(pid, SIGKILL)
             Self.logger.log(
                 "PTY.terminate escalated to SIGKILL pid=\(pid, privacy: .public) (HUP-ignoring child)"
