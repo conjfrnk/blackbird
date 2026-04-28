@@ -624,12 +624,20 @@ public final class MetalRenderer {
             // (vim highlights, status lines, syntax bg) still draw their
             // bg quad; whether they stay solid or become translucent is
             // a user choice (keepBgOpaque).
-            // After a REVERSE swap the effective bg is the original fg,
-            // which is always a concrete palette value — treat it as a
-            // real background so the highlight paints.
-            let effectiveBgRgb = reverse ? cell.fg : cell.bg
+            //
+            // The "no bg quad" decision compares against the active
+            // theme's `defaultBgRgb`, NOT a literal 0x000000. On themes
+            // whose default bg isn't black (Atom dark = 0x282C34,
+            // Catppuccin Mocha = 0x1E1E2E, Solarized = 0x002B36 …) an
+            // explicit `\x1b[40m` (palette black) IS a real background
+            // the user wants painted. Pre-fix the literal-zero check
+            // collapsed `cell.bg == 0x000000` to "no bg" and a vim
+            // status line / htop column that uses ANSI black silently
+            // showed the theme's default bg through. Audit H2.
             let isDefaultBg = !reverse && cell.bg == defaultBgRgb
-            let hasBg = reverse || (!isDefaultBg && effectiveBgRgb != 0x000000)
+            let hasBg = Self.shouldPaintBgQuad(
+                cellBg: cell.bg, defaultBg: defaultBgRgb, reverse: reverse
+            )
 
             // Determine the bg alpha for what we'll write into
             // CellInstance:
@@ -750,6 +758,31 @@ public final class MetalRenderer {
                 ))
             }
         }
+    }
+
+    /// Pure decision: should `buildInstances` emit a background quad
+    /// for this cell?
+    ///
+    /// `true` when:
+    ///   - the cell has REVERSE attribute (the swapped-in fg is a real
+    ///     palette colour the user wants painted), OR
+    ///   - the cell's `bg` differs from the active theme's
+    ///     `defaultBgRgb` (an explicit `\x1b[4Nm` SGR set this cell's
+    ///     background to a palette colour, and even palette black on a
+    ///     non-black theme is "explicit" — the user wants it painted).
+    ///
+    /// Pre-fix this compared `cell.bg` to literal `0x000000`, which on
+    /// non-black themes (Atom dark, Catppuccin, Solarized …) silently
+    /// dropped every `\x1b[40m` quad: vim status lines, htop column
+    /// shading, syntax highlights using ANSI black all leaked the
+    /// theme bg through. Audit H2.
+    ///
+    /// Internal so MetalRendererTests can pin the decision table.
+    static func shouldPaintBgQuad(
+        cellBg: UInt32, defaultBg: UInt32, reverse: Bool
+    ) -> Bool {
+        if reverse { return true }
+        return cellBg != defaultBg
     }
 
     /// Orchestrates per-row rebuild + GPU buffer flatten using the

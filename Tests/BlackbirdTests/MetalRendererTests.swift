@@ -461,4 +461,57 @@ final class MetalRendererTests: XCTestCase {
             renderer.render(in: view, snapshot: snapshot, focused: true)
         }
     }
+
+    // MARK: - High-2: explicit black bg paints on non-black themes
+
+    /// `shouldPaintBgQuad` decides whether a cell's background quad
+    /// gets emitted. Pre-fix the decision compared `cell.bg` to literal
+    /// `0x000000`, so on themes whose default bg isn't black (Atom
+    /// dark, Catppuccin, Solarized …) any cell with `\x1b[40m` (palette
+    /// black) silently dropped its quad and the theme bg leaked
+    /// through. Fix compares to the active theme's `defaultBgRgb`
+    /// instead. Audit H2.
+
+    func test_shouldPaintBgQuad_explicitBlackPaintsOnNonBlackTheme() {
+        // Atom dark theme bg = 0x282C34. Cell bg = palette black
+        // (0x000000). User-emitted `\x1b[40m` IS explicit; must paint.
+        XCTAssertTrue(MetalRenderer.shouldPaintBgQuad(
+            cellBg: 0x000000, defaultBg: 0x282C34, reverse: false
+        ))
+    }
+
+    func test_shouldPaintBgQuad_defaultBgDoesNotPaint() {
+        // Cell bg matches theme default — no quad, transparent
+        // clearColor shows through. This is the "default" cell case.
+        XCTAssertFalse(MetalRenderer.shouldPaintBgQuad(
+            cellBg: 0x282C34, defaultBg: 0x282C34, reverse: false
+        ))
+    }
+
+    func test_shouldPaintBgQuad_explicitNonDefaultBgPaints() {
+        // Cell bg is some palette colour ≠ default — vim status line,
+        // syntax highlight. Must paint.
+        XCTAssertTrue(MetalRenderer.shouldPaintBgQuad(
+            cellBg: 0xFF0000, defaultBg: 0x282C34, reverse: false
+        ))
+    }
+
+    func test_shouldPaintBgQuad_reverseAlwaysPaints() {
+        // REVERSE swaps fg/bg; the resulting bg is whatever the cell's
+        // fg was — always a concrete palette value the user wants
+        // painted (cursor row, selection, highlight). Even when
+        // `cellBg == defaultBg`, reverse forces the quad.
+        XCTAssertTrue(MetalRenderer.shouldPaintBgQuad(
+            cellBg: 0x282C34, defaultBg: 0x282C34, reverse: true
+        ))
+    }
+
+    func test_shouldPaintBgQuad_blackThemeBlackCellDoesNotPaint() {
+        // Black-on-black theme (the pre-fix code only worked here).
+        // cell.bg == defaultBg == 0x000000 → no quad. Pin so future
+        // refactors keep this case at parity with the post-fix logic.
+        XCTAssertFalse(MetalRenderer.shouldPaintBgQuad(
+            cellBg: 0x000000, defaultBg: 0x000000, reverse: false
+        ))
+    }
 }
