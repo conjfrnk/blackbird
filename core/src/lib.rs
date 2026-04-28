@@ -630,6 +630,21 @@ impl Perform for OscScanner<'_> {
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         // Dispatch by OSC number. The first param is always the
         // semicolon-separated numeric prefix (e.g. `7`, `133`).
+        //
+        // We deliberately handle only the OSC numbers that need a
+        // Blackbird-side hook: 7 (CWD reporting) and 133 (semantic prompt
+        // marks). All other OSC numbers fall through to alacritty's main
+        // `Processor` driving `bb.term`. Alacritty handles 0/1/2 (window
+        // titles), 4 (palette set), 8 (hyperlinks via the cell hyperlink
+        // path), 10/11/12 + 104/110/111/112 (default fg/bg/cursor color
+        // get/reset, surfaced via our color-query hook), 50 (cursor),
+        // 52 (clipboard — pinned `Disabled`), 110/111/112 (color resets),
+        // and a few it explicitly ignores.
+        //
+        // Anything not matched here AND not handled by alacritty (OSC 6
+        // working-file, OSC 1337 iTerm2 extensions, etc.) is silently
+        // dropped at both layers. If you add a new Blackbird-owned OSC
+        // hook, list it here so this catch-all stays auditable.
         match params.first().copied() {
             Some(b"7") => self.handle_osc7(params),
             Some(b"133") => self.handle_osc133(params),
@@ -952,15 +967,21 @@ impl OscScanner<'_> {
             _ => return, // unknown sub-kind — silently ignore rather than crash.
         };
 
-        // Audit synthesis #10 — OSC 133 prompt-mark forgery DoS / phishing.
-        // Rate-limit the *navigable* mark kinds (A = prompt start, B =
-        // command start, C = command output) at PROMPT_MARK_PER_SECOND
-        // per rolling 1-second window. D (command end with exit code)
-        // is exempt: it's tied 1:1 to a real C the user already accepted,
-        // and dropping D would leave Swift's prompt-ring with dangling
-        // half-open commands. Excess fires within an active window are
-        // dropped silently.
-        if matches!(kind_byte, b'A' | b'B' | b'C') && !self.prompt_mark_rate.allow() {
+        // Audit synthesis #10 + RC-03 — OSC 133 prompt-mark forgery DoS / phishing.
+        // Rate-limit ALL mark kinds (A = prompt start, B = command start,
+        // C = command output, D = command end with exit code) at
+        // PROMPT_MARK_PER_SECOND per rolling 1-second window.
+        //
+        // Earlier versions exempted D on the assumption it was tied 1:1
+        // to an accepted C, but the code never enforced that pairing. A
+        // hostile remote could spam `OSC 133;D;0\x07` to rotate
+        // legitimate D entries out of Swift's bounded prompt ring. A
+        // marks (the navigation targets) were already protected, so the
+        // realistic impact was exit-code history corruption rather than
+        // navigable-prompt forgery — but the comment claimed an
+        // invariant the code didn't keep. Including D in the gate
+        // restores the comment-vs-code contract.
+        if matches!(kind_byte, b'A' | b'B' | b'C' | b'D') && !self.prompt_mark_rate.allow() {
             return;
         }
 
@@ -2253,18 +2274,6 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         };
         bb.term.reset_damage();
 
-        // Pluck the persistent URI intern cache out of `bb` so we can
-        // mutate it while holding an immutable borrow on `bb.term` (for
-        // `grid`). Entries survive across snapshots (rust-core-3 F1):
-        // the same URI appearing frame after frame is interned exactly
-        // once across the terminal's lifetime. A new snapshot
-        // `Arc::clone`s the existing CStr into its local `links` — one
-        // atomic increment, zero allocation. `uri_cache_bytes` tracks
-        // the global byte footprint; new URIs dropped silently once
-        // it crosses `OSC8_TOTAL_INTERN_BYTES_CAP` (1 MiB).
-        let mut uri_cache = std::mem::take(&mut bb.uri_cstr_cache);
-        let mut uri_cache_bytes = bb.uri_cache_bytes;
-
         let palette = bb.term.colors();
         let grid = bb.term.grid();
 
@@ -2272,39 +2281,47 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let cols = grid.columns() as u16;
         let mut cells: Vec<BBCell> = Vec::with_capacity(rows as usize * cols as usize);
 
-        // OSC 8 hyperlink interning. When non-empty, `links[0]` is the
-        // "no link" sentinel so cell `link_id == 0` always means "no
-        // OSC 8 attribution" and subsequent URIs get 1-based indices.
-        // Caps:
+        // OSC 8 hyperlink interning is split into two phases to keep the
+        // term borrow disjoint from the persistent cache mutation
+        // (audit RC-01). Phase 1 (here, under `&bb.term`) collects each
+        // unique URI as an owned `String` and records each cell's
+        // local-id (1..=N). Phase 2 (after the term borrow ends)
+        // resolves those local ids against `bb.uri_cstr_cache` and
+        // builds the final `links: Vec<Arc<CStr>>`. Translating cells
+        // from local id → final id then walks `cells` once.
+        //
+        // The earlier shape used `mem::take` to pluck the cache out of
+        // `bb` for the duration of the grid loop, then wrote it back at
+        // the end. Any panic between the take and the write-back left
+        // `bb.uri_cstr_cache` empty while `bb.uri_cache_bytes` retained
+        // its non-zero value — every future snapshot would then fail
+        // the byte-cap check against an empty cache, permanently
+        // dropping all OSC 8 attribution. The two-phase shape removes
+        // the take entirely.
+        //
+        // Caps preserved:
         //   - distinct URIs per snapshot: `u16::MAX - 1 = 65534` (local ids)
         //   - per-URI bytes: 4 KiB (covers any realistic http URL)
         //   - total interned bytes ACROSS the persistent cache:
-        //     `OSC8_TOTAL_INTERN_BYTES_CAP` = 1 MiB. Without a global
-        //     byte cap a hostile TUI writing distinct 4 KiB URIs can
-        //     retain ~256 MiB of CStrings per live snapshot ×
-        //     outstanding refcount (rust-core-3 F1). Over the ceiling,
+        //     `OSC8_TOTAL_INTERN_BYTES_CAP` = 1 MiB. Over the ceiling,
         //     new URIs drop to no-link rather than evict — eviction
         //     would invalidate pointers held by still-live snapshots
         //     that `Arc::clone`d the existing CStr.
         //
-        // rust-core-3 F9: `links` starts empty and the index-0
-        // sentinel CString is pushed only when the first hyperlink
-        // cell is seen. The common case — ProMotion frame re-render
-        // with no OSC 8 on screen — pays zero heap allocations for
-        // the intern table (and, with the persistent cache, zero
-        // allocations for repeat-URI snapshots too). `bb_snap_link_url`
-        // short-circuits on `link_id == 0`, and a non-zero lookup
-        // against an empty `links` misses the bounds check and
-        // returns null — so the empty-Vec shape is safe.
-        let mut links: Vec<Arc<std::ffi::CStr>> = Vec::new();
-        // Per-snapshot URI → local id map. `String` keys let us look
-        // up by `&str` (via `Borrow<str>`) without cloning alacritty's
-        // Hyperlink-scoped &str out of its borrow. Only one
-        // `String::from` per unique URI per snapshot.
-        let mut local_uri_to_id: Option<std::collections::HashMap<String, u16>> = None;
-
+        // rust-core-3 F9: `links` stays empty until phase 2 sees that
+        // phase 1 actually collected URIs. The common case — ProMotion
+        // frame re-render with no OSC 8 on screen — pays zero heap
+        // allocations for the intern table.
         const OSC8_URI_MAX: usize = 4096;
         const OSC8_TOTAL_INTERN_BYTES_CAP: usize = 1024 * 1024;
+        // Phase 1 state: dedup'd URIs in insertion order, parallel
+        // dedup map keyed by `&str`. `local_uri_to_id` borrows from
+        // entries in `phase1_uris` (via `String::as_str`)? No — we
+        // store a fresh `String` clone in the map's key so it can
+        // outlive the alacritty Hyperlink borrow each iteration.
+        let mut phase1_uris: Vec<String> = Vec::new();
+        let mut local_uri_to_id: std::collections::HashMap<String, u16> =
+            std::collections::HashMap::new();
         for indexed in grid.display_iter() {
             let link_id: u16 = match indexed.cell.hyperlink() {
                 Some(h) => {
@@ -2313,58 +2330,19 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                     // we defensively treat an empty uri as "no link".
                     if uri.is_empty() || uri.len() > OSC8_URI_MAX {
                         0
+                    } else if let Some(&id) = local_uri_to_id.get(uri) {
+                        id
+                    } else if phase1_uris.len() + 1 >= u16::MAX as usize {
+                        // Out of per-snapshot ids — drop attribution
+                        // silently. 65 534 links per snapshot is
+                        // already well past any realistic TUI.
+                        0
                     } else {
-                        // Lazy init: first hyperlink of the snapshot
-                        // materializes `links` (with its sentinel) and
-                        // the local URI map.
-                        if links.is_empty() {
-                            let sentinel: Arc<std::ffi::CStr> = std::ffi::CString::default().into();
-                            links.push(sentinel);
-                            local_uri_to_id = Some(std::collections::HashMap::with_capacity(8));
-                        }
-                        let local_map = local_uri_to_id
-                            .as_mut()
-                            .expect("local_uri_to_id initialised above");
-                        if let Some(&id) = local_map.get(uri) {
-                            id
-                        } else if links.len() >= u16::MAX as usize {
-                            // Out of per-snapshot ids — drop
-                            // attribution silently. 65 534 links per
-                            // snapshot is already well past any
-                            // realistic TUI.
-                            0
-                        } else {
-                            // Persistent-cache hit? reuse the Arc (one
-                            // atomic increment, zero allocation). Miss
-                            // → intern subject to the global byte cap.
-                            let cstr_arc: Option<Arc<std::ffi::CStr>> =
-                                if let Some(existing) = uri_cache.get(uri) {
-                                    Some(Arc::clone(existing))
-                                } else if uri_cache_bytes.saturating_add(uri.len())
-                                    > OSC8_TOTAL_INTERN_BYTES_CAP
-                                {
-                                    None
-                                } else {
-                                    match std::ffi::CString::new(uri) {
-                                        Ok(cs) => {
-                                            let arc: Arc<std::ffi::CStr> = cs.into();
-                                            uri_cache.insert(uri.to_owned(), Arc::clone(&arc));
-                                            uri_cache_bytes += uri.len();
-                                            Some(arc)
-                                        }
-                                        Err(_) => None,
-                                    }
-                                };
-                            match cstr_arc {
-                                Some(arc) => {
-                                    let id = links.len() as u16;
-                                    links.push(arc);
-                                    local_map.insert(uri.to_owned(), id);
-                                    id
-                                }
-                                None => 0,
-                            }
-                        }
+                        let id = (phase1_uris.len() + 1) as u16; // 1-based; 0 = no link
+                        let owned = uri.to_owned();
+                        local_uri_to_id.insert(owned.clone(), id);
+                        phase1_uris.push(owned);
+                        id
                     }
                 }
                 None => 0,
@@ -2399,19 +2377,74 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let display_offset = grid.display_offset().min(u32::MAX as usize) as u32;
         let history_size = grid.history_size().min(u32::MAX as usize) as u32;
         // Drop the `grid`/`palette` borrows (and by extension the `&bb.term`
-        // borrow) before we touch `bb.uri_cstr_cache` mutably below. The
-        // `cursor_style()`/`mode()` reads through `bb.term` happen through a
-        // fresh immutable borrow, which is compatible with handing the
-        // cache back via `&mut bb`.
+        // borrow) before we touch `bb.uri_cstr_cache` mutably below.
         let _ = grid;
         let _ = palette;
         // `local_uri_to_id` lives and dies with this snapshot.
         drop(local_uri_to_id);
-        // Return the persistent intern cache to BBTerm. Entries survive
-        // across snapshots (rust-core-3 F1) so repeat URIs are a hash
-        // probe + Arc-clone next frame, not a full CString allocation.
-        bb.uri_cstr_cache = uri_cache;
-        bb.uri_cache_bytes = uri_cache_bytes;
+
+        // Phase 2: intern the URIs collected in phase 1 against the
+        // persistent cache. Entries survive across snapshots
+        // (rust-core-3 F1): the same URI appearing frame after frame is
+        // an `Arc::clone` (one atomic increment, zero allocation) on
+        // the second sighting. New URIs dropped silently once the
+        // global byte footprint crosses `OSC8_TOTAL_INTERN_BYTES_CAP`
+        // (1 MiB).
+        //
+        // `links` is empty when phase 1 collected zero URIs (the common
+        // case). When non-empty, `links[0]` is the "no link" sentinel
+        // so cell `link_id == 0` always means "no OSC 8 attribution"
+        // and subsequent URIs get 1-based final indices (matching the
+        // C ABI documented in `bb_snap_link_url`).
+        let mut links: Vec<Arc<std::ffi::CStr>> = Vec::new();
+        // `local_to_final[local_id]` = final id (or 0 if interning
+        // failed for this URI). Built in lockstep with `phase1_uris`,
+        // so `local_to_final[0]` is unused (local id 0 = no link).
+        let mut local_to_final: Vec<u16> = Vec::new();
+        if !phase1_uris.is_empty() {
+            let sentinel: Arc<std::ffi::CStr> = std::ffi::CString::default().into();
+            links.push(sentinel);
+            local_to_final.push(0); // local 0 reserved for "no link"
+            for uri in &phase1_uris {
+                let cstr_arc: Option<Arc<std::ffi::CStr>> = if let Some(existing) =
+                    bb.uri_cstr_cache.get(uri).cloned()
+                {
+                    Some(existing)
+                } else if bb.uri_cache_bytes.saturating_add(uri.len()) > OSC8_TOTAL_INTERN_BYTES_CAP
+                {
+                    None
+                } else {
+                    match std::ffi::CString::new(uri.as_str()) {
+                        Ok(cs) => {
+                            let arc: Arc<std::ffi::CStr> = cs.into();
+                            bb.uri_cstr_cache.insert(uri.clone(), Arc::clone(&arc));
+                            bb.uri_cache_bytes += uri.len();
+                            Some(arc)
+                        }
+                        Err(_) => None,
+                    }
+                };
+                match cstr_arc {
+                    Some(arc) => {
+                        let final_id = links.len() as u16;
+                        links.push(arc);
+                        local_to_final.push(final_id);
+                    }
+                    None => local_to_final.push(0),
+                }
+            }
+            // Translate every cell's local id to its final id. Cells
+            // with local id 0 stay 0 (no link). Cells whose URI failed
+            // to intern (byte-cap exceeded, NUL in URI) get 0 too —
+            // matching the previous shape's "drop attribution silently"
+            // semantics.
+            for cell in cells.iter_mut() {
+                let local = cell.link_id as usize;
+                if local != 0 && local < local_to_final.len() {
+                    cell.link_id = local_to_final[local];
+                }
+            }
+        }
         let term_mode = bb.term.mode();
         let mode = extract_mode_with_extras(bb);
         // DECTCEM (ESC [ ? 25 h/l) toggles SHOW_CURSOR. Previously we
@@ -2745,6 +2778,21 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         let bb = &mut *term;
         // H = cursor home, 2J = erase display, 3J = erase scrollback.
         bb.processor.advance(&mut bb.term, b"\x1b[H\x1b[2J\x1b[3J");
+        // Audit RC-02 + P2-02 — also reset our parallel-parser state and
+        // rate-limit windows. Without this, a mid-sequence parser
+        // continues into post-clear bytes (most dangerous: a mid-DCS
+        // XTGETTCAP that accumulates post-clear bytes into its reply).
+        // The comparable `processor.advance` above only resets alacritty's
+        // grid; our scanner is a separate vte::Parser tracked alongside.
+        bb.osc_parser = Parser::new();
+        bb.osc_possibly_pending = false;
+        bb.in_xtgettcap = false;
+        bb.xtgettcap_buf.clear();
+        // Rate-limit budgets are session state. A pre-clear OSC 11 flood
+        // shouldn't leave the post-clear session unable to answer
+        // legitimate color queries for the rest of the 1s window.
+        bb.color_query_reply_window_start = std::time::Instant::now();
+        bb.color_query_reply_window_count = 0;
     })
 }
 

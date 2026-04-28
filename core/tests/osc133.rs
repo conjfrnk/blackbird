@@ -153,3 +153,64 @@ fn osc_133_d_with_inline_semicolon_form() {
         bb_term_free(term);
     }
 }
+
+/// Audit RC-02: `bb_term_clear_all` must also reset the parallel OSC
+/// parser. Otherwise a partial pre-clear OSC sequence continues into
+/// post-clear bytes, dispatching a PromptMark sourced from text that was
+/// supposed to be a fresh shell prompt.
+#[test]
+fn clear_all_drops_partial_osc133_in_flight() {
+    unsafe {
+        let term = bb_term_new(20, 3, 100);
+        let cap = install_capture(term);
+        // Feed only the OSC introducer + 133 prefix. The osc_parser is
+        // mid-sequence; no event should fire yet.
+        let partial = b"\x1b]133";
+        bb_term_input(term, partial.as_ptr(), partial.len());
+        let pre = cap.lock().unwrap().events.len();
+        // Wipe.
+        bb_term_clear_all(term);
+        // Feed the bytes that, if the partial parse survived, would
+        // complete `OSC 133;A BEL` and fire a phantom PromptMark.
+        let post = b";A\x07hello";
+        bb_term_input(term, post.as_ptr(), post.len());
+        let events = cap.lock().unwrap().events.clone();
+        let marks = collect_marks(&events[pre..]);
+        assert!(
+            marks.is_empty(),
+            "post-clear bytes completed a pre-clear OSC sequence: {marks:?}"
+        );
+        bb_term_free(term);
+    }
+}
+
+/// Audit RC-03: D marks were exempt from `prompt_mark_rate.allow()` on
+/// the basis of a "1:1 with C" invariant the code never enforced. A
+/// hostile remote could spam OSC 133;D;0 to rotate legitimate D events
+/// out of Swift's bounded prompt ring. After the fix all four kinds
+/// (A/B/C/D) are subject to the same per-second cap.
+#[test]
+fn d_marks_are_rate_limited_like_a_b_c() {
+    unsafe {
+        let term = bb_term_new(20, 3, 100);
+        let cap = install_capture(term);
+        // PROMPT_MARK_PER_SECOND = 16. Burst 50 D dispatches in one
+        // input; the rate limiter must drop the excess.
+        let mut burst = Vec::with_capacity(50 * 16);
+        for _ in 0..50 {
+            burst.extend_from_slice(b"\x1b]133;D;0\x07");
+        }
+        bb_term_input(term, burst.as_ptr(), burst.len());
+        let events = cap.lock().unwrap().events.clone();
+        let marks = collect_marks(&events);
+        assert!(
+            marks.len() <= 16,
+            "D-mark rate limit not enforced: {} marks fired",
+            marks.len()
+        );
+        // And we should still see at least one — the limiter is a cap,
+        // not a kill-switch.
+        assert!(!marks.is_empty(), "no D marks fired at all");
+        bb_term_free(term);
+    }
+}
