@@ -165,7 +165,21 @@ public final class TerminalSession: ObservableObject {
     /// Optional so tests can construct a title-only headless session without
     /// spawning a child process. Production paths always have a PTY.
     private let pty: PTY?
-    private let coreQueue = DispatchQueue(label: "blackbird.core")
+    /// Marker installed on `coreQueue` so any sync-entry helper can detect
+    /// it's already running on this session's coreQueue and avoid a
+    /// `coreQueue.sync` self-deadlock (PS-01 / NEW-01).
+    private let coreQueueToken: ObjectIdentifier
+    private let coreQueue: DispatchQueue
+    /// Process-wide key used by `setSpecific`. Different sessions have
+    /// distinct token VALUES on the same key, so `getSpecific(key:)` on a
+    /// thread that's servicing session A's coreQueue returns A's token but
+    /// not B's.
+    private static let coreQueueKey = DispatchSpecificKey<ObjectIdentifier>()
+    /// True when the calling thread is currently servicing THIS session's
+    /// `coreQueue`. Other sessions' coreQueues return false here.
+    private var isOnCoreQueue: Bool {
+        DispatchQueue.getSpecific(key: Self.coreQueueKey) == coreQueueToken
+    }
     private var preferencesSubscription: AnyCancellable?
 
     // MARK: - Main-publish coalescer (audit F1)
@@ -239,6 +253,11 @@ public final class TerminalSession: ObservableObject {
     private init(bbterm: BBTerm, pty: PTY) {
         self.bbterm = bbterm
         self.pty = pty
+        let q = DispatchQueue(label: "blackbird.core")
+        let token = ObjectIdentifier(bbterm)
+        q.setSpecific(key: Self.coreQueueKey, value: token)
+        self.coreQueue = q
+        self.coreQueueToken = token
         wire()
     }
 
@@ -264,6 +283,11 @@ public final class TerminalSession: ObservableObject {
     private init(headlessBBTerm bb: BBTerm) {
         self.bbterm = bb
         self.pty = nil
+        let q = DispatchQueue(label: "blackbird.core")
+        let token = ObjectIdentifier(bb)
+        q.setSpecific(key: Self.coreQueueKey, value: token)
+        self.coreQueue = q
+        self.coreQueueToken = token
         // `wire()` is safe in headless mode: every PTY hookup uses optional
         // chaining, so with `pty == nil` only the bbterm.onEvent handler is
         // installed. That's exactly what the OSC 7 / cwd tests need — feed
@@ -576,6 +600,12 @@ public final class TerminalSession: ObservableObject {
     }
 
     public func scroll(delta: Int32) {
+        // NEW-01: tripwire if a future caller invokes us from within
+        // coreQueue. Today no caller sits on coreQueue when reaching
+        // these methods; if that ever changes the precondition fires
+        // (visible failure) instead of the `coreQueue.sync` below
+        // deadlocking the queue silently.
+        dispatchPrecondition(condition: .notOnQueue(coreQueue))
         var snap: BBSnapshot?
         coreQueue.sync {
             bbterm.scroll(delta: delta)
@@ -588,6 +618,7 @@ public final class TerminalSession: ObservableObject {
     /// (keystrokes, paste) so the user is never left "orphaned" in scrollback
     /// while typing. No-op if already pinned.
     public func scrollToBottom() {
+        dispatchPrecondition(condition: .notOnQueue(coreQueue))
         var snap: BBSnapshot?
         coreQueue.sync {
             bbterm.scrollToBottom()
@@ -600,6 +631,7 @@ public final class TerminalSession: ObservableObject {
     /// cursor / title. Publishes a fresh snapshot so the renderer shows the
     /// empty grid on the next frame.
     public func clearAll() {
+        dispatchPrecondition(condition: .notOnQueue(coreQueue))
         var s: BBSnapshot?
         coreQueue.sync {
             bbterm.clearAll()
@@ -712,10 +744,20 @@ public final class TerminalSession: ObservableObject {
         // coreQueue. BBTerm.deinit otherwise runs whenever ARC drops
         // the last strong ref — possibly off coreQueue — racing the
         // single-thread-per-BBTerm contract. Calling terminate() here
-        // (idempotent) under coreQueue.sync guarantees the FFI free
-        // happens on the same queue that drives `bb_term_input`.
-        coreQueue.sync {
+        // (idempotent) on coreQueue guarantees the FFI free happens on
+        // the same queue that drives `bb_term_input`.
+        //
+        // PS-01: re-entrancy guard. If `deinit` fires on coreQueue
+        // (last strong ref dropped from inside an async block), a
+        // bare `coreQueue.sync` would self-deadlock. When already on
+        // coreQueue we ARE the serial owner, so a direct call is
+        // safe and gives identical thread-affinity guarantees.
+        if isOnCoreQueue {
             self.bbterm.terminate()
+        } else {
+            coreQueue.sync {
+                self.bbterm.terminate()
+            }
         }
     }
 
@@ -754,10 +796,19 @@ public final class TerminalSession: ObservableObject {
             }
 
         // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
+        // M-4 / PS-01: BOTH closures use [weak self]. The outer captures
+        // weakly so a closing window can drop the session promptly; the
+        // INNER also captures weakly so an in-flight `feed(data)` block
+        // is never the last strong-ref-holder. If it were, completing
+        // the block could drop refcount to zero and run `deinit` ON
+        // coreQueue's thread; deinit calls `terminate()` which performs
+        // `coreQueue.sync` — the classic same-queue-sync deadlock. With
+        // both weak captures the chain is broken: when self is gone, the
+        // queued block becomes a no-op.
         pty?.onBytes = { [weak self] data in
             guard let self else { return }
-            self.coreQueue.async {
-                self.feed(data)
+            self.coreQueue.async { [weak self] in
+                self?.feed(data)
             }
         }
 

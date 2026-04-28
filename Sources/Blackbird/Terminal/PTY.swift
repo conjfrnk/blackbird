@@ -956,17 +956,41 @@ public final class PTY {
             // means ESRCH (already exited) or EPERM (impossible here
             // since we're the parent); either way, don't escalate.
             guard kill(pid, 0) == 0 else { return }
-            // PID-reuse guard (audit M9): macOS may have recycled the
-            // pid for an unrelated process if our original child
-            // exited inside the 200ms grace window AND another
-            // process spawned and got the same pid. Compare the
-            // current process's BSD start time against the value we
-            // captured at spawn — if they differ, the kernel has
-            // handed this pid to a different process and we MUST NOT
-            // SIGKILL it.
-            if let original = originalStartTime,
-               let current = Self.bsdProcessStartTime(pid: pid),
-               current != original {
+            // PID-reuse guard (audit M9 + PS-02): macOS may have
+            // recycled the pid for an unrelated process if our
+            // original child exited inside the 200ms grace window AND
+            // another process spawned and got the same pid. Compare
+            // the current process's BSD start time against the value
+            // we captured at spawn — if they differ, OR if we cannot
+            // read the start time at all, the kernel has handed this
+            // pid to a different process (or is in the middle of
+            // doing so, with proc_pidinfo racing the spawn) and we
+            // MUST NOT SIGKILL it. The earlier shape (`if let original
+            // = …, let current = …, current != original`) used
+            // compound `if let` binding: if `current` was nil the
+            // entire condition was false and execution fell through
+            // to the unguarded `kill(pid, SIGKILL)` against the
+            // recycled stranger. The guards below treat "can't
+            // verify" as "skip", which is the safe direction.
+            guard let original = originalStartTime else {
+                // Process spawned before M9's start-time capture
+                // landed (impossible after M9 shipped, but kept for
+                // belt-and-braces). Pre-M9 behaviour was to escalate
+                // unconditionally — preserve it for that historical
+                // window only.
+                _ = kill(pid, SIGKILL)
+                Self.logger.log(
+                    "PTY.terminate escalated to SIGKILL pid=\(pid, privacy: .public) (no start-time captured)"
+                )
+                return
+            }
+            guard let current = Self.bsdProcessStartTime(pid: pid) else {
+                Self.logger.log(
+                    "PTY.terminate skipped SIGKILL: pid=\(pid, privacy: .public) start-time unreadable, cannot verify identity"
+                )
+                return
+            }
+            guard current == original else {
                 Self.logger.log(
                     "PTY.terminate skipped SIGKILL: pid=\(pid, privacy: .public) reused by another process"
                 )

@@ -706,8 +706,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // in every group across the app, and the originating window
         // refreshed twice.
         if let hostWindow = window {
-            titleObserver = hostWindow.observe(\.title, options: [.new]) { [weak self] _, _ in
-                DispatchQueue.main.async {
+            // RW-01 / L-4: capture `hostWindow` weakly inside the
+            // dispatched closure. Otherwise an already-queued main.async
+            // block holds a strong ref to a window that's mid-close,
+            // posting `.blackbirdTabTitleChanged` against it after
+            // `teardownTitleObservers()` invalidated the KVO. Recipients
+            // safely discard via their nil-tabGroup guards, but the
+            // strong hold-open on a closing NSWindow is a hygiene
+            // problem and the spurious post wakes every peer's
+            // refreshTabBar pointlessly.
+            titleObserver = hostWindow.observe(\.title, options: [.new]) { [weak self, weak hostWindow] _, _ in
+                DispatchQueue.main.async { [weak hostWindow] in
+                    guard let hostWindow else { return }
                     self?.refreshTabBar()
                     NotificationCenter.default.post(
                         name: .blackbirdTabTitleChanged,
@@ -768,6 +778,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         if let tok = titleBroadcastObserver {
             NotificationCenter.default.removeObserver(tok)
         }
+        // L-7 / NEW-02: idempotently terminate the session. The
+        // primary teardown path is `windowWillClose →
+        // terminateSessions()`, which runs on main BEFORE the strong
+        // ref drops. But abnormal deallocation paths (alloc/release
+        // without ever showing the window, future refactors that
+        // bypass `performClose`) would otherwise leave `session`
+        // alive, hitting the M-4 deinit-on-coreQueue scenario as the
+        // last strong-ref-holder. `terminate()` is idempotent against
+        // its own `isTerminated` flag — calling here when
+        // `terminateSessions()` already ran is a no-op.
+        session?.terminate()
     }
 
     func refreshTabBar() {
