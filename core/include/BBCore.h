@@ -272,14 +272,31 @@ struct BBSnap {
   uint16_t cursor_col;
   uint16_t cursor_row;
   uint8_t cursor_visible;
-  uint8_t _pad;
+  /**
+   * Pads `display_offset` (u32) to a 4-byte boundary. Without this
+   * the field would land at offset 9 and Rust's repr(C) would
+   * inject 3 bytes of implicit padding that cbindgen wouldn't
+   * reflect in the header — Swift would then read a mis-offset
+   * field. Explicit padding keeps the C and Rust layouts in lock-
+   * step. (Pre-M5 this was 1 byte aligning the previous u16.)
+   */
+  uint8_t _pad[3];
   /**
    * Number of lines the viewport is scrolled above the live grid. 0 means
    * we're pinned to the bottom (live content). When > 0 the renderer must
    * offset the cursor by this amount or hide it if the live cursor row is
    * no longer visible.
+   *
+   * Width: `u32` — scrollback cap is 200 000 lines, well past
+   * `u16::MAX` (65 535). The previous u16 saturated silently, so a
+   * user scrolled past line 65 535 saw the offset frozen at 65 535
+   * while alacritty's real offset kept growing. The renderer's
+   * `FrameKey.displayOffset` was widened to UInt32 in b3edd7e to
+   * defend against narrow-key wraparound, but the data was already
+   * flat at the FFI boundary — that fix is only complete now that
+   * the source field matches. Audit M5.
    */
-  uint16_t display_offset;
+  uint32_t display_offset;
   uint32_t mode;
   uintptr_t cells_len;
   const struct BBCell *cells;

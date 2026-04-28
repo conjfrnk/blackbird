@@ -36,7 +36,7 @@ unsafe fn new_seeded_term(
     term
 }
 
-fn display_offset(term: *mut bc::BBTerm) -> u16 {
+fn display_offset(term: *mut bc::BBTerm) -> u32 {
     unsafe {
         let snap = bc::bb_term_take_snapshot(term);
         let off = (*snap).display_offset;
@@ -162,5 +162,48 @@ fn scroll_with_null_term_is_safe() {
         bc::bb_term_scroll(std::ptr::null_mut(), 0);
         bc::bb_term_scroll(std::ptr::null_mut(), i32::MAX);
         bc::bb_term_scroll_to_bottom(std::ptr::null_mut());
+    }
+}
+
+// ─── Audit M5: display_offset must not saturate at u16::MAX ─────────────
+
+#[test]
+fn display_offset_survives_above_u16_max() {
+    // Pre-fix: BBSnap.display_offset was u16, capped at 65 535 even
+    // though scrollback caps at 200 000. Once the user scrolled past
+    // line 65 535 the offset froze and FrameKey/CacheKey couldn't
+    // distinguish two distinct scroll positions, corrupting hover /
+    // find / cursor uniforms tied to the cache key. Pin that scrolling
+    // to >65 535 reports the actual offset, not a saturated u16.
+    //
+    // Memory budget: 80×24 grid + 100 000-line scrollback. Each
+    // BBCell is 16 bytes; (24 + 100 000) × 80 × 16 ≈ 128 MiB peak —
+    // significant but bounded, runs in <2 s on M-series.
+    unsafe {
+        let term = bc::bb_term_new(80, 24, 100_000);
+        assert!(!term.is_null());
+
+        // Seed 80 000 distinct lines so scrollback holds well above
+        // 65 535 lines.
+        for i in 0..80_000 {
+            let line = format!("L{:06}\n", i);
+            bc::bb_term_input(term, line.as_ptr(), line.len());
+        }
+
+        // Scroll up far enough to exceed the old u16 ceiling.
+        // Positive delta = "show older content" per the FFI doc.
+        bc::bb_term_scroll(term, 70_000);
+        let off = display_offset(term);
+        assert!(
+            off > u16::MAX as u32,
+            "scroll past line 65 535 must report a u32 offset; \
+             got {off} (which is exactly u16::MAX → saturation regression)"
+        );
+        assert!(
+            off <= 80_000,
+            "offset must not exceed history available; got {off}"
+        );
+
+        bc::bb_term_free(term);
     }
 }

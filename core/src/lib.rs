@@ -1652,12 +1652,27 @@ pub struct BBSnap {
     pub cursor_col: u16,
     pub cursor_row: u16,
     pub cursor_visible: u8,
-    pub _pad: u8, // align display_offset to 2-byte boundary
+    /// Pads `display_offset` (u32) to a 4-byte boundary. Without this
+    /// the field would land at offset 9 and Rust's repr(C) would
+    /// inject 3 bytes of implicit padding that cbindgen wouldn't
+    /// reflect in the header — Swift would then read a mis-offset
+    /// field. Explicit padding keeps the C and Rust layouts in lock-
+    /// step. (Pre-M5 this was 1 byte aligning the previous u16.)
+    pub _pad: [u8; 3],
     /// Number of lines the viewport is scrolled above the live grid. 0 means
     /// we're pinned to the bottom (live content). When > 0 the renderer must
     /// offset the cursor by this amount or hide it if the live cursor row is
     /// no longer visible.
-    pub display_offset: u16,
+    ///
+    /// Width: `u32` — scrollback cap is 200 000 lines, well past
+    /// `u16::MAX` (65 535). The previous u16 saturated silently, so a
+    /// user scrolled past line 65 535 saw the offset frozen at 65 535
+    /// while alacritty's real offset kept growing. The renderer's
+    /// `FrameKey.displayOffset` was widened to UInt32 in b3edd7e to
+    /// defend against narrow-key wraparound, but the data was already
+    /// flat at the FFI boundary — that fix is only complete now that
+    /// the source field matches. Audit M5.
+    pub display_offset: u32,
     pub mode: u32, // terminal mode bitflags — see bb_mode constants
     pub cells_len: usize,
     pub cells: *const BBCell,
@@ -1722,7 +1737,7 @@ impl BBSnapOwned {
         cols: u16,
         rows: u16,
         cursor: (u16, u16, bool),
-        display_offset: u16,
+        display_offset: u32,
         history_size: u32,
         mode: u32,
         cursor_shape: u8,
@@ -1738,7 +1753,7 @@ impl BBSnapOwned {
                 cursor_col: cursor.0,
                 cursor_row: cursor.1,
                 cursor_visible: cursor.2 as u8,
-                _pad: 0,
+                _pad: [0; 3],
                 display_offset,
                 mode,
                 cells_len: cells.len(),
@@ -2284,7 +2299,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // `cells` above are from scrollback; the live cursor at `cursor_row`
         // is actually `cursor_row + display_offset` from the top of the
         // visible viewport — and may be below it entirely.
-        let display_offset = grid.display_offset().min(u16::MAX as usize) as u16;
+        let display_offset = grid.display_offset().min(u32::MAX as usize) as u32;
         let history_size = grid.history_size().min(u32::MAX as usize) as u32;
         // Drop the `grid`/`palette` borrows (and by extension the `&bb.term`
         // borrow) before we touch `bb.uri_cstr_cache` mutably below. The
@@ -3274,16 +3289,21 @@ mod tests {
 
     #[test]
     fn snap_layout_matches_expected() {
-        // BBSnap is the C-visible struct (32 bytes). BBSnapOwned wraps it at offset 0.
+        // BBSnap is the C-visible struct. Layout was bumped on
+        // 2026-04-28 (audit M5) to widen `display_offset` u16→u32 so
+        // it survives scrollback past line 65 535. cbindgen
+        // regenerates BBCore.h to match; the test pins the new
+        // offsets so a future field insert that shifted them again
+        // would catch a stale Swift binding.
         assert_eq!(
             std::mem::offset_of!(BBSnap, cells_len),
-            16,
-            "cells_len must be at offset 16 for a clean C ABI"
+            24,
+            "cells_len at offset 24 (post-M5 layout)"
         );
         assert_eq!(
             std::mem::offset_of!(BBSnap, cells),
-            24,
-            "cells must be at offset 24 for a clean C ABI"
+            32,
+            "cells at offset 32 (post-M5 layout)"
         );
         // Verify BBSnapOwned layout: snap is at offset 0 so pointer casts are sound.
         assert_eq!(
@@ -3312,29 +3332,36 @@ mod tests {
             16,
             "underline_color must stay at offset 16 — packed directly after link_id"
         );
-        // Also pin the tail of BBSnap: mode / history_size / cursor_shape
-        // sit past the pointer fields, so a future field insertion BEFORE
-        // them would silently shift their offsets in the Swift bridge.
-        // Audit rust-core-3 F15 + rust-build F7.
+        // Also pin the tail of BBSnap: display_offset / mode /
+        // history_size / cursor_shape sit past the pointer fields, so
+        // a future field insertion BEFORE them would silently shift
+        // their offsets in the Swift bridge. Audit rust-core-3 F15 +
+        // rust-build F7. (Offsets bumped 2026-04-28 for audit M5
+        // u16→u32 widen of display_offset.)
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, display_offset),
+            12,
+            "display_offset at offset 12 (post-M5 u32 widen)"
+        );
         assert_eq!(
             std::mem::offset_of!(BBSnap, mode),
-            12,
-            "mode offset is the load-bearing anchor for the u32 tail"
+            16,
+            "mode follows display_offset (post-M5 layout)"
         );
         assert_eq!(
             std::mem::offset_of!(BBSnap, history_size),
-            32,
-            "history_size follows cells at offset 32"
+            40,
+            "history_size follows cells at offset 40 (post-M5 layout)"
         );
         assert_eq!(
             std::mem::offset_of!(BBSnap, cursor_shape),
-            36,
-            "cursor_shape follows history_size"
+            44,
+            "cursor_shape follows history_size (post-M5 layout)"
         );
         assert_eq!(
             std::mem::size_of::<BBSnap>(),
-            40,
-            "BBSnap total size (including tail padding) must match Swift's stride"
+            48,
+            "BBSnap total size 48 bytes (post-M5 layout, includes tail padding)"
         );
     }
 
