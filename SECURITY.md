@@ -45,10 +45,23 @@ Every paste runs through `normalizePasteLineEndings` →
 
 ### Output sanitization on copy / OSC 52
 
-`copy(_:)` and OSC 52 clipboard-write both run the scrub chain before
-`NSPasteboard.setString`. Prevents Blackbird from transitively
-poisoning other apps' pastes with bidi / control bytes received from
-a hostile remote. Same code path as inbound paste — symmetric.
+`copy(_:)` runs the scrub chain (control-byte sanitisation +
+bidi-override stripping) before `NSPasteboard.setString`. Prevents
+Blackbird from transitively poisoning other apps' pastes with bidi /
+control bytes received from a hostile remote. Same code path as
+inbound paste — symmetric.
+
+OSC 52 (remote shell writes to your clipboard) is more nuanced.
+**The Rust core pins `osc52: Osc52::Disabled`** at `bb_term_new`, so
+`Event::ClipboardStore` is never emitted from alacritty's parser.
+The Swift `.osc52Clipboard` handler in `TerminalSession`, including
+its size cap, scrub chain, and `osc52Enabled` preference toggle, is
+therefore unreachable defense-in-depth: if a future change ever
+flips the Rust gate to `OnlyCopy` or `CopyPaste`, the Swift gate
+already exists to scrub-and-cap before `NSPasteboard.setString`.
+The `osc52Enabled` user preference is wired and persisted but has
+no observable effect today (audit SI-02). When triaging an "OSC 52
+isn't writing to my clipboard" report, the answer is: by design.
 
 ### URL scheme allowlist
 
@@ -102,7 +115,9 @@ tests in `core/tests/terminal_replies.rs`.
   default Blackbird value (10 000). Paired with the 1000-col grid
   ceiling, bounds per-terminal worst-case allocation at ~1.5 GB.
 - OSC 52 payload capped at 1 MiB (Swift,
-  `TerminalSession.osc52MaxBytes`).
+  `TerminalSession.osc52MaxBytes`) — currently unreachable; OSC 52 is
+  pinned `Disabled` in the Rust core. See "Output sanitization on
+  copy / OSC 52" above for the layered defence.
 - Copy-to-clipboard capped at 16 MiB.
 - Find results capped at 10 000 matches.
 - CGFloat coordinates `isFinite`-checked before any `Int(Double)`
