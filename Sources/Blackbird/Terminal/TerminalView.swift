@@ -421,6 +421,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                                                 category: "hover")
     #endif
 
+    /// Production-visible channel for security-relevant decisions —
+    /// blocked OSC 8 phishing-shape clicks, paste-scrub drops, and
+    /// similar. Stays outside `#if DEBUG` so a release user reporting
+    /// "the link won't open" can `log stream --predicate 'category ==
+    /// "security"'` and find a breadcrumb. Privacy: log the decision
+    /// shape with `.public`, never log keystrokes / paste contents.
+    static let securityLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                       category: "security")
+
     public init(frame frameRect: NSRect, device: MTLDevice) {
         // TerminalView is the authoritative owner of CellMetrics; the renderer
         // shares this same instance so layout and rendering never diverge.
@@ -2000,15 +2009,56 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             guard let url, OSC8URLPolicy.isAllowed(url) else { return nil }
             return url
         }
+        // OSC 8 anchor-divergence gate. The href and the visible text
+        // are decoupled in OSC 8 — a hostile remote can render
+        // `https://apple.com/login` while the click target is
+        // `https://evil.tld/login`. The hover tooltip shows the href
+        // (after the audit C1 scrub), but ⌘-click is single-action
+        // and never gives the dwell tooltip a chance to surface. Block
+        // the click when the rendered anchor claims a different host
+        // than the href; the user can ⌥⌘-click after dwelling on the
+        // tooltip to get the real destination if they really meant to
+        // open the divergent target. Regex-fallback URLs have no
+        // separate anchor (the URL IS the visible text), so the gate
+        // applies only to the OSC 8 path. Audit high-1.
+        let acceptOSC8: (HyperlinkResolver, URL) -> URL? = { resolver, url in
+            guard let allowedURL = allow(url) else { return nil }
+            if let anchor = resolver.osc8AnchorText(row: screenRow, col: col),
+               OSC8URLPolicy.anchorDivergesFromHost(
+                   anchorText: anchor, url: allowedURL
+               ) {
+                Self.securityLogger.warning(
+                    """
+                    OSC 8 click blocked: anchor / href host mismatch \
+                    (potential phishing). \
+                    href=\(allowedURL.absoluteString, privacy: .public)
+                    """
+                )
+                return nil
+            }
+            return allowedURL
+        }
+        // OSC 8 attribution wins when present: either we accept it
+        // (allowed scheme + non-divergent anchor) or we block fully —
+        // we do NOT fall through to regex on a blocked OSC 8. Falling
+        // through would let a hostile remote whose href is divergent
+        // smuggle the user to the visible anchor URL via the regex
+        // fallback, which is a different shape of the same trust
+        // violation. Regex is consulted only when the cell carries no
+        // OSC 8 attribution at all.
         #if DEBUG
         if let override = hyperlinkResolverOverride {
-            if let u = allow(override.osc8URL(row: screenRow, col: col)) { return u }
+            if let raw = override.osc8URL(row: screenRow, col: col) {
+                return acceptOSC8(override, raw)
+            }
             return allow(override.regexURL(row: screenRow, col: col))
         }
         #endif
         guard let snap = currentSnapshot else { return nil }
         let resolver = SnapshotHyperlinkResolver(snapshot: snap)
-        if let u = allow(resolver.osc8URL(row: screenRow, col: col)) { return u }
+        if let raw = resolver.osc8URL(row: screenRow, col: col) {
+            return acceptOSC8(resolver, raw)
+        }
         return allow(resolver.regexURL(row: screenRow, col: col))
     }
 
@@ -2218,6 +2268,24 @@ final class FakeHyperlinkSnapshot: HyperlinkResolver {
     func osc8URL(row: Int, col: Int) -> URL? {
         for span in spans where span.row == row && span.cols.contains(col) {
             return span.url
+        }
+        return nil
+    }
+
+    /// Synthesise the anchor text for the click-divergence test: walk
+    /// `rows[row]` over the span's column range and slice out the
+    /// substring. Tests that don't construct spans with rendered
+    /// anchor text (most of them) pass `rows: []` and get nil here,
+    /// which falls through to the protocol default.
+    func osc8AnchorText(row: Int, col: Int) -> String? {
+        for span in spans where span.row == row && span.cols.contains(col) {
+            guard row >= 0, row < rows.count else { return nil }
+            let line = rows[row]
+            let chars = Array(line)
+            let lo = max(0, span.cols.lowerBound)
+            let hi = min(chars.count, span.cols.upperBound)
+            guard lo < hi else { return nil }
+            return String(chars[lo..<hi])
         }
         return nil
     }

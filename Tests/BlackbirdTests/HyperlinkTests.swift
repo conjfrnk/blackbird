@@ -292,6 +292,89 @@ final class HyperlinkTests: XCTestCase {
         )
     }
 
+    // MARK: - High-1: anchor-divergence wired into the click path
+
+    /// Audit high-1. The detector existed but `resolveClickURL` never
+    /// invoked it — pure dead code. Pin the wiring so a future
+    /// "simplify resolveClickURL" refactor can't unwire it without a
+    /// red test. The fixture row contains the visible anchor (which
+    /// claims `https://apple.com/login`); the span's URL is the
+    /// hostile target. A divergent click must block.
+
+    func testCmdClick_blocksDivergentAnchor() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let opener = RecordingURLOpener()
+        view.urlOpenerForTests = opener
+        let visibleAnchor = "https://apple.com/login"
+        view.installHyperlinkSnapshotForTests(
+            rows: [visibleAnchor + String(repeating: " ", count: 80 - visibleAnchor.count)],
+            linkAt: [(row: 0, cols: 0..<visibleAnchor.count, url: "https://evil.tld/login")]
+        )
+        view.performCmdClickForTests(row: 0, col: 5)
+        XCTAssertEqual(
+            opener.opened, [],
+            "divergent anchor (apple.com visible, evil.tld href) must block the click"
+        )
+    }
+
+    func testCmdClick_allowsNonDivergentAnchor() throws {
+        // Same anchor and href host — legitimate OSC 8 link. Must open.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let opener = RecordingURLOpener()
+        view.urlOpenerForTests = opener
+        let visibleAnchor = "https://example.com/login"
+        view.installHyperlinkSnapshotForTests(
+            rows: [visibleAnchor + String(repeating: " ", count: 80 - visibleAnchor.count)],
+            linkAt: [(row: 0, cols: 0..<visibleAnchor.count, url: "https://example.com/login")]
+        )
+        view.performCmdClickForTests(row: 0, col: 5)
+        XCTAssertEqual(
+            opener.opened.map(\.absoluteString),
+            ["https://example.com/login"],
+            "matching anchor and href host must open normally"
+        )
+    }
+
+    func testCmdClick_allowsPlainTextAnchor() throws {
+        // Anchor "click here" is plain text — no URL-shaped token, so
+        // anchorDivergesFromHost returns false and the click goes
+        // through. This prevents the gate from over-blocking the
+        // common case where the visible link text isn't a URL.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let opener = RecordingURLOpener()
+        view.urlOpenerForTests = opener
+        let anchor = "click here to log in"
+        view.installHyperlinkSnapshotForTests(
+            rows: [anchor + String(repeating: " ", count: 80 - anchor.count)],
+            linkAt: [(row: 0, cols: 0..<anchor.count, url: "https://example.com/login")]
+        )
+        view.performCmdClickForTests(row: 0, col: 5)
+        XCTAssertEqual(
+            opener.opened.map(\.absoluteString),
+            ["https://example.com/login"],
+            "plain-text anchor with no URL token must not trigger divergence block"
+        )
+    }
+
+    func testCmdClick_allowsSubdomainAnchorMatch() throws {
+        // Anchor mentions www.example.com; href is example.com.
+        // Same-origin, not phishing — must open.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let opener = RecordingURLOpener()
+        view.urlOpenerForTests = opener
+        let anchor = "https://www.example.com/login"
+        view.installHyperlinkSnapshotForTests(
+            rows: [anchor + String(repeating: " ", count: 80 - anchor.count)],
+            linkAt: [(row: 0, cols: 0..<anchor.count, url: "https://example.com/login")]
+        )
+        view.performCmdClickForTests(row: 0, col: 5)
+        XCTAssertEqual(
+            opener.opened.map(\.absoluteString),
+            ["https://example.com/login"],
+            "subdomain anchor for parent-host href must not block"
+        )
+    }
+
     // MARK: - F7: resolver cache reuse
 
     /// Audit cwd-hyperlink F7. The cache is reusable when the caller

@@ -196,6 +196,22 @@ protocol HyperlinkResolver: AnyObject {
     /// Regex-detected URL for the cell at (row, col), or nil. Only consulted
     /// when `osc8URL` returned nil — OSC 8 wins when both are available.
     func regexURL(row: Int, col: Int) -> URL?
+
+    /// Anchor text rendered under an OSC 8 link at (row, col). Used by
+    /// the click-time divergence detector to flag phishing-shaped links
+    /// where the visible text claims one host but the href points
+    /// elsewhere. Returns nil when the cell has no OSC 8 attribution
+    /// or the anchor can't be reconstructed. Audit high-1.
+    func osc8AnchorText(row: Int, col: Int) -> String?
+}
+
+extension HyperlinkResolver {
+    /// Default returns nil. Conformers that don't model anchor text
+    /// (test fakes that only inject URLs) opt out of divergence
+    /// checking by accepting this default — the click path treats
+    /// "no anchor" as "no claim of identity, can't diverge" which is
+    /// the correct semantics for a plain text-mode anchor.
+    func osc8AnchorText(row: Int, col: Int) -> String? { nil }
 }
 
 /// Production resolver backed by a real `BBSnapshot`. OSC 8 goes through
