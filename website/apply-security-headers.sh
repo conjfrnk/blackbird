@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One-shot CloudFront Response Headers Policy setup for
-# blackbird-terminal.com. Run this once, after which every response from
-# the distribution carries HSTS, CSP, and friends — without per-object
-# overhead or S3 metadata mutation.
+# CloudFront Response Headers Policy for blackbird-terminal.com.
+# Idempotent — safe to re-run when the desired CSP/HSTS/etc. changes.
 #
-# Audit: website F2.
+# Audit: website F2 (HSTS/CSP) + audit follow-up (drop 'unsafe-inline'
+# after extracting CSS to /styles.css).
 #
 # Prereqs:
 #   - AWS CLI with profile "personal" (or set BB_AWS_PROFILE)
+#   - jq
 #   - Distribution E1YJB9AJI2QH8V exists
 #
 # What this does:
-#   1. Creates a Response Headers Policy named "blackbird-security-headers"
-#      if it doesn't already exist.
-#   2. Attaches it to the default cache behaviour of the distribution.
-#
-# Safe to re-run: the script checks existence of the policy by name
-# before creating, and only touches the distribution config if its
-# attachment differs from what we expect.
+#   1. Builds the desired Response Headers Policy ("blackbird-security-headers").
+#   2. Creates the policy if it doesn't exist; updates it in place if its
+#      live config differs from the desired config.
+#   3. Attaches the policy to the default cache behavior of the dist if
+#      not already attached.
 
 PROFILE="${BB_AWS_PROFILE:-personal}"
 DISTRIBUTION_ID="E1YJB9AJI2QH8V"
@@ -27,14 +25,9 @@ POLICY_NAME="blackbird-security-headers"
 
 aws=(aws --profile "$PROFILE")
 
-echo "==> Looking up existing response-headers policy: $POLICY_NAME"
-POLICY_ID="$("${aws[@]}" cloudfront list-response-headers-policies \
-    --query "ResponseHeadersPolicyList.Items[?ResponseHeadersPolicy.ResponseHeadersPolicyConfig.Name=='$POLICY_NAME'].ResponseHeadersPolicy.Id | [0]" \
-    --output text 2>/dev/null || true)"
-
-if [[ -z "$POLICY_ID" || "$POLICY_ID" == "None" ]]; then
-    echo "==> Creating new policy"
-    POLICY_CONFIG="$(cat <<'JSON'
+# Desired policy config. Note: style-src no longer includes 'unsafe-inline'
+# now that all CSS lives in /styles.css served from same origin.
+DESIRED_POLICY_CONFIG="$(cat <<'JSON'
 {
   "Name": "blackbird-security-headers",
   "Comment": "HSTS + CSP + no-sniff + Referrer-Policy + Permissions-Policy for blackbird-terminal.com. website F2.",
@@ -54,7 +47,7 @@ if [[ -z "$POLICY_ID" || "$POLICY_ID" == "None" ]]; then
     },
     "ContentSecurityPolicy": {
       "Override": true,
-      "ContentSecurityPolicy": "default-src 'none'; img-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      "ContentSecurityPolicy": "default-src 'none'; img-src 'self'; style-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     },
     "FrameOptions": {
       "Override": true,
@@ -74,15 +67,38 @@ if [[ -z "$POLICY_ID" || "$POLICY_ID" == "None" ]]; then
 }
 JSON
 )"
-    POLICY_ID="$(echo "$POLICY_CONFIG" | "${aws[@]}" cloudfront create-response-headers-policy \
+
+echo "==> Looking up policy by name: $POLICY_NAME"
+POLICY_ID="$("${aws[@]}" cloudfront list-response-headers-policies \
+    --query "ResponseHeadersPolicyList.Items[?ResponseHeadersPolicy.ResponseHeadersPolicyConfig.Name=='$POLICY_NAME'].ResponseHeadersPolicy.Id | [0]" \
+    --output text 2>/dev/null || true)"
+
+if [[ -z "$POLICY_ID" || "$POLICY_ID" == "None" ]]; then
+    echo "==> Creating new policy"
+    POLICY_ID="$(echo "$DESIRED_POLICY_CONFIG" | "${aws[@]}" cloudfront create-response-headers-policy \
         --response-headers-policy-config file:///dev/stdin \
         --query 'ResponseHeadersPolicy.Id' --output text)"
     echo "    policy id: $POLICY_ID"
 else
-    echo "    policy already exists: $POLICY_ID"
+    echo "    policy exists: $POLICY_ID"
+    LIVE="$("${aws[@]}" cloudfront get-response-headers-policy --id "$POLICY_ID" --output json)"
+    LIVE_CONFIG="$(echo "$LIVE" | jq -c '.ResponseHeadersPolicy.ResponseHeadersPolicyConfig')"
+    DESIRED_CONFIG="$(echo "$DESIRED_POLICY_CONFIG" | jq -c '.')"
+    if [[ "$LIVE_CONFIG" == "$DESIRED_CONFIG" ]]; then
+        echo "==> Policy config matches desired; skipping update"
+    else
+        echo "==> Updating policy in place"
+        ETAG="$(echo "$LIVE" | jq -r '.ETag')"
+        echo "$DESIRED_POLICY_CONFIG" | "${aws[@]}" cloudfront update-response-headers-policy \
+            --id "$POLICY_ID" \
+            --response-headers-policy-config file:///dev/stdin \
+            --if-match "$ETAG" \
+            --output text > /dev/null
+        echo "    policy updated"
+    fi
 fi
 
-echo "==> Reading current distribution config"
+echo "==> Reading distribution config"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 "${aws[@]}" cloudfront get-distribution-config \
@@ -92,7 +108,7 @@ ETAG="$(jq -r '.ETag' "$TMP/dist.json")"
 CURRENT_POLICY="$(jq -r '.DistributionConfig.DefaultCacheBehavior.ResponseHeadersPolicyId // ""' "$TMP/dist.json")"
 
 if [[ "$CURRENT_POLICY" == "$POLICY_ID" ]]; then
-    echo "==> Policy already attached; nothing to do."
+    echo "==> Policy already attached to distribution"
     exit 0
 fi
 

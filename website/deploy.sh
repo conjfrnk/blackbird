@@ -22,10 +22,23 @@ aws s3 cp index.html "s3://${BUCKET}/index.html" \
   --content-type "text/html; charset=utf-8" \
   --profile "$PROFILE"
 
-# Static assets cached for a day.
+# 404 page also revalidates so a copy fix lands without TTL wait.
+aws s3 cp 404.html "s3://${BUCKET}/404.html" \
+  --cache-control "public,max-age=0,must-revalidate" \
+  --content-type "text/html; charset=utf-8" \
+  --profile "$PROFILE"
+
+# Static assets cached for a day. Icon and stylesheet are referenced
+# with ?v= query strings in HTML, so a release that needs to invalidate
+# them bumps the version rather than relying on TTL expiry.
 aws s3 cp icon-512.png "s3://${BUCKET}/icon-512.png" \
   --cache-control "public,max-age=86400" \
   --content-type "image/png" \
+  --profile "$PROFILE"
+
+aws s3 cp styles.css "s3://${BUCKET}/styles.css" \
+  --cache-control "public,max-age=86400" \
+  --content-type "text/css; charset=utf-8" \
   --profile "$PROFILE"
 
 aws s3 cp favicon.svg "s3://${BUCKET}/favicon.svg" \
