@@ -419,6 +419,17 @@ final class TabStripView: NSView {
         editField = nil
         editingPill = nil
         needsDisplay = true
+        // Removing the field as a subview triggers AppKit's
+        // `makeFirstResponder(nil)`, which lands first responder on the
+        // host NSWindow itself — an NSResponder but not an NSView, so
+        // typed characters fall to `noResponderFor:` and ring NSBeep.
+        // Push first responder back to the terminal in the same
+        // synchronous step so no keystrokes can squeak through the
+        // window-as-FR window. The `onCommitRename` side-effects fired
+        // by `commitEdit` (KVO → refreshTabBar) don't touch first
+        // responder, so doing this here (vs. at every call site) is
+        // safe and keeps the contract local.
+        restoreTerminalFocusAfterMouseClick()
     }
 
     /// `true` while any pill is in inline-edit mode. Hover / close
@@ -600,6 +611,24 @@ final class TabStripView: NSView {
             needsDisplay = true
         }
 
+        // Every exit point below must either yield the strip's first-
+        // responder status back to the host TerminalView or hand it to
+        // the inline rename field. AppKit's NSWindow.sendEvent auto-
+        // promotes the hit-tested view to first responder when its
+        // `acceptsFirstResponder` returns true (see this view's
+        // `becomeFirstResponder` comment block) — which is us during a
+        // pill / + click. If we exit without yielding, subsequent
+        // keystrokes route to TabStripView.keyDown → interpretKeyEvents
+        // → insertText, and insertText only honours space (FKA pill
+        // activation). Anything else falls through to AppKit's
+        // `noResponderFor:` path and rings NSBeep. The
+        // `selectedWindow` KVO restore in MainWindowController only
+        // covers the DESTINATION window AND only fires on actual value
+        // changes — clicking the already-selected pill ((self-)select
+        // is a no-op) leaves the strip parked. Restoring here unifies
+        // every mouse exit through one spot.
+        defer { restoreTerminalFocusAfterMouseClick() }
+
         // While a pill is being renamed, a click inside the edit field
         // belongs to the field editor — we shouldn't see it here at all
         // (subviews hit-test first), but the containing pill bounds still
@@ -628,7 +657,10 @@ final class TabStripView: NSView {
 
         // Double-click on a pill body (outside the close hotspot) → enter
         // inline rename mode. Matches Safari / Chrome / iTerm2 tab rename
-        // idiom — no modal alert, no menu trip.
+        // idiom — no modal alert, no menu trip. `beginEditing` makes the
+        // edit field first responder; the `defer` above sees that and
+        // skips the terminal-focus restore so the rename field keeps
+        // focus.
         if event.clickCount == 2 {
             for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
                 let closeRect = closeHotspot(in: rect)
@@ -654,6 +686,37 @@ final class TabStripView: NSView {
             }
             return
         }
+    }
+
+    /// Right-click also auto-promotes the strip via AppKit's NSWindow
+    /// event dispatch (same path as `mouseDown` — `acceptsFirstResponder`
+    /// is gate-keeper, regardless of mouse button). `super` calls
+    /// `menuForEvent:` which routes to our `menu(for:)` override; that
+    /// shows the contextual menu and runs the chosen item's action
+    /// synchronously, then returns. Whether the user picks an item or
+    /// dismisses, first responder ends up parked on the strip — so we
+    /// yield in the same shape as `mouseDown`.
+    override func rightMouseDown(with event: NSEvent) {
+        defer { restoreTerminalFocusAfterMouseClick() }
+        super.rightMouseDown(with: event)
+    }
+
+    /// Yield first-responder status from the strip back to the host
+    /// window's contentView (the TerminalView in production) when the
+    /// strip — or one of its non-edit-field descendants — is currently
+    /// parked there. See the multi-paragraph rationale in `mouseDown`
+    /// for *why*. Idempotent: when the strip isn't first responder, or
+    /// when the edit field legitimately holds it, this is a no-op.
+    /// Tolerant of a nil window / contentView (the strip outliving its
+    /// host briefly during teardown).
+    private func restoreTerminalFocusAfterMouseClick() {
+        guard let win = window, let cv = win.contentView else { return }
+        guard shouldRestoreTerminalFocusAfterMouseClick(
+            currentFirstResponder: win.firstResponder,
+            strip: self,
+            editField: editField
+        ) else { return }
+        win.makeFirstResponder(cv)
     }
 
     // MARK: - Keyboard focus (titlebar-tabs F4)
@@ -884,6 +947,48 @@ final class TabStripView: NSView {
 
         return menu
     }
+}
+
+// MARK: - Mouse-click first-responder yield decision
+
+/// Pure decision function for `TabStripView.restoreTerminalFocusAfterMouseClick`.
+/// Returns `true` when the caller SHOULD push first-responder back to
+/// the host window's contentView, `false` when the current responder
+/// is somewhere we must not clobber (the inline rename text field, the
+/// terminal view itself, or any unrelated view that's none of the
+/// strip's business).
+///
+/// Cases (in evaluation order):
+///   1. nil current responder — auto-promotion failed in some odd way;
+///      restore so subsequent keystrokes have a definite home.
+///   2. Non-NSView responder (typically the host NSWindow itself,
+///      which is an NSResponder but NOT an NSView subclass — it's the
+///      state a window briefly enters when a `becomeFirstResponder`
+///      call returns false). Restore so we don't park keyboard input
+///      on the bare window.
+///   3. Edit field or one of its descendants — the inline rename
+///      legitimately owns first responder while editing. Leave alone.
+///   4. The strip itself or any non-edit-field descendant — AppKit
+///      auto-promoted us during the click. Restore.
+///   5. Anything else (typically the TerminalView or a TerminalView
+///      descendant such as the FindBar's text field) — first responder
+///      already lives where keystrokes belong. Leave alone.
+///
+/// Pure (no AppKit reach-in) so unit tests can drive every case
+/// without instantiating an NSWindow. Internal so tests can reach it
+/// via `@testable import Blackbird`.
+internal func shouldRestoreTerminalFocusAfterMouseClick(
+    currentFirstResponder: NSResponder?,
+    strip: NSView,
+    editField: NSTextField?
+) -> Bool {
+    guard let responder = currentFirstResponder else { return true }
+    guard let view = responder as? NSView else { return true }
+    if let editField,
+       view === editField || view.isDescendant(of: editField) {
+        return false
+    }
+    return view === strip || view.isDescendant(of: strip)
 }
 
 extension TabStripView: NSTextFieldDelegate {
