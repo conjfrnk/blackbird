@@ -39,7 +39,7 @@
       }
       h1 {
         margin: 0 0 12px;
-        font-size: clamp(2.5rem, 6vw, 3.5rem);
+        font-size: clamp(2rem, 8vw, 3.5rem);
         font-weight: 600;
         letter-spacing: -0.025em;
         color: #EBDBB2;
@@ -48,7 +48,7 @@
       .tag {
         margin: 0 0 32px;
         color: #BDAE93;
-        font-size: 1.1875rem;
+        font-size: clamp(1rem, 3.5vw, 1.1875rem);
         letter-spacing: -0.005em;
       }
       a.download {
@@ -71,12 +71,17 @@
          (fullSizeContentView, titlebarAppearsTransparent, no separator,
          centered title, traffic-light overlay). Palette pulled from the
          Gruvbox theme in Theme.swift. */
+      /* Window sizing scales with the viewport so the longest sample line
+         ("Finished `release` profile [optimized] in 4.21s" — 53 chars) fits
+         without horizontal overflow at any width down to ~320px. The
+         `clamp()` floor on font-size keeps text legible; the floor on
+         titlebar/light dimensions keeps macOS chrome recognisable. */
       .bb-window {
         width: 100%;
         max-width: 640px;
         margin: 64px auto 0;
         background: #282828;
-        border-radius: 14px;
+        border-radius: clamp(10px, 2.5vw, 14px);
         overflow: hidden;
         text-align: left;
         font-family: "Hack Nerd Font Mono", "Hack", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
@@ -86,22 +91,22 @@
           0 0 0 0.5px rgba(0, 0, 0, 0.7);
       }
       .bb-titlebar {
-        height: 28px;
+        height: clamp(20px, 5.5vw, 28px);
         position: relative;
         display: flex;
         align-items: center;
       }
       .bb-traffic {
         position: absolute;
-        left: 13px;
+        left: clamp(8px, 2.5vw, 13px);
         top: 50%;
         transform: translateY(-50%);
         display: flex;
-        gap: 8px;
+        gap: clamp(5px, 1.5vw, 8px);
       }
       .bb-traffic .light {
-        width: 12px;
-        height: 12px;
+        width: clamp(8px, 2.4vw, 12px);
+        height: clamp(8px, 2.4vw, 12px);
         border-radius: 50%;
         box-shadow:
           inset 0 0.5px 0 rgba(255, 255, 255, 0.4),
@@ -115,13 +120,13 @@
         width: 100%;
         text-align: center;
         font-family: -apple-system, "SF Pro Text", BlinkMacSystemFont, system-ui, sans-serif;
-        font-size: 0.8125rem;
+        font-size: clamp(0.625rem, 2.4vw, 0.8125rem);
         font-weight: 500;
         color: rgba(235, 219, 178, 0.55);
       }
       .bb-body {
-        padding: 4px 12px 10px;
-        font-size: 0.8125rem;
+        padding: clamp(2px, 0.6vw, 4px) clamp(8px, 2vw, 12px) clamp(6px, 1.5vw, 10px);
+        font-size: clamp(0.5rem, 2.5vw, 0.8125rem);
         line-height: 1.4;
         white-space: pre;
         color: #EBDBB2;
@@ -134,9 +139,10 @@
       .bb-body .dim    { color: #928374; }
       .bb-cursor {
         display: inline-block;
-        width: 7.5px;
-        height: 16px;
-        vertical-align: -3px;
+        /* em-relative so the cursor block scales with .bb-body's font-size */
+        width: 0.6em;
+        height: 1.15em;
+        vertical-align: -0.18em;
         background: #EBDBB2;
         animation: bb-blink 1s steps(2) infinite;
       }
@@ -207,9 +213,14 @@
 
       @media (max-width: 600px) {
         main { padding: 48px 20px 24px; }
-        img.icon { width: 128px; height: 128px; }
+        img.icon { width: clamp(108px, 32vw, 128px); height: auto; }
+        .bb-window { margin-top: 48px; }
         .features { grid-template-columns: 1fr; gap: 28px; }
-        footer { flex-direction: column; gap: 10px; }
+        .bench-line { margin-top: 40px; }
+        footer { flex-direction: column; gap: 10px; margin-top: 48px; }
+      }
+      @media (max-width: 360px) {
+        main { padding: 40px 16px 20px; }
       }
     </style>
   </head>

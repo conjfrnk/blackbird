@@ -1,6 +1,7 @@
 # Claude and AI-generated artifacts
 .claude/
 .superpowers/
+.playwright-mcp/
 # Audit scratchpad (per-agent findings, synthesis catalogs, fix-logs).
 # Contents are useful as reference during active work but not part of the
 # project history — never commit.
