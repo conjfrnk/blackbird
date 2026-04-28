@@ -234,6 +234,33 @@ extension TerminalView {
         return out
     }
 
+    /// Scrub a remote-controlled string for safe display in chrome
+    /// surfaces (hover tooltip, "Open in Finder" affordance, OSC 7 cwd
+    /// in the proxy icon, etc.). Stricter than `sanitizePasteControls`
+    /// + `stripBidiOverrides`: chrome surfaces are single-line and a
+    /// legitimate URL never contains TAB/LF/CR, so those pass-through
+    /// bytes get dropped here rather than preserved.
+    ///
+    /// Audit critical-1: the OSC 8 hover tooltip is the user's
+    /// "verify before clicking" affordance. A hostile remote that
+    /// emits `ESC]8;;https://evil.tld/login\u{202E}moc.elppa//:sptth\x07`
+    /// stores the bidi override in the link table; `URL(string:)`
+    /// accepts the percent-encoded form so the click target stays
+    /// `https://evil.tld/...`, but if the tooltip renders the bidi
+    /// override the user reads `https://apple.com/login` and the
+    /// affordance is defeated. The same pattern applies to any
+    /// snapshot-derived string we surface in chrome.
+    static func scrubURLForDisplay(_ s: String) -> String {
+        var bytes = sanitizePasteControls(Data(s.utf8))
+        // sanitizePasteControls keeps TAB/LF/CR (legitimate in paste);
+        // a chrome surface is single-line, so drop them. Replace with
+        // nothing rather than space — a fake space could survive
+        // truncation and look like part of the URL host.
+        bytes = bytes.filter { $0 != 0x09 && $0 != 0x0A && $0 != 0x0D }
+        bytes = stripBidiOverrides(bytes)
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     /// Strip any literal `ESC [ 2 0 1 ~` terminators from a bracketed-paste
     /// payload so they can't prematurely close the paste window and let
     /// subsequent bytes execute as shell input — the classic paste-injection

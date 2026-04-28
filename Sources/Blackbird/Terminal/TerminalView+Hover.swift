@@ -439,15 +439,25 @@ extension TerminalView {
             hoverTooltipLabel = lbl
             label = lbl
         }
+        // Scrub before truncation. A hostile remote can stuff a
+        // U+202E into the OSC 8 href; `URL(string:)` percent-encodes
+        // it so the click target stays the literal hostile host, but
+        // raw rendering of the snapshot string in NSTextField would
+        // visually flip the rest of the line — defeating the
+        // "hover-to-verify" gesture entirely. Same scrub policy as
+        // paste, plus dropping TAB/LF/CR (single-line surface).
+        let scrubbed = Self.scrubURLForDisplay(urlString)
         // Clamp the displayed URL. A misbehaving remote could stuff
         // megabytes of OSC 8 target into the link table; sizing an
         // NSTextField against it would hang the UI and push the panel
         // off-screen. 512 chars covers every realistic URL; anything
         // over that gets an ellipsis so the user still sees the origin.
+        // Truncating AFTER scrub means a bidi byte can't hide past the
+        // ellipsis at character 513.
         let maxDisplay = 512
-        label.stringValue = urlString.count > maxDisplay
-            ? String(urlString.prefix(maxDisplay)) + "…"
-            : urlString
+        label.stringValue = scrubbed.count > maxDisplay
+            ? String(scrubbed.prefix(maxDisplay)) + "…"
+            : scrubbed
         label.sizeToFit()
         let padX: CGFloat = 8, padY: CGFloat = 4
         let labelFrame = NSRect(

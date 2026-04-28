@@ -1056,4 +1056,90 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertNil(view.selection,
                      "alt-screen exit must clear the active selection (Bug #15)")
     }
+
+    // MARK: - Chrome-surface URL scrubber (audit critical-1)
+
+    /// `scrubURLForDisplay` is the policy gate for any remote-controlled
+    /// string we surface in UI chrome (hover tooltip, "Open in Finder"
+    /// proxy icon, OSC 7 cwd display). Stricter than the paste sanitizer:
+    /// chrome surfaces are single-line, so TAB/LF/CR drop here even
+    /// though they pass through paste.
+
+    func test_scrubURLForDisplay_passesPlainURL() {
+        let input = "https://example.com/path?query=1"
+        XCTAssertEqual(TerminalView.scrubURLForDisplay(input), input)
+    }
+
+    func test_scrubURLForDisplay_dropsBidiOverride() {
+        // The audit's canonical homograph: `https://evil.tld/login` +
+        // U+202E + `moc.elppa//:sptth`. Without scrubbing, NSTextField
+        // renders the second half right-to-left and the user reads
+        // `https://apple.com/login` while the click target stays evil.
+        let lhs = "https://evil.tld/login"
+        let rls = "moc.elppa//:sptth"
+        let attack = lhs + "\u{202E}" + rls
+        let scrubbed = TerminalView.scrubURLForDisplay(attack)
+        XCTAssertFalse(scrubbed.contains("\u{202E}"))
+        XCTAssertEqual(scrubbed, lhs + rls)
+    }
+
+    func test_scrubURLForDisplay_dropsAllExplicitBidiCodepoints() {
+        // The full bidi list scrubbed by stripBidiOverrides — the
+        // chrome scrubber inherits all of them.
+        let bidi: [String.UnicodeScalarView.Element] = [
+            "\u{200E}", "\u{200F}",
+            "\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}",
+            "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}",
+            "\u{061C}", "\u{180E}",
+        ]
+        for cp in bidi {
+            var s = "a"
+            s.unicodeScalars.append(cp)
+            s += "b"
+            XCTAssertEqual(
+                TerminalView.scrubURLForDisplay(s), "ab",
+                "bidi codepoint U+\(String(cp.value, radix: 16, uppercase: true)) must be removed"
+            )
+        }
+    }
+
+    func test_scrubURLForDisplay_dropsTabLfCr() {
+        // Paste keeps TAB/LF/CR (legitimate whitespace in pasted
+        // content). The chrome surface is single-line; these would
+        // wrap or layout-break the tooltip, so we drop them.
+        let input = "https://example.com/\tpath\nfrag\rment"
+        XCTAssertEqual(
+            TerminalView.scrubURLForDisplay(input),
+            "https://example.com/pathfragment"
+        )
+    }
+
+    func test_scrubURLForDisplay_replacesC0WithSpace() {
+        // sanitizePasteControls replaces C0 (excl. TAB/LF/CR) with a
+        // space. The chrome path inherits that — these bytes shouldn't
+        // appear in URLs but if they do, replacement-with-space is
+        // safer than dropping (a fake space is visually obvious).
+        let input = "https://example.com/\u{01}\u{1B}path"
+        XCTAssertEqual(
+            TerminalView.scrubURLForDisplay(input),
+            "https://example.com/  path"
+        )
+    }
+
+    func test_scrubURLForDisplay_replacesUTF8C1WithSpace() {
+        // 0xC2 0x9D (U+009D, OSC) — same policy as paste.
+        var bytes = Data("a".utf8)
+        bytes.append(contentsOf: [0xC2, 0x9D])
+        bytes += Data("b".utf8)
+        let s = String(decoding: bytes, as: UTF8.self)
+        XCTAssertEqual(TerminalView.scrubURLForDisplay(s), "a b")
+    }
+
+    func test_scrubURLForDisplay_preservesNonAsciiUtf8() {
+        // CJK / emoji in URLs (punycode-decoded host display, etc.)
+        // must round-trip. The em-dash (E2 80 94) carries the same E2
+        // prefix as bidi overrides; verify we don't over-match.
+        let input = "https://例え.jp/—path/🌐"
+        XCTAssertEqual(TerminalView.scrubURLForDisplay(input), input)
+    }
 }
