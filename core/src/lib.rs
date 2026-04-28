@@ -759,6 +759,27 @@ impl OscScanner<'_> {
         if decoded.contains(&0) {
             return;
         }
+        // Reject every other ASCII control byte (0x01..=0x1F, 0x7F) too.
+        // Same shape as OSC title control-char scrub (c9304c2): control
+        // bytes in a chrome-displayed string can fool screen readers,
+        // log shippers, or any downstream parser that doesn't pre-scrub.
+        // Symmetric defense with the title path. Audit M13.
+        if decoded
+            .iter()
+            .any(|&b| b < 0x20 || b == 0x7F)
+        {
+            return;
+        }
+        // Reject Unicode bidi-control / zero-width / invisible-payload
+        // codepoints in the path. Without this gate a hostile shell can
+        // emit `OSC 7;file:///Users/foo/%E2%80%AE.bashrc` and the
+        // titlebar proxy icon / "Open in Finder" affordance displays
+        // the path RTL-flipped (visual `cqahsab.<rtl>oof/sresU/` while
+        // the actual filesystem target is what Finder will open). Same
+        // codepoint list the Swift paste sanitizer strips. Audit M2.
+        if contains_bidi_or_invisible(decoded.as_slice()) {
+            return;
+        }
         // Audit synthesis #13 — path-traversal via percent-encoded `..`.
         // An attacker can emit `OSC 7;file:///%2e%2e/%2e%2e/etc/`. After
         // percent-decode the path is `../../../../etc/`; downstream
@@ -887,6 +908,94 @@ pub enum BBPromptMarkKind {
     B = 2,
     C = 3,
     D = 4,
+}
+
+/// True when `bytes` contains any UTF-8 sequence for a Unicode bidi-
+/// control / zero-width / invisible-payload codepoint. Symmetric with
+/// the Swift paste sanitizer's `stripBidiOverrides` byte map.
+///
+/// Used by `handle_osc7` to refuse cwd paths that would visually
+/// spoof the titlebar / "Open in Finder" target. A path like
+/// `/Users/foo/%E2%80%AE.bashrc` decodes to RLO + `.bashrc`; any
+/// renderer that honours bidi (NSTextField, AppKit titlebar) flips
+/// the visible suffix while the filesystem target stays whatever the
+/// shell actually said. The defense lives at the parse boundary so
+/// EVERY downstream consumer of the path benefits.
+///
+/// Codepoints rejected (UTF-8 byte ranges):
+///
+///   2-byte:
+///     C2 AD               U+00AD soft hyphen
+///     D8 9C               U+061C ALM
+///   3-byte:
+///     E1 A0 8E            U+180E MVS
+///     E2 80 8B..8F        U+200B-F ZWSP/ZWNJ/ZWJ/LRM/RLM
+///     E2 80 A8..AE        U+2028/9 LS/PS, U+202A-E embed/override
+///     E2 81 A0            U+2060 word joiner
+///     E2 81 A6..A9        U+2066-9 isolates
+///     EF B8 80..8F        U+FE00-F variation selectors 1-16
+///     EF BB BF            U+FEFF BOM (ZWNBSP)
+///   4-byte:
+///     F3 A0 80..81 ?      U+E0000-E007F tag block
+///     F3 A0 84..87 ? (≤AF on 87) U+E0100-E01EF VS17-256
+///
+/// Audit M2.
+fn contains_bidi_or_invisible(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        let remaining = bytes.len() - i;
+        let b0 = bytes[i];
+        // 2-byte
+        if remaining >= 2 {
+            let b1 = bytes[i + 1];
+            if (b0 == 0xC2 && b1 == 0xAD) || (b0 == 0xD8 && b1 == 0x9C) {
+                return true;
+            }
+        }
+        // 3-byte
+        if remaining >= 3 {
+            let b1 = bytes[i + 1];
+            let b2 = bytes[i + 2];
+            if b0 == 0xE1 && b1 == 0xA0 && b2 == 0x8E {
+                return true;
+            }
+            if b0 == 0xE2 {
+                if b1 == 0x80 && (0x8B..=0x8F).contains(&b2) {
+                    return true;
+                }
+                if b1 == 0x80 && (0xA8..=0xAE).contains(&b2) {
+                    return true;
+                }
+                if b1 == 0x81 && (b2 == 0xA0 || (0xA6..=0xA9).contains(&b2)) {
+                    return true;
+                }
+            }
+            if b0 == 0xEF {
+                if b1 == 0xB8 && (0x80..=0x8F).contains(&b2) {
+                    return true;
+                }
+                if b1 == 0xBB && b2 == 0xBF {
+                    return true;
+                }
+            }
+        }
+        // 4-byte
+        if remaining >= 4 && b0 == 0xF3 {
+            let b1 = bytes[i + 1];
+            let b2 = bytes[i + 2];
+            let b3 = bytes[i + 3];
+            if b1 == 0xA0 {
+                if b2 == 0x80 || b2 == 0x81 {
+                    return true;
+                }
+                if (0x84..=0x87).contains(&b2) && (b2 < 0x87 || b3 <= 0xAF) {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// RFC 3986 percent-decode. Returns `None` only on truncated escapes

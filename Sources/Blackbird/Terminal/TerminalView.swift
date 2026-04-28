@@ -2519,17 +2519,27 @@ extension TerminalView {
         ) ?? (m.endCol - m.startCol + 1)
         guard matchLen > 0 else { return }
         let delBytes = Data(repeating: 0x7F, count: matchLen)
+        // Scrub the replacement bytes through the same pipeline paste
+        // uses. The find-bar Replace field accepts arbitrary user input
+        // — typed or pasted via NSTextField's own paste handler, which
+        // bypasses our paste sanitizer. A user pasting a Trojan-Source
+        // RLO into Replace would otherwise smuggle the bidi byte
+        // straight into the shell. Same C0/C1/bidi/ZWJ/tag-block list
+        // as the paste pipeline. Audit M10.
+        let cleanedReplacement = Self.stripBidiOverrides(
+            Self.sanitizePasteControls(Data(replacement.utf8))
+        )
         #if DEBUG
         if let capture = replaceByteCapture {
             capture(delBytes)
-            if !replacement.isEmpty { capture(Data(replacement.utf8)) }
+            if !cleanedReplacement.isEmpty { capture(cleanedReplacement) }
             return
         }
         #endif
         guard let session else { return }
         session.send(delBytes)
-        if !replacement.isEmpty {
-            session.send(Data(replacement.utf8))
+        if !cleanedReplacement.isEmpty {
+            session.send(cleanedReplacement)
         }
     }
 

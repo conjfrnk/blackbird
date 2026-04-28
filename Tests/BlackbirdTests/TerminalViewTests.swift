@@ -686,6 +686,110 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(TerminalView.stripBidiOverrides(input), input)
     }
 
+    // MARK: - M3 / M4: extended scrub coverage
+
+    /// U+2028 LS / U+2029 PS — Trojan-Source-class invisible separator.
+    /// Some shells / readline configurations / Python REPL treat these
+    /// as line terminators, so a "single-line" paste can sneak in a
+    /// second command. Audit M3.
+    func test_stripBidiOverrides_removesLineSeparators() {
+        let ls = Data([0x61, 0xE2, 0x80, 0xA8, 0x62])  // a U+2028 b
+        let ps = Data([0x61, 0xE2, 0x80, 0xA9, 0x62])  // a U+2029 b
+        XCTAssertEqual(TerminalView.stripBidiOverrides(ls), Data("ab".utf8))
+        XCTAssertEqual(TerminalView.stripBidiOverrides(ps), Data("ab".utf8))
+    }
+
+    /// Zero-width chars (ZWSP/ZWNJ/ZWJ) — homograph + log-injection
+    /// surface. Audit M4.
+    func test_stripBidiOverrides_removesZeroWidthChars() {
+        for cp: UInt8 in [0x8B, 0x8C, 0x8D] {  // U+200B / 200C / 200D
+            let payload = Data([0x61, 0xE2, 0x80, cp, 0x62])
+            XCTAssertEqual(
+                TerminalView.stripBidiOverrides(payload), Data("ab".utf8),
+                "U+200\(String(cp - 0x80, radix: 16, uppercase: true)) (zero-width) must strip"
+            )
+        }
+    }
+
+    func test_stripBidiOverrides_removesWordJoiner() {
+        // U+2060 WORD JOINER — E2 81 A0
+        let payload = Data([0x61, 0xE2, 0x81, 0xA0, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+    }
+
+    func test_stripBidiOverrides_removesBOM() {
+        // U+FEFF — EF BB BF
+        let payload = Data([0x61, 0xEF, 0xBB, 0xBF, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+    }
+
+    func test_stripBidiOverrides_removesSoftHyphen() {
+        // U+00AD — C2 AD
+        let payload = Data([0x61, 0xC2, 0xAD, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+    }
+
+    func test_stripBidiOverrides_removesAllVariationSelectors1to16() {
+        // U+FE00..U+FE0F — EF B8 80..8F
+        for vs: UInt8 in 0x80...0x8F {
+            let payload = Data([0x61, 0xEF, 0xB8, vs, 0x62])
+            XCTAssertEqual(
+                TerminalView.stripBidiOverrides(payload), Data("ab".utf8),
+                "VS at byte \(String(vs, radix: 16, uppercase: true)) must strip"
+            )
+        }
+    }
+
+    func test_stripBidiOverrides_removesTagBlock() {
+        // U+E0073 (tag 's') — F3 A0 81 B3.
+        let payload = Data([0x61, 0xF3, 0xA0, 0x81, 0xB3, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+        // U+E0000 (tag NULL) — F3 A0 80 80.
+        let payload2 = Data([0x61, 0xF3, 0xA0, 0x80, 0x80, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload2), Data("ab".utf8))
+    }
+
+    func test_stripBidiOverrides_removesVariationSelectors17to256() {
+        // U+E0100 (VS17) — F3 A0 84 80
+        let payload = Data([0x61, 0xF3, 0xA0, 0x84, 0x80, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+        // U+E01EF (VS256) — F3 A0 87 AF
+        let payload2 = Data([0x61, 0xF3, 0xA0, 0x87, 0xAF, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload2), Data("ab".utf8))
+    }
+
+    func test_stripBidiOverrides_preservesAdjacentNonVSPlaneE0() {
+        // U+E01F0 (just past VS256) — F3 A0 87 B0. Must NOT strip;
+        // it's outside the variation-selector range. Also U+E0200,
+        // F3 A0 88 80, which shares the F3 A0 lead but b2 is past
+        // the VS upper page.
+        let beyondVS = Data([0x61, 0xF3, 0xA0, 0x87, 0xB0, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(beyondVS), beyondVS)
+        let pastPage = Data([0x61, 0xF3, 0xA0, 0x88, 0x80, 0x62])
+        XCTAssertEqual(TerminalView.stripBidiOverrides(pastPage), pastPage)
+    }
+
+    func test_stripBidiOverrides_attackComboPayload() {
+        // Realistic worst-case: bidi RLO + ZWJ + tag char + VS + soft
+        // hyphen all sandwiched into one payload. Must scrub to the
+        // bare ASCII "ab".
+        var payload = Data("a".utf8)
+        payload.append(contentsOf: [0xE2, 0x80, 0xAE])      // U+202E RLO
+        payload.append(contentsOf: [0xE2, 0x80, 0x8D])      // U+200D ZWJ
+        payload.append(contentsOf: [0xF3, 0xA0, 0x81, 0xA1]) // U+E0061 tag 'a'
+        payload.append(contentsOf: [0xEF, 0xB8, 0x80])      // U+FE00 VS1
+        payload.append(contentsOf: [0xC2, 0xAD])            // U+00AD SHY
+        payload.append(0x62)
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+    }
+
+    func test_stripBidiOverrides_preservesLegitimateMultibyteScalars() {
+        // Em-dash (U+2014, E2 80 94), CJK, emoji, Hebrew/Arabic round-
+        // trip unchanged — we only strip the explicit invisibles.
+        let input = Data("—中文שלום🚀hello world".utf8)
+        XCTAssertEqual(TerminalView.stripBidiOverrides(input), input)
+    }
+
     // MARK: - Paste line-ending normalisation
 
     func test_normalizePaste_collapsesCRLF() {

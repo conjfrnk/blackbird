@@ -159,33 +159,58 @@ extension TerminalView {
         return out
     }
 
-    /// Drop every Unicode bidi formatting / isolate / mark control from
-    /// a paste payload. Targets a dozen codepoints across three UTF-8
-    /// length classes:
+    /// Drop every Unicode bidi-control / zero-width / invisible-payload
+    /// codepoint from a paste payload. Three families of attack:
     ///
-    ///   U+061C  ALM   D8 9C         Arabic letter mark (2-byte)
-    ///   U+180E  MVS   E1 A0 8E      Mongolian vowel separator (3-byte)
-    ///   U+200E  LRM   E2 80 8E      left-to-right mark
-    ///   U+200F  RLM   E2 80 8F      right-to-left mark
-    ///   U+202A  LRE   E2 80 AA      left-to-right embedding
-    ///   U+202B  RLE   E2 80 AB      right-to-left embedding
-    ///   U+202C  PDF   E2 80 AC      pop directional formatting
-    ///   U+202D  LRO   E2 80 AD      left-to-right override  ← Trojan Source
-    ///   U+202E  RLO   E2 80 AE      right-to-left override  ← Trojan Source
-    ///   U+2066  LRI   E2 81 A6      left-to-right isolate
-    ///   U+2067  RLI   E2 81 A7      right-to-left isolate
-    ///   U+2068  FSI   E2 81 A8      first strong isolate
-    ///   U+2069  PDI   E2 81 A9      pop directional isolate
+    ///   1. Bidi reordering (Trojan Source CVE-2021-42574 + follow-ups):
+    ///      U+202A-E embedding/override, U+2066-9 isolates, U+200E/F
+    ///      directional marks, U+061C ALM, U+180E MVS.
+    ///   2. Zero-width / line-separator smuggling: U+200B/C/D
+    ///      (ZWSP/ZWNJ/ZWJ), U+2060 (Word Joiner), U+FEFF (BOM/ZWNBSP),
+    ///      U+00AD (soft hyphen), U+2028 (LS), U+2029 (PS). Some shells/
+    ///      REPLs (Python, zsh `bindkey -e` paste-bracket) treat LS/PS
+    ///      as line terminators, so a "single-line" paste can sneak in
+    ///      a second command. Zero-width chars hide bytes between
+    ///      identifier-shaped tokens (tab-completion homograph, log
+    ///      injection).
+    ///   3. Tag-character invisible payload: U+E0000-E007F. The
+    ///      "Imperceptible Indicator" attack — an invisible string can
+    ///      ride along inside a benign paste and replay through a
+    ///      subsequent `pbpaste` / clipboard manager / log shipper.
+    ///   4. Variation selectors: U+FE00-FE0F (VS1-16), U+E0100-E01EF
+    ///      (VS17-256). Modify rendering of the prior glyph; pasted on
+    ///      their own they invisibly mutate adjacent characters in
+    ///      whatever surface the paste lands in (commit messages,
+    ///      issue trackers, log output).
     ///
-    /// These are rare in legitimate text — Unicode's bidirectional
-    /// algorithm handles Arabic / Hebrew automatically; explicit
-    /// formatting is a spoofing hammer. iTerm2's "Filter control
-    /// sequences on paste" option applies the same policy; the extra
-    /// codepoints here match CVE-2021-42574 follow-up advisories that
-    /// broadened the list beyond the original nine overrides.
+    /// Full byte map (UTF-8):
+    ///
+    ///   U+00AD  SHY   C2 AD               soft hyphen (2-byte)
+    ///   U+061C  ALM   D8 9C               Arabic letter mark (2-byte)
+    ///   U+180E  MVS   E1 A0 8E            Mongolian vowel separator (3)
+    ///   U+200B-D ZWSP/ZWNJ/ZWJ E2 80 8B-8D
+    ///   U+200E/F LRM/RLM       E2 80 8E/8F
+    ///   U+202A-E LRE/RLE/PDF/LRO/RLO E2 80 AA-AE
+    ///   U+2028  LS    E2 80 A8            line separator
+    ///   U+2029  PS    E2 80 A9            paragraph separator
+    ///   U+2060  WJ    E2 81 A0            word joiner
+    ///   U+2066-9 LRI/RLI/FSI/PDI E2 81 A6-A9
+    ///   U+FE00-F VS1-16        EF B8 80-8F
+    ///   U+FEFF  BOM   EF BB BF            byte order mark (ZWNBSP)
+    ///   U+E0000-E007F tag block F3 A0 80 80 - F3 A0 81 BF (4-byte)
+    ///   U+E0100-E01EF VS17-256  F3 A0 84 80 - F3 A0 87 AF (4-byte)
+    ///
+    /// These are rare in legitimate text — Unicode's bidi algorithm
+    /// handles Arabic / Hebrew automatically and identifier rendering
+    /// doesn't need ZWJ. Stripping is safer than rendering.
+    /// Audit M3 / M4.
     static func stripBidiOverrides(_ input: Data) -> Data {
-        // Fast path: no 0xD8 / 0xE1 / 0xE2 byte means no match at all.
-        guard input.contains(where: { $0 == 0xD8 || $0 == 0xE1 || $0 == 0xE2 })
+        // Fast path: lead bytes for any tracked codepoint are
+        // C2 / D8 / E1 / E2 / EF / F3. Absence of all six → no match.
+        guard input.contains(where: {
+            $0 == 0xC2 || $0 == 0xD8 || $0 == 0xE1
+                || $0 == 0xE2 || $0 == 0xEF || $0 == 0xF3
+        })
         else { return input }
         var out = Data()
         out.reserveCapacity(input.count)
@@ -194,14 +219,30 @@ extension TerminalView {
             let b0 = input[i]
             let remaining = input.distance(from: i, to: input.endIndex)
 
-            // 2-byte: U+061C  (D8 9C)
-            if b0 == 0xD8, remaining >= 2,
-               input[input.index(after: i)] == 0x9C {
-                i = input.index(i, offsetBy: 2)
-                continue
+            // 2-byte sequences:
+            //   U+00AD soft hyphen (C2 AD)
+            //   U+061C ALM        (D8 9C)
+            if remaining >= 2 {
+                let b1 = input[input.index(after: i)]
+                if b0 == 0xC2 && b1 == 0xAD {
+                    i = input.index(i, offsetBy: 2)
+                    continue
+                }
+                if b0 == 0xD8 && b1 == 0x9C {
+                    i = input.index(i, offsetBy: 2)
+                    continue
+                }
             }
 
-            // 3-byte sequences: E1 A0 8E (U+180E); E2 8x xx for several.
+            // 3-byte sequences:
+            //   U+180E MVS               (E1 A0 8E)
+            //   U+200B-F ZWSP/ZWNJ/ZWJ/LRM/RLM (E2 80 8B-8F)
+            //   U+2028/9 LS/PS           (E2 80 A8/A9)
+            //   U+202A-E embed/override  (E2 80 AA-AE)
+            //   U+2060 WJ                (E2 81 A0)
+            //   U+2066-9 isolates        (E2 81 A6-A9)
+            //   U+FE00-F VS1-16          (EF B8 80-8F)
+            //   U+FEFF BOM               (EF BB BF)
             if remaining >= 3 {
                 let b1 = input[input.index(i, offsetBy: 1)]
                 let b2 = input[input.index(i, offsetBy: 2)]
@@ -210,20 +251,61 @@ extension TerminalView {
                     continue
                 }
                 if b0 == 0xE2 {
-                    // U+200E / U+200F: E2 80 8E / 8F
-                    if b1 == 0x80 && (b2 == 0x8E || b2 == 0x8F) {
+                    // E2 80 8B..8F  → ZWSP/ZWNJ/ZWJ/LRM/RLM
+                    if b1 == 0x80 && (0x8B...0x8F).contains(b2) {
                         i = input.index(i, offsetBy: 3)
                         continue
                     }
-                    // U+202A..U+202E: E2 80 AA..AE
-                    if b1 == 0x80 && (0xAA...0xAE).contains(b2) {
+                    // E2 80 A8..AE  → LS/PS plus the embed/override block
+                    if b1 == 0x80 && (0xA8...0xAE).contains(b2) {
                         i = input.index(i, offsetBy: 3)
                         continue
                     }
-                    // U+2066..U+2069: E2 81 A6..A9
-                    if b1 == 0x81 && (0xA6...0xA9).contains(b2) {
+                    // E2 81 A0       → Word Joiner
+                    // E2 81 A6..A9   → isolates
+                    if b1 == 0x81 && (b2 == 0xA0 || (0xA6...0xA9).contains(b2)) {
                         i = input.index(i, offsetBy: 3)
                         continue
+                    }
+                }
+                if b0 == 0xEF {
+                    // EF B8 80..8F  → variation selectors 1-16
+                    if b1 == 0xB8 && (0x80...0x8F).contains(b2) {
+                        i = input.index(i, offsetBy: 3)
+                        continue
+                    }
+                    // EF BB BF       → BOM / ZWNBSP
+                    if b1 == 0xBB && b2 == 0xBF {
+                        i = input.index(i, offsetBy: 3)
+                        continue
+                    }
+                }
+            }
+
+            // 4-byte sequences:
+            //   U+E0000-E007F tag block   (F3 A0 80 80 - F3 A0 81 BF)
+            //   U+E0100-E01EF VS17-256    (F3 A0 84 80 - F3 A0 87 AF)
+            if remaining >= 4, b0 == 0xF3 {
+                let b1 = input[input.index(i, offsetBy: 1)]
+                let b2 = input[input.index(i, offsetBy: 2)]
+                let b3 = input[input.index(i, offsetBy: 3)]
+                if b1 == 0xA0 {
+                    // Tag block: b2 ∈ {80, 81}, b3 any continuation.
+                    if b2 == 0x80 || b2 == 0x81 {
+                        i = input.index(i, offsetBy: 4)
+                        continue
+                    }
+                    // VS17-256: b2 ∈ {84,85,86,87}, b3 covers VS17 (84 80)
+                    // through VS256 (87 AF).
+                    if (0x84...0x87).contains(b2) {
+                        // Tighten the b3 bound on the upper page so we
+                        // don't strip non-VS scalars sharing the same
+                        // 3-byte prefix. F3 A0 87 B0..BF is U+E01F0+,
+                        // outside the VS range — preserve those.
+                        if b2 < 0x87 || b3 <= 0xAF {
+                            i = input.index(i, offsetBy: 4)
+                            continue
+                        }
                     }
                 }
             }

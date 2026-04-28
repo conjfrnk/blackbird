@@ -510,4 +510,56 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         view._invokeReplaceCurrentForTests(replacement: "Y")
         XCTAssertEqual(captured, Data([0x7F]) + Data("Y".utf8))
     }
+
+    // MARK: - M10: Replace text routes through paste sanitizer
+
+    /// NSTextField inside the Find bar accepts pasted bytes via its
+    /// own field-editor paste handler — completely separate from
+    /// `TerminalView.paste` and thus from the paste sanitizer. A user
+    /// who pastes a Trojan-Source RLO into the Replace field would
+    /// otherwise smuggle the bidi byte straight into the live shell.
+    /// Pin the policy: replacement bytes are scrubbed through the
+    /// same `sanitizePasteControls` + `stripBidiOverrides` pipeline.
+    /// Audit M10.
+    func test_replaceCurrent_scrubsBidiOverrideFromReplacementText() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let view = TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 480),
+            device: device
+        )
+        let snap = try snapshotWithRow0("ab", cols: 2)
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+        // Replacement contains an embedded RLO (U+202E) — the canonical
+        // homograph attack codepoint. Must be stripped before reaching
+        // the PTY.
+        view._invokeReplaceCurrentForTests(replacement: "x\u{202E}y")
+        // Expect: 2 DELs (matched "ab") + scrubbed "xy" (no RLO).
+        XCTAssertEqual(captured, Data([0x7F, 0x7F]) + Data("xy".utf8))
+        XCTAssertFalse(
+            captured.contains(0xAE),
+            "RLO byte (0xAE inside the E2 80 AE sequence) must not survive scrub"
+        )
+    }
+
+    func test_replaceCurrent_scrubsC0FromReplacementText() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let view = TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 480),
+            device: device
+        )
+        let snap = try snapshotWithRow0("ab", cols: 2)
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+        // Replacement contains ESC + a Bell — both should be replaced
+        // with space by sanitizePasteControls.
+        view._invokeReplaceCurrentForTests(replacement: "x\u{1B}\u{07}y")
+        XCTAssertEqual(captured, Data([0x7F, 0x7F]) + Data("x  y".utf8))
+    }
 }
