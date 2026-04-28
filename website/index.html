@@ -3,17 +3,51 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Blackbird</title>
-    <meta name="description" content="Blackbird — a fast, native macOS terminal." />
+    <title>Blackbird — A fast, native macOS terminal</title>
+    <meta name="description" content="Blackbird is a fast, native macOS terminal. 120 Hz Metal rendering, alacritty_terminal VT parsing, no plugins, no AI, no config files. Free and open source." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="apple-touch-icon" href="/icon-512.png" />
+    <link rel="apple-touch-icon" href="/icon-512.png?v=15" />
     <meta name="theme-color" content="#282828" />
     <link rel="canonical" href="https://blackbird-terminal.com/" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Blackbird" />
-    <meta property="og:description" content="A fast, native macOS terminal." />
+    <meta property="og:site_name" content="Blackbird" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:title" content="Blackbird — A fast, native macOS terminal" />
+    <meta property="og:description" content="Blackbird is a fast, native macOS terminal. 120 Hz Metal rendering, alacritty_terminal VT parsing, no plugins, no AI, no config files." />
     <meta property="og:url" content="https://blackbird-terminal.com/" />
-    <meta property="og:image" content="https://blackbird-terminal.com/icon-512.png" />
+    <meta property="og:image" content="https://blackbird-terminal.com/icon-512.png?v=15" />
+    <meta property="og:image:width" content="512" />
+    <meta property="og:image:height" content="512" />
+    <meta property="og:image:alt" content="Blackbird app icon — Gruvbox spectrum disc" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Blackbird — A fast, native macOS terminal" />
+    <meta name="twitter:description" content="Blackbird is a fast, native macOS terminal. 120 Hz Metal rendering, alacritty_terminal VT parsing, no plugins, no AI, no config files." />
+    <meta name="twitter:image" content="https://blackbird-terminal.com/icon-512.png?v=15" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Blackbird",
+        "description": "A fast, native macOS terminal. 120 Hz Metal rendering, alacritty_terminal VT parsing, no plugins, no AI, no config files.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS 14.0",
+        "softwareVersion": "0.1.15",
+        "downloadUrl": "https://github.com/conjfrnk/blackbird/releases/latest/download/Blackbird.dmg",
+        "url": "https://blackbird-terminal.com/",
+        "image": "https://blackbird-terminal.com/icon-512.png?v=15",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "author": {
+          "@type": "Person",
+          "name": "Connor Frank",
+          "url": "https://github.com/conjfrnk"
+        },
+        "license": "https://opensource.org/licenses/MIT"
+      }
+    </script>
     <style>
       html, body { margin: 0; }
       body {
@@ -35,7 +69,6 @@
         height: 168px;
         display: block;
         margin: 0 auto 28px;
-        image-rendering: -webkit-optimize-contrast;
       }
       h1 {
         margin: 0 0 12px;
@@ -65,7 +98,11 @@
       }
       a.download:hover { background: #FFD866; transform: translateY(-1px); }
       a.download:active { transform: translateY(0); }
-      .reqs { margin-top: 12px; color: #7c6f64; font-size: 0.8125rem; }
+      a.download:focus-visible {
+        outline: 3px solid #282828;
+        outline-offset: 2px;
+      }
+      .reqs { margin-top: 12px; color: #A89984; font-size: 0.8125rem; }
 
       /* Terminal window mockup — chrome matches MainWindowController.swift
          (fullSizeContentView, titlebarAppearsTransparent, no separator,
@@ -160,7 +197,7 @@
         gap: 32px 56px;
         text-align: left;
       }
-      .feat h3 {
+      .feat h2 {
         margin: 0 0 6px;
         font-size: 1.1875rem;
         font-weight: 600;
@@ -183,7 +220,7 @@
         margin: 56px auto 0;
         max-width: 760px;
         text-align: center;
-        color: #928374;
+        color: #A89984;
         font-size: 0.875rem;
       }
       .bench-line a {
@@ -202,7 +239,7 @@
         justify-content: space-between;
         align-items: center;
         font-size: 0.8125rem;
-        color: #7c6f64;
+        color: #A89984;
       }
       footer a {
         color: #BDAE93;
@@ -226,7 +263,7 @@
   </head>
   <body>
     <main>
-      <img class="icon" src="/icon-512.png" alt="Blackbird app icon" width="512" height="512" />
+      <img class="icon" src="/icon-512.png?v=15" alt="" width="512" height="512" fetchpriority="high" decoding="async" />
       <h1>Blackbird</h1>
       <p class="tag">A fast, native macOS terminal.</p>
       <a class="download" href="https://github.com/conjfrnk/blackbird/releases/latest/download/Blackbird.dmg">Download for macOS</a>
@@ -246,19 +283,19 @@
 
       <div class="features">
         <div class="feat">
-          <h3>Native</h3>
+          <h2>Native</h2>
           <p>Blackbird is a native macOS app, built to feel like something Apple could have shipped.</p>
         </div>
         <div class="feat">
-          <h3>Fast</h3>
+          <h2>Fast</h2>
           <p>Metal renders the terminal at 120 Hz on ProMotion, redrawing only the rows that changed.</p>
         </div>
         <div class="feat">
-          <h3>Accurate</h3>
+          <h2>Accurate</h2>
           <p>VT parsing runs on Rust's <code>alacritty_terminal</code>, the same core that powers Alacritty and Zed.</p>
         </div>
         <div class="feat">
-          <h3>Minimal</h3>
+          <h2>Minimal</h2>
           <p>There are tabs but no splits, and no profiles, plugins, AI, or config files.</p>
         </div>
       </div>
