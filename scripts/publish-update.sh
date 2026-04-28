@@ -73,6 +73,27 @@ APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}
   APPCAST_FEED_URL="https://blackbird-terminal.com/appcast.xml" \
   bash scripts/make-appcast.sh --full > website/appcast.xml
 
+# Bump the two version-bearing strings in website/index.html so the splash
+# always reads the version that was just shipped:
+#   1. the download sub-line  → "Apple Silicon and Intel · v<X.Y.Z>"
+#   2. the terminal mockup    → "Compiling blackbird_core v<X.Y.Z>"
+# Each sed is anchored on a unique literal in the file, so neither can
+# match the other or any future addition. Idempotent: re-running with the
+# same $VERSION rewrites each token to itself, the diff stays empty, and
+# the "skip commit if unchanged" branch below still fires on retry.
+echo "==> Bumping version labels in website/index.html"
+sed -i '' -E "s|(Apple Silicon and Intel · )v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|\1v${VERSION}|" website/index.html
+sed -i '' -E "s|(blackbird_core )v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|\1v${VERSION}|" website/index.html
+# Sanity: every "v[X.Y.Z]" semver token in the file should now be the
+# new version. If any older token survived, one of the anchors regressed.
+STRAY="$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' website/index.html | grep -Fv "v${VERSION}" || true)"
+if [[ -n "$STRAY" ]]; then
+    echo "!! website/index.html still contains older version token(s):" >&2
+    echo "$STRAY" | sed 's/^/   /' >&2
+    echo "!! check the anchor strings haven't changed" >&2
+    exit 1
+fi
+
 # Ordering matters: commit + push FIRST, then S3 deploy. If the push fails
 # (auth hiccup, someone else pushed main, hook rejection), S3 is untouched
 # so the live appcast keeps matching the tracked appcast. If the S3 upload
@@ -80,12 +101,12 @@ APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}
 # idempotent: the appcast regenerates to the same content (same DMG bytes,
 # same EdDSA signature input), `git diff --cached --quiet` will then say
 # "nothing to commit" and we fall through to re-deploying S3 on retry.
-echo "==> Committing appcast.xml"
-git add website/appcast.xml
+echo "==> Committing appcast.xml + index.html"
+git add website/appcast.xml website/index.html
 if git diff --cached --quiet; then
-    echo "==> website/appcast.xml unchanged — skipping commit (assuming retry after S3 failure)"
+    echo "==> nothing to commit — skipping (assuming retry after S3 failure)"
 else
-    git commit -m "feat(website): signed appcast for ${TAG}"
+    git commit -m "feat(website): signed appcast + version label for ${TAG}"
 fi
 
 echo "==> Pushing to origin main (before S3 deploy — if this fails we stop)"
