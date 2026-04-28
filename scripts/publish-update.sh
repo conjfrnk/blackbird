@@ -90,22 +90,22 @@ echo "    $(shasum -a 256 "$DMG_PATH" | awk '{print $1}')  $(wc -c <"$DMG_PATH")
 # Before signing the DMG into the appcast (which is the moment a malicious
 # replacement would propagate to every existing install via Sparkle), assert:
 #   1. spctl Gatekeeper assessment passes — Apple's authoritative verdict
-#      that this DMG is notarized, the embedded .app is signed, and
-#      Gatekeeper would launch it.
+#      that this DMG would be accepted at mount time.
 #   2. spctl's `source=` is `Notarized Developer ID` (rules out
-#      unsigned-but-locally-trusted, e.g. dev-signed DMGs that happen to
-#      pass `--type install` on the developer's own machine).
-#   3. The Team ID in spctl's `origin=` line matches our pinned $TEAM_ID
-#      (catches a different-team-signed DMG even if Apple notarized it).
+#      dev-signed-but-locally-trusted DMGs that pass `--type install` on
+#      the developer's own machine).
+#   3. The Team ID extracted via `codesign --display` matches our pinned
+#      $TEAM_ID (catches a different-team-signed DMG even if Apple
+#      notarized it). spctl emits `origin=<Team ID>` for `--type execute`
+#      on .apps but not for `--type install` on DMGs; codesign reads the
+#      TeamIdentifier directly from the DMG's CodeDirectory regardless.
 #   4. The notarization ticket is stapled (so first-launch works without
 #      Apple's notary servers being reachable for the user).
 #
 # `codesign --verify` on the bare DMG was considered and dropped: an
-# unsigned DMG passes `codesign --verify` silently (it finds no
-# signature, returns 0), so it provides no defense. spctl's check
-# internally validates the embedded .app's signature via the same
-# machinery codesign would use, but with the actual notarization gate
-# applied — strictly stronger.
+# unsigned DMG passes `codesign --verify` silently. We use `codesign
+# --display` instead, which prints `TeamIdentifier=<id>` only when a
+# valid signature is present — absence is itself a fail signal.
 #
 # Each check captures stdout+stderr so failure messages are attributable.
 # Any failure aborts before sign_update touches the EdDSA key.
@@ -123,12 +123,11 @@ verify_dmg() {
 
     # Sanity-check the spctl format before grepping for specific values.
     # Apple has reorganized spctl output across macOS releases; if the
-    # `source=` / `origin=` anchors are missing entirely, something
-    # deeper has changed and operator should verify manually rather
-    # than trust a "Team ID mismatch" diagnostic that's actually a
-    # tooling-format issue.
-    if ! grep -qE '^source=' <<<"$out" || ! grep -qE '^origin=' <<<"$out"; then
-        printf '!! spctl output missing source=/origin= anchors — format may have changed:\n' >&2
+    # `source=` anchor is missing, something deeper has changed and the
+    # operator should verify manually rather than trust a "not notarized"
+    # diagnostic that's actually a tooling-format issue.
+    if ! grep -qE '^source=' <<<"$out"; then
+        printf '!! spctl output missing source= anchor — format may have changed:\n' >&2
         printf '%s\n' "$out" | sed 's/^/   | /' >&2
         printf '!! verify the DMG manually (codesign -dv, stapler validate) before retrying.\n' >&2
         exit 1
@@ -139,8 +138,14 @@ verify_dmg() {
         printf '%s\n' "$out" | sed 's/^/   | /' >&2
         exit 1
     fi
-    if ! grep -qE "^origin=Developer ID Application:.*\\(${TEAM_ID}\\)" <<<"$out"; then
-        printf '!! Team ID mismatch (expected %s) in spctl origin:\n' "$TEAM_ID" >&2
+
+    if ! out="$(codesign --display --verbose=2 "$dmg" 2>&1)"; then
+        printf '!! codesign --display failed for %s:\n' "$dmg" >&2
+        printf '%s\n' "$out" | sed 's/^/   | /' >&2
+        exit 1
+    fi
+    if ! grep -qE "^TeamIdentifier=${TEAM_ID}\$" <<<"$out"; then
+        printf '!! Team ID mismatch (expected %s) in codesign output:\n' "$TEAM_ID" >&2
         printf '%s\n' "$out" | sed 's/^/   | /' >&2
         exit 1
     fi
