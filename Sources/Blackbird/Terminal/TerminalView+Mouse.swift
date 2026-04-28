@@ -61,7 +61,18 @@ extension TerminalView {
         // without triggering the selection path below.
         if event.modifierFlags.contains(.command) {
             let underlyingOption = event.modifierFlags.contains(.option)
-            if !mouseReportingEnabled() || underlyingOption {
+            // Suppress URL resolution when the click landed in the
+            // titlebar inset region (above the text grid). The
+            // `bufferPointFromEvent` Y-clamp snaps titlebar clicks to
+            // displayRow 0; if row 0 happens to carry an OSC 8 link
+            // cell at the click column, the gesture would silently
+            // open that URL instead of starting a window-drag. The
+            // intent of ⌘-drag-from-titlebar is unambiguous (it's the
+            // chrome region, not text). Audit M12.
+            let local = convert(event.locationInWindow, from: nil)
+            let textAreaTop = bounds.height - titlebarOnlyTopInset
+            let inTextArea = local.y < textAreaTop
+            if inTextArea, !mouseReportingEnabled() || underlyingOption {
                 let p = bufferPointFromEvent(event)
                 // Buffer-relative line → screen row. OSC 8 attribution is
                 // keyed on screen-space cells since the snapshot only carries

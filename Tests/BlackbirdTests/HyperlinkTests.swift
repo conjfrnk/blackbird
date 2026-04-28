@@ -375,6 +375,59 @@ final class HyperlinkTests: XCTestCase {
         )
     }
 
+    // MARK: - M12: ⌘-click in titlebar inset region suppresses URL resolution
+
+    /// Pre-fix: `bufferPointFromEvent` snaps any titlebar-region click
+    /// to displayRow 0. If row 0 carries an OSC 8 link cell at the
+    /// click column, ⌘-drag-from-titlebar would silently open that
+    /// URL instead of starting a window-drag (the user's clear
+    /// intent — chrome region, not text). Audit M12.
+    ///
+    /// The fix gates URL resolution on `local.y < textAreaTop`. We
+    /// can't easily verify that `performDrag` was called (NSWindow
+    /// black-box), but we CAN verify the URL is NOT opened — sufficient
+    /// to pin the regression.
+    func testCmdClick_inTitlebarInsetRegion_doesNotOpenUrl() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let opener = RecordingURLOpener()
+        view.urlOpenerForTests = opener
+        // Row 0 is fully covered by an OSC 8 hyperlink. A click on
+        // any column of row 0 in the text area would open the URL
+        // — but a click in the titlebar region must not.
+        let anchor = "https://example.com/dangerous-row-0-link"
+        view.installHyperlinkSnapshotForTests(
+            rows: [anchor + String(repeating: " ", count: 80 - anchor.count)],
+            linkAt: [(row: 0, cols: 0..<80, url: "https://example.com/dangerous-row-0-link")]
+        )
+        // titlebarOnlyTopInset returns 28 when window is nil; with
+        // an 800×480 frame the textAreaTop is 480 - 28 = 452. Click
+        // at y=470 — 18 points inside the titlebar inset region.
+        let titlebarPoint = NSPoint(x: 50, y: 470)
+        let ev = try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: titlebarPoint,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1.0
+        ))
+        view.mouseDown(with: ev)
+        XCTAssertEqual(
+            opener.opened, [],
+            "⌘-click in titlebar inset region must NOT open the row-0 OSC 8 URL"
+        )
+    }
+
+    /// Sister: ⌘-click in the text area keeps the existing OSC 8
+    /// resolution path (the M12 gate is one-directional — it
+    /// suppresses titlebar clicks only, never text-area clicks). The
+    /// existing `testCmdClickOpensOsc8Href` covers that path through
+    /// `performCmdClickForTests` (bypasses mouseDown). The titlebar
+    /// regression in this file is the new gate.
+
     // MARK: - F7: resolver cache reuse
 
     /// Audit cwd-hyperlink F7. The cache is reusable when the caller
