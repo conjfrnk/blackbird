@@ -241,3 +241,66 @@ fn multiple_queries_reply_in_order() {
         ]
     );
 }
+
+// ─── Audit M1: PtyWrite reply rate-limit ─────────────────────────────
+
+#[test]
+fn pty_write_reply_capped_under_burst() {
+    // Pre-fix: a hostile shell streaming `ESC[6n` in a tight loop
+    // produced one PtyWrite reply per query, unbounded. Cap at 32/sec
+    // matches the OSC color-query gate. Fire 1000 cursor-position
+    // queries in a single bb_term_input call — must observe ≤ 32
+    // replies, not 1000. Audit M1.
+    let mut burst = Vec::with_capacity(4096);
+    for _ in 0..1000 {
+        burst.extend_from_slice(b"\x1b[6n");
+    }
+    let writes = run(&burst);
+    assert!(
+        writes.len() <= 32,
+        "expected ≤ 32 replies under PTY_WRITE_REPLY_PER_SECOND cap; got {}",
+        writes.len()
+    );
+    // Must produce at LEAST one reply — the cap is a ceiling, not
+    // a floor; legitimate single-query callers must still get an
+    // answer.
+    assert!(
+        !writes.is_empty(),
+        "rate limiter must not block all replies"
+    );
+}
+
+#[test]
+fn pty_write_reply_cap_applies_across_query_kinds() {
+    // The cap is total across DSR + DA + CPR, not per-kind. Mix
+    // ESC[6n (CPR), ESC[5n (status), ESC[c (DA1), ESC[>c (DA2) and
+    // verify the total stays ≤ 32 even though each kind alone would
+    // be well under 32 individually.
+    let mut burst = Vec::with_capacity(8192);
+    for _ in 0..200 {
+        burst.extend_from_slice(b"\x1b[6n\x1b[5n\x1b[c\x1b[>c");
+    }
+    let writes = run(&burst);
+    assert!(
+        writes.len() <= 32,
+        "mixed-kind burst must respect the same total cap; got {}",
+        writes.len()
+    );
+}
+
+#[test]
+fn pty_write_reply_first_32_succeed() {
+    // The cap is not "drop everything past N" but "allow N then drop"
+    // — the first 32 replies in any 1-second window must succeed.
+    // Sanity-check the lower bound.
+    let mut burst = Vec::with_capacity(4096);
+    for _ in 0..100 {
+        burst.extend_from_slice(b"\x1b[6n");
+    }
+    let writes = run(&burst);
+    assert!(
+        writes.len() >= 32 || writes.len() == 100,
+        "first 32 queries in a fresh window must succeed; saw {}",
+        writes.len()
+    );
+}

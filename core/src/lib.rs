@@ -322,6 +322,49 @@ impl ColorRequestQueue {
 struct RoutingListener {
     cell: Arc<CallbackCell>,
     color_queue: Arc<ColorRequestQueue>,
+    /// Sliding-window rate-limiter for `Event::PtyWrite` (DSR / DA1 /
+    /// DA2 / DECXCPR replies). Arc<UnsafeCell> so the listener can
+    /// mutate it from `send_event` (which takes `&self`) under the
+    /// single-thread-per-BBTerm discipline. Per audit M1 — pre-fix a
+    /// hostile shell streaming `ESC[6n` in a tight loop unboundedly
+    /// fanned PtyWrite replies into the writeQueue, blocking
+    /// keystrokes.
+    pty_write_rate: Arc<UnsafeCell<PtyWriteRateState>>,
+}
+
+/// Rate-limiter state for PtyWrite reply events. Sibling shape to
+/// `PromptMarkRateState`. Mutated only on the BBTerm-owning thread.
+#[derive(Debug)]
+struct PtyWriteRateState {
+    window_start: std::time::Instant,
+    window_count: u32,
+}
+
+const PTY_WRITE_REPLY_PER_SECOND: u32 = 32;
+const PTY_WRITE_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl PtyWriteRateState {
+    fn new() -> Self {
+        Self {
+            window_start: std::time::Instant::now(),
+            window_count: 0,
+        }
+    }
+
+    /// Returns true if the dispatch is allowed; false if the cap has
+    /// been hit and the caller should drop the event silently.
+    fn allow(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.window_start) >= PTY_WRITE_REPLY_WINDOW {
+            self.window_start = now;
+            self.window_count = 0;
+        }
+        if self.window_count >= PTY_WRITE_REPLY_PER_SECOND {
+            return false;
+        }
+        self.window_count += 1;
+        true
+    }
 }
 
 /// Strip C0 controls (U+0000..=U+001F), DEL (U+007F), and C1 controls
@@ -400,6 +443,25 @@ impl EventListener for RoutingListener {
                     });
                 }
                 Event::PtyWrite(ref s) => {
+                    // Sliding-window cap on cursor-position / DA / DSR /
+                    // DECXCPR replies. A hostile shell streaming
+                    // `ESC[6n` in a tight loop would otherwise pin
+                    // coreQueue + writeQueue at 100% CPU and prevent
+                    // user keystrokes from making forward progress.
+                    // 32/sec is generous for legitimate query traffic
+                    // (typically a handful at session start, plus
+                    // rare reactive queries during e.g. nvim auto-
+                    // detection). Audit M1.
+                    //
+                    // SAFETY: `pty_write_rate` is UnsafeCell shared
+                    // via Arc; the single-thread-per-BBTerm discipline
+                    // (see RoutingListener doc) means no concurrent
+                    // mutation. We're already inside an `unsafe {}`
+                    // block at the top of `send_event`.
+                    let allowed = (*self.pty_write_rate.get()).allow();
+                    if !allowed {
+                        return;
+                    }
                     let bytes = s.as_bytes();
                     self.cell.fire(BBEvent {
                         kind: BBEventKind::PtyWrite,
@@ -1300,9 +1362,11 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
 
         let callback = Arc::new(CallbackCell::new());
         let color_queue = Arc::new(ColorRequestQueue::new());
+        let pty_write_rate = Arc::new(UnsafeCell::new(PtyWriteRateState::new()));
         let listener = RoutingListener {
             cell: Arc::clone(&callback),
             color_queue: Arc::clone(&color_queue),
+            pty_write_rate: Arc::clone(&pty_write_rate),
         };
         let term = Term::new(config, &size, listener);
         let bb = Box::new(BBTerm {
@@ -3126,9 +3190,11 @@ mod tests {
         };
         let callback = Arc::new(CallbackCell::new());
         let color_queue = Arc::new(ColorRequestQueue::new());
+        let pty_write_rate = Arc::new(UnsafeCell::new(PtyWriteRateState::new()));
         let listener = RoutingListener {
             cell: Arc::clone(&callback),
             color_queue: Arc::clone(&color_queue),
+            pty_write_rate: Arc::clone(&pty_write_rate),
         };
         // Keep the Arcs alive past listener construction so the inner
         // cells survive for the lifetime of `term`.
