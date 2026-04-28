@@ -2497,11 +2497,26 @@ extension TerminalView {
     }
 
     /// Emits DEL×N bytes to erase the matched span, then the UTF-8 replacement.
+    /// `N` is the number of *shell-input characters* in the match — equal to
+    /// the number of non-spacer cells in `[startCol, endCol]` on the match
+    /// row. A wide CJK glyph counts as one DEL even though it occupies two
+    /// columns; without this distinction the column-span DEL count would
+    /// overshoot by one per wide grapheme and erase characters to the left
+    /// of the actual match. Audit H6.
     private func sendReplacement(
         match m: (line: Int32, startCol: Int, endCol: Int),
         replacement: String
     ) {
-        let matchLen = m.endCol - m.startCol + 1
+        let snap = effectiveSnapshot()
+        let screenRow = Int(m.line) + (snap?.displayOffset ?? 0)
+        // Use the cell-walked count when we have a snapshot row to walk;
+        // fall back to the col span for scrollback / no-snapshot test
+        // paths (those don't match wide chars in practice — replace
+        // requires the match be on the cursor line, which is always
+        // in viewport).
+        let matchLen = snap?.nonSpacerCellCount(
+            row: screenRow, startCol: m.startCol, endCol: m.endCol
+        ) ?? (m.endCol - m.startCol + 1)
         guard matchLen > 0 else { return }
         let delBytes = Data(repeating: 0x7F, count: matchLen)
         #if DEBUG

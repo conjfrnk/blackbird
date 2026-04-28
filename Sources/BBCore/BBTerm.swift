@@ -374,6 +374,124 @@ public final class BBSnapshot {
     public var mode: UInt32 { handle.pointee.mode }
     public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 
+    /// Three-way classification of a single cell. `character(at:row:)`
+    /// collapses spacer and empty into one nil — fine for "give me what
+    /// to render here" but ambiguous for layout math: a wide CJK glyph
+    /// at col 0 paints col 1 as a spacer (an extension of the char on
+    /// its left), whereas an unwritten cell at col 5 is empty (no glyph,
+    /// no extension). Find / replace need to distinguish the two when
+    /// computing column spans and DEL counts.
+    public enum CellKind: Equatable {
+        /// Cell carries a printable character. The leading cell of a
+        /// wide glyph reports `.character`; the spacer cell to its
+        /// right reports `.spacer`.
+        case character(Character)
+        /// Cell is a wide-glyph spacer — owned by the leading cell to
+        /// its left (`WIDE_CHAR_SPACER`) or to its right at end-of-line
+        /// (`LEADING_WIDE_CHAR_SPACER`).
+        case spacer
+        /// Cell has never been written by the shell — alacritty's
+        /// `\0` sentinel.
+        case empty
+    }
+
+    /// Classify the cell at `(col, row)` for layout-math purposes. Used
+    /// by the row-walker to compute exact wide-glyph widths and by the
+    /// replace path to count shell-input characters in a match span.
+    public func cellKind(at col: Int, row: Int) -> CellKind {
+        guard col >= 0, row >= 0, col < cols, row < rows else { return .empty }
+        let idx = row * cols + col
+        guard idx < cellCount else { return .empty }
+        let cell = handle.pointee.cells[idx]
+        let spacerMask = UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER)
+        if cell.flags & spacerMask != 0 {
+            return .spacer
+        }
+        let scalar = cell.ch
+        guard scalar != 0, let us = Unicode.Scalar(scalar) else { return .empty }
+        return .character(Character(us))
+    }
+
+    /// Walk a screen row's cells, skipping spacer cells, and return the
+    /// row's visible characters together with a parallel UTF-16 →
+    /// starting-column map. Used by find / replace to translate regex
+    /// `NSRange` (UTF-16 units) and `String.range(of:)` results back to
+    /// grid-cell columns. Without this map a wide CJK glyph (1 char, 2
+    /// cells) or a non-BMP scalar (2 UTF-16 units, 1 char, 2 cells for
+    /// emoji) produces an off-by-N column report on every match after
+    /// it on the same row.
+    ///
+    /// `utf16ToCol` has length `text.utf16.count + 1`; the trailing
+    /// sentinel is the column IMMEDIATELY AFTER the last painted
+    /// character's rightmost cell — so for a match covering UTF-16
+    /// units `[lo, hi)`, the last grid column covered is
+    /// `utf16ToCol[hi] - 1`, which handles wide-char tails without a
+    /// special case. Trailing empty cells (unwritten) do NOT extend
+    /// the sentinel.
+    ///
+    /// Returns nil for out-of-range rows. Audit H4 / H5.
+    public func rowTextWithUTF16ToColMap(row: Int) -> (text: String, utf16ToCol: [Int])? {
+        guard row >= 0, row < rows else { return nil }
+        var text = ""
+        text.reserveCapacity(cols)
+        var utf16ToCol: [Int] = []
+        utf16ToCol.reserveCapacity(cols + 1)
+        var sentinel = 0
+        var c = 0
+        while c < cols {
+            switch cellKind(at: c, row: row) {
+            case .character(let ch):
+                // Width = run of trailing spacer cells. A narrow char
+                // has none (next cell is char or empty); a wide char
+                // owns exactly one (alacritty marks col+1 as spacer).
+                var next = c + 1
+                while next < cols, cellKind(at: next, row: row) == .spacer {
+                    next += 1
+                }
+                for _ in 0..<ch.utf16.count {
+                    utf16ToCol.append(c)
+                }
+                text.append(ch)
+                sentinel = next
+                c = next
+            case .spacer:
+                // Orphan spacer (shouldn't occur — alacritty always
+                // writes the leading char first). Skip without
+                // advancing the sentinel.
+                c += 1
+            case .empty:
+                // Unwritten cell. Stop walking — trailing empties don't
+                // extend the row's text or contribute to the sentinel.
+                c = cols
+            }
+        }
+        utf16ToCol.append(sentinel)
+        return (text, utf16ToCol)
+    }
+
+    /// Number of shell-input characters in `[startCol, endCol]` on
+    /// `row` — equal to the DEL count needed to erase the span via
+    /// readline. Counts cells whose `cellKind` is `.character` and
+    /// excludes spacer / empty cells. A wide CJK glyph at col 0 (one
+    /// character, cells 0–1) returns 1.
+    ///
+    /// Returns nil when the row is outside the snapshot's viewport
+    /// (caller falls back to col-span counting for scrollback rows
+    /// that aren't in the snapshot — replace requires the match be
+    /// on the cursor line, which is always in viewport, so this
+    /// fallback never fires in practice). Audit H6.
+    public func nonSpacerCellCount(row: Int, startCol: Int, endCol: Int) -> Int? {
+        guard row >= 0, row < rows else { return nil }
+        guard startCol >= 0, endCol >= startCol, endCol < cols else { return nil }
+        var count = 0
+        for c in startCol...endCol {
+            if case .character = cellKind(at: c, row: row) {
+                count += 1
+            }
+        }
+        return count
+    }
+
     public func character(at col: Int, row: Int) -> Character? {
         // Full four-sided bounds check plus explicit cells_len guard.
         // `handle.pointee.cells` is an `UnsafePointer<BBCell>` — its

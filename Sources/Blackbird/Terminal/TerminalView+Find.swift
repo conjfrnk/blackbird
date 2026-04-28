@@ -265,8 +265,18 @@ extension TerminalView {
         }
         // Substring (non-regex) path stays synchronous. `String.range(of:)`
         // is bounded by the haystack length and can't catastrophic-backtrack.
+        //
+        // Per-row, prefer the snapshot's cell walker (`rowTextWithUTF16ToColMap`)
+        // for in-viewport rows: it produces a haystack whose UTF-16 offsets
+        // map back to exact grid columns, so wide CJK / emoji and non-BMP
+        // scalars no longer skew the reported (startCol, endCol). For
+        // scrollback rows (outside the snapshot's viewport) the snapshot
+        // doesn't carry cell info; fall back to `session.textRange` and
+        // accept the legacy approximation (one-cell-per-char). Audit H4.
         outer: for ln in topLine...bottomLine {
-            let hay = session.textRange(
+            let screenRow = Int(ln) + snap.displayOffset
+            let mapped = snap.rowTextWithUTF16ToColMap(row: screenRow)
+            let hay = mapped?.text ?? session.textRange(
                 from: BufferPoint(line: ln, col: 0),
                 to:   BufferPoint(line: ln, col: snap.cols - 1),
                 rectangular: false
@@ -274,8 +284,27 @@ extension TerminalView {
             guard !hay.isEmpty else { continue }
             var cursor = hay.startIndex
             while let r = hay.range(of: query, options: stringOptions, range: cursor..<hay.endIndex) {
-                let startCol = hay.distance(from: hay.startIndex, to: r.lowerBound)
-                let endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
+                let startCol: Int
+                let endCol: Int
+                if let utf16ToCol = mapped?.utf16ToCol {
+                    let lo16 = hay.utf16.distance(
+                        from: hay.utf16.startIndex,
+                        to: r.lowerBound.samePosition(in: hay.utf16) ?? hay.utf16.startIndex
+                    )
+                    let hi16 = hay.utf16.distance(
+                        from: hay.utf16.startIndex,
+                        to: r.upperBound.samePosition(in: hay.utf16) ?? hay.utf16.endIndex
+                    )
+                    let loIdx = max(0, min(lo16, utf16ToCol.count - 1))
+                    let hiIdx = max(loIdx, min(hi16, utf16ToCol.count - 1))
+                    startCol = utf16ToCol[loIdx]
+                    endCol   = max(startCol, utf16ToCol[hiIdx] - 1)
+                } else {
+                    // Scrollback row — legacy approximation. Off-by-N for
+                    // rows containing wide chars; documented limitation.
+                    startCol = hay.distance(from: hay.startIndex, to: r.lowerBound)
+                    endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
+                }
                 findMatches.append((line: ln, startCol: startCol, endCol: endCol))
                 cursor = r.upperBound
                 if findMatches.count >= findMatchLimit { break outer }
@@ -312,17 +341,30 @@ extension TerminalView {
     ) {
         guard let session else { return }
         // Snapshot rows on the main thread — `session.textRange` reads
-        // from the BBTerm grid which lives on the main actor.
-        var rows: [(line: Int32, hay: String)] = []
+        // from the BBTerm grid which lives on the main actor. For
+        // in-viewport rows, also capture the cell-derived UTF-16-to-col
+        // map so the worker thread can translate `NSRange` offsets back
+        // to grid columns without skewing across wide / non-BMP chars.
+        // Scrollback rows fall back to `session.textRange` with a nil
+        // map (legacy approximation). Audit H5.
+        let snap = currentSnapshot
+        var rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)] = []
         rows.reserveCapacity(Int(bottomLine - topLine + 1))
         for ln in topLine...bottomLine {
-            let hay = session.textRange(
-                from: BufferPoint(line: ln, col: 0),
-                to:   BufferPoint(line: ln, col: cols - 1),
-                rectangular: false
-            )
-            if !hay.isEmpty {
-                rows.append((line: ln, hay: hay))
+            let screenRow = Int(ln) + (snap?.displayOffset ?? 0)
+            if let mapped = snap?.rowTextWithUTF16ToColMap(row: screenRow) {
+                if !mapped.text.isEmpty {
+                    rows.append((line: ln, hay: mapped.text, utf16ToCol: mapped.utf16ToCol))
+                }
+            } else {
+                let hay = session.textRange(
+                    from: BufferPoint(line: ln, col: 0),
+                    to:   BufferPoint(line: ln, col: cols - 1),
+                    rectangular: false
+                )
+                if !hay.isEmpty {
+                    rows.append((line: ln, hay: hay, utf16ToCol: nil))
+                }
             }
         }
         // Capture the snapshot's seq at scan-submit time so the publish
@@ -354,8 +396,21 @@ extension TerminalView {
                     range: NSRange(location: 0, length: ns.length)
                 ) { result, _, stop in
                     guard let r = result?.range, r.length > 0 else { return }
-                    let startCol = r.location
-                    let endCol = r.location + r.length - 1
+                    let startCol: Int
+                    let endCol: Int
+                    if let utf16ToCol = row.utf16ToCol {
+                        // NSRegularExpression returns UTF-16 offsets;
+                        // translate via the row's parallel map so wide
+                        // / non-BMP chars don't skew the column report.
+                        let loIdx = max(0, min(r.location, utf16ToCol.count - 1))
+                        let hiIdx = max(loIdx, min(r.location + r.length, utf16ToCol.count - 1))
+                        startCol = utf16ToCol[loIdx]
+                        endCol   = max(startCol, utf16ToCol[hiIdx] - 1)
+                    } else {
+                        // Scrollback row — legacy approximation.
+                        startCol = r.location
+                        endCol = r.location + r.length - 1
+                    }
                     matches.append((line: row.line, startCol: startCol, endCol: endCol))
                     if matches.count >= limit { stop.pointee = true }
                 }

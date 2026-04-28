@@ -344,3 +344,170 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
         )
     }
 }
+
+// MARK: - High-4 / High-5 / High-6: wide-grapheme column math
+
+/// `BBSnapshot.rowTextWithUTF16ToColMap` translates regex / String
+/// ranges back to grid columns through a parallel UTF-16 → col map.
+/// `nonSpacerCellCount` returns the shell-input character count for a
+/// match span — the DEL count `sendReplacement` needs to erase via
+/// readline. Both replace `String.distance` / `r.location`-as-column
+/// math that overshot by N per wide-cell glyph on the row.
+///
+/// Fixtures use `BBTerm` directly (no PTY, no session) so each test is
+/// well under the per-test memory budget (~5 KB grid + transient String).
+final class FindWideGraphemeColumnMapTests: XCTestCase {
+
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
+    /// Build a snapshot where row 0 contains `text` starting at col 0.
+    /// `cols` matches the visible content exactly so trailing-space
+    /// padding doesn't bloat the test fixtures (alacritty initialises
+    /// cells with ' ' and never reverts to '\0', so cols past the typed
+    /// content are reported as spaces by the row walker — we keep cols
+    /// tight to keep assertions readable).
+    private func snapshotWithRow0(_ text: String, cols: Int) throws -> BBSnapshot {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: UInt16(cols), rows: 4)))
+        term.input("\u{1B}[1;1H")
+        term.input(text)
+        return try XCTUnwrap(term.snapshot())
+    }
+
+    // MARK: rowTextWithUTF16ToColMap
+
+    func test_rowTextWithUTF16ToColMap_widCJK() throws {
+        // Row contents: "中abc" — 中 (BMP, 1 UTF-16 unit) at cols 0–1
+        // (wide), then a/b/c each 1 UTF-16 unit at cols 2/3/4. cols=5
+        // exactly so no trailing space padding.
+        let snap = try snapshotWithRow0("中abc", cols: 5)
+        let mapped = try XCTUnwrap(snap.rowTextWithUTF16ToColMap(row: 0))
+        XCTAssertEqual(mapped.text, "中abc")
+        // utf16ToCol[i] = starting col of UTF-16 unit i.
+        // [0] → 中 starts at col 0
+        // [1] → a starts at col 2 (中 owns cols 0–1)
+        // [2] → b at col 3
+        // [3] → c at col 4
+        // [4] → sentinel: col 5 (immediately after c's only cell)
+        XCTAssertEqual(mapped.utf16ToCol, [0, 2, 3, 4, 5])
+    }
+
+    func test_rowTextWithUTF16ToColMap_emoji() throws {
+        // 😀 = U+1F600, 2 UTF-16 units (high+low surrogates), 1 char,
+        // 2 cells. Then "test" at cols 2/3/4/5.
+        let snap = try snapshotWithRow0("😀test", cols: 6)
+        let mapped = try XCTUnwrap(snap.rowTextWithUTF16ToColMap(row: 0))
+        XCTAssertEqual(mapped.text, "😀test")
+        // 😀 contributes TWO UTF-16 units, both starting at col 0.
+        // Then t/e/s/t at cols 2/3/4/5. Sentinel = 6.
+        XCTAssertEqual(mapped.utf16ToCol, [0, 0, 2, 3, 4, 5, 6])
+    }
+
+    func test_rowTextWithUTF16ToColMap_plainASCII() throws {
+        let snap = try snapshotWithRow0("hello", cols: 5)
+        let mapped = try XCTUnwrap(snap.rowTextWithUTF16ToColMap(row: 0))
+        XCTAssertEqual(mapped.text, "hello")
+        XCTAssertEqual(mapped.utf16ToCol, [0, 1, 2, 3, 4, 5])
+    }
+
+    func test_rowTextWithUTF16ToColMap_widCJKEmbeddedAscii() throws {
+        // Mixed sequence: 中 + abc + 中 + xyz. Each 中 is 2 cells.
+        // Cols: 0-1 (中), 2-4 (abc), 5-6 (中), 7-9 (xyz). Total cols=10.
+        let snap = try snapshotWithRow0("中abc中xyz", cols: 10)
+        let mapped = try XCTUnwrap(snap.rowTextWithUTF16ToColMap(row: 0))
+        XCTAssertEqual(mapped.text, "中abc中xyz")
+        // 8 chars (中=1, abc=3, 中=1, xyz=3), 8 UTF-16 units (中 is BMP).
+        // [0] 中 → col 0
+        // [1] a → col 2  (after first 中's 2 cells)
+        // [2] b → col 3
+        // [3] c → col 4
+        // [4] 中 → col 5
+        // [5] x → col 7  (after second 中's 2 cells)
+        // [6] y → col 8
+        // [7] z → col 9
+        // [8] sentinel → col 10
+        XCTAssertEqual(mapped.utf16ToCol, [0, 2, 3, 4, 5, 7, 8, 9, 10])
+    }
+
+    func test_rowTextWithUTF16ToColMap_outOfRangeRowReturnsNil() throws {
+        let snap = try snapshotWithRow0("hi", cols: 2)
+        XCTAssertNil(snap.rowTextWithUTF16ToColMap(row: -1))
+        XCTAssertNil(snap.rowTextWithUTF16ToColMap(row: snap.rows))
+        XCTAssertNil(snap.rowTextWithUTF16ToColMap(row: 99_999))
+    }
+
+    // MARK: nonSpacerCellCount
+
+    func test_nonSpacerCellCount_widCJKMatch() throws {
+        // Row "中abc"; full-row match (cols 0–4) is 4 shell-chars.
+        let snap = try snapshotWithRow0("中abc", cols: 5)
+        XCTAssertEqual(snap.nonSpacerCellCount(row: 0, startCol: 0, endCol: 4), 4)
+        // 中-only match (cols 0–1) is 1 shell-char.
+        XCTAssertEqual(snap.nonSpacerCellCount(row: 0, startCol: 0, endCol: 1), 1)
+        // abc-only match (cols 2–4) is 3 shell-chars.
+        XCTAssertEqual(snap.nonSpacerCellCount(row: 0, startCol: 2, endCol: 4), 3)
+    }
+
+    func test_nonSpacerCellCount_emojiMatch() throws {
+        // Row "😀test"; full-row match (cols 0–5) is 5 shell-chars
+        // (😀 + t + e + s + t).
+        let snap = try snapshotWithRow0("😀test", cols: 6)
+        XCTAssertEqual(snap.nonSpacerCellCount(row: 0, startCol: 0, endCol: 5), 5)
+        XCTAssertEqual(snap.nonSpacerCellCount(row: 0, startCol: 0, endCol: 1), 1)  // 😀
+    }
+
+    func test_nonSpacerCellCount_outOfRangeReturnsNil() throws {
+        let snap = try snapshotWithRow0("hi", cols: 2)
+        XCTAssertNil(snap.nonSpacerCellCount(row: -1, startCol: 0, endCol: 0))
+        XCTAssertNil(snap.nonSpacerCellCount(row: 0, startCol: -1, endCol: 0))
+        XCTAssertNil(snap.nonSpacerCellCount(row: 0, startCol: 0, endCol: snap.cols))
+        XCTAssertNil(snap.nonSpacerCellCount(row: 0, startCol: 5, endCol: 2))
+    }
+
+    // MARK: replace integration — H6
+
+    func test_replaceCurrent_widCJKEmitsCorrectDelCount() throws {
+        // Row "中abc"; match the entire span (cols 0–4). Pre-fix the
+        // DEL count was endCol-startCol+1 = 5, which would erase one
+        // shell char too many (eating a space before the match).
+        // Post-fix the count is 4 (one DEL per shell-input character).
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let view = TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 480),
+            device: device
+        )
+        let snap = try snapshotWithRow0("中abc", cols: 5)
+        let cursorLine = Int32(snap.cursorRow)
+        // After "\u{1B}[1;1H" + "中abc" the cursor is on row 0 (where
+        // we wrote), so the on-cursor-line guard passes.
+        XCTAssertEqual(cursorLine, 0,
+                       "test fixture: cursor must land on the row carrying the wide chars")
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 4)]
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+        view._invokeReplaceCurrentForTests(replacement: "x")
+        // Expect: 4 × 0x7F (one per shell-char in 中abc) + "x".
+        XCTAssertEqual(captured, Data([0x7F, 0x7F, 0x7F, 0x7F]) + Data("x".utf8))
+    }
+
+    func test_replaceCurrent_widCJKOnlyEmitsOneDel() throws {
+        // Match just the 中 cell (cols 0–1). One shell-char, one DEL.
+        // Pre-fix the count was 2 (col span), eating an extra char.
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let view = TerminalView(
+            frame: NSRect(x: 0, y: 0, width: 800, height: 480),
+            device: device
+        )
+        let snap = try snapshotWithRow0("中abc", cols: 5)
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+        view._invokeReplaceCurrentForTests(replacement: "Y")
+        XCTAssertEqual(captured, Data([0x7F]) + Data("Y".utf8))
+    }
+}
