@@ -145,11 +145,20 @@ enum OSC8URLPolicy {
         while anchorHost.hasSuffix(".") { anchorHost.removeLast() }
         var normHref = hrefHost
         while normHref.hasSuffix(".") { normHref.removeLast() }
-        // Treat a subdomain match as non-divergent — "www.apple.com"
-        // anchor for an "apple.com" href isn't phishing.
+        // Treat exact-match and "anchor is more specific than href" as
+        // non-divergent — `www.apple.com` anchor for `apple.com` href
+        // is not phishing.
         if anchorHost == normHref { return false }
         if anchorHost.hasSuffix("." + normHref) { return false }
-        if normHref.hasSuffix("." + anchorHost) { return false }
+        // SI-01 — earlier we also accepted the inverse (anchor host is
+        // a parent of href host) on the assumption it modelled the
+        // `apple.com` ↔ `www.apple.com` case. That inverts trust on
+        // wildcard-hosted domains: anchor `https://github.io/project`
+        // with href `https://attacker.github.io/steal` would pass this
+        // check because `attacker.github.io.hasSuffix(".github.io")`,
+        // letting any subdomain of a wildcard host claim the apex.
+        // Removed. Users who legitimately want to navigate to a
+        // divergent host can dwell to see the tooltip and ⌥⌘-click.
         return true
     }
 
@@ -200,18 +209,23 @@ protocol HyperlinkResolver: AnyObject {
     /// Anchor text rendered under an OSC 8 link at (row, col). Used by
     /// the click-time divergence detector to flag phishing-shaped links
     /// where the visible text claims one host but the href points
-    /// elsewhere. Returns nil when the cell has no OSC 8 attribution
-    /// or the anchor can't be reconstructed. Audit high-1.
-    func osc8AnchorText(row: Int, col: Int) -> String?
+    /// elsewhere. Returns the empty string when the cell has no OSC 8
+    /// attribution or the anchor can't be reconstructed — divergence
+    /// detection treats empty-anchor as "no URL-shaped claim of
+    /// identity in the visible text" and lets the URL through. Audit
+    /// high-1, P2-01.
+    func osc8AnchorText(row: Int, col: Int) -> String
 }
 
 extension HyperlinkResolver {
-    /// Default returns nil. Conformers that don't model anchor text
-    /// (test fakes that only inject URLs) opt out of divergence
-    /// checking by accepting this default — the click path treats
-    /// "no anchor" as "no claim of identity, can't diverge" which is
-    /// the correct semantics for a plain text-mode anchor.
-    func osc8AnchorText(row: Int, col: Int) -> String? { nil }
+    /// Default returns the empty string. P2-01: making this non-nil
+    /// (was `String?` returning nil) means future conformers — including
+    /// test fakes that only inject URLs — cannot structurally opt out
+    /// of `anchorDivergesFromHost` evaluation. An empty anchor is safe:
+    /// the divergence detector's URL regex finds no match and lets the
+    /// click through, matching the previous "no anchor → no claim → no
+    /// divergence" semantics without leaving the bypass open.
+    func osc8AnchorText(row: Int, col: Int) -> String { "" }
 }
 
 /// Production resolver backed by a real `BBSnapshot`. OSC 8 goes through
@@ -259,9 +273,14 @@ final class SnapshotHyperlinkResolver: HyperlinkResolver {
     /// single string. Used by the click-time divergence detector
     /// (`OSC8URLPolicy.anchorDivergesFromHost`) to flag phishing-shaped
     /// OSC 8 hyperlinks. Audit cwd-hyperlink F2.
-    func osc8AnchorText(row: Int, col: Int) -> String? {
+    ///
+    /// Returns the empty string when (row, col) carries no link id or
+    /// the cell-character lookup yielded nothing — divergence detection
+    /// treats empty as "no host claim in the anchor text" and the
+    /// click is allowed to proceed. P2-01.
+    func osc8AnchorText(row: Int, col: Int) -> String {
         let anchorID = snapshot.linkID(row: row, col: col)
-        guard anchorID != 0 else { return nil }
+        guard anchorID != 0 else { return "" }
         var out = ""
         // Walk left from (row, col) until the link id changes, then right.
         var l = col
@@ -277,6 +296,6 @@ final class SnapshotHyperlinkResolver: HyperlinkResolver {
                 out.append(ch)
             }
         }
-        return out.isEmpty ? nil : out
+        return out
     }
 }

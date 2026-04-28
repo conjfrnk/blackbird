@@ -2025,10 +2025,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // applies only to the OSC 8 path. Audit high-1.
         let acceptOSC8: (HyperlinkResolver, URL) -> URL? = { resolver, url in
             guard let allowedURL = allow(url) else { return nil }
-            if let anchor = resolver.osc8AnchorText(row: screenRow, col: col),
-               OSC8URLPolicy.anchorDivergesFromHost(
-                   anchorText: anchor, url: allowedURL
-               ) {
+            // P2-01: divergence detection runs unconditionally now that
+            // `osc8AnchorText` returns a non-optional String. An empty
+            // anchor short-circuits inside `anchorDivergesFromHost` (no
+            // URL-shaped match → not divergent).
+            let anchor = resolver.osc8AnchorText(row: screenRow, col: col)
+            if OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: anchor, url: allowedURL
+            ) {
                 Self.securityLogger.warning(
                     """
                     OSC 8 click blocked: anchor / href host mismatch \
@@ -2277,19 +2281,20 @@ final class FakeHyperlinkSnapshot: HyperlinkResolver {
     /// Synthesise the anchor text for the click-divergence test: walk
     /// `rows[row]` over the span's column range and slice out the
     /// substring. Tests that don't construct spans with rendered
-    /// anchor text (most of them) pass `rows: []` and get nil here,
-    /// which falls through to the protocol default.
-    func osc8AnchorText(row: Int, col: Int) -> String? {
+    /// anchor text (most of them) pass `rows: []` and get the empty
+    /// string here, which short-circuits divergence detection (no
+    /// URL-shaped claim in the anchor).
+    func osc8AnchorText(row: Int, col: Int) -> String {
         for span in spans where span.row == row && span.cols.contains(col) {
-            guard row >= 0, row < rows.count else { return nil }
+            guard row >= 0, row < rows.count else { return "" }
             let line = rows[row]
             let chars = Array(line)
             let lo = max(0, span.cols.lowerBound)
             let hi = min(chars.count, span.cols.upperBound)
-            guard lo < hi else { return nil }
+            guard lo < hi else { return "" }
             return String(chars[lo..<hi])
         }
-        return nil
+        return ""
     }
 
     func regexURL(row: Int, col: Int) -> URL? {

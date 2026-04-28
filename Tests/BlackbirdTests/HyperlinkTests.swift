@@ -292,6 +292,31 @@ final class HyperlinkTests: XCTestCase {
         )
     }
 
+    /// Audit SI-01: the previous `normHref.hasSuffix("." + anchorHost)`
+    /// check inverted trust on wildcard-hosted domains. Anchor host
+    /// `github.io` (a public-suffix wildcard) and href host
+    /// `attacker.github.io` would pass the divergence check because
+    /// `attacker.github.io.hasSuffix(".github.io")` — letting any
+    /// subdomain of a wildcard host claim the apex visually. Removed.
+    func testAnchorDivergence_wildcardHostPhishingFlagged() {
+        let url = URL(string: "https://attacker.github.io/steal")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://github.io/project",
+                url: url
+            ),
+            "wildcard-host subdomain phishing must flag"
+        )
+        let pagesURL = URL(string: "https://hostile.pages.dev/x")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "Visit https://pages.dev for the docs",
+                url: pagesURL
+            ),
+            "wildcard-host subdomain phishing must flag for pages.dev too"
+        )
+    }
+
     // MARK: - High-1: anchor-divergence wired into the click path
 
     /// Audit high-1. The detector existed but `resolveClickURL` never
@@ -458,8 +483,14 @@ final class HyperlinkTests: XCTestCase {
         let resolver = SnapshotHyperlinkResolver(snapshot: snap)
         XCTAssertEqual(resolver.osc8AnchorText(row: 0, col: 0), "hi")
         XCTAssertEqual(resolver.osc8AnchorText(row: 0, col: 1), "hi")
-        XCTAssertNil(resolver.osc8AnchorText(row: 0, col: 5),
-                     "cell with no link id must return nil")
+        // P2-01: cells with no link id now return "" (was nil) so the
+        // divergence detector sees a defined "no claim of identity" and
+        // short-circuits.
+        XCTAssertEqual(
+            resolver.osc8AnchorText(row: 0, col: 5),
+            "",
+            "cell with no link id must return empty string"
+        )
     }
 
     func testCmdClickBlocksJavascriptOsc8() throws {
