@@ -334,6 +334,40 @@ public final class TerminalSession: ObservableObject {
         pty?.foregroundWorkingDirectory()
     }
 
+    /// Classify the foreground process tree for the OSC 7 ingest gate.
+    /// `.local` → trust shell-reported cwd. `.remote` / `.unknown` →
+    /// drop the OSC 7 payload (audit synthesis #4 / KNOWN_ISSUES "OSC 7
+    /// trust over SSH").
+    ///
+    /// Production sessions always have a non-nil `pty`, so the fail-
+    /// closed posture is enforced through `PTY.classifyForegroundNamespace()`
+    /// which returns `.unknown` on syscall failure / BFS cap. Headless
+    /// test sessions (`makeHeadlessForTests` — `pty == nil`) default to
+    /// `.local` to preserve the historical "OSC 7 just lands in tests"
+    /// ergonomics; tests that exercise the gate explicitly set
+    /// `_testForegroundNamespaceOverride`.
+    public func classifyForegroundNamespace() -> PTY.ForegroundNamespace {
+        #if DEBUG
+        if let override = _testForegroundNamespaceOverride {
+            return override
+        }
+        #endif
+        // Headless fallback intentionally `.local`, not `.unknown`. See
+        // doc comment — production code paths always have a pty.
+        return pty?.classifyForegroundNamespace() ?? .local
+    }
+
+    #if DEBUG
+    /// Test-only override for `classifyForegroundNamespace()`. The real
+    /// implementation walks `proc_listpids` from `tcgetpgrp(masterFD)`,
+    /// which a headless test session (`makeHeadlessForTests` — `pty == nil`)
+    /// can't drive without forking ssh. Setting this to a specific case
+    /// lets tests simulate `.local`, `.remote(...)`, or `.unknown(...)`
+    /// without spawning a real foreground child. Cleared with `nil` to
+    /// fall back to the real path. Mirrors `_testForegroundChildOverride`.
+    var _testForegroundNamespaceOverride: PTY.ForegroundNamespace?
+    #endif
+
     /// Send a POSIX signal directly to the terminal's foreground process group.
     /// More reliable than writing 0x03 for SIGINT because it bypasses the
     /// line discipline — works even if the shell changed termios (ISIG off,
@@ -819,7 +853,25 @@ public final class TerminalSession: ObservableObject {
                     // UTF-8; the payload is a ready-to-use filesystem path.
                     // Store on the main thread so reads from ⌘T / ⌘N stay
                     // trivially race-free (those actions also run on main).
-                    self.lastKnownCwd = path
+                    //
+                    // SSH-trust gate (audit synthesis #4 / KNOWN_ISSUES
+                    // "OSC 7 trust over SSH"): trust the shell-reported
+                    // cwd ONLY when the foreground process tree
+                    // classifies as `.local`. A `.remote` (ssh, mosh-
+                    // client, docker exec, kubectl exec, …) means the
+                    // path describes the remote fs; `.unknown` means we
+                    // failed to classify (PTY closing, syscall error,
+                    // BFS cap hit). Both cases drop the OSC 7 payload
+                    // — fail-closed posture, opposite of the advisory
+                    // `hasForegroundChild` / `foregroundWorkingDirectory`
+                    // helpers.
+                    //
+                    // Cost: one syscall to read fg pgroup + at most ~256
+                    // node BFS (capped). Per `cd` only; well under the
+                    // frame budget on main.
+                    if case .local = self.classifyForegroundNamespace() {
+                        self.lastKnownCwd = path
+                    }
                 case .promptMark(let kind, let exitCode):
                     // Shell integration: A = prompt start, B = command start,
                     // C = output start, D = command end (with exit code).

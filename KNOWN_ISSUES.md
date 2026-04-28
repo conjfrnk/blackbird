@@ -43,21 +43,15 @@ The scrollback URL detector matches `http(s)://` and `ftp://` only. `mailto:` is
 
 If you actually want to open a local path, drag the file into the terminal or use `open path/to/file` in the shell.
 
-## OSC 7 trust over SSH (audit synthesis #4)
+## OSC 7 trust over SSH — shipped 2026-04-28
 
-**Symptom:** When the user SSHs from Blackbird to a remote host and the remote shell emits `OSC 7;file:///root/.ssh`, Blackbird's titlebar proxy icon and the "Open in Finder" affordance follow that path against the LOCAL filesystem. A click opens the local user's `.ssh` directory instead of (correctly) ignoring an OSC 7 the local cwd hasn't actually changed to.
+The Swift-side process-tree gate landed. `PTY.classifyForegroundNamespace()` does a BFS from `tcgetpgrp(masterFD)` via `proc_listpids(PROC_PPID_ONLY)`, checking each pid's `proc_pidpath` basename against `{ssh, slogin, mosh-client, telnet, docker, podman, nerdctl, kubectl, lima}`. The gate returns one of three states — `.local`, `.remote(basename, pid)`, or `.unknown(reason)` — and `TerminalSession` trusts the OSC 7 payload **only when the result is `.local`**. Both `.remote` and `.unknown` (PTY closed, syscall failure, BFS cap hit) drop the update and leave `lastKnownCwd` at its previous trusted value.
 
-**Root cause:** The Rust core (`core/src/lib.rs::handle_osc7`) sees only the byte stream — it cannot distinguish "this OSC 7 came from my local zsh" from "this OSC 7 came from a remote shell I'm SSH'd into via a local zsh". From the terminal's perspective every byte is local.
+Fail-closed posture is deliberate: a `Bool` return would have collapsed "definitely local" with "couldn't tell" and silently let attacker-controlled OSC 7 through on syscall failure. That's the opposite of the security stance the gate is meant to take, even though the sibling helpers `hasForegroundChild()` / `foregroundWorkingDirectory()` are advisory and fail-open.
 
-**Why it's deferred:** The fix belongs in Swift's `CwdResolver`, not the parser. The right approach walks `proc_pidinfo` for the PTY foreground process and distrusts OSC 7 while any descendant's `argv[0]` matches `ssh`/`mosh-client`. A pure Rust-side heuristic ("watch for `ssh ` at line start") was considered and rejected as leaky — it misses `ssh foo cat /`, redirected variants, aliases, and gives false confidence.
+Defense-in-depth complement to the input validation already in `handle_osc7` (audit synthesis #13: `..` segments, non-absolute paths, NUL bytes, non-UTF-8 — all dropped silently in core). Tests in `Tests/BlackbirdTests/CwdTests.swift`: gate fires on `.remote`, gate fires on `.unknown`, gate clears resumes updates, headless session defaults to `.unknown`, BFS-on-self returns `.local`, and a positive-control test that spawns a fake binary named `ssh` and asserts the BFS finds it.
 
-**Mitigations already in core (audit synthesis #13, shipped 2026-04-27):**
-- `..` segments (raw or percent-encoded `%2e%2e`) drop the OSC 7 silently
-- Non-absolute paths drop the OSC 7 silently
-- Embedded NUL bytes drop the OSC 7 silently
-- Non-UTF-8 percent-decoded paths drop the OSC 7 silently
-
-**Status: deferred.** Tracked as a TODO in `handle_osc7`. The proper Swift-side process-tree gate is a separate followup.
+Limitation kept: a remote shell running inside a multiplexer (tmux/screen) on the local host evades the gate, because the multiplexer's server detaches from the original PTY and `proc_listpids` from the terminal can't see across the boundary. Multiplexers also don't generally proxy OSC 7 across, so the practical exposure is low.
 
 ## v0.1.9 hardening-sweep deferrals (2026-04-24)
 
@@ -72,8 +66,8 @@ A multi-agent review + blind-test pass surfaced 67 unique findings. The critical
 - **`MainThreadWatchdog` modernisation** (F-S6-004). Uses deprecated `Process.launchPath`; swap to `executableURL` + handle macOS 13+ hardened-runtime rules.
 - **Sparkle swizzle leak** (F-S7-001). `SparkleAlertOverride.install()` leaks the previous `imp_implementationWithBlock` block on re-call. Track replacement / restorable swizzle.
 - **Preferences schema-downgrade guard** (F-S7-003). Migration silently overwrites a higher on-disk schema version with `currentSchemaVersion`, destroying the breadcrumb that a newer release was ever installed.
-- **publish-update.sh trust-root hardening** (SEC-003 / F-S8-004). Download the DMG from GitHub Releases, then verify `codesign --strict`, `spctl --assess`, `stapler validate`, and a pinned SHA-256 before feeding to `sign_update`.
-- **release.sh `CODESIGN_LOG` swallow + other script discipline** (F-S8-001, F-S8-002, F-S8-005, F-S8-009, F-S8-013, F-S8-025). Three classes of `|| true`-on-git, non-atomic appcast write, and untrapped `mktemp -d` leaks. Tracked in `scripts/tests/` which currently fails 3 of 6 by design as regression guards.
+- **publish-update.sh trust-root hardening — shipped 2026-04-28** (SEC-003 / F-S8-004). The script now runs `codesign --verify --strict`, `spctl --assess --type install`, parses `origin=` for a pinned Team ID (`F2B95Q4CT8`), and `xcrun stapler validate` before signing the DMG into the appcast. Pinned-SHA was dropped from the original deferred description because in a single-developer flow there's no out-of-band trust root for the SHA itself; the codesign+spctl+stapler chain plus Team ID parsed from spctl's origin line is the meaningful trust root. Three new test cases in `scripts/tests/publish_update_test.sh` (spctl reject, wrong-Team-ID origin, stapler reject) regression-guard the verify gate. Drive-by fix bundled in: F-S8-003 version-arg validation (semver regex). The `make-appcast.sh` non-atomic write (F-S8-025) remains deferred — its tripwire test still fails by design.
+- **release.sh `CODESIGN_LOG` swallow + other script discipline** (F-S8-001, F-S8-002, F-S8-005, F-S8-009, F-S8-013, F-S8-025). Three classes of `|| true`-on-git, non-atomic appcast write, and untrapped `mktemp -d` leaks. Tracked in `scripts/tests/` which currently fails 2 of 14 by design as regression guards (down from 3/6 after the SEC-003 + F-S8-003 fixes landed).
 - **Blind test flakiness in cumulative ASan run** (internal). `PTYLifetimeRaceTests` and a few sibling tests pass in isolation but trigger ASan cumulative-allocation aborts when the full suite runs in one xctest process. Gated behind `BB_RUN_FLAKY_PTY_TESTS=1` until we understand whether the cause is our code or the xctest runner's ASan accounting.
 
 Full triage ledger in `docs/superpowers/reviews/v0.1.9-sweep/triage.md` (gitignored, local-only).

@@ -37,6 +37,22 @@ RAW_VERSION="$1"
 VERSION="${RAW_VERSION#v}"
 TAG="v${VERSION}"
 
+# Apple Developer Team ID. Public — embedded in every signed binary
+# Apple ships, visible via `codesign -dv` on any DMG. Pinning here means
+# a malicious DMG signed by a *different* team (e.g. a stolen-creds
+# scenario where someone notarizes under their own account) fails the
+# verification chain even though `spctl --assess` would otherwise mark
+# it "Notarized Developer ID". Audit SEC-003 / F-S8-004.
+TEAM_ID="F2B95Q4CT8"
+
+# Validate version arg shape before doing anything network-bound. Same
+# semver pattern cut-release.sh uses; F-S8-003 regression-guard caught
+# the inconsistency.
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+    echo "!! version '$VERSION' is not a valid semver (X.Y.Z[-pre])" >&2
+    exit 2
+fi
+
 echo "==> Verifying release $TAG exists on GitHub with an attached DMG"
 if ! gh release view "$TAG" >/dev/null 2>&1; then
     echo "!! No GH release found for $TAG. Has CI finished?" >&2
@@ -67,6 +83,79 @@ if [[ ! -s "$DMG_PATH" ]]; then
     exit 1
 fi
 echo "    $(shasum -a 256 "$DMG_PATH" | awk '{print $1}')  $(wc -c <"$DMG_PATH") bytes"
+
+# ---------------------------------------------------------------------------
+# Trust-root verification (audit SEC-003 / F-S8-004).
+#
+# Before signing the DMG into the appcast (which is the moment a malicious
+# replacement would propagate to every existing install via Sparkle), assert:
+#   1. spctl Gatekeeper assessment passes — Apple's authoritative verdict
+#      that this DMG is notarized, the embedded .app is signed, and
+#      Gatekeeper would launch it.
+#   2. spctl's `source=` is `Notarized Developer ID` (rules out
+#      unsigned-but-locally-trusted, e.g. dev-signed DMGs that happen to
+#      pass `--type install` on the developer's own machine).
+#   3. The Team ID in spctl's `origin=` line matches our pinned $TEAM_ID
+#      (catches a different-team-signed DMG even if Apple notarized it).
+#   4. The notarization ticket is stapled (so first-launch works without
+#      Apple's notary servers being reachable for the user).
+#
+# `codesign --verify` on the bare DMG was considered and dropped: an
+# unsigned DMG passes `codesign --verify` silently (it finds no
+# signature, returns 0), so it provides no defense. spctl's check
+# internally validates the embedded .app's signature via the same
+# machinery codesign would use, but with the actual notarization gate
+# applied — strictly stronger.
+#
+# Each check captures stdout+stderr so failure messages are attributable.
+# Any failure aborts before sign_update touches the EdDSA key.
+# ---------------------------------------------------------------------------
+
+verify_dmg() {
+    local dmg="$1"
+    local out
+
+    if ! out="$(spctl --assess --type install --verbose=2 "$dmg" 2>&1)"; then
+        printf '!! spctl --assess rejected DMG %s:\n' "$dmg" >&2
+        printf '%s\n' "$out" | sed 's/^/   | /' >&2
+        exit 1
+    fi
+
+    # Sanity-check the spctl format before grepping for specific values.
+    # Apple has reorganized spctl output across macOS releases; if the
+    # `source=` / `origin=` anchors are missing entirely, something
+    # deeper has changed and operator should verify manually rather
+    # than trust a "Team ID mismatch" diagnostic that's actually a
+    # tooling-format issue.
+    if ! grep -qE '^source=' <<<"$out" || ! grep -qE '^origin=' <<<"$out"; then
+        printf '!! spctl output missing source=/origin= anchors — format may have changed:\n' >&2
+        printf '%s\n' "$out" | sed 's/^/   | /' >&2
+        printf '!! verify the DMG manually (codesign -dv, stapler validate) before retrying.\n' >&2
+        exit 1
+    fi
+
+    if ! grep -qE '^source=Notarized Developer ID' <<<"$out"; then
+        printf '!! DMG is not notarized (source= line):\n' >&2
+        printf '%s\n' "$out" | sed 's/^/   | /' >&2
+        exit 1
+    fi
+    if ! grep -qE "^origin=Developer ID Application:.*\\(${TEAM_ID}\\)" <<<"$out"; then
+        printf '!! Team ID mismatch (expected %s) in spctl origin:\n' "$TEAM_ID" >&2
+        printf '%s\n' "$out" | sed 's/^/   | /' >&2
+        exit 1
+    fi
+
+    if ! out="$(xcrun stapler validate "$dmg" 2>&1)"; then
+        printf '!! stapler validate failed for %s:\n' "$dmg" >&2
+        printf '%s\n' "$out" | sed 's/^/   | /' >&2
+        exit 1
+    fi
+
+    echo "    DMG verified: notarized, Team ID ${TEAM_ID}, stapled."
+}
+
+echo "==> Verifying DMG signature, notarization, and Team ID"
+verify_dmg "$DMG_PATH"
 
 echo "==> Signing + regenerating website/appcast.xml"
 APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}" \

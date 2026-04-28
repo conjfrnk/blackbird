@@ -687,6 +687,176 @@ public final class PTY {
         }
     }
 
+    /// Basenames of binaries that, when present in the PTY's foreground
+    /// process tree, mean "the user is looking at a different filesystem
+    /// namespace right now." A shell running on the other side of any of
+    /// these wrappers can still emit OSC 7 — but the path it reports
+    /// doesn't exist on our local fs, so dereferencing it (titlebar proxy
+    /// icon, "Open in Finder", new-tab cwd inheritance) is a security
+    /// hazard. KNOWN_ISSUES.md "OSC 7 trust over SSH" / audit synthesis #4.
+    ///
+    /// Conservative set — `scp` / `rsync` / `git` are intentionally
+    /// excluded because they don't run an interactive shell that can
+    /// emit OSC 7. False positives (gate fires when the user *isn't*
+    /// remote) are merely a correctness regression — `lastKnownCwd`
+    /// stays at its last trusted value. False negatives (gate misses an
+    /// actual remote shell) are the security risk we're guarding
+    /// against, so when in doubt, add to the set.
+    private static let remoteShellBinaryBasenames: Set<String> = [
+        "ssh", "slogin", "mosh-client", "telnet",
+        "docker", "podman", "nerdctl", "kubectl", "lima",
+    ]
+
+    #if DEBUG
+    /// Test-only read-only view of the set. Lets a unit test pin the
+    /// canonical wrappers without exposing a mutable knob to production.
+    static var remoteShellBinaryBasenamesForTests: Set<String> {
+        remoteShellBinaryBasenames
+    }
+    #endif
+
+    /// Verdict from the foreground process-tree walk. Three states —
+    /// `Bool` would conflate "definitely local" with "couldn't tell" and
+    /// the security gate's posture differs sharply between them. Forced
+    /// destructuring at the call site keeps the fail-closed posture
+    /// honest: callers must explicitly decide what to do with `.unknown`,
+    /// not silently trip into the `false` branch.
+    public enum ForegroundNamespace: Equatable {
+        /// Walk completed and found no remote-shell binary in the tree.
+        case local
+        /// Walk found a binary in `remoteShellBinaryBasenames` — the
+        /// user is SSH'd / inside `docker exec` / etc. The associated
+        /// values let a future caller (titlebar "remote" indicator)
+        /// avoid re-walking.
+        case remote(basename: String, pid: pid_t)
+        /// Walk could not complete: PTY not running, `tcgetpgrp ≤ 0`,
+        /// `proc_listpids` failure, BFS cap hit. The OSC 7 gate treats
+        /// this as remote (fail-closed).
+        case unknown(reason: String)
+    }
+
+    /// Classify the PTY's foreground process tree. The OSC 7 ingest gate
+    /// in `TerminalSession` trusts the shell-reported cwd ONLY when the
+    /// result is `.local`; both `.remote` and `.unknown` cause the
+    /// payload to be dropped. KNOWN_ISSUES.md "OSC 7 trust over SSH" /
+    /// audit synthesis #4.
+    ///
+    /// Walks via BFS rooted at the foreground pgroup leader. Each node:
+    ///   - basename(`proc_pidpath(pid)`) → check membership
+    ///   - children = `proc_listpids(PROC_PPID_ONLY, pid, ...)`
+    /// Bounded: a deep tree is capped at 256 nodes to keep this from
+    /// becoming a slow path. OSC 7 fires at most once per shell `cd`,
+    /// so total cost is a handful of syscalls per `cd` — well below the
+    /// frame budget even on the main queue (the OSC event sink runs
+    /// there). Audit synthesis #4.
+    ///
+    /// On any error the function returns `.unknown` rather than
+    /// silently trusting the shell — opposite of `hasForegroundChild` /
+    /// `foregroundWorkingDirectory` which fail-open because they're
+    /// advisory UI features, not security gates.
+    public func classifyForegroundNamespace() -> ForegroundNamespace {
+        // F-S5-001: serialise the masterFD read against the read-loop's
+        // close, same as `hasForegroundChild` / `foregroundWorkingDirectory`.
+        let rootPID: pid_t? = stateQueue.sync {
+            guard _isRunning else { return nil }
+            let fg = tcgetpgrp(masterFD)
+            return fg > 0 ? fg : nil
+        }
+        guard let root = rootPID else {
+            return .unknown(reason: "PTY not running or tcgetpgrp ≤ 0")
+        }
+        return Self.classifyProcessTree(rootPID: root)
+    }
+
+    /// Hoisted out as a static so unit tests covering the BFS itself
+    /// can pin it without driving a real PTY. The public API still goes
+    /// through the masterFD-locked entry point above. Test-only entry
+    /// point — production callers must use `classifyForegroundNamespace()`
+    /// so the masterFD lifecycle gate fires.
+    static func classifyProcessTree(rootPID: pid_t) -> ForegroundNamespace {
+        // BFS through the process tree. `seen` guards against cycles —
+        // shouldn't happen in a well-formed UNIX process graph, but a
+        // bug in `proc_listpids` returning stale data could otherwise
+        // loop us. Cap traversal at 256 nodes; on overflow we treat the
+        // result as `.unknown` (fail-closed) rather than silently
+        // returning `.local`.
+        var queue: [pid_t] = [rootPID]
+        var seen: Set<pid_t> = [rootPID]
+        var examined = 0
+        let cap = 256
+
+        while let pid = queue.popLast() {
+            examined += 1
+            if examined > cap {
+                Self.logger.warning("classifyProcessTree: BFS hit cap=\(cap, privacy: .public) at pid=\(pid, privacy: .public); returning .unknown (fail-closed)")
+                return .unknown(reason: "BFS cap (\(cap)) exceeded")
+            }
+            if let basename = Self.executableBasename(pid: pid),
+               Self.remoteShellBinaryBasenames.contains(basename) {
+                return .remote(basename: basename, pid: pid)
+            }
+            for child in Self.childPIDs(parent: pid) where !seen.contains(child) {
+                seen.insert(child)
+                queue.append(child)
+            }
+        }
+        return .local
+    }
+
+    /// `proc_pidpath` → last path component. Returns nil if the pid is
+    /// gone or the syscall fails.
+    ///
+    /// Buffer is sized to `4 * MAXPATHLEN` per `<sys/proc_info.h>`'s
+    /// `PROC_PIDPATHINFO_MAXSIZE` (that constant lives in an internal
+    /// header not surfaced through `Darwin`, so we compute the same
+    /// value inline). Apple uses 4× headroom because exec'd binaries
+    /// can have long paths after symlink resolution.
+    private static func executableBasename(pid: pid_t) -> String? {
+        let bufSize = 4 * Int(MAXPATHLEN)
+        var buf = [CChar](repeating: 0, count: bufSize)
+        let n = proc_pidpath(pid, &buf, UInt32(bufSize))
+        guard n > 0 else { return nil }
+        let path = String(cString: buf)
+        guard !path.isEmpty else { return nil }
+        return (path as NSString).lastPathComponent
+    }
+
+    /// Children of `parent` via `proc_listpids(PROC_PPID_ONLY, ...)`.
+    /// Two-call pattern: probe size first, then fill.
+    ///
+    /// TOCTOU note: between probe and fill, `parent` may gain new
+    /// children. The fill call is bounded by the byte length we pass
+    /// (`buf.count * stride`), so the kernel truncates rather than
+    /// overflows — `prefix(cap)` clamps the resulting slice. Truncation
+    /// causes us to miss new children, which is a fail-closed outcome
+    /// at the BFS level (we don't see the new branch, but the BFS still
+    /// completes; the caller's `.local` result for a fork-bombing
+    /// process is suspect, but the gate caller treats `.local` as the
+    /// "trusted" verdict only — a missed remote-binary descendant in a
+    /// fork-bombing tree is the exact case where the gate's BFS cap
+    /// also fires and forces `.unknown`.
+    ///
+    /// Returns an empty array on syscall failure (which is
+    /// indistinguishable from "no children"). Callers reaching this
+    /// path with a parent they expected to have children should treat
+    /// the whole walk as suspect.
+    private static func childPIDs(parent: pid_t) -> [pid_t] {
+        let probe = proc_listpids(UInt32(PROC_PPID_ONLY), UInt32(parent), nil, 0)
+        guard probe > 0 else { return [] }
+        let cap = Int(probe) / MemoryLayout<pid_t>.stride
+        guard cap > 0 else { return [] }
+        var pids = [pid_t](repeating: 0, count: cap)
+        let written = pids.withUnsafeMutableBufferPointer { buf -> Int32 in
+            proc_listpids(UInt32(PROC_PPID_ONLY), UInt32(parent), buf.baseAddress, Int32(buf.count * MemoryLayout<pid_t>.stride))
+        }
+        guard written > 0 else { return [] }
+        // Clamp to the buffer we allocated; the syscall is byte-bounded
+        // by the size we passed, so `count` cannot exceed `cap` in
+        // practice — but `prefix(cap)` makes that invariant local.
+        let count = min(Int(written) / MemoryLayout<pid_t>.stride, cap)
+        return Array(pids.prefix(count)).filter { $0 > 0 }
+    }
+
     /// Send a signal directly to the foreground process group of the terminal.
     /// For SIGINT (Ctrl+C) this is more reliable than writing 0x03 to the
     /// master fd, because the shell may have turned off ISIG or changed VINTR

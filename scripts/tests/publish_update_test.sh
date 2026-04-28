@@ -66,6 +66,40 @@ exit 0
 STUB
     chmod +x "$root/website/deploy.sh"
 
+    # codesign / spctl / xcrun stubs — pass by default so the new
+    # verify_dmg block (audit SEC-003) doesn't false-fail every test.
+    # Individual cases override these to simulate rejection.
+    cat >"$root/stub-bin/codesign" <<'STUB'
+#!/usr/bin/env bash
+# Default-pass stub. Mimics `codesign --verify --strict --verbose=2`.
+exit 0
+STUB
+    chmod +x "$root/stub-bin/codesign"
+
+    cat >"$root/stub-bin/spctl" <<'STUB'
+#!/usr/bin/env bash
+# Default-pass stub. Emits the `source=` and `origin=` lines
+# publish-update.sh greps for. Team ID matches the pinned F2B95Q4CT8.
+cat <<'EOF'
+/path/to/Blackbird.dmg: accepted
+source=Notarized Developer ID
+origin=Developer ID Application: Connor Frank (F2B95Q4CT8)
+EOF
+exit 0
+STUB
+    chmod +x "$root/stub-bin/spctl"
+
+    cat >"$root/stub-bin/xcrun" <<'STUB'
+#!/usr/bin/env bash
+# Default-pass stub for `xcrun stapler validate`.
+if [[ "${1:-}" == "stapler" && "${2:-}" == "validate" ]]; then
+    echo "stub xcrun: stapler validate ok"
+    exit 0
+fi
+exit 0
+STUB
+    chmod +x "$root/stub-bin/xcrun"
+
     # gh stub — claim the release exists with the expected DMG.
     cat >"$root/stub-bin/gh" <<STUB
 #!/usr/bin/env bash
@@ -320,8 +354,224 @@ STUB
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# CASE 4 — SEC-003 / F-S8-004: spctl rejects DMG → publish aborts before
+# signing it into the appcast. The whole point of the verify chain is to
+# stop here, before sign_update / make-appcast touches the EdDSA key.
+# ---------------------------------------------------------------------------
+
+case_verify_spctl_reject() {
+    local tmp; tmp="$(mk_tmp bb-pub-4)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+
+    # Replace spctl with a rejecting stub.
+    cat >"$tmp/stub-bin/spctl" <<'STUB'
+#!/usr/bin/env bash
+echo "/path/to/Blackbird.dmg: rejected" >&2
+echo "source=no usable signature" >&2
+exit 3
+STUB
+    chmod +x "$tmp/stub-bin/spctl"
+
+    # Tripwire: replace make-appcast.sh with a guard that aborts the
+    # whole test if the script reached the signing stage despite spctl
+    # rejecting. The verify gate must short-circuit before this fires.
+    cat >"$tmp/scripts/make-appcast.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "TRIPWIRE: make-appcast ran despite spctl reject" >&2
+exit 0
+STUB
+    chmod +x "$tmp/scripts/make-appcast.sh"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "publish-update.sh aborts on spctl reject (rc=$rc)"
+    else
+        fail "SEC-003: publish-update.sh exited 0 despite spctl reject"
+    fi
+
+    if grep -q "TRIPWIRE: make-appcast ran" "$log"; then
+        fail "SEC-003: make-appcast.sh ran after spctl rejected DMG"
+    else
+        pass "SEC-003: signing did NOT run after spctl rejected DMG"
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 5 — SEC-003: spctl reports a DIFFERENT Team ID in origin=.
+# Notarization passes (source=Notarized Developer ID) but the DMG was
+# signed by some other Apple Developer account. The Team ID pin must
+# catch this.
+# ---------------------------------------------------------------------------
+
+case_verify_wrong_team_id() {
+    local tmp; tmp="$(mk_tmp bb-pub-5)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+
+    # spctl stub that "accepts" but reports a different team.
+    cat >"$tmp/stub-bin/spctl" <<'STUB'
+#!/usr/bin/env bash
+cat <<'EOF'
+/path/to/Blackbird.dmg: accepted
+source=Notarized Developer ID
+origin=Developer ID Application: Bad Actor (XXXXXXXXXX)
+EOF
+exit 0
+STUB
+    chmod +x "$tmp/stub-bin/spctl"
+
+    cat >"$tmp/scripts/make-appcast.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "TRIPWIRE: make-appcast ran despite wrong Team ID" >&2
+exit 0
+STUB
+    chmod +x "$tmp/scripts/make-appcast.sh"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "publish-update.sh aborts on wrong Team ID (rc=$rc)"
+    else
+        fail "SEC-003: publish-update.sh accepted DMG signed by wrong team"
+    fi
+
+    if grep -q "TRIPWIRE: make-appcast ran" "$log"; then
+        fail "SEC-003: make-appcast.sh ran with wrong-Team-ID DMG"
+    else
+        pass "SEC-003: signing did NOT run with wrong-Team-ID DMG"
+    fi
+
+    # Diagnostic should mention the expected team for operator
+    # debugging — without this an operator hits a verify failure with
+    # no clue what Team ID was wrong.
+    if grep -q "F2B95Q4CT8" "$log"; then
+        pass "diagnostic mentions the expected Team ID"
+    else
+        fail "diagnostic should mention expected Team ID for debugging"
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 6 — SEC-003: stapler validate fails. spctl is happy but the
+# notarization ticket isn't actually stapled (a corruption-after-
+# notarization scenario). Must abort before signing.
+# ---------------------------------------------------------------------------
+
+case_verify_stapler_reject() {
+    local tmp; tmp="$(mk_tmp bb-pub-6)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+
+    cat >"$tmp/stub-bin/xcrun" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "stapler" && "${2:-}" == "validate" ]]; then
+    echo "Processing: /path/to/Blackbird.dmg" >&2
+    echo "Could not validate ticket. CloudKit response error" >&2
+    exit 65
+fi
+exit 0
+STUB
+    chmod +x "$tmp/stub-bin/xcrun"
+
+    cat >"$tmp/scripts/make-appcast.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "TRIPWIRE: make-appcast ran despite stapler reject" >&2
+exit 0
+STUB
+    chmod +x "$tmp/scripts/make-appcast.sh"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "publish-update.sh aborts on stapler failure (rc=$rc)"
+    else
+        fail "SEC-003: publish-update.sh exited 0 despite stapler failure"
+    fi
+
+    if grep -q "TRIPWIRE: make-appcast ran" "$log"; then
+        fail "SEC-003: make-appcast.sh ran after stapler rejected DMG"
+    else
+        pass "SEC-003: signing did NOT run after stapler rejected DMG"
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 7 — SEC-003: spctl output is missing source=/origin= anchors
+# entirely. This means Apple changed the spctl format. Operator must
+# get a clear "format changed, verify manually" message rather than a
+# misleading "Team ID mismatch."
+# ---------------------------------------------------------------------------
+
+case_verify_format_change() {
+    local tmp; tmp="$(mk_tmp bb-pub-7)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+
+    cat >"$tmp/stub-bin/spctl" <<'STUB'
+#!/usr/bin/env bash
+# Simulate a future spctl that drops source=/origin= for some new format.
+echo "/path/to/Blackbird.dmg: accepted"
+echo "verdict: legitimate"
+echo "team: F2B95Q4CT8"
+exit 0
+STUB
+    chmod +x "$tmp/stub-bin/spctl"
+
+    cat >"$tmp/scripts/make-appcast.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "TRIPWIRE: make-appcast ran despite format change" >&2
+exit 0
+STUB
+    chmod +x "$tmp/scripts/make-appcast.sh"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "publish-update.sh aborts on missing spctl anchors (rc=$rc)"
+    else
+        fail "SEC-003: publish-update.sh accepted spctl with no anchors"
+    fi
+
+    if grep -q "TRIPWIRE: make-appcast ran" "$log"; then
+        fail "SEC-003: signing ran despite missing spctl anchors"
+    else
+        pass "SEC-003: signing did NOT run with missing spctl anchors"
+    fi
+
+    # Diagnostic should clearly say the format may have changed —
+    # operator should not be sent on a wild Team ID chase.
+    if grep -q "format may have changed" "$log"; then
+        pass "diagnostic distinguishes format-change from Team ID mismatch"
+    else
+        fail "diagnostic should mention format change, not just bare Team ID error"
+    fi
+
+    rm -f "$log"
+}
+
 case_atomic_appcast
 case_arg_validation
 case_push_then_deploy
+case_verify_spctl_reject
+case_verify_wrong_team_id
+case_verify_stapler_reject
+case_verify_format_change
 
 test_end

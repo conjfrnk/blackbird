@@ -905,16 +905,12 @@ impl OscScanner<'_> {
                 _ => {}
             }
         }
-        // Audit synthesis #4 (SSH-trust gap): when the user is SSH'd to a
-        // remote host, the remote shell can emit OSC 7 and Blackbird's
-        // titlebar proxy icon will then point at the LOCAL filesystem
-        // path with the same name. Click → Finder opens the local path.
-        // The terminal core can't see the foreground process tree, so a
-        // proper fix is a Swift-side `CwdResolver` check that walks the
-        // PTY foreground process for an `ssh`/`mosh-client` child and
-        // distrusts OSC 7 while one is alive. Tracked as deferred work in
-        // KNOWN_ISSUES.md ("OSC 7 trust over SSH").
-        // TODO(audit synthesis #4): wire CwdResolver SSH-trust gate.
+        // Audit synthesis #4 (SSH-trust): the gate lives on the Swift
+        // side because the Rust core can't see the foreground process
+        // tree. `TerminalSession` walks `proc_listpids(PROC_PPID_ONLY)`
+        // from the fg pgroup and drops `.cwdChanged` events at ingest
+        // when the tree contains an `ssh`/`mosh-client`/`docker`/etc
+        // binary. Shipped 2026-04-28; this site stays validation-only.
 
         let ev = BBEvent {
             kind: BBEventKind::CwdChanged,

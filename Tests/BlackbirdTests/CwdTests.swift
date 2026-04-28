@@ -124,4 +124,144 @@ final class CwdTests: XCTestCase {
         cancellable.cancel()
         XCTAssertEqual(s.lastKnownCwd, "/Users/foo/proj")
     }
+
+    // MARK: - SSH-trust gate (audit synthesis #4 / KNOWN_ISSUES "OSC 7 trust over SSH")
+
+    /// Gate fires when foreground namespace is `.remote(...)` → OSC 7
+    /// payload is dropped, `lastKnownCwd` keeps its previous value.
+    /// Simulates `ssh remote` being live: the shell on the other side
+    /// emits `OSC 7;file:///root/.ssh`, which on the local fs is
+    /// `/Users/<me>/.ssh` — the attack documented in KNOWN_ISSUES.md.
+    func testOscCwdDroppedWhenForegroundIsRemote() {
+        let s = TerminalSession.makeHeadlessForTests()
+        // Seed a known-good local cwd, simulating "user was at this
+        // path before they ran `ssh`".
+        s._testForegroundNamespaceOverride = .local
+        let trustedLocal = "/Users/foo/local-project"
+        let exp = expectation(description: "trusted cwd lands")
+        let cancellable = s.$lastKnownCwd.dropFirst().sink { value in
+            if value != nil { exp.fulfill() }
+        }
+        s.feedBytesForTests(Data("\u{1b}]7;file://\(trustedLocal)\u{1b}\\".utf8))
+        wait(for: [exp], timeout: 1.0)
+        cancellable.cancel()
+        XCTAssertEqual(s.lastKnownCwd, trustedLocal)
+
+        // Now simulate ssh being live and a remote OSC 7 arriving.
+        s._testForegroundNamespaceOverride = .remote(basename: "ssh", pid: 99999)
+        s.feedBytesForTests(Data("\u{1b}]7;file:///root/.ssh\u{1b}\\".utf8))
+        // Pump the runloop briefly — a missed gate would visibly flip
+        // lastKnownCwd from the trusted value to /root/.ssh.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(
+            s.lastKnownCwd, trustedLocal,
+            "OSC 7 from a remote shell must not overwrite the local cwd"
+        )
+        s._testForegroundNamespaceOverride = nil
+    }
+
+    /// Fail-closed: `.unknown` (couldn't classify the tree) is treated
+    /// like `.remote`, NOT like `.local`. A syscall failure or BFS cap
+    /// hit must not silently let a remote OSC 7 through.
+    func testOscCwdDroppedWhenForegroundIsUnknown() {
+        let s = TerminalSession.makeHeadlessForTests()
+        s._testForegroundNamespaceOverride = .unknown(reason: "test")
+        s.feedBytesForTests(Data("\u{1b}]7;file:///some/path\u{1b}\\".utf8))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertNil(
+            s.lastKnownCwd,
+            ".unknown classification must fail-closed (drop OSC 7), not pass through"
+        )
+        s._testForegroundNamespaceOverride = nil
+    }
+
+    /// Gate clears (user ran `exit` from ssh) → subsequent OSC 7 lands
+    /// normally. The gate is consulted per-event, not latched.
+    func testOscCwdResumesAfterRemoteExits() {
+        let s = TerminalSession.makeHeadlessForTests()
+        s._testForegroundNamespaceOverride = .remote(basename: "ssh", pid: 99999)
+        s.feedBytesForTests(Data("\u{1b}]7;file:///remote/hidden\u{1b}\\".utf8))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertNil(s.lastKnownCwd, "remote OSC 7 must not seed lastKnownCwd")
+
+        // ssh exits — namespace returns to .local.
+        s._testForegroundNamespaceOverride = .local
+        let exp = expectation(description: "local cwd lands after ssh exit")
+        let cancellable = s.$lastKnownCwd.dropFirst().sink { value in
+            if value != nil { exp.fulfill() }
+        }
+        s.feedBytesForTests(Data("\u{1b}]7;file:///Users/foo/back-home\u{1b}\\".utf8))
+        wait(for: [exp], timeout: 1.0)
+        cancellable.cancel()
+        XCTAssertEqual(s.lastKnownCwd, "/Users/foo/back-home")
+        s._testForegroundNamespaceOverride = nil
+    }
+
+    /// Headless session has no PTY → classification defaults to
+    /// `.local` so existing OSC 7 tests (which don't set an override)
+    /// keep working. The fail-closed posture for production is enforced
+    /// inside `PTY.classifyForegroundNamespace()`, which returns
+    /// `.unknown` on tcgetpgrp/proc_listpids failure — production
+    /// sessions always have `pty != nil` so they go through that path.
+    func testHeadlessSessionDefaultsToLocal() {
+        let s = TerminalSession.makeHeadlessForTests()
+        if case .local = s.classifyForegroundNamespace() {
+            // ok — headless ergonomic default
+        } else {
+            XCTFail(
+                "Headless session should default to .local for test ergonomics; got \(s.classifyForegroundNamespace())"
+            )
+        }
+    }
+
+    /// Negative control: walking from this xctest process — which has
+    /// no `ssh` / `mosh-client` / `docker` etc in its tree — returns
+    /// `.local`. Pinned with the BFS-on-self check.
+    func testClassifyProcessTreeOnSelfReturnsLocal() {
+        let me = getpid()
+        let result = PTY.classifyProcessTree(rootPID: me)
+        switch result {
+        case .local:
+            break  // expected
+        case .remote(let basename, _):
+            XCTFail("xctest tree must not contain remote binary; matched \(basename)")
+        case .unknown(let reason):
+            XCTFail("xctest tree should classify cleanly as .local; got .unknown(\(reason))")
+        }
+    }
+
+    /// Basename-set membership: the remote-binary set contains the
+    /// canonical wrappers we said it would. Without this, a refactor
+    /// that accidentally narrowed the set (e.g., dropped `mosh-client`
+    /// on the assumption it's "covered by ssh") would silently regress
+    /// the gate to mishandle non-ssh remote sessions, and the BFS-on-
+    /// self test would still pass. Pairs with the BFS-walks-correctly
+    /// negative control above to give us positive + negative coverage
+    /// without spawning subprocesses (`proc_pidpath` returns the
+    /// interpreter path for shebang scripts, which would defeat a
+    /// naive script-based positive control). Audit synthesis #4.
+    func testRemoteShellBasenameSetCoversCanonicalWrappers() {
+        // The expected entries — these are the ones the gate's threat
+        // model relies on. A regression that drops any of these is a
+        // security-relevant change and should be loud.
+        let expected = ["ssh", "slogin", "mosh-client", "telnet",
+                        "docker", "podman", "nerdctl", "kubectl", "lima"]
+        for binary in expected {
+            XCTAssertTrue(
+                PTY.remoteShellBinaryBasenamesForTests.contains(binary),
+                "remote-binary set must contain '\(binary)' — required for SSH-trust gate"
+            )
+        }
+        // Negative: the set is conservative, not catch-all. Local
+        // tools that look similar but don't run a remote shell
+        // (`scp`, `rsync`, `git`) must NOT be in the set, otherwise the
+        // gate would over-fire and pin lastKnownCwd unnecessarily
+        // during routine local file ops.
+        for binary in ["zsh", "bash", "scp", "rsync", "git"] {
+            XCTAssertFalse(
+                PTY.remoteShellBinaryBasenamesForTests.contains(binary),
+                "'\(binary)' must NOT be in the remote-binary set — would over-fire the gate"
+            )
+        }
+    }
 }
