@@ -19,6 +19,22 @@ import AppKit
 /// and assert that first responder ends up back on `contentView` —
 /// the production path that pushes keystrokes to `TerminalView`.
 ///
+/// LIMITATION (called out so a future maintainer doesn't assume
+/// these tests are stronger than they are): we invoke
+/// `strip.mouseDown(with:)` directly with a synthesized `NSEvent`,
+/// rather than dispatching through `NSWindow.sendEvent(_:)` which is
+/// what *performs* the auto-promotion in real AppKit. The test
+/// stand-in for AppKit's promotion is the explicit
+/// `host.makeFirstResponder(strip)` line in each test. Going through
+/// the real `sendEvent` pipeline would require a key window with an
+/// event tap; that's costly to set up under xctest and would push
+/// us past the per-test memory budget. Net effect: these tests
+/// cover "given the strip is parked, mouseDown's defer yields
+/// correctly" — the *post-promotion* half. The pure-function tests
+/// already cover that decision exhaustively, so the integration
+/// surface is genuinely the strip-mounting + window-context shape,
+/// not the auto-promote race.
+///
 /// Memory + safety budget (per `feedback_test_memory_safety`):
 ///   - Each test allocates 1 host `NSWindow` (~40 KB resident,
 ///     `defer: true`, no graphics context until first display) plus

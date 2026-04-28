@@ -2,20 +2,24 @@ import XCTest
 import AppKit
 @testable import Blackbird
 
-/// Pins the contract of `shouldRestoreTerminalFocusAfterMouseClick`,
-/// the pure decision used by the titlebar tab strip's `mouseDown`
-/// handler when AppKit auto-promotes the strip (or one of its
-/// non-edit-field subviews) to first responder. With the strip
-/// holding focus, subsequent keystrokes have no terminal-bound
-/// recipient and AppKit rings NSBeep — these tests guard the rules
-/// for when to forcibly hand focus back to the terminal view, and
-/// when to leave the existing first responder alone (notably during
-/// inline-rename so the user's edit isn't silently committed).
+/// Pins the contract of `shouldYieldFirstResponderToTerminal`, the
+/// pure decision used by the titlebar tab strip's `mouseDown` /
+/// `rightMouseDown` defer blocks and `teardownEdit` when AppKit
+/// auto-promotes the strip (or one of its non-protected subviews) to
+/// first responder. With the strip holding focus, subsequent
+/// keystrokes have no terminal-bound recipient and AppKit rings
+/// NSBeep — these tests guard the rules for when to forcibly hand
+/// focus back to the terminal view, and when to leave the existing
+/// first responder alone (notably during inline-rename so the user's
+/// edit isn't silently committed).
 ///
 /// Tests are written blindly against the contract spec. The
 /// implementation file (TitlebarTabBar.swift) was deliberately NOT
-/// read while authoring — this prevents tests that pass for the
-/// wrong reason because they encode the impl rather than the spec.
+/// read while authoring the original tests — this prevents tests that
+/// pass for the wrong reason because they encode the impl rather than
+/// the spec. (The signature was later renamed/generalised after
+/// review feedback; only the call shape was updated, not the
+/// expected outcomes.)
 ///
 /// Memory + safety budget (per `feedback_test_memory_safety`):
 ///   - Each test allocates ≤ 4 plain `NSView` / `NSTextField` /
@@ -32,10 +36,10 @@ final class TabStripMouseFocusYieldTests: XCTestCase {
         let editField = NSTextField()
         strip.addSubview(editField)
         XCTAssertTrue(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: nil,
-                strip: strip,
-                editField: editField
+                claimedBy: strip,
+                preserveDescendantsOf: [editField]
             ),
             "Rule 1: nil first responder must trigger a restore"
         )
@@ -51,10 +55,10 @@ final class TabStripMouseFocusYieldTests: XCTestCase {
         strip.addSubview(editField)
         let bareResponder = NSResponder()
         XCTAssertTrue(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: bareResponder,
-                strip: strip,
-                editField: editField
+                claimedBy: strip,
+                preserveDescendantsOf: [editField]
             ),
             "Rule 2: a non-NSView NSResponder (e.g., the host window) must trigger a restore"
         )
@@ -68,10 +72,10 @@ final class TabStripMouseFocusYieldTests: XCTestCase {
         let editField = NSTextField()
         strip.addSubview(editField)
         XCTAssertFalse(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: editField,
-                strip: strip,
-                editField: editField
+                claimedBy: strip,
+                preserveDescendantsOf: [editField]
             ),
             "Rule 3: must NOT restore when the editField itself is first responder (inline rename in progress)"
         )
@@ -87,10 +91,10 @@ final class TabStripMouseFocusYieldTests: XCTestCase {
         strip.addSubview(editField)
         editField.addSubview(fieldEditor)
         XCTAssertFalse(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: fieldEditor,
-                strip: strip,
-                editField: editField
+                claimedBy: strip,
+                preserveDescendantsOf: [editField]
             ),
             "Rule 4: must NOT restore when first responder is a descendant of the editField (field-editor case)"
         )
@@ -103,10 +107,10 @@ final class TabStripMouseFocusYieldTests: XCTestCase {
         let editField = NSTextField()
         strip.addSubview(editField)
         XCTAssertTrue(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: strip,
-                strip: strip,
-                editField: editField
+                claimedBy: strip,
+                preserveDescendantsOf: [editField]
             ),
             "Rule 5: must restore when the strip itself is first responder (AppKit auto-promotion)"
         )
@@ -122,10 +126,10 @@ final class TabStripMouseFocusYieldTests: XCTestCase {
         strip.addSubview(editField)
         strip.addSubview(otherSubview)
         XCTAssertTrue(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: otherSubview,
-                strip: strip,
-                editField: editField
+                claimedBy: strip,
+                preserveDescendantsOf: [editField]
             ),
             "Rule 6: must restore when first responder is a strip descendant outside the editField subtree"
         )
@@ -141,56 +145,76 @@ final class TabStripMouseFocusYieldTests: XCTestCase {
         strip.addSubview(editField)
         let unrelated = NSView() // e.g., the TerminalView or FindBar field
         XCTAssertFalse(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: unrelated,
-                strip: strip,
-                editField: editField
+                claimedBy: strip,
+                preserveDescendantsOf: [editField]
             ),
             "Rule 7: must NOT restore when first responder is an unrelated view (terminal, find bar, etc.)"
         )
     }
 
-    /// Case 8 — degenerate: editField is nil (no rename in
+    /// Case 8 — degenerate: protectedRoots is empty (no rename in
     /// progress) and the strip itself was promoted. Restore.
-    func test_editFieldNil_currentResponderIsStrip_returnsTrue() {
+    func test_emptyProtectedRoots_currentResponderIsStrip_returnsTrue() {
         let strip = NSView()
         XCTAssertTrue(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: strip,
-                strip: strip,
-                editField: nil
+                claimedBy: strip,
+                preserveDescendantsOf: []
             ),
-            "Rule 8: must restore when editField is nil and strip itself is first responder"
+            "Rule 8: must restore when protectedRoots is empty and strip itself is first responder"
         )
     }
 
-    /// Case 9 — editField is nil and first responder is some
+    /// Case 9 — empty protectedRoots and first responder is some
     /// unrelated view. Leave focus alone.
-    func test_editFieldNil_currentResponderUnrelated_returnsFalse() {
+    func test_emptyProtectedRoots_currentResponderUnrelated_returnsFalse() {
         let strip = NSView()
         let unrelated = NSView()
         XCTAssertFalse(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: unrelated,
-                strip: strip,
-                editField: nil
+                claimedBy: strip,
+                preserveDescendantsOf: []
             ),
-            "Rule 9: must NOT restore when editField is nil and first responder is unrelated"
+            "Rule 9: must NOT restore when protectedRoots is empty and first responder is unrelated"
         )
     }
 
-    /// Case 10 — pathological: editField === strip. Impossible in
-    /// practice, but the spec pins that the editField-protection
-    /// branch fires first, so the answer is FALSE.
-    func test_editFieldSameAsStrip_returnsFalse() {
+    /// Case 10 — pathological: a protected root identical to the
+    /// claimant. Impossible in practice (the strip is never one of
+    /// its own protected roots), but the spec pins that the
+    /// preservation branch fires first, so the answer is FALSE.
+    func test_protectedRootSameAsClaimant_returnsFalse() {
         let strip = NSTextField() // both roles played by the same object
         XCTAssertFalse(
-            shouldRestoreTerminalFocusAfterMouseClick(
+            shouldYieldFirstResponderToTerminal(
                 currentFirstResponder: strip,
-                strip: strip,
-                editField: strip
+                claimedBy: strip,
+                preserveDescendantsOf: [strip]
             ),
-            "Rule 10: when editField === strip, the editField-protection branch wins → FALSE"
+            "Rule 10: when a protected root === claimant, preservation wins → FALSE"
+        )
+    }
+
+    /// Case 11 — multi-root preservation: two protected roots, FR
+    /// inside the second. Mirror of FirstResponderRestoreTests' multi-
+    /// root case so the new shape composes the same way.
+    func test_multipleProtectedRoots_currentResponderInSecond_returnsFalse() {
+        let strip = NSView()
+        let root1 = NSView()
+        let root2 = NSView()
+        let leaf = NSView()
+        root2.addSubview(leaf)
+        XCTAssertFalse(
+            shouldYieldFirstResponderToTerminal(
+                currentFirstResponder: leaf,
+                claimedBy: strip,
+                preserveDescendantsOf: [root1, root2]
+            ),
+            "Rule 11: a descendant of any protected root must NOT trigger a restore"
         )
     }
 }

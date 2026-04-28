@@ -1,4 +1,7 @@
 import AppKit
+#if DEBUG
+import os
+#endif
 
 /// Custom tab bar that sits inside the titlebar row — same row as the
 /// traffic-light buttons, Safari / iTerm2 style. Built on top of AppKit's
@@ -402,8 +405,14 @@ final class TabStripView: NSView {
         let target = tabs[idx]
         teardownEdit()
         // Call through AFTER teardown so the consumer's side-effects
-        // (title publication → KVO → refreshTabBar) don't land while the
-        // subview is still alive and racing for the first-responder slot.
+        // (title publication → KVO → refreshTabBar) don't land while
+        // the field subview is still alive. Note that `teardownEdit`
+        // now also yields first-responder back to the terminal view
+        // synchronously (see `yieldFirstResponderToTerminalIfParked`),
+        // so by the time `onCommitRename` runs the FR slot is settled
+        // — the older comment about "racing for the first-responder
+        // slot" no longer applies, but the teardown-then-publish
+        // ordering still does.
         onCommitRename?(target, trimmed)
     }
 
@@ -429,7 +438,7 @@ final class TabStripView: NSView {
         // by `commitEdit` (KVO → refreshTabBar) don't touch first
         // responder, so doing this here (vs. at every call site) is
         // safe and keeps the contract local.
-        restoreTerminalFocusAfterMouseClick()
+        yieldFirstResponderToTerminalIfParked()
     }
 
     /// `true` while any pill is in inline-edit mode. Hover / close
@@ -627,7 +636,7 @@ final class TabStripView: NSView {
         // changes — clicking the already-selected pill ((self-)select
         // is a no-op) leaves the strip parked. Restoring here unifies
         // every mouse exit through one spot.
-        defer { restoreTerminalFocusAfterMouseClick() }
+        defer { yieldFirstResponderToTerminalIfParked() }
 
         // While a pill is being renamed, a click inside the edit field
         // belongs to the field editor — we shouldn't see it here at all
@@ -697,26 +706,62 @@ final class TabStripView: NSView {
     /// dismisses, first responder ends up parked on the strip — so we
     /// yield in the same shape as `mouseDown`.
     override func rightMouseDown(with event: NSEvent) {
-        defer { restoreTerminalFocusAfterMouseClick() }
+        defer { yieldFirstResponderToTerminalIfParked() }
         super.rightMouseDown(with: event)
     }
+
+    #if DEBUG
+    /// `os.Logger` (not `NSLog`) so `privacy: .public` markers actually
+    /// take effect. Same pattern as `MainWindowController.tabsLogger`.
+    /// Used as a canary for the rare case where
+    /// `window.makeFirstResponder(cv)` returns `false` — that would
+    /// silently re-open the NSBeep regression this fix targets, so a
+    /// log line is the only evidence we'd have in dev.
+    private static let focusLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                            category: "tabFocus")
+    #endif
 
     /// Yield first-responder status from the strip back to the host
     /// window's contentView (the TerminalView in production) when the
     /// strip — or one of its non-edit-field descendants — is currently
     /// parked there. See the multi-paragraph rationale in `mouseDown`
     /// for *why*. Idempotent: when the strip isn't first responder, or
-    /// when the edit field legitimately holds it, this is a no-op.
-    /// Tolerant of a nil window / contentView (the strip outliving its
-    /// host briefly during teardown).
-    private func restoreTerminalFocusAfterMouseClick() {
+    /// when one of the protected roots (the inline rename text field)
+    /// legitimately holds it, this is a no-op. Tolerant of a nil
+    /// window / contentView (the strip outliving its host briefly
+    /// during teardown).
+    ///
+    /// Called from `mouseDown`'s defer, `rightMouseDown`'s defer, and
+    /// `teardownEdit` — every path the strip can be silently parked on
+    /// after a user gesture.
+    private func yieldFirstResponderToTerminalIfParked() {
         guard let win = window, let cv = win.contentView else { return }
-        guard shouldRestoreTerminalFocusAfterMouseClick(
+        // When `editField` is non-nil we expect it to be a subview of
+        // the strip (the inline rename text field is added in
+        // `beginEditing` via `addSubview`). DEBUG-assert the invariant
+        // so a future refactor that breaks the parentage trips loudly
+        // instead of producing plausible-looking but wrong yield
+        // decisions (an editField from a different strip would
+        // short-circuit the protection branch and allow real keystroke
+        // theft).
+        #if DEBUG
+        if let field = editField {
+            assert(field.isDescendant(of: self),
+                   "editField must be a subview of its TabStripView")
+        }
+        #endif
+        let protectedRoots: [NSView] = [editField].compactMap { $0 }
+        guard shouldYieldFirstResponderToTerminal(
             currentFirstResponder: win.firstResponder,
-            strip: self,
-            editField: editField
+            claimedBy: self,
+            preserveDescendantsOf: protectedRoots
         ) else { return }
-        win.makeFirstResponder(cv)
+        let ok = win.makeFirstResponder(cv)
+        #if DEBUG
+        if !ok {
+            Self.focusLogger.error("yieldFirstResponderToTerminalIfParked: makeFirstResponder(contentView) returned false — strip remains parked, keystrokes will ring NSBeep until the user clicks away. Investigate why TerminalView refused to become first responder.")
+        }
+        #endif
     }
 
     // MARK: - Keyboard focus (titlebar-tabs F4)
@@ -949,46 +994,57 @@ final class TabStripView: NSView {
     }
 }
 
-// MARK: - Mouse-click first-responder yield decision
+// MARK: - Strip first-responder yield decision
 
-/// Pure decision function for `TabStripView.restoreTerminalFocusAfterMouseClick`.
+/// Pure decision function for `TabStripView.yieldFirstResponderToTerminalIfParked`.
 /// Returns `true` when the caller SHOULD push first-responder back to
 /// the host window's contentView, `false` when the current responder
-/// is somewhere we must not clobber (the inline rename text field, the
-/// terminal view itself, or any unrelated view that's none of the
-/// strip's business).
+/// is somewhere we must not clobber.
 ///
-/// Cases (in evaluation order):
-///   1. nil current responder — auto-promotion failed in some odd way;
-///      restore so subsequent keystrokes have a definite home.
+/// `claimant` is the view AppKit may have auto-promoted on a mouse
+/// gesture (the `TabStripView` in production). `protectedRoots` is the
+/// list of subtrees that legitimately own first responder while
+/// non-empty — for the strip that's the inline rename text field while
+/// rename is active, and only that. Empty at all other times.
+///
+/// Mirrors the shape of `shouldRestoreFirstResponder(currentFirstResponder:preserveDescendantsOf:)`
+/// in `MainWindowController` so a future "another view that
+/// legitimately holds FR" case is a 1-line append to `protectedRoots`
+/// rather than another parameter.
+///
+/// Decision order (first match wins):
+///   1. nil current responder — auto-promotion failed in some odd way
+///      OR a `makeFirstResponder(nil)` left the window without one.
+///      Restore so subsequent keystrokes have a definite home.
 ///   2. Non-NSView responder (typically the host NSWindow itself,
-///      which is an NSResponder but NOT an NSView subclass — it's the
+///      which is an NSResponder but NOT an NSView subclass — the
 ///      state a window briefly enters when a `becomeFirstResponder`
-///      call returns false). Restore so we don't park keyboard input
-///      on the bare window.
-///   3. Edit field or one of its descendants — the inline rename
-///      legitimately owns first responder while editing. Leave alone.
-///   4. The strip itself or any non-edit-field descendant — AppKit
-///      auto-promoted us during the click. Restore.
-///   5. Anything else (typically the TerminalView or a TerminalView
+///      call returns false). Anything else hitting this branch
+///      (NSWindowController, NSApplication, custom global responders)
+///      is treated as "unintended" — restore. Production today has
+///      no such responder; a comment in the call site flags the
+///      assumption for any future addition.
+///   3. Inside any protected root — leave alone.
+///   4. The claimant itself or any of its non-protected descendants —
+///      AppKit auto-promoted us, restore.
+///   5. Anything else (typically TerminalView or a TerminalView
 ///      descendant such as the FindBar's text field) — first responder
 ///      already lives where keystrokes belong. Leave alone.
 ///
 /// Pure (no AppKit reach-in) so unit tests can drive every case
 /// without instantiating an NSWindow. Internal so tests can reach it
 /// via `@testable import Blackbird`.
-internal func shouldRestoreTerminalFocusAfterMouseClick(
+internal func shouldYieldFirstResponderToTerminal(
     currentFirstResponder: NSResponder?,
-    strip: NSView,
-    editField: NSTextField?
+    claimedBy claimant: NSView,
+    preserveDescendantsOf protectedRoots: [NSView]
 ) -> Bool {
     guard let responder = currentFirstResponder else { return true }
     guard let view = responder as? NSView else { return true }
-    if let editField,
-       view === editField || view.isDescendant(of: editField) {
+    if protectedRoots.contains(where: { view === $0 || view.isDescendant(of: $0) }) {
         return false
     }
-    return view === strip || view.isDescendant(of: strip)
+    return view === claimant || view.isDescendant(of: claimant)
 }
 
 extension TabStripView: NSTextFieldDelegate {
