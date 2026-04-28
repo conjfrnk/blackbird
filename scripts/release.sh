@@ -118,6 +118,18 @@ if [[ "${1:-}" == "notarize" ]]; then
     : "${APPLE_ID:?APPLE_ID required for notarization}"
     : "${APP_SPECIFIC_PASSWORD:?APP_SPECIFIC_PASSWORD required for notarization}"
     : "${TEAM_ID:?TEAM_ID required for notarization}"
+    : "${DEVELOPER_ID:?DEVELOPER_ID required for notarization (used to sign the DMG)}"
+    # notarytool will happily accept an unsigned DMG when its inner .app
+    # is signed, and stapler will attach a ticket to it — but Gatekeeper
+    # rejects the resulting DMG at mount time with `source=no usable
+    # signature`, and publish-update.sh's verify_dmg refuses to sign the
+    # Sparkle appcast for the same reason. Sign the DMG itself before
+    # submission so the wrapper carries a Developer ID signature with a
+    # secure Apple timestamp; spctl will then accept the stapled DMG.
+    # F-S8-004 follow-up.
+    echo "==> Signing DMG"
+    codesign --sign "$DEVELOPER_ID" --timestamp "$DMG_PATH"
+    codesign --verify --strict --verbose=2 "$DMG_PATH"
     echo "==> Submitting to notarytool"
     xcrun notarytool submit "$DMG_PATH" \
         --apple-id "$APPLE_ID" \
