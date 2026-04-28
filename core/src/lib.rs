@@ -323,21 +323,55 @@ struct RoutingListener {
     cell: Arc<CallbackCell>,
     color_queue: Arc<ColorRequestQueue>,
     /// Sliding-window rate-limiter for `Event::PtyWrite` (DSR / DA1 /
-    /// DA2 / DECXCPR replies). Arc<UnsafeCell> so the listener can
-    /// mutate it from `send_event` (which takes `&self`) under the
-    /// single-thread-per-BBTerm discipline. Per audit M1 — pre-fix a
-    /// hostile shell streaming `ESC[6n` in a tight loop unboundedly
-    /// fanned PtyWrite replies into the writeQueue, blocking
-    /// keystrokes.
-    pty_write_rate: Arc<UnsafeCell<PtyWriteRateState>>,
+    /// DA2 / DECXCPR replies). Per audit M1 — pre-fix a hostile shell
+    /// streaming `ESC[6n` in a tight loop unboundedly fanned PtyWrite
+    /// replies into the writeQueue, blocking keystrokes. Wrapped in
+    /// `PtyWriteRateCell` (mirrors `ColorRequestQueue`'s pattern) so
+    /// the Arc is `Send + Sync` under the single-thread-per-BBTerm
+    /// discipline.
+    pty_write_rate: Arc<PtyWriteRateCell>,
 }
 
-/// Rate-limiter state for PtyWrite reply events. Sibling shape to
-/// `PromptMarkRateState`. Mutated only on the BBTerm-owning thread.
+/// Rate-limiter state for PtyWrite reply events. Mutated only on the
+/// BBTerm-owning thread; the Send/Sync impls below upgrade the
+/// `Arc<…>` to thread-safe under that discipline (same pattern as
+/// `ColorRequestQueue`).
 #[derive(Debug)]
 struct PtyWriteRateState {
     window_start: std::time::Instant,
     window_count: u32,
+}
+
+/// Send+Sync wrapper around `UnsafeCell<PtyWriteRateState>` so it can
+/// live behind an `Arc` shared with `RoutingListener`. The wrapper is
+/// the same shape `ColorRequestQueue` uses; both rely on the
+/// single-thread-per-BBTerm contract documented in `RoutingListener`.
+struct PtyWriteRateCell {
+    state: UnsafeCell<PtyWriteRateState>,
+}
+
+// SAFETY: BBTerm's single-thread-per-handle contract (see
+// `RoutingListener` doc) forbids concurrent access to the listener,
+// and PtyWriteRateCell is reachable only via that listener.
+unsafe impl Send for PtyWriteRateCell {}
+unsafe impl Sync for PtyWriteRateCell {}
+
+impl PtyWriteRateCell {
+    fn new() -> Self {
+        Self {
+            state: UnsafeCell::new(PtyWriteRateState::new()),
+        }
+    }
+
+    /// Returns true if the dispatch is allowed; false if the cap has
+    /// been hit and the caller should drop the event silently.
+    ///
+    /// # Safety
+    /// Caller must respect the single-thread-per-BBTerm discipline —
+    /// no concurrent calls.
+    unsafe fn allow(&self) -> bool {
+        (*self.state.get()).allow()
+    }
 }
 
 const PTY_WRITE_REPLY_PER_SECOND: u32 = 32;
@@ -453,12 +487,13 @@ impl EventListener for RoutingListener {
                     // rare reactive queries during e.g. nvim auto-
                     // detection). Audit M1.
                     //
-                    // SAFETY: `pty_write_rate` is UnsafeCell shared
-                    // via Arc; the single-thread-per-BBTerm discipline
-                    // (see RoutingListener doc) means no concurrent
+                    // SAFETY: `pty_write_rate` is wrapped in
+                    // `PtyWriteRateCell` shared via Arc; the
+                    // single-thread-per-BBTerm discipline (see
+                    // RoutingListener doc) means no concurrent
                     // mutation. We're already inside an `unsafe {}`
                     // block at the top of `send_event`.
-                    let allowed = (*self.pty_write_rate.get()).allow();
+                    let allowed = self.pty_write_rate.allow();
                     if !allowed {
                         return;
                     }
@@ -831,10 +866,7 @@ impl OscScanner<'_> {
         // bytes in a chrome-displayed string can fool screen readers,
         // log shippers, or any downstream parser that doesn't pre-scrub.
         // Symmetric defense with the title path. Audit M13.
-        if decoded
-            .iter()
-            .any(|&b| b < 0x20 || b == 0x7F)
-        {
+        if decoded.iter().any(|&b| b < 0x20 || b == 0x7F) {
             return;
         }
         // Reject Unicode bidi-control / zero-width / invisible-payload
@@ -1367,7 +1399,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
 
         let callback = Arc::new(CallbackCell::new());
         let color_queue = Arc::new(ColorRequestQueue::new());
-        let pty_write_rate = Arc::new(UnsafeCell::new(PtyWriteRateState::new()));
+        let pty_write_rate = Arc::new(PtyWriteRateCell::new());
         let listener = RoutingListener {
             cell: Arc::clone(&callback),
             color_queue: Arc::clone(&color_queue),
@@ -3195,7 +3227,7 @@ mod tests {
         };
         let callback = Arc::new(CallbackCell::new());
         let color_queue = Arc::new(ColorRequestQueue::new());
-        let pty_write_rate = Arc::new(UnsafeCell::new(PtyWriteRateState::new()));
+        let pty_write_rate = Arc::new(PtyWriteRateCell::new());
         let listener = RoutingListener {
             cell: Arc::clone(&callback),
             color_queue: Arc::clone(&color_queue),
