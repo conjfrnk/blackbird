@@ -547,13 +547,7 @@ public final class TerminalSession: ObservableObject {
             bbterm.scroll(delta: delta)
             snap = bbterm.snapshot()
         }
-        if let snap {
-            if Thread.isMainThread {
-                self.snapshot = snap
-            } else {
-                DispatchQueue.main.async { self.snapshot = snap }
-            }
-        }
+        if let snap { publishPendingSnapshot(snap) }
     }
 
     /// Snap the viewport back to the live grid. Call from the input path
@@ -565,13 +559,7 @@ public final class TerminalSession: ObservableObject {
             bbterm.scrollToBottom()
             snap = bbterm.snapshot()
         }
-        if let snap {
-            if Thread.isMainThread {
-                self.snapshot = snap
-            } else {
-                DispatchQueue.main.async { self.snapshot = snap }
-            }
-        }
+        if let snap { publishPendingSnapshot(snap) }
     }
 
     /// ⌘K target — clear viewport + scrollback while preserving palette /
@@ -583,10 +571,16 @@ public final class TerminalSession: ObservableObject {
             bbterm.clearAll()
             s = bbterm.snapshot()
         }
-        if let s {
-            if Thread.isMainThread { snapshot = s }
-            else { DispatchQueue.main.async { self.snapshot = s } }
-        }
+        if let s { publishPendingSnapshot(s) }
+        // Route through the same single-slot coalescer that `feed(_:)`
+        // uses. Pre-fix this wrote `self.snapshot = s` inline, leaving
+        // any stale `pendingSnapshot` from a chatty feed in place — the
+        // already-queued main dispatch then overwrote the freshly-
+        // cleared snapshot with pre-clear content for a one-frame
+        // flash. The coalescer's overwrite-then-coalesce semantics make
+        // ⌘K visible on the next runloop tick (≤ 1 frame on 60Hz, ~8ms
+        // on ProMotion) which is below the perceptual threshold; the
+        // race-free correctness wins. Audit H8.
     }
 
     /// Push a full palette into the Rust term + publish a fresh snapshot so

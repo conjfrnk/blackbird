@@ -188,4 +188,49 @@ final class SnapshotCoalescingTests: XCTestCase {
             + "snapshotDispatchScheduled flag never re-armed after main drain."
         )
     }
+
+    // MARK: - High-8: scroll/clearAll/scrollToBottom no longer bypass the coalescer
+
+    /// Pre-fix `clearAll()` wrote `self.snapshot = blank` inline while a
+    /// queued main dispatch from a prior `feed()` still carried a pre-
+    /// clear snapshot. The dispatch then fired and overwrote the freshly-
+    /// cleared snapshot with the stale one — user saw a one-frame flash
+    /// of pre-clear content. Fix routes `clearAll()` (and the two
+    /// scroll APIs) through `publishPendingSnapshot` so the coalescer's
+    /// "latest wins" semantics swallow the stale pending. Audit H8.
+    func test_clearAll_winsAgainstStalePendingFeed() {
+        let session = TerminalSession.makeHeadlessForTests()
+        defer { session.terminate() }
+
+        // Step 1: feed text. Schedules a coalesced dispatch holding a
+        // snapshot whose cells contain "hello".
+        session.feedBytesForTests(Data("hello".utf8))
+
+        // Step 2: clearAll BEFORE the queued dispatch fires. With the
+        // fix, this overwrites pendingSnapshot with the cleared snap.
+        session.clearAll()
+
+        // Step 3: drain main — the single queued dispatch fires once.
+        let drained = expectation(description: "drain")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 1.0)
+
+        // Step 4: the published snapshot must reflect clearAll, not the
+        // stale feed. clearAll wipes both viewport and scrollback, so
+        // cell (0, 0) is blank (alacritty fills with ' ' on clear).
+        let live = session.snapshot
+        XCTAssertNotNil(live, "clearAll must publish a snapshot")
+        if let s = live {
+            // Pre-fix the stale "hello" snapshot would have written 'h'
+            // here. Post-fix the cleared snapshot writes ' ' (or nil
+            // for an unwritten cell — both fail the 'h' check).
+            let ch = s.character(at: 0, row: 0)
+            XCTAssertNotEqual(
+                ch, "h",
+                "clearAll must win against stale pending feed snapshot. "
+                + "If 'h' is observed, the feed's queued main dispatch "
+                + "overwrote clearAll's inline write — Audit H8 regression."
+            )
+        }
+    }
 }
