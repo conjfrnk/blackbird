@@ -620,23 +620,40 @@ final class KeyEncoderExtendedTests: XCTestCase {
         )
     }
 
-    // MARK: - F10 (audit). optionIsMeta interaction with Ctrl+Option+arrow
+    // MARK: - F10 / H7 (audit). optionIsMeta interaction with Ctrl+Option+arrow
 
-    /// When `optionIsMeta=false`, `encodeSpecial` strips `.option` from the
-    /// effective modifier set. Ctrl+Option+Up in Native mode reports only
-    /// Ctrl (mod=5); in Meta mode it reports Ctrl+Alt (mod=7). Pin both.
-    func test_ctrlOptionUp_nativeVsMetaMode() {
+    /// Native mode strips `.option` from `effectiveMods` for printables
+    /// and special keys — Option produces OS dead-keys / glyphs and the
+    /// shell shouldn't see it. EXCEPTION: when Ctrl is also held there
+    /// is no dead-key in play, so the user's clear intent is Meta+Ctrl
+    /// (Emacs M-C-* bindings). Both Native and Meta modes must report
+    /// mod=7 (alt+ctrl) for Ctrl+Option+Up. Audit H7.
+    func test_ctrlOptionUp_nativeAndMetaModesBothReportAltCtrl() {
         let native = KeyEncoder(optionIsMeta: false)
         XCTAssertEqual(
             native.encodeSpecial(.up, modifiers: [.control, .option]),
-            csiOneLetter(final: 0x41, mod: 5),
-            "Native mode: Option is stripped, only Ctrl survives"
+            csiOneLetter(final: 0x41, mod: 7),
+            "Native mode preserves Option when Ctrl is also held — "
+            + "Emacs M-C-Up reaches the shell intact"
         )
         let meta = KeyEncoder(optionIsMeta: true)
         XCTAssertEqual(
             meta.encodeSpecial(.up, modifiers: [.control, .option]),
             csiOneLetter(final: 0x41, mod: 7),
             "Meta mode: Alt bit + Ctrl bit both present in modParam"
+        )
+    }
+
+    /// The Native-mode strip only applies to Option-only chords. With
+    /// Ctrl absent, Option+Up still reports plain ESC[A in Native mode
+    /// (Option is invisible). Pins the inverse so the H7 fix doesn't
+    /// regress the Option-only behaviour that Native mode is for.
+    func test_optionUp_nativeMode_strippedWithoutCtrl() {
+        let native = KeyEncoder(optionIsMeta: false)
+        XCTAssertEqual(
+            native.encodeSpecial(.up, modifiers: [.option]),
+            Data([0x1B, 0x5B, 0x41]),
+            "Native mode + Option-only: still strips Option (modParam=1, no mods)"
         )
     }
 }
