@@ -320,9 +320,13 @@ public final class MetalRenderer {
     }
 
     public func setCursorColor(rgb: UInt32) {
-        let r = Float((rgb >> 16) & 0xFF) / 255.0
-        let g = Float((rgb >> 8)  & 0xFF) / 255.0
-        let b = Float(rgb & 0xFF) / 255.0
+        // L-2 / RW-02: use the precomputed `inv255` constant the
+        // F6 optimization introduced for `rgbToSIMD`. Three runtime
+        // divisions become three multiplies; consistency with the
+        // rest of the renderer.
+        let r = Float((rgb >> 16) & 0xFF) * Self.inv255
+        let g = Float((rgb >> 8)  & 0xFF) * Self.inv255
+        let b = Float(rgb & 0xFF) * Self.inv255
         cursorColor = SIMD4<Float>(r, g, b, 1.0)
     }
 

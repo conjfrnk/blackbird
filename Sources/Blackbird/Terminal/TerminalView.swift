@@ -959,6 +959,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         hoverTooltipItem?.cancel()
         hoverTooltipItem = nil
         hoverTooltipPanel?.orderOut(nil)
+        // M-7 / RW-04: also kill the selection autoscroll timer. `deinit`
+        // already invalidates it (terminal-view-2 F2), but tab tear-out
+        // moves the view between windows WITHOUT calling deinit. Between
+        // `viewWillMove` and `viewDidMoveToWindow` `self.window` is nil;
+        // an active timer firing in that gap would call
+        // `session?.scroll(delta:)` against stale window coordinates.
+        selectionAutoscrollTimer?.invalidate()
+        selectionAutoscrollTimer = nil
     }
 
     public override func viewDidMoveToWindow() {
@@ -2301,10 +2309,13 @@ final class FakeHyperlinkSnapshot: HyperlinkResolver {
         guard row >= 0, row < rows.count else { return nil }
         let line = rows[row]
         let nsLine = line as NSString
-        // Same pattern the production `URLDetector` uses so fallback
-        // semantics match. The regex is rebuilt per call — fine for tests,
-        // the grid is tiny.
-        let pattern = #"(?i)(?:https?|ftp|file)://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"#
+        // I-2 / SI-03: match the production `URLDetector.regex` exactly.
+        // The earlier test-fake pattern included `file` in the scheme
+        // alternation, but production excludes it (KNOWN_ISSUES.md
+        // documents `file://` as intentionally not clickable). Tests
+        // that injected `file://` rows were exercising the policy gate
+        // against an input the production detector would never produce.
+        let pattern = #"(?i)(?:https?|ftp)://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"#
         // Pattern is a constant; force-try so a bad edit fails loudly.
         let regex = try! NSRegularExpression(pattern: pattern)
         let range = NSRange(location: 0, length: nsLine.length)

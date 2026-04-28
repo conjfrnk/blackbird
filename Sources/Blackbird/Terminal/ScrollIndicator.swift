@@ -57,10 +57,15 @@ final class ScrollIndicator: NSView {
         let scrollFromBottom = CGFloat(displayOffset) / CGFloat(max(historySize, 1))
 
         let track = bounds.height
-        let thumbHeight = max(24, track * viewportFraction)
+        // L-3 / RW-05: clamp the thumb height to the track so a very
+        // small window can't make `thumbHeight > track`, which gives
+        // `maxThumbY < 0` and renders the thumb above its parent's
+        // origin. The 24pt floor still applies when the track is at
+        // least that tall.
+        let thumbHeight = min(track, max(24, track * viewportFraction))
         // Thumb y: at displayOffset == 0 (bottom) → thumb at bottom.
         //          at displayOffset == historySize (top) → thumb at top.
-        let maxThumbY = track - thumbHeight
+        let maxThumbY = max(0, track - thumbHeight)
         let thumbY = maxThumbY * scrollFromBottom
 
         let thumbWidth: CGFloat = 4

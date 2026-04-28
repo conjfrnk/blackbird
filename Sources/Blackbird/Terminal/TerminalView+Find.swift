@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import os
 import BBCore
 
 /// macOS Services + Find-bar + context-menu integration for
@@ -473,13 +474,24 @@ extension TerminalView {
         }
     }
 
-    /// Heap-allocated mutable Bool used as a poor man's cancellation
-    /// token between the regex worker and the timeout. Writes are
-    /// confined to the main thread (timeout); reads happen on a
-    /// background thread (worker). Reading a stale value just delays
-    /// cancellation by one row, which is acceptable.
+    /// Heap-allocated cancellation token between the regex worker and
+    /// the timeout. Writes from main (timeout); reads from a global
+    /// concurrent worker (regex enumerator).
+    ///
+    /// M-8 / EI-03: previous shape was `var value: Bool = false` —
+    /// Swift's memory model has no benign-data-race exemption, and
+    /// TSan flags concurrent unsynchronised access to a plain `var`
+    /// as undefined behavior. Wrapping the bool in
+    /// `OSAllocatedUnfairLock` (macOS 13+, available everywhere
+    /// Blackbird ships) makes the read/write pair memory-model-safe
+    /// at negligible cost (one atomic compare-exchange per cell), and
+    /// silences TSan on sanitised CI runs.
     private final class AtomicFlag {
-        var value: Bool = false
+        private let lock = OSAllocatedUnfairLock(initialState: false)
+        var value: Bool {
+            get { lock.withLock { $0 } }
+            set { lock.withLock { $0 = newValue } }
+        }
     }
 
     private func nextRegexSearchID() -> UInt64 {

@@ -147,16 +147,27 @@ public final class BBTerm {
     /// drive a PTY's `TIOCSWINSZ` MUST use the returned dims, not the
     /// requested ones — telling the shell it has 1500 columns when the grid
     /// only has 1000 makes the shell wrap text past the visible viewport
-    /// (rust-core-3 F4 / Bug #3). For a no-op (null handle, or zero in
-    /// either dim) the returned size equals the input request, since the
-    /// grid was untouched.
+    /// (rust-core-3 F4 / Bug #3).
+    ///
+    /// L-5 / EI-04: callers MUST also pass cols ≥ 1 and rows ≥ 1.
+    /// Earlier shape returned the unclamped input verbatim when either
+    /// dim was zero, which contradicted the "use returned dims" contract
+    /// — a caller obeying the contract would then ioctl `cols=0` to the
+    /// PTY. Production callers (`TerminalSession.resize` via
+    /// `clampResize` flooring at 2; `PTY.resize` with its `> 0` guard)
+    /// already filter zero before reaching here, so the precondition
+    /// only fires on a legitimate misuse.
     @discardableResult
     public func resize(to size: Size) -> Size {
+        precondition(
+            size.cols > 0 && size.rows > 0,
+            "BBTerm.resize requires positive dimensions; got cols=\(size.cols), rows=\(size.rows)"
+        )
         guard let h = handle else { return size }
         let result = bb_term_resize2(h, size.cols, size.rows)
-        // bb_term_resize2 returns (0, 0, 0) on no-op (zero in either dim);
-        // treat that as "no resize happened" and report the request back
-        // unchanged so callers don't drive a PTY to 0×0.
+        // The precondition above means a (0, 0, 0) return now signals a
+        // null-handle no-op, not a zero-input rejection — fall through to
+        // returning the input request which is itself non-zero.
         if result.applied_cols == 0 || result.applied_rows == 0 {
             return size
         }
