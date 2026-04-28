@@ -79,10 +79,15 @@ fn xtgettcap_tn_returns_xterm_kitty() {
 }
 
 #[test]
-fn xtgettcap_co_returns_256() {
+fn xtgettcap_co_returns_truecolor_count() {
+    // Audit NEW-DF-004: Blackbird decodes truecolor SGR; advertise
+    // 16 777 216 (= 2^24) so TUIs that gate truecolor branches on
+    // `tput colors` see the real capability. Pre-LOW-sweep this was
+    // "256" and TUIs fell back to the 256-color path.
     let writes = run(b"\x1bP+q436F\x1b\\");
     let joined: Vec<u8> = writes.into_iter().flatten().collect();
-    let expected = b"\x1bP1+r436F=323536\x1b\\".to_vec();
+    // "16777216" in ASCII = 31 36 37 37 37 32 31 36
+    let expected = b"\x1bP1+r436F=3136373737323136\x1b\\".to_vec();
     assert_eq!(joined, expected);
 }
 
@@ -110,7 +115,7 @@ fn xtgettcap_multiple_caps_split_by_semicolon() {
     let writes = run(b"\x1bP+q544E;436F\x1b\\");
     let joined: Vec<u8> = writes.into_iter().flatten().collect();
     let mut expected = b"\x1bP1+r544E=787465726D2D6B69747479\x1b\\".to_vec();
-    expected.extend_from_slice(b"\x1bP1+r436F=323536\x1b\\");
+    expected.extend_from_slice(b"\x1bP1+r436F=3136373737323136\x1b\\");
     assert_eq!(joined, expected);
 }
 
@@ -121,7 +126,7 @@ fn xtgettcap_mixed_known_and_unknown_in_same_request() {
     let joined: Vec<u8> = writes.into_iter().flatten().collect();
     let mut expected = b"\x1bP1+r524742=38\x1b\\".to_vec();
     expected.extend_from_slice(b"\x1bP0+r5858\x1b\\");
-    expected.extend_from_slice(b"\x1bP1+r436F=323536\x1b\\");
+    expected.extend_from_slice(b"\x1bP1+r436F=3136373737323136\x1b\\");
     assert_eq!(joined, expected);
 }
 

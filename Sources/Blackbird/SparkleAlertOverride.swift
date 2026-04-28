@@ -21,14 +21,40 @@ enum SparkleAlertOverride {
     static func install() {
         let cls: AnyClass = SPUStandardUserDriver.self
         let sel = NSSelectorFromString("showUpdateNotFoundWithError:acknowledgement:")
-        guard let method = class_getInstanceMethod(cls, sel) else { return }
+        guard let method = class_getInstanceMethod(cls, sel) else {
+            // A Sparkle major-version bump that renames or removes
+            // this selector silently disables the override and lets
+            // the bare Sparkle UX surface again. Log the miss so the
+            // regression is greppable from `log stream --predicate
+            // 'category == "SparkleAlertOverride"'` instead of a
+            // user-reported "the alert came back". Audit EH-009.
+            logger.fault(
+                "SparkleAlertOverride: target selector `showUpdateNotFoundWithError:acknowledgement:` not found on SPUStandardUserDriver — Sparkle API drift?"
+            )
+            return
+        }
 
         typealias Block = @convention(block) (AnyObject, Error, @escaping () -> Void) -> Void
         let block: Block = { _, _, ack in
             let name = Bundle.main
                 .object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Blackbird"
-            let version = Bundle.main
-                .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+            let version: String = {
+                if let v = Bundle.main.object(
+                    forInfoDictionaryKey: "CFBundleShortVersionString"
+                ) as? String, !v.isEmpty {
+                    return v
+                }
+                // Missing/empty version means a corrupted bundle —
+                // surface so a user reporting "the alert says
+                // 'Blackbird  is the latest'" can grep for the cause.
+                // One log per session per miss; the alert path is
+                // user-driven (Check for Updates), not a hot path.
+                // Audit EH-005.
+                logger.fault(
+                    "SparkleAlertOverride: CFBundleShortVersionString missing from Info.plist"
+                )
+                return ""
+            }()
             let alert = NSAlert()
             alert.messageText = "You're up to date"
             alert.informativeText = "\(name) \(version) is the latest version."

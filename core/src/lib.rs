@@ -751,7 +751,12 @@ fn find_cap_value(cap_hex: &[u8]) -> Option<&'static [u8]> {
 /// Claimed caps (why each matters):
 /// - TN     = "xterm-kitty"  — the terminal identity string some TUIs
 ///   key on to enable advanced protocols.
-/// - Co     = "256"          — color count.
+/// - Co     = "16777216"     — color count. Pre-LOW-sweep this was
+///   "256" (legacy default), which made `tput colors` report 256 even
+///   though Blackbird decodes truecolor SGR 38;2;R;G;Bm — TUIs that
+///   gate truecolor branches on the terminfo Co value (mc, less +F,
+///   ranger, some neovim plugins) fell back to 256-color paths.
+///   Audit NEW-DF-004.
 /// - RGB    = "8"             — truecolor bits per channel.
 /// - Smulx  = "\E[4:%p1%dm"   — styled underline select (SGR 4:n).
 /// - Setulc = "\E[58:2::%p1%{65536}%/%d:%p2%{256}%/%d:%p3%d%;m"
@@ -766,8 +771,8 @@ fn find_cap_value(cap_hex: &[u8]) -> Option<&'static [u8]> {
 static XTGETTCAP_TABLE: &[(&[u8], &[u8])] = &[
     // TN     = "TN"     → 544E        value "xterm-kitty"  → 787465726D2D6B69747479
     (b"544E", b"787465726D2D6B69747479"),
-    // Co     = "Co"     → 436F        value "256"          → 323536
-    (b"436F", b"323536"),
+    // Co     = "Co"     → 436F        value "16777216"     → 3136373737323136
+    (b"436F", b"3136373737323136"),
     // RGB    = "RGB"    → 524742      value "8"            → 38
     (b"524742", b"38"),
     // Smulx  = "Smulx"  → 536D756C78  value "\x1B[4:%p1%dm"
