@@ -221,6 +221,16 @@ public final class MetalRenderer {
         let cmdHoverBufferLine: Int32
         let cmdHoverStartCol: Int32
         let cmdHoverEndCol: Int32
+        /// `GlyphAtlas.generation` at the time this row cache was
+        /// built. The atlas saturation flush rewrites slot 0..N with
+        /// fresh glyphs, but our cached `CellInstance`s carry baked-in
+        /// UV coords pointing at those slots. A stale row would
+        /// silently sample the post-flush occupant of its cells'
+        /// slots — visible-but-undamaged rows render the wrong
+        /// glyphs until the row is independently damaged. Including
+        /// generation in the key forces a full rebuild on every
+        /// flush. Audit H3.
+        let atlasGeneration: UInt64
     }
     private var lastCacheKey: CacheKey?
 
@@ -1169,7 +1179,8 @@ public final class MetalRenderer {
                 blinkSkip: blinkSkipNow,
                 cmdHoverBufferLine: cmdHoverBufferLine,
                 cmdHoverStartCol: cmdHoverStartCol,
-                cmdHoverEndCol: cmdHoverEndCol
+                cmdHoverEndCol: cmdHoverEndCol,
+                atlasGeneration: atlas.generation
             )
             let cacheCompatible = !dirtyRowsDisabled
                 && lastCacheKey == newCacheKey

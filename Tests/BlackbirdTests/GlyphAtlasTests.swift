@@ -41,6 +41,68 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertNotNil(atlas.lookupOrInsert(scalar: previously))
     }
 
+    // MARK: - High-3: atlas generation bumps on saturation
+
+    /// Pins the audit-H3 invariant: every saturation flush bumps
+    /// `generation`. MetalRenderer.CacheKey includes
+    /// `atlas.generation`, so a bump invalidates every cached row's
+    /// UVs and forces a full rebuild — without this, undamaged rows
+    /// keep their pre-flush UVs (which now point at whatever post-
+    /// flush glyphs occupy those slots) and silently render wrong
+    /// glyphs.
+    func test_generation_bumpsOnSaturationFlush() throws {
+        let font = NSFont(name: "Menlo", size: 13) ?? .systemFont(ofSize: 13)
+        let metrics = CellMetrics(font: font)
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let atlas = try XCTUnwrap(GlyphAtlas(
+            device: device, metrics: metrics, capacityGlyphs: 4, scale: 1
+        ))
+        XCTAssertEqual(atlas.generation, 0,
+                       "fresh atlas must start at generation 0")
+        // Fill to capacity — no flush yet, so generation stays 0.
+        for cp: UInt32 in 0x41...0x44 {
+            let s = try XCTUnwrap(UnicodeScalar(cp))
+            XCTAssertNotNil(atlas.lookupOrInsert(scalar: s))
+        }
+        XCTAssertEqual(atlas.generation, 0,
+                       "filling without overflow must NOT bump generation")
+        // Overflow forces saturation flush → generation bumps once.
+        let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
+        XCTAssertNotNil(atlas.lookupOrInsert(scalar: overflow))
+        XCTAssertEqual(atlas.generation, 1,
+                       "saturation flush must bump generation by 1")
+        // Fill the post-flush atlas (slot 0..3 reused), then overflow
+        // a second time → generation bumps again.
+        for cp: UInt32 in 0x46...0x48 {
+            let s = try XCTUnwrap(UnicodeScalar(cp))
+            XCTAssertNotNil(atlas.lookupOrInsert(scalar: s))
+        }
+        let overflow2 = try XCTUnwrap(UnicodeScalar(0x49 as UInt32))
+        XCTAssertNotNil(atlas.lookupOrInsert(scalar: overflow2))
+        XCTAssertEqual(atlas.generation, 2,
+                       "second saturation flush must bump generation again")
+    }
+
+    func test_generation_doesNotBumpOnCacheHit() throws {
+        // Re-looking-up a cached glyph must NOT bump generation —
+        // otherwise every steady-state render would invalidate the
+        // row cache and rebuild every frame.
+        let font = NSFont(name: "Menlo", size: 13) ?? .systemFont(ofSize: 13)
+        let metrics = CellMetrics(font: font)
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let atlas = try XCTUnwrap(GlyphAtlas(
+            device: device, metrics: metrics, capacityGlyphs: 16, scale: 1
+        ))
+        let s = try XCTUnwrap(UnicodeScalar(0x41 as UInt32))
+        _ = atlas.lookupOrInsert(scalar: s)
+        let genAfterInsert = atlas.generation
+        for _ in 0..<10 {
+            _ = atlas.lookupOrInsert(scalar: s)
+        }
+        XCTAssertEqual(atlas.generation, genAfterInsert,
+                       "cache-hit lookups must not bump generation")
+    }
+
     func test_initRejectsZeroCapacity() {
         // Guard: zero capacity would divide by zero picking grid rows.
         let font = NSFont.systemFont(ofSize: 13)

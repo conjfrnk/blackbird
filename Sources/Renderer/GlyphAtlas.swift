@@ -83,6 +83,14 @@ public final class GlyphAtlas {
     /// Up to 4 entries total.
     private var styledFonts: [Style: NSFont] = [:]
     private var nextSlot: Int = 0
+    /// Monotonic counter incremented on every saturation flush. Every
+    /// successful `lookupOrInsert` returns a (kept, generation) pair so
+    /// the renderer can detect when its cached row UVs were issued
+    /// against an older atlas layout — those UVs now point at whatever
+    /// glyph occupies the same slot post-flush, and the cached row
+    /// would silently render the wrong glyph until the row is
+    /// independently damaged. Audit H3.
+    public private(set) var generation: UInt64 = 0
     /// Single-slot holes that the wide-glyph row-align path opened up.
     /// When a wide (2-slot) glyph doesn't fit in the current row's
     /// trailing column we skip to the next row, leaving one orphan
@@ -285,6 +293,16 @@ public final class GlyphAtlas {
             // discard so the post-flush narrow-reclaim path doesn't
             // hand out slots that overlap newly-allocated ones.
             freeNarrowSlots.removeAll(keepingCapacity: true)
+            // Bump generation. Cached row UVs from MetalRenderer
+            // anchored to the pre-flush slot layout will still be
+            // valid byte-wise but point at whatever the post-flush
+            // path writes into those slots — i.e. they'd render the
+            // wrong glyph. The renderer keys its row cache on
+            // (snapshot, atlasGeneration); a generation bump forces
+            // every cached row to rebuild on the next frame, and
+            // freshly-rasterised glyphs in their new slots produce
+            // matching UVs in the rebuilt instances. Audit H3.
+            generation &+= 1
             if wide && slotsNeeded > slotCols {
                 // Pathological: a wide glyph in an atlas narrower than 2
                 // slots. Give up on this one — the atlas was misconfigured.
