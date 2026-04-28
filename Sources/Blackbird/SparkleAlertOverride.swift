@@ -11,8 +11,14 @@ import ObjectiveC.runtime
 /// ever one instance, so the behaviour is equivalent.
 @MainActor
 enum SparkleAlertOverride {
+    // EI-01: every other os.Logger in the project uses
+    // "dev.conjfrnk.blackbird"; `scripts/run-with-probe.sh` filters on
+    // it. The earlier "com.blackbird.terminal" subsystem made the
+    // selector-drift fault and the missing-CFBundleShortVersionString
+    // warning invisible to the canonical `log stream --predicate
+    // 'subsystem == "dev.conjfrnk.blackbird"'` query.
     fileprivate static let logger = Logger(
-        subsystem: "com.blackbird.terminal",
+        subsystem: "dev.conjfrnk.blackbird",
         category: "SparkleAlertOverride"
     )
 

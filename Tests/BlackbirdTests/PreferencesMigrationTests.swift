@@ -298,14 +298,16 @@ final class PreferencesMigrationTests: XCTestCase {
         )
     }
 
-    /// Companion test: a fresh suite (no schema key on disk) must NOT
-    /// gain a stamped key from the migration path either, because the
-    /// registered default already covers the missing-key case via the
-    /// `stored == 0 ? currentSchemaVersion : stored` branch in
-    /// `migrateIfNeeded(in:)`. Pins the equal/missing branch as a
-    /// no-op so future refactors don't accidentally re-introduce the
-    /// downgrade-stamp by way of an "always stamp" simplification.
-    func test_freshSuite_migrationDoesNotStampSchemaVersion() throws {
+    /// Audit EI-02: a fresh suite (no schema key on disk) MUST run the
+    /// migration walk and stamp the current schema version when done.
+    /// The previous shape (registered `prefsSchemaVersion` in the
+    /// registration domain + `stored == 0 ? currentSchemaVersion : stored`)
+    /// was a silent bypass — `migrateV1toV2` never ran for legacy v1
+    /// installs whose persistent domain lacked the key, and the test
+    /// seam couldn't exercise the migration path at all. After the fix
+    /// the seam treats 0 as "needs walk", `migrateV1toV2` runs (no-op
+    /// for fresh-suite/no-legacy-keys), and the version key is stamped.
+    func test_freshSuite_migrationStampsCurrentSchemaVersion() throws {
         let suiteName = "blackbird.tests.migration.\(UUID().uuidString)"
         guard let suite = UserDefaults(suiteName: suiteName) else {
             XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
@@ -313,13 +315,6 @@ final class PreferencesMigrationTests: XCTestCase {
         }
         defer { suite.removePersistentDomain(forName: suiteName) }
 
-        // NSRegistrationDomain is process-global, so `suite.object(forKey:)`
-        // reads through to Preferences.swift's `defaults.register(defaults:)`
-        // call (line 187) and returns the registered default. To assert
-        // "no persistent write happened" we must look at the suite's
-        // persistent domain directly, which only contains values that
-        // were actually `set(_:forKey:)`-d on the suite — registration
-        // defaults don't leak in.
         let schemaKey = "prefsSchemaVersion"
         XCTAssertNil(
             suite.persistentDomain(forName: suiteName)?[schemaKey],
@@ -328,19 +323,56 @@ final class PreferencesMigrationTests: XCTestCase {
 
         Preferences.migrateIfNeeded(in: suite)
 
-        // After running migration on an empty suite, we expect NO
-        // persistent-domain write — the registration domain alone covers
-        // the missing-key case. If a future refactor unconditionally
-        // stamps the version, this test will catch the drift.
+        let stamped = suite.persistentDomain(forName: suiteName)?[schemaKey] as? Int
+        XCTAssertEqual(
+            stamped,
+            Preferences.currentSchemaVersion,
+            """
+            Migration on a fresh suite must stamp `prefsSchemaVersion =
+            currentSchemaVersion`. EI-02: leaving the key unstamped (the
+            previous behavior, relying on the registered default) hid
+            the silent-bypass bug where legacy v1 installs never ran
+            `migrateV1toV2`.
+            """
+        )
+    }
+
+    /// Audit EI-02 — actually exercise the v1 → v2 migration. Place
+    /// legacy unprefixed keys in a fresh suite and verify they get
+    /// copied to their `bb.`-prefixed counterparts. Before the fix
+    /// this could not be tested: the seam early-returned on `stored
+    /// == 0`. Now it walks.
+    func test_v1ToV2_copiesLegacyKeysToPrefixed() throws {
+        let suiteName = "blackbird.tests.migration.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        // Legacy unprefixed shape from pre-v1 installs.
+        suite.set("Solarized", forKey: "theme")
+        suite.set(15.0, forKey: "fontSize")
+
+        Preferences.migrateIfNeeded(in: suite)
+
+        XCTAssertEqual(
+            suite.string(forKey: "bb.theme"),
+            "Solarized",
+            "v1→v2 must copy legacy `theme` to `bb.theme`"
+        )
+        XCTAssertEqual(
+            suite.double(forKey: "bb.fontSize"),
+            15.0,
+            "v1→v2 must copy legacy `fontSize` to `bb.fontSize`"
+        )
         XCTAssertNil(
-            suite.persistentDomain(forName: suiteName)?[schemaKey],
-            """
-            Migration on a fresh suite wrote a schema version key.
-            The current contract is: rely on the registered default for
-            missing keys; only persist a version after a real walk-forward.
-            If the contract changes, update both this test and the
-            F-S7-003 invariant comment in Preferences.swift together.
-            """
+            suite.object(forKey: "theme"),
+            "v1→v2 must remove the legacy unprefixed key"
+        )
+        XCTAssertNil(
+            suite.object(forKey: "fontSize"),
+            "v1→v2 must remove the legacy unprefixed key"
         )
     }
 

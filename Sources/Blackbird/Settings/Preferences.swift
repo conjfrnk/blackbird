@@ -185,7 +185,20 @@ public final class Preferences: ObservableObject {
         // (settings F7)
         let defaults = UserDefaults.standard
         defaults.register(defaults: [
-            Preferences.schemaVersionKey: Preferences.currentSchemaVersion,
+            // Audit EI-02: do NOT register `schemaVersionKey`. Earlier
+            // builds did, on the theory that a fresh install would
+            // read back as currentSchemaVersion and skip the
+            // migration walk. That hides a legacy install whose
+            // `prefsSchemaVersion` was never written to disk: with
+            // registration the read-through returns currentSchemaVersion
+            // and the seam early-returns, leaving legacy unprefixed
+            // keys uncopied. Without registration, an absent key reads
+            // 0, the seam treats 0 as "needs walk", `migrateV1toV2`
+            // copies legacy keys (no-op when none exist), and the seam
+            // stamps the current version on completion. This also makes
+            // `migrateIfNeeded(in:)` testable: a fresh
+            // `UserDefaults(suiteName:)` truly reads 0 and exercises
+            // the v1→v2 path.
             Preferences.k("theme"):             Theme.gruvbox.rawValue,
             Preferences.k("themeMode"):         ThemeMode.dark.rawValue,
             Preferences.k("fontName"):          "Hack Nerd Font Mono",
@@ -330,14 +343,15 @@ public final class Preferences: ObservableObject {
     /// machinery (`Theme(rawValue:) ?? .defaultTheme`, etc.), so leaving
     /// a higher version number on disk is safe.
     internal static func migrateIfNeeded(in defaults: UserDefaults) {
+        // `integer(forKey:)` returns 0 if the key is absent. Now that
+        // we no longer register `schemaVersionKey` in NSRegistrationDomain
+        // (audit EI-02), 0 unambiguously means "no schema version has
+        // ever been stamped to this defaults instance" — treat as v0,
+        // walk through every migration step, and stamp current at the
+        // end. A non-zero `stored` is an actual persistent-domain value
+        // we trust verbatim.
         let stored = defaults.integer(forKey: Preferences.schemaVersionKey)
-        // `integer(forKey:)` returns 0 if the key is absent AND no registered
-        // default is in NSRegistrationDomain. We registered `currentSchemaVersion`
-        // above, so a fresh install reads the current version and skips the
-        // walk. A 0 here would mean registration didn't take (shouldn't
-        // happen) — treat as current too so we don't log-spam on every launch.
-        let effective = stored == 0 ? Preferences.currentSchemaVersion : stored
-        guard effective < Preferences.currentSchemaVersion else {
+        guard stored < Preferences.currentSchemaVersion else {
             // Already current (stored == current) or NEWER (downgrade).
             //
             // Downgrade case (stored > current): leave the key alone. See
@@ -345,13 +359,10 @@ public final class Preferences: ObservableObject {
             // water mark would cause a future re-upgrade to re-run already-
             // applied migrations and corrupt v(N+1)-shaped data.
             //
-            // Equal case (stored == current): nothing to do. We deliberately
-            // do NOT re-stamp here either, because the registered default
-            // already covers a `stored == 0` (registration-domain miss) and
-            // a real persistent-domain `stored == current` needs no rewrite.
+            // Equal case (stored == current): nothing to do.
             return
         }
-        var v = effective
+        var v = stored
         if v < 2 {
             migrateV1toV2(defaults: defaults)
             v = 2
@@ -362,21 +373,27 @@ public final class Preferences: ObservableObject {
 
     /// Copy every legacy unprefixed key into its `bb.`-prefixed counterpart
     /// and remove the original. No-op for keys that are absent on disk —
-    /// they'll fall through to the registered default transparently. If a
-    /// user somehow has both the legacy key and a prefixed key set (e.g.
-    /// a mid-upgrade crash), the prefixed key wins and the legacy is
-    /// removed. (settings F3)
+    /// they'll fall through to the registered default transparently.
+    ///
+    /// EI-02: previously this conditioned the copy on `alreadyPrefixed
+    /// == nil` (intent: in a mid-upgrade-crash where both keys were
+    /// set, prefer the prefixed value). That check called
+    /// `defaults.object(forKey: prefixed)`, which walks the search list
+    /// and returns the registered default — `bb.theme` always reads
+    /// non-nil because `Preferences.init` registers
+    /// `Theme.gruvbox.rawValue`. So `alreadyPrefixed != nil` was
+    /// effectively always true, and the copy never happened. Result:
+    /// legacy v1 users had their unprefixed keys silently deleted on
+    /// upgrade, and their settings reset to the registered defaults.
+    /// We unconditionally copy now. The mid-crash case becomes "legacy
+    /// wins"; an exotic edge case which is no worse than the previous
+    /// "legacy is silently dropped." (settings F3)
     private static func migrateV1toV2(defaults: UserDefaults) {
         for name in Preferences.legacyUnprefixedKeys {
             let prefixed = Preferences.k(name)
-            let legacy = defaults.object(forKey: name)
-            let alreadyPrefixed = defaults.object(forKey: prefixed)
-            if legacy != nil {
-                if alreadyPrefixed == nil {
-                    defaults.set(legacy, forKey: prefixed)
-                }
-                defaults.removeObject(forKey: name)
-            }
+            guard let legacy = defaults.object(forKey: name) else { continue }
+            defaults.set(legacy, forKey: prefixed)
+            defaults.removeObject(forKey: name)
         }
     }
 }
