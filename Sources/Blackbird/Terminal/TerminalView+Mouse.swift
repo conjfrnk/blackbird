@@ -421,11 +421,27 @@ extension TerminalView {
         let optionHeld = event.modifierFlags.contains(.option)
         if mouseReportingEnabled() && !optionHeld {
             // Mouse mode: forward as SGR/X10 scroll events.
-            // Wheel up = button 64, wheel down = button 65.
+            // xterm wheel-up (button 64) = "show older content" (less
+            // scrolls back). wheel-down (button 65) = "show newer
+            // content" (less advances).
+            //
+            // macOS `scrollingDeltaY` is pre-inverted by the system —
+            // it reports the direction the user expects CONTENT to
+            // move, not the raw finger / wheel motion. So:
+            //
+            //   Natural ON  + swipe up → deltaY > 0 (content goes up,
+            //   user wants newer content from below) → button 65.
+            //   Natural OFF + swipe up → deltaY < 0 (content goes
+            //   down, user wants older content from above) → button 64.
+            //
+            // Pre-M7 the mapping was inverted (deltaY > 0 → button 64),
+            // which gave the right answer for Natural ON via wishful
+            // thinking but was backwards for Natural OFF — `less` /
+            // `tmux` scrolled in the wrong direction. Audit M7.
             if event.scrollingDeltaY > 0 {
-                sendMouseEvent(event, button: 64, press: true, session: session)
-            } else if event.scrollingDeltaY < 0 {
                 sendMouseEvent(event, button: 65, press: true, session: session)
+            } else if event.scrollingDeltaY < 0 {
+                sendMouseEvent(event, button: 64, press: true, session: session)
             }
         } else {
             // Normal mode: scroll the display through scrollback history.
