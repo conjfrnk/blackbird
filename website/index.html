@@ -4,49 +4,55 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blackbird</title>
-    <meta name="description" content="Blackbird — a fast native macOS terminal." />
+    <meta name="description" content="Blackbird — a fast, native macOS terminal." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/icon-512.png" />
     <meta name="theme-color" content="#282828" />
     <link rel="canonical" href="https://blackbird-terminal.com/" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="Blackbird" />
-    <meta property="og:description" content="A fast native macOS terminal." />
+    <meta property="og:description" content="A fast, native macOS terminal." />
     <meta property="og:url" content="https://blackbird-terminal.com/" />
     <meta property="og:image" content="https://blackbird-terminal.com/icon-512.png" />
     <style>
-      html, body { height: 100%; margin: 0; }
+      html, body { margin: 0; }
       body {
         background: #282828;
         color: #EBDBB2;
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
-        display: flex;
-        align-items: center;
-        justify-content: center;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
+        line-height: 1.5;
       }
       main {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 80px 32px 32px;
         text-align: center;
-        padding: 24px;
       }
       img.icon {
-        width: 256px;
-        height: 256px;
+        width: 168px;
+        height: 168px;
         display: block;
         margin: 0 auto 28px;
         image-rendering: -webkit-optimize-contrast;
       }
       h1 {
-        margin: 0;
-        font-size: clamp(2.5rem, 6vw, 4rem);
+        margin: 0 0 12px;
+        font-size: clamp(2.5rem, 6vw, 3.5rem);
         font-weight: 600;
-        letter-spacing: -0.02em;
+        letter-spacing: -0.025em;
         color: #EBDBB2;
+        line-height: 1.1;
+      }
+      .tag {
+        margin: 0 0 32px;
+        color: #BDAE93;
+        font-size: 1.1875rem;
+        letter-spacing: -0.005em;
       }
       a.download {
         display: inline-block;
-        margin-top: 32px;
         padding: 14px 28px;
         background: #FABD2F;
         color: #282828;
@@ -59,8 +65,151 @@
       }
       a.download:hover { background: #FFD866; transform: translateY(-1px); }
       a.download:active { transform: translateY(0); }
-      @media (max-width: 480px) {
-        img.icon { width: 192px; height: 192px; }
+      .reqs { margin-top: 12px; color: #7c6f64; font-size: 0.8125rem; }
+
+      /* Terminal window mockup — chrome matches MainWindowController.swift
+         (fullSizeContentView, titlebarAppearsTransparent, no separator,
+         centered title, traffic-light overlay). Palette pulled from the
+         Gruvbox theme in Theme.swift. */
+      .bb-window {
+        width: 100%;
+        max-width: 640px;
+        margin: 64px auto 0;
+        background: #282828;
+        border-radius: 14px;
+        overflow: hidden;
+        text-align: left;
+        font-family: "Hack Nerd Font Mono", "Hack", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+        box-shadow:
+          0 50px 100px -20px rgba(0, 0, 0, 0.7),
+          0 22px 38px -10px rgba(0, 0, 0, 0.45),
+          0 0 0 0.5px rgba(0, 0, 0, 0.7);
+      }
+      .bb-titlebar {
+        height: 28px;
+        position: relative;
+        display: flex;
+        align-items: center;
+      }
+      .bb-traffic {
+        position: absolute;
+        left: 13px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        gap: 8px;
+      }
+      .bb-traffic .light {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        box-shadow:
+          inset 0 0.5px 0 rgba(255, 255, 255, 0.4),
+          inset 0 -0.5px 0 rgba(0, 0, 0, 0.3),
+          0 0 0 0.5px rgba(0, 0, 0, 0.4);
+      }
+      .bb-traffic .close { background: linear-gradient(180deg, #FF6E62 0%, #ED4D44 100%); }
+      .bb-traffic .min   { background: linear-gradient(180deg, #FEC042 0%, #E0A529 100%); }
+      .bb-traffic .max   { background: linear-gradient(180deg, #43D964 0%, #1FAA3A 100%); }
+      .bb-title {
+        width: 100%;
+        text-align: center;
+        font-family: -apple-system, "SF Pro Text", BlinkMacSystemFont, system-ui, sans-serif;
+        font-size: 0.8125rem;
+        font-weight: 500;
+        color: rgba(235, 219, 178, 0.55);
+      }
+      .bb-body {
+        padding: 4px 12px 10px;
+        font-size: 0.8125rem;
+        line-height: 1.4;
+        white-space: pre;
+        color: #EBDBB2;
+      }
+      .bb-body .row { white-space: pre; }
+      .bb-body .path   { color: #83A598; font-weight: 600; }
+      .bb-body .prompt { color: #B8BB26; }
+      .bb-body .ok     { color: #B8BB26; font-weight: 700; }
+      .bb-body .num    { color: #FABD2F; }
+      .bb-body .dim    { color: #928374; }
+      .bb-cursor {
+        display: inline-block;
+        width: 7.5px;
+        height: 16px;
+        vertical-align: -3px;
+        background: #EBDBB2;
+        animation: bb-blink 1s steps(2) infinite;
+      }
+      @keyframes bb-blink { 50% { opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) {
+        .bb-cursor { animation: none; }
+      }
+
+      /* Features grid */
+      .features {
+        margin: 64px auto 0;
+        max-width: 760px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 32px 56px;
+        text-align: left;
+      }
+      .feat h3 {
+        margin: 0 0 6px;
+        font-size: 1.1875rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        color: #EBDBB2;
+      }
+      .feat p {
+        margin: 0;
+        color: #BDAE93;
+        font-size: 0.9375rem;
+        line-height: 1.5;
+      }
+      .feat code {
+        color: #83A598;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 0.875rem;
+      }
+
+      .bench-line {
+        margin: 56px auto 0;
+        max-width: 760px;
+        text-align: center;
+        color: #928374;
+        font-size: 0.875rem;
+      }
+      .bench-line a {
+        color: #FABD2F;
+        text-decoration: none;
+        border-bottom: 1px dotted rgba(250, 189, 47, 0.4);
+      }
+      .bench-line a:hover { border-bottom-color: #FABD2F; }
+
+      footer {
+        margin: 64px auto 0;
+        max-width: 760px;
+        padding: 24px 0 0;
+        border-top: 1px solid #3c3836;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.8125rem;
+        color: #7c6f64;
+      }
+      footer a {
+        color: #BDAE93;
+        text-decoration: none;
+      }
+      footer a:hover { color: #EBDBB2; }
+      footer .links { display: flex; gap: 18px; }
+
+      @media (max-width: 600px) {
+        main { padding: 48px 20px 24px; }
+        img.icon { width: 128px; height: 128px; }
+        .features { grid-template-columns: 1fr; gap: 28px; }
+        footer { flex-direction: column; gap: 10px; }
       }
     </style>
   </head>
@@ -68,7 +217,53 @@
     <main>
       <img class="icon" src="/icon-512.png" alt="Blackbird app icon" width="512" height="512" />
       <h1>Blackbird</h1>
+      <p class="tag">A fast, native macOS terminal.</p>
       <a class="download" href="https://github.com/conjfrnk/blackbird/releases/latest/download/Blackbird.dmg">Download for macOS</a>
+      <div class="reqs">Requires macOS 14 or later · Apple Silicon and Intel · v0.1.14</div>
+
+      <div class="bb-window" aria-hidden="true">
+        <div class="bb-titlebar">
+          <div class="bb-traffic">
+            <span class="light close"></span>
+            <span class="light min"></span>
+            <span class="light max"></span>
+          </div>
+          <div class="bb-title">Blackbird</div>
+        </div>
+        <div class="bb-body"><div class="row"><span class="path">~/blackbird</span> <span class="prompt">❯</span> cargo test --release</div><div class="row dim">   Compiling blackbird_core v0.1.14</div><div class="row dim">    Finished `release` profile [optimized] in 4.21s</div><div class="row">     Running unittests src/lib.rs</div><div class="row">running <span class="num">247</span> tests</div><div class="row">test result: <span class="ok">ok.</span> <span class="num">247</span> passed; <span class="num">0</span> failed; <span class="num">0</span> ignored</div><div class="row"><span class="path">~/blackbird</span> <span class="prompt">❯</span> <span class="bb-cursor"></span></div></div>
+      </div>
+
+      <div class="features">
+        <div class="feat">
+          <h3>Native</h3>
+          <p>Blackbird is a native macOS app, built to feel like something Apple could have shipped.</p>
+        </div>
+        <div class="feat">
+          <h3>Fast</h3>
+          <p>Metal renders the terminal at 120 Hz on ProMotion, redrawing only the rows that changed.</p>
+        </div>
+        <div class="feat">
+          <h3>Accurate</h3>
+          <p>VT parsing runs on Rust's <code>alacritty_terminal</code>, the same core that powers Alacritty and Zed.</p>
+        </div>
+        <div class="feat">
+          <h3>Minimal</h3>
+          <p>There are tabs but no splits, and no profiles, plugins, AI, or config files.</p>
+        </div>
+      </div>
+
+      <div class="bench-line">
+        Throughput is measured against Terminal.app, iTerm2, Ghostty, and Alacritty. <a href="https://github.com/conjfrnk/blackbird/blob/main/docs/benchmarks/vtebench-2026-04-20.md">See benchmarks →</a>
+      </div>
+
+      <footer>
+        <div>© 2026 Connor Frank · MIT License</div>
+        <div class="links">
+          <a href="https://github.com/conjfrnk/blackbird">GitHub</a>
+          <a href="https://github.com/conjfrnk/blackbird/releases">Changelog</a>
+          <a href="https://github.com/conjfrnk/blackbird/blob/main/SECURITY.md">Security</a>
+        </div>
+      </footer>
     </main>
   </body>
 </html>
