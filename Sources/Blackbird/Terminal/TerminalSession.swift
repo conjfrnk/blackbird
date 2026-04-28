@@ -649,6 +649,15 @@ public final class TerminalSession: ObservableObject {
         preferencesSubscription?.cancel()
         preferencesSubscription = nil
         pty?.terminate()
+        // Audit M6: explicitly tear down the Rust core BBTerm on
+        // coreQueue. BBTerm.deinit otherwise runs whenever ARC drops
+        // the last strong ref — possibly off coreQueue — racing the
+        // single-thread-per-BBTerm contract. Calling terminate() here
+        // (idempotent) under coreQueue.sync guarantees the FFI free
+        // happens on the same queue that drives `bb_term_input`.
+        coreQueue.sync {
+            self.bbterm.terminate()
+        }
     }
 
     // MARK: - Wiring

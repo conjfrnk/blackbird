@@ -85,8 +85,41 @@ public final class BBTerm {
         bb_term_set_event_cb(ptr, BBTerm.eventTrampoline, UnsafeMutableRawPointer(box))
     }
 
+    /// Tear down the Rust core handle and clear the trampoline. Must
+    /// be called on the same serial queue that drives `bb_term_input`
+    /// — otherwise an in-flight trampoline on the input queue races
+    /// the FFI clear/free here. Idempotent; subsequent calls are
+    /// no-ops.
+    ///
+    /// Production callers (TerminalSession.terminate) wrap this in
+    /// `coreQueue.sync` so the same-queue contract is satisfied.
+    /// `deinit` falls back to calling this if the explicit path
+    /// didn't fire — that fallback is the historical path; the
+    /// explicit hook lets `deinit` become a no-op for the FFI portion
+    /// when an owner properly tears down through `terminate()`. Audit
+    /// M6.
+    public func terminate() {
+        guard let h = handle else { return }
+        // Clear the trampoline's back-reference BEFORE the FFI free
+        // so any straggler trampoline call (which only happens off
+        // the contract — same-queue discipline forbids it — but we
+        // defend anyway) reads a nil owner and short-circuits before
+        // touching `self`.
+        ctxBox.pointee.owner = nil
+        bb_term_set_event_cb(h, nil, nil)
+        bb_term_free(h)
+        handle = nil
+    }
+
     deinit {
+        // If the owner already called `terminate()` on the right
+        // queue, `handle` is nil and this is a clean no-op. Otherwise
+        // we run the FFI teardown here as a fallback — same race
+        // surface as pre-M6, but the explicit-terminate path now
+        // exists for owners who want to be deterministic about which
+        // queue runs the free.
         if let h = handle {
+            ctxBox.pointee.owner = nil
             bb_term_set_event_cb(h, nil, nil)
             bb_term_free(h)
         }
