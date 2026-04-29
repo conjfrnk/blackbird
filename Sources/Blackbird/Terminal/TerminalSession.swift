@@ -700,10 +700,15 @@ public final class TerminalSession: ObservableObject {
         // from the pre-clear shell don't survive into the post-clear
         // session. `applyPalette` is async on `coreQueue` so it orders
         // naturally after the synchronous clear above.
-        // ThemeManager is `@MainActor`; hop to main to read it.
+        // ThemeManager.resolvedPalette is `@MainActor`-isolated; both
+        // branches below enter on main, so MainActor.assumeIsolated is
+        // the correct Swift 6 vocabulary for the runtime guarantee
+        // (Thread.isMainThread inline branch and DispatchQueue.main.async
+        // both deliver a main-thread context).
         let applyResolved: () -> Void = { [weak self] in
             guard let self else { return }
-            self.applyPalette(ThemeManager.shared.resolvedPalette)
+            let palette = MainActor.assumeIsolated { ThemeManager.shared.resolvedPalette }
+            self.applyPalette(palette)
         }
         if Thread.isMainThread {
             applyResolved()
