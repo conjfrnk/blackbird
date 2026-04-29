@@ -878,11 +878,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Both checks are gated on a non-nil prior snapshot so the very
         // first render() (where `currentSnapshot` is still nil) doesn't
         // misfire — there's no live selection at session start anyway.
+        //  - H-6 (history collapsed by ⌘K): `TerminalSession.clearAll()`
+        //    calls `bb_term_clear_all`, which drops the entire scrollback
+        //    ring. A selection that pointed into history now references
+        //    deleted lines — copy returns blank. The cols/altScreen gates
+        //    above don't fire (cols unchanged, no alt-screen toggle), so
+        //    we need an explicit "history just collapsed to zero" predicate.
+        //    Picked "was-non-zero, now-zero" rather than "shrank" so a
+        //    natural scrollback eviction (history wraps at the cap) — which
+        //    keeps history positive — doesn't drop a live selection.
         if selection != nil, let prev = currentSnapshot {
             let colsChanged = prev.cols != snapshot.cols
             let altScreenChanged = prev.termMode.contains(.altScreen)
                 != snapshot.termMode.contains(.altScreen)
-            if colsChanged || altScreenChanged {
+            let historyCollapsed = prev.historySize > 0 && snapshot.historySize == 0
+            if colsChanged || altScreenChanged || historyCollapsed {
                 selection = nil
             }
         }

@@ -630,6 +630,20 @@ public final class TerminalSession: ObservableObject {
     /// ⌘K target — clear viewport + scrollback while preserving palette /
     /// cursor / title. Publishes a fresh snapshot so the renderer shows the
     /// empty grid on the next frame.
+    ///
+    /// H-6: also invalidate prompt-mark state. The OSC 133 ring's
+    /// `(history_size, grid_row)` tuples encode buffer positions that
+    /// `bb_term_clear_all` has just deleted, so a post-clear ⌘[ would
+    /// otherwise navigate to stale lines. Selection itself lives on
+    /// `TerminalView` and is invalidated through the render-time gate
+    /// (the `historyCollapsed` predicate added in the same change),
+    /// which observes the post-clear snapshot we publish below.
+    ///
+    /// L-24: re-apply the user's current theme palette after the core
+    /// clear. `bb_term_clear_all` preserves OSC 4 palette mutations by
+    /// design, so a hostile remote that recoloured ANSI 0 to red leaves
+    /// the post-clear shell with the wrong colours. Re-pushing the
+    /// resolved theme overwrites any adversarial palette state.
     public func clearAll() {
         dispatchPrecondition(condition: .notOnQueue(coreQueue))
         var s: BBSnapshot?
@@ -637,7 +651,36 @@ public final class TerminalSession: ObservableObject {
             bbterm.clearAll()
             s = bbterm.snapshot()
         }
+        // H-6: drop prompt-state tied to the now-deleted scrollback. The
+        // render-side gate handles `selection`; we own the OSC 133 ring +
+        // last-mark + cycle cursor here. Mutating @Published properties
+        // on main keeps Combine subscribers race-free.
+        let resetPromptState: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.promptMarks = []
+            self.promptCursor = nil
+            self.lastPromptMark = nil
+        }
+        if Thread.isMainThread {
+            resetPromptState()
+        } else {
+            DispatchQueue.main.async(execute: resetPromptState)
+        }
         if let s { publishImmediate(s) }
+        // L-24: re-apply the resolved theme palette so OSC 4 mutations
+        // from the pre-clear shell don't survive into the post-clear
+        // session. `applyPalette` is async on `coreQueue` so it orders
+        // naturally after the synchronous clear above.
+        // ThemeManager is `@MainActor`; hop to main to read it.
+        let applyResolved: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.applyPalette(ThemeManager.shared.resolvedPalette)
+        }
+        if Thread.isMainThread {
+            applyResolved()
+        } else {
+            DispatchQueue.main.async(execute: applyResolved)
+        }
     }
 
     /// Synchronous publish path used by user-input-driven snapshots
