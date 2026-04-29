@@ -1045,7 +1045,18 @@ public final class MetalRenderer {
         // fault, shader trap) surface in the unified log instead of
         // silently blanking the window. `privacy: .public` is load-bearing
         // for readability — see `feedback_nslog_private_format`.
-        buffer.addCompletedHandler { [weak self] cb in
+        //
+        // Strong-capture the semaphore (NOT `[weak self]`): if the renderer
+        // deinits between `commit()` and the GPU completion firing, a weak
+        // `self?` resolves to nil and silently drops the `signal()`. The
+        // semaphore then deinits with an unbalanced wait/signal count and
+        // libdispatch aborts the process with `BUG IN CLIENT OF
+        // LIBDISPATCH: Semaphore object deallocated while in use`. The
+        // semaphore's lifetime is independent of `self`, so capturing it
+        // strongly here keeps the slot bookkeeping intact across renderer
+        // teardown — Apple's canonical pattern for triple-buffered Metal
+        // ring semaphores. Audit M-3 (2026-04-29).
+        buffer.addCompletedHandler { [semaphore = self.inflightSemaphore] cb in
             if cb.status == .error {
                 if let err = cb.error {
                     Self.logger.error("command buffer failed: \(String(describing: err), privacy: .public)")
@@ -1053,7 +1064,7 @@ public final class MetalRenderer {
                     Self.logger.error("command buffer ended with .error status (no NSError)")
                 }
             }
-            self?.inflightSemaphore.signal()
+            semaphore.signal()
         }
 
         // Build a cheap closure that answers "is buffer-(line, col) inside
