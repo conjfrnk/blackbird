@@ -2,9 +2,7 @@ import Metal
 import CoreText
 import CoreGraphics
 import AppKit
-#if DEBUG
 import os
-#endif
 
 /// A fixed-capacity texture atlas of monochrome glyphs. Narrow glyphs occupy
 /// one cell-sized slot; wide glyphs (CJK, emoji) occupy two horizontally-
@@ -102,18 +100,22 @@ public final class GlyphAtlas {
     /// saturation flushes on otherwise-fine workloads. Audit
     /// glyph-atlas F4.
     private var freeNarrowSlots: [Int] = []
-    #if DEBUG
     /// Counter for lookup-or-insert calls that found a full atlas and had
     /// to return nil (cell ends up blank on screen). Logged via `logger`
     /// the first time saturation bites and every 1000th event thereafter
     /// so a future font-mix stretching past the 4096-glyph cap surfaces
     /// before users notice missing glyphs. Cleared never — atlas lifetime
     /// matches the window.
+    ///
+    /// Active in Release as well as Debug — atlas saturation flushes
+    /// happen under field load and the diagnostic must survive there to
+    /// be useful. Cost is one Int increment per saturation event
+    /// (negligible). Logger is `os.Logger` so it's eligible for Release
+    /// per `feedback_nslog_private_format`. Audit M-6 (2026-04-29).
     private var saturationHits: Int = 0
     private static let logger = Logger(
         subsystem: "dev.conjfrnk.blackbird", category: "atlas"
     )
-    #endif
 
     public init?(device: MTLDevice, metrics: CellMetrics, capacityGlyphs: Int, scale: CGFloat = 1.0) {
         // Guard against nonsensical inputs up front: zero capacity would
@@ -278,14 +280,12 @@ public final class GlyphAtlas {
             // on every lookup. Prewarmed ASCII + box-drawing are re-
             // inserted on demand by the render path, same way they
             // landed initially. One flush per episode.
-            #if DEBUG
             saturationHits += 1
             if saturationHits == 1 || saturationHits % 1000 == 0 {
                 Self.logger.log(
                     "atlas saturated at \(self.capacityGlyphs, privacy: .public); flushed & rebuilding (hit #\(self.saturationHits, privacy: .public))"
                 )
             }
-            #endif
             byKey.removeAll(keepingCapacity: true)
             nextSlot = 0
             slot = 0
