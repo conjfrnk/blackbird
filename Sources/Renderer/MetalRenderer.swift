@@ -60,6 +60,17 @@ public final class MetalRenderer {
     /// all three.
     private var instanceBuffers: [MTLBuffer]
     private var instanceCapacities: [Int]
+    /// Hard cap on `instanceCapacities[slot]`. The grow path doubles the
+    /// current capacity each time it overflows; bounded today only by
+    /// "GPU OOM intervenes first" (Audit L-21). Defense-in-depth: cap
+    /// the doubling so an Int multiply can't overflow in pathological
+    /// futures. 4 million CellInstances at ~80 bytes/instance ≈ 320 MB
+    /// per slot — orders of magnitude above any realistic terminal
+    /// grid (BBCore caps at MAX_DIM=4096 per side; even a degenerate
+    /// 4096x4096 grid is only 16M cells split across rows that don't
+    /// all paint). Sized to fit GPU memory comfortably while leaving
+    /// the trap for `* 2` overflow well out of reach.
+    private static let instanceCapacityHardCap = 4 * 1024 * 1024
     private var frameIndex: Int = 0
     /// The slot the current `render(in:)` call has locked. Set after
     /// `inflightSemaphore.wait()`, read by `buildInstances` and the encoder,
@@ -928,7 +939,25 @@ public final class MetalRenderer {
         let total = rowInstanceCache.reduce(0) { $0 + $1.count }
         let slot = currentSlot
         if total > instanceCapacities[slot] {
-            let newCap = max(total, instanceCapacities[slot] * 2)
+            // Defense-in-depth on `* 2`: an unguarded `Int` multiply
+            // would trap on overflow. Bounded today (GPU OOM
+            // intervenes first) but the cap pins the contract at the
+            // arithmetic site so a future regression that lets total
+            // grow unboundedly can't crash the renderer mid-frame.
+            // Audit L-21 (2026-04-29).
+            let doubled = instanceCapacities[slot]
+                .multipliedReportingOverflow(by: 2)
+            let proposed: Int
+            if doubled.overflow {
+                // We've already exceeded UInt63. Saturate to the hard
+                // cap; if `total` itself is also above the cap, the
+                // makeBuffer call below will fail and we'll skip the
+                // frame on the next branch.
+                proposed = Self.instanceCapacityHardCap
+            } else {
+                proposed = min(doubled.partialValue, Self.instanceCapacityHardCap)
+            }
+            let newCap = max(total, proposed)
             if let newBuf = device.makeBuffer(
                 length: newCap * MemoryLayout<CellInstance>.stride,
                 options: [.storageModeShared]
