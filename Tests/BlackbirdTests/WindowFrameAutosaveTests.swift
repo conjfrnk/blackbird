@@ -60,13 +60,20 @@ final class WindowFrameAutosaveTests: XCTestCase {
     /// is built on; if AppKit ever changed its storage shape this
     /// would catch it before the production path silently broke again.
     func test_saveFrameUsingName_writesFrameToDefaults() {
-        let frame = NSRect(x: 100, y: 200, width: 800, height: 480)
+        let contentRect = NSRect(x: 100, y: 200, width: 800, height: 480)
+        let styleMask: NSWindow.StyleMask = [.titled, .closable, .resizable]
         let window = NSWindow(
-            contentRect: frame,
-            styleMask: [.titled, .closable, .resizable],
+            contentRect: contentRect,
+            styleMask: styleMask,
             backing: .buffered,
             defer: false
         )
+        // `NSWindow.isReleasedWhenClosed` defaults to true for windows
+        // created via this initialiser, which causes a double-release at
+        // scope-end under ASan: `close()` releases, then ARC releases
+        // again. Flip it off so ARC owns the lifecycle. (audit-fix
+        // 2026-04-29)
+        window.isReleasedWhenClosed = false
         defer { window.close() }
 
         window.saveFrame(usingName: Self.testAutosaveName)
@@ -78,7 +85,17 @@ final class WindowFrameAutosaveTests: XCTestCase {
         // Pin the first four fields (the frame); the trailing screen
         // block depends on which display the test host is using and
         // isn't load-bearing for the bug.
-        let prefix = "100 200 800 480 "
+        //
+        // CRITICAL: `NSWindow.init(contentRect:…)` interprets the rect as
+        // CONTENT, not FRAME — the resulting `window.frame` is the
+        // content rect grown by the titlebar height (and any other
+        // chrome implied by `styleMask`). `saveFrame` writes
+        // `window.frame`, so we must compare against the equivalent
+        // frame, not the input contentRect, or we'd be off by ~28pt of
+        // titlebar on every macOS build (NOT a display-geometry issue —
+        // it fails on every host).
+        let expectedFrame = NSWindow.frameRect(forContentRect: contentRect, styleMask: styleMask)
+        let prefix = "\(formatFrameComponents(expectedFrame)) "
         XCTAssertTrue(
             saved?.hasPrefix(prefix) ?? false,
             "saved value must begin with '\(prefix)' (got: \(saved ?? "nil"))"
@@ -98,6 +115,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
         defer { window.close() }
         // Mirror the main window's tabbing setup so we're testing the
         // exact config that was failing in production.
@@ -107,6 +125,9 @@ final class WindowFrameAutosaveTests: XCTestCase {
 
         // Simulate the user dragging a corner: enlarge the frame, then
         // run the explicit save (mirroring the windowDidResize path).
+        // `setFrame` takes a FRAME rect (not content rect) so we pass
+        // the full frame and read it back as-is — no titlebar grow on
+        // this path.
         let resized = NSRect(x: 50, y: 75, width: 1600, height: 900)
         window.setFrame(resized, display: false)
         window.saveFrame(usingName: Self.testAutosaveName)
@@ -114,7 +135,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
         let saved = UserDefaults.standard.string(forKey: Self.defaultsKey)
         XCTAssertNotNil(saved,
             "explicit saveFrame must populate defaults under '.preferred' tabbing")
-        let prefix = "50 75 1600 900 "
+        let prefix = "\(formatFrameComponents(window.frame)) "
         XCTAssertTrue(
             saved?.hasPrefix(prefix) ?? false,
             "saved frame must reflect the resize, not the initial frame (got: \(saved ?? "nil"))"
@@ -130,14 +151,22 @@ final class WindowFrameAutosaveTests: XCTestCase {
     /// instead of the constructor default. Pinning round-trip here
     /// would catch any future macOS change to the storage shape.
     func test_setFrameUsingName_restoresPreviouslySavedFrame() {
-        let originalFrame = NSRect(x: 350, y: 250, width: 1024, height: 768)
+        // Use a `setFrame`-shaped FRAME rect (not a contentRect) for the
+        // assertion target so we compare frame-to-frame and don't get
+        // bitten by the contentRect → frame titlebar grow that AppKit
+        // applies in `init(contentRect:…)`. The saver still needs SOME
+        // initial content rect for its constructor — that doesn't matter
+        // because we explicitly `setFrame` to the target before saving.
+        let savedFrame = NSRect(x: 350, y: 250, width: 1024, height: 800)
         let saver = NSWindow(
-            contentRect: originalFrame,
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
             styleMask: [.titled, .resizable],
             backing: .buffered,
             defer: false
         )
+        saver.isReleasedWhenClosed = false
         defer { saver.close() }
+        saver.setFrame(savedFrame, display: false)
         saver.saveFrame(usingName: Self.testAutosaveName)
 
         // Fresh window at a tiny default frame — verifies the apply is
@@ -149,14 +178,15 @@ final class WindowFrameAutosaveTests: XCTestCase {
             backing: .buffered,
             defer: false
         )
+        restorer.isReleasedWhenClosed = false
         defer { restorer.close() }
-        XCTAssertNotEqual(restorer.frame, originalFrame,
+        XCTAssertNotEqual(restorer.frame, savedFrame,
             "test setup precondition: restorer must start at a different frame")
 
         let applied = restorer.setFrameUsingName(Self.testAutosaveName)
         XCTAssertTrue(applied,
             "setFrameUsingName must report success when defaults has the key")
-        XCTAssertEqual(restorer.frame, originalFrame,
+        XCTAssertEqual(restorer.frame, savedFrame,
             "restorer's frame must match the previously-saved frame")
     }
 
@@ -167,14 +197,27 @@ final class WindowFrameAutosaveTests: XCTestCase {
     /// (currently 800×480 at origin), the off-screen-nudge then either
     /// no-ops (default frame is on-screen) or recenters.
     func test_setFrameUsingName_withNoSavedFrame_leavesFrameUnchanged() {
-        let constructorFrame = NSRect(x: 0, y: 0, width: 800, height: 480)
+        let contentRect = NSRect(x: 0, y: 0, width: 800, height: 480)
+        let styleMask: NSWindow.StyleMask = [.titled, .resizable]
         let window = NSWindow(
-            contentRect: constructorFrame,
-            styleMask: [.titled, .resizable],
+            contentRect: contentRect,
+            styleMask: styleMask,
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
         defer { window.close() }
+
+        // Capture the constructor's actual frame BEFORE the apply
+        // attempt. AppKit grows `contentRect` by the titlebar height to
+        // produce `window.frame`, so the constructor frame is the
+        // contentRect height plus the titlebar (e.g. 480 → 512). The
+        // bug being pinned here is "no-saved-key apply must be a
+        // no-op" — comparing pre-apply vs post-apply makes that
+        // contract explicit and host-independent (audit-fix
+        // 2026-04-29: prior literal-frame compare failed because it
+        // confused contentRect with frame).
+        let frameBeforeApply = window.frame
 
         // setUp cleared the key. Sanity:
         XCTAssertNil(
@@ -185,7 +228,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
         let applied = window.setFrameUsingName(Self.testAutosaveName)
         XCTAssertFalse(applied,
             "setFrameUsingName must return false when key is absent")
-        XCTAssertEqual(window.frame, constructorFrame,
+        XCTAssertEqual(window.frame, frameBeforeApply,
             "frame must be untouched when no save exists")
     }
 
@@ -198,5 +241,30 @@ final class WindowFrameAutosaveTests: XCTestCase {
     func test_frameAutosaveName_isStableContract() {
         XCTAssertEqual(MainWindowController.frameAutosaveName, "BlackbirdMainWindow",
             "renaming the autosave name silently invalidates every existing user's saved frame")
+    }
+
+    // MARK: - Helpers
+
+    /// Formats `rect.origin.x rect.origin.y rect.width rect.height` the
+    /// way AppKit's `saveFrame(usingName:)` does — integer components
+    /// for whole-number frames, no trailing `.0`. The full saved string
+    /// has eight space-separated values (frame + screen-visible-frame),
+    /// but only the first four are load-bearing for this suite; the
+    /// trailing screen block depends on the test host's display
+    /// geometry and is asserted via `hasPrefix`.
+    private func formatFrameComponents(_ rect: NSRect) -> String {
+        let x = formatNumber(rect.origin.x)
+        let y = formatNumber(rect.origin.y)
+        let w = formatNumber(rect.size.width)
+        let h = formatNumber(rect.size.height)
+        return "\(x) \(y) \(w) \(h)"
+    }
+
+    /// `%g` style: integer if the value is a whole number, otherwise
+    /// fractional with no superfluous zeros. Mirrors AppKit's
+    /// `saveFrame` serializer.
+    private func formatNumber(_ v: CGFloat) -> String {
+        if v.rounded() == v { return String(Int(v)) }
+        return String(format: "%g", Double(v))
     }
 }
