@@ -349,6 +349,15 @@ extension TerminalView {
         // Scrollback rows fall back to `session.textRange` with a nil
         // map (legacy approximation). Audit H5.
         let snap = currentSnapshot
+        // L-16 / DI-10: snap the seq BEFORE the row-build loop, against
+        // the same snapshot the rows are about to be sourced from. The
+        // earlier shape captured `currentSnapshot?.sequenceID` AFTER
+        // the loop — if a publish swapped the snapshot during the loop,
+        // the rows came from snap[N] but the seq stamped was snap[N+1],
+        // and the publish gate downstream would think a stale-seq
+        // result was current. Tying the seq to `snap` (the locally-held
+        // reference) makes them snap atomically.
+        let scanSeq = snap?.sequenceID
         var rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)] = []
         rows.reserveCapacity(Int(bottomLine - topLine + 1))
         for ln in topLine...bottomLine {
@@ -368,10 +377,6 @@ extension TerminalView {
                 }
             }
         }
-        // Capture the snapshot's seq at scan-submit time so the publish
-        // can stamp `findMatchesSeq` with the snapshot the rows actually
-        // came from — even if `currentSnapshot` advances during the scan.
-        let scanSeq = currentSnapshot?.sequenceID
 
         let mySearchID = nextRegexSearchID()
         activeRegexSearchID = mySearchID
