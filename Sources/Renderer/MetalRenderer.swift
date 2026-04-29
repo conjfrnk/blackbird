@@ -29,6 +29,22 @@ public final class MetalRenderer {
     private let cursorPipelineState: MTLRenderPipelineState
     public var atlas: GlyphAtlas
     public var metrics: CellMetrics
+    /// Bumped on every mutation of `self.metrics`. Folded into both
+    /// `FrameKey` and `CacheKey` so the frame-skip and per-row caches
+    /// invalidate automatically when metrics change — even if a future
+    /// path mutates `metrics` directly without going through
+    /// `reconfigure(metrics:scale:)`. Mirrors the `atlas.generation`
+    /// pattern already in `CacheKey` (which solves the same
+    /// post-flush-stale-UV problem for the atlas).
+    ///
+    /// Without this counter the font-size invariant ("FrameKey contains
+    /// everything that affects pixels") was held only by the explicit
+    /// `lastFrameKey = nil` inside `reconfigure`. `metrics` is `public
+    /// var`, so any other mutator would silently bypass that
+    /// invalidation and the next render could short-circuit on a stale
+    /// FrameKey while the atlas / cell sizes had changed underneath.
+    /// Audit M-20 (2026-04-29).
+    public private(set) var metricsGeneration: UInt64 = 0
 
     /// Triple-buffered instance-data ring. Each `render(in:)` call writes to
     /// the buffer at `frameIndex` and advances the index; the command buffer
@@ -164,6 +180,13 @@ public final class MetalRenderer {
         let cmdHoverBufferLine: Int32
         let cmdHoverStartCol: Int32
         let cmdHoverEndCol: Int32
+        /// `MetalRenderer.metricsGeneration` snapshot. Folded in so a
+        /// metrics mutation (font-size change, future external setter)
+        /// invalidates the frame-skip cache automatically — without
+        /// this, the invariant relied on every mutator remembering to
+        /// null `lastFrameKey` by hand. Mirrors `CacheKey.atlasGeneration`.
+        /// Audit M-20.
+        let metricsGeneration: UInt64
     }
     private var lastFrameKey: FrameKey?
     /// Observable frame-skip signal. `true` when the most recent
@@ -231,6 +254,14 @@ public final class MetalRenderer {
         /// generation in the key forces a full rebuild on every
         /// flush. Audit H3.
         let atlasGeneration: UInt64
+        /// `MetalRenderer.metricsGeneration` at the time this row cache
+        /// was built. Cached `CellInstance`s carry baked-in pixel
+        /// positions computed against the metrics that were live when
+        /// the row was built; a metrics change (font size flip)
+        /// invalidates those positions. Including generation here
+        /// forces a full rebuild whenever metrics rotate, even on a
+        /// path that didn't go through `reconfigure`. Audit M-20.
+        let metricsGeneration: UInt64
     }
     private var lastCacheKey: CacheKey?
 
@@ -446,6 +477,10 @@ public final class MetalRenderer {
         self.cursorPipelineState = cursorPSO
         self.atlas = atlas
         self.metrics = metrics
+        // Initial generation. Subsequent metrics mutations bump this
+        // counter so FrameKey/CacheKey equality forces a rebuild even
+        // if every other key field is identical. Audit M-20.
+        self.metricsGeneration = 1
         self.instanceBuffers = buffers
         self.instanceCapacities = [startCap, startCap, startCap]
         // Warm ASCII + box-drawing into the atlas before the first draw so
@@ -487,6 +522,11 @@ public final class MetalRenderer {
             return false
         }
         self.metrics = newMetrics
+        // Bump alongside the metrics mutation so any future path that
+        // also writes to `metrics` (test harness, external mutator)
+        // inherits the cache-invalidation contract by construction.
+        // Audit M-20.
+        self.metricsGeneration &+= 1
         self.atlas = a
         // Re-warm the new atlas so the post-resize first repaint doesn't
         // pay for CoreText rasterisation of every visible character.
@@ -995,7 +1035,8 @@ public final class MetalRenderer {
             blinkSkip: blinkSkipNow,
             cmdHoverBufferLine: cmdHoverBufferLine,
             cmdHoverStartCol: cmdHoverStartCol,
-            cmdHoverEndCol: cmdHoverEndCol
+            cmdHoverEndCol: cmdHoverEndCol,
+            metricsGeneration: metricsGeneration
         )
         if !frameSkipDisabled, frameKey == lastFrameKey {
             // Nothing that affects pixels has changed since the last
@@ -1203,7 +1244,8 @@ public final class MetalRenderer {
                 cmdHoverBufferLine: cmdHoverBufferLine,
                 cmdHoverStartCol: cmdHoverStartCol,
                 cmdHoverEndCol: cmdHoverEndCol,
-                atlasGeneration: atlas.generation
+                atlasGeneration: atlas.generation,
+                metricsGeneration: metricsGeneration
             )
             let cacheCompatible = !dirtyRowsDisabled
                 && lastCacheKey == newCacheKey

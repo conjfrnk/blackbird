@@ -561,4 +561,41 @@ final class MetalRendererTests: XCTestCase {
         XCTAssertEqual(UInt32(clamping: Int(UInt32.max) + 1), UInt32.max)
         XCTAssertEqual(UInt32(clamping: Int.max), UInt32.max)
     }
+
+    // MARK: - M-20: metricsGeneration bumps on every metrics mutation
+
+    /// Pins the audit-M-20 invariant: every metrics mutation bumps
+    /// `metricsGeneration`, which is folded into both `FrameKey` and
+    /// `CacheKey`. Without this counter the font-size invariant was
+    /// held only by the explicit `lastFrameKey = nil` inside
+    /// `reconfigure(metrics:scale:)` — any other path that mutated
+    /// `metrics` directly (today: none, but `metrics` is `public var`)
+    /// would silently bypass the invalidation and the next render
+    /// could short-circuit on a stale FrameKey while the cell sizes
+    /// had changed underneath.
+    ///
+    /// Mirrors the GlyphAtlas `generation` test in GlyphAtlasTests.
+    func test_metricsGeneration_startsAtOneAndBumpsOnReconfigure() throws {
+        let device = try requireMetalDevice()
+        let metrics1 = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics1))
+        // Initial generation is 1 (set in init). The exact value isn't
+        // load-bearing — what matters is that a fresh renderer has a
+        // non-zero generation and that subsequent reconfigures
+        // monotonically bump it.
+        let gen0 = renderer.metricsGeneration
+        XCTAssertGreaterThanOrEqual(gen0, 1,
+            "fresh renderer must seed metricsGeneration so FrameKey is well-defined on the first render")
+
+        let metrics2 = CellMetrics(font: .monospacedSystemFont(ofSize: 20, weight: .regular))
+        XCTAssertTrue(renderer.reconfigure(metrics: metrics2, scale: 2.0))
+        let gen1 = renderer.metricsGeneration
+        XCTAssertEqual(gen1, gen0 &+ 1,
+            "successful reconfigure must bump metricsGeneration by 1")
+
+        let metrics3 = CellMetrics(font: .monospacedSystemFont(ofSize: 16, weight: .regular))
+        XCTAssertTrue(renderer.reconfigure(metrics: metrics3, scale: 2.0))
+        XCTAssertEqual(renderer.metricsGeneration, gen1 &+ 1,
+            "second reconfigure must bump metricsGeneration again")
+    }
 }
