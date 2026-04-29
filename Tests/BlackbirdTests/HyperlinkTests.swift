@@ -292,6 +292,169 @@ final class HyperlinkTests: XCTestCase {
         )
     }
 
+    // MARK: - H-2: scheme-dispatch (mailto + IPv6 + IDN-on-mailto)
+
+    /// Audit pass-2 H-2. Pre-fix the anchor regex
+    /// `(?i)(?:https?|ftp)://…` did not recognise `mailto:`, so the
+    /// divergence detector silently returned false for an anchor that
+    /// claimed one mail address while the href targeted another. A
+    /// hostile remote emitted `\x1b]8;;mailto:attacker@evil.com\x1b\\
+    /// Contact support@apple.com\x1b]8;;\x1b\\` — click composed mail
+    /// to attacker. Post-fix the mailto candidate is recognised and the
+    /// domain mismatch (`evil.com` vs `apple.com`) trips divergence.
+    func testAnchorDivergence_mailtoPhishingFlagged() {
+        let url = URL(string: "mailto:attacker@evil.com")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "Contact mailto:support@apple.com",
+                url: url
+            ),
+            "hostile mailto href + visible apple.com mailto anchor must trip divergence"
+        )
+    }
+
+    /// Audit pass-2 H-2. Same-domain mailto must NOT flag — visible
+    /// "user@apple.com" with href "user@apple.com" is the legitimate
+    /// case; over-blocking it would silence the gate's signal value.
+    func testAnchorDivergence_mailtoSameDomainNotFlagged() {
+        let url = URL(string: "mailto:user@apple.com")!
+        XCTAssertFalse(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "mailto:user@apple.com",
+                url: url
+            ),
+            "matching mailto domain must not flag as divergent"
+        )
+    }
+
+    /// Audit pass-2 H-2. Cyrillic а ("аpple") in the anchor's mailto
+    /// domain is the IDN homograph variant — pre-fix, `hostLooksLikeIDN`
+    /// only ran for http(s)/ftp; `isMailtoSafe` accepted any domain.
+    /// Now the anchor parses with non-ASCII, the divergence detector
+    /// flags the mismatch because the href is `evil.com`. (Even if the
+    /// anchor were the same Cyrillic-aliased domain, `isAllowed` would
+    /// reject the click separately via the extended IDN check.)
+    func testAnchorDivergence_mailtoIDNHomographFlagged() {
+        let url = URL(string: "mailto:attacker@evil.com")!
+        // U+0430 (Cyrillic а) replaces U+0061 in "apple"
+        let cyrillicAnchor = "mailto:user@\u{0430}pple.com"
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: cyrillicAnchor,
+                url: url
+            ),
+            "mailto IDN-look-alike anchor vs unrelated href must flag"
+        )
+    }
+
+    /// Audit pass-2 H-2. The host-side IDN gate must also cover the
+    /// mailto domain in `isAllowed`/`isMailtoSafe` — pre-fix a
+    /// `mailto:user@аpple.com` (Cyrillic а) href passed `isAllowed`
+    /// outright because the IDN check was scoped to host-required
+    /// schemes only. Post-fix `isAllowed` rejects it.
+    func testIsAllowed_rejectsMailtoIDNDomain() {
+        // U+0430 Cyrillic а replaces U+0061 in "apple". URL(string:)
+        // accepts this in macOS Foundation; the gate must reject.
+        guard let u = URL(string: "mailto:user@\u{0430}pple.com") else {
+            XCTFail("URL(string:) should accept mailto with Cyrillic domain")
+            return
+        }
+        XCTAssertFalse(
+            OSC8URLPolicy.isAllowed(u),
+            "mailto with non-ASCII (IDN homograph) domain must be rejected"
+        )
+    }
+
+    func testIsAllowed_rejectsMailtoPunycodeDomain() {
+        // xn--pple-43d is the punycode for "аpple" (Cyrillic а). A
+        // hostile remote sends the ACE-encoded form to bypass any
+        // raw-non-ASCII filter. The IDN gate must catch both shapes.
+        guard let u = URL(string: "mailto:user@xn--pple-43d.com") else {
+            XCTFail("URL(string:) should accept mailto with punycode domain")
+            return
+        }
+        XCTAssertFalse(
+            OSC8URLPolicy.isAllowed(u),
+            "mailto with punycode-encoded domain must be rejected"
+        )
+    }
+
+    /// Audit pass-2 H-2. IPv6 anchors `https://[2001:db8::1]/` failed
+    /// the prior regex's host class entirely, so the divergence
+    /// detector returned false ("no URL claim in anchor") — the gate
+    /// was effectively skipped for IPv6 hrefs. Post-fix Foundation's
+    /// URL parser handles bracket-form authority and returns the
+    /// expected host. Same anchor + href IPv6 host must NOT flag.
+    func testAnchorDivergence_ipv6SameAddressNotFlagged() {
+        let url = URL(string: "https://[2001:db8::1]/path")!
+        XCTAssertFalse(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://[2001:db8::1]/",
+                url: url
+            ),
+            "matching IPv6 anchor and href hosts must not flag"
+        )
+    }
+
+    /// Audit pass-2 H-2. Different IPv6 hosts (anchor claims one
+    /// address, href is a different address) must flag. Pre-fix the
+    /// regex never recognised either, so this check was silently a
+    /// no-op.
+    func testAnchorDivergence_ipv6MismatchFlagged() {
+        let url = URL(string: "https://[2001:db8::2]/")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://[2001:db8::1]/",
+                url: url
+            ),
+            "anchor IPv6 host differs from href IPv6 host — must flag"
+        )
+    }
+
+    /// Audit pass-2 H-2. Anchor text that *looks* URL-shaped (contains
+    /// "://" with a known scheme prefix) but fails Foundation's URL
+    /// parser must fail closed. A hostile remote can craft a
+    /// syntactically broken authority (`https://[::bad]/`) banking on
+    /// the parser tripping and the gate skipping. The fix: when we see
+    /// a URL prefix but URL(string:) rejects it, treat it as divergent.
+    func testAnchorDivergence_malformedURLFailsClosed() {
+        let url = URL(string: "https://evil.tld/login")!
+        // `https://]not-a-host[/` — Foundation will reject. Pre-fix
+        // the regex's `[A-Za-z0-9.\-]+` host class would have refused
+        // to match too, so the previous outcome was also "no match" →
+        // returned false (silent bypass). Post-fix we detect the URL
+        // shape and fail closed when parsing fails.
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://]not-a-host[/path",
+                url: url
+            ),
+            "URL-shaped anchor that fails to parse must fail closed (treated as divergent)"
+        )
+    }
+
+    /// Audit pass-2 H-2. Cross-scheme spoof: href is mailto but anchor
+    /// text claims an https URL, or vice-versa. Either form is the
+    /// shape a phishing payload would use; both must flag.
+    func testAnchorDivergence_crossSchemeSpoofFlagged() {
+        let httpHref = URL(string: "https://evil.tld/login")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "mailto:support@apple.com",
+                url: httpHref
+            ),
+            "mailto anchor under https href must flag"
+        )
+        let mailtoHref = URL(string: "mailto:attacker@evil.com")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://apple.com/contact",
+                url: mailtoHref
+            ),
+            "https anchor under mailto href must flag"
+        )
+    }
+
     /// Audit SI-01: the previous `normHref.hasSuffix("." + anchorHost)`
     /// check inverted trust on wildcard-hosted domains. Anchor host
     /// `github.io` (a public-suffix wildcard) and href host
