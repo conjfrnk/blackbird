@@ -91,6 +91,25 @@ enum OSC8URLPolicy {
         return true
     }
 
+    /// Extract the domain (right of the last `@`) from a `mailto:` URL.
+    /// `URL.host` is unreliable for mailto on Foundation — depending on
+    /// version, it may return nil even for valid mailto URLs. The
+    /// canonical location is the path: `mailto:user@domain` parses with
+    /// path == "user@domain". Returns nil when there's no `@` or the
+    /// right side is empty.
+    static func mailtoDomain(_ url: URL) -> String? {
+        guard url.scheme?.lowercased() == "mailto" else { return nil }
+        // For mailto URLs URL.path holds "user@domain" (no leading
+        // slash). Foundation occasionally splits on '@' for
+        // url.user/url.host, but the path form is consistent across
+        // OS versions and is what RFC 6068 describes.
+        let raw = url.path
+        guard let at = raw.lastIndex(of: "@") else { return nil }
+        let domain = raw[raw.index(after: at)...]
+        if domain.isEmpty { return nil }
+        return String(domain).lowercased()
+    }
+
     /// True when the host contains non-ASCII characters or looks like an
     /// ACE-encoded (punycode) IDN. Either form is a homograph phishing
     /// vector on the OSC 8 click path. Case-insensitive — RFC 3986 host
@@ -122,34 +141,75 @@ enum OSC8URLPolicy {
     /// expected behaviour); false-positives would block legitimate link
     /// chrome. Audit cwd-hyperlink F2.
     static func anchorDivergesFromHost(anchorText: String, url: URL) -> Bool {
-        // No href host → can't compare. The click path already rejects
-        // these via `isAllowed`'s host-required check, so this is belt
-        // and braces.
+        let hrefScheme = url.scheme?.lowercased()
+        // Locate the first URL-shaped token in the anchor text. Foundation's
+        // `URL(string:)` lets us scheme-dispatch and inherit IPv6/IDN edge
+        // handling for free — the prior regex `(?i)(?:https?|ftp)://([A-Za-z0-9.\-]+)`
+        // missed `mailto:`, rejected IPv6 brackets, and never reached the
+        // IDN gate. Audit pass-2 H-2 (canonical fix for S-3 + S-9 + S-10).
+        guard let (anchorURL, hadURLShape) = extractAnchorURL(from: anchorText) else {
+            // Anchor text contains no URL-shaped token whatsoever —
+            // plain text like "click here". The visible content makes
+            // no claim of identity, so divergence detection has nothing
+            // to compare. Audit pass-1 SI baseline behaviour preserved.
+            return false
+        }
+        guard let anchorURLValid = anchorURL else {
+            // Anchor text *looked* URL-shaped (contains "://" or a known
+            // scheme prefix) but failed to parse. Fail closed: a hostile
+            // remote that crafts a syntactically broken URL-shaped anchor
+            // shouldn't bypass the divergence gate by tripping a parser
+            // edge case. H-2 explicit requirement.
+            _ = hadURLShape
+            return true
+        }
+        let anchorScheme = anchorURLValid.scheme?.lowercased()
+        // Mailto branch: compare the right-of-`@` domain. Local-part
+        // comparison is too strict for the realistic phishing axis —
+        // attackers can re-use any local-part — but registering a
+        // look-alike domain is the actual cost.
+        if hrefScheme == "mailto" || anchorScheme == "mailto" {
+            // Either side mailto and the other isn't → divergent
+            // (a `mailto:` href under an `https://` anchor or vice-versa
+            // is itself the spoof shape we're trying to catch).
+            guard hrefScheme == "mailto", anchorScheme == "mailto" else {
+                return true
+            }
+            guard
+                let hrefDomain = mailtoDomain(url),
+                let anchorDomain = mailtoDomain(anchorURLValid)
+            else {
+                // Either side has no `@domain`; we can't validate, fail
+                // closed for the anchor-shaped-as-URL case.
+                return true
+            }
+            let normHref = stripTrailingDots(hrefDomain)
+            let normAnchor = stripTrailingDots(anchorDomain)
+            if normAnchor == normHref { return false }
+            if normAnchor.hasSuffix("." + normHref) { return false }
+            return true
+        }
+        // Host-required schemes (http/https/ftp). Foundation's URL
+        // parser handles IPv6 bracket-form and IDN automatically.
         guard let hrefHost = url.host?.lowercased(), !hrefHost.isEmpty else {
+            // No href host to compare against. The click path already
+            // rejects these via `isAllowed`'s host-required check; belt
+            // and braces here.
             return false
         }
-        // Extract a URL-shaped token from the anchor. NSDataDetector is
-        // overkill; a minimal regex suffices: scheme + "://" + host-ish
-        // characters up to the next path/punct boundary.
-        let pattern = #"(?i)(?:https?|ftp)://([A-Za-z0-9.\-]+)"#
-        // Pattern is a constant; force-try so a bad edit fails loudly.
-        let re = try! NSRegularExpression(pattern: pattern)
-        let ns = anchorText as NSString
-        let range = NSRange(location: 0, length: ns.length)
-        guard let match = re.firstMatch(in: anchorText, range: range), match.numberOfRanges >= 2 else {
-            return false
+        guard let anchorHost = anchorURLValid.host?.lowercased(), !anchorHost.isEmpty else {
+            // Anchor parsed as URL-shaped but produced no host. Likely
+            // a malformed authority (e.g. `https://[::bad]/`); fail
+            // closed per H-2 spec.
+            return true
         }
-        let anchorHostRange = match.range(at: 1)
-        guard anchorHostRange.location != NSNotFound else { return false }
-        var anchorHost = ns.substring(with: anchorHostRange).lowercased()
-        while anchorHost.hasSuffix(".") { anchorHost.removeLast() }
-        var normHref = hrefHost
-        while normHref.hasSuffix(".") { normHref.removeLast() }
+        let normHref = stripTrailingDots(hrefHost)
+        let normAnchor = stripTrailingDots(anchorHost)
         // Treat exact-match and "anchor is more specific than href" as
         // non-divergent — `www.apple.com` anchor for `apple.com` href
         // is not phishing.
-        if anchorHost == normHref { return false }
-        if anchorHost.hasSuffix("." + normHref) { return false }
+        if normAnchor == normHref { return false }
+        if normAnchor.hasSuffix("." + normHref) { return false }
         // SI-01 — earlier we also accepted the inverse (anchor host is
         // a parent of href host) on the assumption it modelled the
         // `apple.com` ↔ `www.apple.com` case. That inverts trust on
@@ -160,6 +220,93 @@ enum OSC8URLPolicy {
         // Removed. Users who legitimately want to navigate to a
         // divergent host can dwell to see the tooltip and ⌥⌘-click.
         return true
+    }
+
+    /// Strip trailing `.` from a host/domain. Both `apple.com.` (trailing
+    /// dot is RFC-legal absolute form) and `apple.com` should normalise
+    /// the same way.
+    private static func stripTrailingDots(_ s: String) -> String {
+        var out = s
+        while out.hasSuffix(".") { out.removeLast() }
+        return out
+    }
+
+    /// Pull a URL-shaped token out of `anchorText`. Returns:
+    ///   - `(parsedURL, true)` when a URL-shaped substring was found
+    ///     and `URL(string:)` accepted it.
+    ///   - `(nil, true)` when a URL-shaped substring was found but
+    ///     `URL(string:)` rejected it (caller fails closed).
+    ///   - `nil` when the anchor contains no URL-shaped token at all
+    ///     (caller treats as plain text → no divergence).
+    ///
+    /// "URL-shaped" means: the substring contains `://` (http/https/ftp/
+    /// scheme://host…) OR begins with a known mailto prefix. Both are
+    /// the shapes a phishing anchor would imitate; everything else is
+    /// plain text where the user already isn't being misled.
+    ///
+    /// Implementation uses a permissive-then-strict scan rather than a
+    /// regex over the host class, because the host class is exactly
+    /// the gap H-2 closes (IPv6 brackets, percent-encoded UTF-8, etc.).
+    /// We hand the candidate substring to `URL(string:)` and let
+    /// Foundation decide.
+    private static func extractAnchorURL(from anchorText: String) -> (URL?, Bool)? {
+        // Try mailto first — it's distinguishable by a fixed prefix
+        // (case-insensitive) and unambiguous.
+        if let mailto = findMailtoCandidate(in: anchorText) {
+            return (URL(string: mailto), true)
+        }
+        // Then scheme://… for http/https/ftp.
+        if let http = findHTTPCandidate(in: anchorText) {
+            return (URL(string: http), true)
+        }
+        return nil
+    }
+
+    /// Scan for a `mailto:` candidate. Returns the substring from the
+    /// `mailto:` prefix to the first whitespace or end-of-string. Empty
+    /// payload (just `mailto:`) is treated as not-found.
+    private static func findMailtoCandidate(in text: String) -> String? {
+        let lower = text.lowercased()
+        guard let prefixRange = lower.range(of: "mailto:") else { return nil }
+        let originalStart = text.index(text.startIndex, offsetBy: lower.distance(from: lower.startIndex, to: prefixRange.lowerBound))
+        // Walk forward until whitespace.
+        var end = originalStart
+        let textEnd = text.endIndex
+        while end < textEnd, !text[end].isWhitespace {
+            end = text.index(after: end)
+        }
+        let candidate = String(text[originalStart..<end])
+        // Reject "mailto:" with nothing after — not URL-shaped enough
+        // to count as a claim.
+        if candidate.lowercased() == "mailto:" { return nil }
+        return candidate
+    }
+
+    /// Scan for an `http://`, `https://`, or `ftp://` candidate.
+    /// Returns the substring from the scheme prefix to the first
+    /// whitespace or end-of-string. The candidate is fed verbatim into
+    /// `URL(string:)` — IPv6 brackets, percent-encoding, IDN, and
+    /// non-ASCII all flow through Foundation's parser, closing the
+    /// host-class gaps from the prior regex.
+    private static func findHTTPCandidate(in text: String) -> String? {
+        let lower = text.lowercased()
+        // Find the earliest of the three scheme prefixes. (Anchor that
+        // mentions multiple URLs is the rare phishing shape; first
+        // wins — the divergence detector is a heuristic, not a parser.)
+        var best: String.Index? = nil
+        for prefix in ["https://", "http://", "ftp://"] {
+            if let r = lower.range(of: prefix), best == nil || r.lowerBound < best! {
+                best = r.lowerBound
+            }
+        }
+        guard let lowerStart = best else { return nil }
+        let start = text.index(text.startIndex, offsetBy: lower.distance(from: lower.startIndex, to: lowerStart))
+        var end = start
+        let textEnd = text.endIndex
+        while end < textEnd, !text[end].isWhitespace {
+            end = text.index(after: end)
+        }
+        return String(text[start..<end])
     }
 
     /// `mailto:` syntax (RFC 6068) allows query headers:
@@ -177,6 +324,14 @@ enum OSC8URLPolicy {
     /// templates etc.) without the exfil risk.
     private static func isMailtoSafe(_ url: URL) -> Bool {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        // H-2: extend IDN homograph defence to mailto domain. A
+        // hostile remote emitting `mailto:user@аpple.com` (Cyrillic а)
+        // visually claims apple.com but sends mail to a registered
+        // lookalike domain. Same threat model as the http(s)/ftp host
+        // path; same defence.
+        if let domain = mailtoDomain(url), hostLooksLikeIDN(domain) {
             return false
         }
         guard let items = comps.queryItems, !items.isEmpty else {
