@@ -949,6 +949,23 @@ public final class TerminalSession: ObservableObject {
             // capture into `let` here, not read `Preferences.shared`
             // again on main. That avoids the TOCTOU class entirely.
             let osc52EnabledAtDispatch = Preferences.shared.osc52Enabled
+            // SFH-005 sibling: fire the OSC 52 oversize breadcrumb on
+            // coreQueue, BEFORE the main hop, so a terminating session
+            // can't suppress the security log. The post-hop `guard let
+            // self else { return }` would otherwise drop this diagnostic
+            // on a session torn down between dispatch and main drain.
+            // The static logger needs no `self`, and the gating value
+            // rides through to the main hop as `osc52OversizeAtDispatch`
+            // so the NSPasteboard write is skipped just like before.
+            var osc52OversizeAtDispatch = false
+            if case .osc52Clipboard(let text) = event,
+               osc52EnabledAtDispatch,
+               text.utf8.count > Self.osc52MaxBytes {
+                osc52OversizeAtDispatch = true
+                Self.osc52Logger.info(
+                    "OSC 52 payload \(text.utf8.count, privacy: .public) bytes exceeds \(Self.osc52MaxBytes, privacy: .public) cap — dropping"
+                )
+            }
             // M-1: re-establish [weak self] for the main hop. The outer
             // closure's `guard let self else { return }` re-bound `self`
             // strongly inside the closure's lexical scope, and that strong
@@ -998,18 +1015,13 @@ public final class TerminalSession: ObservableObject {
                     // is the one consistent with the event-handler
                     // ordering and the user's intent at dispatch time.
                     guard osc52EnabledAtDispatch else { break }
-                    if text.utf8.count > Self.osc52MaxBytes {
-                        // SFH-005: log in Release. OSC 52 oversize is a security
-                        // boundary — a hostile remote trying to stuff a
-                        // DoS-class payload into NSPasteboard must produce a
-                        // unified-log breadcrumb so field users can answer
-                        // "why didn't my clipboard update?" and "is my
-                        // terminal under attack?".
-                        Self.osc52Logger.info(
-                            "OSC 52 payload \(text.utf8.count, privacy: .public) bytes exceeds \(Self.osc52MaxBytes, privacy: .public) cap — dropping"
-                        )
-                        break
-                    }
+                    // SFH-005: oversize check + forensic breadcrumb
+                    // already fired on coreQueue before the main hop
+                    // (see osc52OversizeAtDispatch). Honour the captured
+                    // decision here to skip the NSPasteboard write —
+                    // diagnostic is in the unified log even if this hop
+                    // landed on a terminating session.
+                    if osc52OversizeAtDispatch { break }
                     // Scrub C0/C1 controls + bidi overrides before handing
                     // the payload to NSPasteboard. A compromised remote
                     // would otherwise push a Trojan Source blob or raw ESC
