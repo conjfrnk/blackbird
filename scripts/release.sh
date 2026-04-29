@@ -81,6 +81,34 @@ if [[ $CODESIGN_STATUS -ne 0 ]]; then
 fi
 printf '%s\n' "$CODESIGN_LOG" | tail -3
 
+# Pin Team ID at the build phase, symmetric with publish-update.sh:147.
+# `publish-update.sh` already greps `TeamIdentifier=` from `codesign
+# --display` on the DMG before signing it into the appcast; that catches a
+# wrong-team DMG at publish time. This pre-flight catches the same problem
+# at build time so an artifact signed under a different Apple Developer
+# account never even reaches the notarization step (saves an Apple-side
+# round-trip and a bad upload). Read DEVELOPMENT_TEAM out of project.yml so
+# the expected value tracks the project config, not a duplicated literal.
+# Audit M-11 (S-7 + N-3 / L-25).
+EXPECTED_TEAM_ID="$(awk -F': ' '/^[[:space:]]*DEVELOPMENT_TEAM:/ {print $2; exit}' project.yml | tr -d ' ')"
+if [[ -z "$EXPECTED_TEAM_ID" ]]; then
+    echo "!! release.sh: cannot read DEVELOPMENT_TEAM from project.yml" >&2
+    exit 1
+fi
+ACTUAL_TEAM_ID="$(codesign --display --verbose=2 "$APP_DST" 2>&1 | awk -F'=' '/^TeamIdentifier=/ {print $2; exit}')"
+if [[ -z "$ACTUAL_TEAM_ID" ]]; then
+    echo "!! release.sh: codesign --display did not emit TeamIdentifier= for $APP_DST" >&2
+    echo "   the bundle may be unsigned or the signature unreadable; aborting." >&2
+    exit 1
+fi
+if [[ "$ACTUAL_TEAM_ID" != "$EXPECTED_TEAM_ID" ]]; then
+    echo "!! release.sh: signed Team ID mismatch — got '$ACTUAL_TEAM_ID', expected '$EXPECTED_TEAM_ID'" >&2
+    echo "   the .app was signed under a different Apple Developer account than the one" >&2
+    echo "   pinned in project.yml. Check DEVELOPER_ID / keychain identity selection." >&2
+    exit 1
+fi
+echo "    codesign Team ID verified: $ACTUAL_TEAM_ID"
+
 # Sparkle is a SwiftPM binary product (XCFramework) pulled via
 # XCRemoteSwiftPackageReference. Xcode's SPM integration auto-creates an
 # implicit "Embed & Sign" step for package products that include
