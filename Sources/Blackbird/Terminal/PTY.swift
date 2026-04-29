@@ -671,14 +671,23 @@ public final class PTY {
         }
         guard let pid = targetPID else { return nil }
         var info = proc_vnodepathinfo()
+        let infoSize = Int32(MemoryLayout<proc_vnodepathinfo>.size)
         let bytes = proc_pidinfo(
             pid,
             PROC_PIDVNODEPATHINFO,
             0,
             &info,
-            Int32(MemoryLayout<proc_vnodepathinfo>.size)
+            infoSize
         )
-        guard bytes > 0 else { return nil }
+        // Audit L-8: require a complete fill, matching sibling
+        // `bsdProcessStartTime`'s `n == size` invariant. Darwin's
+        // proc_pidinfo today returns the full struct or fails outright,
+        // but the kernel contract permits a short return that leaves
+        // the tail zero-filled — which would silently turn a partial
+        // pvi_cdir into a blank or truncated path. Treat any short
+        // return as failure rather than trusting a partially populated
+        // struct. Sibling-symmetric with bsdProcessStartTime.
+        guard bytes == infoSize else { return nil }
         return withUnsafePointer(to: &info.pvi_cdir.vip_path) { tuple -> String? in
             tuple.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { cstr in
                 let s = String(cString: cstr)
