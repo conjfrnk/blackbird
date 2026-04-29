@@ -150,14 +150,36 @@ final class WindowFrameAutosaveTests: XCTestCase {
     /// explicitly so the off-screen-nudge sees the restored frame
     /// instead of the constructor default. Pinning round-trip here
     /// would catch any future macOS change to the storage shape.
-    func test_setFrameUsingName_restoresPreviouslySavedFrame() {
-        // Use a `setFrame`-shaped FRAME rect (not a contentRect) for the
-        // assertion target so we compare frame-to-frame and don't get
-        // bitten by the contentRect → frame titlebar grow that AppKit
-        // applies in `init(contentRect:…)`. The saver still needs SOME
-        // initial content rect for its constructor — that doesn't matter
-        // because we explicitly `setFrame` to the target before saving.
-        let savedFrame = NSRect(x: 350, y: 250, width: 1024, height: 800)
+    func test_setFrameUsingName_restoresPreviouslySavedFrame() throws {
+        // Build a target frame that is unambiguously inside the main
+        // screen's visibleFrame, so AppKit's
+        // setFrameUsingName/setFrameFromString screen-relocation logic
+        // doesn't reposition us. AppKit serializes the screen's
+        // visibleFrame alongside the window frame; on restore it
+        // re-locates the window relative to the current main screen,
+        // and on a multi-monitor host with the saver running on a
+        // different display than the restorer the X / Y shift can be
+        // thousands of points. Pinning the saved frame inside the
+        // current main screen's visibleFrame guarantees both saver
+        // and restorer agree on the screen, so the round-trip is a
+        // pure-storage assertion (audit-fix 2026-04-29: previous
+        // hard-coded (350, 250) failed on hosts whose main display
+        // had a different origin).
+        let mainScreen = try XCTUnwrap(NSScreen.main,
+            "test host has no main NSScreen — cannot build an on-screen target")
+        let vis = mainScreen.visibleFrame
+        // Pick a window that's safely inside visibleFrame on every
+        // sane host: width/height capped at half the visible size,
+        // origin offset 80pt in from the visible-frame origin.
+        let targetWidth = min(CGFloat(1024), floor(vis.width / 2))
+        let targetHeight = min(CGFloat(800), floor(vis.height / 2))
+        let savedFrame = NSRect(
+            x: vis.origin.x + 80,
+            y: vis.origin.y + 80,
+            width: targetWidth,
+            height: targetHeight
+        )
+
         let saver = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
             styleMask: [.titled, .resizable],

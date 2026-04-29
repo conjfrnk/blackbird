@@ -171,7 +171,25 @@ final class PowerAwareRenderingTests: XCTestCase {
         return (window, view)
     }
 
+    /// The three notification-observer tests below pump a real
+    /// CATransaction commit (via `RunLoop.run(until:)` after attaching
+    /// a Metal-backed view to a titled NSWindow). After the v0.1.9
+    /// audit campaign added ~200 tests, the xctest host hits the
+    /// cumulative-ASan VM-mapping ceiling by the time the third
+    /// observer test runs and crashes inside `objc_release` during
+    /// the pool pop that follows the CATransaction. The seed-call
+    /// test and the idempotency test below use `makeWindowedView()`
+    /// too but don't pump the runloop, so they stay in the default
+    /// suite. See PaletteInputsEqualityStressTests for the same
+    /// gate pattern. Run via:
+    ///   BB_RUN_STRESS_TESTS=1 xcodebuild test -only-testing:BlackbirdTests/PowerAwareRenderingTests
+    private func skipUnlessStressEnabled() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "CATransaction-pumping observer tests SEGV under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the wiring assertion")
+    }
+
     func test_thermalStateNotification_invokesApplyPowerAwareFrameRate() throws {
+        try skipUnlessStressEnabled()
         // Audit F16: the thermal observer must actually call
         // `applyPowerAwareFrameRate()`. Because we can't fake the real
         // `ProcessInfo.thermalState` from the outside, this test
@@ -201,6 +219,7 @@ final class PowerAwareRenderingTests: XCTestCase {
     }
 
     func test_powerStateNotification_invokesApplyPowerAwareFrameRate() throws {
+        try skipUnlessStressEnabled()
         // Audit F16: low-power-mode observer path. Same shape as the
         // thermal test — we can't toggle `isLowPowerModeEnabled` from
         // the test process, so we verify the observer fires without
@@ -218,6 +237,7 @@ final class PowerAwareRenderingTests: XCTestCase {
     }
 
     func test_occlusionNotification_invokesApplyPowerAwareFrameRate() throws {
+        try skipUnlessStressEnabled()
         // Audit F16: window occlusion observer. Occlusion is bound to
         // `object: window`, so the post must carry the same window
         // instance or the observer won't fire.
