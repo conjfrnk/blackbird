@@ -509,7 +509,20 @@ public final class PTY {
                     reaped = false
                 } else {
                     // Still here — SIGHUP was ignored. Force the exit.
-                    _ = kill(self.childPID, SIGKILL)
+                    //
+                    // Audit follow-up (2026-04-29): sibling of L-4
+                    // SIGHUP rc/errno capture (commits d12d96e +
+                    // 8a78a94). A failure here means SIGKILL didn't
+                    // reach the child — useful to know. ESRCH (child
+                    // already exited between the previous `waitpid`
+                    // and this `kill`) is normal teardown; everything
+                    // else is a real failure worth logging.
+                    let killRC = kill(self.childPID, SIGKILL)
+                    if killRC != 0 {
+                        let savedErrno = errno
+                        let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
+                        Self.logger.log(level: level, "PTY read-loop teardown: kill(\(self.childPID, privacy: .public), SIGKILL) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
+                    }
                     let forced = waitpid(self.childPID, &status, 0)
                     reaped = (forced == self.childPID)
                 }
@@ -1056,10 +1069,23 @@ public final class PTY {
                 )
                 return
             }
-            _ = kill(pid, SIGKILL)
-            Self.logger.log(
-                "PTY.terminate escalated to SIGKILL pid=\(pid, privacy: .public) (HUP-ignoring child)"
-            )
+            // Audit follow-up (2026-04-29): sibling of L-4 SIGHUP
+            // rc/errno capture (commits d12d96e + 8a78a94). Capture
+            // rc/errno here too: ESRCH at this point means the child
+            // exited between the `current == original` check above
+            // and this `kill` — vanishingly rare, but still informational.
+            // Anything else is a real failure (e.g. EPERM if we
+            // somehow lost privilege to signal our own child).
+            let killRC = kill(pid, SIGKILL)
+            if killRC != 0 {
+                let savedErrno = errno
+                let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
+                Self.logger.log(level: level, "PTY.terminate escalation: kill(\(pid, privacy: .public), SIGKILL) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
+            } else {
+                Self.logger.log(
+                    "PTY.terminate escalated to SIGKILL pid=\(pid, privacy: .public) (HUP-ignoring child)"
+                )
+            }
         }
     }
 }

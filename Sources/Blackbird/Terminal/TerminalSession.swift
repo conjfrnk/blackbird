@@ -684,16 +684,30 @@ public final class TerminalSession: ObservableObject {
         // render-side gate handles `selection`; we own the OSC 133 ring +
         // last-mark + cycle cursor here. Mutating @Published properties
         // on main keeps Combine subscribers race-free.
-        let resetPromptState: () -> Void = { [weak self] in
+        //
+        // Audit follow-up (2026-04-29): typed `@MainActor () -> Void`
+        // for compile-time enforcement, sibling of `applyResolved` four
+        // lines below (d3ca442 hotfix). The mutated `@Published`
+        // properties (`promptMarks`, `promptCursor`, `lastPromptMark`)
+        // are `@MainActor`-isolated; both delivery branches below enter
+        // the main thread before invoking the closure. Typing it as
+        // `@MainActor` makes the type system enforce what the runtime
+        // guarantees: a future caller that hands `resetPromptState` to
+        // e.g. `coreQueue.async(execute:)` would now fail to compile,
+        // instead of trapping at runtime via `MainActor.assumeIsolated`.
+        let resetPromptState: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
             self.promptMarks = []
             self.promptCursor = nil
             self.lastPromptMark = nil
         }
         if Thread.isMainThread {
-            resetPromptState()
+            // We're on main but the function isn't `@MainActor`, so the
+            // wrapper is what the compiler accepts to call a
+            // `@MainActor` closure synchronously.
+            MainActor.assumeIsolated(resetPromptState)
         } else {
-            DispatchQueue.main.async(execute: resetPromptState)
+            DispatchQueue.main.async { MainActor.assumeIsolated(resetPromptState) }
         }
         if let s { publishImmediate(s) }
         // L-24: re-apply the resolved theme palette so OSC 4 mutations

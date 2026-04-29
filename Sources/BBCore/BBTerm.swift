@@ -1,5 +1,6 @@
 import Foundation
 import BBCore
+import os
 
 /// Swift wrapper over the BBCore C ABI. Owns a single BBTerm and guarantees
 /// freeing on deinit. Not Sendable — must be used from a single serial queue
@@ -29,6 +30,23 @@ public final class BBTerm {
     /// dispatched event is negligible compared to the cost of UB
     /// silently corrupting alacritty state in Release.
     fileprivate var isInsideEventDispatch: Bool = false
+
+    /// Shared diagnostic channel for defensive guards in BBTerm /
+    /// BBSnapshot — sibling of M-15 / L-17 / M-17 (one-shot warning
+    /// when a clamp engages). Gives the dim-clamp and
+    /// `rowTextWithUTF16ToColMap` `.invalid` branch a discoverable
+    /// breadcrumb in `log stream --predicate 'category == "bbterm"'`
+    /// without flooding when the regression is sustained.
+    fileprivate static let clampLogger = Logger(
+        subsystem: "dev.conjfrnk.blackbird",
+        category: "bbterm"
+    )
+    /// One-shot latch: fires the dim-clamp warning at most once per
+    /// process. Audit follow-up (2026-04-29).
+    fileprivate static let didLogDimClamp = OSAllocatedUnfairLock(initialState: false)
+    /// One-shot latch for `rowTextWithUTF16ToColMap` `.invalid` branch.
+    /// Audit L-15 / DI-9 follow-up (2026-04-29).
+    fileprivate static let didLogInvalidCell = OSAllocatedUnfairLock(initialState: false)
 
     public struct Size: Equatable {
         public var cols: UInt16
@@ -88,7 +106,26 @@ public final class BBTerm {
         // scrollback=10_000 — the extra headroom only materialises when
         // output actually scrolls off. Capped at 200k by the Rust side
         // (see bb_term_new).
-        guard let ptr = bb_term_new(size.cols, size.rows, scrollback) else { return nil }
+        //
+        // Wrapper-side clamp matches the Rust core's `[MIN_DIM, MAX_DIM]`
+        // envelope so a single source-of-truth defines the legitimate
+        // grid range for both layers. The Rust side independently clamps
+        // (belt-and-braces). Audit follow-up (2026-04-29): when the clamp
+        // engages, fire a one-shot warning so a callsite feeding
+        // garbage dims is discoverable in `log stream` rather than
+        // silently observing a snapshot whose dims don't match what
+        // they asked for.
+        let clampedCols = min(max(size.cols, Self.MIN_DIM), Self.MAX_DIM)
+        let clampedRows = min(max(size.rows, Self.MIN_DIM), Self.MAX_DIM)
+        if clampedCols != size.cols || clampedRows != size.rows {
+            Self.didLogDimClamp.withLock { logged in
+                if !logged {
+                    logged = true
+                    Self.clampLogger.warning("dim clamp engaged in BBTerm.init: requested=(\(size.cols, privacy: .public),\(size.rows, privacy: .public)) clamped=(\(clampedCols, privacy: .public),\(clampedRows, privacy: .public)) bounds=[\(Self.MIN_DIM, privacy: .public),\(Self.MAX_DIM, privacy: .public)]")
+                }
+            }
+        }
+        guard let ptr = bb_term_new(clampedCols, clampedRows, scrollback) else { return nil }
         self.handle = ptr
 
         let box = UnsafeMutablePointer<EventCtx>.allocate(capacity: 1)
@@ -205,6 +242,19 @@ public final class BBTerm {
         #endif
         let clampedCols = min(max(size.cols, Self.MIN_DIM), Self.MAX_DIM)
         let clampedRows = min(max(size.rows, Self.MIN_DIM), Self.MAX_DIM)
+        if clampedCols != size.cols || clampedRows != size.rows {
+            // Audit follow-up (2026-04-29): one-shot warning when the
+            // wrapper-side clamp engages. Sibling of M-15 / L-17 / M-17.
+            // Shares the latch with `init?(size:)` so a noisy caller
+            // doesn't get two warning lines for "same broken value
+            // construct + resize".
+            Self.didLogDimClamp.withLock { logged in
+                if !logged {
+                    logged = true
+                    Self.clampLogger.warning("dim clamp engaged in BBTerm.resize: requested=(\(size.cols, privacy: .public),\(size.rows, privacy: .public)) clamped=(\(clampedCols, privacy: .public),\(clampedRows, privacy: .public)) bounds=[\(Self.MIN_DIM, privacy: .public),\(Self.MAX_DIM, privacy: .public)]")
+                }
+            }
+        }
         guard let h = handle else { return Size(cols: clampedCols, rows: clampedRows) }
         let result = bb_term_resize2(h, clampedCols, clampedRows)
         // The wrapper-side clamp guarantees a non-zero (cols, rows) reach
@@ -619,6 +669,17 @@ public final class BBSnapshot {
                 // right (which would cause a regex search to silently
                 // miss matches past that column). Audit L-15 / DI-9
                 // (2026-04-29).
+                //
+                // Audit follow-up (2026-04-29): one-shot warning so an
+                // alacritty filter regression that lets surrogate /
+                // out-of-range scalars through is discoverable rather
+                // than silently skipped. Sibling of M-15 / L-17 / M-17.
+                BBTerm.didLogInvalidCell.withLock { logged in
+                    if !logged {
+                        logged = true
+                        BBTerm.clampLogger.warning("rowTextWithUTF16ToColMap: encountered .invalid cell at row=\(row, privacy: .public) col=\(c, privacy: .public) — alacritty filter regression?")
+                    }
+                }
                 c += 1
             case .empty:
                 // Unwritten cell. Stop walking — trailing empties don't

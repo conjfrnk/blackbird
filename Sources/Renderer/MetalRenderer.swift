@@ -456,10 +456,28 @@ public final class MetalRenderer {
         // crash here on layout drift rather than rendering scrambled UVs.
         // F-S4-001 — the test-target call site never ran in production.
         _pinCellInstanceLayout()
-        guard let queue = device.makeCommandQueue() else { return nil }
-        guard let library = device.makeDefaultLibrary() else { return nil }
+        // Audit follow-up (2026-04-29): the L-6 fix surfaced PSO failures
+        // via NSError logging at the two `try device.makeRenderPipelineState`
+        // catch sites. The `init?` body has six other failure paths that
+        // were still silently `return nil`-ing — TerminalView's fatalError
+        // text promises "see unified log under category=renderer" but
+        // those promises were broken until each site logs which step
+        // failed. Mechanical: one `Self.logger.error` per site so triage
+        // can distinguish "no command queue" from "default library missing"
+        // from "vertex_cell function missing", etc.
+        guard let queue = device.makeCommandQueue() else {
+            Self.logger.error("MetalRenderer.init: device.makeCommandQueue() returned nil")
+            return nil
+        }
+        guard let library = device.makeDefaultLibrary() else {
+            Self.logger.error("MetalRenderer.init: device.makeDefaultLibrary() returned nil")
+            return nil
+        }
         guard let vertexFn = library.makeFunction(name: "vertex_cell"),
-              let fragmentFn = library.makeFunction(name: "fragment_cell") else { return nil }
+              let fragmentFn = library.makeFunction(name: "fragment_cell") else {
+            Self.logger.error("MetalRenderer.init: cell shader makeFunction(vertex_cell/fragment_cell) returned nil")
+            return nil
+        }
 
         let desc = MTLRenderPipelineDescriptor()
         desc.vertexFunction = vertexFn
@@ -516,7 +534,10 @@ public final class MetalRenderer {
         }
 
         guard let cursorVertex = library.makeFunction(name: "vertex_cursor"),
-              let cursorFragment = library.makeFunction(name: "fragment_cursor") else { return nil }
+              let cursorFragment = library.makeFunction(name: "fragment_cursor") else {
+            Self.logger.error("MetalRenderer.init: cursor shader makeFunction(vertex_cursor/fragment_cursor) returned nil")
+            return nil
+        }
         let cursorDesc = MTLRenderPipelineDescriptor()
         cursorDesc.vertexFunction = cursorVertex
         cursorDesc.fragmentFunction = cursorFragment
@@ -536,6 +557,7 @@ public final class MetalRenderer {
         }
 
         guard let atlas = GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: Self.atlasCapacity, scale: scale) else {
+            Self.logger.error("MetalRenderer.init: GlyphAtlas init failed (capacityGlyphs=\(Self.atlasCapacity, privacy: .public) scale=\(Double(scale), privacy: .public))")
             return nil
         }
 
@@ -544,8 +566,9 @@ public final class MetalRenderer {
         let bytes = startCap * MemoryLayout<CellInstance>.stride
         var buffers: [MTLBuffer] = []
         buffers.reserveCapacity(3)
-        for _ in 0..<3 {
+        for i in 0..<3 {
             guard let b = device.makeBuffer(length: bytes, options: [.storageModeShared]) else {
+                Self.logger.error("MetalRenderer.init: device.makeBuffer(length=\(bytes, privacy: .public)) returned nil for instance buffer \(i, privacy: .public) of 3")
                 return nil
             }
             buffers.append(b)
