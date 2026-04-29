@@ -742,6 +742,14 @@ public final class TerminalSession: ObservableObject {
     public func applyPalette(_ palette: ThemePalette) {
         coreQueue.async { [weak self] in
             guard let self else { return }
+            // L-1: same termination gate as `feed` (F11). All other coreQueue.async
+            // paths bail when isTerminated is set; without the check here a
+            // theme apply that races terminate() can publish a snapshot through
+            // the coalescer for a session whose consumer is tearing down.
+            self.publishLock.lock()
+            let terminated = self.isTerminated
+            self.publishLock.unlock()
+            if terminated { return }
             for (i, c) in palette.ansi.enumerated() {
                 self.bbterm.setColor(slot: i, rgb: c)
             }
