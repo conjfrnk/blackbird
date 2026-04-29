@@ -28,27 +28,75 @@ enum MainThreadWatchdog {
     private static var installed = false
     private static let installLock = NSLock()
 
-    /// Last timestamp main responded to a ping. `atomic` semantics via plain
-    /// `Double` + `OSMemoryBarrier` would be the standard approach; the
-    /// runtime we run under (arm64 macOS) gives us natural-aligned 8-byte
-    /// reads/writes for free, so a plain stored property paired with a
-    /// memory fence on write is sufficient for this diagnostic.
-    nonisolated(unsafe) private static var lastMainHeartbeat: Double = 0
+    /// Minimum hang threshold (50 ms). `install(hangThreshold:)` clamps any
+    /// caller-supplied value at or below this floor up to it, so a bad
+    /// caller can't arm a watchdog that fires on every runloop tick.
+    /// Sub-50 ms hangs aren't actionable — sample(1) itself takes ~200 ms.
+    static let minHangThreshold: Double = 0.05
+
+    /// Minimum ping interval (10 ms). `install(pingInterval:)` clamps any
+    /// caller-supplied value at or below this floor up to it, so
+    /// `Thread.sleep(forTimeInterval: 0)` (which returns immediately on
+    /// Darwin) can't put the watchdog thread into a tight busy-wait that
+    /// pegs an efficiency core. Likewise prevents the main-thread Timer
+    /// from being scheduled with `timeInterval: 0` (fires every runloop
+    /// service iteration). Audit M-22.
+    static let minPingInterval: Double = 0.01
+
+    /// Last timestamp main responded to a ping. Written by the main-runloop
+    /// timer (audit M-2 fixed: previously `nonisolated(unsafe) var Double`,
+    /// read by the watchdog thread without synchronization). The lock
+    /// matches the M-8 fix shape (`OSAllocatedUnfairLock<Bool>` for
+    /// AtomicFlag.value); both are heap-resident, low-contention, and
+    /// known memory-model-safe under TSan.
+    private static let lastMainHeartbeat = OSAllocatedUnfairLock<Double>(initialState: 0)
+
+    /// Last-installed ping interval after clamping. Exposed for tests so the
+    /// M-22 clamp can be observed without touching the private internal
+    /// timer/thread state. nil until first install.
+    static var installedPingInterval: Double? {
+        installLock.lock()
+        defer { installLock.unlock() }
+        return _installedPingInterval
+    }
+
+    /// Last-installed hang threshold after clamping. Exposed for tests.
+    static var installedHangThreshold: Double? {
+        installLock.lock()
+        defer { installLock.unlock() }
+        return _installedHangThreshold
+    }
+
+    private static var _installedPingInterval: Double?
+    private static var _installedHangThreshold: Double?
 
     /// Arm the watchdog on the main queue. Call from AppDelegate.
+    ///
+    /// Both parameters are clamped to safety floors (`minHangThreshold`,
+    /// `minPingInterval`). Passing 0 or negative values does NOT arm a
+    /// tight-spinning thread — it arms a watchdog at the floor. Audit M-22.
     static func install(hangThreshold: Double = 0.5, pingInterval: Double = 0.1) {
+        // Clamp before grabbing the lock so the values we record under the
+        // lock are the safe ones. NaN-guarded via `max`: NaN propagates
+        // through `max` deterministically (returns first arg), so an NaN
+        // input lands on the floor.
+        let safeThreshold = hangThreshold.isFinite ? max(minHangThreshold, hangThreshold) : minHangThreshold
+        let safePing = pingInterval.isFinite ? max(minPingInterval, pingInterval) : minPingInterval
+
         installLock.lock()
         defer { installLock.unlock() }
         guard !installed else { return }
         installed = true
+        _installedPingInterval = safePing
+        _installedHangThreshold = safeThreshold
 
-        lastMainHeartbeat = CACurrentMediaTime()
-        logger.log("MainThreadWatchdog armed: ping=\(pingInterval, privacy: .public)s threshold=\(hangThreshold, privacy: .public)s")
+        lastMainHeartbeat.withLock { $0 = CACurrentMediaTime() }
+        logger.log("MainThreadWatchdog armed: ping=\(safePing, privacy: .public)s threshold=\(safeThreshold, privacy: .public)s (requested ping=\(pingInterval, privacy: .public)s threshold=\(hangThreshold, privacy: .public)s)")
 
         // Main-thread heartbeat. Runs on the main runloop; each tick refreshes
         // the timestamp the watchdog thread watches.
-        let timer = Timer(timeInterval: pingInterval, repeats: true) { _ in
-            lastMainHeartbeat = CACurrentMediaTime()
+        let timer = Timer(timeInterval: safePing, repeats: true) { _ in
+            lastMainHeartbeat.withLock { $0 = CACurrentMediaTime() }
         }
         // `.common` so the heartbeat keeps ticking under modal + tracking
         // runloop modes (NSMenu popup, live resize). If we used `.default`,
@@ -60,16 +108,16 @@ enum MainThreadWatchdog {
         // captures a snapshot if stale.
         let t = Thread {
             while true {
-                Thread.sleep(forTimeInterval: pingInterval)
+                Thread.sleep(forTimeInterval: safePing)
                 let now = CACurrentMediaTime()
-                let age = now - lastMainHeartbeat
-                if age >= hangThreshold {
+                let age = now - lastMainHeartbeat.withLock { $0 }
+                if age >= safeThreshold {
                     captureHangReport(age: age)
                     // Rate-limit: after capturing, wait for main to recover
                     // before capturing again. Otherwise a multi-second hang
                     // produces a capture every pingInterval.
-                    while CACurrentMediaTime() - lastMainHeartbeat >= hangThreshold {
-                        Thread.sleep(forTimeInterval: pingInterval)
+                    while CACurrentMediaTime() - lastMainHeartbeat.withLock({ $0 }) >= safeThreshold {
+                        Thread.sleep(forTimeInterval: safePing)
                     }
                 }
             }
