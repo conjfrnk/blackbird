@@ -69,13 +69,19 @@ final class MenuValidationTests: XCTestCase {
         AppDelegate()
     }
 
-    /// Cast-safe validateMenuItem call. Returns:
+    /// validateMenuItem call. Returns:
     ///   - the result of `delegate.validateMenuItem(item)` when AppDelegate
     ///     conforms to NSMenuItemValidation
-    ///   - `nil` when AppDelegate does NOT conform (the F-S6-009 bug case
-    ///     — no validator means the menu item defaults to enabled)
-    /// This dual return lets tests assert "either properly validated OR
-    /// missing validator (bug)" without coupling to one outcome.
+    ///   - `nil` when AppDelegate does NOT conform (the original F-S6-009
+    ///     bug shape — no validator means the menu item defaults to enabled)
+    ///
+    /// Audit M-19: pre-Batch-6, AppDelegate didn't conform to
+    /// NSMenuItemValidation, so this cast always returned nil and every
+    /// caller that did `if let valid = validate(…) { … }` short-circuited
+    /// — tests passed VACUOUSLY. After the H-9 fix landed (commit 9413aaf),
+    /// the cast succeeds and the validator runs; callers must now use a
+    /// `guard let` + XCTFail pattern so a future regression that re-removes
+    /// the conformance is observable instead of silently green.
     private func validate(_ delegate: AppDelegate, item: NSMenuItem) -> Bool? {
         if let validator = delegate as? NSMenuItemValidation {
             return validator.validateMenuItem(item)
@@ -99,16 +105,26 @@ final class MenuValidationTests: XCTestCase {
 
         for tag in 1...9 {
             let item = makeMenuItem(action: selector, tag: tag)
-            if let valid = validate(delegate, item: item) {
-                XCTAssertFalse(
-                    valid,
-                    "with zero Blackbird tabs alive, ⌘\(tag) must be disabled "
-                        + "(F-S6-009). Got valid=true for tag=\(tag)."
+            // Audit M-19: previously this used `if let valid = validate(…)`
+            // which short-circuited silently when the cast returned nil —
+            // pre-H-9 every iteration fell through, so the test passed
+            // vacuously. After 9413aaf the cast succeeds; if a future
+            // regression removes the conformance the cast goes back to nil
+            // and we'd silently regress to vacuous-pass without this guard.
+            guard let valid = validate(delegate, item: item) else {
+                XCTFail(
+                    "AppDelegate must conform to NSMenuItemValidation (audit "
+                        + "H-9, commit 9413aaf); cast returned nil for tag=\(tag). "
+                        + "If conformance was removed, ⌘1-9 routes from any "
+                        + "keyWindow with no count gating."
                 )
+                return
             }
-            // If validate returns nil, AppDelegate doesn't conform to
-            // NSMenuItemValidation — the F-S6-009 bug. The TST.md sweep
-            // (TST-S6-008) flags this gap.
+            XCTAssertFalse(
+                valid,
+                "with zero Blackbird tabs alive, ⌘\(tag) must be disabled "
+                    + "(F-S6-009). Got valid=true for tag=\(tag)."
+            )
         }
     }
 
@@ -165,22 +181,56 @@ final class MenuValidationTests: XCTestCase {
 
     // MARK: - F-S6-009: closeWindow against non-Blackbird keyWindow
 
-    /// Pre-flight: NO controllers. Bare delegate + a single non-Blackbird
-    /// stub window. Memory: ~50 KB. Time: <10 ms.
+    /// Pre-flight: NO controllers. Bare delegate + no keyWindow. Memory:
+    /// ~50 KB. Time: <10 ms.
     ///
-    /// Per F-S6-009: ⌘⇧W on a Settings (or any non-Blackbird) keyWindow
-    /// closes the Settings window — benign but unexpected. The proposed
-    /// fix gates `closeWindow(_:)` on key-window class. Pin: no crash.
-    func test_closeWindow_validation_nonBlackbirdKeyWindow_doesNotCrash() {
+    /// Audit H-9 / M-19: ⌘⇧W routes to AppDelegate.closeWindow regardless
+    /// of which window class is key. The pre-H-9 leak shape: closeWindow
+    /// flipped `MainWindowController.bypassCloseConfirm = true` for the
+    /// duration of the call (with `defer { …= false }`), so a nested-
+    /// modal sandwiched between flip and reset would observe the leaked
+    /// flag in another controller's `windowShouldClose`. The H-9 fix
+    /// gates closeWindow on `ownedKeyWindow()` BEFORE the flip, so an
+    /// invocation with no Blackbird-owned key window must leave
+    /// `bypassCloseConfirm` untouched (== false on entry → false on
+    /// exit).
+    func test_closeWindow_validation_nonBlackbirdKeyWindow_leavesBypassFlagFalse() {
+        // Establish baseline: bypassCloseConfirm starts false (and we
+        // want it false after this test runs, so other tests in the same
+        // process don't observe a leaked-true flag).
+        MainWindowController.bypassCloseConfirm = false
+        defer { MainWindowController.bypassCloseConfirm = false }
+
         let delegate = freshAppDelegate()
         let selector = #selector(AppDelegate.closeWindow(_:))
         let item = makeMenuItem(action: selector, tag: 0)
 
-        // No keyWindow at all — pure no-keyWindow path.
-        _ = validate(delegate, item: item)
-        // Either true or false is acceptable; pin no-crash.
-        XCTAssertTrue(true, "closeWindow validation against no-keyWindow "
-                            + "returned without crash")
+        // validate() also exercises the H-9 validator branch.
+        guard let valid = validate(delegate, item: item) else {
+            return XCTFail(
+                "AppDelegate must conform to NSMenuItemValidation (audit "
+                    + "H-9). Without it, ⌘⇧W enables on any keyWindow class."
+            )
+        }
+        XCTAssertFalse(
+            valid,
+            "closeWindow validator must reject when no Blackbird-owned key "
+                + "window is present (audit H-9). Got valid=true."
+        )
+
+        // Dispatch the action with no keyWindow. The H-9 fix's
+        // `guard let window = ownedKeyWindow() else { return }` short-
+        // circuits BEFORE `bypassCloseConfirm = true`. Post-condition:
+        // the static flag is still false.
+        delegate.perform(selector, with: item)
+        XCTAssertFalse(
+            MainWindowController.bypassCloseConfirm,
+            "closeWindow with no Blackbird key window must NOT flip "
+                + "bypassCloseConfirm (audit H-9 leak shape). The static "
+                + "flag is shared across the whole process; a leaked "
+                + "true here would silently bypass per-tab close confirm "
+                + "in any later windowShouldClose."
+        )
     }
 
     // MARK: - selectTab dispatch with no controller registry
@@ -188,33 +238,58 @@ final class MenuValidationTests: XCTestCase {
     /// Pre-flight: bare delegate. No controllers in the registry. Memory:
     /// ~10 KB. Time: <5 ms.
     ///
-    /// Calling `selectTab(_:)` with no Blackbird windows alive must not
-    /// crash. The handler should silently no-op (or guard via
-    /// `validateMenuItem`).
-    func test_selectTab_dispatch_noControllers_doesNotCrash() {
+    /// Audit H-9 / M-19: with no Blackbird-owned windows alive,
+    /// `selectTab(_:)` must NOT change which window is key. The H-9
+    /// hardening adds an `ownedKeyWindow()` guard before
+    /// `tabs[index].makeKeyAndOrderFront`, so a runaway dispatch can't
+    /// promote an arbitrary window to key. Pin the post-condition: the
+    /// keyWindow before equals the keyWindow after.
+    func test_selectTab_dispatch_noControllers_keyWindowUnchanged() {
         let delegate = freshAppDelegate()
         let item = makeMenuItem(action: #selector(AppDelegate.selectTab(_:)), tag: 1)
 
-        // perform on the delegate via the action selector. We use NSApp's
-        // sendAction so we exercise the full responder + target chain.
-        // Since `NSApp.delegate` is the test host's, not ours, we call
-        // the method directly via objc_msgSend (perform).
+        // Snapshot keyWindow identity. May be nil in xctest host.
+        let beforeKey = NSApp.keyWindow
+
         delegate.perform(#selector(AppDelegate.selectTab(_:)), with: item)
-        XCTAssertTrue(true, "selectTab with no controllers returned without "
-                            + "crash")
+
+        let afterKey = NSApp.keyWindow
+        // Identity comparison via ObjectIdentifier-on-AnyObject: nil-on-
+        // nil compares equal; nil-on-some compares not-equal.
+        XCTAssertTrue(
+            beforeKey === afterKey,
+            "selectTab with no controllers must not change keyWindow "
+                + "(audit H-9). Before=\(String(describing: beforeKey)) "
+                + "after=\(String(describing: afterKey))."
+        )
     }
 
     // MARK: - selectTab dispatch with negative + out-of-range tags
 
     /// Pre-flight: bare delegate. Memory: ~10 KB. Time: <5 ms.
-    func test_selectTab_dispatch_outOfRangeTags_doNotCrash() {
+    ///
+    /// Audit H-9 / M-19: out-of-range tags (`<= 0`, `> tabs.count`, or
+    /// `Int.max`) must NOT promote an arbitrary window to key. The H-9
+    /// fix adds `index >= 0, index < tabs.count` guard inside selectTab,
+    /// AND the validator gates on `tag >= 1 && tag <= tabs.count` so the
+    /// menu item disables out-of-range tags before they ever reach
+    /// dispatch. Pin the dispatch-side post-condition: keyWindow
+    /// identity stable across each out-of-range invocation.
+    func test_selectTab_dispatch_outOfRangeTags_keyWindowUnchanged() {
         let delegate = freshAppDelegate()
         let selector = #selector(AppDelegate.selectTab(_:))
 
         for tag in [-1, 0, 99, Int.max] {
+            let beforeKey = NSApp.keyWindow
             let item = makeMenuItem(action: selector, tag: tag)
             delegate.perform(selector, with: item)
+            let afterKey = NSApp.keyWindow
+            XCTAssertTrue(
+                beforeKey === afterKey,
+                "selectTab with out-of-range tag \(tag) must not change "
+                    + "keyWindow (audit H-9). Before=\(String(describing: beforeKey)) "
+                    + "after=\(String(describing: afterKey))."
+            )
         }
-        XCTAssertTrue(true, "selectTab with out-of-range tags survived")
     }
 }
