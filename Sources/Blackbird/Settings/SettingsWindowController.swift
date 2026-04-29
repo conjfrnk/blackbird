@@ -75,11 +75,34 @@ final class SettingsWindowController {
         }
         guard let w = window else { return }
         if !w.isVisible {
-            w.center()
+            // Audit M-18 / MS-2 (2026-04-29): only center the window
+            // when there's no autosaved frame yet. Calling `center()`
+            // on every reopen overwrites the frame the user just
+            // dragged into place — `setFrameAutosaveName` had already
+            // restored that frame at window construction, so a center
+            // here clobbers it and the autosave records the new
+            // (centered) origin a moment later. Cocoa keys autosaved
+            // frames under `NSWindow Frame <autosaveName>` in the
+            // standard defaults; if that key is missing, we know the
+            // user has never positioned this window and centering is
+            // the right first-show behaviour.
+            let autosaveDefaultsKey = "NSWindow Frame \(SettingsWindowController.frameAutosaveName)"
+            if UserDefaults.standard.string(forKey: autosaveDefaultsKey) == nil {
+                w.center()
+            }
+            // else: setFrameAutosaveName already applied the saved origin.
         }
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    /// The autosave name the Settings window registers with AppKit.
+    /// Cocoa stores the persisted frame under
+    /// `NSWindow Frame <autosaveName>` in the standard defaults
+    /// domain; `show()` reads that key to decide whether to call
+    /// `center()` on a reopen. Keep the literal in one place so a
+    /// rename can't desync the read-side and write-side.
+    fileprivate static let frameAutosaveName = "BlackbirdSettingsV2"
 
     private func makeWindow() -> NSWindow {
         let w = SettingsWindow(
@@ -96,7 +119,7 @@ final class SettingsWindowController {
         // Version-suffix the autosave name so existing users on a stuck
         // small frame (previous default was 520×360) are reset to the
         // new, roomier default rather than opening at the cramped size.
-        w.setFrameAutosaveName("BlackbirdSettingsV2")
+        w.setFrameAutosaveName(SettingsWindowController.frameAutosaveName)
         // Settings lives above other app windows even when the user
         // switches back to the terminal briefly.
         w.hidesOnDeactivate = false
