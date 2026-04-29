@@ -584,7 +584,19 @@ public final class TerminalSession: ObservableObject {
         if Thread.isMainThread {
             self.snapshot = newSnap
         } else {
-            DispatchQueue.main.async { self.snapshot = newSnap }
+            // Mirror publishPendingSnapshot's shape: weak self + post-hop
+            // isTerminated re-check under publishLock. Without this the
+            // closure strongly retains the session across the main hop and
+            // can write `@Published` after terminate() had its chance to
+            // tear consumers down (sibling of M-1 / F11).
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.publishLock.lock()
+                let terminated = self.isTerminated
+                self.publishLock.unlock()
+                guard !terminated else { return }
+                self.snapshot = newSnap
+            }
         }
     }
 
@@ -730,7 +742,19 @@ public final class TerminalSession: ObservableObject {
         if Thread.isMainThread {
             self.snapshot = snap
         } else {
-            DispatchQueue.main.async { self.snapshot = snap }
+            // Mirror publishPendingSnapshot's shape: weak self + post-hop
+            // isTerminated re-check under publishLock. Without this the
+            // closure strongly retains the session across the main hop and
+            // can write `@Published` after terminate() had its chance to
+            // tear consumers down (sibling of M-1 / F11).
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.publishLock.lock()
+                let terminated = self.isTerminated
+                self.publishLock.unlock()
+                guard !terminated else { return }
+                self.snapshot = snap
+            }
         }
     }
 
