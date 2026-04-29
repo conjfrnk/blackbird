@@ -5861,12 +5861,18 @@ mod tests {
             bb_term_input(term, dcs.as_ptr(), dcs.len());
 
             let writes = *sink.count.lock().unwrap();
-            assert!(
-                writes <= PTY_WRITE_REPLY_PER_SECOND as usize,
-                "XTGETTCAP must inherit the PtyWrite cap; expected at most \
-                 {} PtyWrites within one window, got {}",
-                PTY_WRITE_REPLY_PER_SECOND,
-                writes
+            // Reviewer feedback (2026-04-29): assert exact saturation,
+            // not `<= cap`. The N=200 input is designed to overflow the
+            // 32/sec budget by ~6×, so anything other than exactly 32
+            // PtyWrites is a regression: e.g. if a future bug makes
+            // `allow()` always return false, `0 <= 32` would still pass
+            // and the cap would silently fail-open at zero.
+            assert_eq!(
+                writes, PTY_WRITE_REPLY_PER_SECOND as usize,
+                "XTGETTCAP must saturate the PtyWrite cap exactly; expected \
+                 {} PtyWrites within one window (N={N} cap-hex tokens overflows \
+                 by ~6×), got {}",
+                PTY_WRITE_REPLY_PER_SECOND, writes
             );
 
             bb_term_free(term);
@@ -5919,13 +5925,23 @@ mod tests {
             bb_term_input(term, input.as_ptr(), input.len());
 
             let writes = *sink.count.lock().unwrap();
-            assert!(
-                writes <= PTY_WRITE_REPLY_PER_SECOND as usize,
-                "combined XTGETTCAP + DSR PtyWrites must respect the \
-                 shared cap; expected ≤ {}, got {}",
-                PTY_WRITE_REPLY_PER_SECOND,
-                writes
+            // Reviewer feedback (2026-04-29): assert exact saturation,
+            // not `<= cap`. The combined 50 + 50 input overflows the
+            // 32/sec budget by ~3×, so the cap MUST land exactly at 32.
+            // A weaker `<=` assertion would let `writes == 0` pass, which
+            // is the failure mode if a future refactor breaks `allow()`
+            // to always return false.
+            assert_eq!(
+                writes, PTY_WRITE_REPLY_PER_SECOND as usize,
+                "combined XTGETTCAP + DSR PtyWrites must saturate the shared \
+                 cap exactly; expected {} (50+50 inputs overflow by ~3×), got {}",
+                PTY_WRITE_REPLY_PER_SECOND, writes
             );
+
+            // Reviewer feedback (2026-04-29): the sibling
+            // `xtgettcap_pty_write_cap_holds` test calls `bb_term_free`;
+            // this one was leaking the BBTerm. Symmetric cleanup.
+            bb_term_free(term);
         }
     }
 }
