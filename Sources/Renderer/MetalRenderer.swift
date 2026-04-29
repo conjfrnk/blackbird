@@ -444,7 +444,21 @@ public final class MetalRenderer {
         desc.colorAttachments[0].sourceAlphaBlendFactor = .one
         desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
-        guard let pso = try? device.makeRenderPipelineState(descriptor: desc) else { return nil }
+        // Surface the underlying NSError from `makeRenderPipelineState` —
+        // a `try?` collapse here used to look like "renderer init returned
+        // nil for an unknowable reason" downstream, and the upstream
+        // fatalError ("Metal device could not produce a command queue")
+        // misled triage. The PSO can fail for shader-compile errors,
+        // descriptor mismatches, vertex-attribute layout drift, etc. —
+        // all of which the NSError describes far better than a nil bubble
+        // up. Audit L-6 (2026-04-29).
+        let pso: MTLRenderPipelineState
+        do {
+            pso = try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            Self.logger.error("cell render pipeline state creation failed: \(String(describing: error), privacy: .public)")
+            return nil
+        }
 
         guard let cursorVertex = library.makeFunction(name: "vertex_cursor"),
               let cursorFragment = library.makeFunction(name: "fragment_cursor") else { return nil }
@@ -453,7 +467,14 @@ public final class MetalRenderer {
         cursorDesc.fragmentFunction = cursorFragment
         cursorDesc.colorAttachments[0].pixelFormat = .bgra8Unorm
         // Cursor is opaque white — no blending.
-        guard let cursorPSO = try? device.makeRenderPipelineState(descriptor: cursorDesc) else { return nil }
+        // Same do/catch shape as the cell PSO above. Audit L-6.
+        let cursorPSO: MTLRenderPipelineState
+        do {
+            cursorPSO = try device.makeRenderPipelineState(descriptor: cursorDesc)
+        } catch {
+            Self.logger.error("cursor render pipeline state creation failed: \(String(describing: error), privacy: .public)")
+            return nil
+        }
 
         guard let atlas = GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: Self.atlasCapacity, scale: scale) else {
             return nil

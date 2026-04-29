@@ -445,7 +445,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // upsampling), just without re-rasterizing at the new resolution.
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         guard let renderer = MetalRenderer(device: device, metrics: metrics, scale: scale) else {
-            fatalError("Metal device could not produce a command queue")
+            // MetalRenderer.init? returns nil for any of: command queue
+            // creation, default library load, vertex/fragment function
+            // lookup, render pipeline state creation, atlas allocation,
+            // or instance buffer allocation. The actual error from the
+            // failing path is logged via `MetalRenderer.logger` (audit
+            // L-6) — `log stream --predicate 'category == "renderer"'`
+            // shows the underlying NSError (shader compile error,
+            // descriptor mismatch, GPU memory pressure, etc.). The
+            // pre-fix message claimed "command queue" specifically,
+            // which misled triage when the actual failure was a PSO.
+            fatalError("MetalRenderer init failed; see unified log under category=\"renderer\" for the underlying error")
         }
         self.renderer = renderer
         self.metrics = metrics
