@@ -899,13 +899,19 @@ public final class PTY {
             // leader exiting) silently dropped the user's Ctrl+C before
             // this log fired. Production now surfaces the errno via
             // `log stream --predicate 'subsystem == "dev.conjfrnk.blackbird"'`.
+            // ESRCH is the *expected* race when the foreground pgroup
+            // leader has already exited — log at .info to avoid spam on
+            // every shell-exit / Ctrl+C race. EINVAL/EPERM are real
+            // failures and stay at .error.
             let rc = kill(-pgrp, sig)
             if rc < 0 {
                 let savedErrno = errno
-                Self.logger.warning("sendSignalToForeground: kill(-\(pgrp, privacy: .public), \(sig, privacy: .public)) failed errno=\(savedErrno, privacy: .public)")
+                let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
+                Self.logger.log(level: level, "sendSignalToForeground: kill(-\(pgrp, privacy: .public), \(sig, privacy: .public)) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
             }
         } else {
-            Self.logger.warning("sendSignalToForeground: tcgetpgrp returned \(pgrp, privacy: .public) errno=\(errno, privacy: .public)")
+            let savedErrno = errno
+            Self.logger.warning("sendSignalToForeground: tcgetpgrp returned \(pgrp, privacy: .public) errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
         }
     }
 
