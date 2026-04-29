@@ -185,11 +185,31 @@ impl CallbackCell {
     /// (DSR, DA1/DA2, DECXCPR replies, OSC 10/11/12 color responses,
     /// XTGETTCAP responses).
     ///
+    /// Drop policy: dropped PtyWrites are silent BY DESIGN. Logging
+    /// each drop would itself become a flood-amplifier (the very thing
+    /// the rate cap is defending against — a hostile DCS+q with 1300
+    /// cap_hex tokens would emit 1300 log lines). The
+    /// `osc_color_query_rate_limit_drops_excess` /
+    /// `xtgettcap_pty_write_cap_holds` tests cover the cap behavior,
+    /// and `bb_term_clear_all` resets the budget so a flood-induced
+    /// drop episode doesn't strand legitimate post-clear traffic.
+    ///
     /// # Safety
     /// Caller must ensure no concurrent access and that the `BBEvent` fields
     /// are valid for the duration of the call.
     unsafe fn fire(&self, event: BBEvent) {
         self.debug_check_thread();
+        // Reviewer feedback (2026-04-29): read the callback slot FIRST.
+        // If no callback is registered (e.g. `set()` never called or
+        // explicitly cleared), every PtyWrite previously consumed a
+        // budget slot anyway — the cap should limit *dispatched* events,
+        // not *attempted* ones. With this reorder a pre-callback
+        // PtyWrite flood no longer drains the budget that the post-
+        // callback session needs.
+        let (cb, ctx) = *self.slot.get();
+        let Some(f) = cb else {
+            return;
+        };
         // Audit H-4: PtyWrite cap is total-by-construction. All three
         // PtyWrite-firing paths (RoutingListener::send_event,
         // dispatch_xtgettcap, drain_color_requests) inherit the cap from
@@ -198,10 +218,7 @@ impl CallbackCell {
         if matches!(event.kind, BBEventKind::PtyWrite) && !self.pty_write_rate.allow() {
             return;
         }
-        let (cb, ctx) = *self.slot.get();
-        if let Some(f) = cb {
-            f(event, ctx);
-        }
+        f(event, ctx);
     }
 }
 
@@ -4876,8 +4893,18 @@ mod tests {
     /// asserts the reset.
     #[test]
     fn clear_all_resets_modify_other_keys_and_prompt_rate() {
+        use std::os::raw::c_void;
+
+        // Reviewer feedback (2026-04-29): with `CallbackCell::fire`'s
+        // reordered "callback-first, rate-gate-second" check, the
+        // PtyWrite rate budget is only consumed when a callback is
+        // registered. Register a no-op callback so the DSR-driven
+        // PtyWrite path actually mutates `pty_write_rate.window_count`.
+        unsafe extern "C" fn noop(_ev: BBEvent, _ctx: *mut c_void) {}
+
         unsafe {
             let term = bb_term_new(80, 24, 100);
+            bb_term_set_event_cb(term, Some(noop), std::ptr::null_mut());
             let bb = &mut *term;
 
             // 1. modify_other_keys: drive `CSI > 4 ; 2 m` to set level 2.
