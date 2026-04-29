@@ -3109,14 +3109,13 @@ pub const BB_STRING_MAGIC: u64 = 0xB1AC_5BBD_5721_57E0;
 /// iterating.
 ///
 /// Returns a heap-allocated `BBString` the caller must free with
-/// `bb_string_release`. Returns null on (a) null `term`, (b) zero-area
-/// range that produces empty text (the FFI returns an empty `BBString`
-/// in this shape — true null is the all-paths fallback), or (c) a panic
+/// `bb_string_release`. Returns null on (a) null `term` or (b) a panic
 /// during text extraction (caught by `catch_unwind` and reported as a
 /// `BBEventKind::Fatal` event before this function returns null).
-/// Callers cannot distinguish (a) from (c) by the return value alone;
-/// wire a Fatal event handler if you need to learn about extraction
-/// panics. Audit L-9 (2026-04-29).
+/// Zero-area ranges return an empty `BBString`, not null. Callers
+/// cannot distinguish (a) from (b) by the return value alone; wire a
+/// Fatal event handler if you need to learn about extraction panics.
+/// Audit L-9 (2026-04-29).
 ///
 /// # Safety
 /// Same preconditions as `bb_term_input`. Caller owns the returned pointer.
