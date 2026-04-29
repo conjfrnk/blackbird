@@ -135,7 +135,21 @@ fi
 
 echo "==> Committing + tagging $TAG"
 
-git add project.yml Sources/Blackbird/Info.plist Blackbird.xcodeproj/project.pbxproj 2>/dev/null || true
+# Surface any git add failure to the operator. Previously this swallowed
+# stderr + masked the exit code via `2>/dev/null || true`, which left
+# the script falling through to the misleading "Nothing staged to
+# commit" branch when the real failure was upstream (permissions, lock
+# file, etc). Audit F-S8-002 / SFH-026.
+#
+# Pass each path independently so a missing optional path (e.g. an
+# unchanged Blackbird.xcodeproj/project.pbxproj that git won't add)
+# doesn't fail the whole add. project.yml + Info.plist are required;
+# the pbxproj line is best-effort because xcodegen sometimes produces
+# a byte-identical pbxproj on regen.
+git add project.yml Sources/Blackbird/Info.plist
+if [[ -e Blackbird.xcodeproj/project.pbxproj ]]; then
+    git add Blackbird.xcodeproj/project.pbxproj
+fi
 # Only commit if there's actually a diff (pbxproj may or may not change).
 if [[ -n "$(git diff --cached --name-only)" ]]; then
     git commit -m "release: v${VERSION}"
