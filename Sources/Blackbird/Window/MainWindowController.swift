@@ -90,13 +90,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var titleObserver: NSKeyValueObservation?
     private var titleBroadcastObserver: NSObjectProtocol?
 
-    #if DEBUG
     /// `os.Logger` (not `NSLog`) so `privacy: .public` markers actually take
     /// effect — `log stream`'s reader otherwise redacts the message body to
     /// `<private>` because NSLog builds its format string at runtime.
+    ///
+    /// NOT gated on `#if DEBUG`: the conditions this logger is the canary
+    /// for (AppKit private "TabBar" view-class drift, tab-group identity
+    /// reassignment) are field-undiagnosable in Release. If a future macOS
+    /// renames the private class, our strip-hiding silently stops working
+    /// and Release users see both the native and the custom strip at once
+    /// — we need the log line in production to know it happened.
+    /// (audit M-4, sibling pattern of H-2)
     private static let tabsLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                            category: "tabs")
-    #endif
 
     /// Called when the window is about to close. AppDelegate uses this to
     /// remove the controller from its tracking array.
@@ -601,17 +607,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // the custom strip at once. os.Logger with `.public` so the
             // message isn't redacted in `log stream`. (main-window F7)
             //
-            // The logger itself is DEBUG-only (developer canary; we
-            // don't surface this in Release because the user can't act
-            // on it), so the call site is gated to match.
-            #if DEBUG
+            // The logger now fires in Release too — this canary is the
+            // only signal we'd have that AppKit renamed its private
+            // class, and a Release-only regression is exactly the case
+            // we can't reproduce in dev. (audit M-4)
             let inGroup = (window.tabGroup?.windows.count ?? 1) > 1
             if inGroup, matches == 0 {
                 Self.tabsLogger.warning("hideNativeTabStrip: 0 'TabBar' views found in a multi-tab window — AppKit may have renamed its private class; pill + native strip may both be visible.")
             }
-            #else
-            _ = matches
-            #endif
         }
     }
 
@@ -651,10 +654,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // the handlers synchronously so the strip is hidden in the
         // same transaction as AppKit's insert.
         let winObs = group.observe(\.windows, options: [.new]) { [weak self] _, _ in
+            // KVO is documented to fire on the mutator thread.
+            // `NSWindowTabGroup` mutates on main today, but that's an
+            // implementation detail Apple could change in a future
+            // macOS (Sparkle relaunch sequencing, a private hook, an
+            // off-main animation pipeline) — the synchronous calls
+            // below into `hideNativeTabStrip` / `refreshTabBar` touch
+            // AppKit views and therefore MUST run on main. Trip
+            // immediately if the contract ever breaks instead of
+            // landing in a hard-to-debug AppKit assertion deep inside
+            // a layout pass. Same pattern as the M-12 / M-22 tripwires
+            // from prior batches. (audit L-2)
+            dispatchPrecondition(condition: .onQueue(.main))
             self?.hideNativeTabStrip()
             self?.refreshTabBar()
         }
         let selObs = group.observe(\.selectedWindow, options: [.new]) { [weak self] _, change in
+            dispatchPrecondition(condition: .onQueue(.main))
             self?.refreshTabBar()
             // Drive focus to this tab's TerminalView when WE are the
             // newly-selected tab. Unified focus-restore site for all
@@ -684,6 +700,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // on `isTabBarVisible` lets us flip it back off the moment it
         // happens, before the user ever sees a second tab UI.
         let visObs = group.observe(\.isTabBarVisible, options: [.new]) { [weak self] _, change in
+            dispatchPrecondition(condition: .onQueue(.main))
             guard change.newValue == true else { return }
             self?.hideNativeTabStrip()
         }
@@ -810,10 +827,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 teardownTitleObservers()
             }
             lastObservedTabGroupID = currentGroupID
-            #if DEBUG
+            // Release builds also log this transition; tab-group identity
+            // change in production is one of the seams where the native
+            // strip can re-show silently. (audit M-4)
             let kind = currentGroupID == nil ? "detached" : "new group"
             Self.tabsLogger.log("tab-group identity changed (\(kind, privacy: .public)) — resubscribing")
-            #endif
         }
         // The FIRST window's installTitlebarTabBar runs its async
         // observeTabGroup before any other window joins — so tabGroup is
