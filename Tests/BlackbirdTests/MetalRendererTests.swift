@@ -514,4 +514,51 @@ final class MetalRendererTests: XCTestCase {
             cellBg: 0x000000, defaultBg: 0x000000, reverse: false
         ))
     }
+
+    // MARK: - M-16: displayOffset cast must not trap on negative input
+    //
+    // BBSnapshot.displayOffset returns Int (from a Rust u32) and is
+    // therefore non-negative by construction today. The renderer used
+    // to feed it through `UInt32(value)`, which traps on negative
+    // input — a one-liner regression that lets a negative value sneak
+    // through (e.g. an off-by-one in a future scrollback math change)
+    // would crash the renderer mid-frame. Switching to
+    // `UInt32(clamping:)` pins the contract at the cast site so the
+    // hot per-frame path becomes unconditionally safe.
+    //
+    // We can't construct a BBSnapshot with a negative displayOffset
+    // from a test (the field is u32 in Rust, the Swift accessor just
+    // widens it). The smallest signal-bearing test is to pin the
+    // semantics of `UInt32(clamping:)` for the inputs that matter:
+    // negative ints clamp to 0, the project-typical positive range
+    // round-trips, and Int.min doesn't trap. Co-located here (next
+    // to shouldPaintBgQuad and the rest of the FrameKey-input pins)
+    // because the cast lives inside the FrameKey/CacheKey builds.
+
+    func test_displayOffsetCast_negativeClampsToZero() {
+        // Sentinel for the regression we're guarding against: any
+        // negative value (Int.min in particular — the audit-cited
+        // worst case) must NOT trap and must produce a valid UInt32.
+        XCTAssertEqual(UInt32(clamping: -1), 0)
+        XCTAssertEqual(UInt32(clamping: Int.min), 0)
+        XCTAssertEqual(UInt32(clamping: -100_000), 0)
+    }
+
+    func test_displayOffsetCast_positiveRoundTrips() {
+        // Normal scrollback range — preserved exactly. Rust core caps
+        // history at 200 000 lines; cast must not narrow.
+        XCTAssertEqual(UInt32(clamping: 0), 0)
+        XCTAssertEqual(UInt32(clamping: 200_000), 200_000)
+        XCTAssertEqual(UInt32(clamping: Int(UInt32.max)), UInt32.max)
+    }
+
+    func test_displayOffsetCast_overflowSaturates() {
+        // Inputs above UInt32.max saturate rather than trap. The
+        // FrameKey contract is "two visually different scroll
+        // positions must produce two different UInt32 values"; once
+        // we've saturated we've exceeded that contract, but trapping
+        // is strictly worse than rendering at the saturated key.
+        XCTAssertEqual(UInt32(clamping: Int(UInt32.max) + 1), UInt32.max)
+        XCTAssertEqual(UInt32(clamping: Int.max), UInt32.max)
+    }
 }

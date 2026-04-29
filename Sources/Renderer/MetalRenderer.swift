@@ -979,7 +979,13 @@ public final class MetalRenderer {
             cursorCol: Int32(snapshot?.cursorCol ?? -1),
             cursorShape: cursorShapeOverride ?? UInt8(snapshot?.cursorShape ?? 3),
             cursorVisible: snapshot?.cursorVisible ?? false,
-            displayOffset: UInt32(snapshot?.displayOffset ?? 0),
+            // `UInt32(clamping:)` not `UInt32(_:)` — defense-in-depth on
+            // the hot per-frame path. Today `BBSnapshot.displayOffset`
+            // returns `Int` from a Rust `u32` so it's never negative,
+            // but a future regression that lets a negative slip through
+            // would trap the renderer mid-frame; clamping pins the
+            // contract at the cast site. Audit M-16 (2026-04-29).
+            displayOffset: UInt32(clamping: snapshot?.displayOffset ?? 0),
             topInsetPoints: topInsetPoints,
             defaultBgRgb: defaultBgRgb,
             backgroundOpacity: backgroundOpacity,
@@ -1184,7 +1190,9 @@ public final class MetalRenderer {
                 focused: focused,
                 cursorShape: effectiveShape,
                 cursorVisible: snap.cursorVisible,
-                displayOffset: UInt32(snap.displayOffset),
+                // Sibling of the FrameKey site — same clamping rationale.
+                // Audit M-16 (2026-04-29).
+                displayOffset: UInt32(clamping: snap.displayOffset),
                 topInsetPoints: topInsetPoints,
                 defaultBgRgb: defaultBgRgb,
                 backgroundOpacity: backgroundOpacity,
