@@ -764,6 +764,46 @@ final class PreferencesMigrationTests: XCTestCase {
         )
     }
 
+    /// Audit H-8 source-level pin (audit 2026-04-29): the observer-path
+    /// tests above can only verify the gate inside `handleDefaultsChange`.
+    /// `Preferences.shared` is a process-wide singleton initialised
+    /// exactly once per xctest process, so the init-time gate at
+    /// `Preferences.swift:284-288` is unreachable from a runtime test
+    /// — by the time any test runs, the gate has already evaluated
+    /// against whatever schema version was on disk at process launch.
+    ///
+    /// This pin asserts the gate's structural invariant in source: the
+    /// `isDowngrade` predicate is computed AND the init-time
+    /// `repairEnumRawValues(in: self)` call is wrapped in
+    /// `if !isDowngrade`. A future regression that breaks ONLY the init
+    /// gate (e.g. someone refactors and drops the wrapper) would ship
+    /// green against the runtime tests; this catches it.
+    func test_initTimeEnumRepairGate_isPinnedInSource() throws {
+        let prefsURL = try Self.locatePreferencesSwift()
+        let src = try String(contentsOf: prefsURL, encoding: .utf8)
+
+        XCTAssertTrue(
+            src.contains("isDowngrade") && src.contains("storedSchemaVersion > Preferences.currentSchemaVersion"),
+            """
+            H-8 gate predicate must remain in Preferences.swift. Expected
+            both `isDowngrade` and the comparison
+            `storedSchemaVersion > Preferences.currentSchemaVersion`
+            to appear in source — they're how the init computes whether
+            we're on a downgrade and must skip the enum repair.
+            """
+        )
+        XCTAssertTrue(
+            src.contains("if !isDowngrade {") && src.contains("Preferences.repairEnumRawValues(in: self)"),
+            """
+            H-8 init-time gate must wrap the init-time repair call.
+            Expected `if !isDowngrade {` guarding
+            `Preferences.repairEnumRawValues(in: self)` in source. The
+            observer-path runtime tests cannot reach the init gate —
+            this source pin is the only check protecting that branch.
+            """
+        )
+    }
+
     // MARK: - M-14 / DI-7 (audit 2026-04-29) — external defaults write triggers re-clamp
     //
     // `didSet` only fires on Swift-side assignments. SwiftUI's
