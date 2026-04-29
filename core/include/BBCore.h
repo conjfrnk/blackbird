@@ -377,6 +377,16 @@ extern "C" {
  * Panics inside this function are caught by `catch_unwind` and swallowed
  * silently (no `BBTerm` context is available yet to deliver a Fatal event).
  * The function returns null as the fallback value.
+ *
+ * # Clamping
+ * `cols` and `rows` are clamped to `[MIN_DIM, MAX_DIM]` (currently `[2, 1000]`)
+ * — symmetric with `bb_term_resize2`. A `0` on either axis still returns null
+ * (treated as "no terminal requested"), matching pre-2026-04-29 behaviour.
+ * `scrollback` is capped at `SCROLLBACK_MAX` (200 000 lines). Pre-H-7 a 1×1
+ * grid was constructable and silently grew to 2×2 on the next resize; now
+ * the clamp lands at construction time so the grid the caller observes via
+ * snapshot matches what they asked for (modulo the public `[MIN_DIM, MAX_DIM]`
+ * envelope).
  */
 struct BBTerm *bb_term_new(uint16_t cols, uint16_t rows, uint32_t scrollback);
 

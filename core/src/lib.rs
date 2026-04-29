@@ -1347,6 +1347,22 @@ fn guard_no_term<T>(fallback: T, f: impl FnOnce() -> T) -> T {
 // FFI entry points
 // ---------------------------------------------------------------------------
 
+/// Minimum grid dimension (cells per row/column). Below 2 alacritty's reflow
+/// math degenerates: a 1-col grid with scrollback becomes millions of 1-cell
+/// rows on shrink. Shared between `bb_term_new` (init clamp, audit H-7) and
+/// `bb_term_resize2` (resize clamp) so both paths agree.
+const MIN_DIM: u16 = 2;
+/// Maximum grid dimension. A caller passing `u16::MAX` would otherwise allocate
+/// `rows × (cols + scrollback) × cell_size` bytes — at 65535 × (65535 + 200000)
+/// × 32B that's ~520 GB, enough to freeze any machine. 1000 × 1000 × 32B ≈
+/// 32 MB grid, comfortable.
+const MAX_DIM: u16 = 1000;
+/// Scrollback ceiling. Alacritty allocates lazily, so the realistic memory
+/// cost of `MAX_DIM × SCROLLBACK_MAX × ~16B = ~3.1 GB` worst-case never
+/// materialises in practice — but the cap is real defence against a runaway
+/// caller. 200k lines covers dense Claude Code / build-log workloads.
+const SCROLLBACK_MAX: u32 = 200_000;
+
 /// Create a new terminal. Returns null on invalid input or internal error.
 ///
 /// # Thread safety
@@ -1364,31 +1380,29 @@ fn guard_no_term<T>(fallback: T, f: impl FnOnce() -> T) -> T {
 /// Panics inside this function are caught by `catch_unwind` and swallowed
 /// silently (no `BBTerm` context is available yet to deliver a Fatal event).
 /// The function returns null as the fallback value.
+///
+/// # Clamping
+/// `cols` and `rows` are clamped to `[MIN_DIM, MAX_DIM]` (currently `[2, 1000]`)
+/// — symmetric with `bb_term_resize2`. A `0` on either axis still returns null
+/// (treated as "no terminal requested"), matching pre-2026-04-29 behaviour.
+/// `scrollback` is capped at `SCROLLBACK_MAX` (200 000 lines). Pre-H-7 a 1×1
+/// grid was constructable and silently grew to 2×2 on the next resize; now
+/// the clamp lands at construction time so the grid the caller observes via
+/// snapshot matches what they asked for (modulo the public `[MIN_DIM, MAX_DIM]`
+/// envelope).
 #[no_mangle]
 pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *mut BBTerm {
     guard_no_term(std::ptr::null_mut(), || {
         if cols == 0 || rows == 0 {
             return std::ptr::null_mut();
         }
-        // Same bounds as bb_term_resize — a caller passing UInt16.max
-        // would try to allocate cols×rows×cell_size + scrollback ×
-        // cols × cell_size, tens or hundreds of GB. Clamp up front so
-        // bb_term_new is safe to call with any input.
-        const MAX_DIM: u16 = 1000;
+        // Audit H-7: clamp BOTH bounds, symmetric with `bb_term_resize2`.
+        // Pre-H-7 the floor was missing here, so `bb_term_new(1, 1, …)`
+        // succeeded and then silently grew on the next resize call.
         let size = TermSize {
-            cols: cols.min(MAX_DIM) as usize,
-            rows: rows.min(MAX_DIM) as usize,
+            cols: cols.clamp(MIN_DIM, MAX_DIM) as usize,
+            rows: rows.clamp(MIN_DIM, MAX_DIM) as usize,
         };
-        // Cap scrollback. Alacritty allocates a Cell (~16 B) per (col,
-        // line) in scrollback lazily; paired with the 1000-col
-        // theoretical ceiling above, worst-case allocation is cols ×
-        // scrollback × ~16 B. At a realistic 120-col session × 200 000
-        // lines × 16 B = ~384 MB worst-case, which fits comfortably on
-        // modern Macs and gives Claude Code / dense-log workloads
-        // iTerm2-class headroom. Allocation is lazy so a fresh session
-        // costs almost nothing; memory grows only as output actually
-        // scrolls off screen.
-        const SCROLLBACK_MAX: u32 = 200_000;
         let scrollback = scrollback.min(SCROLLBACK_MAX);
         let config = Config {
             scrolling_history: scrollback as usize,
@@ -1968,15 +1982,8 @@ pub unsafe extern "C" fn bb_term_resize2(
         if term.is_null() || cols == 0 || rows == 0 {
             return fallback;
         }
-        // Floor + ceiling on dimensions. The floor (2) prevents reflow
-        // explosion on shrink (1-col scrollback = millions of 1-cell
-        // rows). The ceiling (1000) prevents a caller passing a huge
-        // value (UInt16.max = 65535) from allocating
-        // rows × (cols + scrollback) × cell_size bytes — at 65535 ×
-        // (65535 + 200000) × 32B that's ~520 GB, enough to freeze any
-        // machine. 1000 × 1000 × 32B ≈ 32 MB grid, comfortable.
-        const MIN_DIM: u16 = 2;
-        const MAX_DIM: u16 = 1000;
+        // Floor + ceiling on dimensions. See module-level `MIN_DIM` /
+        // `MAX_DIM` for rationale. Symmetric with `bb_term_new` (audit H-7).
         let bb = &mut *term;
         let applied_cols = cols.clamp(MIN_DIM, MAX_DIM);
         let applied_rows = rows.clamp(MIN_DIM, MAX_DIM);
@@ -3183,6 +3190,46 @@ mod tests {
         unsafe {
             assert!(bb_term_new(0, 24, 1000).is_null());
             assert!(bb_term_new(80, 0, 1000).is_null());
+        }
+    }
+
+    /// Regression for audit H-7 (2026-04-29): `bb_term_new` must clamp BOTH
+    /// bounds (floor + ceiling), symmetric with `bb_term_resize2`. Pre-H-7
+    /// the floor was missing, so `bb_term_new(1, 1, …)` constructed a 1×1
+    /// grid that silently grew on the next resize. The clamp now lands at
+    /// construction time and the snapshot reflects the post-clamp dims.
+    ///
+    /// Memory discipline: small dims only — never near-MAX. Per
+    /// `feedback_oom_resize_test.md`.
+    #[test]
+    fn new_clamps_below_min_dim() {
+        unsafe {
+            // Sub-MIN_DIM cols / rows must clamp UP to MIN_DIM = 2.
+            let term = bb_term_new(1, 1, 100);
+            assert!(!term.is_null(), "bb_term_new(1, 1, …) must succeed");
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null());
+            assert_eq!((*snap).cols, MIN_DIM, "cols must clamp up to MIN_DIM");
+            assert_eq!((*snap).rows, MIN_DIM, "rows must clamp up to MIN_DIM");
+            bb_snap_release(snap);
+            bb_term_free(term);
+        }
+    }
+
+    /// Regression for audit H-7: `bb_term_new` ceiling clamp still works
+    /// after the H-7 floor was added. A small over-cap value (MAX_DIM + 1)
+    /// keeps the test memory-safe; we never approach `u16::MAX`.
+    #[test]
+    fn new_clamps_above_max_dim() {
+        unsafe {
+            let term = bb_term_new(MAX_DIM + 1, MAX_DIM + 1, 100);
+            assert!(!term.is_null());
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null());
+            assert_eq!((*snap).cols, MAX_DIM, "cols must clamp down to MAX_DIM");
+            assert_eq!((*snap).rows, MAX_DIM, "rows must clamp down to MAX_DIM");
+            bb_snap_release(snap);
+            bb_term_free(term);
         }
     }
 
