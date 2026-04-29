@@ -427,6 +427,12 @@ public final class TerminalSession: ObservableObject {
     /// A new prompt resets `promptCursor` to nil so the next jump
     /// starts from the newest mark.
     private func recordPromptStart() {
+        // M-12: tripwire the same way scroll / scrollToBottom / clearAll do.
+        // `coreQueue.sync` self-deadlocks if invoked from coreQueue, and the
+        // bbterm event handler's pre-main fast-path for ptyWrite already
+        // demonstrates a precedent for handlers calling back into us off
+        // their queue. Fail loud if a future caller lands here on coreQueue.
+        dispatchPrecondition(condition: .notOnQueue(coreQueue))
         guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
             return
         }
@@ -509,6 +515,11 @@ public final class TerminalSession: ObservableObject {
     /// is already below the current live bottom (odd — only possible if
     /// scrollback was cleared between record and jump; fall back to live).
     private func scrollToMark(_ mark: PromptMark) {
+        // M-12: same tripwire rationale as recordPromptStart above. The
+        // public callers (jumpToPreviousPrompt / jumpToNextPrompt) run on
+        // main today, but a future event-driven path could land here from
+        // coreQueue and hit the sync self-deadlock invisibly.
+        dispatchPrecondition(condition: .notOnQueue(coreQueue))
         guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
             return
         }
