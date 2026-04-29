@@ -1426,12 +1426,35 @@ public final class MetalRenderer {
         // Called on whatever thread releases the last strong ref (usually
         // main, but not guaranteed). `waitUntilCompleted` is documented
         // safe from any thread; no additional synchronisation needed.
-        if let drain = commandQueue.makeCommandBuffer() {
-            drain.commit()
-            drain.waitUntilCompleted()
+        //
+        // `makeCommandBuffer()` can return nil when the queue is full or
+        // in error state. Pre-fix L-22, that case was a silent swallow:
+        // combined with the M-3 `[weak self]` semaphore-signal miss
+        // (now landed strong-captured), it formed the actual semaphore-
+        // trap chain — no drain → no completion → no signal → semaphore
+        // deinits unbalanced → libdispatch aborts. Post-M-3 the chain
+        // is broken at the signal site, so this branch is purely
+        // diagnostic; log so a future drift makes itself visible. One
+        // retry is cheap and covers transient queue-full pressure;
+        // beyond that we accept the diagnostic and proceed (the
+        // semaphore is already balanced via M-3's strong-captured
+        // signal). Audit L-22 / NA-2 (2026-04-29).
+        var drained = false
+        for _ in 0..<2 {
+            if let drain = commandQueue.makeCommandBuffer() {
+                drain.commit()
+                drain.waitUntilCompleted()
+                drained = true
+                break
+            }
+        }
+        if !drained {
+            Self.logger.error("MetalRenderer.deinit: drain commandBuffer creation failed; relying on M-3 strong-captured signal to balance the semaphore")
         }
         #if DEBUG
-        Self.logger.debug("MetalRenderer deinit — in-flight frames drained")
+        if drained {
+            Self.logger.debug("MetalRenderer deinit — in-flight frames drained")
+        }
         #endif
     }
 }
