@@ -640,4 +640,302 @@ final class PreferencesMigrationTests: XCTestCase {
             "F-S7-010: explicit user write of false also fails to round-trip — broader bridge issue?"
         )
     }
+
+    // MARK: - H-8 / DI-1 (audit 2026-04-29) — downgrade preserves vN+1 enum values
+    //
+    // The init-time enum repair (themeRaw / themeModeRaw / bellRaw /
+    // cursorShapeRaw / optionKeyRaw) used to fire unconditionally —
+    // anything that didn't match a known case got reset to the default.
+    // On a downgrade (user runs vN+1, which writes a new enum case;
+    // user reverts to vN, which doesn't know the case), the repair
+    // would clobber the value to the vN default. Re-upgrade to vN+1:
+    // the value is gone.
+    //
+    // The fix gates the repair on `storedSchemaVersion <=
+    // currentSchemaVersion`. The same gate runs in
+    // `handleDefaultsChange()` (the M-14 / L-28 path), so we test the
+    // observer path: it fires from `UserDefaults.didChangeNotification`
+    // and runs the SAME repair logic with the SAME gate.
+
+    /// Audit H-8 (2026-04-29): with an on-disk schema version GREATER
+    /// than `currentSchemaVersion` (a downgrade scenario), an enum
+    /// rawValue we don't recognise must SURVIVE — it's most plausibly
+    /// a vN+1 enum case the current binary lacks. Clobbering would
+    /// silently destroy the user's preference.
+    ///
+    /// This test would FAIL without the fix in this audit batch
+    /// (the repair-on-downgrade gate). Without the gate, any unknown
+    /// raw value gets reset to the default on every notification fire.
+    func test_downgrade_preservesUnknownEnumRawValue() throws {
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+
+        // Snapshot the schema key + the enum we mutate, restore on exit.
+        let schemaKey = "prefsSchemaVersion"
+        let originalSchema = d.object(forKey: schemaKey)
+        let originalThemeRaw = p.themeRaw
+        defer {
+            // Restore order matters: clear the future-version stamp
+            // BEFORE writing the original theme back, so the observer's
+            // downgrade gate doesn't fire on the restore write.
+            if let originalSchema {
+                d.set(originalSchema, forKey: schemaKey)
+            } else {
+                d.removeObject(forKey: schemaKey)
+            }
+            p.themeRaw = originalThemeRaw
+            // One more drain to absorb any settled-state notification.
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+
+        // Stamp a "future" schema version. The observer's downgrade
+        // gate reads this AT NOTIFICATION TIME, so it has to land
+        // before the unknown-rawValue write below.
+        let futureVersion = Preferences.currentSchemaVersion + 1
+        d.set(futureVersion, forKey: schemaKey)
+        // Drain so the observer settles.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        // Land an unknown enum rawValue — the kind of value vN+1 could
+        // have written that vN's binary doesn't know.
+        let futureRawValue = "FutureThemeName_\(UUID().uuidString)"
+        p.themeRaw = futureRawValue
+
+        // Drain the main queue so the observer can fire its repair.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        XCTAssertEqual(
+            p.themeRaw, futureRawValue,
+            """
+            Audit H-8: with stored schema version (\(futureVersion)) >
+            currentSchemaVersion (\(Preferences.currentSchemaVersion)),
+            an unknown enum rawValue must SURVIVE the
+            handleDefaultsChange observer. The downgrade gate is what
+            preserves the user's vN+1 preference across a temporary
+            re-run of vN. Got: \(p.themeRaw).
+            """
+        )
+    }
+
+    /// Audit H-8 sibling: WHEN the stored schema version is at-or-
+    /// below currentSchemaVersion (the legitimate "garbage / typo"
+    /// case), the repair must STILL run. We don't want to overcorrect
+    /// the H-8 fix into a regression of the original "Settings Picker
+    /// shows empty row" recovery.
+    ///
+    /// This test would FAIL if a future change accidentally widened
+    /// the downgrade gate to also skip the legitimate-repair case.
+    func test_atCurrentSchema_unknownEnumRawValueGetsRepaired() throws {
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+
+        let schemaKey = "prefsSchemaVersion"
+        let originalSchema = d.object(forKey: schemaKey)
+        let originalThemeRaw = p.themeRaw
+        defer {
+            if let originalSchema {
+                d.set(originalSchema, forKey: schemaKey)
+            } else {
+                d.removeObject(forKey: schemaKey)
+            }
+            p.themeRaw = originalThemeRaw
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+
+        // Stamp the current version explicitly so the gate evaluates
+        // `stored == current`, not `stored > current`.
+        d.set(Preferences.currentSchemaVersion, forKey: schemaKey)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        // Land an unknown rawValue.
+        p.themeRaw = "TypoThemeName_\(UUID().uuidString)"
+
+        // Drain so the observer's repair runs.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+        // The repair must reset to Theme.defaultTheme.rawValue.
+        XCTAssertEqual(
+            p.themeRaw, Theme.defaultTheme.rawValue,
+            """
+            Audit H-8: at stored == current schema version, the
+            existing enum-rawValue repair must STILL run — that's the
+            "garbage typo" recovery the H-8 gate must not regress.
+            """
+        )
+    }
+
+    // MARK: - M-14 / DI-7 (audit 2026-04-29) — external defaults write triggers re-clamp
+    //
+    // `didSet` only fires on Swift-side assignments. SwiftUI's
+    // @AppStorage bridge re-fires `objectWillChange` on external
+    // writes, which means the binding RE-READS the user-domain value
+    // — but it does NOT trip `didSet`. So `defaults write
+    // dev.conjfrnk.blackbird bb.fontSize -float NaN` lands at runtime
+    // without re-clamping.
+    //
+    // The fix subscribes to `UserDefaults.didChangeNotification` and
+    // re-runs the clamp pass with the same-value-guard pattern (every
+    // write is gated on a delta) to avoid the SwiftUI feedback loop.
+
+    /// Audit M-14 (2026-04-29): an external `defaults write` of NaN
+    /// to bb.fontSize must re-clamp without an infinite loop.
+    ///
+    /// This test would FAIL without the fix in this audit batch.
+    /// Pre-fix: NaN survives in `Preferences.shared.fontSize` until
+    /// the user reads it through the slider binding. Post-fix: the
+    /// observer fires `handleDefaultsChange()`, which re-runs the
+    /// `didSet` clamp via a Swift-side write.
+    func test_externalDefaultsWrite_NaN_triggersReClamp() throws {
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+        let originalFontSize = p.fontSize
+        defer {
+            p.fontSize = originalFontSize
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+
+        // Pre-condition: a sane in-range value.
+        p.fontSize = 13.0
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        // Simulate `defaults write dev.conjfrnk.blackbird bb.fontSize -float NaN`.
+        // We write directly through UserDefaults.standard to bypass the
+        // didSet machinery — this is the exact shape an external CLI
+        // write would have at runtime. NSNumber wraps NaN so the
+        // KVC bridge accepts it.
+        d.set(Double.nan, forKey: "bb.fontSize")
+
+        // Drain the main queue so the observer fires. The bound is
+        // generous (300 ms) because we're chaining: bridge → notification
+        // → main-queue post → observer → didSet → another notification.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+
+        XCTAssertTrue(
+            p.fontSize.isFinite,
+            """
+            Audit M-14: NaN written to UserDefaults externally must be
+            re-clamped by the didChangeNotification observer. Got:
+            \(p.fontSize).
+            """
+        )
+        XCTAssertGreaterThanOrEqual(
+            p.fontSize, 9.0,
+            "Audit M-14: post-clamp fontSize must respect lower bound"
+        )
+        XCTAssertLessThanOrEqual(
+            p.fontSize, 32.0,
+            "Audit M-14: post-clamp fontSize must respect upper bound"
+        )
+    }
+
+    /// Audit M-14 (2026-04-29): re-clamp runs in BOUNDED time. The
+    /// same-value-guard pattern is the canonical defence against the
+    /// SwiftUI @AppStorage feedback loop (commit 982b719 / memory
+    /// `feedback_swiftui_userdefaults_feedback_loop.md`). If the
+    /// observer's clamp write triggered itself without a guard, the
+    /// main queue would pile up `main.async` blocks and a single
+    /// external write would wedge the runloop.
+    ///
+    /// This test bounds the wallclock of a single external write to
+    /// ~1 second, which is orders of magnitude above what a healthy
+    /// path takes (single-digit ms) and orders of magnitude below
+    /// what a runaway loop would take (the original beachball hit
+    /// minutes before OOM).
+    ///
+    /// This test would FAIL if the same-value guards inside
+    /// `handleDefaultsChange()` were removed.
+    func test_externalDefaultsWrite_outOfRange_terminatesQuickly() throws {
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+        let originalFontSize = p.fontSize
+        defer {
+            p.fontSize = originalFontSize
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+
+        p.fontSize = 13.0
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        let start = Date()
+        // Simulate an external CLI write of an out-of-range value.
+        d.set(999.0, forKey: "bb.fontSize")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.5))
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertLessThan(
+            elapsed, 1.0,
+            """
+            Audit M-14: external defaults write took \(elapsed) s to
+            settle — exceeds 1 s budget. Probable cause: missing
+            same-value guard in handleDefaultsChange, causing the
+            observer's clamp write to re-trigger itself via the
+            SwiftUI bridge.
+            """
+        )
+        XCTAssertEqual(
+            p.fontSize, 32.0, accuracy: 1e-9,
+            "Audit M-14: 999.0 must clamp to 32.0 after observer fires"
+        )
+    }
+
+    // MARK: - L-28 / MS-9 (audit 2026-04-29) — external write of unknown enum rawValue
+
+    /// Audit L-28 (2026-04-29): a mid-session external `defaults write`
+    /// of an unknown enum rawValue used to leave the SwiftUI Picker
+    /// rendering empty (no tag matches). The init-time repair only
+    /// fired ONCE; mid-session external writes bypassed it.
+    ///
+    /// The fix wires the same `repairEnumRawValues` pass into
+    /// `handleDefaultsChange()`, so the observer rescues the model
+    /// even when the user runs `defaults write
+    /// dev.conjfrnk.blackbird bb.theme -string Bogus` while Settings
+    /// is open.
+    ///
+    /// This test would FAIL without the fix in this audit batch.
+    /// Pre-fix: an external write of an unknown rawValue stays in
+    /// `themeRaw` forever; the Picker renders empty. Post-fix: the
+    /// observer reverts to `Theme.defaultTheme.rawValue` (matching
+    /// the derived getter's `?? .defaultTheme` fallback).
+    func test_externalDefaultsWrite_unknownEnumRawValue_revertsToDefault() throws {
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+        // Use a known schema version (NOT a downgrade) so the gate
+        // permits the repair.
+        let schemaKey = "prefsSchemaVersion"
+        let originalSchema = d.object(forKey: schemaKey)
+        let originalThemeRaw = p.themeRaw
+        defer {
+            if let originalSchema {
+                d.set(originalSchema, forKey: schemaKey)
+            } else {
+                d.removeObject(forKey: schemaKey)
+            }
+            p.themeRaw = originalThemeRaw
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+
+        d.set(Preferences.currentSchemaVersion, forKey: schemaKey)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        // Simulate `defaults write dev.conjfrnk.blackbird bb.theme -string BogusTheme`.
+        // The CLI write goes through UserDefaults directly; in-process
+        // we ape it via UserDefaults.standard.set(...). The crucial
+        // difference from `p.themeRaw = "BogusTheme"` is that didSet
+        // doesn't fire — we hit the same path an external CLI would.
+        d.set("BogusTheme_\(UUID().uuidString)", forKey: "bb.theme")
+
+        // Drain so the observer fires its repair.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+
+        XCTAssertEqual(
+            p.themeRaw, Theme.defaultTheme.rawValue,
+            """
+            Audit L-28: an external CLI write of an unknown enum
+            rawValue must be repaired by handleDefaultsChange (matching
+            the init-time repair). Without this, the SwiftUI Picker
+            renders an empty row and the user can't recover without
+            a relaunch. Got: \(p.themeRaw).
+            """
+        )
+    }
 }

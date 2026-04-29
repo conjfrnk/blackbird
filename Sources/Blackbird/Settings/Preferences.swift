@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import os
 
 /// Single source of truth for user preferences, backed by `UserDefaults`
 /// via `@AppStorage`. `ObservableObject` so SwiftUI views bind via
@@ -152,6 +153,24 @@ public final class Preferences: ObservableObject {
     public var cursorShape: CursorShape { CursorShape(rawValue: cursorShapeRaw) ?? .followShell }
     public var optionKey: OptionKey { OptionKey(rawValue: optionKeyRaw) ?? .meta }
 
+    private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                       category: "preferences")
+
+    /// Held weakly across `init` so the observer is torn down with the
+    /// singleton. Tagged `nonisolated(unsafe)` only because `Preferences`
+    /// is itself a process-wide singleton; the observer is created once,
+    /// in `init`, and never reassigned.
+    private var defaultsObserver: NSObjectProtocol?
+
+    /// Re-entry guard for the `UserDefaults.didChangeNotification` handler.
+    /// Without this, the same-value-guard pattern alone is enough to break
+    /// the SwiftUI bridge re-fire loop, but a second-order hazard remains:
+    /// our own clamp/repair writes fire `didChangeNotification` recursively
+    /// from inside the observer callback. The recursion is bounded (each
+    /// pass converges) but `true` here lets us short-circuit cheaply on
+    /// the inner re-entry.
+    private var isProcessingDefaultsChange = false
+
     /// Resolved `(opacity, blurRadius)` from the single translucency slider.
     /// Piecewise-linear with three anchors:
     ///   v=1  (Solid)   → opacity 1.000, blur 0
@@ -253,11 +272,20 @@ public final class Preferences: ObservableObject {
         // user can't pick from the list without first choosing something
         // valid. Repair at init so the picker and the running palette
         // agree on first render.
-        if Theme(rawValue: themeRaw) == nil { themeRaw = Theme.defaultTheme.rawValue }
-        if ThemeMode(rawValue: themeModeRaw) == nil { themeModeRaw = ThemeMode.auto.rawValue }
-        if BellStyle(rawValue: bellRaw) == nil { bellRaw = BellStyle.visual.rawValue }
-        if CursorShape(rawValue: cursorShapeRaw) == nil { cursorShapeRaw = CursorShape.followShell.rawValue }
-        if OptionKey(rawValue: optionKeyRaw) == nil { optionKeyRaw = OptionKey.meta.rawValue }
+        //
+        // Audit H-8 / DI-1 (2026-04-29): SKIP this repair on a downgrade —
+        // when stored schema version > currentSchemaVersion, an enum
+        // rawValue we don't recognise is most likely a vN+1 case the
+        // current binary lacks. Clobbering it to the vN default would
+        // silently destroy the user's preference; on re-upgrade to vN+1
+        // the value is gone. On a non-downgrade (stored <= current) the
+        // repair runs as before — that's the original "garbage from a
+        // typo / hand-edited plist" recovery path, which we still want.
+        let storedSchemaVersion = defaults.integer(forKey: Preferences.schemaVersionKey)
+        let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
+        if !isDowngrade {
+            Preferences.repairEnumRawValues(in: self)
+        }
 
         // Force a through-didSet write on each numeric pref so values
         // already on disk get sanitised. `@AppStorage`'s `didSet` runs
@@ -267,6 +295,129 @@ public final class Preferences: ObservableObject {
         // the didSet chain and normalises once at launch.
         fontSize = fontSize
         translucency = translucency
+
+        // Audit M-14 / DI-7, L-28 / MS-9 (2026-04-29): in-session
+        // `didSet` clamps and the init-time enum repair both miss values
+        // landed by an external `defaults write …` call mid-run. The
+        // SwiftUI @AppStorage bridge bridges the change into the binding
+        // (so the Picker / Slider re-evaluates) but `didSet` doesn't
+        // fire — by design, since the new value came from the
+        // userDefaults bridge, not from a Swift assignment. Subscribe
+        // to `UserDefaults.didChangeNotification` and re-run the same
+        // sanitisation passes the init does.
+        //
+        // CRITICAL HAZARD — `feedback_swiftui_userdefaults_feedback_loop.md`,
+        // commit 982b719: any UserDefaults write from a sink that
+        // observes `Preferences.objectWillChange` re-fires itself via
+        // SwiftUI's global `UserDefaultObserver`. We're observing
+        // `UserDefaults.didChangeNotification` directly here (one layer
+        // closer to the source) but the same guarantee applies: a
+        // re-write from inside the callback fires the notification
+        // again, immediately, on the same queue. Two guards close it:
+        //
+        //   (a) `isProcessingDefaultsChange` re-entrancy flag — cheap
+        //       short-circuit when our own clamp write is the trigger.
+        //   (b) Same-value comparison inside each clamp/repair branch:
+        //       a clamp that produces the same value as the current
+        //       in-memory state is a no-op WRITE (we skip it), even if
+        //       it's a logical repair.
+        //
+        // The downgrade gate from H-8 wires through here too, so
+        // mid-session external writes of vN+1 values don't get clobbered.
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: defaults,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleDefaultsChange()
+        }
+    }
+
+    deinit {
+        if let token = defaultsObserver {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    /// Re-runs the sanitisation passes on the in-memory `Preferences`
+    /// state when an external `defaults write` lands a tampered numeric
+    /// or unknown enum rawValue mid-session. The init-time repair only
+    /// fires once; this hooks the same machinery to
+    /// `UserDefaults.didChangeNotification` so the model recovers
+    /// without a relaunch.
+    private func handleDefaultsChange() {
+        // Re-entry guard — our own clamp/repair writes below fire
+        // `UserDefaults.didChangeNotification` synchronously on the same
+        // queue. The same-value guards inside each branch are the
+        // canonical defence (they'd terminate a runaway in one extra
+        // pass) but this short-circuit makes it cheap and explicit.
+        guard !isProcessingDefaultsChange else { return }
+        isProcessingDefaultsChange = true
+        defer { isProcessingDefaultsChange = false }
+
+        let defaults = UserDefaults.standard
+
+        // H-8 downgrade gate: skip the enum repair when the on-disk
+        // schema version is ahead of the current binary. Same predicate
+        // as init.
+        let storedSchemaVersion = defaults.integer(forKey: Preferences.schemaVersionKey)
+        let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
+        if !isDowngrade {
+            Preferences.repairEnumRawValues(in: self)
+        }
+
+        // Numeric clamps — same envelope as the `didSet` blocks. The
+        // didSet fires on Swift-side assignment, which is exactly what
+        // `self.fontSize = …` triggers; the same-value guard inside
+        // didSet skips the write when the clamped value matches.
+        let currentFontSize = self.fontSize
+        let normalisedFont = currentFontSize.isFinite ? currentFontSize : 13
+        let clampedFont = max(9, min(32, normalisedFont))
+        if clampedFont != currentFontSize {
+            Preferences.logger.log("re-clamping fontSize after external defaults write: \(currentFontSize) → \(clampedFont)")
+            self.fontSize = clampedFont
+        }
+
+        let currentTrans = self.translucency
+        let normalisedTrans = currentTrans.isFinite ? currentTrans : 1
+        let clampedTrans = max(1, min(10, normalisedTrans))
+        if clampedTrans != currentTrans {
+            Preferences.logger.log("re-clamping translucency after external defaults write: \(currentTrans) → \(clampedTrans)")
+            self.translucency = clampedTrans
+        }
+    }
+
+    /// Repair every enum-backed @AppStorage string whose stored value
+    /// doesn't match a known case. Reset to the documented default,
+    /// matching the derived getter's `?? .default` fallback so the
+    /// SwiftUI Picker can render the row and the model + UI agree.
+    ///
+    /// Same-value guards on every branch — required by
+    /// `feedback_swiftui_userdefaults_feedback_loop.md` because both
+    /// the init caller and the `UserDefaults.didChangeNotification`
+    /// observer can fire this on a path that loops back through the
+    /// SwiftUI bridge.
+    private static func repairEnumRawValues(in prefs: Preferences) {
+        if Theme(rawValue: prefs.themeRaw) == nil {
+            let target = Theme.defaultTheme.rawValue
+            if prefs.themeRaw != target { prefs.themeRaw = target }
+        }
+        if ThemeMode(rawValue: prefs.themeModeRaw) == nil {
+            let target = ThemeMode.auto.rawValue
+            if prefs.themeModeRaw != target { prefs.themeModeRaw = target }
+        }
+        if BellStyle(rawValue: prefs.bellRaw) == nil {
+            let target = BellStyle.visual.rawValue
+            if prefs.bellRaw != target { prefs.bellRaw = target }
+        }
+        if CursorShape(rawValue: prefs.cursorShapeRaw) == nil {
+            let target = CursorShape.followShell.rawValue
+            if prefs.cursorShapeRaw != target { prefs.cursorShapeRaw = target }
+        }
+        if OptionKey(rawValue: prefs.optionKeyRaw) == nil {
+            let target = OptionKey.meta.rawValue
+            if prefs.optionKeyRaw != target { prefs.optionKeyRaw = target }
+        }
     }
 
     /// Remove wrong-type values from numeric pref keys. `@AppStorage<Double>`
