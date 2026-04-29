@@ -122,6 +122,17 @@ pub type BBEventCb = unsafe extern "C" fn(BBEvent, *mut c_void);
 /// `send_event`. Zero cost in release (rust-core-1 F2/F10).
 struct CallbackCell {
     slot: UnsafeCell<(Option<BBEventCb>, *mut c_void)>,
+    /// Sliding-window cap on `Event::PtyWrite` dispatches. Audit M1 (the
+    /// 32/sec contract on cursor-position / DA / DSR / DECXCPR replies)
+    /// originally lived in `RoutingListener::send_event`, so two direct-
+    /// fire sites (`dispatch_xtgettcap` and `drain_color_requests`)
+    /// bypassed it — a 4 KiB DCS+q with `;`-delimited cap_hex spawned
+    /// ~1300 PtyWrites in one batch, totally bypassing the cap. Audit
+    /// H-4 moved the gate here so all three call sites inherit it by
+    /// construction. The cell is `Arc<PtyWriteRateCell>` so the listener
+    /// shares ownership and `bb_term_clear_all` can `reset()` it via
+    /// `BBTerm`'s clone (audit H-3).
+    pty_write_rate: Arc<PtyWriteRateCell>,
     #[cfg(debug_assertions)]
     owner: std::sync::OnceLock<std::thread::ThreadId>,
 }
@@ -132,9 +143,10 @@ unsafe impl Send for CallbackCell {}
 unsafe impl Sync for CallbackCell {}
 
 impl CallbackCell {
-    fn new() -> Self {
+    fn new(pty_write_rate: Arc<PtyWriteRateCell>) -> Self {
         CallbackCell {
             slot: UnsafeCell::new((None, std::ptr::null_mut())),
+            pty_write_rate,
             #[cfg(debug_assertions)]
             owner: std::sync::OnceLock::new(),
         }
@@ -166,11 +178,26 @@ impl CallbackCell {
 
     /// Invoke the stored callback if one is registered.
     ///
+    /// `BBEventKind::PtyWrite` events go through the shared rate cap
+    /// (audit M1 + H-4); excess PtyWrites silently drop here. All other
+    /// kinds are dispatched unconditionally — the rate gate is specific
+    /// to PTY reply traffic that a hostile shell can fan out unboundedly
+    /// (DSR, DA1/DA2, DECXCPR replies, OSC 10/11/12 color responses,
+    /// XTGETTCAP responses).
+    ///
     /// # Safety
     /// Caller must ensure no concurrent access and that the `BBEvent` fields
     /// are valid for the duration of the call.
     unsafe fn fire(&self, event: BBEvent) {
         self.debug_check_thread();
+        // Audit H-4: PtyWrite cap is total-by-construction. All three
+        // PtyWrite-firing paths (RoutingListener::send_event,
+        // dispatch_xtgettcap, drain_color_requests) inherit the cap from
+        // here. This used to live in RoutingListener::send_event, where
+        // it gated only the alacritty-driven path.
+        if matches!(event.kind, BBEventKind::PtyWrite) && !self.pty_write_rate.allow() {
+            return;
+        }
         let (cb, ctx) = *self.slot.get();
         if let Some(f) = cb {
             f(event, ctx);
@@ -322,14 +349,13 @@ impl ColorRequestQueue {
 struct RoutingListener {
     cell: Arc<CallbackCell>,
     color_queue: Arc<ColorRequestQueue>,
-    /// Sliding-window rate-limiter for `Event::PtyWrite` (DSR / DA1 /
-    /// DA2 / DECXCPR replies). Per audit M1 — pre-fix a hostile shell
-    /// streaming `ESC[6n` in a tight loop unboundedly fanned PtyWrite
-    /// replies into the writeQueue, blocking keystrokes. Wrapped in
-    /// `PtyWriteRateCell` (mirrors `ColorRequestQueue`'s pattern) so
-    /// the Arc is `Send + Sync` under the single-thread-per-BBTerm
-    /// discipline.
-    pty_write_rate: Arc<PtyWriteRateCell>,
+    // Audit H-4 (2026-04-29): the PtyWrite rate cap (32/sec, audit M1)
+    // moved into `CallbackCell::fire` so all three dispatch paths
+    // (this listener, `dispatch_xtgettcap`, `drain_color_requests`)
+    // inherit it by construction. The shared `Arc<PtyWriteRateCell>`
+    // now lives on `CallbackCell`; the listener doesn't need its own
+    // reference because every send_event PtyWrite goes through
+    // `self.cell.fire`.
 }
 
 /// Rate-limiter state for PtyWrite reply events. Mutated only on the
@@ -371,6 +397,18 @@ impl PtyWriteRateCell {
     /// no concurrent calls.
     unsafe fn allow(&self) -> bool {
         (*self.state.get()).allow()
+    }
+
+    /// Reset the sliding window so the next `allow()` starts a fresh
+    /// 1-second budget. Used by `bb_term_clear_all` (audit H-3) so a
+    /// pre-clear PtyWrite flood doesn't eat the post-clear session's
+    /// PTY-write budget.
+    ///
+    /// # Safety
+    /// Caller must respect the single-thread-per-BBTerm discipline —
+    /// no concurrent calls.
+    unsafe fn reset(&self) {
+        *self.state.get() = PtyWriteRateState::new();
     }
 }
 
@@ -528,26 +566,14 @@ impl EventListener for RoutingListener {
                     });
                 }
                 Event::PtyWrite(ref s) => {
-                    // Sliding-window cap on cursor-position / DA / DSR /
-                    // DECXCPR replies. A hostile shell streaming
-                    // `ESC[6n` in a tight loop would otherwise pin
-                    // coreQueue + writeQueue at 100% CPU and prevent
-                    // user keystrokes from making forward progress.
-                    // 32/sec is generous for legitimate query traffic
-                    // (typically a handful at session start, plus
-                    // rare reactive queries during e.g. nvim auto-
-                    // detection). Audit M1.
-                    //
-                    // SAFETY: `pty_write_rate` is wrapped in
-                    // `PtyWriteRateCell` shared via Arc; the
-                    // single-thread-per-BBTerm discipline (see
-                    // RoutingListener doc) means no concurrent
-                    // mutation. We're already inside an `unsafe {}`
-                    // block at the top of `send_event`.
-                    let allowed = self.pty_write_rate.allow();
-                    if !allowed {
-                        return;
-                    }
+                    // The 32/sec cap on cursor-position / DA / DSR /
+                    // DECXCPR replies (audit M1) lives inside
+                    // `CallbackCell::fire` for `kind == PtyWrite`, so the
+                    // gate is total-by-construction — every PtyWrite
+                    // path (this one + dispatch_xtgettcap +
+                    // drain_color_requests) inherits the same cap from
+                    // one place (audit H-4). Pre-H-4 the gate lived
+                    // here; the two direct-fire sites then bypassed it.
                     let bytes = s.as_bytes();
                     self.cell.fire(BBEvent {
                         kind: BBEventKind::PtyWrite,
@@ -1479,13 +1505,12 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             ..Default::default()
         };
 
-        let callback = Arc::new(CallbackCell::new());
-        let color_queue = Arc::new(ColorRequestQueue::new());
         let pty_write_rate = Arc::new(PtyWriteRateCell::new());
+        let callback = Arc::new(CallbackCell::new(Arc::clone(&pty_write_rate)));
+        let color_queue = Arc::new(ColorRequestQueue::new());
         let listener = RoutingListener {
             cell: Arc::clone(&callback),
             color_queue: Arc::clone(&color_queue),
-            pty_write_rate: Arc::clone(&pty_write_rate),
         };
         let term = Term::new(config, &size, listener);
         let bb = Box::new(BBTerm {
@@ -2822,8 +2847,10 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
 /// Clear the visible screen AND the scrollback, moving the cursor to the
 /// top-left. Equivalent to `clear -x` (BSD) / iTerm2's "⌘K" wipe — NOT
 /// what `clear(1)` emits, which is viewport-only (a plain `\x1b[H\x1b[2J`
-/// that leaves scrollback intact). The rest of the terminal state
-/// (palette, cursor color, etc.) is untouched.
+/// that leaves scrollback intact). The terminal palette is intentionally
+/// preserved (the user's theme survives ⌘K). All other parser / rate-
+/// limiter / cache state IS reset so a pre-clear adversarial flood
+/// can't degrade the post-clear session — see audit H-3 (2026-04-29).
 ///
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null is a no-op.
@@ -2851,6 +2878,36 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         // legitimate color queries for the rest of the 1s window.
         bb.color_query_reply_window_start = std::time::Instant::now();
         bb.color_query_reply_window_count = 0;
+
+        // Audit H-3 (2026-04-29): four sibling state slots survived the
+        // pre-existing reset list, leaving these adversarial-state
+        // primitives carryable across ⌘K:
+        //
+        //   1. `prompt_mark_rate` — pre-clear OSC 133 flood degraded
+        //      post-clear prompt navigation for up to 1 s.
+        //   2. `modify_other_keys` — xterm modifyOtherKeys mode persisted
+        //      across the wipe.
+        //   3. `pty_write_rate` (Arc on the callback) — pre-clear OSC 11
+        //      flood ate the 1-s PTY-write budget.
+        //   4. `uri_cstr_cache` / `uri_cache_bytes` — pre-clear OSC 8
+        //      cache flood blocked legitimate post-clear OSC 8 links
+        //      until app relaunch (the 1 MiB byte-cap stayed exhausted).
+        bb.prompt_mark_rate = PromptMarkRateState::new();
+        bb.modify_other_keys = 0;
+        bb.callback.pty_write_rate.reset();
+
+        // OSC 8 URI intern cache: drop entries that no live snapshot
+        // still references. `bb_term_take_snapshot` cloned each Arc into
+        // the snapshot's `links` vec, so any URI with `Arc::strong_count
+        // > 1` is still pointed-to by a snapshot whose `*const c_char`
+        // would dangle if we evicted. Retain those; drop the rest.
+        // `uri_cache_bytes` rebuilds from the surviving entries (sum of
+        // `key.len()`) — this also fixes the latent invariant break
+        // from the old `mem::take` shape (audit RC-01) where a panic
+        // could leave bytes_count stale.
+        bb.uri_cstr_cache
+            .retain(|_uri, arc| Arc::strong_count(arc) > 1);
+        bb.uri_cache_bytes = bb.uri_cstr_cache.keys().map(|k| k.len()).sum();
     })
 }
 
@@ -3324,7 +3381,7 @@ mod tests {
     #[cfg(debug_assertions)]
     fn callback_cell_catches_cross_thread_access() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
-        let cell = Arc::new(CallbackCell::new());
+        let cell = Arc::new(CallbackCell::new(Arc::new(PtyWriteRateCell::new())));
         // Latch the owner on this thread by touching the cell once.
         unsafe {
             cell.fire(BBEvent {
@@ -3367,13 +3424,12 @@ mod tests {
             scrolling_history: scrollback,
             ..Default::default()
         };
-        let callback = Arc::new(CallbackCell::new());
-        let color_queue = Arc::new(ColorRequestQueue::new());
         let pty_write_rate = Arc::new(PtyWriteRateCell::new());
+        let callback = Arc::new(CallbackCell::new(Arc::clone(&pty_write_rate)));
+        let color_queue = Arc::new(ColorRequestQueue::new());
         let listener = RoutingListener {
             cell: Arc::clone(&callback),
             color_queue: Arc::clone(&color_queue),
-            pty_write_rate: Arc::clone(&pty_write_rate),
         };
         // Keep the Arcs alive past listener construction so the inner
         // cells survive for the lifetime of `term`.
@@ -4683,6 +4739,127 @@ mod tests {
         }
     }
 
+    /// Audit H-3 (2026-04-29): `bb_term_clear_all` must reset the four
+    /// state slots a pre-clear flood otherwise carries across ⌘K. This
+    /// test mutates each slot via legitimate input, calls clear_all, and
+    /// asserts the reset.
+    #[test]
+    fn clear_all_resets_modify_other_keys_and_prompt_rate() {
+        unsafe {
+            let term = bb_term_new(80, 24, 100);
+            let bb = &mut *term;
+
+            // 1. modify_other_keys: drive `CSI > 4 ; 2 m` to set level 2.
+            let set_mok = b"\x1b[>4;2m";
+            bb_term_input(term, set_mok.as_ptr(), set_mok.len());
+            assert_eq!(
+                (*term).modify_other_keys,
+                2,
+                "precondition: modify_other_keys should latch to 2"
+            );
+
+            // 2. prompt_mark_rate: drive a few OSC 133 marks so the
+            //    window_count is non-zero.
+            for _ in 0..5 {
+                bb_term_input(term, b"\x1b]133;A\x07".as_ptr(), 7);
+            }
+            assert!(
+                (*term).prompt_mark_rate.window_count > 0,
+                "precondition: prompt_mark_rate must have absorbed marks"
+            );
+
+            // 3. pty_write_rate: drive a few DSR queries via the PTY
+            //    write path so the window_count climbs.
+            for _ in 0..5 {
+                bb_term_input(term, b"\x1b[6n".as_ptr(), 4);
+            }
+            let pty_count_before = (*bb.callback.pty_write_rate.state.get()).window_count;
+            assert!(
+                pty_count_before > 0,
+                "precondition: pty_write_rate must have absorbed replies"
+            );
+
+            // Now clear_all.
+            bb_term_clear_all(term);
+
+            assert_eq!(
+                (*term).modify_other_keys,
+                0,
+                "clear_all must reset modify_other_keys"
+            );
+            assert_eq!(
+                (*term).prompt_mark_rate.window_count,
+                0,
+                "clear_all must reset prompt_mark_rate"
+            );
+            assert_eq!(
+                (*(*term).callback.pty_write_rate.state.get()).window_count,
+                0,
+                "clear_all must reset pty_write_rate window_count"
+            );
+
+            bb_term_free(term);
+        }
+    }
+
+    /// Audit H-3: the URI intern cache must drop entries that no live
+    /// snapshot still references — but live snapshot Arcs MUST stay
+    /// valid (their `*const c_char` is held by the snapshot's `links`
+    /// vec). The test takes a snapshot pre-clear (so its Arc strong-
+    /// count is 2), then clears, then asserts the cache retained that
+    /// entry. Releasing the snapshot then clearing again must drop it.
+    #[test]
+    fn clear_all_retains_uri_arcs_held_by_live_snapshots() {
+        unsafe {
+            let term = bb_term_new(20, 4, 100);
+
+            // Emit a single OSC 8 link so the cache picks it up.
+            let osc8 = b"\x1b]8;;https://example.com/\x1b\\X\x1b]8;;\x1b\\";
+            bb_term_input(term, osc8.as_ptr(), osc8.len());
+
+            // Take a snapshot — this clones the URI's Arc into the
+            // snapshot's `links` vec.
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null());
+            assert!(
+                !(*term).uri_cstr_cache.is_empty(),
+                "precondition: cache populated by OSC 8 input"
+            );
+            let bytes_before = (*term).uri_cache_bytes;
+            assert!(bytes_before > 0);
+
+            // Clear-all WHILE the snapshot is live: the cache must
+            // RETAIN the entry because Arc::strong_count > 1.
+            bb_term_clear_all(term);
+
+            assert!(
+                !(*term).uri_cstr_cache.is_empty(),
+                "clear_all must retain URI arcs that live snapshots still hold"
+            );
+            assert_eq!(
+                (*term).uri_cache_bytes,
+                bytes_before,
+                "uri_cache_bytes must rebuild from surviving entries"
+            );
+
+            // Release the snapshot — now strong_count drops to 1 (only
+            // the cache holds it). A second clear_all should evict.
+            bb_snap_release(snap);
+            bb_term_clear_all(term);
+            assert!(
+                (*term).uri_cstr_cache.is_empty(),
+                "clear_all must drop URI arcs no live snapshot holds"
+            );
+            assert_eq!(
+                (*term).uri_cache_bytes,
+                0,
+                "uri_cache_bytes must zero out when cache is empty"
+            );
+
+            bb_term_free(term);
+        }
+    }
+
     /// Regression for rust-core-2 F10: OSC 52 clipboard-store no longer
     /// fires an `Osc52Clipboard` event by default. alacritty's `Osc52`
     /// config is `Disabled`, so the `Event::ClipboardStore` path is gated
@@ -5424,10 +5601,7 @@ mod tests {
         // U+200E LRM, U+200F RLM.
         assert_eq!(scrub_title_controls("\u{200E}a\u{200F}b"), "ab");
         // U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ.
-        assert_eq!(
-            scrub_title_controls("a\u{200B}b\u{200C}c\u{200D}d"),
-            "abcd"
-        );
+        assert_eq!(scrub_title_controls("a\u{200B}b\u{200C}c\u{200D}d"), "abcd");
         // U+FEFF BOM.
         assert_eq!(scrub_title_controls("\u{FEFF}hello"), "hello");
         // Variation selectors (U+FE0F is the emoji presentation selector;
@@ -5467,5 +5641,122 @@ mod tests {
             "Title payload must not contain U+202E byte sequence; got {:?}",
             String::from_utf8_lossy(&title.1)
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Audit H-4 — PtyWrite cap is total-by-construction across all paths
+    // -------------------------------------------------------------------
+
+    /// Audit H-4 (2026-04-29): a single XTGETTCAP DCS with many
+    /// `;`-delimited cap_hex tokens must NOT bypass the PtyWrite cap.
+    /// Pre-H-4 the cap lived on `RoutingListener::send_event`, so
+    /// `dispatch_xtgettcap`'s direct `cell.fire` calls inherited zero
+    /// rate limiting — a 4 KiB DCS would spawn ~1300 PtyWrites per
+    /// chunk, ~40x the audit-M1 contract.
+    #[test]
+    fn xtgettcap_pty_write_cap_holds() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            count: Mutex<usize>,
+        }
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            if matches!(ev.kind, BBEventKind::PtyWrite) {
+                let sink = &*(ctx as *const Sink);
+                *sink.count.lock().unwrap() += 1;
+            }
+        }
+
+        // Build a DCS+q with N copies of the TN cap (hex `544E`),
+        // semicolon-delimited. Each cap generates one PtyWrite reply
+        // pre-cap. With the cap in place, replies should top out at
+        // PTY_WRITE_REPLY_PER_SECOND.
+        const N: usize = 200;
+        let mut dcs: Vec<u8> = Vec::with_capacity(2 + 5 * N + 2);
+        dcs.extend_from_slice(b"\x1bP+q");
+        for i in 0..N {
+            if i > 0 {
+                dcs.push(b';');
+            }
+            dcs.extend_from_slice(b"544E");
+        }
+        dcs.extend_from_slice(b"\x1b\\");
+
+        let sink = Sink {
+            count: Mutex::new(0),
+        };
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+            bb_term_input(term, dcs.as_ptr(), dcs.len());
+
+            let writes = *sink.count.lock().unwrap();
+            assert!(
+                writes <= PTY_WRITE_REPLY_PER_SECOND as usize,
+                "XTGETTCAP must inherit the PtyWrite cap; expected at most \
+                 {} PtyWrites within one window, got {}",
+                PTY_WRITE_REPLY_PER_SECOND,
+                writes
+            );
+
+            bb_term_free(term);
+        }
+    }
+
+    /// Audit H-4: cross-path verification. Drive both a PtyWrite-firing
+    /// path (XTGETTCAP) AND another PtyWrite-firing path (DSR cursor-
+    /// position query → `RoutingListener::send_event`'s PtyWrite arm)
+    /// in the SAME input batch. The combined PtyWrite count must still
+    /// honour the cap — confirming the gate is total-by-construction.
+    #[test]
+    fn pty_write_cap_holds_across_paths() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            count: Mutex<usize>,
+        }
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            if matches!(ev.kind, BBEventKind::PtyWrite) {
+                let sink = &*(ctx as *const Sink);
+                *sink.count.lock().unwrap() += 1;
+            }
+        }
+
+        // 50-cap DCS (XTGETTCAP path) + 50 DSR queries (alacritty's
+        // PtyWrite path via send_event). Total ungated would be 100;
+        // with the gate in CallbackCell::fire, both paths share the
+        // same 32/sec budget.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"\x1bP+q");
+        for i in 0..50 {
+            if i > 0 {
+                input.push(b';');
+            }
+            input.extend_from_slice(b"544E");
+        }
+        input.extend_from_slice(b"\x1b\\");
+        for _ in 0..50 {
+            input.extend_from_slice(b"\x1b[6n"); // DSR cursor position
+        }
+
+        let sink = Sink {
+            count: Mutex::new(0),
+        };
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+            bb_term_input(term, input.as_ptr(), input.len());
+
+            let writes = *sink.count.lock().unwrap();
+            assert!(
+                writes <= PTY_WRITE_REPLY_PER_SECOND as usize,
+                "combined XTGETTCAP + DSR PtyWrites must respect the \
+                 shared cap; expected ≤ {}, got {}",
+                PTY_WRITE_REPLY_PER_SECOND,
+                writes
+            );
+        }
     }
 }

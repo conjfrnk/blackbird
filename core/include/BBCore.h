@@ -648,8 +648,10 @@ void bb_term_scroll_to_bottom(struct BBTerm *term);
  * Clear the visible screen AND the scrollback, moving the cursor to the
  * top-left. Equivalent to `clear -x` (BSD) / iTerm2's "⌘K" wipe — NOT
  * what `clear(1)` emits, which is viewport-only (a plain `\x1b[H\x1b[2J`
- * that leaves scrollback intact). The rest of the terminal state
- * (palette, cursor color, etc.) is untouched.
+ * that leaves scrollback intact). The terminal palette is intentionally
+ * preserved (the user's theme survives ⌘K). All other parser / rate-
+ * limiter / cache state IS reset so a pre-clear adversarial flood
+ * can't degrade the post-clear session — see audit H-3 (2026-04-29).
  *
  * # Safety
  * Same preconditions as `bb_term_input`. Null is a no-op.
