@@ -69,6 +69,20 @@ enum OSC8URLPolicy {
     static func isAllowed(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         guard allowedSchemes.contains(scheme) else { return false }
+        // Pass-3 C0 bypass fix: a URL like
+        // `mailto:user@apple.com%08evil.com` round-trips through
+        // Foundation: `absoluteString` keeps the percent-encoded `%08`
+        // while `path` normalises the C0 byte AWAY entirely, leaving
+        // `mailtoDomain` reading `apple.comevil.com`. The anchor
+        // divergence detector compares against the wrong domain (or
+        // short-circuits when the anchor is empty), and Mail.app may
+        // re-decode the `%08` to bounce the click to one of `apple.com`,
+        // `apple.comevil.com`, or `evil.com` depending on its parser.
+        // Reject any URL with percent-encoded C0 controls (00-1F) or
+        // DEL (7F) before any per-scheme branch — there is no benign
+        // reason to embed a control byte in an OSC 8 hyperlink, and
+        // every interpretation downstream is a phishing vector.
+        guard !containsPercentEncodedControlBytes(url.absoluteString) else { return false }
         if scheme == "mailto" {
             return isMailtoSafe(url)
         }
@@ -91,30 +105,58 @@ enum OSC8URLPolicy {
         return true
     }
 
-    /// Extract the domain (right of the last `@`) from a `mailto:` URL.
+    /// Extract the domain (right of the `@`) from a `mailto:` URL.
     /// `URL.host` is unreliable for mailto on Foundation — depending on
     /// version, it may return nil even for valid mailto URLs. The
     /// canonical location is the path: `mailto:user@domain` parses with
-    /// path == "user@domain". Returns nil when there's no `@` or the
-    /// right side is empty.
-    static func mailtoDomain(_ url: URL) -> String? {
+    /// path == "user@domain". Returns nil when there's no `@`, the
+    /// right side is empty, OR the path contains more than one `@`
+    /// (multi-recipient mailto per RFC 6068 — there is no single
+    /// canonical "domain" so we cannot validate; fail closed).
+    private static func mailtoDomain(_ url: URL) -> String? {
         guard url.scheme?.lowercased() == "mailto" else { return nil }
         // For mailto URLs URL.path holds "user@domain" (no leading
         // slash). Foundation occasionally splits on '@' for
         // url.user/url.host, but the path form is consistent across
         // OS versions and is what RFC 6068 describes.
         let raw = url.path
-        guard let at = raw.lastIndex(of: "@") else { return nil }
+        // Pass-3 fail-closed: RFC 6068 allows multi-recipient mailto
+        // (`mailto:user@safe.com,b@evil.com`). Picking last via
+        // `lastIndex(of: "@")` silently selects evil.com; picking first
+        // ignores it. Neither choice is a "canonical" domain — we
+        // cannot honestly validate, so refuse to emit one. Caller
+        // treats nil as "no domain" → divergence/safety checks fail
+        // closed and the click is blocked.
+        let atCount = raw.reduce(0) { $0 + ($1 == "@" ? 1 : 0) }
+        guard atCount == 1 else { return nil }
+        guard let at = raw.firstIndex(of: "@") else { return nil }
         let domain = raw[raw.index(after: at)...]
         if domain.isEmpty { return nil }
         return String(domain).lowercased()
+    }
+
+    /// True when `s` contains a percent-encoded C0 control byte
+    /// (`%00`–`%1F`) or DEL (`%7F`). Hex digits are matched
+    /// case-insensitively. Used as the canonical click-time bypass
+    /// guard in `isAllowed`: Foundation will retain percent-encoded
+    /// control bytes in `absoluteString` while normalising them out of
+    /// `path`/`host`, leaving the rest of the policy comparing the
+    /// wrong substrings against the eventual handler's interpretation.
+    /// Cheapest mitigation: reject the URL before any per-scheme
+    /// comparison runs.
+    private static func containsPercentEncodedControlBytes(_ s: String) -> Bool {
+        // %00-%1F covers all C0 controls (NUL through US incl. BS, HT,
+        // LF, CR, ESC). %7F covers DEL. Hex digits are case-insensitive
+        // because Foundation may emit either case in absoluteString.
+        let pattern = #"%(?i)(0[0-9A-F]|1[0-9A-F]|7F)"#
+        return s.range(of: pattern, options: .regularExpression) != nil
     }
 
     /// True when the host contains non-ASCII characters or looks like an
     /// ACE-encoded (punycode) IDN. Either form is a homograph phishing
     /// vector on the OSC 8 click path. Case-insensitive — RFC 3986 host
     /// strings are case-insensitive after scheme normalisation.
-    static func hostLooksLikeIDN(_ host: String) -> Bool {
+    private static func hostLooksLikeIDN(_ host: String) -> Bool {
         for scalar in host.unicodeScalars {
             if scalar.value > 0x7F { return true }
         }
@@ -205,11 +247,20 @@ enum OSC8URLPolicy {
         }
         let normHref = stripTrailingDots(hrefHost)
         let normAnchor = stripTrailingDots(anchorHost)
-        // Treat exact-match and "anchor is more specific than href" as
-        // non-divergent — `www.apple.com` anchor for `apple.com` href
-        // is not phishing.
-        if normAnchor == normHref { return false }
-        if normAnchor.hasSuffix("." + normHref) { return false }
+        // Pass-3 default-port fix: previously this branch compared
+        // hosts only — `https://example.com` and
+        // `https://example.com:8443` looked identical, letting a
+        // hostile remote front-end an attacker-controlled port behind
+        // an apex-host anchor. Compare (host, effectivePort) tuples.
+        // Default-port-on-href + omitted-on-anchor (and vice versa) is
+        // legitimate; only divergent ports flag.
+        let hrefPort = url.port ?? defaultPort(hrefScheme ?? "")
+        let anchorPort = anchorURLValid.port ?? defaultPort(anchorScheme ?? "")
+        // Treat exact-match (same host AND same effective port) and
+        // "anchor is more specific than href" as non-divergent —
+        // `www.apple.com` anchor for `apple.com` href is not phishing.
+        if normAnchor == normHref && anchorPort == hrefPort { return false }
+        if normAnchor.hasSuffix("." + normHref) && anchorPort == hrefPort { return false }
         // SI-01 — earlier we also accepted the inverse (anchor host is
         // a parent of href host) on the assumption it modelled the
         // `apple.com` ↔ `www.apple.com` case. That inverts trust on
@@ -231,6 +282,19 @@ enum OSC8URLPolicy {
         return out
     }
 
+    /// Default port for the listed scheme — used to canonicalise
+    /// `https://example.com` ≡ `https://example.com:443` for the
+    /// divergence comparison. Returns nil for schemes outside the
+    /// host-required allowlist (mailto handled separately).
+    private static func defaultPort(_ scheme: String) -> Int? {
+        switch scheme.lowercased() {
+        case "http": return 80
+        case "https": return 443
+        case "ftp": return 21
+        default: return nil
+        }
+    }
+
     /// Pull a URL-shaped token out of `anchorText`. Returns:
     ///   - `(parsedURL, true)` when a URL-shaped substring was found
     ///     and `URL(string:)` accepted it.
@@ -250,45 +314,103 @@ enum OSC8URLPolicy {
     /// We hand the candidate substring to `URL(string:)` and let
     /// Foundation decide.
     private static func extractAnchorURL(from anchorText: String) -> (URL?, Bool)? {
-        // Try mailto first — it's distinguishable by a fixed prefix
-        // (case-insensitive) and unambiguous.
-        if let mailto = findMailtoCandidate(in: anchorText) {
-            return (URL(string: mailto), true)
+        // Pass-3 ordering fix (item 5): previously this tried mailto
+        // first, which biased the detector toward an embedded
+        // `mailto:` substring even when an http(s)/ftp candidate
+        // appeared earlier in the text. Worse, `findMailtoCandidate`
+        // matched `mailto:` anywhere — an anchor like
+        // `see https://example.com/mailto:foo` extracted `mailto:foo`
+        // as the supposed URL claim. Resolve both ambiguities by
+        // picking whichever candidate's prefix appears earliest in
+        // the original string. Equal start positions tie-break to
+        // mailto (mailto prefix is longer than `http://` so a
+        // legitimately co-located shape is unambiguously mailto).
+        let mailto = findMailtoCandidate(in: anchorText)
+        let http = findHTTPCandidate(in: anchorText)
+        switch (mailto, http) {
+        case (nil, nil):
+            return nil
+        case (let m?, nil):
+            return (URL(string: m.candidate), true)
+        case (nil, let h?):
+            return (URL(string: h.candidate), true)
+        case let (m?, h?):
+            // Pick whichever prefix appeared earlier in the source.
+            return m.start <= h.start
+                ? (URL(string: m.candidate), true)
+                : (URL(string: h.candidate), true)
         }
-        // Then scheme://… for http/https/ftp.
-        if let http = findHTTPCandidate(in: anchorText) {
-            return (URL(string: http), true)
+    }
+
+    /// A candidate URL substring extracted from anchor text plus the
+    /// position of its scheme prefix in the original string. Position
+    /// is preserved so `extractAnchorURL` can pick the earliest
+    /// candidate when both http and mailto match (item 5 ordering).
+    private struct AnchorCandidate {
+        let candidate: String
+        let start: String.Index
+    }
+
+    /// Scan for a `mailto:` candidate. Returns the substring from the
+    /// `mailto:` prefix to the first whitespace, with trailing
+    /// punctuation stripped. Empty payload (just `mailto:`) is
+    /// treated as not-found.
+    ///
+    /// Pass-3 (item 5): only matches when `mailto:` appears at the
+    /// start of the text, or is preceded by whitespace or an
+    /// unambiguous separator. Inside a path like
+    /// `https://example.com/mailto:foo` the substring used to match
+    /// and the `foo` was extracted as if it were a mailto claim.
+    private static func findMailtoCandidate(in text: String) -> AnchorCandidate? {
+        let lower = text.lowercased()
+        var searchStart = lower.startIndex
+        while searchStart < lower.endIndex,
+              let prefixRange = lower.range(of: "mailto:", range: searchStart..<lower.endIndex)
+        {
+            // Boundary check: previous char (if any) must be whitespace
+            // or an unambiguous separator. This keeps embedded
+            // `mailto:` substrings out of the candidate set without
+            // requiring a full URL parser.
+            let isBoundary: Bool
+            if prefixRange.lowerBound == lower.startIndex {
+                isBoundary = true
+            } else {
+                let prev = lower[lower.index(before: prefixRange.lowerBound)]
+                // Same separator class used elsewhere for URL-text
+                // boundaries: whitespace, common punctuation, brackets.
+                isBoundary = prev.isWhitespace || "([{<,;\"'".contains(prev)
+            }
+            if isBoundary {
+                let originalStart = text.index(
+                    text.startIndex,
+                    offsetBy: lower.distance(from: lower.startIndex, to: prefixRange.lowerBound)
+                )
+                // Walk forward until whitespace.
+                var end = originalStart
+                let textEnd = text.endIndex
+                while end < textEnd, !text[end].isWhitespace {
+                    end = text.index(after: end)
+                }
+                let trimmed = trimTrailingPunctuation(text[originalStart..<end])
+                let candidate = String(trimmed)
+                // Reject "mailto:" with nothing after — not URL-shaped
+                // enough to count as a claim.
+                if candidate.lowercased() == "mailto:" { return nil }
+                return AnchorCandidate(candidate: candidate, start: originalStart)
+            }
+            searchStart = lower.index(after: prefixRange.lowerBound)
         }
         return nil
     }
 
-    /// Scan for a `mailto:` candidate. Returns the substring from the
-    /// `mailto:` prefix to the first whitespace or end-of-string. Empty
-    /// payload (just `mailto:`) is treated as not-found.
-    private static func findMailtoCandidate(in text: String) -> String? {
-        let lower = text.lowercased()
-        guard let prefixRange = lower.range(of: "mailto:") else { return nil }
-        let originalStart = text.index(text.startIndex, offsetBy: lower.distance(from: lower.startIndex, to: prefixRange.lowerBound))
-        // Walk forward until whitespace.
-        var end = originalStart
-        let textEnd = text.endIndex
-        while end < textEnd, !text[end].isWhitespace {
-            end = text.index(after: end)
-        }
-        let candidate = String(text[originalStart..<end])
-        // Reject "mailto:" with nothing after — not URL-shaped enough
-        // to count as a claim.
-        if candidate.lowercased() == "mailto:" { return nil }
-        return candidate
-    }
-
     /// Scan for an `http://`, `https://`, or `ftp://` candidate.
     /// Returns the substring from the scheme prefix to the first
-    /// whitespace or end-of-string. The candidate is fed verbatim into
-    /// `URL(string:)` — IPv6 brackets, percent-encoding, IDN, and
-    /// non-ASCII all flow through Foundation's parser, closing the
-    /// host-class gaps from the prior regex.
-    private static func findHTTPCandidate(in text: String) -> String? {
+    /// whitespace, with trailing punctuation stripped. The candidate
+    /// is fed verbatim into `URL(string:)` — IPv6 brackets,
+    /// percent-encoding, IDN, and non-ASCII all flow through
+    /// Foundation's parser, closing the host-class gaps from the
+    /// prior regex.
+    private static func findHTTPCandidate(in text: String) -> AnchorCandidate? {
         let lower = text.lowercased()
         // Find the earliest of the three scheme prefixes. (Anchor that
         // mentions multiple URLs is the rare phishing shape; first
@@ -306,7 +428,31 @@ enum OSC8URLPolicy {
         while end < textEnd, !text[end].isWhitespace {
             end = text.index(after: end)
         }
-        return String(text[start..<end])
+        let trimmed = trimTrailingPunctuation(text[start..<end])
+        return AnchorCandidate(candidate: String(trimmed), start: start)
+    }
+
+    /// Strip trailing punctuation from a candidate URL substring.
+    ///
+    /// Pass-3 (item 4): the previous regex `[^A-Za-z0-9.\-]` stopped
+    /// at any non-host char; the new whitespace-walk continues
+    /// through punctuation so a sentence like
+    /// `visit https://apple.com, please` produced the candidate
+    /// `https://apple.com,` — Foundation accepted it with host
+    /// `apple.com,` and divergence fired on a legitimate match.
+    /// Trim the standard URL-extraction trailing-punctuation set
+    /// before handing the substring to `URL(string:)`. One pass is
+    /// enough for the realistic shapes; we don't need to look at
+    /// the next char because the candidate ends at whitespace.
+    private static func trimTrailingPunctuation(_ s: Substring) -> Substring {
+        let trail: Set<Character> = [".", ",", ";", ":", "!", "?", ")", "]", "}", ">"]
+        var end = s.endIndex
+        while end > s.startIndex {
+            let prev = s.index(before: end)
+            if !trail.contains(s[prev]) { break }
+            end = prev
+        }
+        return s[s.startIndex..<end]
     }
 
     /// `mailto:` syntax (RFC 6068) allows query headers:
@@ -326,6 +472,17 @@ enum OSC8URLPolicy {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return false
         }
+        // Pass-3 item 6: RFC 6068 multi-recipient mailto carries
+        // multiple `@`-separated addresses
+        // (`mailto:user@safe.com,b@evil.com`). There is no honest
+        // canonical "domain" for the URL — picking last silently
+        // gives evil.com the win, picking first silently ignores it.
+        // Reject before mailtoDomain has a chance to lie. (Note: a
+        // `mailto:` with NO `@` at all — `mailto:?subject=hi` — is
+        // allowed below; this guard fires only on >1 `@` in the path.)
+        let path = url.path
+        let atCount = path.reduce(0) { $0 + ($1 == "@" ? 1 : 0) }
+        if atCount > 1 { return false }
         // H-2: extend IDN homograph defence to mailto domain. A
         // hostile remote emitting `mailto:user@аpple.com` (Cyrillic а)
         // visually claims apple.com but sends mail to a registered
