@@ -4,7 +4,7 @@ use std::cell::UnsafeCell;
 use std::os::raw::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -218,6 +218,18 @@ impl CallbackCell {
         if matches!(event.kind, BBEventKind::PtyWrite) && !self.pty_write_rate.allow() {
             return;
         }
+        // Audit M-9 follow-up (2026-04-29): set the
+        // `FFI_HANDLER_IN_FLIGHT` latch around the user-callback
+        // dispatch so a synchronous re-entry from inside `f` into a
+        // `bb_term_*` entry point can be detected at the FFI boundary
+        // BEFORE the second `&mut Term` reborrow takes effect. The
+        // Swift-side `BBTerm.isInsideEventDispatch` precondition fires
+        // AFTER the second `&mut Term` is on stack — this guard is the
+        // dynamic catch one frame earlier. RAII drop restores `false`
+        // even if `f` panics (the outer `catch_unwind` machinery in
+        // `guard_with_term` still owns the panic; this guard exists
+        // only to expose the in-flight bit).
+        let _handler_guard = HandlerInFlightGuard::enter();
         f(event, ctx);
     }
 }
@@ -989,6 +1001,39 @@ static XTGETTCAP_TABLE: &[(&[u8], &[u8])] = &[
     ),
 ];
 
+/// Reject-class indices for `osc7_reject` — keep stable so the per-class
+/// `Once` instances (and any future test that asserts a specific class
+/// fired) line up across builds.
+const OSC7_REJECT_RATE: usize = 0;
+const OSC7_REJECT_PERCENT_DECODE: usize = 1;
+const OSC7_REJECT_UTF8: usize = 2;
+const OSC7_REJECT_NUL: usize = 3;
+const OSC7_REJECT_CONTROL: usize = 4;
+const OSC7_REJECT_BIDI: usize = 5;
+const OSC7_REJECT_NON_ABSOLUTE: usize = 6;
+const OSC7_REJECT_TRAVERSAL: usize = 7;
+/// Per-class one-shot latches. Audit follow-up (2026-04-29): the eight
+/// silent `return` paths in `handle_osc7` made an attacker / shell-misbehaving
+/// regression invisible. One-shot per class so a sustained flood doesn't
+/// drown the log; the first reject of each shape produces a breadcrumb.
+static OSC7_REJECT_LOGGED: [Once; 8] = [
+    Once::new(),
+    Once::new(),
+    Once::new(),
+    Once::new(),
+    Once::new(),
+    Once::new(),
+    Once::new(),
+    Once::new(),
+];
+fn osc7_reject(class: usize, name: &str) {
+    if let Some(latch) = OSC7_REJECT_LOGGED.get(class) {
+        latch.call_once(|| {
+            eprintln!("[blackbird_core] OSC 7 rejected ({})", name);
+        });
+    }
+}
+
 impl OscScanner<'_> {
     fn handle_osc7(&mut self, params: &[&[u8]]) {
         let Some(url) = params.get(1) else { return };
@@ -1044,10 +1089,12 @@ impl OscScanner<'_> {
         // legitimate cwd updates) but BEFORE `percent_decode` (so the
         // allocation work still benefits from rate-limiting).
         if !self.osc7_rate.allow() {
+            osc7_reject(OSC7_REJECT_RATE, "rate");
             return;
         }
 
         let Some(decoded) = percent_decode(path_bytes) else {
+            osc7_reject(OSC7_REJECT_PERCENT_DECODE, "percent_decode");
             return;
         };
         // Spec (2026-04-17-blackbird-gaps-design.md §4.1): "Malformed UTF-8
@@ -1057,6 +1104,7 @@ impl OscScanner<'_> {
         // UTF-8 bytes — Swift wraps the pointer in a Swift String which
         // assumes UTF-8 validity.
         let Ok(decoded_str) = std::str::from_utf8(&decoded) else {
+            osc7_reject(OSC7_REJECT_UTF8, "utf8");
             return;
         };
         // Reject embedded NUL bytes. `%00` is valid UTF-8 and slips past
@@ -1065,6 +1113,7 @@ impl OscScanner<'_> {
         // hostile payload truncate what downstream consumers see when
         // they cast through a C API. TST-S1-014.
         if decoded.contains(&0) {
+            osc7_reject(OSC7_REJECT_NUL, "nul");
             return;
         }
         // Reject every other ASCII control byte (0x01..=0x1F, 0x7F) too.
@@ -1073,6 +1122,7 @@ impl OscScanner<'_> {
         // log shippers, or any downstream parser that doesn't pre-scrub.
         // Symmetric defense with the title path. Audit M13.
         if decoded.iter().any(|&b| b < 0x20 || b == 0x7F) {
+            osc7_reject(OSC7_REJECT_CONTROL, "control");
             return;
         }
         // Reject Unicode bidi-control / zero-width / invisible-payload
@@ -1083,6 +1133,7 @@ impl OscScanner<'_> {
         // the actual filesystem target is what Finder will open). Same
         // codepoint list the Swift paste sanitizer strips. Audit M2.
         if contains_bidi_or_invisible(decoded.as_slice()) {
+            osc7_reject(OSC7_REJECT_BIDI, "bidi");
             return;
         }
         // Audit synthesis #13 — path-traversal via percent-encoded `..`.
@@ -1094,18 +1145,23 @@ impl OscScanner<'_> {
         // OSC 7 specifies an absolute path; relative paths are illegal
         // by spec.
         if !decoded_str.starts_with('/') {
+            osc7_reject(OSC7_REJECT_NON_ABSOLUTE, "non_absolute");
             return;
         }
         for component in std::path::Path::new(decoded_str).components() {
             match component {
                 // The standard parent-dir component.
-                std::path::Component::ParentDir => return,
+                std::path::Component::ParentDir => {
+                    osc7_reject(OSC7_REJECT_TRAVERSAL, "traversal");
+                    return;
+                }
                 // Defensive paranoia for the `\..` shape on
                 // case-insensitive HFS+ / APFS — a literal `Normal`
                 // component whose bytes equal `..` would mean some
                 // higher layer mis-parsed components, but we'd still
                 // refuse it.
                 std::path::Component::Normal(s) if s.as_encoded_bytes() == b".." => {
+                    osc7_reject(OSC7_REJECT_TRAVERSAL, "traversal");
                     return;
                 }
                 _ => {}
@@ -1476,6 +1532,49 @@ impl Drop for FatalInFlightGuard {
     }
 }
 
+thread_local! {
+    /// True while `CallbackCell::fire` is invoking the registered C callback
+    /// on this thread. Captures the call-graph shape "callback synchronously
+    /// re-enters bb_term_*" — alacritty's `&mut Term` borrow held by the
+    /// outer entry point is still live, so the second `&mut Term` reborrow
+    /// inside the re-entered call would alias.
+    ///
+    /// Sibling of the Swift-side M-9 `BBTerm.isInsideEventDispatch`
+    /// precondition: the Swift guard fires AFTER the second `&mut Term`
+    /// has already taken effect on stack; this Rust guard fires BEFORE
+    /// the second reborrow, catching the violation at the actual UB
+    /// boundary. Audit follow-up to M-9 (2026-04-29).
+    ///
+    /// Currently checked only by `bb_term_input` (the canonical re-entry
+    /// vector — every bytes-in path runs the VT parser, which fires
+    /// events). Coverage for the rest of the entry-point surface is
+    /// tracked in KNOWN_ISSUES.md as deferred follow-up; the Swift
+    /// precondition still backstops them.
+    static FFI_HANDLER_IN_FLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard: flips `FFI_HANDLER_IN_FLIGHT` to `true` while the user
+/// callback is on stack, restores `false` on drop. Acquired inside
+/// `CallbackCell::fire` immediately around the `f(event, ctx)` call so a
+/// callback that synchronously re-enters `bb_term_*` is observable via
+/// the latch BEFORE the inner call grabs `&mut Term`.
+struct HandlerInFlightGuard;
+impl HandlerInFlightGuard {
+    fn enter() -> Self {
+        FFI_HANDLER_IN_FLIGHT.with(|c| c.set(true));
+        HandlerInFlightGuard
+    }
+}
+impl Drop for HandlerInFlightGuard {
+    fn drop(&mut self) {
+        FFI_HANDLER_IN_FLIGHT.with(|c| c.set(false));
+    }
+}
+
+/// One-shot latch for the handler-reentry warning. Audit M-9 follow-up
+/// (2026-04-29).
+static HANDLER_REENTRY_LOGGED: Once = Once::new();
+
 /// Panic-swallowing guard for contexts where no `BBTerm` exists yet
 /// (`bb_term_new`'s allocation path, `bb_term_free`'s destructor).
 fn guard_no_term<T>(fallback: T, f: impl FnOnce() -> T) -> T {
@@ -1488,6 +1587,14 @@ fn guard_no_term<T>(fallback: T, f: impl FnOnce() -> T) -> T {
 // ---------------------------------------------------------------------------
 // FFI entry points
 // ---------------------------------------------------------------------------
+
+/// One-shot latch for the dim-clamp warning. Sibling of the Swift-side
+/// `BBTerm.didLogDimClamp` (audit follow-up 2026-04-29). Fires the first
+/// time `bb_term_new` or `bb_term_resize2` clamps a caller-supplied
+/// dimension — captures Swift wrappers / future direct C consumers that
+/// hand the FFI an out-of-envelope value. Single global latch (not
+/// per-callsite) so a sustained regression doesn't flood the log.
+static DIM_CLAMP_LOGGED: Once = Once::new();
 
 /// Minimum grid dimension (cells per row/column). Below 2 alacritty's reflow
 /// math degenerates: a 1-col grid with scrollback becomes millions of 1-cell
@@ -1541,9 +1648,23 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         // Audit H-7: clamp BOTH bounds, symmetric with `bb_term_resize2`.
         // Pre-H-7 the floor was missing here, so `bb_term_new(1, 1, …)`
         // succeeded and then silently grew on the next resize call.
+        let clamped_cols = cols.clamp(MIN_DIM, MAX_DIM);
+        let clamped_rows = rows.clamp(MIN_DIM, MAX_DIM);
+        // Audit follow-up (2026-04-29): one-shot warning when the clamp
+        // engages. Sibling of the Swift-side `BBTerm.didLogDimClamp`
+        // pattern. Captures direct C consumers (and Swift wrappers
+        // whose own clamp regresses) that feed out-of-envelope dims.
+        if clamped_cols != cols || clamped_rows != rows {
+            DIM_CLAMP_LOGGED.call_once(|| {
+                eprintln!(
+                    "[blackbird_core] dim clamp engaged in bb_term_new: requested=({}, {}) clamped=({}, {}) bounds=[{}, {}]",
+                    cols, rows, clamped_cols, clamped_rows, MIN_DIM, MAX_DIM
+                );
+            });
+        }
         let size = TermSize {
-            cols: cols.clamp(MIN_DIM, MAX_DIM) as usize,
-            rows: rows.clamp(MIN_DIM, MAX_DIM) as usize,
+            cols: clamped_cols as usize,
+            rows: clamped_rows as usize,
         };
         let scrollback = scrollback.min(SCROLLBACK_MAX);
         let config = Config {
@@ -1642,6 +1763,34 @@ pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
 pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len: usize) {
     guard_with_term(term, (), || {
         if term.is_null() || len == 0 || bytes.is_null() {
+            return;
+        }
+        // Audit M-9 follow-up (2026-04-29): re-entry catch one frame
+        // earlier than the Swift-side `BBTerm.isInsideEventDispatch`
+        // precondition. If the user callback (currently on stack via
+        // `CallbackCell::fire`) synchronously called back into
+        // `bb_term_input`, the outer `&mut Term` borrow held by the
+        // outer call is still live. Bailing here drops the input
+        // bytes silently (they're already bytes the parser saw) but
+        // critically prevents the second `&mut *term` reborrow below
+        // from aliasing.
+        //
+        // One-shot warning + early return is the right shape: a
+        // panic here would be caught by `guard_with_term` and
+        // dispatched back to the same callback we're trying to
+        // protect, defeating the purpose. The Swift precondition
+        // still backstops this for cases the cell.fire path didn't
+        // mark (e.g. event dispatch from outside `fire`, or future
+        // entry-point coverage). `bb_term_input` is the canonical
+        // re-entry vector — every bytes-in path runs the VT parser,
+        // which fires events.
+        if FFI_HANDLER_IN_FLIGHT.with(|c| c.get()) {
+            HANDLER_REENTRY_LOGGED.call_once(|| {
+                eprintln!(
+                    "[blackbird_core] bb_term_input called from inside event handler — \
+                     dropping re-entrant input to avoid &mut Term alias. Audit M-9."
+                );
+            });
             return;
         }
         // Audit L-11 (2026-04-29): defense-in-depth against
@@ -2151,6 +2300,19 @@ pub unsafe extern "C" fn bb_term_resize2(
         let bb = &mut *term;
         let applied_cols = cols.clamp(MIN_DIM, MAX_DIM);
         let applied_rows = rows.clamp(MIN_DIM, MAX_DIM);
+        let clamped_flag = applied_cols != cols || applied_rows != rows;
+        // Audit follow-up (2026-04-29): one-shot warning when the clamp
+        // engages. Shares `DIM_CLAMP_LOGGED` with `bb_term_new` so a
+        // single sustained regression produces exactly one log line
+        // regardless of which entry point trips first.
+        if clamped_flag {
+            DIM_CLAMP_LOGGED.call_once(|| {
+                eprintln!(
+                    "[blackbird_core] dim clamp engaged in bb_term_resize2: requested=({}, {}) clamped=({}, {}) bounds=[{}, {}]",
+                    cols, rows, applied_cols, applied_rows, MIN_DIM, MAX_DIM
+                );
+            });
+        }
         let size = TermSize {
             cols: applied_cols as usize,
             rows: applied_rows as usize,
@@ -2159,7 +2321,7 @@ pub unsafe extern "C" fn bb_term_resize2(
         BBResizeResult {
             applied_cols,
             applied_rows,
-            clamped: u8::from(applied_cols != cols || applied_rows != rows),
+            clamped: u8::from(clamped_flag),
             _pad: [0; 3],
         }
     })
@@ -4356,6 +4518,122 @@ mod tests {
 
             bb_term_free(term);
             Arc::from_raw(state_ptr as *const State);
+        }
+    }
+
+    /// Audit M-9 follow-up (2026-04-29): the Rust-side
+    /// `FFI_HANDLER_IN_FLIGHT` latch must drop a synchronous re-entrant
+    /// `bb_term_input` call from inside a registered event callback.
+    /// Without the latch, the second `&mut Term` reborrow inside the
+    /// re-entered call would alias the outer call's borrow — UB.
+    ///
+    /// The shape we arrange: feed a BEL byte, which generates a Bell
+    /// event. The callback, on receiving Bell, calls back into
+    /// `bb_term_input` with another byte. The latch must short-circuit
+    /// that second call so the second byte is NOT processed. We pin
+    /// the contract by counting how many Bell events fire: BEL ×1
+    /// inbound → 1 dispatch, the re-entered call dropped before
+    /// running parser, so no second Bell.
+    #[test]
+    fn input_does_not_reenter_from_inside_event_handler() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct State {
+            term: *mut BBTerm,
+            bell_count: Mutex<u32>,
+            already_reentered: Mutex<bool>,
+        }
+        unsafe impl Send for State {}
+        unsafe impl Sync for State {}
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let state = &*(ctx as *const State);
+            if ev.kind == BBEventKind::Bell {
+                *state.bell_count.lock().unwrap() += 1;
+                let mut already = state.already_reentered.lock().unwrap();
+                if !*already {
+                    *already = true;
+                    drop(already);
+                    // Try to re-enter — must be dropped silently by the
+                    // FFI_HANDLER_IN_FLIGHT latch. If this re-enters,
+                    // the second BEL gets parsed and bell_count climbs
+                    // to 2.
+                    let bel: u8 = 0x07;
+                    bb_term_input(state.term, &bel as *const u8, 1);
+                }
+            }
+        }
+
+        let state = Box::into_raw(Box::new(State {
+            term: std::ptr::null_mut(),
+            bell_count: Mutex::new(0),
+            already_reentered: Mutex::new(false),
+        }));
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            (*state).term = term;
+            bb_term_set_event_cb(term, Some(cb), state as *mut c_void);
+            // First input: a single BEL byte → fires Bell → callback
+            // runs and tries to re-enter with another BEL.
+            let bel: u8 = 0x07;
+            bb_term_input(term, &bel as *const u8, 1);
+
+            let count = *(*state).bell_count.lock().unwrap();
+            assert_eq!(
+                count, 1,
+                "callback's re-entrant bb_term_input must be dropped by \
+                 FFI_HANDLER_IN_FLIGHT — re-entry would parse the second \
+                 BEL and produce a second Bell dispatch (got {})",
+                count
+            );
+
+            bb_term_free(term);
+            drop(Box::from_raw(state));
+        }
+    }
+
+    /// Sibling: when the callback does NOT re-enter, the latch must not
+    /// stick — a follow-up `bb_term_input` call from outside the
+    /// callback runs normally. Pins the RAII drop semantics.
+    #[test]
+    fn input_resumes_after_callback_returns_without_reentry() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            bell_count: Mutex<u32>,
+        }
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let sink = &*(ctx as *const Sink);
+            if ev.kind == BBEventKind::Bell {
+                *sink.bell_count.lock().unwrap() += 1;
+            }
+        }
+
+        let sink = Sink {
+            bell_count: Mutex::new(0),
+        };
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+            // Two separate `bb_term_input` calls — neither re-enters from
+            // inside `cb`. Both must dispatch normally.
+            let bel: u8 = 0x07;
+            bb_term_input(term, &bel as *const u8, 1);
+            bb_term_input(term, &bel as *const u8, 1);
+
+            let count = *sink.bell_count.lock().unwrap();
+            assert_eq!(
+                count, 2,
+                "non-re-entrant calls must not be blocked by \
+                 FFI_HANDLER_IN_FLIGHT (latch failed to clear on cb return)",
+            );
+
+            bb_term_free(term);
         }
     }
 
