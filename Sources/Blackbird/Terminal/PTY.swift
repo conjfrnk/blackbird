@@ -963,7 +963,19 @@ public final class PTY {
         // and the child's reap — see startReading(). This avoids racing close()
         // against the read loop's read(), which could otherwise produce a
         // double-close or an fd-reuse bug under rapid session churn (Plan 4).
-        kill(childPID, SIGHUP)
+        //
+        // Capture rc to complete the L-4 "all signals observable"
+        // invariant. Today this is structurally safe (`childPID` cannot
+        // be recycled mid-`terminate()`), but a failure here means
+        // SIGHUP didn't reach the child — useful to know. ESRCH (child
+        // already exited) is normal teardown; everything else is a
+        // real failure.
+        let hupRC = kill(childPID, SIGHUP)
+        if hupRC < 0 {
+            let savedErrno = errno
+            let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
+            Self.logger.log(level: level, "terminate: kill(\(self.childPID, privacy: .public), SIGHUP) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
+        }
         // Audit pty F3. A shell running `trap '' HUP` (or any other
         // HUP-ignoring init flow) won't close the slave fd in response
         // to the signal above, so the read loop stays blocked forever
