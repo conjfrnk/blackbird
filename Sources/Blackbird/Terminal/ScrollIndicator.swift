@@ -54,7 +54,15 @@ final class ScrollIndicator: NSView {
         let viewportFraction = CGFloat(rows) / totalLines
 
         // Fraction scrolled from bottom (0.0) to top (1.0).
-        let scrollFromBottom = CGFloat(displayOffset) / CGFloat(max(historySize, 1))
+        // M-15 / EC-2: clamp to [0, 1]. Sibling of L-3's thumb-height
+        // clamp — if `displayOffset > historySize` (regression in the
+        // Rust scroll math, or a transient mis-snap), an unclamped
+        // ratio paints the thumb above the track. The 0 floor guards
+        // a hypothetical negative `displayOffset` (today bb_term_*
+        // returns u32, but the Swift Int could carry a sign through a
+        // future ABI change) — defense-in-depth, mirrors L-3 shape.
+        let rawFromBottom = CGFloat(displayOffset) / CGFloat(max(historySize, 1))
+        let scrollFromBottom = min(1, max(0, rawFromBottom))
 
         let track = bounds.height
         // L-3 / RW-05: clamp the thumb height to the track so a very
