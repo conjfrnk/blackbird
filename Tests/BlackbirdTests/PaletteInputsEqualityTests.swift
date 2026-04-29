@@ -28,22 +28,87 @@ import Combine
 /// via `Preferences.translucencyResolved` reads — observable through
 /// `Preferences.objectWillChange` fan-out + wallclock. We assert the
 /// system stays responsive under fontSize churn.
+///
+/// Stress vs. default-suite split:
+///   - The two 1000-iteration churn tests live in
+///     `PaletteInputsEqualityStressTests` below — class-level
+///     XCTSkipIf in `setUp()` keeps the entire fixture out of the
+///     default suite when `BB_RUN_STRESS_TESTS != 1`. The skip gate
+///     MUST run before `setUp()`'s body does any allocation, because
+///     under cumulative ASan the xctest host is at the VM-mapping
+///     ceiling; an instance-level XCTSkipIf inside the test BODY
+///     fires too late and the host SEGVs in `objc_release` while
+///     teardown is still mapping shadow pages. Skipping at the class
+///     level via the override of `setUp()` (instance) before any
+///     pref snapshots is the cheapest way to keep stress invocation
+///     working while not paying the cost in the default suite.
+///   - The positive-control test
+///     (`test_themeChange_firesObjectWillChange_provesPalettePathLive`)
+///     stays here so it ALWAYS runs in the default suite; it has no
+///     stress cost.
 final class PaletteInputsEqualityTests: XCTestCase {
 
-    /// Skip the 1000-iteration wallclock-signature tests when not
-    /// running an explicit stress sweep. Under macos-14 GHA's
-    /// cumulative ASan shadow-mapping, two 1000-iteration UserDefaults
-    /// churn loops + their sink drains push the xctest host over the
-    /// VM-mapping ceiling that the v0.1.9 sweep already taxed (700+
-    /// pre-existing tests + 200+ new). Run via
-    /// `BB_RUN_STRESS_TESTS=1 xcodebuild test -only-testing:…` for the
-    /// real wallclock signal; the third test in this file
-    /// (`test_themeChange_firesObjectWillChange_provesPalettePathLive`)
-    /// stays in the default suite as the gate's positive-control.
-    static func skipUnlessStressEnabled() throws {
-        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
-                      "1000-iteration UserDefaults stress tests flake under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the wallclock signal")
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
     }
+
+    // MARK: - TST-S7-001: positive control (default suite)
+
+    /// Positive control: an actual THEME change SHOULD trigger
+    /// applyToAll work (the palette inputs include theme + mode).
+    /// We don't measure the work itself — we just verify
+    /// `Preferences.objectWillChange` fires, proving the sink path
+    /// is wired.
+    ///
+    /// This test catches the CONVERSE bug: a regression that nukes
+    /// the theme path while collapsing the equality gate too far,
+    /// leaving the user with a "stuck" theme.
+    func test_themeChange_firesObjectWillChange_provesPalettePathLive() {
+        let p = Preferences.shared
+        let savedThemeRaw = p.themeRaw
+        defer { p.themeRaw = savedThemeRaw }
+
+        // Flip themeRaw between two distinct themes.
+        let allThemes = Theme.allCases
+        guard allThemes.count >= 2 else {
+            XCTFail("Need ≥ 2 themes to flip; got \(allThemes.count)")
+            return
+        }
+        let a = allThemes[0]
+        let b = allThemes[1]
+        p.themeRaw = a.rawValue
+
+        var fired = false
+        let cancellable = p.objectWillChange.sink { _ in fired = true }
+        defer { cancellable.cancel() }
+
+        p.themeRaw = b.rawValue
+        // SwiftUI's @AppStorage forwards objectWillChange synchronously
+        // on the setter — we don't need to hop a runloop to observe.
+        XCTAssertTrue(
+            fired,
+            """
+            TST-S7-001 control: themeRaw write should fire
+            Preferences.objectWillChange so ThemeManager re-applies
+            palette. If this test fails, the @AppStorage bridge
+            broke entirely — every other Settings test would also
+            be affected.
+            """
+        )
+    }
+}
+
+/// Stress sweep for TST-S7-001. The class-level skip in `setUp()`
+/// keeps this entire fixture out of the default suite when
+/// `BB_RUN_STRESS_TESTS != 1`, avoiding the cumulative-ASan SEGV
+/// the inline XCTSkipIf could not prevent (the body's pref
+/// snapshots ran before the skip fired, pushing the host over the
+/// VM-mapping ceiling on its way to teardown).
+///
+/// Invoke via:
+///   BB_RUN_STRESS_TESTS=1 xcodebuild test -only-testing:BlackbirdTests/PaletteInputsEqualityStressTests
+final class PaletteInputsEqualityStressTests: XCTestCase {
 
     // Match PreferencesTests snapshot-and-restore so this file plays
     // safely with the shared singleton. Only the four prefs we touch
@@ -59,8 +124,15 @@ final class PaletteInputsEqualityTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
-    override func setUp() {
-        super.setUp()
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        // Skip BEFORE touching Preferences.shared. Under cumulative
+        // ASan the xctest host is at the VM-mapping ceiling and any
+        // allocation past this point can SEGV in teardown's
+        // objc_release. Gating here means the entire fixture is
+        // a no-op in the default suite.
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "1000-iteration UserDefaults stress tests flake under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the wallclock signal")
         let p = Preferences.shared
         savedFontSize     = p.fontSize
         savedFontName     = p.fontName
@@ -69,15 +141,21 @@ final class PaletteInputsEqualityTests: XCTestCase {
     }
 
     override func tearDown() {
-        let p = Preferences.shared
-        p.fontSize     = savedFontSize
-        p.fontName     = savedFontName
-        p.themeRaw     = savedThemeRaw
-        p.themeModeRaw = savedThemeModeRaw
-        // Drain the ThemeManager sink so queued applyToAll blocks don't
-        // leak into the next test's body. Same pattern as
-        // ThemeResolutionTests.tearDown.
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        // tearDown runs even when setUp threw XCTSkip; only restore
+        // if we actually snapshotted (savedFontSize == 0 sentinel
+        // for the skipped path since fontSize is always > 0 when
+        // a real snapshot ran).
+        if savedFontSize > 0 {
+            let p = Preferences.shared
+            p.fontSize     = savedFontSize
+            p.fontName     = savedFontName
+            p.themeRaw     = savedThemeRaw
+            p.themeModeRaw = savedThemeModeRaw
+            // Drain the ThemeManager sink so queued applyToAll blocks
+            // don't leak into the next test's body. Same pattern as
+            // ThemeResolutionTests.tearDown.
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
         super.tearDown()
     }
 
@@ -99,7 +177,6 @@ final class PaletteInputsEqualityTests: XCTestCase {
     /// already alive, so registration is not exercised. The win we get
     /// is a backstop on the gate's continued correctness.
     func test_fontSizeChurn_doesNotProduceWallclockSignatureOfPaletteReapply() throws {
-        try Self.skipUnlessStressEnabled()
         let p = Preferences.shared
         // Fix the theme so anything the sink does on theme grounds is
         // constant across the run.
@@ -146,7 +223,6 @@ final class PaletteInputsEqualityTests: XCTestCase {
     /// We bounce between two valid font names and measure wallclock.
     /// Same budget as the fontSize test.
     func test_fontNameChurn_doesNotProduceWallclockSignatureOfPaletteReapply() throws {
-        try Self.skipUnlessStressEnabled()
         let p = Preferences.shared
         p.themeRaw = Theme.defaultTheme.rawValue
         p.themeModeRaw = "dark"
@@ -176,43 +252,4 @@ final class PaletteInputsEqualityTests: XCTestCase {
         )
     }
 
-    /// Positive control: an actual THEME change SHOULD trigger
-    /// applyToAll work (the palette inputs include theme + mode).
-    /// We don't measure the work itself — we just verify
-    /// `Preferences.objectWillChange` fires, proving the sink path
-    /// is wired.
-    ///
-    /// This test catches the CONVERSE bug: a regression that nukes
-    /// the theme path while collapsing the equality gate too far,
-    /// leaving the user with a "stuck" theme.
-    func test_themeChange_firesObjectWillChange_provesPalettePathLive() {
-        let p = Preferences.shared
-        // Flip themeRaw between two distinct themes.
-        let allThemes = Theme.allCases
-        guard allThemes.count >= 2 else {
-            XCTFail("Need ≥ 2 themes to flip; got \(allThemes.count)")
-            return
-        }
-        let a = allThemes[0]
-        let b = allThemes[1]
-        p.themeRaw = a.rawValue
-
-        var fired = false
-        let cancellable = p.objectWillChange.sink { _ in fired = true }
-        defer { cancellable.cancel() }
-
-        p.themeRaw = b.rawValue
-        // SwiftUI's @AppStorage forwards objectWillChange synchronously
-        // on the setter — we don't need to hop a runloop to observe.
-        XCTAssertTrue(
-            fired,
-            """
-            TST-S7-001 control: themeRaw write should fire
-            Preferences.objectWillChange so ThemeManager re-applies
-            palette. If this test fails, the @AppStorage bridge
-            broke entirely — every other Settings test would also
-            be affected.
-            """
-        )
-    }
 }
