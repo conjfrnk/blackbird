@@ -1,5 +1,17 @@
 import Foundation
+import os
 import BBCore
+
+/// Diagnostic channel for `bufferPoint`'s defensive guards. `bufferPoint`
+/// is a free function so the logger lives in a private namespace. One-shot
+/// because a sustained zero-cell-dim state would otherwise flood the
+/// unified log every time a click event fires. NO `#if DEBUG` gate —
+/// Release diagnosability matters (mirrors H-2 / M-4 / M-5 lesson).
+private enum BufferPointDiag {
+    static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                               category: "selection")
+    static let didLogBadCellDim = OSAllocatedUnfairLock(initialState: false)
+}
 
 /// A point in the terminal's addressable buffer. `line` is signed so
 /// negative values refer to scrollback history, matching alacritty's
@@ -101,6 +113,16 @@ public func bufferPoint(
     // the grid has no cell size.
     guard cellWidth.isFinite, cellWidth > 0,
           cellHeight.isFinite, cellHeight > 0 else {
+        // The guard prevents an `Int(±Inf)` trap, but the user-visible
+        // shape is a broken selection (every click maps to the
+        // origin). Surface it once so a font-load regression or a
+        // pre-metrics click race is discoverable in Release.
+        BufferPointDiag.didLogBadCellDim.withLock { didLog in
+            if !didLog {
+                didLog = true
+                BufferPointDiag.logger.warning("bufferPoint: bad cell dims, returning origin sentinel — cellWidth=\(cellWidth, privacy: .public) cellHeight=\(cellHeight, privacy: .public) viewportHeight=\(viewportHeight, privacy: .public)")
+            }
+        }
         return BufferPoint(line: 0, col: 0)
     }
     // Guard against two trap classes at Int(Double):
