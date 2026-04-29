@@ -30,7 +30,18 @@ final class ThemeResolutionTests: XCTestCase {
         // the next test starts. Short duration — most of the theme
         // tests queue a single applyToAll, so 0.05 s is well over the
         // drain time.
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        //
+        // Cumulative-ASan note: this drain is the trigger for the
+        // CATransaction-pool-pop SEGV after the v0.1.9 audit campaign
+        // pushed the host past the VM-mapping ceiling. None of the
+        // tests in THIS file actually mutate themeRaw / themeModeRaw
+        // (they read theme palettes only), so the drain is unnecessary
+        // here — if a future test in this file does start mutating
+        // theme prefs, restore the drain and gate the file behind
+        // BB_RUN_STRESS_TESTS=1.
+        if ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] == "1" {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
         super.tearDown()
     }
 
