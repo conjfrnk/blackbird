@@ -701,19 +701,24 @@ public final class TerminalSession: ObservableObject {
         // session. `applyPalette` is async on `coreQueue` so it orders
         // naturally after the synchronous clear above.
         // ThemeManager.resolvedPalette is `@MainActor`-isolated; both
-        // branches below enter on main, so MainActor.assumeIsolated is
-        // the correct Swift 6 vocabulary for the runtime guarantee
-        // (Thread.isMainThread inline branch and DispatchQueue.main.async
-        // both deliver a main-thread context).
-        let applyResolved: () -> Void = { [weak self] in
+        // delivery branches below enter the main thread before invoking
+        // the closure. Typing the closure as `@MainActor () -> Void`
+        // makes the type system enforce what the runtime guarantees:
+        // a future caller that hands `applyResolved` to e.g.
+        // `coreQueue.async(execute:)` would now fail to compile, instead
+        // of trapping at runtime via `MainActor.assumeIsolated`.
+        let applyResolved: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
-            let palette = MainActor.assumeIsolated { ThemeManager.shared.resolvedPalette }
+            let palette = ThemeManager.shared.resolvedPalette
             self.applyPalette(palette)
         }
         if Thread.isMainThread {
-            applyResolved()
+            // We're on main but the function isn't `@MainActor`, so the
+            // wrapper is what the compiler accepts to call a
+            // `@MainActor` closure synchronously.
+            MainActor.assumeIsolated(applyResolved)
         } else {
-            DispatchQueue.main.async(execute: applyResolved)
+            DispatchQueue.main.async { MainActor.assumeIsolated(applyResolved) }
         }
     }
 
