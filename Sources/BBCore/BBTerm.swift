@@ -107,25 +107,28 @@ public final class BBTerm {
         // output actually scrolls off. Capped at 200k by the Rust side
         // (see bb_term_new).
         //
-        // Wrapper-side clamp matches the Rust core's `[MIN_DIM, MAX_DIM]`
-        // envelope so a single source-of-truth defines the legitimate
-        // grid range for both layers. The Rust side independently clamps
-        // (belt-and-braces). Audit follow-up (2026-04-29): when the clamp
-        // engages, fire a one-shot warning so a callsite feeding
-        // garbage dims is discoverable in `log stream` rather than
-        // silently observing a snapshot whose dims don't match what
-        // they asked for.
-        let clampedCols = min(max(size.cols, Self.MIN_DIM), Self.MAX_DIM)
-        let clampedRows = min(max(size.rows, Self.MIN_DIM), Self.MAX_DIM)
-        if clampedCols != size.cols || clampedRows != size.rows {
-            Self.didLogDimClamp.withLock { logged in
-                if !logged {
-                    logged = true
-                    Self.clampLogger.warning("dim clamp engaged in BBTerm.init: requested=(\(size.cols, privacy: .public),\(size.rows, privacy: .public)) clamped=(\(clampedCols, privacy: .public),\(clampedRows, privacy: .public)) bounds=[\(Self.MIN_DIM, privacy: .public),\(Self.MAX_DIM, privacy: .public)]")
+        // Audit follow-up (2026-04-29): observe the Rust-side
+        // `[MIN_DIM, MAX_DIM]` clamp without changing init semantics —
+        // pass the requested dims through verbatim so the existing
+        // `cols == 0 || rows == 0 → return nil` contract (pinned by
+        // `test_initFailsWithZeroDimensions`) is preserved. The
+        // wrapper-side observation fires when the request would be
+        // clamped but isn't zero (e.g. cols=1 → clamped to MIN_DIM=2).
+        // Sibling of M-15 / L-17 / M-17 (one-shot warning when
+        // defensive clamp engages).
+        if size.cols != 0 && size.rows != 0 {
+            let clampedCols = min(max(size.cols, Self.MIN_DIM), Self.MAX_DIM)
+            let clampedRows = min(max(size.rows, Self.MIN_DIM), Self.MAX_DIM)
+            if clampedCols != size.cols || clampedRows != size.rows {
+                Self.didLogDimClamp.withLock { logged in
+                    if !logged {
+                        logged = true
+                        Self.clampLogger.warning("dim clamp engaged in BBTerm.init: requested=(\(size.cols, privacy: .public),\(size.rows, privacy: .public)) clamped=(\(clampedCols, privacy: .public),\(clampedRows, privacy: .public)) bounds=[\(Self.MIN_DIM, privacy: .public),\(Self.MAX_DIM, privacy: .public)]")
+                    }
                 }
             }
         }
-        guard let ptr = bb_term_new(clampedCols, clampedRows, scrollback) else { return nil }
+        guard let ptr = bb_term_new(size.cols, size.rows, scrollback) else { return nil }
         self.handle = ptr
 
         let box = UnsafeMutablePointer<EventCtx>.allocate(capacity: 1)

@@ -73,3 +73,58 @@ A multi-agent review + blind-test pass surfaced 67 unique findings. The critical
 
 Full triage ledger in `docs/superpowers/reviews/v0.1.9-sweep/triage.md` (gitignored, local-only).
 
+## Deferred Audit Items (post-2026-04-29 campaign)
+
+The 75-commit / 11-batch audit-fix campaign closed in commit `1050eee`. The
+items below were intentionally scoped out of that campaign — either the
+fix surface is too invasive for the campaign's incremental shape, or the
+test seam for non-vacuous coverage doesn't exist yet. Tracked here so
+they don't fall off the radar.
+
+- **R1 — telemetry routing for one-shot warnings.** The campaign added
+  ~20 one-shot Logger / `OSAllocatedUnfairLock<Bool>` warnings (M-15,
+  L-17, M-17, dim clamp, OSC 7 reject classes, MetalRenderer.init paths,
+  PTY SIGKILL rc/errno, watchdog clamp). These currently land in
+  `os_log` only — no in-app surface, no opt-in telemetry pipe. A
+  unified collector that an opt-in user could ship to `dist/` for
+  triage would close the loop, but the design (privacy posture, opt-in
+  affordance, retention) is its own track.
+- **R3 #4 — `@MainActor AppDelegate`.** Promoting `AppDelegate` to
+  `@MainActor` would let the type system enforce what the runtime
+  guarantees today. Currently relies on `dispatchPrecondition(.onQueue(.main))`
+  tripwires (M-12). Promotion needs sweeping every NSApplicationDelegate
+  delegate-call site for actor-isolation soundness; deferred behind a
+  real Swift 6 concurrency pass.
+- **R3 #5 — `BatchCloseToken`.** The window-close batching path uses
+  ad-hoc Bool flags; a typed token (struct with explicit lifecycle) would
+  make the batch boundary discoverable and testable. Quick refactor but
+  needs MainWindowController seams that don't exist yet (see F-S6
+  deferrals re `makeForTesting(stubSession:)`).
+- **R3 #7 — titleObserver KVO precondition.** The
+  `NSWindow.title` KVO observer relies on the observer being installed
+  before the first `setTitle:` fires; a precondition tripwire on observer
+  presence would make the contract explicit. Today the contract holds
+  by construction (observer is installed in init), but a future
+  refactor that delays observer install could regress silently.
+- **M-8 — `BBTerm.owningQueue`.** The FFI contract requires every
+  `bb_term_*` call to happen on the same thread/queue that drives
+  `bb_term_input`. Production paths satisfy this via
+  `coreQueue.sync` discipline; a runtime check needs an `owningQueue`
+  field on BBTerm and `dispatchPrecondition(.onQueue(owningQueue))` at
+  every entry point. Deferred because the queue's worker pthread isn't
+  a stable identity (GCD's `dispatch_sync` optimisation can borrow the
+  calling thread); enforcement lives in `TerminalSession`'s
+  dispatchPrecondition tripwires (M-12) for now. Resolution path:
+  thread `owningQueue: DispatchQueue` through BBTerm's init.
+- **`FFI_HANDLER_IN_FLIGHT` coverage for non-`bb_term_input` entry
+  points.** The Rust-side handler-reentry latch (M-9 follow-up,
+  2026-04-29) is wired up only at `bb_term_input` — the canonical
+  re-entry vector. The other entry points (`bb_term_resize2`,
+  `bb_term_scroll`, `bb_term_take_snapshot`, `bb_term_text_range`,
+  `bb_term_clear_all`, `bb_term_set_named_color`, etc.) still rely on
+  the Swift-side `BBTerm.isInsideEventDispatch` precondition — which
+  fires AFTER the second `&mut Term` is on stack, one frame too late.
+  Adding the latch check at every entry point is mechanical but
+  requires a parallel Rust unit test per entry point to prove the
+  guard fires; deferred as a follow-up batch.
+
