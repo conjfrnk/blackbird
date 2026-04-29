@@ -80,8 +80,10 @@ public final class PTY {
     /// Format: (tv_sec, tv_usec) since the system epoch — uniquely
     /// identifies a process even if its pid is later recycled. Nil
     /// means the start-time read failed at spawn (rare on a healthy
-    /// system); the SIGKILL escalation falls back to the pre-M9
-    /// behaviour in that case.
+    /// system); per audit H-1 the SIGKILL escalation now skips
+    /// rather than firing unconditionally in that case, because
+    /// without a baseline we cannot prove the pid still belongs
+    /// to our child if the kernel has recycled it.
     ///
     /// Both fields are `UInt64` because that's what `proc_bsdinfo`'s
     /// `pbi_start_tvsec` / `pbi_start_tvusec` deliver on Darwin.
@@ -991,14 +993,24 @@ public final class PTY {
             // recycled stranger. The guards below treat "can't
             // verify" as "skip", which is the safe direction.
             guard let original = originalStartTime else {
-                // Process spawned before M9's start-time capture
-                // landed (impossible after M9 shipped, but kept for
-                // belt-and-braces). Pre-M9 behaviour was to escalate
-                // unconditionally — preserve it for that historical
-                // window only.
-                _ = kill(pid, SIGKILL)
+                // No start-time was captured at spawn (audit H-1).
+                // `bsdProcessStartTime` can transiently fail at fork
+                // for any kernel-info reason — proc_pidinfo races a
+                // partially-set-up process, EPERM under sandbox, etc.
+                // Without a baseline we cannot prove the pid still
+                // belongs to our child, so we MUST NOT escalate: if
+                // the child exited inside the 200ms grace window and
+                // macOS recycled its pid, an unconditional SIGKILL
+                // here would terminate the unrelated stranger. Skip
+                // is the safe-by-default direction; the read loop's
+                // SIGHUP will still tear down a well-behaved child,
+                // and a HUP-ignoring child without a start-time
+                // baseline is the rare-rare case we accept lingering
+                // over killing the wrong process. The pre-M9
+                // unconditional-kill comment that lived here was
+                // wrong by today's standards.
                 Self.logger.log(
-                    "PTY.terminate escalated to SIGKILL pid=\(pid, privacy: .public) (no start-time captured)"
+                    "PTY.terminate skipping SIGKILL pid=\(pid, privacy: .public) (no start-time captured at spawn)"
                 )
                 return
             }
