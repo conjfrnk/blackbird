@@ -635,7 +635,13 @@ public final class MetalRenderer {
         // Row in *buffer* space (scrollback-adjusted) — the ⌘-hover range
         // is keyed on buffer line so the underline survives scrolling
         // without the caller re-resolving the pointer on every snapshot.
-        let rowBufferLine = Int32(row - snapshot.displayOffset)
+        // `Int32(clamping:)` for parity with the M-16 sites: the
+        // subtraction operates on `Int`s sourced from BBCore, and a
+        // future regression that lets either operand exceed Int32's
+        // range (or pushes the difference negative-overflow) would
+        // trap the renderer mid-frame. Clamping keeps the contract
+        // pinned at the cast site. Audit UR-2 (2026-04-29).
+        let rowBufferLine = Int32(clamping: row - snapshot.displayOffset)
         let cmdHoverActiveOnThisRow =
             cmdHoverStartCol >= 0
             && cmdHoverBufferLine == rowBufferLine
@@ -753,7 +759,9 @@ public final class MetalRenderer {
             }
             bg.w = bgAlpha
 
-            let bufferLine = Int32(row) - Int32(snapshot.displayOffset)
+            // `Int32(clamping:)` per UR-2 — same defense-in-depth
+            // rationale as the `rowBufferLine` site above.
+            let bufferLine = Int32(clamping: row) - Int32(clamping: snapshot.displayOffset)
             let selected = isSelected(bufferLine, col)
             var effectiveBg = selected ? selectionTint : bg
             var effectiveHasBg = selected ? true : hasBg
@@ -1091,9 +1099,13 @@ public final class MetalRenderer {
             selACol: selFields.aCol,
             selBCol: selFields.bCol,
             focused: focused,
-            cursorRow: Int32(snapshot?.cursorRow ?? -1),
-            cursorCol: Int32(snapshot?.cursorCol ?? -1),
-            cursorShape: cursorShapeOverride ?? UInt8(snapshot?.cursorShape ?? 3),
+            // `Int32(clamping:)` / `UInt8(clamping:)` for parity
+            // with the M-16 displayOffset sites: defense-in-depth on
+            // Rust-snapshot integers entering the FrameKey hot path.
+            // Audit UR-2 (2026-04-29).
+            cursorRow: Int32(clamping: snapshot?.cursorRow ?? -1),
+            cursorCol: Int32(clamping: snapshot?.cursorCol ?? -1),
+            cursorShape: cursorShapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
             cursorVisible: snapshot?.cursorVisible ?? false,
             // `UInt32(clamping:)` not `UInt32(_:)` — defense-in-depth on
             // the hot per-frame path. Today `BBSnapshot.displayOffset`
@@ -1246,13 +1258,17 @@ public final class MetalRenderer {
             // snapshot's DECSCUSR shape. When nil, follow the shell. Used
             // everywhere below — `useCellInvertedCursor`, the "hidden"
             // short-circuit, and the cache key.
-            let effectiveShape: UInt8 = cursorShapeOverride ?? UInt8(snap.cursorShape)
+            // `UInt8(clamping:)` per UR-2 — defense-in-depth on the
+            // Rust-snapshot cursorShape entering the cache key path.
+            let effectiveShape: UInt8 = cursorShapeOverride ?? UInt8(clamping: snap.cursorShape)
             let shape = UInt32(effectiveShape)
             // Reset the blink cycle every time the cursor moves, so a
             // moving cursor is continuously visible. Tracked in
             // grid-coordinate space (cursorRow/Col), not screen row.
-            let curRow = Int32(snap.cursorRow)
-            let curCol = Int32(snap.cursorCol)
+            // `Int32(clamping:)` per UR-2 — defense-in-depth on
+            // Rust-snapshot cursor coordinates.
+            let curRow = Int32(clamping: snap.cursorRow)
+            let curCol = Int32(clamping: snap.cursorCol)
             // Capture the prior cursor position BEFORE overwriting
             // `lastCursorRow` — the partial-rebuild path below needs it
             // to force-rebuild the row the cursor just vacated. Audit
