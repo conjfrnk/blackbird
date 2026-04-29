@@ -20,8 +20,30 @@ final class CursorShapeTests: XCTestCase {
     }
 
     func test_resolver_returns_followShell_for_unknown_raw() {
+        // The contract: an unrecognised rawValue must NEVER surface to
+        // the renderer as something other than `.followShell`. There
+        // are two layers that uphold this jointly, and we pin both:
+        //
+        //   (1) The pure enum bridge `CursorShape(rawValue: …)` returns
+        //       `nil` for an unknown string — no silent coercion inside
+        //       Swift's RawRepresentable.
+        //
+        //   (2) The persisted-raw → effective-shape pipeline lands on
+        //       `.followShell`. Post-Batch-5 (audit H-8 / L-28,
+        //       2026-04-29) this is enforced TWICE: the resolver
+        //       `cursorShape` has a `?? .followShell` fallback, AND the
+        //       `UserDefaults.didChangeNotification` observer repairs an
+        //       unknown rawValue back to `followShell.rawValue`
+        //       synchronously when it lands on disk. Either layer alone
+        //       satisfies the contract; together they make it
+        //       defence-in-depth.
+        //
+        // We can't observe layer (1) by reading `cursorShapeRaw` after
+        // a write — the observer repairs it before this thread sees the
+        // value — so we assert layer (1) on the literal, and assert the
+        // joint contract by writing garbage and reading the resolver.
+        XCTAssertNil(Preferences.CursorShape(rawValue: "garbage-not-a-case"))
         Preferences.shared.cursorShapeRaw = "garbage-not-a-case"
-        XCTAssertNil(Preferences.CursorShape(rawValue: Preferences.shared.cursorShapeRaw))
         XCTAssertEqual(Preferences.shared.cursorShape, .followShell)
     }
 
