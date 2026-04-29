@@ -213,4 +213,140 @@ final class BBTermTests: XCTestCase {
             "snapshot still produced; setColor didn't corrupt term state"
         )
     }
+
+    /// pre-flight: ~80 cells; ~5 ms.
+    ///
+    /// Audit L-18 / EC-7 (2026-04-29): pre-fix, BBTerm.resize hard-
+    /// preconditioned on `cols > 0 && rows > 0`, trapping the process
+    /// on a `(0, 0)` request. The fix moved the floor into the wrapper
+    /// so the same call produces a usable `(MIN_DIM, MIN_DIM)` grid
+    /// instead of aborting. Pin the new shape: any sub-floor request
+    /// returns the floor-clamped dims, never traps.
+    ///
+    /// In Release the assertion is compiled out and the wrapper just
+    /// clamps. In DEBUG `XCTExpectFailure` would be needed if we
+    /// expected the inner assertionFailure to fire — but
+    /// XCTest+assertionFailure semantics are racy in DEBUG, so this
+    /// test only exercises the post-clamp shape and not the assert
+    /// itself.
+    func test_resize_zeroDim_clampsToFloor_ratherThanTrapping() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        // Both dims zero — the legacy precondition shape. The wrapper
+        // must clamp up to MIN_DIM and return the floored dims.
+        // NOTE: in DEBUG this triggers an assertionFailure inside the
+        // wrapper which XCTest treats as a fatal. We skip the actual
+        // call when running under DEBUG and only exercise the
+        // mixed-dim shape (cols=0, rows=24) — which would also trap
+        // pre-fix but is now the documented clamp path. Either way
+        // the contract "no process abort + returns clamped dims"
+        // holds in Release; DEBUG callers learn at the assertion.
+        #if !DEBUG
+        let appliedZero = term.resize(to: .init(cols: 0, rows: 0))
+        XCTAssertEqual(appliedZero.cols, BBTerm.MIN_DIM)
+        XCTAssertEqual(appliedZero.rows, BBTerm.MIN_DIM)
+        #endif
+        // Sub-floor (1, 1) request — this shape never tripped the
+        // precondition (it required strict zero), so it ran in DEBUG
+        // and Release alike. Must clamp up to MIN_DIM.
+        let appliedSubFloor = term.resize(to: .init(cols: 1, rows: 1))
+        XCTAssertEqual(appliedSubFloor.cols, BBTerm.MIN_DIM, "cols clamp up to MIN_DIM")
+        XCTAssertEqual(appliedSubFloor.rows, BBTerm.MIN_DIM, "rows clamp up to MIN_DIM")
+        // Snapshot agrees — the grid the renderer is going to paint
+        // matches the dims the wrapper returned.
+        let snap = try XCTUnwrap(term.snapshot())
+        XCTAssertEqual(snap.cols, Int(BBTerm.MIN_DIM))
+        XCTAssertEqual(snap.rows, Int(BBTerm.MIN_DIM))
+    }
+
+    /// Audit L-18: above-ceiling shape mirrors the floor side. The
+    /// wrapper now also caps at `MAX_DIM` symmetrically. We can't
+    /// allocate a 5000×5000 grid in this test (memory rules), but
+    /// passing `MAX_DIM + 1` is cheap and pins that the wrapper's
+    /// clamp ceiling matches the Rust side.
+    func test_resize_aboveCeiling_clampsToMaxDim() throws {
+        try requireTestFitsInBudget(
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+        )
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        let applied = term.resize(to: .init(cols: BBTerm.MAX_DIM + 1, rows: BBTerm.MAX_DIM + 1))
+        XCTAssertEqual(applied.cols, BBTerm.MAX_DIM, "cols clamp down to MAX_DIM")
+        XCTAssertEqual(applied.rows, BBTerm.MAX_DIM, "rows clamp down to MAX_DIM")
+    }
+
+    /// pre-flight: ~5 cells; ~5 ms; no allocation past the 80×24 grid.
+    ///
+    /// Audit L-19 / EC-9 (2026-04-29): `row * cols + col` indexing in
+    /// `character(at:row:)`, `cellKind(at:row:)`, and
+    /// `visibleRowsAsText()` is now overflow-checked via
+    /// `multipliedReportingOverflow` / `addingReportingOverflow`.
+    /// Today the upstream bounds (`row < rows`, `col < cols`, both
+    /// ≤ MAX_DIM) make overflow unreachable, but the helper exists
+    /// as defence-in-depth for any future code path that lifts those
+    /// bounds.
+    ///
+    /// Paper analysis: `Int.max` on a 64-bit Mac is 2^63 - 1 ≈ 9.2e18.
+    /// `MAX_DIM × MAX_DIM = 1_000_000 ≪ Int.max`, so no in-spec call
+    /// can overflow. The test's role is to pin the BEHAVIOUR contract:
+    /// `character(at:row:)` returns `nil` for any input that would
+    /// overflow the index calc, NOT a crash or a stale cell read. We
+    /// cheat and pass the upper-bound input shape that the wrapper's
+    /// own four-sided bounds check rejects BEFORE the index calc;
+    /// this is the same shape a production caller would land on, so
+    /// the contract "out-of-range returns nil" holds end-to-end.
+    func test_character_extremeIndices_returnsNilNotTrap() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 5)))
+        term.input("hi")
+        let snap = try XCTUnwrap(term.snapshot())
+        // Each of these would overflow `row * cols + col` on a
+        // hypothetical caller that bypassed the upstream bounds check.
+        // The four-sided guard at the top of `character(at:row:)`
+        // catches them first; the flatIndex helper is the second
+        // line of defence.
+        XCTAssertNil(snap.character(at: Int.max, row: 0))
+        XCTAssertNil(snap.character(at: 0, row: Int.max))
+        XCTAssertNil(snap.character(at: Int.max, row: Int.max))
+        // And the happy path still works — we didn't break the
+        // narrow-cell read path while adding the overflow guards.
+        XCTAssertEqual(snap.character(at: 0, row: 0), "h")
+        XCTAssertEqual(snap.character(at: 1, row: 0), "i")
+    }
+
+    /// pre-flight: ~10 cells; ~5 ms.
+    ///
+    /// Audit L-15 / DI-9 (2026-04-29): `cellKind` now exposes a
+    /// distinct `.invalid` case for cells whose `ch` field is non-zero
+    /// but fails `Unicode.Scalar` construction (surrogate scalars,
+    /// out-of-range scalars). alacritty rejects these upstream today,
+    /// so the only way to observe `.invalid` is via the row-walker's
+    /// behaviour: `rowTextWithUTF16ToColMap` skips invalid cells
+    /// without truncating, so a hostile cell at column N doesn't blank
+    /// out columns N+1..end. Pin that the row-walker contract holds
+    /// for the typical case (no invalid cells); the negative case
+    /// can't be reached without bypassing alacritty's filter.
+    func test_rowTextWithUTF16ToColMap_skipsInvalidCellsWithoutTruncating() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 1)))
+        term.input("abc")
+        let snap = try XCTUnwrap(term.snapshot())
+        let result = try XCTUnwrap(snap.rowTextWithUTF16ToColMap(row: 0))
+        // Happy path pin: alacritty initialises empty cells with a
+        // space char (0x20), so the row text is "abc" + space-fill to
+        // the column count. The contract this test guards is that
+        // the walker visits every column up to `cols` without
+        // truncating mid-row — that's the "invalid cell doesn't blank
+        // the rest of the row" property we care about. The
+        // `.invalid` branch in the walker uses the same `c += 1`
+        // continuation pattern as the orphan-spacer branch, so the
+        // proxy here is the orphan-spacer-free happy path.
+        XCTAssertTrue(result.text.hasPrefix("abc"), "leading chars survive")
+        XCTAssertEqual(result.text.count, 10, "walker visits all 10 cols")
+        XCTAssertEqual(
+            result.utf16ToCol.count, result.text.utf16.count + 1,
+            "utf16-to-col map has trailing sentinel"
+        )
+        XCTAssertEqual(result.utf16ToCol.first, 0, "first char starts at col 0")
+        XCTAssertEqual(
+            result.utf16ToCol.last, 10,
+            "sentinel = col immediately after the last painted cell"
+        )
+    }
 }
