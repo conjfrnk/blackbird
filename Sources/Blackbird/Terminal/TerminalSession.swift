@@ -892,6 +892,14 @@ public final class TerminalSession: ObservableObject {
                 self.send(data)
                 return
             }
+            // L-14: capture pref-driven gates at decision time, on the
+            // queue the event fired on, so a pref-flip during the
+            // coreQueue → main hop can't change the answer. Today the
+            // only pref-gated case in the switch is OSC 52, but the
+            // shape generalises: any future pref-checked branch should
+            // capture into `let` here, not read `Preferences.shared`
+            // again on main. That avoids the TOCTOU class entirely.
+            let osc52EnabledAtDispatch = Preferences.shared.osc52Enabled
             // M-1: re-establish [weak self] for the main hop. The outer
             // closure's `guard let self else { return }` re-bound `self`
             // strongly inside the closure's lexical scope, and that strong
@@ -930,7 +938,17 @@ public final class TerminalSession: ObservableObject {
                     // a misbehaving remote shouldn't stuff arbitrary
                     // bytes into the user's clipboard or crash the
                     // session.
-                    guard Preferences.shared.osc52Enabled else { break }
+                    //
+                    // L-14: read the captured `osc52EnabledAtDispatch`
+                    // (snapshotted on coreQueue before the hop), not
+                    // `Preferences.shared` directly. A user disabling
+                    // OSC 52 mid-hop must NOT have the now-disabled
+                    // payload still land — and a user enabling it
+                    // mid-hop must NOT see a payload they couldn't have
+                    // intercepted. Either direction, the captured value
+                    // is the one consistent with the event-handler
+                    // ordering and the user's intent at dispatch time.
+                    guard osc52EnabledAtDispatch else { break }
                     if text.utf8.count > Self.osc52MaxBytes {
                         // SFH-005: log in Release. OSC 52 oversize is a security
                         // boundary — a hostile remote trying to stuff a
