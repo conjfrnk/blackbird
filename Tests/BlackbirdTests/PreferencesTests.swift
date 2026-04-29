@@ -543,11 +543,17 @@ final class PreferencesTests: XCTestCase {
     // MARK: - fontSize clamp coverage (audit swift-tests-prefs F7)
 
     /// Regression for swift-tests-prefs F7: `fontSize.didSet` clamps NaN,
-    /// below-9, and above-64 values. `test_scalarProperties_roundTrip`
+    /// below-9, and above-32 values. `test_scalarProperties_roundTrip`
     /// only exercises an in-range write (13.5) so the clamp code would
     /// silently regress. These assertions pin every branch of the
     /// `let normalised = fontSize.isFinite ? fontSize : 13` guard and the
-    /// `max(9, min(64, normalised))` envelope.
+    /// `max(9, min(32, normalised))` envelope.
+    ///
+    /// Audit M-13 / DI-6 (2026-04-29): the ceiling moved from 64 to 32
+    /// to match the SettingsView slider (`9...32`). A tampered or
+    /// migrated value in (32, 64] used to survive the Preferences
+    /// clamp and surface a slider pinned to its max while the actual
+    /// font was much larger; aligning at 32 closes that gap.
     func test_fontSize_clampsBelowNine() {
         let p = Preferences.shared
         p.fontSize = 3.0
@@ -557,12 +563,29 @@ final class PreferencesTests: XCTestCase {
         )
     }
 
-    func test_fontSize_clampsAboveSixtyFour() {
+    func test_fontSize_clampsAboveThirtyTwo() {
         let p = Preferences.shared
         p.fontSize = 999.0
         XCTAssertEqual(
-            p.fontSize, 64.0, accuracy: 1e-9,
-            "fontSize above 64 must clamp down to 64 — Settings UI ceiling"
+            p.fontSize, 32.0, accuracy: 1e-9,
+            "fontSize above 32 must clamp down to 32 — Settings UI slider ceiling (audit M-13)"
+        )
+    }
+
+    /// Audit M-13 (2026-04-29): a value in the previously-tolerated band
+    /// (32, 64] must now clamp to 32. Without the ceiling alignment,
+    /// the Settings slider (range 9...32) couldn't represent the value
+    /// and the user saw the slider thumb pinned to 32 while the actual
+    /// font was e.g. 48. This test would FAIL if the clamp ceiling
+    /// regressed from 32 back to 64 (the old behaviour fixed in this
+    /// audit batch).
+    func test_fontSize_inOldBandClampsToThirtyTwo() {
+        let p = Preferences.shared
+        // Lands inside the (32, 64] band that the prior clamp tolerated.
+        p.fontSize = 48.0
+        XCTAssertEqual(
+            p.fontSize, 32.0, accuracy: 1e-9,
+            "Audit M-13: a value of 48 must clamp to 32 (UI ceiling), not 48 (old Preferences ceiling)"
         )
     }
 

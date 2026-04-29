@@ -90,11 +90,18 @@ public final class Preferences: ObservableObject {
         didSet {
             // A tampered plist or a stale UserDefaults key can surface
             // NaN, ±Infinity, negative, or absurdly large sizes.
-            // Settings UI clamps to 9…32 at the bump actions; mirror the
-            // same bound on every set so direct writes (migrations,
-            // scripting, tests) can't poison readers downstream.
+            // The Settings slider and ⌘+/⌘- bump actions both bound the
+            // user-visible value to 9...32. Mirror that same envelope at
+            // the model layer (audit M-13 / DI-6, 2026-04-29): the prior
+            // ceiling of 64 let tampered or migrated values in (32, 64]
+            // survive the clamp while the slider could only render up to
+            // 32, so the user opened Settings and saw the thumb pinned to
+            // its max while the actual font was e.g. 48. Aligning the
+            // ceiling at 32 makes the model and the UI agree by
+            // construction; no other code reads `fontSize` expecting a
+            // value above 32.
             let normalised = fontSize.isFinite ? fontSize : 13
-            let clamped = max(9, min(64, normalised))
+            let clamped = max(9, min(32, normalised))
             if clamped != fontSize { fontSize = clamped }
         }
     }
