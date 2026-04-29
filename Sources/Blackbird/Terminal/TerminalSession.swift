@@ -852,7 +852,20 @@ public final class TerminalSession: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 let enabled = Preferences.shared.colorQueryEnabled
-                self.coreQueue.async { [bbterm = self.bbterm] in
+                // L-23: weak bbterm so the inner coreQueue.async block is
+                // never the last strong ref. Without this, a sink fire that
+                // races terminate() can land here, dispatch its coreQueue
+                // block holding the only strong bbterm, run on coreQueue,
+                // and drop that ref on completion — BBTerm.deinit then
+                // runs on coreQueue's thread, off the documented same-
+                // thread discipline thread. Today terminate() pre-nils
+                // BBTerm.handle so the deinit is a no-op, but the window
+                // between isTerminated=true and the inner block firing is
+                // when the path is reachable. Weak capture closes it
+                // unconditionally; guard makes the post-terminate fire a
+                // clean no-op.
+                self.coreQueue.async { [weak bbterm = self.bbterm] in
+                    guard let bbterm else { return }
                     bbterm.setColorQueryEnabled(enabled)
                 }
             }
