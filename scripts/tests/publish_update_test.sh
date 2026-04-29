@@ -566,6 +566,204 @@ STUB
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# CASE 8 — M-21 / MS-5: the JSON-LD `softwareVersion` slot in
+# website/index.html must be rewritten on every publish. Through v0.1.15
+# this slot was silently stale because the old STRAY check only matched
+# `v[X.Y.Z]` tokens. The fix adds a third sed targeting
+# `"softwareVersion": "..."` plus a separate STRAY scan anchored on the
+# JSON-LD field name.
+#
+# Seed an index.html containing a stale softwareVersion (0.1.15) plus the
+# two existing anchors, run publish-update.sh successfully through to the
+# index.html rewrite step, and assert the slot now reads the new VERSION.
+# We don't need the script to make it all the way to git push — the
+# rewrite happens before that, and a later-step failure just means the
+# git stub never gets exercised. We assert on the on-disk file.
+# ---------------------------------------------------------------------------
+
+case_jsonld_softwareversion_rewritten() {
+    local tmp; tmp="$(mk_tmp bb-pub-8)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+
+    # The default codesign stub is a bare `exit 0` — verify_dmg's
+    # `TeamIdentifier=${TEAM_ID}` grep would fail before we ever reach
+    # the index.html rewrite. Replace with a stub that emits the matching
+    # Team ID so verify_dmg passes and the script proceeds.
+    cat >"$tmp/stub-bin/codesign" <<'STUB'
+#!/usr/bin/env bash
+mode=""
+for arg in "$@"; do
+    case "$arg" in
+        --display) mode="display" ;;
+        --verify) mode="verify" ;;
+    esac
+done
+case "$mode" in
+    display)
+        cat <<'EOF'
+Executable=/path/to/Blackbird.dmg
+Format=disk image
+TeamIdentifier=F2B95Q4CT8
+EOF
+        ;;
+    *) ;;
+esac
+exit 0
+STUB
+    chmod +x "$tmp/stub-bin/codesign"
+
+    # Seed a minimal index.html with all three version-bearing strings.
+    # The softwareVersion is the old (stale) value; the other two are
+    # also stale, just to make sure the test exercises every sed.
+    cat >"$tmp/website/index.html" <<'HTML'
+<!doctype html>
+<html lang="en">
+  <head>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "softwareVersion": "0.1.15",
+        "operatingSystem": "macOS 14.0"
+      }
+    </script>
+  </head>
+  <body>
+    <div class="reqs">Requires macOS 14 or later · Apple Silicon and Intel · v0.1.15</div>
+    <div class="row dim">   Compiling blackbird_core v0.1.15</div>
+  </body>
+</html>
+HTML
+
+    # Re-stage the seeded index.html so the script's `git add` /
+    # `git diff --cached` ordering works on the fresh content.
+    (cd "$tmp" && git add website/index.html \
+        && git -c commit.gpgsign=false commit -q -m "seed index.html")
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+    # The push step in this fixture targets a real local bare-repo origin,
+    # so the script may exit 0 here. Either way, what we care about is the
+    # state of website/index.html on disk.
+    echo "    info: publish-update rc=$rc"
+
+    # Three assertions — each version slot must have been rewritten.
+    if grep -qE '"softwareVersion": "0\.2\.0"' "$tmp/website/index.html"; then
+        pass "M-21: JSON-LD softwareVersion slot rewritten to 0.2.0"
+    else
+        fail "M-21: JSON-LD softwareVersion slot still stale"
+        grep -n softwareVersion "$tmp/website/index.html" | sed 's/^/      | /' >&2
+    fi
+    if grep -q "Apple Silicon and Intel · v0.2.0" "$tmp/website/index.html"; then
+        pass "download sub-line rewritten"
+    else
+        fail "download sub-line not rewritten"
+    fi
+    if grep -q "blackbird_core v0.2.0" "$tmp/website/index.html"; then
+        pass "terminal mockup rewritten"
+    else
+        fail "terminal mockup not rewritten"
+    fi
+
+    # Sanity: the old stale value must not survive anywhere in the file.
+    if grep -q "0.1.15" "$tmp/website/index.html"; then
+        fail "M-21: stale 0.1.15 token survived the rewrite"
+        grep -n "0.1.15" "$tmp/website/index.html" | sed 's/^/      | /' >&2
+    else
+        pass "no stale 0.1.15 tokens remain in index.html"
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 9 — M-21 STRAY-check regression-guard: if the JSON-LD field name
+# ever moves (e.g. someone renames it to `softwareVersionString` or wraps
+# it in a different shape) so the third sed silently misses, the new
+# STRAY_SOFTWARE_VERSION check must catch the residue. Seed an index.html
+# whose softwareVersion field uses a DIFFERENT key the sed pattern won't
+# touch, and assert the script exits non-zero with the diagnostic message.
+# ---------------------------------------------------------------------------
+
+case_jsonld_softwareversion_stray_guard() {
+    local tmp; tmp="$(mk_tmp bb-pub-9)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+
+    # Same Team ID stub as case 8 — verify_dmg must pass to reach the
+    # rewrite + STRAY-check.
+    cat >"$tmp/stub-bin/codesign" <<'STUB'
+#!/usr/bin/env bash
+mode=""
+for arg in "$@"; do
+    case "$arg" in
+        --display) mode="display" ;;
+    esac
+done
+case "$mode" in
+    display)
+        cat <<'EOF'
+Executable=/path/to/Blackbird.dmg
+TeamIdentifier=F2B95Q4CT8
+EOF
+        ;;
+esac
+exit 0
+STUB
+    chmod +x "$tmp/stub-bin/codesign"
+
+    # Seed an index.html whose softwareVersion appears under a NORMAL
+    # key (so the sed touches it) AND under a SECOND copy with a stale
+    # value the sed-anchor will rewrite, but ALSO with an unprefixed
+    # 0.1.15 in a place that doesn't carry the JSON-LD anchor — to
+    # exercise the STRAY scan correctly we need the JSON-LD pattern itself
+    # to leave a stale entry. Construct a doubled JSON-LD slot: the sed
+    # `s|...|...|` (without /g) only rewrites the first match per line.
+    # Putting both on the same line bypasses the second.
+    cat >"$tmp/website/index.html" <<'HTML'
+<!doctype html>
+<html><head>
+<script type="application/ld+json">
+{"softwareVersion": "0.1.15", "extra": "softwareVersion": "0.1.15"}
+</script>
+</head>
+<body>
+<div class="reqs">Requires macOS 14 or later · Apple Silicon and Intel · v0.1.15</div>
+<div class="row dim">Compiling blackbird_core v0.1.15</div>
+</body></html>
+HTML
+
+    (cd "$tmp" && git add website/index.html \
+        && git -c commit.gpgsign=false commit -q -m "seed doubled-slot index.html")
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+
+    # The double-slot trick leaves a stale `"softwareVersion": "0.1.15"`
+    # behind after the sed runs (sed's default is to replace only the
+    # first match per line). The STRAY_SOFTWARE_VERSION scan must catch
+    # this and exit non-zero with the JSON-LD diagnostic.
+    if [[ "$rc" != "0" ]]; then
+        pass "M-21: STRAY check catches missed JSON-LD softwareVersion (rc=$rc)"
+    else
+        fail "M-21: STRAY check did NOT catch missed JSON-LD softwareVersion"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "JSON-LD softwareVersion slot is stale" "$log"; then
+        pass "M-21: diagnostic identifies the JSON-LD slot specifically"
+    else
+        fail "M-21: STRAY-check diagnostic missing"
+        tail -20 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
 case_atomic_appcast
 case_arg_validation
 case_push_then_deploy
@@ -573,5 +771,7 @@ case_verify_spctl_reject
 case_verify_wrong_team_id
 case_verify_stapler_reject
 case_verify_format_change
+case_jsonld_softwareversion_rewritten
+case_jsonld_softwareversion_stray_guard
 
 test_end

@@ -163,28 +163,60 @@ echo "==> Verifying DMG signature, notarization, and Team ID"
 verify_dmg "$DMG_PATH"
 
 echo "==> Signing + regenerating website/appcast.xml"
+# Atomic-write contract: a `> website/appcast.xml` redirect truncates the
+# target file the moment the shell opens the FD, BEFORE make-appcast.sh
+# emits its first byte. If make-appcast.sh (or sign_update inside it)
+# crashes mid-stream, the live tracked appcast is left truncated — every
+# Sparkle client polling between the crash and a fix would see malformed
+# XML and stop checking for updates. Stage to a tempfile + atomic rename
+# so the on-disk appcast is always either the previous valid file or a
+# complete new one. Audit L-13 / F-S8-025.
+TMP_APPCAST="$(mktemp -t blackbird-appcast.XXXXXX)"
+# The trap catches `set -e` aborts mid-pipeline (sign_update failure,
+# hdiutil failure inside make-appcast, OOM, SIGINT). On the success path
+# the `mv` consumes the tempfile so the trap's `rm` is a no-op.
+trap 'rm -f "$TMP_APPCAST"' EXIT
 APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}" \
   APPCAST_FEED_URL="https://blackbird-terminal.com/appcast.xml" \
-  bash scripts/make-appcast.sh --full > website/appcast.xml
+  bash scripts/make-appcast.sh --full > "$TMP_APPCAST"
+mv -f "$TMP_APPCAST" website/appcast.xml
 
-# Bump the two version-bearing strings in website/index.html so the splash
-# always reads the version that was just shipped:
-#   1. the download sub-line  → "Apple Silicon and Intel · v<X.Y.Z>"
-#   2. the terminal mockup    → "Compiling blackbird_core v<X.Y.Z>"
-# Each sed is anchored on a unique literal in the file, so neither can
-# match the other or any future addition. Idempotent: re-running with the
-# same $VERSION rewrites each token to itself, the diff stays empty, and
-# the "skip commit if unchanged" branch below still fires on retry.
+# Bump the three version-bearing strings in website/index.html so the
+# splash always reads the version that was just shipped:
+#   1. the download sub-line     → "Apple Silicon and Intel · v<X.Y.Z>"
+#   2. the terminal mockup       → "Compiling blackbird_core v<X.Y.Z>"
+#   3. the JSON-LD SoftwareApp   → "softwareVersion": "<X.Y.Z>"
+# Each sed is anchored on a unique literal in the file, so none can match
+# another or any future addition. Idempotent: re-running with the same
+# $VERSION rewrites each token to itself, the diff stays empty, and the
+# "skip commit if unchanged" branch below still fires on retry.
+#
+# The JSON-LD slot was silently stale every release through v0.1.15 — the
+# original pre-2026-04-29 STRAY check matched only `v[X.Y.Z]` tokens, so
+# unprefixed semver in JSON-LD survived. Audit M-21 (MS-5).
 echo "==> Bumping version labels in website/index.html"
 sed -i '' -E "s|(Apple Silicon and Intel · )v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|\1v${VERSION}|" website/index.html
 sed -i '' -E "s|(blackbird_core )v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|\1v${VERSION}|" website/index.html
+sed -i '' -E "s|(\"softwareVersion\": \")[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\")|\1${VERSION}\3|" website/index.html
 # Sanity: every "v[X.Y.Z]" semver token in the file should now be the
 # new version. If any older token survived, one of the anchors regressed.
 STRAY="$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' website/index.html | grep -Fv "v${VERSION}" || true)"
 if [[ -n "$STRAY" ]]; then
-    echo "!! website/index.html still contains older version token(s):" >&2
+    echo "!! website/index.html still contains older v-prefixed version token(s):" >&2
     echo "$STRAY" | sed 's/^/   /' >&2
     echo "!! check the anchor strings haven't changed" >&2
+    exit 1
+fi
+# Separate scan for the unprefixed JSON-LD `softwareVersion` slot. Plain
+# `\b[0-9]+\.[0-9]+\.[0-9]+` would also match macOS minimum-version
+# strings ("macOS 14.0", "minimumSystemVersion": "14.0"), so anchor on
+# the JSON-LD field name to avoid false-positive bait. The third sed
+# above is the only writer; this is the matching guard.
+STRAY_SOFTWARE_VERSION="$(grep -oE '"softwareVersion": "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"' website/index.html | grep -Fv "\"softwareVersion\": \"${VERSION}\"" || true)"
+if [[ -n "$STRAY_SOFTWARE_VERSION" ]]; then
+    echo "!! website/index.html JSON-LD softwareVersion slot is stale:" >&2
+    echo "$STRAY_SOFTWARE_VERSION" | sed 's/^/   /' >&2
+    echo "!! the third sed above didn't match — anchor or field name may have changed" >&2
     exit 1
 fi
 
