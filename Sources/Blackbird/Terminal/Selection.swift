@@ -68,12 +68,22 @@ public struct Selection: Equatable {
 /// display row.
 ///
 /// Columns clamp to `[0, cols-1]`. `line` clamps upward at `rows - 1`
-/// (so clicks below the last grid row snap to it). When `historySize`
-/// is supplied, `line` also clamps downward at `-historySize` — a
-/// drag that overshoots the top of retained scrollback lands on the
-/// oldest visible line instead of producing an unreachable negative
-/// line that copies as empty. `historySize: nil` (default) preserves
-/// pre-M11 behaviour: no lower clamp. Audit M11.
+/// (so clicks below the last grid row snap to it). `line` also clamps
+/// downward at `-historySize` — a drag that overshoots the top of
+/// retained scrollback lands on the oldest visible line instead of
+/// producing an unreachable negative line that copies as empty. Audit
+/// M11. `historySize` is required (M-17 / EC-4): pass `0` only at
+/// call sites that genuinely have no history info, with a comment
+/// explaining why.
+///
+/// Contract (M-17 / L-17 / EC-4 / EC-6):
+///   - Returns `BufferPoint(line: 0, col: 0)` when `cellWidth` or
+///     `cellHeight` is non-positive or non-finite. Without that
+///     guard, `safeX / 0` traps as `Int(±Inf)`. Sentinel chosen to
+///     match the natural "origin" mapping when the grid has no
+///     well-defined cell size.
+///   - All `localPoint` / `viewportHeight` non-finite values clamp
+///     to 0; finite-but-huge values clamp to ±1_000_000 px.
 public func bufferPoint(
     forView localPoint: CGPoint,
     cellWidth: CGFloat,
@@ -82,8 +92,17 @@ public func bufferPoint(
     displayOffset: Int,
     cols: Int,
     rows: Int,
-    historySize: Int? = nil
+    historySize: Int
 ) -> BufferPoint {
+    // L-17 / EC-6: cell dims are public-API divisors. A degenerate
+    // 0 / NaN / -Inf would trap at `Int(safeX / cellWidth)` because
+    // the result is ±Infinity which Int can't represent. Return the
+    // origin sentinel — there's no meaningful cell to land on when
+    // the grid has no cell size.
+    guard cellWidth.isFinite, cellWidth > 0,
+          cellHeight.isFinite, cellHeight > 0 else {
+        return BufferPoint(line: 0, col: 0)
+    }
     // Guard against two trap classes at Int(Double):
     //   1. NaN / ±Infinity — a stray Core Animation value through
     //      NSEvent.locationInWindow during unusual drags.
@@ -99,15 +118,12 @@ public func bufferPoint(
     let displayRow = max(0, Int((safeVH - safeY) / cellHeight))
     let col = max(0, min(cols - 1, Int(safeX / cellWidth)))
     let rawLine = displayRow - displayOffset
-    // Clamp upward at rows-1; conditionally downward at -historySize.
+    // Clamp upward at rows-1; downward at -historySize. Pass 0 at
+    // call sites without history info; that effectively disables the
+    // lower clamp for live-grid-only clicks.
     let upper = rows - 1
     let upperClamped = min(upper, rawLine)
-    let clampedLine: Int
-    if let hist = historySize {
-        clampedLine = max(-hist, upperClamped)
-    } else {
-        clampedLine = upperClamped
-    }
+    let clampedLine = max(-historySize, upperClamped)
     return BufferPoint(line: Int32(clampedLine), col: col)
 }
 

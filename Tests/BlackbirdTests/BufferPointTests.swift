@@ -28,7 +28,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 0,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 0
         )
         XCTAssertEqual(p.line, 0)
         XCTAssertEqual(p.col, 0)
@@ -47,7 +48,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 0,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 0
         )
         XCTAssertEqual(p.line, Int32(rows - 1))
         XCTAssertEqual(p.col, cols - 1)
@@ -68,7 +70,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 0,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 0
         )
         XCTAssertEqual(p.col, 5)
         XCTAssertEqual(p.line, 3)
@@ -85,7 +88,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 0,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 0
         )
         XCTAssertEqual(p.col, cols - 1)
         XCTAssertEqual(p.line, 0)
@@ -102,7 +106,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 0,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 0
         )
         XCTAssertEqual(p.line, Int32(rows - 1))
         XCTAssertEqual(p.col, 0)
@@ -121,7 +126,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: nan,   // the guard under test
             displayOffset: 0,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 0
         )
         XCTAssertGreaterThanOrEqual(p.col, 0, "NaN viewportHeight must not trap")
         XCTAssertGreaterThanOrEqual(p.line, 0, "NaN viewportHeight must not trap")
@@ -148,7 +154,8 @@ final class BufferPointTests: XCTestCase {
                 viewportHeight: viewportH,
                 displayOffset: 0,
                 cols: cols,
-                rows: rows
+                rows: rows,
+                historySize: 0
             )
             XCTAssertGreaterThanOrEqual(p.col, 0, "\(t) must not trap")
             XCTAssertGreaterThanOrEqual(p.line, 0, "\(t) must not trap")
@@ -165,7 +172,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 0,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 0
         )
         XCTAssertEqual(p.col, 0)
         XCTAssertEqual(p.line, 0)
@@ -181,7 +189,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 5,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 100  // big enough to not be the binding clamp
         )
         XCTAssertEqual(p.line, -5)
         XCTAssertEqual(p.col, 0)
@@ -197,7 +206,8 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 5,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 100
         )
         XCTAssertEqual(p.line, -5)
         XCTAssertEqual(p.col, 0)
@@ -350,9 +360,10 @@ final class BufferPointTests: XCTestCase {
         XCTAssertEqual(p.line, -100)
     }
 
-    func test_historySizeNil_preservesPreM11Behaviour() {
-        // Default historySize=nil: no lower clamp (matches every
-        // existing call site that doesn't have a snapshot).
+    func test_historySizeZero_clampsLineToZero() {
+        // M-17 / EC-4: historySize is now required. Passing 0 means
+        // "no scrollback" — the lower clamp is `max(0, ...)` which
+        // pins any negative rawLine to 0 (the live grid top row).
         let p = bufferPoint(
             forView: CGPoint(x: 0, y: viewportH - 0.5),
             cellWidth: cellW,
@@ -360,8 +371,82 @@ final class BufferPointTests: XCTestCase {
             viewportHeight: viewportH,
             displayOffset: 999,
             cols: cols,
-            rows: rows
+            rows: rows,
+            historySize: 0
         )
-        XCTAssertEqual(p.line, -999, "nil historySize must NOT lower-clamp")
+        XCTAssertEqual(p.line, 0, "historySize=0 must clamp negative lines to 0")
     }
+
+    // MARK: - L-17: cell-dim guard
+
+    /// L-17 / EC-6: cellWidth = 0 would produce `Int(safeX / 0) ==
+    /// Int(±Inf)` which traps. The contract is that the function
+    /// returns the origin sentinel instead.
+    func test_zeroCellWidth_returnsOriginSentinel() {
+        let p = bufferPoint(
+            forView: CGPoint(x: 25, y: viewportH - 0.5),
+            cellWidth: 0,            // the guard under test
+            cellHeight: cellH,
+            viewportHeight: viewportH,
+            displayOffset: 0,
+            cols: cols,
+            rows: rows,
+            historySize: 0
+        )
+        XCTAssertEqual(p.line, 0)
+        XCTAssertEqual(p.col, 0)
+    }
+
+    func test_zeroCellHeight_returnsOriginSentinel() {
+        let p = bufferPoint(
+            forView: CGPoint(x: 25, y: viewportH - 0.5),
+            cellWidth: cellW,
+            cellHeight: 0,           // the guard under test
+            viewportHeight: viewportH,
+            displayOffset: 0,
+            cols: cols,
+            rows: rows,
+            historySize: 0
+        )
+        XCTAssertEqual(p.line, 0)
+        XCTAssertEqual(p.col, 0)
+    }
+
+    func test_nanCellWidth_returnsOriginSentinel() {
+        let p = bufferPoint(
+            forView: CGPoint(x: 25, y: viewportH - 0.5),
+            cellWidth: .nan,
+            cellHeight: cellH,
+            viewportHeight: viewportH,
+            displayOffset: 0,
+            cols: cols,
+            rows: rows,
+            historySize: 0
+        )
+        XCTAssertEqual(p.line, 0)
+        XCTAssertEqual(p.col, 0)
+    }
+
+    func test_negativeCellHeight_returnsOriginSentinel() {
+        // Negative cell dim is just as poisonous (Int division on
+        // negative double works but the sign flip would map the click
+        // to the wrong cell). Belt-and-braces: same sentinel.
+        let p = bufferPoint(
+            forView: CGPoint(x: 25, y: viewportH - 0.5),
+            cellWidth: cellW,
+            cellHeight: -cellH,
+            viewportHeight: viewportH,
+            displayOffset: 0,
+            cols: cols,
+            rows: rows,
+            historySize: 0
+        )
+        XCTAssertEqual(p.line, 0)
+        XCTAssertEqual(p.col, 0)
+    }
+
+    // MARK: - M-15: ScrollIndicator displayOffset > historySize is paper-tested
+    //
+    // (See ScrollIndicatorTests for the geometry; the math itself is a
+    // saturating clamp on `displayOffset / max(historySize, 1)`.)
 }

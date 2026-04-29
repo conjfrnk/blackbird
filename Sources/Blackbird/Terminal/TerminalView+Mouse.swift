@@ -226,6 +226,10 @@ extension TerminalView {
         let textAreaHeight = bounds.height - titlebarOnlyTopInset
         let clampedY = min(max(0, local.y), max(0, textAreaHeight))
         let clampedLocal = CGPoint(x: local.x, y: clampedY)
+        // M-17: historySize is required. When we have no snapshot
+        // (very-early drag before the first publish), pass 0 — the
+        // lower clamp degrades to "live grid only" which is exactly
+        // what's safe for that pre-snapshot window.
         return bufferPoint(
             forView: clampedLocal,
             cellWidth: metrics.cellWidth,
@@ -234,7 +238,7 @@ extension TerminalView {
             displayOffset: snap?.displayOffset ?? 0,
             cols: snap?.cols ?? 80,
             rows: snap?.rows ?? 24,
-            historySize: snap?.historySize
+            historySize: snap?.historySize ?? 0
         )
     }
 
@@ -548,6 +552,8 @@ extension TerminalView {
         let textAreaHeight = bounds.height - titlebarOnlyTopInset
         let clampedY = min(max(0, local.y), max(0, textAreaHeight))
         let clampedLocal = CGPoint(x: local.x, y: clampedY)
+        // M-17: historySize required; pass 0 when no snapshot is
+        // available yet (pre-first-publish click race).
         return bufferPoint(
             forView: clampedLocal,
             cellWidth: metrics.cellWidth,
@@ -556,7 +562,7 @@ extension TerminalView {
             displayOffset: snap?.displayOffset ?? 0,
             cols: snap?.cols ?? 80,
             rows: snap?.rows ?? 24,
-            historySize: snap?.historySize
+            historySize: snap?.historySize ?? 0
         )
     }
 
