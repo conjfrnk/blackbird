@@ -2950,17 +2950,19 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         bb.color_query_reply_window_start = std::time::Instant::now();
         bb.color_query_reply_window_count = 0;
 
-        // Audit H-3 (2026-04-29): four sibling state slots survived the
+        // Audit H-3 (2026-04-29): five sibling state slots survived the
         // pre-existing reset list, leaving these adversarial-state
         // primitives carryable across ⌘K:
         //
         //   1. `prompt_mark_rate` — pre-clear OSC 133 flood degraded
         //      post-clear prompt navigation for up to 1 s.
-        //   2. `modify_other_keys` — xterm modifyOtherKeys mode persisted
+        //   2. `osc7_rate` — pre-clear OSC 7 flood ate the 1-s ingest
+        //      budget, so post-clear `cd` events dropped silently.
+        //   3. `modify_other_keys` — xterm modifyOtherKeys mode persisted
         //      across the wipe.
-        //   3. `pty_write_rate` (Arc on the callback) — pre-clear OSC 11
+        //   4. `pty_write_rate` (Arc on the callback) — pre-clear OSC 11
         //      flood ate the 1-s PTY-write budget.
-        //   4. `uri_cstr_cache` / `uri_cache_bytes` — pre-clear OSC 8
+        //   5. `uri_cstr_cache` / `uri_cache_bytes` — pre-clear OSC 8
         //      cache flood blocked legitimate post-clear OSC 8 links
         //      until app relaunch (the 1 MiB byte-cap stayed exhausted).
         bb.prompt_mark_rate = PromptMarkRateState::new();
@@ -4868,7 +4870,7 @@ mod tests {
         }
     }
 
-    /// Audit H-3 (2026-04-29): `bb_term_clear_all` must reset the four
+    /// Audit H-3 (2026-04-29): `bb_term_clear_all` must reset the five
     /// state slots a pre-clear flood otherwise carries across ⌘K. This
     /// test mutates each slot via legitimate input, calls clear_all, and
     /// asserts the reset.
@@ -4908,6 +4910,18 @@ mod tests {
                 "precondition: pty_write_rate must have absorbed replies"
             );
 
+            // 4. osc7_rate (reviewer feedback 2026-04-29): drive a few
+            //    legitimate OSC 7 events so the window_count climbs.
+            //    Same flood-vs-clear shape as the other slots.
+            for _ in 0..5 {
+                let osc7 = b"\x1b]7;file:///tmp\x07";
+                bb_term_input(term, osc7.as_ptr(), osc7.len());
+            }
+            assert!(
+                (*term).osc7_rate.window_count > 0,
+                "precondition: osc7_rate must have absorbed cwd events"
+            );
+
             // Now clear_all.
             bb_term_clear_all(term);
 
@@ -4925,6 +4939,11 @@ mod tests {
                 (*(*term).callback.pty_write_rate.state.get()).window_count,
                 0,
                 "clear_all must reset pty_write_rate window_count"
+            );
+            assert_eq!(
+                (*term).osc7_rate.window_count,
+                0,
+                "clear_all must reset osc7_rate window_count"
             );
 
             bb_term_free(term);
