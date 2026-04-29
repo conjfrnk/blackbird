@@ -673,7 +673,7 @@ public final class PTY {
         }
         guard let pid = targetPID else { return nil }
         var info = proc_vnodepathinfo()
-        let infoSize = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        let infoSize = Int32(MemoryLayout<proc_vnodepathinfo>.stride)
         let bytes = proc_pidinfo(
             pid,
             PROC_PIDVNODEPATHINFO,
@@ -689,7 +689,19 @@ public final class PTY {
         // pvi_cdir into a blank or truncated path. Treat any short
         // return as failure rather than trusting a partially populated
         // struct. Sibling-symmetric with bsdProcessStartTime.
-        guard bytes == infoSize else { return nil }
+        //
+        // Distinguish the two failure modes: bytes <= 0 is a legit
+        // syscall failure (process exited, EPERM under sandbox, etc.)
+        // and is expected; a short positive return is a kernel-contract
+        // violation that today never fires but, if Darwin's behavior
+        // ever changes (kernel update, new sandbox profile), would
+        // otherwise silently break cwd inheritance with zero diagnostic
+        // signal. Log the short-read case so a future debugger sees it.
+        guard bytes > 0 else { return nil }
+        guard bytes == infoSize else {
+            Self.logger.error("foregroundWorkingDirectory: proc_pidinfo short read pid=\(pid, privacy: .public) got=\(bytes, privacy: .public) want=\(infoSize, privacy: .public) — kernel contract violation, returning nil")
+            return nil
+        }
         return withUnsafePointer(to: &info.pvi_cdir.vip_path) { tuple -> String? in
             tuple.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { cstr in
                 let s = String(cString: cstr)
