@@ -401,11 +401,59 @@ impl PtyWriteRateState {
     }
 }
 
-/// Strip C0 controls (U+0000..=U+001F), DEL (U+007F), and C1 controls
-/// (U+0080..=U+009F) from an OSC 0/1/2 window-title payload. Bug #18: a
-/// hostile stream sets the title to `before\x1b[31mafter`; downstream
-/// loggers / accessibility consumers misinterpret the embedded controls
-/// even though NSWindow sanitizes for display.
+/// True for Unicode scalars that NSWindow / NSTextField will render in a
+/// way the user can't see: bidi-control overrides, zero-width joiners,
+/// invisible tag-block / variation-selector codepoints, and the BOM.
+///
+/// Sibling of `contains_bidi_or_invisible`'s byte-shape sweep below — the
+/// scalar list MUST stay in lock-step with it. If you add a codepoint to
+/// one, add the matching UTF-8 byte range to the other (and vice versa).
+/// The two functions exist because their input shapes differ: this one
+/// takes a `char` (callers already validated UTF-8), while
+/// `contains_bidi_or_invisible` takes raw bytes (post-percent-decode
+/// payloads that may not yet be valid UTF-8).
+///
+/// Codepoints rejected (mirroring `contains_bidi_or_invisible`'s byte
+/// table, see its doc for the byte ranges):
+///   U+00AD (SHY), U+061C (ALM), U+180E (MVS),
+///   U+200B..=U+200F (ZWSP/ZWNJ/ZWJ/LRM/RLM),
+///   U+2028..=U+202E (LS/PS, LRE/RLE/PDF/LRO/RLO),
+///   U+2060 (WJ), U+2066..=U+2069 (LRI/RLI/FSI/PDI),
+///   U+FE00..=U+FE0F (variation selectors 1..16), U+FEFF (BOM/ZWNBSP),
+///   U+E0000..=U+E007F (tag block),
+///   U+E0100..=U+E01EF (variation selectors 17..256).
+fn is_bidi_or_invisible_scalar(c: char) -> bool {
+    let cp = c as u32;
+    matches!(cp,
+        0x00AD
+        | 0x061C
+        | 0x180E
+        | 0x200B..=0x200F
+        | 0x2028..=0x202E
+        | 0x2060
+        | 0x2066..=0x2069
+        | 0xFE00..=0xFE0F
+        | 0xFEFF
+        | 0xE0000..=0xE007F
+        | 0xE0100..=0xE01EF
+    )
+}
+
+/// Strip C0 controls (U+0000..=U+001F), DEL (U+007F), C1 controls
+/// (U+0080..=U+009F), AND bidi-control / invisible scalars from an OSC
+/// 0/1/2 window-title payload.
+///
+/// Bug #18: a hostile stream sets the title to `before\x1b[31mafter`;
+/// downstream loggers / accessibility consumers misinterpret the embedded
+/// controls even though NSWindow sanitizes for display.
+///
+/// Audit H-5 (2026-04-29): C0/C1 stripping isn't enough. A hostile shell
+/// can emit `\x1b]2;safe\u{202E}txt\x07` and AppKit's titlebar honours
+/// U+202E (RIGHT-TO-LEFT OVERRIDE), visually flipping the suffix to
+/// `txt.efas` while the underlying title stays whatever the shell said.
+/// The OSC 7 path got `contains_bidi_or_invisible` (rejection); the title
+/// path can't reject (that would drop the entire title), so we strip the
+/// offending scalars in-place and keep everything else.
 ///
 /// Codepoint-wise filter so C1 (UTF-8 `0xC2 0x80..=0xC2 0x9F`) drops by
 /// a single `c <= '\u{9F}'` check rather than a fragile byte sweep that
@@ -424,6 +472,9 @@ fn scrub_title_controls(s: &str) -> String {
         let is_del = cp == 0x7F;
         let is_c1 = (0x80..=0x9F).contains(&cp);
         if is_c0 || is_del || is_c1 {
+            continue;
+        }
+        if is_bidi_or_invisible_scalar(c) {
             continue;
         }
         out.push(c);
@@ -5353,6 +5404,67 @@ mod tests {
             title.1.as_slice(),
             b"ab",
             "C1 control U+0085 must be stripped from title; got {:?}",
+            String::from_utf8_lossy(&title.1)
+        );
+    }
+
+    /// Audit H-5 (2026-04-29): OSC 0/2 title bidi-spoof. A hostile shell
+    /// emits `\x1b]2;safe\u{202E}txt\x07` and AppKit honours U+202E
+    /// (RIGHT-TO-LEFT OVERRIDE), visually flipping the suffix. The strip
+    /// must remove ALL bidi-control / invisible scalars so what reaches
+    /// `window.title` is read-as-shown.
+    #[test]
+    fn scrub_title_controls_strips_bidi_and_invisible() {
+        // U+202E RLO between "safe" and "txt".
+        assert_eq!(scrub_title_controls("safe\u{202E}txt"), "safetxt");
+        // U+202D LRO.
+        assert_eq!(scrub_title_controls("a\u{202D}b"), "ab");
+        // U+2066 LRI, U+2069 PDI bracket pair.
+        assert_eq!(scrub_title_controls("a\u{2066}b\u{2069}c"), "abc");
+        // U+200E LRM, U+200F RLM.
+        assert_eq!(scrub_title_controls("\u{200E}a\u{200F}b"), "ab");
+        // U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ.
+        assert_eq!(
+            scrub_title_controls("a\u{200B}b\u{200C}c\u{200D}d"),
+            "abcd"
+        );
+        // U+FEFF BOM.
+        assert_eq!(scrub_title_controls("\u{FEFF}hello"), "hello");
+        // Variation selectors (U+FE0F is the emoji presentation selector;
+        // very common — but in the title path we strip it because it's an
+        // invisible payload-shape codepoint that can be abused for spoofing.
+        // The renderer never sees it from the title path; emoji titles
+        // collapse to the base codepoint).
+        assert_eq!(scrub_title_controls("a\u{FE0F}b"), "ab");
+        // Tag block (E0000..E007F).
+        assert_eq!(scrub_title_controls("a\u{E0041}b"), "ab");
+        // Non-bidi scalars stay put.
+        assert_eq!(scrub_title_controls("café 日本語"), "café 日本語");
+    }
+
+    /// Audit H-5 (integration): drive the canonical bidi-spoof attack
+    /// payload through the full input path. The Title event must contain
+    /// no bidi-control bytes (U+202E is `0xE2 0x80 0xAE`).
+    #[test]
+    fn osc_title_strips_bidi_overrides() {
+        // U+202E in UTF-8 is E2 80 AE.
+        let seq = b"\x1b]2;safe\xE2\x80\xAEtxt\x07";
+        let events = drive_events(seq);
+        let title = events
+            .iter()
+            .find(|(k, _)| *k == BBEventKind::Title as u32)
+            .expect("expected Title event");
+        assert_eq!(
+            title.1.as_slice(),
+            b"safetxt",
+            "U+202E must be stripped; got {:?}",
+            String::from_utf8_lossy(&title.1)
+        );
+        // Defense in depth: no bidi-control byte sequence reaches the
+        // listener even after stripping.
+        assert!(
+            !title.1.windows(3).any(|w| w == [0xE2, 0x80, 0xAE]),
+            "Title payload must not contain U+202E byte sequence; got {:?}",
             String::from_utf8_lossy(&title.1)
         );
     }
