@@ -413,6 +413,12 @@ void bb_term_free(struct BBTerm *term);
  *   at least `len` bytes. Passing `bytes = null, len = 0` is safe (no-op).
  * - No two threads may call any `bb_term_*` function concurrently on the same
  *   `term`; interior state is mutated and `Term`/`Processor` are not `Sync`.
+ * - `len` must be `<= isize::MAX as usize`. Larger values are rejected up
+ *   front (no input processed) with a Fatal event dispatched — defense-in-
+ *   depth against `slice::from_raw_parts`'s safety precondition (audit
+ *   L-11). Swift's BBTerm wrapper can't construct such an input, but C-ABI
+ *   consumers (fuzzers, native bindings, pre-Swift-conversion test harnesses)
+ *   can.
  *
  * Panics inside this function are caught by `catch_unwind` and delivered as a
  * `BBEventKind::Fatal` event to the registered callback. The function returns

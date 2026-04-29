@@ -1646,6 +1646,12 @@ pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
 ///   at least `len` bytes. Passing `bytes = null, len = 0` is safe (no-op).
 /// - No two threads may call any `bb_term_*` function concurrently on the same
 ///   `term`; interior state is mutated and `Term`/`Processor` are not `Sync`.
+/// - `len` must be `<= isize::MAX as usize`. Larger values are rejected up
+///   front (no input processed) with a Fatal event dispatched — defense-in-
+///   depth against `slice::from_raw_parts`'s safety precondition (audit
+///   L-11). Swift's BBTerm wrapper can't construct such an input, but C-ABI
+///   consumers (fuzzers, native bindings, pre-Swift-conversion test harnesses)
+///   can.
 ///
 /// Panics inside this function are caught by `catch_unwind` and delivered as a
 /// `BBEventKind::Fatal` event to the registered callback. The function returns
@@ -1655,6 +1661,20 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
     guard_with_term(term, (), || {
         if term.is_null() || len == 0 || bytes.is_null() {
             return;
+        }
+        // Audit L-11 (2026-04-29): defense-in-depth against
+        // `slice::from_raw_parts`'s safety precondition that the slice
+        // length fit in an isize (`len * mem::size_of::<u8>()` must be
+        // representable as `isize`). The Swift wrapper can't reach this
+        // path because Swift `Data.count` is `Int = isize`; a C ABI
+        // consumer (fuzzer, native binding) can. `panic!` here is
+        // caught by `guard_with_term` and surfaced as a Fatal event so
+        // the host learns about the contract violation instead of
+        // silently UB'ing.
+        if len > isize::MAX as usize {
+            panic!(
+                "bb_term_input: len {len} exceeds isize::MAX (slice::from_raw_parts precondition)"
+            );
         }
         let bb = &mut *term;
         let slice = std::slice::from_raw_parts(bytes, len);
@@ -4199,6 +4219,63 @@ mod tests {
             assert!(
                 fatal.unwrap().1.contains("intentional test panic"),
                 "fatal msg should contain panic message: {:?}",
+                fatal
+            );
+            drop(guard_);
+
+            bb_term_free(term);
+            Arc::from_raw(fired_ptr as *const Mutex<Vec<(u32, String)>>);
+        }
+    }
+
+    /// Audit L-11 (2026-04-29): `bb_term_input` must reject `len >
+    /// isize::MAX` BEFORE `slice::from_raw_parts` is reached. Defense-in-
+    /// depth — the Swift wrapper can't construct such an input, but a
+    /// C ABI consumer (fuzzer, native binding) can. The contract
+    /// violation surfaces as a Fatal event so the host learns about it.
+    ///
+    /// Memory discipline: we pass a tiny stack buffer + an oversized
+    /// `len`. The check fires BEFORE the unsafe slice construction, so
+    /// the bytes pointer is never read. We never allocate `isize::MAX`.
+    #[test]
+    fn input_len_above_isize_max_dispatches_fatal() {
+        use std::os::raw::c_void;
+        use std::sync::{Arc, Mutex};
+
+        let fired: Arc<Mutex<Vec<(u32, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let fired_ptr = Arc::into_raw(fired.clone()) as *mut c_void;
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let fired = &*(ctx as *const Mutex<Vec<(u32, String)>>);
+            let msg = if ev.payload.is_null() || ev.len == 0 {
+                String::new()
+            } else {
+                let slice = std::slice::from_raw_parts(ev.payload, ev.len);
+                String::from_utf8_lossy(slice).into_owned()
+            };
+            fired.lock().unwrap().push((ev.kind as u32, msg));
+        }
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            bb_term_set_event_cb(term, Some(cb), fired_ptr);
+
+            // Tiny dummy buffer — never read by the FFI because the
+            // length check panics before from_raw_parts.
+            let dummy = [0u8; 4];
+            let bad_len = (isize::MAX as usize).wrapping_add(1);
+            bb_term_input(term, dummy.as_ptr(), bad_len);
+
+            let guard_ = fired.lock().unwrap();
+            let fatal = guard_.iter().find(|(k, _)| *k == BBEventKind::Fatal as u32);
+            assert!(
+                fatal.is_some(),
+                "expected Fatal event for oversized len, got {:?}",
+                *guard_
+            );
+            assert!(
+                fatal.unwrap().1.contains("isize::MAX"),
+                "fatal msg should mention the cap; got {:?}",
                 fatal
             );
             drop(guard_);
