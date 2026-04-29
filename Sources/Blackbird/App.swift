@@ -149,8 +149,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let installWatchdog = (hangEnv == "1")
         #endif
         if installWatchdog { MainThreadWatchdog.install() }
+        // `installMainMenu` builds the full menu tree (including the
+        // conditional Sparkle "Check for Updates…" item via
+        // `insertSparkleMenuItem(into:)`) BEFORE publishing it as the
+        // app's main menu. Earlier this used to publish the menu first,
+        // then mutate it to insert Sparkle — leaving a one-tick window
+        // where a user mid-⌘ at launch could see an inconsistent menu
+        // shape. (audit L-27)
         installMainMenu()
-        installSparkleMenuItem()
         // Live-toggle Sparkle's auto-check when the pref changes, so the
         // Settings > Updates toggle takes effect without relaunching. No-op
         // when the updater isn't configured (dev builds); the Preferences
@@ -195,22 +201,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.showWindow(nil)
     }
 
-    /// Inserts a "Check for Updates…" item into the app submenu right after
-    /// "About Blackbird". Target is the Sparkle controller so the standard
-    /// `checkForUpdates(_:)` selector is dispatched correctly. Kept separate
-    /// from `buildAppMenu()` because `updaterController` is lazy and tests
-    /// shouldn't trigger it.
-    private func installSparkleMenuItem() {
+    /// Inserts a "Check for Updates…" item into the supplied app submenu
+    /// right after "About Blackbird". Target is the Sparkle controller so
+    /// the standard `checkForUpdates(_:)` selector is dispatched correctly.
+    /// Kept separate from `buildAppMenu()` because `updaterController` is
+    /// lazy and tests shouldn't trigger it.
+    ///
+    /// Called from `installMainMenu` BEFORE the menu is published as
+    /// `NSApp.mainMenu`, so users mid-⌘ at launch can never observe a
+    /// half-built menu shape. (audit L-27)
+    func insertSparkleMenuItem(into appSubmenu: NSMenu) {
         // Only show the menu entry when the updater is actually usable. A
         // visible "Check for Updates…" that pops an "Unable to check" alert
         // every time is worse than no menu item at all — users either click
         // it expecting a check (and get an error) or avoid it for fear of
         // hitting that error again. Hide until we ship real appcast config.
         guard let controller = updaterController else { return }
-        guard
-            let firstItem = NSApp.mainMenu?.items.first,
-            let appSubmenu = firstItem.submenu
-        else { return }
         let checkItem = NSMenuItem(
             title: "Check for Updates…",
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
@@ -374,11 +380,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Selects a numbered tab (⌘1–⌘9). Tag encodes the 1-based index.
-    @objc func selectTab(_ sender: NSMenuItem) {
+    ///
+    /// Sender is typed `Any?` to match the other AppDelegate selectors
+    /// (`closeWindow`, `newWindow`, `newWindowForTab`, `openSettings`).
+    /// A typed-Swift `NSMenuItem` parameter would still emit an @objc thunk
+    /// that does an unconditional cast — a future custom-binding caller
+    /// (e.g., a "record keyboard shortcut" feature) passing a non-NSMenuItem
+    /// sender would trap. Cast inside the body and guard. (audit L-26)
+    @objc func selectTab(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
         guard let window = NSApp.keyWindow else { return }
         let tabs = window.tabbedWindows ?? [window]
-        let index = sender.tag - 1
-        guard index < tabs.count else { return }
+        let index = item.tag - 1
+        guard index >= 0, index < tabs.count else { return }
         tabs[index].makeKeyAndOrderFront(nil)
     }
 
@@ -407,4 +421,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+}
+
+// MARK: - NSMenuItemValidation (audit H-9)
+
+/// `selectTab(_:)` (⌘1-9) and `closeWindow(_:)` (⌘⇧W) are wired to
+/// AppDelegate selectors with `target=nil`. AppKit walks the responder
+/// chain and reaches AppDelegate regardless of which window class is key
+/// — Settings, About, a Sparkle alert, etc. Without a validator, ⌘5
+/// pressed while Settings is key would route to the AppDelegate handler,
+/// snapshot `NSApp.keyWindow` (the Settings window), and either no-op
+/// confusingly or attempt to walk a non-existent tab group. ⌘⇧W is worse:
+/// `closeWindow` flips the static `MainWindowController.bypassCloseConfirm`
+/// for the duration of the call; any nested-modal that runs between flip
+/// and reset (a future "unsaved changes" alert in the Settings close path)
+/// would see the leaked flag and silently bypass per-tab close confirmation
+/// in any MainWindowController whose `windowShouldClose` fires in nested
+/// mode.
+///
+/// Gate both selectors on (a) keyWindow exists, (b) it belongs to a
+/// MainWindowController we own, and for `selectTab` (c) the tag falls
+/// inside the current tab group. Other selectors fall through with
+/// `return true` so we don't accidentally mask AppKit's default validation
+/// for items we don't introduce.
+extension AppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(selectTab(_:)):
+            guard let win = NSApp.keyWindow,
+                  controllers.contains(where: { $0.window === win }) else {
+                return false
+            }
+            let tabs = win.tabbedWindows ?? [win]
+            return item.tag >= 1 && item.tag <= tabs.count
+        case #selector(closeWindow(_:)):
+            guard let win = NSApp.keyWindow else { return false }
+            return controllers.contains(where: { $0.window === win })
+        default:
+            return true
+        }
+    }
 }

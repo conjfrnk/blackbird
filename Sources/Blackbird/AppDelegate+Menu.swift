@@ -25,7 +25,15 @@ extension AppDelegate {
 
         let appItem = NSMenuItem()
         main.addItem(appItem)
-        appItem.submenu = buildAppMenu()
+        let appSubmenu = buildAppMenu()
+        // Insert the conditional "Check for Updates…" item BEFORE we
+        // publish `mainMenu`. Mutating the menu after publish (the prior
+        // sequence — `installMainMenu()` then `installSparkleMenuItem()`)
+        // briefly exposed a half-built App submenu shape to any user
+        // who happened to be mid-⌘ when the app finished launching.
+        // (audit L-27)
+        insertSparkleMenuItem(into: appSubmenu)
+        appItem.submenu = appSubmenu
 
         let fileItem = NSMenuItem()
         main.addItem(fileItem)
