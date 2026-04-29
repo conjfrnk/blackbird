@@ -873,7 +873,15 @@ public final class TerminalSession: ObservableObject {
                 self.send(data)
                 return
             }
-            DispatchQueue.main.async {
+            // M-1: re-establish [weak self] for the main hop. The outer
+            // closure's `guard let self else { return }` re-bound `self`
+            // strongly inside the closure's lexical scope, and that strong
+            // ref was implicitly captured here — every queued title /
+            // bell / OSC 52 dispatch held a strong ref to the session
+            // until main drained. Mirrors the M-4 fix at the inner
+            // coreQueue.async site for `feed`.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 switch event {
                 case .title(let t):
                     // Route through applyOscTitle so a user-set override
