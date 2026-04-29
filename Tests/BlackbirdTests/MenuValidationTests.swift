@@ -185,15 +185,26 @@ final class MenuValidationTests: XCTestCase {
     /// ~50 KB. Time: <10 ms.
     ///
     /// Audit H-9 / M-19: ⌘⇧W routes to AppDelegate.closeWindow regardless
-    /// of which window class is key. The pre-H-9 leak shape: closeWindow
-    /// flipped `MainWindowController.bypassCloseConfirm = true` for the
-    /// duration of the call (with `defer { …= false }`), so a nested-
-    /// modal sandwiched between flip and reset would observe the leaked
-    /// flag in another controller's `windowShouldClose`. The H-9 fix
-    /// gates closeWindow on `ownedKeyWindow()` BEFORE the flip, so an
-    /// invocation with no Blackbird-owned key window must leave
-    /// `bypassCloseConfirm` untouched (== false on entry → false on
-    /// exit).
+    /// of which window class is key. The H-9 fix gates closeWindow on
+    /// `ownedKeyWindow()` BEFORE the `bypassCloseConfirm` flip, so an
+    /// invocation with no Blackbird-owned key window must short-circuit
+    /// without ever flipping the flag.
+    ///
+    /// Coverage scope (be honest about what this catches): this test
+    /// asserts the validator returns false for non-Blackbird key windows
+    /// AND that no static state leaks past dispatch return — i.e. the flag
+    /// reads false BOTH before and AFTER `delegate.perform(...)` returns.
+    /// That catches a regression where the validator stops gating, OR
+    /// where a flag set before the early return doesn't get reset.
+    ///
+    /// What this test does NOT cover: the original leak SHAPE — a
+    /// nested-modal observer that snapshots `bypassCloseConfirm`
+    /// MID-call (between the flip and the `defer` reset) — is not
+    /// exercised here. `defer { …= false }` runs at function exit before
+    /// dispatch returns to the test, so a leak that's only observable
+    /// inside a nested modal would slip past. Capturing the mid-call
+    /// shape requires a stub MainWindowController with a synthetic
+    /// `windowShouldClose` observer; that's deferred (per audit memo).
     func test_closeWindow_validation_nonBlackbirdKeyWindow_leavesBypassFlagFalse() {
         // Establish baseline: bypassCloseConfirm starts false (and we
         // want it false after this test runs, so other tests in the same
@@ -235,8 +246,10 @@ final class MenuValidationTests: XCTestCase {
 
     // MARK: - selectTab dispatch with no controller registry
 
-    /// Pre-flight: bare delegate. No controllers in the registry. Memory:
-    /// ~10 KB. Time: <5 ms.
+    /// Pre-flight: stage one non-Blackbird NSWindow as keyWindow. Memory:
+    /// ~50 KB. Time: <100 ms (one runloop service tick to let makeKey
+    /// land). Skips if xctest host refuses to honour makeKeyAndOrderFront
+    /// (the assertion would be vacuous otherwise — see body).
     ///
     /// Audit H-9 / M-19: with no Blackbird-owned windows alive,
     /// `selectTab(_:)` must NOT change which window is key. The H-9
@@ -244,29 +257,55 @@ final class MenuValidationTests: XCTestCase {
     /// `tabs[index].makeKeyAndOrderFront`, so a runaway dispatch can't
     /// promote an arbitrary window to key. Pin the post-condition: the
     /// keyWindow before equals the keyWindow after.
-    func test_selectTab_dispatch_noControllers_keyWindowUnchanged() {
+    ///
+    /// Why we stage: without a concrete keyWindow before dispatch,
+    /// `NSApp.keyWindow` is nil and `nil === nil` passes vacuously even
+    /// if H-9 were reverted. Staging a non-Blackbird key window gives us
+    /// a non-nil identity to compare. If staging fails (xctest host
+    /// won't honour makeKey), the test would be vacuous either way —
+    /// XCTSkip rather than pretend.
+    func test_selectTab_dispatch_noControllers_keyWindowUnchanged() throws {
+        let stagedWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        stagedWindow.title = "non-blackbird-staged"
+        stagedWindow.makeKeyAndOrderFront(nil)
+        defer { stagedWindow.close() }
+
+        // Allow one runloop service tick for makeKey to actually take
+        // effect before we read NSApp.keyWindow.
+        let exp = expectation(description: "makeKey-settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { exp.fulfill() }
+        wait(for: [exp], timeout: 1.0)
+
+        guard let beforeKey = NSApp.keyWindow else {
+            throw XCTSkip(
+                "xctest host did not promote staged NSWindow to keyWindow; "
+                    + "without a non-nil pre-state the identity check is "
+                    + "vacuous (`nil === nil` passes even on H-9 revert)."
+            )
+        }
+
         let delegate = freshAppDelegate()
         let item = makeMenuItem(action: #selector(AppDelegate.selectTab(_:)), tag: 1)
-
-        // Snapshot keyWindow identity. May be nil in xctest host.
-        let beforeKey = NSApp.keyWindow
-
         delegate.perform(#selector(AppDelegate.selectTab(_:)), with: item)
 
         let afterKey = NSApp.keyWindow
-        // Identity comparison via ObjectIdentifier-on-AnyObject: nil-on-
-        // nil compares equal; nil-on-some compares not-equal.
         XCTAssertTrue(
             beforeKey === afterKey,
-            "selectTab with no controllers must not change keyWindow "
-                + "(audit H-9). Before=\(String(describing: beforeKey)) "
+            "selectTab with no controllers must not promote a different "
+                + "window to key (audit H-9). Before=\(String(describing: beforeKey)) "
                 + "after=\(String(describing: afterKey))."
         )
     }
 
     // MARK: - selectTab dispatch with negative + out-of-range tags
 
-    /// Pre-flight: bare delegate. Memory: ~10 KB. Time: <5 ms.
+    /// Pre-flight: stage one non-Blackbird NSWindow as keyWindow. Memory:
+    /// ~50 KB. Time: <100 ms. Skips if staging fails (see sibling test).
     ///
     /// Audit H-9 / M-19: out-of-range tags (`<= 0`, `> tabs.count`, or
     /// `Int.max`) must NOT promote an arbitrary window to key. The H-9
@@ -275,19 +314,42 @@ final class MenuValidationTests: XCTestCase {
     /// menu item disables out-of-range tags before they ever reach
     /// dispatch. Pin the dispatch-side post-condition: keyWindow
     /// identity stable across each out-of-range invocation.
-    func test_selectTab_dispatch_outOfRangeTags_keyWindowUnchanged() {
+    ///
+    /// Staging a non-Blackbird key window before dispatch turns this from
+    /// a vacuous `nil === nil` check into a real regression detector.
+    func test_selectTab_dispatch_outOfRangeTags_keyWindowUnchanged() throws {
+        let stagedWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        stagedWindow.title = "non-blackbird-staged-oor"
+        stagedWindow.makeKeyAndOrderFront(nil)
+        defer { stagedWindow.close() }
+
+        let exp = expectation(description: "makeKey-settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { exp.fulfill() }
+        wait(for: [exp], timeout: 1.0)
+
+        guard let beforeKey = NSApp.keyWindow else {
+            throw XCTSkip(
+                "xctest host did not promote staged NSWindow to keyWindow; "
+                    + "skipping rather than passing vacuously."
+            )
+        }
+
         let delegate = freshAppDelegate()
         let selector = #selector(AppDelegate.selectTab(_:))
 
         for tag in [-1, 0, 99, Int.max] {
-            let beforeKey = NSApp.keyWindow
             let item = makeMenuItem(action: selector, tag: tag)
             delegate.perform(selector, with: item)
             let afterKey = NSApp.keyWindow
             XCTAssertTrue(
                 beforeKey === afterKey,
-                "selectTab with out-of-range tag \(tag) must not change "
-                    + "keyWindow (audit H-9). Before=\(String(describing: beforeKey)) "
+                "selectTab with out-of-range tag \(tag) must not promote a "
+                    + "different window to key (audit H-9). Before=\(String(describing: beforeKey)) "
                     + "after=\(String(describing: afterKey))."
             )
         }

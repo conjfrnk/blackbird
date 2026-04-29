@@ -60,58 +60,66 @@ final class MainThreadWatchdogTests: XCTestCase {
                        "smoke: process state stable across 5x install()")
     }
 
-    // MARK: - Install with bad parameters
+    // MARK: - Pure-function clamp (audit M-22)
 
-    /// Pre-flight: pure-logic. Memory: ~0. Time: <10 ms.
+    /// Pre-flight: pure-logic. Memory: ~0. Time: <1 ms. No threads spawned,
+    /// no `install()` called.
     ///
     /// Audit M-22: `install(pingInterval: 0.0)` previously armed a tight-
     /// spinning watchdog thread (`Thread.sleep(forTimeInterval: 0.0)`
     /// returns immediately on Darwin → busy-wait at .utility QoS pegs an
-    /// efficiency core; matching `Timer(timeInterval: 0.0)` on main fires
-    /// every runloop service iteration). The fix clamps both parameters
-    /// to a safety floor — `minPingInterval = 0.01` and `minHang
-    /// Threshold = 0.05`. Observe the clamp directly: after install with
-    /// `pingInterval: 0.0`, `installedPingInterval` MUST be at or above
-    /// `minPingInterval`.
+    /// efficiency core). The fix routes through `_clamp(...)`, a pure
+    /// function that floors `pingInterval` to `minPingInterval`.
     ///
-    /// Note: `installLock` deduplicates, so this assertion is only
-    /// meaningful on the FIRST install per process. The other tests in
-    /// this file (which run before this one in lexicographic order in
-    /// most XCTest configurations) may have already armed the watchdog
-    /// with different parameters; we tolerate that by asserting "the
-    /// recorded interval — whatever was first installed — is at the
-    /// floor or above" rather than "exactly the safe floor for this
-    /// call's input."
-    func test_install_withZeroPingInterval_isClampedToSafetyFloor() {
-        MainThreadWatchdog.install(hangThreshold: 60.0, pingInterval: 0.0)
-
-        guard let armed = MainThreadWatchdog.installedPingInterval else {
-            return XCTFail("install must record installedPingInterval after first call")
-        }
-        XCTAssertGreaterThanOrEqual(
-            armed,
+    /// We exercise the pure clamp directly rather than `install(...)`
+    /// because `install()` is idempotent — the FIRST install per process
+    /// wins, so an `install`-based test passes vacuously when other
+    /// tests have already armed the watchdog with safe values. Reverting
+    /// the clamp at the call site would NOT trip an `install`-based
+    /// assertion, but it WILL trip this pure-function assertion
+    /// unconditionally.
+    func test_clamp_zeroPing_clampsToFloor() {
+        let result = MainThreadWatchdog._clamp(hangThreshold: 1.0, pingInterval: 0.0)
+        XCTAssertEqual(
+            result.pingInterval,
             MainThreadWatchdog.minPingInterval,
             "ping=0.0 must clamp to minPingInterval (\(MainThreadWatchdog.minPingInterval)s) — "
                 + "M-22 fix prevents tight-spinning watchdog thread"
         )
     }
 
-    /// Pre-flight: pure-logic. Memory: ~0. Time: <10 ms.
+    /// Pre-flight: pure-logic. Memory: ~0. Time: <1 ms.
     ///
     /// Audit M-22 sibling: a negative threshold would let any heartbeat
     /// age (always positive) >= threshold, producing a hang capture on
     /// every tick. Verify the threshold floor is observed.
-    func test_install_withNegativeThreshold_isClampedToSafetyFloor() {
-        MainThreadWatchdog.install(hangThreshold: -1.0, pingInterval: 0.1)
-
-        guard let armed = MainThreadWatchdog.installedHangThreshold else {
-            return XCTFail("install must record installedHangThreshold after first call")
-        }
-        XCTAssertGreaterThanOrEqual(
-            armed,
+    func test_clamp_negativeThreshold_clampsToFloor() {
+        let result = MainThreadWatchdog._clamp(hangThreshold: -1.0, pingInterval: 0.1)
+        XCTAssertEqual(
+            result.hangThreshold,
             MainThreadWatchdog.minHangThreshold,
             "hangThreshold=-1.0 must clamp to minHangThreshold (\(MainThreadWatchdog.minHangThreshold)s) — "
                 + "M-22 fix prevents fork-bomb of /usr/bin/sample on negative threshold"
+        )
+    }
+
+    /// Pre-flight: pure-logic. Memory: ~0. Time: <1 ms.
+    ///
+    /// NaN inputs must NOT propagate to the live timer/thread. `_clamp`
+    /// short-circuits via `isFinite` — Swift's `max(_:_:)` with NaN is
+    /// argument-order-dependent (`max(0.05, .nan) == 0.05` but
+    /// `max(.nan, 0.05) == .nan`), so we don't rely on it.
+    func test_clamp_NaN_clampsToFloor() {
+        let result = MainThreadWatchdog._clamp(hangThreshold: .nan, pingInterval: .nan)
+        XCTAssertEqual(
+            result.hangThreshold,
+            MainThreadWatchdog.minHangThreshold,
+            "NaN hangThreshold must clamp to minHangThreshold via isFinite short-circuit"
+        )
+        XCTAssertEqual(
+            result.pingInterval,
+            MainThreadWatchdog.minPingInterval,
+            "NaN pingInterval must clamp to minPingInterval via isFinite short-circuit"
         )
     }
 
