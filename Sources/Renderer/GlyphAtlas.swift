@@ -282,8 +282,16 @@ public final class GlyphAtlas {
             // landed initially. One flush per episode.
             saturationHits += 1
             if saturationHits == 1 || saturationHits % 1000 == 0 {
+                // Capture the triggering glyph + style flags so a field
+                // report can distinguish wide-glyph saturation (CJK
+                // workload outgrew 4096 slots) from style-explosion
+                // (bold/italic triplication of ASCII keeping every
+                // narrow scalar in three slots). Different fixes:
+                // bigger atlas vs smarter style coalescing. Orphan
+                // slot count surfaces wide-alignment fragmentation
+                // pressure independently. All fields PII-free.
                 Self.logger.log(
-                    "atlas saturated at \(self.capacityGlyphs, privacy: .public); flushed & rebuilding (hit #\(self.saturationHits, privacy: .public))"
+                    "atlas saturated at \(self.capacityGlyphs, privacy: .public); flush hit #\(self.saturationHits, privacy: .public); trigger U+\(String(format: "%04X", scalar.value), privacy: .public) wide=\(wide ? 1 : 0, privacy: .public) bold=\(style.bold ? 1 : 0, privacy: .public) italic=\(style.italic ? 1 : 0, privacy: .public); orphan slots=\(self.freeNarrowSlots.count, privacy: .public)"
                 )
             }
             byKey.removeAll(keepingCapacity: true)
