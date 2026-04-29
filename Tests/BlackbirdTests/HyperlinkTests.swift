@@ -328,13 +328,15 @@ final class HyperlinkTests: XCTestCase {
     }
 
     /// Audit pass-2 H-2. Cyrillic а ("аpple") in the anchor's mailto
-    /// domain is the IDN homograph variant — pre-fix, `hostLooksLikeIDN`
+    /// domain on a different-domain href. Pre-fix, `hostLooksLikeIDN`
     /// only ran for http(s)/ftp; `isMailtoSafe` accepted any domain.
-    /// Now the anchor parses with non-ASCII, the divergence detector
-    /// flags the mismatch because the href is `evil.com`. (Even if the
-    /// anchor were the same Cyrillic-aliased domain, `isAllowed` would
-    /// reject the click separately via the extended IDN check.)
-    func testAnchorDivergence_mailtoIDNHomographFlagged() {
+    /// Pass-3 honesty rename (item 3): this test passes because of the
+    /// *domain mismatch* (`evil.com` vs `аpple.com`), not because of
+    /// the IDN substitution per se — the divergence detector would
+    /// flag any unrelated domain pair. The new
+    /// `testAnchorDivergence_mailtoIDNAnchorOnSameDomainFlagged` pins
+    /// the IDN-on-same-domain axis specifically.
+    func testAnchorDivergence_mailtoDifferentDomainFlagged() {
         let url = URL(string: "mailto:attacker@evil.com")!
         // U+0430 (Cyrillic а) replaces U+0061 in "apple"
         let cyrillicAnchor = "mailto:user@\u{0430}pple.com"
@@ -344,6 +346,24 @@ final class HyperlinkTests: XCTestCase {
                 url: url
             ),
             "mailto IDN-look-alike anchor vs unrelated href must flag"
+        )
+    }
+
+    /// Audit pass-3 (item 3). Pin that the divergence path detects an
+    /// IDN substitution on the anchor SIDE when the href is the
+    /// legitimate ASCII domain. Anchor visually claims `apple.com` but
+    /// uses Cyrillic а; href is real apple.com. The detector flags the
+    /// domain string mismatch (Cyrillic-аpple.com vs apple.com) — this
+    /// pins that the IDN substitution is caught by the divergence
+    /// detector, not just by `isAllowed`'s IDN gate on the href side.
+    func testAnchorDivergence_mailtoIDNAnchorOnSameDomainFlagged() {
+        let url = URL(string: "mailto:user@apple.com")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "mailto:user@\u{0430}pple.com",  // Cyrillic а
+                url: url
+            ),
+            "IDN-look-alike anchor with same legitimate href must flag"
         )
     }
 
@@ -667,6 +687,121 @@ final class HyperlinkTests: XCTestCase {
         XCTAssertNil(
             resolver.osc8URL(row: 0, col: 0),
             "javascript: OSC 8 URLs must not surface through the click resolver"
+        )
+    }
+
+    // MARK: - Pass-3 hardening
+
+    /// Pass-3 item 1 (CRITICAL). A URL like
+    /// `mailto:user@apple.com%08evil.com` round-trips through
+    /// Foundation: `absoluteString` keeps the `%08` while `path`
+    /// silently drops it, so `mailtoDomain` reads `apple.comevil.com`
+    /// and any subsequent comparison sees the wrong domain. Mail.app
+    /// may then re-decode and bounce the click anywhere from
+    /// `apple.com` to `evil.com`. `isAllowed` must reject any URL
+    /// whose `absoluteString` contains percent-encoded C0 controls or
+    /// DEL — there is no benign reason to embed a control byte in an
+    /// OSC 8 hyperlink.
+    func testIsAllowed_rejectsPercentEncodedControlBytes() {
+        for byte: UInt8 in [0x00, 0x07, 0x08, 0x09, 0x0A, 0x0D, 0x1B, 0x7F] {
+            let mailto = "mailto:user@apple.com%\(String(format: "%02X", byte))evil.com"
+            let https  = "https://apple.com/path%\(String(format: "%02X", byte))evil"
+            if let u = URL(string: mailto) {
+                XCTAssertFalse(
+                    OSC8URLPolicy.isAllowed(u),
+                    "mailto with %\(String(format: "%02X", byte)) must be rejected"
+                )
+            }
+            if let u = URL(string: https) {
+                XCTAssertFalse(
+                    OSC8URLPolicy.isAllowed(u),
+                    "https with %\(String(format: "%02X", byte)) must be rejected"
+                )
+            }
+        }
+    }
+
+    /// Pass-3 item 2 (HIGH). Default-port confusion: previously the
+    /// host comparison ignored ports, so `https://example.com` looked
+    /// identical to `https://example.com:8443` and a hostile remote
+    /// could front-end an attacker-controlled port behind an apex
+    /// anchor. Compare (host, effectivePort) tuples; only divergent
+    /// effective ports flag.
+    func testAnchorDivergence_nondefaultPortFlagged() {
+        let url = URL(string: "https://example.com:8443/")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://example.com/",
+                url: url
+            ),
+            "anchor omitting non-default port must trip divergence"
+        )
+    }
+
+    /// Pass-3 item 2 (HIGH). The other half of the port equivalence
+    /// rule: an explicit default-port (`:443` for https) must compare
+    /// equal to an omitted port. Otherwise we'd over-block legitimate
+    /// links that happen to spell out `:443`.
+    func testAnchorDivergence_defaultPortExplicitNotFlagged() {
+        let url = URL(string: "https://example.com:443/")!
+        XCTAssertFalse(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://example.com/",
+                url: url
+            ),
+            "explicit default port must equal omitted"
+        )
+    }
+
+    /// Pass-3 item 4 (MEDIUM). The whitespace-walk candidate scanner
+    /// keeps trailing punctuation, so `visit https://apple.com,
+    /// please` produced the candidate `https://apple.com,` —
+    /// Foundation accepted it with host `apple.com,` and divergence
+    /// fired on a legitimate match. Trailing punctuation must be
+    /// stripped before parsing.
+    func testAnchorDivergence_trailingPunctuationStripped() {
+        let url = URL(string: "https://apple.com/")!
+        XCTAssertFalse(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "visit https://apple.com, please",
+                url: url
+            ),
+            "trailing comma in anchor must not trigger false-positive divergence"
+        )
+    }
+
+    /// Pass-3 item 6 (MEDIUM). RFC 6068 multi-recipient mailto
+    /// (`mailto:user@safe.com,b@evil.com`) used to silently pick the
+    /// last `@`-separated segment via `lastIndex(of:)`, attributing
+    /// the URL to evil.com without telling anyone. There is no honest
+    /// "canonical" domain for a multi-recipient mailto — fail closed.
+    func testMailto_multiAtFailsClosed() {
+        guard let u = URL(string: "mailto:user@apple.com,b@evil.com") else { return }
+        XCTAssertFalse(
+            OSC8URLPolicy.isAllowed(u),
+            "multi-@ mailto must be rejected (cannot determine canonical domain)"
+        )
+    }
+
+    /// Pass-3 item 8 (MEDIUM). KNOWN LIMITATION: Foundation's
+    /// `URL.host` doesn't normalise IPv6 long-form vs short-form, so
+    /// the divergence detector sees them as different hosts and
+    /// flags an over-broad mismatch. Security-correct (over-blocks
+    /// rather than under-blocks); pinned here so any future "fix"
+    /// has to consciously update this comment instead of accidentally
+    /// changing the behaviour.
+    ///
+    /// If this test starts FAILING, IPv6 normalization has been
+    /// added — confirm the new behavior is intentional and update
+    /// this comment.
+    func testAnchorDivergence_ipv6LongVsShortFormCurrentlyDiverges() {
+        let url = URL(string: "https://[2001:db8::1]/")!
+        XCTAssertTrue(
+            OSC8URLPolicy.anchorDivergesFromHost(
+                anchorText: "https://[2001:0db8:0000:0000:0000:0000:0000:0001]/",
+                url: url
+            ),
+            "IPv6 long-form vs short-form currently diverges (Foundation does not normalise)"
         )
     }
 
