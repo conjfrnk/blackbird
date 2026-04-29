@@ -1183,7 +1183,8 @@ pub enum BBPromptMarkKind {
 }
 
 /// True when `bytes` contains any UTF-8 sequence for a Unicode bidi-
-/// control / zero-width / invisible-payload codepoint. Symmetric with
+/// control / zero-width / invisible-payload codepoint, OR when `bytes`
+/// is not valid UTF-8 at all (caller-policy: refuse). Symmetric with
 /// the Swift paste sanitizer's `stripBidiOverrides` byte map.
 ///
 /// Used by `handle_osc7` to refuse cwd paths that would visually
@@ -1194,80 +1195,26 @@ pub enum BBPromptMarkKind {
 /// shell actually said. The defense lives at the parse boundary so
 /// EVERY downstream consumer of the path benefits.
 ///
-/// Codepoints rejected (UTF-8 byte ranges):
+/// Reviewer feedback (2026-04-29): the previous implementation was a
+/// hand-rolled UTF-8 byte sweep that duplicated the codepoint list in
+/// `is_bidi_or_invisible_scalar`. Two encodings of the same set drift
+/// the moment one is updated and the other isn't. Delegating to
+/// `is_bidi_or_invisible_scalar` makes them mechanically equivalent —
+/// the canonical list lives in exactly one place.
 ///
-///   2-byte:
-///     C2 AD               U+00AD soft hyphen
-///     D8 9C               U+061C ALM
-///   3-byte:
-///     E1 A0 8E            U+180E MVS
-///     E2 80 8B..8F        U+200B-F ZWSP/ZWNJ/ZWJ/LRM/RLM
-///     E2 80 A8..AE        U+2028/9 LS/PS, U+202A-E embed/override
-///     E2 81 A0            U+2060 word joiner
-///     E2 81 A6..A9        U+2066-9 isolates
-///     EF B8 80..8F        U+FE00-F variation selectors 1-16
-///     EF BB BF            U+FEFF BOM (ZWNBSP)
-///   4-byte:
-///     F3 A0 80..81 ?      U+E0000-E007F tag block
-///     F3 A0 84..87 ? (≤AF on 87) U+E0100-E01EF VS17-256
+/// Behavior on invalid UTF-8: returns `true` (refuse). This is a
+/// no-op vs. the previous behavior at the only call site
+/// (`handle_osc7` already gates `std::str::from_utf8(&decoded)`
+/// BEFORE this check, so invalid UTF-8 returns early there). Stating
+/// the policy here makes future call sites safer-by-default.
 ///
-/// Audit M2.
+/// Codepoint set rejected — see `is_bidi_or_invisible_scalar` for the
+/// canonical list. Audit M2.
 fn contains_bidi_or_invisible(bytes: &[u8]) -> bool {
-    let mut i = 0;
-    while i < bytes.len() {
-        let remaining = bytes.len() - i;
-        let b0 = bytes[i];
-        // 2-byte
-        if remaining >= 2 {
-            let b1 = bytes[i + 1];
-            if (b0 == 0xC2 && b1 == 0xAD) || (b0 == 0xD8 && b1 == 0x9C) {
-                return true;
-            }
-        }
-        // 3-byte
-        if remaining >= 3 {
-            let b1 = bytes[i + 1];
-            let b2 = bytes[i + 2];
-            if b0 == 0xE1 && b1 == 0xA0 && b2 == 0x8E {
-                return true;
-            }
-            if b0 == 0xE2 {
-                if b1 == 0x80 && (0x8B..=0x8F).contains(&b2) {
-                    return true;
-                }
-                if b1 == 0x80 && (0xA8..=0xAE).contains(&b2) {
-                    return true;
-                }
-                if b1 == 0x81 && (b2 == 0xA0 || (0xA6..=0xA9).contains(&b2)) {
-                    return true;
-                }
-            }
-            if b0 == 0xEF {
-                if b1 == 0xB8 && (0x80..=0x8F).contains(&b2) {
-                    return true;
-                }
-                if b1 == 0xBB && b2 == 0xBF {
-                    return true;
-                }
-            }
-        }
-        // 4-byte
-        if remaining >= 4 && b0 == 0xF3 {
-            let b1 = bytes[i + 1];
-            let b2 = bytes[i + 2];
-            let b3 = bytes[i + 3];
-            if b1 == 0xA0 {
-                if b2 == 0x80 || b2 == 0x81 {
-                    return true;
-                }
-                if (0x84..=0x87).contains(&b2) && (b2 < 0x87 || b3 <= 0xAF) {
-                    return true;
-                }
-            }
-        }
-        i += 1;
-    }
-    false
+    let Ok(s) = std::str::from_utf8(bytes) else {
+        return true;
+    };
+    s.chars().any(is_bidi_or_invisible_scalar)
 }
 
 /// RFC 3986 percent-decode. Returns `None` only on truncated escapes
