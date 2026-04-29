@@ -644,6 +644,10 @@ struct OscScanner<'a> {
     /// on `BBTerm` and threaded in via `&mut` because the scanner is
     /// rebuilt per `bb_term_input` call.
     prompt_mark_rate: &'a mut PromptMarkRateState,
+    /// Sliding-window state for OSC 7 (CWD) ingest rate limiting (audit
+    /// M-7 — `classifyForegroundNamespace()` proc_listpids amplification).
+    /// Same threading reason as `prompt_mark_rate`.
+    osc7_rate: &'a mut Osc7RateState,
 }
 
 /// Per-terminal sliding-window rate limiter for OSC 133 prompt marks.
@@ -679,6 +683,27 @@ const PROMPT_MARK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1
 const COLOR_QUERY_REPLY_PER_SECOND: u32 = 32;
 const COLOR_QUERY_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// OSC 7 (CWD reporting) ingest rate limit (audit M-7, 2026-04-29).
+/// Legitimate shells emit one OSC 7 per `cd` — typically far fewer than
+/// 1/sec interactively. A hostile remote streaming OSC 7s in a tight
+/// loop forces `TerminalSession.handleCwdChanged` (Swift) to run
+/// `classifyForegroundNamespace()` on every event, which does a
+/// `proc_listpids(PROC_PPID_ONLY)` BFS up to 256 nodes — main-thread
+/// work that beachballs the UI. 32/sec mirrors the existing PtyWrite
+/// cap; well above any realistic interactive shell, well below the
+/// flood-amplification threshold. Excess OSC 7s are dropped silently.
+const OSC7_INGEST_PER_SECOND: u32 = 32;
+const OSC7_INGEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Maximum byte length of a single OSC 7 URL accepted for percent-decode
+/// (audit L-20, 2026-04-29). OSC 8's `OSC8_URI_MAX` is 4096 by the same
+/// reasoning: a legitimate `file://` URL for a cwd is at most a few
+/// hundred bytes; oversized payloads are either malicious spam or a
+/// bug, and the unbounded `Vec::with_capacity(bytes.len())` inside
+/// `percent_decode` would otherwise let a remote allocate megabytes per
+/// OSC 7 chunk.
+const OSC7_URL_MAX: usize = 4096;
+
 impl PromptMarkRateState {
     fn new() -> Self {
         Self {
@@ -696,6 +721,39 @@ impl PromptMarkRateState {
             self.window_count = 0;
         }
         if self.window_count >= PROMPT_MARK_PER_SECOND {
+            return false;
+        }
+        self.window_count += 1;
+        true
+    }
+}
+
+/// Per-terminal sliding-window rate limiter for OSC 7 (CWD) ingest.
+/// See `OSC7_INGEST_PER_SECOND` for sizing rationale (audit M-7).
+/// Same shape as `PromptMarkRateState` — kept as a separate type so the
+/// constants are independent and the `clear_all` reset can target each
+/// limiter individually (audit H-3).
+#[derive(Clone, Copy)]
+struct Osc7RateState {
+    window_start: std::time::Instant,
+    window_count: u32,
+}
+
+impl Osc7RateState {
+    fn new() -> Self {
+        Self {
+            window_start: std::time::Instant::now(),
+            window_count: 0,
+        }
+    }
+
+    fn allow(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.window_start) >= OSC7_INGEST_WINDOW {
+            self.window_start = now;
+            self.window_count = 0;
+        }
+        if self.window_count >= OSC7_INGEST_PER_SECOND {
             return false;
         }
         self.window_count += 1;
@@ -917,6 +975,27 @@ static XTGETTCAP_TABLE: &[(&[u8], &[u8])] = &[
 impl OscScanner<'_> {
     fn handle_osc7(&mut self, params: &[&[u8]]) {
         let Some(url) = params.get(1) else { return };
+
+        // Audit L-20 (2026-04-29): cap the input length BEFORE
+        // `percent_decode`. percent_decode does
+        // `Vec::with_capacity(bytes.len())`, so an unbounded URL lets a
+        // hostile remote allocate megabytes per OSC 7 chunk. OSC 8 caps
+        // its URI at the same shape (`OSC8_URI_MAX = 4096`); legitimate
+        // `file://` cwd URLs are at most a few hundred bytes.
+        if url.len() > OSC7_URL_MAX {
+            return;
+        }
+
+        // Audit M-7 (2026-04-29): rate-limit ingest. Legitimate shells
+        // emit one OSC 7 per `cd`. A hostile remote streaming OSC 7s in
+        // a tight loop forces Swift's `classifyForegroundNamespace()` to
+        // run a `proc_listpids` BFS on every event — main-thread work
+        // that beachballs the UI. Drop excess silently within the
+        // sliding window. Done BEFORE the parsing / validation work so
+        // a flood doesn't even pay the percent-decode cost.
+        if !self.osc7_rate.allow() {
+            return;
+        }
 
         // Accept only `file://` with an empty or `localhost` authority.
         let Some(rest) = url.strip_prefix(b"file://") else {
@@ -1287,6 +1366,10 @@ pub struct BBTerm {
     /// the sliding window covers prompt marks that arrive in different
     /// PTY chunks.
     prompt_mark_rate: PromptMarkRateState,
+    /// OSC 7 (CWD) ingest rate-limit window (audit M-7). See
+    /// `Osc7RateState`. Persisted across `bb_term_input` calls — same
+    /// rationale as `prompt_mark_rate`.
+    osc7_rate: Osc7RateState,
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
     /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
     /// 256+ allocations, but a hostile stream can fan replies across many
@@ -1527,6 +1610,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             uri_cache_bytes: 0,
             modify_other_keys: 0,
             prompt_mark_rate: PromptMarkRateState::new(),
+            osc7_rate: Osc7RateState::new(),
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
         });
@@ -1622,6 +1706,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     xtgettcap_buf: &mut bb.xtgettcap_buf,
                     modify_other_keys: &mut bb.modify_other_keys,
                     prompt_mark_rate: &mut bb.prompt_mark_rate,
+                    osc7_rate: &mut bb.osc7_rate,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
@@ -1644,6 +1729,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             xtgettcap_buf: &mut bb.xtgettcap_buf,
             modify_other_keys: &mut bb.modify_other_keys,
             prompt_mark_rate: &mut bb.prompt_mark_rate,
+            osc7_rate: &mut bb.osc7_rate,
         };
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);
@@ -2893,6 +2979,7 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         //      cache flood blocked legitimate post-clear OSC 8 links
         //      until app relaunch (the 1 MiB byte-cap stayed exhausted).
         bb.prompt_mark_rate = PromptMarkRateState::new();
+        bb.osc7_rate = Osc7RateState::new();
         bb.modify_other_keys = 0;
         bb.callback.pty_write_rate.reset();
 
@@ -5311,6 +5398,64 @@ mod tests {
             .find(|(k, _)| *k == BBEventKind::CwdChanged as u32)
             .expect("expected CwdChanged event for a clean absolute path");
         assert_eq!(&cwd.1, b"/Users/foo/proj");
+    }
+
+    /// Audit M-7 (2026-04-29): a hostile remote streaming OSC 7s in a
+    /// tight loop must not flood `CwdChanged` events. Within a 1-second
+    /// rolling window, at most `OSC7_INGEST_PER_SECOND` (32) make it
+    /// through — the rest drop silently.
+    #[test]
+    fn osc7_rate_limit_drops_excess() {
+        // 200 OSC 7s, all to a legitimate path. Without the rate gate
+        // every one fires CwdChanged.
+        let mut buf = Vec::new();
+        for _ in 0..200 {
+            buf.extend_from_slice(b"\x1b]7;file:///Users/foo/proj\x07");
+        }
+        let events = drive_events(&buf);
+        let cwd_count = events
+            .iter()
+            .filter(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+            .count();
+        assert!(
+            cwd_count <= OSC7_INGEST_PER_SECOND as usize,
+            "expected at most {} CwdChanged within one window, got {}",
+            OSC7_INGEST_PER_SECOND,
+            cwd_count
+        );
+    }
+
+    /// Audit L-20 (2026-04-29): an oversized OSC 7 URL must be refused
+    /// before reaching `percent_decode` (whose
+    /// `Vec::with_capacity(bytes.len())` would otherwise allocate
+    /// proportional to the attack input). One byte over the cap must
+    /// not fire.
+    ///
+    /// Memory discipline: we allocate `OSC7_URL_MAX + small` bytes
+    /// (~4 KiB) — well below any concerning footprint.
+    #[test]
+    fn osc7_oversized_url_is_refused() {
+        // Build a `file:///` URL whose total `url` arg length exceeds
+        // OSC7_URL_MAX by exactly one byte.
+        let prefix = b"file:///";
+        let pad_len = OSC7_URL_MAX + 1 - prefix.len();
+        let mut url = Vec::with_capacity(prefix.len() + pad_len);
+        url.extend_from_slice(prefix);
+        url.extend(std::iter::repeat(b'a').take(pad_len));
+        assert_eq!(url.len(), OSC7_URL_MAX + 1);
+
+        let mut seq = Vec::new();
+        seq.extend_from_slice(b"\x1b]7;");
+        seq.extend_from_slice(&url);
+        seq.extend_from_slice(b"\x07");
+
+        let events = drive_events(&seq);
+        assert!(
+            events
+                .iter()
+                .all(|(k, _)| *k != BBEventKind::CwdChanged as u32),
+            "oversized OSC 7 URL must be dropped pre-decode; got events: {events:?}"
+        );
     }
 
     // -------------------------------------------------------------------
