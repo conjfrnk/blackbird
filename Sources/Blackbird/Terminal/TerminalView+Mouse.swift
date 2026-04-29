@@ -222,23 +222,29 @@ extension TerminalView {
     /// `NSEvent` to pass — can derive a selection cursor from the raw
     /// mouse location. Audit terminal-view-2 F2.
     private func bufferPointFromLocalPoint(_ local: CGPoint) -> BufferPoint {
-        let snap = currentSnapshot
+        // M-17 / pass-2: surface the pre-first-publish click race
+        // before silently mapping into a synthetic 80×24 zero-history
+        // grid. Pulling the nil-snap path out into a logged early-
+        // return makes the regression discoverable in Release; the
+        // same one-shot lock is shared with `bufferPointFromEvent`
+        // (lives on `TerminalView` proper) so two callsites firing in
+        // sequence still produce at most one log line per process.
+        guard let snap = currentSnapshot else {
+            TerminalView.logEarlyClickOnce()
+            return BufferPoint(line: 0, col: 0)
+        }
         let textAreaHeight = bounds.height - titlebarOnlyTopInset
         let clampedY = min(max(0, local.y), max(0, textAreaHeight))
         let clampedLocal = CGPoint(x: local.x, y: clampedY)
-        // M-17: historySize is required. When we have no snapshot
-        // (very-early drag before the first publish), pass 0 — the
-        // lower clamp degrades to "live grid only" which is exactly
-        // what's safe for that pre-snapshot window.
         return bufferPoint(
             forView: clampedLocal,
             cellWidth: metrics.cellWidth,
             cellHeight: metrics.cellHeight,
             viewportHeight: textAreaHeight,
-            displayOffset: snap?.displayOffset ?? 0,
-            cols: snap?.cols ?? 80,
-            rows: snap?.rows ?? 24,
-            historySize: snap?.historySize ?? 0
+            displayOffset: snap.displayOffset,
+            cols: snap.cols,
+            rows: snap.rows,
+            historySize: snap.historySize
         )
     }
 
@@ -537,7 +543,17 @@ extension TerminalView {
 
     func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
         let local = convert(event.locationInWindow, from: nil)
-        let snap = currentSnapshot
+        // M-17 / pass-2: nil-snap means the click landed before the
+        // first BBSnapshot publish — there is no real grid to map
+        // against, so the previous "synthetic 80×24, zero history"
+        // fallback would silently produce bogus selection coordinates.
+        // Early-return the origin sentinel and warn once. Shared one-
+        // shot lock with `bufferPointFromLocalPoint` keeps the log
+        // line count bounded across both callsites.
+        guard let snap = currentSnapshot else {
+            TerminalView.logEarlyClickOnce()
+            return BufferPoint(line: 0, col: 0)
+        }
         // `.fullSizeContentView` means `bounds.height` includes the titlebar
         // region which the text grid doesn't occupy. `bufferPoint` below does
         // `viewportHeight - localPoint.y` to derive the display-row Y; if the
@@ -552,17 +568,15 @@ extension TerminalView {
         let textAreaHeight = bounds.height - titlebarOnlyTopInset
         let clampedY = min(max(0, local.y), max(0, textAreaHeight))
         let clampedLocal = CGPoint(x: local.x, y: clampedY)
-        // M-17: historySize required; pass 0 when no snapshot is
-        // available yet (pre-first-publish click race).
         return bufferPoint(
             forView: clampedLocal,
             cellWidth: metrics.cellWidth,
             cellHeight: metrics.cellHeight,
             viewportHeight: textAreaHeight,
-            displayOffset: snap?.displayOffset ?? 0,
-            cols: snap?.cols ?? 80,
-            rows: snap?.rows ?? 24,
-            historySize: snap?.historySize ?? 0
+            displayOffset: snap.displayOffset,
+            cols: snap.cols,
+            rows: snap.rows,
+            historySize: snap.historySize
         )
     }
 

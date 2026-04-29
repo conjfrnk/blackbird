@@ -432,6 +432,32 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     static let securityLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "security")
 
+    /// Production-visible channel for the mouse-event path's defensive
+    /// guards. Right now used only by the M-17 nil-snap warning — a
+    /// click that lands before the first BBSnapshot publish maps to a
+    /// synthetic 80×24 zero-history grid; without the log, the broken
+    /// selection that follows has no breadcrumb. One-shot lock keeps
+    /// repeated pre-publish clicks from spamming the unified log.
+    /// Internal because both `TerminalView+Mouse.swift` callsites of
+    /// `bufferPoint` share the same one-shot.
+    static let mouseLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                    category: "mouse")
+    static let didLogEarlyClick = OSAllocatedUnfairLock(initialState: false)
+
+    /// One-shot warning for the M-17 pre-first-publish click race. Both
+    /// `bufferPointFromEvent` and `bufferPointFromLocalPoint` early-
+    /// return into this when `currentSnapshot == nil`; the shared lock
+    /// ensures the log fires at most once per process lifetime even
+    /// across the two callsites.
+    static func logEarlyClickOnce() {
+        didLogEarlyClick.withLock { didLog in
+            if !didLog {
+                didLog = true
+                mouseLogger.warning("click before first snapshot publish — bufferPoint returning origin sentinel against synthetic grid")
+            }
+        }
+    }
+
     public init(frame frameRect: NSRect, device: MTLDevice) {
         // TerminalView is the authoritative owner of CellMetrics; the renderer
         // shares this same instance so layout and rendering never diverge.
