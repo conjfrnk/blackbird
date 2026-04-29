@@ -106,20 +106,40 @@ enum OSC8URLPolicy {
     }
 
     /// Extract the domain (right of the `@`) from a `mailto:` URL.
-    /// `URL.host` is unreliable for mailto on Foundation — depending on
-    /// version, it may return nil even for valid mailto URLs. The
-    /// canonical location is the path: `mailto:user@domain` parses with
-    /// path == "user@domain". Returns nil when there's no `@`, the
-    /// right side is empty, OR the path contains more than one `@`
-    /// (multi-recipient mailto per RFC 6068 — there is no single
-    /// canonical "domain" so we cannot validate; fail closed).
+    ///
+    /// Both `URL.host` and `URL.path` are unreliable for mailto across
+    /// Foundation versions — on macOS 14 (CI) `URL.path` returns the
+    /// empty string for `mailto:user@host`, while macOS 15+ returns
+    /// `"user@host"`. Earlier versions of this helper relied on
+    /// `URL.path` and silently accepted hostile mailto URLs on the CI
+    /// runner because every domain check short-circuited on a nil
+    /// domain. Parse the mailto envelope ourselves from
+    /// `absoluteString` so behaviour is identical across Foundation
+    /// versions.
+    ///
+    /// Returns nil when there's no `@`, the right side is empty, OR
+    /// the envelope contains more than one `@` (multi-recipient mailto
+    /// per RFC 6068 — there is no single canonical "domain" so we
+    /// cannot validate; fail closed).
     private static func mailtoDomain(_ url: URL) -> String? {
-        guard url.scheme?.lowercased() == "mailto" else { return nil }
-        // For mailto URLs URL.path holds "user@domain" (no leading
-        // slash). Foundation occasionally splits on '@' for
-        // url.user/url.host, but the path form is consistent across
-        // OS versions and is what RFC 6068 describes.
-        let raw = url.path
+        return mailtoDomain(fromAbsoluteString: url.absoluteString)
+    }
+
+    /// Same as `mailtoDomain(_:)` but operates on a raw URL string.
+    /// Splitting this out lets the helper avoid `URL.path`/`URL.host`
+    /// entirely, which Foundation handles inconsistently for `mailto:`
+    /// across macOS versions (see `mailtoDomain(_:)` doc).
+    ///
+    /// Algorithm (intentionally version-agnostic):
+    ///  1. Build the mailto envelope (`mailto:` stripped, query/fragment
+    ///     stripped) via `mailtoEnvelope(fromAbsoluteString:)`.
+    ///  2. Fail closed when the envelope contains more than one `@`
+    ///     (RFC 6068 multi-recipient mailto — no canonical domain).
+    ///  3. Split on the single `@` and return the lowercased right
+    ///     side, or nil when the right side is empty.
+    private static func mailtoDomain(fromAbsoluteString s: String) -> String? {
+        let envelope = mailtoEnvelope(fromAbsoluteString: s)
+        if envelope.isEmpty { return nil }
         // Pass-3 fail-closed: RFC 6068 allows multi-recipient mailto
         // (`mailto:user@safe.com,b@evil.com`). Picking last via
         // `lastIndex(of: "@")` silently selects evil.com; picking first
@@ -127,12 +147,19 @@ enum OSC8URLPolicy {
         // cannot honestly validate, so refuse to emit one. Caller
         // treats nil as "no domain" → divergence/safety checks fail
         // closed and the click is blocked.
-        let atCount = raw.reduce(0) { $0 + ($1 == "@" ? 1 : 0) }
+        let atCount = envelope.reduce(0) { $0 + ($1 == "@" ? 1 : 0) }
         guard atCount == 1 else { return nil }
-        guard let at = raw.firstIndex(of: "@") else { return nil }
-        let domain = raw[raw.index(after: at)...]
+        guard let at = envelope.firstIndex(of: "@") else { return nil }
+        let domain = envelope[envelope.index(after: at)...]
         if domain.isEmpty { return nil }
-        return String(domain).lowercased()
+        // Foundation percent-encodes non-ASCII bytes in
+        // `absoluteString` (`mailto:user@аpple.com` → `mailto:user@%D0%B0pple.com`).
+        // The IDN homograph defence relies on seeing the actual
+        // non-ASCII codepoints, so decode before returning. Decoding
+        // a pure-ASCII domain is a no-op, so the punycode (`xn--…`)
+        // case still flows through unchanged.
+        let decoded = String(domain).removingPercentEncoding ?? String(domain)
+        return decoded.lowercased()
     }
 
     /// True when `s` contains a percent-encoded C0 control byte
@@ -479,9 +506,17 @@ enum OSC8URLPolicy {
         // gives evil.com the win, picking first silently ignores it.
         // Reject before mailtoDomain has a chance to lie. (Note: a
         // `mailto:` with NO `@` at all — `mailto:?subject=hi` — is
-        // allowed below; this guard fires only on >1 `@` in the path.)
-        let path = url.path
-        let atCount = path.reduce(0) { $0 + ($1 == "@" ? 1 : 0) }
+        // allowed below; this guard fires only on >1 `@` in the
+        // envelope.)
+        //
+        // Foundation cross-version note: on macOS 14 `URL.path` returns
+        // the empty string for mailto URLs, which silently collapsed
+        // the `@`-count to zero and let multi-recipient mailtos
+        // through. Compute the count from the absoluteString envelope
+        // (mailto:…?…) so behaviour is identical across versions. See
+        // `mailtoDomain(fromAbsoluteString:)` for the parser.
+        let envelope = mailtoEnvelope(url)
+        let atCount = envelope.reduce(0) { $0 + ($1 == "@" ? 1 : 0) }
         if atCount > 1 { return false }
         // H-2: extend IDN homograph defence to mailto domain. A
         // hostile remote emitting `mailto:user@аpple.com` (Cyrillic а)
@@ -497,6 +532,34 @@ enum OSC8URLPolicy {
         return items.allSatisfy { item in
             item.name.lowercased() == "subject"
         }
+    }
+
+    /// Return the substring between `mailto:` and the first `?`
+    /// (query) or `#` (fragment), or the entire post-prefix string
+    /// when neither is present. Empty string when the URL isn't a
+    /// mailto. Used by `isMailtoSafe` for the multi-`@` count and by
+    /// `mailtoDomain(fromAbsoluteString:)` for the `@`-split, both
+    /// without touching `URL.path` (see `mailtoDomain` doc for why
+    /// `URL.path` is unsafe here).
+    private static func mailtoEnvelope(_ url: URL) -> Substring {
+        return mailtoEnvelope(fromAbsoluteString: url.absoluteString)
+    }
+
+    private static func mailtoEnvelope(fromAbsoluteString s: String) -> Substring {
+        let prefix = "mailto:"
+        guard s.count >= prefix.count,
+              s.prefix(prefix.count).lowercased() == prefix
+        else {
+            return Substring("")
+        }
+        var envelope = Substring(s.dropFirst(prefix.count))
+        if let qIdx = envelope.firstIndex(of: "?") {
+            envelope = envelope[envelope.startIndex..<qIdx]
+        }
+        if let fIdx = envelope.firstIndex(of: "#") {
+            envelope = envelope[envelope.startIndex..<fIdx]
+        }
+        return envelope
     }
 }
 
