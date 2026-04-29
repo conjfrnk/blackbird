@@ -969,15 +969,30 @@ public final class MetalRenderer {
                 proposed = min(doubled.partialValue, Self.instanceCapacityHardCap)
             }
             let newCap = max(total, proposed)
+            // Surfacing a cap-exceeded workload separately from a GPU
+            // OOM: when `total` itself is above the hard cap, the
+            // doubling math saturated but the user's grid is genuinely
+            // beyond what the renderer was sized for — different bug
+            // class than `makeBuffer` returning nil under memory
+            // pressure. One-line warning so a release-mode log can
+            // tell the two apart. Audit L-21 follow-up (2026-04-29).
+            if total > Self.instanceCapacityHardCap {
+                Self.logger.error("instance count \(total, privacy: .public) exceeds hard cap \(Self.instanceCapacityHardCap, privacy: .public); attempting allocation anyway (workload outgrew renderer sizing — investigate grid dims / row paint logic)")
+            }
+            let bufBytes = newCap * MemoryLayout<CellInstance>.stride
             if let newBuf = device.makeBuffer(
-                length: newCap * MemoryLayout<CellInstance>.stride,
+                length: bufBytes,
                 options: [.storageModeShared]
             ) {
                 instanceBuffers[slot] = newBuf
                 instanceCapacities[slot] = newCap
             } else {
                 // Out-of-GPU-memory while growing — skip frame. Next
-                // repaint will retry.
+                // repaint will retry. Log so a silently-stale frame
+                // surfaces in the unified log instead of just looking
+                // like the renderer skipped a tick. Audit L-21
+                // follow-up (2026-04-29).
+                Self.logger.error("instance buffer grow failed: requested \(newCap, privacy: .public) instances (\(bufBytes, privacy: .public) bytes); skipping frame")
                 return 0
             }
         }
