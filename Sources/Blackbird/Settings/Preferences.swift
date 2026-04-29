@@ -157,18 +157,20 @@ public final class Preferences: ObservableObject {
                                        category: "preferences")
 
     /// Held weakly across `init` so the observer is torn down with the
-    /// singleton. Tagged `nonisolated(unsafe)` only because `Preferences`
-    /// is itself a process-wide singleton; the observer is created once,
-    /// in `init`, and never reassigned.
+    /// singleton. The observer is created once, in `init`, and never
+    /// reassigned; mutation of this field is bounded by `init` and
+    /// `deinit`, both of which run with exclusive access to the singleton.
     private var defaultsObserver: NSObjectProtocol?
 
     /// Re-entry guard for the `UserDefaults.didChangeNotification` handler.
-    /// Without this, the same-value-guard pattern alone is enough to break
-    /// the SwiftUI bridge re-fire loop, but a second-order hazard remains:
-    /// our own clamp/repair writes fire `didChangeNotification` recursively
-    /// from inside the observer callback. The recursion is bounded (each
-    /// pass converges) but `true` here lets us short-circuit cheaply on
-    /// the inner re-entry.
+    /// Our clamp/repair writes fire `didChangeNotification`, which is
+    /// re-delivered on a later main-queue tick (the observer is
+    /// registered with `queue: .main`, which always wraps delivery in an
+    /// OperationQueue task). The same-value guards inside each branch
+    /// are the canonical defence; this short-circuit is belt-and-braces
+    /// in case Apple ever changes the delivery model. Main-queue-only
+    /// access enforced by `dispatchPrecondition` at the top of
+    /// `handleDefaultsChange`.
     private var isProcessingDefaultsChange = false
 
     /// Resolved `(opacity, blurRadius)` from the single translucency slider.
@@ -346,11 +348,18 @@ public final class Preferences: ObservableObject {
     /// `UserDefaults.didChangeNotification` so the model recovers
     /// without a relaunch.
     private func handleDefaultsChange() {
-        // Re-entry guard — our own clamp/repair writes below fire
-        // `UserDefaults.didChangeNotification` synchronously on the same
-        // queue. The same-value guards inside each branch are the
-        // canonical defence (they'd terminate a runaway in one extra
-        // pass) but this short-circuit makes it cheap and explicit.
+        // Locks the contract the `isProcessingDefaultsChange` flag relies
+        // on: the observer is registered with `queue: .main`, so this
+        // handler must execute on the main queue. If a future change
+        // moves the queue without revisiting the flag, the precondition
+        // catches it before the data race ships.
+        dispatchPrecondition(condition: .onQueue(.main))
+        // Re-entry guard — our clamp/repair writes fire
+        // `UserDefaults.didChangeNotification`, which is re-delivered on
+        // a later main-queue tick. The same-value guards inside each
+        // branch are the canonical defence; this re-entrancy short-
+        // circuit is belt-and-braces in case Apple ever changes the
+        // delivery model.
         guard !isProcessingDefaultsChange else { return }
         isProcessingDefaultsChange = true
         defer { isProcessingDefaultsChange = false }
@@ -370,11 +379,24 @@ public final class Preferences: ObservableObject {
         // didSet fires on Swift-side assignment, which is exactly what
         // `self.fontSize = …` triggers; the same-value guard inside
         // didSet skips the write when the clamped value matches.
+        //
+        // NOTE — intentionally NOT gated behind `isDowngrade` (sibling
+        // of H-8): the H-8 gate exists because enum rawValues legitimately
+        // gain new cases across schema versions, so an unknown rawValue
+        // on a downgrade is most plausibly a vN+1 case we shouldn't
+        // clobber. Numeric envelopes (fontSize 9...32, translucency
+        // 1...10) are presumed STABLE across versions — they're product
+        // decisions tied to UI layout, not schema. A NaN / out-of-range
+        // value on disk is a tampered-plist case in any version, and
+        // clamping it is the correct recovery on every binary that sees
+        // it. If a future version widens the envelope, that change
+        // SHOULD bump the schema and add an explicit migration; the H-8
+        // gate isn't the right place to express it.
         let currentFontSize = self.fontSize
         let normalisedFont = currentFontSize.isFinite ? currentFontSize : 13
         let clampedFont = max(9, min(32, normalisedFont))
         if clampedFont != currentFontSize {
-            Preferences.logger.log("re-clamping fontSize after external defaults write: \(currentFontSize) → \(clampedFont)")
+            Preferences.logger.log("re-clamping fontSize after external defaults write: \(currentFontSize, privacy: .public) → \(clampedFont, privacy: .public)")
             self.fontSize = clampedFont
         }
 
@@ -382,7 +404,7 @@ public final class Preferences: ObservableObject {
         let normalisedTrans = currentTrans.isFinite ? currentTrans : 1
         let clampedTrans = max(1, min(10, normalisedTrans))
         if clampedTrans != currentTrans {
-            Preferences.logger.log("re-clamping translucency after external defaults write: \(currentTrans) → \(clampedTrans)")
+            Preferences.logger.log("re-clamping translucency after external defaults write: \(currentTrans, privacy: .public) → \(clampedTrans, privacy: .public)")
             self.translucency = clampedTrans
         }
     }
