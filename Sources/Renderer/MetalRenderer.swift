@@ -15,6 +15,31 @@ public final class MetalRenderer {
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "renderer")
 
+    /// One-shot guard for `clampDisplayOffset`. Set the first time a
+    /// negative raw `displayOffset` reaches the cast site so the
+    /// `.error` log fires once per process instead of every frame
+    /// (a stuck-negative regression would otherwise drown the
+    /// unified log). Renderer is main-thread only — `dispatchPrecondition`
+    /// in `render(in:)` and `reconfigure(metrics:scale:)` enforces it —
+    /// so a plain static-mutable Bool is safe without a lock.
+    /// Audit M-16 follow-up (2026-04-29).
+    private static var negativeDisplayOffsetWarned = false
+
+    /// Clamp a raw `Int` displayOffset into `UInt32` and one-shot warn
+    /// if it was ever negative. Today BBCore's snapshot accessor wraps
+    /// a Rust `u32` so the negative branch is unreachable, but the
+    /// clamp is the contract pin (M-16) and the warning is the early
+    /// signal for a regression that lets the contract drift. Two call
+    /// sites (FrameKey + CacheKey); both per-frame, so the helper
+    /// avoids duplicating the comment block at each one.
+    private static func clampDisplayOffset(_ raw: Int) -> UInt32 {
+        if raw < 0, !MetalRenderer.negativeDisplayOffsetWarned {
+            MetalRenderer.negativeDisplayOffsetWarned = true
+            logger.error("displayOffset went negative (\(raw, privacy: .public)); clamping to 0. BBCore contract violated — investigate scrollback math.")
+        }
+        return UInt32(clamping: raw)
+    }
+
     /// Glyph atlas slots. 4096 covers ASCII + Latin supplements + common CJK
     /// + box-drawing + emoji-presentation for typical workloads without
     /// hitting the "atlas full → new glyphs render as blanks" cliff that a
@@ -1107,13 +1132,15 @@ public final class MetalRenderer {
             cursorCol: Int32(clamping: snapshot?.cursorCol ?? -1),
             cursorShape: cursorShapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
             cursorVisible: snapshot?.cursorVisible ?? false,
-            // `UInt32(clamping:)` not `UInt32(_:)` — defense-in-depth on
+            // `clampDisplayOffset` not `UInt32(_:)` — defense-in-depth on
             // the hot per-frame path. Today `BBSnapshot.displayOffset`
             // returns `Int` from a Rust `u32` so it's never negative,
             // but a future regression that lets a negative slip through
             // would trap the renderer mid-frame; clamping pins the
-            // contract at the cast site. Audit M-16 (2026-04-29).
-            displayOffset: UInt32(clamping: snapshot?.displayOffset ?? 0),
+            // contract at the cast site, and the helper one-shots a
+            // `.error` log so the violation surfaces without spamming.
+            // Audit M-16 / UR follow-up (2026-04-29).
+            displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
             topInsetPoints: topInsetPoints,
             defaultBgRgb: defaultBgRgb,
             backgroundOpacity: backgroundOpacity,
@@ -1323,9 +1350,10 @@ public final class MetalRenderer {
                 focused: focused,
                 cursorShape: effectiveShape,
                 cursorVisible: snap.cursorVisible,
-                // Sibling of the FrameKey site — same clamping rationale.
-                // Audit M-16 (2026-04-29).
-                displayOffset: UInt32(clamping: snap.displayOffset),
+                // Sibling of the FrameKey site — same clamping rationale,
+                // routed through `clampDisplayOffset` for the one-shot
+                // negative-detected warning. Audit M-16 (2026-04-29).
+                displayOffset: Self.clampDisplayOffset(snap.displayOffset),
                 topInsetPoints: topInsetPoints,
                 defaultBgRgb: defaultBgRgb,
                 backgroundOpacity: backgroundOpacity,
