@@ -431,4 +431,61 @@ final class TerminalSessionTests: XCTestCase {
             "terminate() must cancel + nil the preferencesSubscription (Bug #24)"
         )
     }
+
+    /// H-6: clearAll() must invalidate prompt-state slots that pointed
+    /// into the now-deleted scrollback. Without this, post-clear ⌘[
+    /// jumps to stale prompt indices and the OSC 133 ring keeps marks
+    /// for lines that don't exist anymore.
+    ///
+    /// Selection is owned by `TerminalView` and invalidated through the
+    /// render-time gate's `historyCollapsed` predicate, which requires
+    /// a live MTKView attached to a window — out of scope for this
+    /// headless session-level test. The view-side gate is exercised
+    /// indirectly via integration testing on a real window. Here we
+    /// pin the session-side prompt-state reset that the audit calls
+    /// out as the primary mechanism.
+    ///
+    /// Memory: trivial. Headless 2×2 grid + a handful of synthetic
+    /// PromptMark structs. No PTY, no shell process. Connor's OOM-
+    /// floor checklist (project memory feedback_test_memory_safety.md)
+    /// is satisfied trivially.
+    func test_clearAll_invalidatesPromptState() throws {
+        let session = TerminalSession.makeHeadlessForTests()
+        defer { session.terminate() }
+
+        // Seed prompt-mark ring + last-mark + jump cursor so all three
+        // slots have non-default values. _testAppendMark sets cursor=nil
+        // each call so we re-establish the cursor by walking back via
+        // jumpToPreviousPrompt.
+        session._testAppendMark(.init(historySize: 3, gridRow: 1))
+        session._testAppendMark(.init(historySize: 7, gridRow: 2))
+        session._testAppendMark(.init(historySize: 12, gridRow: 0))
+        session.lastPromptMark = (kind: .promptStart, exitCode: "")
+        session.jumpToPreviousPrompt()  // cursor → 2
+
+        // Pre-clear sanity: every slot has the non-default value we set.
+        XCTAssertEqual(session.promptMarks.count, 3,
+                       "prompt-mark ring should be seeded before clearAll")
+        XCTAssertNotNil(session.lastPromptMark,
+                        "lastPromptMark should be seeded before clearAll")
+        XCTAssertEqual(session._testPromptCursor, 2,
+                       "promptCursor should be seeded before clearAll")
+
+        // Clear and let the main-queue reset block drain. The reset hops
+        // to main when called off-main; in a main-thread test the inline
+        // branch fires, so this expectation just absorbs any other queued
+        // main work (initial-snapshot dispatch from wire(), etc).
+        session.clearAll()
+        let drained = expectation(description: "main drain after clearAll")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 3.0)
+
+        // H-6: all three slots must be back to their default-empty values.
+        XCTAssertEqual(session.promptMarks, [],
+                       "clearAll must drop the prompt-mark ring (H-6)")
+        XCTAssertNil(session.lastPromptMark,
+                     "clearAll must drop lastPromptMark (H-6)")
+        XCTAssertNil(session._testPromptCursor,
+                     "clearAll must drop the prompt-jump cursor (H-6)")
+    }
 }
