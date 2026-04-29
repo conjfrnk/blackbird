@@ -1,4 +1,5 @@
 import AppKit
+import os
 
 /// Minimal right-edge scroll indicator — a translucent pill whose size
 /// reflects the viewport-to-buffer ratio and whose position reflects
@@ -12,6 +13,18 @@ import AppKit
 /// Not interactive in v1 — it's a read-only hint. Drag-to-scroll is a
 /// natural future extension but omitted to keep scope tight.
 final class ScrollIndicator: NSView {
+    /// Diagnostic channel for the M-15 clamp. One-shot warning when the
+    /// `displayOffset / historySize` ratio escapes `[0, 1]` — that
+    /// signals an upstream regression in the Rust scroll math (or, on
+    /// the negative branch, a future ABI sign change). The clamp
+    /// silently corrects the visual; the log makes it discoverable via
+    /// `log stream --predicate 'category == "scrollIndicator"'` in a
+    /// release build. NO `#if DEBUG` gate — Release diagnosability
+    /// matters more than the one-time line cost.
+    private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                       category: "scrollIndicator")
+    private static let didLogOutOfRange = OSAllocatedUnfairLock(initialState: false)
+
     private let thumbLayer = CALayer()
     /// Parent layer for every prompt-mark tick so we can animate / fade the
     /// marks as a group without touching the thumb. Sits under the thumb so
@@ -63,6 +76,19 @@ final class ScrollIndicator: NSView {
         // future ABI change) — defense-in-depth, mirrors L-3 shape.
         let rawFromBottom = CGFloat(displayOffset) / CGFloat(max(historySize, 1))
         let scrollFromBottom = min(1, max(0, rawFromBottom))
+        // Defense-in-depth observability. The clamp above hides a bad
+        // upstream value; without a log, a regression in the Rust
+        // scroll math would manifest only as a thumb that pins to the
+        // edge with no breadcrumb. One-shot so a sustained regression
+        // doesn't flood the unified log.
+        if rawFromBottom > 1 || rawFromBottom < 0 {
+            Self.didLogOutOfRange.withLock { didLog in
+                if !didLog {
+                    didLog = true
+                    Self.logger.warning("scroll-from-bottom ratio out of [0,1]: displayOffset=\(displayOffset, privacy: .public) historySize=\(historySize, privacy: .public)")
+                }
+            }
+        }
 
         let track = bounds.height
         // L-3 / RW-05: clamp the thumb height to the track so a very

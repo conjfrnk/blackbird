@@ -69,6 +69,35 @@ final class ScrollIndicatorTests: XCTestCase {
             "displayOffset == historySize should pin thumb-top to track-top")
     }
 
+    /// Symmetric to `test_displayOffsetExceedsHistorySize_thumbStaysOnTrack`
+    /// for the lower bound. Today `bb_term_*` exposes scroll offsets as
+    /// `u32` so a negative `displayOffset` is unreachable through the
+    /// real publish path, but the M-15 clamp explicitly guards both
+    /// bounds (`min(1, max(0, rawFromBottom))`) for a future ABI sign
+    /// change. Lock the invariant in: thumb origin Y must remain on the
+    /// track when the input is below zero.
+    func test_displayOffsetNegative_thumbStaysOnTrack() {
+        let indicator = ScrollIndicator(frame: NSRect(x: 0, y: 0, width: 12, height: 200))
+        indicator.update(displayOffset: -50, historySize: 50, rows: 24)
+
+        guard let f = thumbFrame(of: indicator) else {
+            XCTFail("thumbLayer not observable via Mirror")
+            return
+        }
+        let trackHeight: CGFloat = 200
+        XCTAssertGreaterThanOrEqual(f.origin.y, 0,
+            "thumb origin Y must not go negative on negative displayOffset")
+        XCTAssertLessThanOrEqual(f.origin.y + f.size.height, trackHeight + 0.5,
+            "thumb top must not exceed track top edge on negative displayOffset")
+        XCTAssertTrue(f.size.height.isFinite)
+        XCTAssertGreaterThan(f.size.height, 0)
+        // Negative offset clamps to scrollFromBottom == 0, which pins
+        // the thumb to the track bottom. Tighter assertion than the
+        // upper-bound test because the floor maps to a single point.
+        XCTAssertEqual(f.origin.y, 0, accuracy: 0.5,
+            "displayOffset < 0 should clamp to bottom (scrollFromBottom = 0)")
+    }
+
     func test_displayOffsetZero_thumbAtBottom() {
         let indicator = ScrollIndicator(frame: NSRect(x: 0, y: 0, width: 12, height: 200))
         indicator.update(displayOffset: 0, historySize: 50, rows: 24)
