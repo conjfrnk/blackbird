@@ -42,7 +42,18 @@ if [[ "${1:-}" == "--full" ]]; then
     FULL=1
 fi
 
-DMG="$(ls -t dist/Blackbird-*.dmg 2>/dev/null | head -1 || true)"
+# Pick the version-newest DMG, NOT the mtime-newest. A stale-dated
+# rebuild of an OLDER version sitting next to the freshly-cut newer
+# one would otherwise shadow the real release. Sort lexicographically
+# on the version segment using `sort -V` (GNU/BSD versionsort), which
+# correctly orders "0.10.0" after "0.9.0" — plain `sort` would not.
+# Audit F-S8-008 / SFH-027.
+DMG=""
+for candidate in $(ls dist/Blackbird-*.dmg 2>/dev/null \
+                       | sed -E 's|^dist/Blackbird-(.*)\.dmg$|\1|' \
+                       | sort -V); do
+    DMG="dist/Blackbird-${candidate}.dmg"
+done
 if [[ -z "$DMG" || ! -f "$DMG" ]]; then
     echo "!! No DMG found in dist/. Run scripts/release.sh first." >&2
     exit 1
