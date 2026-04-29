@@ -5,15 +5,30 @@ import BBCore
 /// freeing on deinit. Not Sendable — must be used from a single serial queue
 /// (the `core` queue in a TerminalSession).
 public final class BBTerm {
-    #if DEBUG
+    /// Floor on resize / construction dimensions. Mirrors
+    /// `MIN_DIM` in `core/src/lib.rs`. Wrapper-side clamping lets the
+    /// public `BBTerm.resize(to:)` accept anything callers throw at
+    /// it — including the legacy `(0, 0)` shape — without trapping
+    /// (audit L-18 / EC-7). The Rust side enforces the same floor;
+    /// this constant exists so the wrapper can normalise BEFORE the
+    /// FFI call so the returned dimensions always describe a usable
+    /// grid.
+    public static let MIN_DIM: UInt16 = 2
+    /// Ceiling counterpart to `MIN_DIM`. Same rationale: wrapper-side
+    /// clamp matches the Rust `MAX_DIM` so callers see a usable
+    /// `Size` echoed back.
+    public static let MAX_DIM: UInt16 = 1000
+
     /// Re-entrancy latch set while `dispatch(_:)` is running the
-    /// registered event handler. Used by the DEBUG-only assertion in
+    /// registered event handler. Used by the precondition in
     /// `dispatch` to catch any handler that synchronously calls back
     /// into a `bb_term_*` function — alacritty's `&mut Term` borrow
-    /// would be live while we re-enter, which is UB-adjacent. Release
-    /// builds omit the field entirely so there's no runtime cost.
+    /// would be live while we re-enter, which is UB-adjacent. Audit
+    /// M-9 (2026-04-29) promoted this from a `#if DEBUG`-only field
+    /// to a Release-also field: the cost of one Bool branch per
+    /// dispatched event is negligible compared to the cost of UB
+    /// silently corrupting alacritty state in Release.
     fileprivate var isInsideEventDispatch: Bool = false
-    #endif
 
     public struct Size: Equatable {
         public var cols: UInt16
@@ -118,6 +133,24 @@ public final class BBTerm {
         // surface as pre-M6, but the explicit-terminate path now
         // exists for owners who want to be deterministic about which
         // queue runs the free.
+        //
+        // Audit M-8 (2026-04-29): the FFI contract requires every
+        // `bb_term_*` call (including the trampoline-clear and free
+        // here) to happen on the same thread context that has been
+        // driving `bb_term_input`. Production paths
+        // (TerminalSession.terminate) ensure this by calling
+        // `terminate()` on `coreQueue.sync` first; deinit then
+        // observes `handle == nil`. A runtime thread-equality check
+        // here would false-positive on legitimate same-queue use
+        // because GCD's `dispatch_sync` optimisation can borrow the
+        // calling thread — the queue's worker pthread isn't a
+        // stable identity. Contract enforcement therefore lives in
+        // `TerminalSession`'s dispatchPrecondition tripwires (audit
+        // M-12); the BBTerm wrapper trusts callers to honour the
+        // single-thread discipline. M-8 remains a doc-only fix at
+        // this layer pending a queue-aware enforcement primitive
+        // (e.g. `dispatchPrecondition(.onQueue(owningQueue))` if
+        // BBTerm grew an explicit `owningQueue` field).
         if let h = handle {
             ctxBox.pointee.owner = nil
             bb_term_set_event_cb(h, nil, nil)
@@ -143,33 +176,43 @@ public final class BBTerm {
     }
 
     /// Resize the grid to `size`, returning the dimensions actually applied
-    /// after the Rust core's `[2, 1000]` clamp on each axis. Callers that
+    /// after the `[MIN_DIM, MAX_DIM]` clamp on each axis. Callers that
     /// drive a PTY's `TIOCSWINSZ` MUST use the returned dims, not the
     /// requested ones — telling the shell it has 1500 columns when the grid
     /// only has 1000 makes the shell wrap text past the visible viewport
     /// (rust-core-3 F4 / Bug #3).
     ///
-    /// L-5 / EI-04: callers MUST also pass cols ≥ 1 and rows ≥ 1.
-    /// Earlier shape returned the unclamped input verbatim when either
-    /// dim was zero, which contradicted the "use returned dims" contract
-    /// — a caller obeying the contract would then ioctl `cols=0` to the
-    /// PTY. Production callers (`TerminalSession.resize` via
-    /// `clampResize` flooring at 2; `PTY.resize` with its `> 0` guard)
-    /// already filter zero before reaching here, so the precondition
-    /// only fires on a legitimate misuse.
+    /// Audit L-18 / EC-7 (2026-04-29): the wrapper now clamps to
+    /// `[MIN_DIM, MAX_DIM]` BEFORE calling the FFI so a `(0, 0)` request
+    /// no longer trap-aborts the process — it floors to `(MIN_DIM,
+    /// MIN_DIM)`. The Rust side independently clamps, so this is
+    /// belt-and-braces; the wrapper-side clamp lets `BBTerm.resize` be
+    /// safely called from any code path that hasn't pre-validated dims
+    /// (e.g., a future state-restoration with a stale persisted size).
+    /// A DEBUG `assertionFailure` still fires on a zero input so legacy
+    /// callers that were relying on the old precondition catch the drift
+    /// during development.
     @discardableResult
     public func resize(to size: Size) -> Size {
-        precondition(
-            size.cols > 0 && size.rows > 0,
-            "BBTerm.resize requires positive dimensions; got cols=\(size.cols), rows=\(size.rows)"
-        )
-        guard let h = handle else { return size }
-        let result = bb_term_resize2(h, size.cols, size.rows)
-        // The precondition above means a (0, 0, 0) return now signals a
-        // null-handle no-op, not a zero-input rejection — fall through to
-        // returning the input request which is itself non-zero.
+        #if DEBUG
+        if size.cols == 0 || size.rows == 0 {
+            assertionFailure(
+                "BBTerm.resize received zero dimension; got cols=\(size.cols), rows=\(size.rows). "
+                + "Wrapper clamps up to MIN_DIM=\(Self.MIN_DIM) so this no longer traps in Release, "
+                + "but the call site is feeding garbage — fix it."
+            )
+        }
+        #endif
+        let clampedCols = min(max(size.cols, Self.MIN_DIM), Self.MAX_DIM)
+        let clampedRows = min(max(size.rows, Self.MIN_DIM), Self.MAX_DIM)
+        guard let h = handle else { return Size(cols: clampedCols, rows: clampedRows) }
+        let result = bb_term_resize2(h, clampedCols, clampedRows)
+        // The wrapper-side clamp guarantees a non-zero (cols, rows) reach
+        // the FFI, so a `(0, 0, 0)` return now exclusively signals the
+        // null-handle / panic fallback path. Fall through to returning
+        // the clamped request, which itself describes a usable grid.
         if result.applied_cols == 0 || result.applied_rows == 0 {
-            return size
+            return Size(cols: clampedCols, rows: clampedRows)
         }
         return Size(cols: result.applied_cols, rows: result.applied_rows)
     }
@@ -233,8 +276,15 @@ public final class BBTerm {
     /// the axis-aligned bounding box between start/end; `false` selects the
     /// prose-style sweep (first line from startCol, middle lines full, last
     /// line to endCol). Lines outside the buffer are silently skipped.
-    /// Returns `nil` when the underlying FFI call fails (null handle or
-    /// out-of-range arguments).
+    ///
+    /// Returns `nil` on (a) null handle, (b) zero-area range (FFI returns
+    /// an empty `BBString` and we forward `""`; an outright `nil` here is
+    /// the C-side null-allocation fallback), or (c) a panic during text
+    /// extraction (the Rust side catches it via `catch_unwind` and returns
+    /// null, with a Fatal event also dispatched on the registered
+    /// callback). Callers cannot distinguish (a) vs (c) from this return
+    /// value alone — wire a `.fatal` handler via `onEvent` if you need to
+    /// learn about extraction-time panics. Audit L-9 (2026-04-29).
     public func textRange(
         startLine: Int32, startCol: Int,
         endLine: Int32,   endCol: Int,
@@ -276,25 +326,30 @@ public final class BBTerm {
 
     private func dispatch(_ ev: BBEvent) {
         guard let handler else { return }
-        #if DEBUG
         // Re-entrancy guard: if the event handler calls back into a
         // `bb_term_*` function while we're still inside a dispatch, the
         // Rust core may re-enter alacritty's `&mut Term` while the prior
         // call is still holding it. That's UB-adjacent — the borrow
         // checker can't see across the FFI boundary. Audit ffi-bridge
-        // F11. Debug-only so the release path has zero overhead; any
-        // new call site that accidentally reenters will trip this
-        // during development.
-        if isInsideEventDispatch {
-            assertionFailure(
-                "BBTerm event handler called back into bb_term_* synchronously. "
-                + "Route the call through DispatchQueue.main.async or a later "
-                + "runloop tick instead."
-            )
-        }
+        // F11 / M-9 (2026-04-29).
+        //
+        // M-9 promoted this from a `#if DEBUG` `assertionFailure` to a
+        // Release-also `precondition`: aborting loudly is strictly
+        // better than corrupting alacritty state, and the cost is one
+        // Bool branch on a low-volume code path. The Rust side catches
+        // many but not all re-entry shapes via `FFI_FATAL_IN_FLIGHT`;
+        // this Swift guard is the static catch for the call-graph
+        // shape ("handler synchronously calls bb_term_*"), the Rust
+        // guard is the dynamic catch for the data shape (panic during
+        // a callback chain).
+        precondition(
+            !isInsideEventDispatch,
+            "BBTerm event handler called back into bb_term_* synchronously. "
+            + "Route the call through DispatchQueue.main.async or a later "
+            + "runloop tick instead. Audit M-9."
+        )
         isInsideEventDispatch = true
         defer { isInsideEventDispatch = false }
-        #endif
         // BBEventKind is typedef uint32_t in C. ev.kind is UInt32.
         // The BB_EVENT_KIND_* constants are C enum variants; use their integer
         // values directly to avoid Swift 6 cross-module typedef comparison issues.
@@ -314,11 +369,30 @@ public final class BBTerm {
         case 7:   // BB_EVENT_KIND_PROMPT_MARK
             if let kind = PromptMarkKind(rawValue: UInt8(clamping: ev.i32_arg)) {
                 handler(.promptMark(kind: kind, exitCode: Self.string(from: ev)))
+            } else {
+                // Audit L-3 (2026-04-29): the Rust side defines exactly
+                // the four `PromptMarkKind` raw values 1..=4. A value
+                // outside that range here means the C ABI drifted
+                // (Rust added a new variant the Swift enum doesn't
+                // know about, or `i32_arg` got mis-encoded). Drop in
+                // Release; loud-fail in DEBUG so CI catches drift.
+                assertionFailure(
+                    "BB_EVENT_KIND_PROMPT_MARK with unknown raw value \(ev.i32_arg). "
+                    + "Swift PromptMarkKind covers 1..=4; Rust ABI has drifted. Audit L-3."
+                )
             }
         case 99:  // BB_EVENT_KIND_FATAL
             handler(.fatal(Self.string(from: ev)))
         default:
-            break
+            // Audit L-3 (2026-04-29): unknown event kind means the
+            // Rust enum gained a variant the Swift switch doesn't
+            // handle. Silent drop in Release (forward-compatible),
+            // loud-fail in DEBUG so the regression surfaces in CI on
+            // the next FFI bump.
+            assertionFailure(
+                "BBTerm.dispatch saw unknown BBEventKind raw value \(ev.kind). "
+                + "Swift switch covers 1..7 + 99; Rust ABI has drifted. Audit L-3."
+            )
         }
     }
 
@@ -418,13 +492,13 @@ public final class BBSnapshot {
     public var mode: UInt32 { handle.pointee.mode }
     public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 
-    /// Three-way classification of a single cell. `character(at:row:)`
-    /// collapses spacer and empty into one nil — fine for "give me what
-    /// to render here" but ambiguous for layout math: a wide CJK glyph
-    /// at col 0 paints col 1 as a spacer (an extension of the char on
-    /// its left), whereas an unwritten cell at col 5 is empty (no glyph,
-    /// no extension). Find / replace need to distinguish the two when
-    /// computing column spans and DEL counts.
+    /// Four-way classification of a single cell. `character(at:row:)`
+    /// collapses spacer / empty / invalid into one nil — fine for "give
+    /// me what to render here" but ambiguous for layout math: a wide
+    /// CJK glyph at col 0 paints col 1 as a spacer (an extension of
+    /// the char on its left), whereas an unwritten cell at col 5 is
+    /// empty (no glyph, no extension). Find / replace need to
+    /// distinguish the two when computing column spans and DEL counts.
     public enum CellKind: Equatable {
         /// Cell carries a printable character. The leading cell of a
         /// wide glyph reports `.character`; the spacer cell to its
@@ -437,6 +511,16 @@ public final class BBSnapshot {
         /// Cell has never been written by the shell — alacritty's
         /// `\0` sentinel.
         case empty
+        /// Cell holds a non-zero scalar that fails `Unicode.Scalar`
+        /// construction — surrogate scalars (`0xD800..=0xDFFF`),
+        /// out-of-range values (≥ `0x110000`), or future invalid
+        /// shapes the Rust core didn't filter. Treated by row-walkers
+        /// as "skip without halting" so the row's haystack isn't
+        /// truncated mid-line. alacritty 0.26 rejects surrogate
+        /// scalars upstream so this is defensive today; if a future
+        /// upstream change lets one through, the row-walker
+        /// continues past it. Audit L-15 / DI-9 (2026-04-29).
+        case invalid
     }
 
     /// Classify the cell at `(col, row)` for layout-math purposes. Used
@@ -444,7 +528,13 @@ public final class BBSnapshot {
     /// replace path to count shell-input characters in a match span.
     public func cellKind(at col: Int, row: Int) -> CellKind {
         guard col >= 0, row >= 0, col < cols, row < rows else { return .empty }
-        let idx = row * cols + col
+        // Audit L-19 / EC-9 (2026-04-29): defence-in-depth on
+        // `row * cols + col`. Today bounded by the upstream guards
+        // (`row < rows`, `col < cols` with rows/cols ≤ 1000), so
+        // overflow is unreachable in practice. Promote to an explicit
+        // overflow-aware compute so any future code path that calls
+        // this with larger `Int` inputs can't silently wrap.
+        guard let idx = Self.flatIndex(row: row, col: col, cols: cols) else { return .empty }
         guard idx < cellCount else { return .empty }
         let cell = handle.pointee.cells[idx]
         let spacerMask = UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER)
@@ -452,8 +542,24 @@ public final class BBSnapshot {
             return .spacer
         }
         let scalar = cell.ch
-        guard scalar != 0, let us = Unicode.Scalar(scalar) else { return .empty }
+        guard scalar != 0 else { return .empty }
+        guard let us = Unicode.Scalar(scalar) else { return .invalid }
         return .character(Character(us))
+    }
+
+    /// Compute `row * cols + col` with overflow detection. Returns
+    /// `nil` when either the multiply or the add would wrap a signed
+    /// `Int`. Defence-in-depth helper for cell-array indexing
+    /// (audit L-19 / EC-9, 2026-04-29). Today the inputs are bounded
+    /// by `MAX_DIM` and overflow is unreachable; the helper exists so
+    /// any future caller that lifts those bounds gets a safe fallback
+    /// instead of a UB-adjacent wrap.
+    fileprivate static func flatIndex(row: Int, col: Int, cols: Int) -> Int? {
+        let (product, mulOverflow) = row.multipliedReportingOverflow(by: cols)
+        if mulOverflow { return nil }
+        let (idx, addOverflow) = product.addingReportingOverflow(col)
+        if addOverflow { return nil }
+        return idx
     }
 
     /// Walk a screen row's cells, skipping spacer cells, and return the
@@ -503,6 +609,17 @@ public final class BBSnapshot {
                 // writes the leading char first). Skip without
                 // advancing the sentinel.
                 c += 1
+            case .invalid:
+                // Cell holds a non-zero scalar that fails
+                // `Unicode.Scalar` construction — surrogate or
+                // out-of-range. alacritty rejects these upstream
+                // today, so this branch is defensive. Skip past
+                // without truncating the row's haystack so a single
+                // hostile cell can't blank out everything to its
+                // right (which would cause a regex search to silently
+                // miss matches past that column). Audit L-15 / DI-9
+                // (2026-04-29).
+                c += 1
             case .empty:
                 // Unwritten cell. Stop walking — trailing empties don't
                 // extend the row's text or contribute to the sentinel.
@@ -545,7 +662,11 @@ public final class BBSnapshot {
         // against cellCount too so a snapshot with a corrupted
         // rows/cols metadata can't turn into a UAF read.
         guard col >= 0, row >= 0, col < cols, row < rows else { return nil }
-        let idx = row * cols + col
+        // Audit L-19 / EC-9 (2026-04-29): overflow-safe flat index.
+        // Bounded today by `MAX_DIM`, so the multiply can't wrap on
+        // any in-spec snapshot; the helper exists so a future caller
+        // that lifts that bound gets a safe fallback.
+        guard let idx = Self.flatIndex(row: row, col: col, cols: cols) else { return nil }
         guard idx < cellCount else { return nil }
         let scalar = handle.pointee.cells[idx].ch
         guard scalar != 0, let us = Unicode.Scalar(scalar) else { return nil }
@@ -665,7 +786,11 @@ extension BBSnapshot: A11ySnapshotSource {
             var chars: [Character] = []
             chars.reserveCapacity(cols)
             for c in 0..<cols {
-                let idx = r * cols + c
+                // Audit L-19 / EC-9 (2026-04-29): overflow-safe flat
+                // index. Today bounded by `MAX_DIM`, so the multiply
+                // can't wrap; the helper exists so a future caller
+                // that lifts that bound gets a safe fallback.
+                guard let idx = Self.flatIndex(row: r, col: c, cols: cols) else { break }
                 // `cellsPtr` is a raw UnsafePointer — subscripting past
                 // the end is UB, not a trap. Guard against a
                 // corrupted snapshot where cells_len drifts below
