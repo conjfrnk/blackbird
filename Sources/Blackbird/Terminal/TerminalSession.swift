@@ -532,6 +532,12 @@ public final class TerminalSession: ObservableObject {
     }
 
     public func resize(to size: Size) {
+        // M-12 sibling: same tripwire rationale as recordPromptStart /
+        // scrollToMark. `coreQueue.sync` self-deadlocks if invoked from
+        // coreQueue, and a future bbterm-event-driven path could land
+        // here on coreQueue and wedge the session invisibly. Public API
+        // surface — fail loud rather than silently hang.
+        dispatchPrecondition(condition: .notOnQueue(coreQueue))
         // Synchronous on the caller's thread. coreQueue serializes PTY +
         // BBTerm resize (same guarantee as before) but we block the caller
         // (typically main during a window drag) so the returned snapshot is
@@ -767,6 +773,12 @@ public final class TerminalSession: ObservableObject {
     /// queue so the grid can't mutate mid-read (same discipline as other
     /// `bbterm.*` accessors).
     public func textRange(from start: BufferPoint, to end: BufferPoint, rectangular: Bool) -> String {
+        // M-12 sibling: same tripwire rationale as recordPromptStart /
+        // scrollToMark / resize. Public method used by selection-copy and
+        // find-match extraction (both on main today). `coreQueue.sync`
+        // self-deadlocks if invoked from coreQueue, so fail loud rather
+        // than wedge the session if a future caller lands here off-main.
+        dispatchPrecondition(condition: .notOnQueue(coreQueue))
         var out = ""
         coreQueue.sync {
             out = bbterm.textRange(
