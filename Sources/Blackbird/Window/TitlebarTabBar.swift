@@ -710,16 +710,19 @@ final class TabStripView: NSView {
         super.rightMouseDown(with: event)
     }
 
-    #if DEBUG
     /// `os.Logger` (not `NSLog`) so `privacy: .public` markers actually
     /// take effect. Same pattern as `MainWindowController.tabsLogger`.
     /// Used as a canary for the rare case where
     /// `window.makeFirstResponder(cv)` returns `false` — that would
-    /// silently re-open the NSBeep regression this fix targets, so a
-    /// log line is the only evidence we'd have in dev.
+    /// silently re-open the NSBeep regression this fix targets.
+    ///
+    /// NOT gated on `#if DEBUG`: the failure mode (NSBeep on every
+    /// keystroke until the user clicks away) is exactly the kind of
+    /// regression that only shows up in production, and the log line
+    /// is the only evidence we'd have to act on a user report.
+    /// (audit M-5, sibling pattern of M-4)
     private static let focusLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                             category: "tabFocus")
-    #endif
 
     /// Yield first-responder status from the strip back to the host
     /// window's contentView (the TerminalView in production) when the
@@ -757,11 +760,12 @@ final class TabStripView: NSView {
             preserveDescendantsOf: protectedRoots
         ) else { return }
         let ok = win.makeFirstResponder(cv)
-        #if DEBUG
         if !ok {
+            // Logs in Release too — the NSBeep-on-every-keystroke
+            // regression this canary covers is field-only by nature.
+            // (audit M-5)
             Self.focusLogger.error("yieldFirstResponderToTerminalIfParked: makeFirstResponder(contentView) returned false — strip remains parked, keystrokes will ring NSBeep until the user clicks away. Investigate why TerminalView refused to become first responder.")
         }
-        #endif
     }
 
     // MARK: - Keyboard focus (titlebar-tabs F4)
