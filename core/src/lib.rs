@@ -982,20 +982,25 @@ impl OscScanner<'_> {
         // hostile remote allocate megabytes per OSC 7 chunk. OSC 8 caps
         // its URI at the same shape (`OSC8_URI_MAX = 4096`); legitimate
         // `file://` cwd URLs are at most a few hundred bytes.
+        //
+        // The length check stays FIRST (free, no allocation, no state
+        // mutation) so an oversized hostile URL never even consumes a
+        // rate-limit slot.
         if url.len() > OSC7_URL_MAX {
             return;
         }
 
-        // Audit M-7 (2026-04-29): rate-limit ingest. Legitimate shells
-        // emit one OSC 7 per `cd`. A hostile remote streaming OSC 7s in
-        // a tight loop forces Swift's `classifyForegroundNamespace()` to
-        // run a `proc_listpids` BFS on every event — main-thread work
-        // that beachballs the UI. Drop excess silently within the
-        // sliding window. Done BEFORE the parsing / validation work so
-        // a flood doesn't even pay the percent-decode cost.
-        if !self.osc7_rate.allow() {
-            return;
-        }
+        // Reviewer feedback (2026-04-29): reorder the cheap structural
+        // validation (scheme, authority) BEFORE the rate gate. Pre-fix,
+        // a hostile remote firing 32 well-formed-but-malicious OSC 7s
+        // (wrong scheme `http://x`, path traversal `/../../`) consumed
+        // the entire 1-second budget; subsequent legitimate
+        // `OSC 7;file:///Users/foo/proj` from the user's shell got
+        // dropped silently, breaking prompt-cwd, "Open in Finder",
+        // new-tab cwd inheritance. The gate now consumes a budget slot
+        // ONLY on requests that pass scheme + authority — so floods of
+        // structural garbage cost zero budget. M-7 (proc_listpids
+        // amplification) and L-20 (allocation cap) remain enforced.
 
         // Accept only `file://` with an empty or `localhost` authority.
         let Some(rest) = url.strip_prefix(b"file://") else {
@@ -1011,6 +1016,19 @@ impl OscScanner<'_> {
         } else {
             return; // non-local host
         };
+
+        // Audit M-7 (2026-04-29) + reviewer reorder: rate-limit ingest.
+        // Legitimate shells emit one OSC 7 per `cd`. A hostile remote
+        // streaming OSC 7s in a tight loop forces Swift's
+        // `classifyForegroundNamespace()` to run a `proc_listpids` BFS
+        // on every event — main-thread work that beachballs the UI.
+        // Drop excess silently within the sliding window. Sits AFTER
+        // structural validation (so malformed traffic doesn't starve
+        // legitimate cwd updates) but BEFORE `percent_decode` (so the
+        // allocation work still benefits from rate-limiting).
+        if !self.osc7_rate.allow() {
+            return;
+        }
 
         let Some(decoded) = percent_decode(path_bytes) else {
             return;
@@ -5431,7 +5449,11 @@ mod tests {
     #[test]
     fn osc7_rate_limit_drops_excess() {
         // 200 OSC 7s, all to a legitimate path. Without the rate gate
-        // every one fires CwdChanged.
+        // every one fires CwdChanged. Reviewer feedback (2026-04-29):
+        // assert exact saturation, not `<= cap`. 200 inputs overflow
+        // the 32-slot budget by ~6×, so a healthy gate lands at exactly
+        // 32. A weaker `<=` assertion would let `cwd_count == 0` pass
+        // (silent fail-open).
         let mut buf = Vec::new();
         for _ in 0..200 {
             buf.extend_from_slice(b"\x1b]7;file:///Users/foo/proj\x07");
@@ -5441,11 +5463,106 @@ mod tests {
             .iter()
             .filter(|(k, _)| *k == BBEventKind::CwdChanged as u32)
             .count();
-        assert!(
-            cwd_count <= OSC7_INGEST_PER_SECOND as usize,
-            "expected at most {} CwdChanged within one window, got {}",
-            OSC7_INGEST_PER_SECOND,
-            cwd_count
+        assert_eq!(
+            cwd_count, OSC7_INGEST_PER_SECOND as usize,
+            "OSC 7 ingest must saturate the cap exactly within one \
+             window (200 inputs overflow by ~6×); expected {} got {}",
+            OSC7_INGEST_PER_SECOND, cwd_count
+        );
+    }
+
+    /// Audit M-7 + reviewer feedback (2026-04-29): after the 1-second
+    /// window expires the OSC 7 ingest counter resets. Mirror of
+    /// `osc133_rate_limit_window_resets_after_one_second`. Saturates
+    /// the cap, sleeps just past the boundary, fires one more, asserts
+    /// the post-sleep event lands.
+    ///
+    /// Wall-clock cost: ~1.1 s (sleep). Acceptable per the audit fix
+    /// plan.
+    #[test]
+    fn osc7_rate_limit_window_resets_after_window() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            count: Mutex<usize>,
+        }
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            if matches!(ev.kind, BBEventKind::CwdChanged) {
+                let sink = &*(ctx as *const Sink);
+                *sink.count.lock().unwrap() += 1;
+            }
+        }
+
+        let sink = Sink {
+            count: Mutex::new(0),
+        };
+        unsafe {
+            let term = bb_term_new(80, 24, 1000);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+
+            // Fire exactly the cap (32) inside the first window.
+            let one_event = b"\x1b]7;file:///Users/foo/proj\x07";
+            let mut buf = Vec::with_capacity(one_event.len() * OSC7_INGEST_PER_SECOND as usize);
+            for _ in 0..OSC7_INGEST_PER_SECOND {
+                buf.extend_from_slice(one_event);
+            }
+            bb_term_input(term, buf.as_ptr(), buf.len());
+            assert_eq!(
+                *sink.count.lock().unwrap(),
+                OSC7_INGEST_PER_SECOND as usize,
+                "first window must accept exactly the cap"
+            );
+
+            // Sleep past the window boundary so the counter resets.
+            std::thread::sleep(OSC7_INGEST_WINDOW + std::time::Duration::from_millis(100));
+
+            bb_term_input(term, one_event.as_ptr(), one_event.len());
+            assert_eq!(
+                *sink.count.lock().unwrap(),
+                OSC7_INGEST_PER_SECOND as usize + 1,
+                "post-sleep OSC 7 must dispatch once the window resets"
+            );
+
+            bb_term_free(term);
+        }
+    }
+
+    /// Reviewer feedback (2026-04-29): a hostile flood of MALFORMED
+    /// OSC 7s (wrong scheme, path traversal, non-local authority) must
+    /// not consume the rate budget that legitimate `file:///` events
+    /// rely on. The fix reorders `osc7_rate.allow()` to sit AFTER the
+    /// cheap structural validation; this test pins that ordering.
+    ///
+    /// Setup: fire 200 malformed OSC 7s (200× the `wrong scheme` shape
+    /// that the structural gate rejects), then fire one legitimate
+    /// `file:///`. The legitimate event MUST land — pre-fix, the
+    /// malformed flood would have eaten every slot and the legitimate
+    /// event would have dropped silently.
+    #[test]
+    fn osc7_malformed_flood_does_not_starve_legitimate_traffic() {
+        // 200 malformed events (wrong scheme — fails structural check)
+        // followed by one legitimate event. Pre-fix, slots 1..32 went
+        // to malformed traffic (which then failed scheme check anyway,
+        // dispatching zero CwdChanged) and the legitimate event hit a
+        // saturated counter and dropped. Post-fix, the malformed flood
+        // is rejected before consuming any slots, so the legitimate
+        // event sails through.
+        let mut buf = Vec::new();
+        for _ in 0..200 {
+            buf.extend_from_slice(b"\x1b]7;http://x/\x07"); // wrong scheme
+        }
+        buf.extend_from_slice(b"\x1b]7;file:///Users/foo/proj\x07");
+
+        let events = drive_events(&buf);
+        let cwd_count = events
+            .iter()
+            .filter(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+            .count();
+        assert_eq!(
+            cwd_count, 1,
+            "legitimate OSC 7 after a malformed flood must dispatch; \
+             got {cwd_count} CwdChanged (events={events:?})"
         );
     }
 
