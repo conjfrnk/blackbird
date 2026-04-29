@@ -5918,7 +5918,7 @@ mod tests {
         let pad_len = OSC7_URL_MAX + 1 - prefix.len();
         let mut url = Vec::with_capacity(prefix.len() + pad_len);
         url.extend_from_slice(prefix);
-        url.extend(std::iter::repeat(b'a').take(pad_len));
+        url.extend(std::iter::repeat_n(b'a', pad_len));
         assert_eq!(url.len(), OSC7_URL_MAX + 1);
 
         let mut seq = Vec::new();

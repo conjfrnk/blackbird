@@ -27,7 +27,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.85.0"
           components: clippy, rustfmt
           targets: aarch64-apple-darwin, x86_64-apple-darwin
 
@@ -82,7 +82,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.85.0"
           targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Cache cargo
@@ -213,7 +213,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.85.0"
           targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Cache cargo
@@ -258,7 +258,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.85.0"
           targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Cache cargo
@@ -321,7 +321,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.85.0"
           targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Cache cargo
@@ -432,7 +432,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.85.0"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -456,7 +456,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: "1.85.0"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
