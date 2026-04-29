@@ -29,13 +29,13 @@ enum MainThreadWatchdog {
     private static let installLock = NSLock()
 
     /// Minimum hang threshold (50 ms). `install(hangThreshold:)` clamps any
-    /// caller-supplied value at or below this floor up to it, so a bad
-    /// caller can't arm a watchdog that fires on every runloop tick.
-    /// Sub-50 ms hangs aren't actionable — sample(1) itself takes ~200 ms.
+    /// value below this floor up to the floor, so a bad caller can't arm a
+    /// watchdog that fires on every runloop tick. Sub-50 ms hangs aren't
+    /// actionable — sample(1) itself takes ~200 ms.
     static let minHangThreshold: Double = 0.05
 
     /// Minimum ping interval (10 ms). `install(pingInterval:)` clamps any
-    /// caller-supplied value at or below this floor up to it, so
+    /// value below this floor up to the floor, so
     /// `Thread.sleep(forTimeInterval: 0)` (which returns immediately on
     /// Darwin) can't put the watchdog thread into a tight busy-wait that
     /// pegs an efficiency core. Likewise prevents the main-thread Timer
@@ -70,6 +70,22 @@ enum MainThreadWatchdog {
     private static var _installedPingInterval: Double?
     private static var _installedHangThreshold: Double?
 
+    /// Pure-function clamp helper — extracted from `install(...)` so the
+    /// M-22 clamp invariant is testable independently of the install
+    /// idempotency latch. Tests assert `_clamp` directly: a clamp-revert
+    /// regression flips this function's output even when the watchdog has
+    /// already been installed by a prior test in the same xctest process.
+    ///
+    /// NaN never reaches `max` — `isFinite` short-circuits to the floor;
+    /// this matters because Swift's `max(_:_:)` with NaN is argument-order-
+    /// dependent and unsafe to rely on (`max(0.05, .nan)` returns 0.05 but
+    /// `max(.nan, 0.05)` returns NaN).
+    internal static func _clamp(hangThreshold: Double, pingInterval: Double) -> (hangThreshold: Double, pingInterval: Double) {
+        let safeThreshold = hangThreshold.isFinite ? max(minHangThreshold, hangThreshold) : minHangThreshold
+        let safePing = pingInterval.isFinite ? max(minPingInterval, pingInterval) : minPingInterval
+        return (safeThreshold, safePing)
+    }
+
     /// Arm the watchdog on the main queue. Call from AppDelegate.
     ///
     /// Both parameters are clamped to safety floors (`minHangThreshold`,
@@ -77,11 +93,20 @@ enum MainThreadWatchdog {
     /// tight-spinning thread — it arms a watchdog at the floor. Audit M-22.
     static func install(hangThreshold: Double = 0.5, pingInterval: Double = 0.1) {
         // Clamp before grabbing the lock so the values we record under the
-        // lock are the safe ones. NaN-guarded via `max`: NaN propagates
-        // through `max` deterministically (returns first arg), so an NaN
-        // input lands on the floor.
-        let safeThreshold = hangThreshold.isFinite ? max(minHangThreshold, hangThreshold) : minHangThreshold
-        let safePing = pingInterval.isFinite ? max(minPingInterval, pingInterval) : minPingInterval
+        // lock are the safe ones.
+        let (safeThreshold, safePing) = _clamp(hangThreshold: hangThreshold, pingInterval: pingInterval)
+
+        // Per audit M-22 / SFH-005 / M-4 / M-5: when the clamp changes a
+        // caller's input, log a warning so the substitution isn't silent.
+        // `safeThreshold != hangThreshold` is true for NaN (NaN != anything),
+        // so the NaN path also logs; the explicit `!isFinite` guard is for
+        // clarity.
+        if safeThreshold != hangThreshold || !hangThreshold.isFinite {
+            logger.warning("hangThreshold \(hangThreshold, privacy: .public)s clamped to floor \(safeThreshold, privacy: .public)s — caller passed unsafe value (audit M-22)")
+        }
+        if safePing != pingInterval || !pingInterval.isFinite {
+            logger.warning("pingInterval \(pingInterval, privacy: .public)s clamped to floor \(safePing, privacy: .public)s — caller passed unsafe value (audit M-22)")
+        }
 
         installLock.lock()
         defer { installLock.unlock() }
