@@ -286,7 +286,7 @@ public final class Preferences: ObservableObject {
         let storedSchemaVersion = defaults.integer(forKey: Preferences.schemaVersionKey)
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
-            Preferences.repairEnumRawValues(in: self)
+            Preferences.repairEnumRawValues(in: self, defaults: defaults)
         }
 
         // Force a through-didSet write on each numeric pref so values
@@ -347,6 +347,20 @@ public final class Preferences: ObservableObject {
     /// fires once; this hooks the same machinery to
     /// `UserDefaults.didChangeNotification` so the model recovers
     /// without a relaunch.
+    ///
+    /// CRITICAL — read decisions from `defaults.*(forKey:)`, NOT from
+    /// the `@AppStorage` properties on `self`. SwiftUI's `@AppStorage`
+    /// caches the wrappedValue inside its `Location` object, and on a
+    /// non-`View` host (this class is a singleton, not a `View`) the
+    /// cache only refreshes when the SwiftUI bridge re-publishes —
+    /// which doesn't happen synchronously with an external
+    /// `UserDefaults.standard.set(…)`. Reading `self.fontSize` here
+    /// returns the STALE Swift-side cached value (the value before the
+    /// external write), so the clamp comparison sees `13 → 13` (no
+    /// rewrite) when disk actually holds `999`. Read disk directly for
+    /// the comparison; write through the `@AppStorage` setter (which
+    /// IS synchronous on UserDefaults + refreshes the cache + fires
+    /// didSet for the same-value guard).
     private func handleDefaultsChange() {
         // Locks the contract the `isProcessingDefaultsChange` flag relies
         // on: the observer is registered with `queue: .main`, so this
@@ -372,7 +386,7 @@ public final class Preferences: ObservableObject {
         let storedSchemaVersion = defaults.integer(forKey: Preferences.schemaVersionKey)
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
-            Preferences.repairEnumRawValues(in: self)
+            Preferences.repairEnumRawValues(in: self, defaults: defaults)
         }
 
         // Numeric clamps — same envelope as the `didSet` blocks. The
@@ -392,19 +406,24 @@ public final class Preferences: ObservableObject {
         // it. If a future version widens the envelope, that change
         // SHOULD bump the schema and add an explicit migration; the H-8
         // gate isn't the right place to express it.
-        let currentFontSize = self.fontSize
-        let normalisedFont = currentFontSize.isFinite ? currentFontSize : 13
+        //
+        // `defaults.double(forKey:)` returns the disk value (or the
+        // registered-default 13 if absent). Reading `self.fontSize`
+        // would return the STALE @AppStorage cache — see method
+        // header.
+        let diskFontSize = defaults.double(forKey: Preferences.k("fontSize"))
+        let normalisedFont = diskFontSize.isFinite ? diskFontSize : 13
         let clampedFont = max(9, min(32, normalisedFont))
-        if clampedFont != currentFontSize {
-            Preferences.logger.log("re-clamping fontSize after external defaults write: \(currentFontSize, privacy: .public) → \(clampedFont, privacy: .public)")
+        if clampedFont != diskFontSize {
+            Preferences.logger.log("re-clamping fontSize after external defaults write: \(diskFontSize, privacy: .public) → \(clampedFont, privacy: .public)")
             self.fontSize = clampedFont
         }
 
-        let currentTrans = self.translucency
-        let normalisedTrans = currentTrans.isFinite ? currentTrans : 1
+        let diskTrans = defaults.double(forKey: Preferences.k("translucency"))
+        let normalisedTrans = diskTrans.isFinite ? diskTrans : 1
         let clampedTrans = max(1, min(10, normalisedTrans))
-        if clampedTrans != currentTrans {
-            Preferences.logger.log("re-clamping translucency after external defaults write: \(currentTrans, privacy: .public) → \(clampedTrans, privacy: .public)")
+        if clampedTrans != diskTrans {
+            Preferences.logger.log("re-clamping translucency after external defaults write: \(diskTrans, privacy: .public) → \(clampedTrans, privacy: .public)")
             self.translucency = clampedTrans
         }
     }
@@ -419,26 +438,40 @@ public final class Preferences: ObservableObject {
     /// the init caller and the `UserDefaults.didChangeNotification`
     /// observer can fire this on a path that loops back through the
     /// SwiftUI bridge.
-    private static func repairEnumRawValues(in prefs: Preferences) {
-        if Theme(rawValue: prefs.themeRaw) == nil {
+    ///
+    /// Reads each rawValue from `defaults` directly rather than via the
+    /// `@AppStorage` property. The init caller passes the same
+    /// `UserDefaults.standard` instance the wrapper writes against; the
+    /// observer caller MUST read disk because @AppStorage's
+    /// non-`View`-host cache lags behind external `defaults.set(…)`
+    /// writes (see `handleDefaultsChange` header). Reading from
+    /// `defaults` is correct on both paths and matches the registered-
+    /// default fallback the @AppStorage init-default would produce.
+    private static func repairEnumRawValues(in prefs: Preferences, defaults: UserDefaults) {
+        let themeRaw = defaults.string(forKey: k("theme")) ?? Theme.gruvbox.rawValue
+        if Theme(rawValue: themeRaw) == nil {
             let target = Theme.defaultTheme.rawValue
-            if prefs.themeRaw != target { prefs.themeRaw = target }
+            if themeRaw != target { prefs.themeRaw = target }
         }
-        if ThemeMode(rawValue: prefs.themeModeRaw) == nil {
+        let themeModeRaw = defaults.string(forKey: k("themeMode")) ?? ThemeMode.dark.rawValue
+        if ThemeMode(rawValue: themeModeRaw) == nil {
             let target = ThemeMode.auto.rawValue
-            if prefs.themeModeRaw != target { prefs.themeModeRaw = target }
+            if themeModeRaw != target { prefs.themeModeRaw = target }
         }
-        if BellStyle(rawValue: prefs.bellRaw) == nil {
+        let bellRaw = defaults.string(forKey: k("bell")) ?? BellStyle.visual.rawValue
+        if BellStyle(rawValue: bellRaw) == nil {
             let target = BellStyle.visual.rawValue
-            if prefs.bellRaw != target { prefs.bellRaw = target }
+            if bellRaw != target { prefs.bellRaw = target }
         }
-        if CursorShape(rawValue: prefs.cursorShapeRaw) == nil {
+        let cursorShapeRaw = defaults.string(forKey: k("cursorShape")) ?? CursorShape.followShell.rawValue
+        if CursorShape(rawValue: cursorShapeRaw) == nil {
             let target = CursorShape.followShell.rawValue
-            if prefs.cursorShapeRaw != target { prefs.cursorShapeRaw = target }
+            if cursorShapeRaw != target { prefs.cursorShapeRaw = target }
         }
-        if OptionKey(rawValue: prefs.optionKeyRaw) == nil {
+        let optionKeyRaw = defaults.string(forKey: k("optionKey")) ?? OptionKey.meta.rawValue
+        if OptionKey(rawValue: optionKeyRaw) == nil {
             let target = OptionKey.meta.rawValue
-            if prefs.optionKeyRaw != target { prefs.optionKeyRaw = target }
+            if optionKeyRaw != target { prefs.optionKeyRaw = target }
         }
     }
 

@@ -774,7 +774,7 @@ final class PreferencesMigrationTests: XCTestCase {
     ///
     /// This pin asserts the gate's structural invariant in source: the
     /// `isDowngrade` predicate is computed AND the init-time
-    /// `repairEnumRawValues(in: self)` call is wrapped in
+    /// `repairEnumRawValues(in: self, …)` call is wrapped in
     /// `if !isDowngrade`. A future regression that breaks ONLY the init
     /// gate (e.g. someone refactors and drops the wrapper) would ship
     /// green against the runtime tests; this catches it.
@@ -793,13 +793,14 @@ final class PreferencesMigrationTests: XCTestCase {
             """
         )
         XCTAssertTrue(
-            src.contains("if !isDowngrade {") && src.contains("Preferences.repairEnumRawValues(in: self)"),
+            src.contains("if !isDowngrade {") && src.contains("Preferences.repairEnumRawValues(in: self, defaults: defaults)"),
             """
             H-8 init-time gate must wrap the init-time repair call.
             Expected `if !isDowngrade {` guarding
-            `Preferences.repairEnumRawValues(in: self)` in source. The
-            observer-path runtime tests cannot reach the init gate —
-            this source pin is the only check protecting that branch.
+            `Preferences.repairEnumRawValues(in: self, defaults: defaults)`
+            in source. The observer-path runtime tests cannot reach the
+            init gate — this source pin is the only check protecting
+            that branch.
             """
         )
     }
