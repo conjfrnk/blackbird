@@ -1,9 +1,7 @@
 import AppKit
 import Combine
 import Metal
-#if DEBUG
 import os
-#endif
 
 extension Notification.Name {
     /// Fired whenever any MainWindowController observes its own window's

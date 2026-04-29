@@ -1,7 +1,5 @@
 import AppKit
-#if DEBUG
 import os
-#endif
 
 /// Custom tab bar that sits inside the titlebar row — same row as the
 /// traffic-light buttons, Safari / iTerm2 style. Built on top of AppKit's
