@@ -26,6 +26,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var controllers: [MainWindowController] = []
 
+    /// Diagnostics for the menu / responder-chain action plumbing.
+    /// NOT gated on `#if DEBUG`: the leakage-class bug this is a canary
+    /// for (⌘⇧W flipping `bypassCloseConfirm` while a non-Blackbird window
+    /// is key, allowing a nested-modal in the Settings close path to
+    /// silently bypass per-tab close confirmation in another
+    /// MainWindowController) is field-undiagnosable in Release without a
+    /// breadcrumb. Same Release-diagnosability rationale as `tabsLogger`
+    /// / `focusLogger` (audit H-2 / M-4 / M-5). H-9 leak class.
+    private static let menuLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                           category: "menu")
+
+    /// Returns the current key window if it's owned by Blackbird (a
+    /// `MainWindowController` we track), else nil. Single chokepoint
+    /// shared by `validateMenuItem` (menu-driven dispatch) AND the
+    /// action implementations (programmatic / AppleScript /
+    /// `NSApp.sendAction` paths) so the gating is identical at every
+    /// entry point. `validateMenuItem` is consulted only for menu
+    /// dispatch, so without this guard inside the action bodies a
+    /// programmatic `closeWindow(_:)` call while Settings is keyWindow
+    /// would still flip `MainWindowController.bypassCloseConfirm` and
+    /// leak the bypass into a nested-modal sibling controller's
+    /// `windowShouldClose`. (audit H-9, Pragmatic DRY.)
+    private func ownedKeyWindow() -> NSWindow? {
+        guard let win = NSApp.keyWindow,
+              controllers.contains(where: { $0.window === win }) else { return nil }
+        return win
+    }
+
     /// Sparkle updater — present ONLY when the app is properly configured
     /// for auto-updates (real `SUFeedURL` and `SUPublicEDKey` set in
     /// Info.plist). On a dev build the Info.plist ships placeholders, which
@@ -388,18 +416,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (e.g., a "record keyboard shortcut" feature) passing a non-NSMenuItem
     /// sender would trap. Cast inside the body and guard. (audit L-26)
     @objc func selectTab(_ sender: Any?) {
-        guard let item = sender as? NSMenuItem else { return }
-        guard let window = NSApp.keyWindow else { return }
+        guard let item = sender as? NSMenuItem else {
+            Self.menuLogger.error(
+                "selectTab: unexpected sender type \(String(describing: type(of: sender)), privacy: .public) — expected NSMenuItem"
+            )
+            return
+        }
+        // Programmatic / AppleScript / NSApp.sendAction paths bypass
+        // `validateMenuItem`, so re-check Blackbird ownership here. (H-9)
+        guard let window = ownedKeyWindow() else {
+            Self.menuLogger.notice(
+                "selectTab: no Blackbird-owned key window; ignoring tag=\(item.tag, privacy: .public)"
+            )
+            return
+        }
         let tabs = window.tabbedWindows ?? [window]
         let index = item.tag - 1
-        guard index >= 0, index < tabs.count else { return }
+        guard index >= 0, index < tabs.count else {
+            Self.menuLogger.debug(
+                "selectTab: tag \(item.tag, privacy: .public) out of range (tabs=\(tabs.count, privacy: .public))"
+            )
+            return
+        }
         tabs[index].makeKeyAndOrderFront(nil)
     }
 
     /// Closes every tab in the key window. Shows a confirmation alert when
     /// there are multiple tabs so the user can't accidentally nuke all sessions.
     @objc func closeWindow(_ sender: Any?) {
-        guard let window = NSApp.keyWindow else { return }
+        // Programmatic / AppleScript / NSApp.sendAction paths bypass
+        // `validateMenuItem` — without this guard, ⌘⇧W dispatched while
+        // Settings (or any non-Blackbird window) is key would still flip
+        // `MainWindowController.bypassCloseConfirm`, and a nested-modal
+        // running between the flip and the deferred reset would see the
+        // leaked flag in another controller's `windowShouldClose`.
+        // (audit H-9 — the bug the original commit message claimed fixed.)
+        guard let window = ownedKeyWindow() else {
+            Self.menuLogger.notice("closeWindow: no Blackbird-owned key window; ignoring")
+            return
+        }
         let tabs = window.tabbedWindows ?? [window]
         if tabs.count > 1 {
             let alert = NSAlert()
@@ -446,17 +501,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// for items we don't introduce.
 extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        // AppKit invokes `validateMenuItem` on the main thread during the
+        // menu update cycle. Lock the contract so a future caller (e.g.,
+        // a background queue building a custom menu) can't silently
+        // wander off-main and read `controllers` / `NSApp.keyWindow`
+        // from a non-main context. Sibling pattern of the KVO tripwires
+        // (audit L-2) and the M-12 Settings tripwires.
+        dispatchPrecondition(condition: .onQueue(.main))
         switch item.action {
         case #selector(selectTab(_:)):
-            guard let win = NSApp.keyWindow,
-                  controllers.contains(where: { $0.window === win }) else {
-                return false
-            }
+            guard let win = ownedKeyWindow() else { return false }
             let tabs = win.tabbedWindows ?? [win]
             return item.tag >= 1 && item.tag <= tabs.count
         case #selector(closeWindow(_:)):
-            guard let win = NSApp.keyWindow else { return false }
-            return controllers.contains(where: { $0.window === win })
+            return ownedKeyWindow() != nil
         default:
             return true
         }
