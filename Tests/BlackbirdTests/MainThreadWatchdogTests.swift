@@ -33,31 +33,58 @@ final class MainThreadWatchdogTests: XCTestCase {
     /// Pre-flight: pure-logic test. Memory: ~0 (just calls install()).
     /// Time: <10 ms. No sample(1) spawn (no hang triggered).
     ///
-    /// `MainThreadWatchdog.install(...)` should be idempotent — calling
-    /// it 5 times must not start 5 heartbeat threads (per F-S6-005 the
-    /// thread runs forever; multiplying threads = multiplying `sample(1)`
-    /// children at next hang). The audit explicitly flags `installLock`
-    /// + `installed` guard as the deduplication seam.
-    func test_install_isIdempotent_acrossRepeatCalls() {
+    /// Repurposed (2026-04-29): the original "5x install ⇒ 5 threads
+    /// don't get spawned" assertion was vacuous — `activeProcessorCount`
+    /// is invariant w.r.t. install() — and would have passed even if
+    /// the deduplication seam were silently removed. The honest pin
+    /// for the dedup contract is via Batch 10's `installedPingInterval`
+    /// /  `installedHangThreshold` getters: the FIRST install wins, so
+    /// a SECOND install with DIFFERENT params must NOT change the
+    /// recorded values. Reverting the `installed` latch would let the
+    /// second install overwrite, and this test would catch it.
+    func test_install_isIdempotent_secondCallDoesNotOverwriteRecordedParams() {
         // Generous threshold + ping so we never trigger an actual hang
         // capture during this test.
-        let threshold: TimeInterval = 60.0
-        let ping: TimeInterval = 1.0
+        let firstThreshold: TimeInterval = 60.0
+        let firstPing: TimeInterval = 1.0
 
-        // First install — arms the watchdog.
-        MainThreadWatchdog.install(hangThreshold: threshold, pingInterval: ping)
+        // First install — arms the watchdog AND records the clamped
+        // params. Note: this only matters when this test is the first
+        // to call install() in the xctest process; if a prior test
+        // already armed the watchdog, the recorded params will be
+        // whatever IT installed. The non-vacuous half of the contract
+        // we pin is "the SECOND call here is a no-op": even if the
+        // first values differ from `firstThreshold` / `firstPing`,
+        // the second call must NOT mutate them.
+        MainThreadWatchdog.install(hangThreshold: firstThreshold, pingInterval: firstPing)
 
-        // Second through fifth installs — must be no-ops. We can't
-        // observe the heartbeat-thread count without reading the source,
-        // but we CAN observe that install() returns without crashing
-        // and without growing memory or thread count meaningfully.
-        let pre = ProcessInfo.processInfo.activeProcessorCount  // smoke
-        for _ in 0..<4 {
-            MainThreadWatchdog.install(hangThreshold: threshold, pingInterval: ping)
+        guard
+            let recordedPing = MainThreadWatchdog.installedPingInterval,
+            let recordedThreshold = MainThreadWatchdog.installedHangThreshold
+        else {
+            return XCTFail(
+                "installedPingInterval / installedHangThreshold must be non-nil "
+                    + "after first install (or after a prior test's install)"
+            )
         }
-        let post = ProcessInfo.processInfo.activeProcessorCount
-        XCTAssertEqual(pre, post,
-                       "smoke: process state stable across 5x install()")
+
+        // Second through fifth installs — with VERY DIFFERENT params.
+        // The dedup latch must reject all of them; recorded values
+        // must equal what the first install captured.
+        for _ in 0..<4 {
+            MainThreadWatchdog.install(hangThreshold: 999.0, pingInterval: 0.123)
+        }
+
+        XCTAssertEqual(
+            MainThreadWatchdog.installedPingInterval, recordedPing,
+            "second install must not overwrite installedPingInterval — "
+                + "dedup latch regressed if recorded value changed"
+        )
+        XCTAssertEqual(
+            MainThreadWatchdog.installedHangThreshold, recordedThreshold,
+            "second install must not overwrite installedHangThreshold — "
+                + "dedup latch regressed if recorded value changed"
+        )
     }
 
     // MARK: - Pure-function clamp (audit M-22)

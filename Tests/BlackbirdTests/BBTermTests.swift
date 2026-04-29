@@ -293,15 +293,26 @@ final class BBTermTests: XCTestCase {
     /// own four-sided bounds check rejects BEFORE the index calc;
     /// this is the same shape a production caller would land on, so
     /// the contract "out-of-range returns nil" holds end-to-end.
-    func test_character_extremeIndices_returnsNilNotTrap() throws {
+    /// Honest rename (2026-04-29): `Int.max` inputs are caught by the
+    /// four-sided bounds check at the top of `character(at:row:)`
+    /// (`col < cols`, `row < rows`), NOT by the `flatIndex` overflow
+    /// helper that's the second line of defence. The test exercises
+    /// the upstream guard's "out-of-range returns nil" contract — a
+    /// happy-path proxy for the actual overflow path, which is
+    /// unreachable on in-spec snapshots because `MAX_DIM × MAX_DIM ≪
+    /// Int.max`. The flatIndex helper itself is unit-tested separately
+    /// (or would be — wiring a `@testable` seam through `fileprivate
+    /// static func flatIndex` is invasive enough that we accept the
+    /// proxy and document it). F-7 / F-8 honest-label sweep.
+    func test_character_outOfRangeIndices_returnNilViaUpstreamBoundsCheck() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 5)))
         term.input("hi")
         let snap = try XCTUnwrap(term.snapshot())
-        // Each of these would overflow `row * cols + col` on a
-        // hypothetical caller that bypassed the upstream bounds check.
-        // The four-sided guard at the top of `character(at:row:)`
-        // catches them first; the flatIndex helper is the second
-        // line of defence.
+        // Each of these is rejected by the four-sided bounds check at
+        // the top of `character(at:row:)` BEFORE reaching the
+        // flatIndex helper. The test pins the upstream contract: any
+        // out-of-range input returns nil (no trap, no stale cell
+        // read).
         XCTAssertNil(snap.character(at: Int.max, row: 0))
         XCTAssertNil(snap.character(at: 0, row: Int.max))
         XCTAssertNil(snap.character(at: Int.max, row: Int.max))
@@ -313,17 +324,18 @@ final class BBTermTests: XCTestCase {
 
     /// pre-flight: ~10 cells; ~5 ms.
     ///
-    /// Audit L-15 / DI-9 (2026-04-29): `cellKind` now exposes a
-    /// distinct `.invalid` case for cells whose `ch` field is non-zero
-    /// but fails `Unicode.Scalar` construction (surrogate scalars,
-    /// out-of-range scalars). alacritty rejects these upstream today,
-    /// so the only way to observe `.invalid` is via the row-walker's
-    /// behaviour: `rowTextWithUTF16ToColMap` skips invalid cells
-    /// without truncating, so a hostile cell at column N doesn't blank
-    /// out columns N+1..end. Pin that the row-walker contract holds
-    /// for the typical case (no invalid cells); the negative case
-    /// can't be reached without bypassing alacritty's filter.
-    func test_rowTextWithUTF16ToColMap_skipsInvalidCellsWithoutTruncating() throws {
+    /// Honest rename (2026-04-29): the `.invalid` cell branch is
+    /// unreachable on in-spec snapshots — alacritty 0.26 rejects
+    /// surrogate / out-of-range scalars upstream, so this test never
+    /// observes a `.invalid` cell. It pins the happy-path row walker
+    /// contract (every column up to `cols` is visited, no mid-row
+    /// truncation) which is the same shape the `.invalid` branch
+    /// preserves: `c += 1` continuation. The actual `.invalid`
+    /// behaviour can't be exercised without bypassing alacritty's
+    /// filter; reverting the L-15 fix would NOT trip this test
+    /// because alacritty refuses to construct an invalid cell in the
+    /// first place. F-9 honest-label sweep.
+    func test_rowTextWithUTF16ToColMap_happyPathWalkerVisitsEveryColumn() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 1)))
         term.input("abc")
         let snap = try XCTUnwrap(term.snapshot())
