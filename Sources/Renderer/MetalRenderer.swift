@@ -27,23 +27,33 @@ public final class MetalRenderer {
     public let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
     private let cursorPipelineState: MTLRenderPipelineState
-    public var atlas: GlyphAtlas
-    public var metrics: CellMetrics
+    /// External read-only by design. A direct `renderer.atlas = newAtlas`
+    /// write would publish a fresh `GlyphAtlas` whose `generation`
+    /// counter restarts at 0; if `lastCacheKey.atlasGeneration` was also
+    /// 0 (no previous saturation flush) the renderer's per-row cache
+    /// would silently match against the new atlas's UV layout while
+    /// holding pre-swap UV coordinates — wrong glyphs that look right.
+    /// Funnel all swaps through `reconfigure(metrics:scale:)`, which
+    /// invalidates `lastFrameKey` / `lastCacheKey` / `rowInstanceCache`
+    /// in lockstep. Audit UR-1 (2026-04-29).
+    public private(set) var atlas: GlyphAtlas
+    /// External read-only by design. Pairs with `metricsGeneration`
+    /// below: the only writer is `reconfigure(metrics:scale:)`, which
+    /// bumps the generation in lockstep so the FrameKey / CacheKey
+    /// short-circuits invalidate on the very next frame. A direct
+    /// `renderer.metrics = newMetrics` write would skip the bump and
+    /// strand the renderer on stale cell sizes. Audit UR-7 (2026-04-29).
+    public private(set) var metrics: CellMetrics
     /// Bumped on every mutation of `self.metrics`. Folded into both
     /// `FrameKey` and `CacheKey` so the frame-skip and per-row caches
-    /// invalidate automatically when metrics change — even if a future
-    /// path mutates `metrics` directly without going through
-    /// `reconfigure(metrics:scale:)`. Mirrors the `atlas.generation`
-    /// pattern already in `CacheKey` (which solves the same
-    /// post-flush-stale-UV problem for the atlas).
-    ///
-    /// Without this counter the font-size invariant ("FrameKey contains
-    /// everything that affects pixels") was held only by the explicit
-    /// `lastFrameKey = nil` inside `reconfigure`. `metrics` is `public
-    /// var`, so any other mutator would silently bypass that
-    /// invalidation and the next render could short-circuit on a stale
-    /// FrameKey while the atlas / cell sizes had changed underneath.
-    /// Audit M-20 (2026-04-29).
+    /// invalidate automatically when metrics change. With `metrics`
+    /// now `public private(set)` (Audit UR-7) external direct writes
+    /// are impossible — the only writer is `reconfigure(metrics:scale:)`,
+    /// which bumps this counter in lockstep, so the invariant
+    /// "FrameKey contains everything that affects pixels" is enforced
+    /// by construction. Mirrors the `atlas.generation` pattern already
+    /// in `CacheKey` (which solves the same post-flush-stale-UV problem
+    /// for the atlas). Audit M-20 (2026-04-29).
     public private(set) var metricsGeneration: UInt64 = 0
 
     /// Triple-buffered instance-data ring. Each `render(in:)` call writes to
@@ -554,10 +564,11 @@ public final class MetalRenderer {
             return false
         }
         self.metrics = newMetrics
-        // Bump alongside the metrics mutation so any future path that
-        // also writes to `metrics` (test harness, external mutator)
-        // inherits the cache-invalidation contract by construction.
-        // Audit M-20.
+        // Bump alongside the metrics mutation so the FrameKey /
+        // CacheKey short-circuits invalidate on the next frame. With
+        // `metrics` `public private(set)` (UR-7) this method is the
+        // only writer, so the bump-on-every-mutation invariant holds
+        // by construction. Audit M-20.
         self.metricsGeneration &+= 1
         self.atlas = a
         // Re-warm the new atlas so the post-resize first repaint doesn't
