@@ -1510,19 +1510,26 @@ public final class MetalRenderer {
         // semaphore is already balanced via M-3's strong-captured
         // signal). Audit L-22 / NA-2 (2026-04-29).
         var drained = false
-        for _ in 0..<2 {
+        var drainAttempt = -1
+        for attempt in 0..<2 {
             if let drain = commandQueue.makeCommandBuffer() {
                 drain.commit()
                 drain.waitUntilCompleted()
                 drained = true
+                drainAttempt = attempt
                 break
             }
         }
         if !drained {
-            Self.logger.error("MetalRenderer.deinit: drain commandBuffer creation failed; relying on M-3 strong-captured signal to balance the semaphore")
+            Self.logger.error("MetalRenderer.deinit: drain commandBuffer creation failed (both attempts); relying on M-3 strong-captured signal to balance the semaphore")
+        } else if drainAttempt > 0 {
+            // Succeeded on retry — first attempt failed. Surfaces queue
+            // pressure as an early warning before it escalates to both
+            // attempts failing. Audit L-22 follow-up (2026-04-29).
+            Self.logger.notice("MetalRenderer.deinit: drain commandBuffer succeeded on attempt \(drainAttempt + 1, privacy: .public); queue was momentarily unable to vend a buffer")
         }
         #if DEBUG
-        if drained {
+        if drained && drainAttempt == 0 {
             Self.logger.debug("MetalRenderer deinit — in-flight frames drained")
         }
         #endif
