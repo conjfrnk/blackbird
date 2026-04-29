@@ -2710,6 +2710,9 @@ pub unsafe extern "C" fn bb_snap_release(snap: *const BBSnap) {
 ///
 /// Pass the returned non-zero id to `bb_snap_link_url` to get the URL.
 ///
+/// Safe to call from any thread (the snapshot's link table is immutable
+/// post-construction). Audit L-10 (2026-04-29).
+///
 /// # Safety
 /// `snap` must be non-null and returned by `bb_term_take_snapshot` /
 /// `bb_snap_retain`, not yet released to zero.
@@ -2736,6 +2739,9 @@ pub unsafe extern "C" fn bb_snap_link_id_at(snap: *const BBSnap, row: u16, col: 
 /// null, `link_id == 0`, or the id is unknown. The returned pointer is
 /// valid for the snapshot's lifetime (until the matching `bb_snap_release`
 /// drops the refcount to zero).
+///
+/// Safe to call from any thread (the snapshot's URL table is immutable
+/// post-construction). Audit L-10 (2026-04-29).
 ///
 /// # Safety
 /// `snap` must be non-null and returned by `bb_term_take_snapshot` /
@@ -3103,7 +3109,14 @@ pub const BB_STRING_MAGIC: u64 = 0xB1AC_5BBD_5721_57E0;
 /// iterating.
 ///
 /// Returns a heap-allocated `BBString` the caller must free with
-/// `bb_string_release`. Returns null when `term` is null.
+/// `bb_string_release`. Returns null on (a) null `term`, (b) zero-area
+/// range that produces empty text (the FFI returns an empty `BBString`
+/// in this shape — true null is the all-paths fallback), or (c) a panic
+/// during text extraction (caught by `catch_unwind` and reported as a
+/// `BBEventKind::Fatal` event before this function returns null).
+/// Callers cannot distinguish (a) from (c) by the return value alone;
+/// wire a Fatal event handler if you need to learn about extraction
+/// panics. Audit L-9 (2026-04-29).
 ///
 /// # Safety
 /// Same preconditions as `bb_term_input`. Caller owns the returned pointer.
