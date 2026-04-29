@@ -502,7 +502,16 @@ public final class MetalRenderer {
         do {
             pso = try device.makeRenderPipelineState(descriptor: desc)
         } catch {
-            Self.logger.error("cell render pipeline state creation failed: \(String(describing: error), privacy: .public)")
+            // Cast to NSError and log domain/code/desc/userInfo
+            // explicitly. `String(describing:)` on the bare error sometimes
+            // collapses the NSError into a one-line summary that drops
+            // `userInfo` — which is exactly where the Metal shader-compiler
+            // diagnostic block lands (`MTLRenderPipelineErrorDomain`,
+            // `userInfo[NSLocalizedDescriptionKey]`, plus compiler logs).
+            // Explicit access guarantees the diagnostic survives. Audit L-6
+            // follow-up (2026-04-29).
+            let ns = error as NSError
+            Self.logger.error("cell render pipeline state creation failed: domain=\(ns.domain, privacy: .public) code=\(ns.code, privacy: .public) desc=\(ns.localizedDescription, privacy: .public) userInfo=\(String(describing: ns.userInfo), privacy: .public)")
             return nil
         }
 
@@ -518,7 +527,11 @@ public final class MetalRenderer {
         do {
             cursorPSO = try device.makeRenderPipelineState(descriptor: cursorDesc)
         } catch {
-            Self.logger.error("cursor render pipeline state creation failed: \(String(describing: error), privacy: .public)")
+            // Same NSError-explicit shape as the cell PSO site above —
+            // userInfo carries the Metal shader-compiler diagnostic
+            // block. Audit L-6 follow-up (2026-04-29).
+            let ns = error as NSError
+            Self.logger.error("cursor render pipeline state creation failed: domain=\(ns.domain, privacy: .public) code=\(ns.code, privacy: .public) desc=\(ns.localizedDescription, privacy: .public) userInfo=\(String(describing: ns.userInfo), privacy: .public)")
             return nil
         }
 
