@@ -273,7 +273,7 @@ extension TerminalView {
             guard !fired else { return }
             fired = true
             selectionLogger.notice(
-                "setAccessibilitySelectedTextRange called; v0.2 ships getter-only — see KNOWN_ISSUES § 'Accessibility'"
+                "setAccessibilitySelectedTextRange called; v0.2 ships getter-only (F-S5-021 v0.2 cycle entry in KNOWN_ISSUES.md). v1.0 may revisit if a per-cell metrics seam is added."
             )
         }
     }

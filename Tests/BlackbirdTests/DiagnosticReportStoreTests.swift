@@ -149,6 +149,72 @@ final class DiagnosticReportStoreTests: XCTestCase {
                        "reload must reflect deletions, not retain stale entries")
     }
 
+    // MARK: - Security: reject symlinks
+
+    func testSymlinkInCrashDirIsRejected() throws {
+        // Memory: <1 KB. Wall: ~10 ms (one regular file, one symlink).
+        // Security: a planted symlink at ~/Library/Logs/DiagnosticReports/
+        // Blackbird-foo.ips → /etc/passwd would otherwise be surfaced as
+        // a "crash report"; clicking Email Diagnostics would exfiltrate
+        // its target to the support address.
+        let target = crashDir.appendingPathComponent("Blackbird-target.ips")
+        try "{\"real\":true}".write(to: target, atomically: true, encoding: .utf8)
+        let symlink = crashDir.appendingPathComponent("Blackbird-symlink.ips")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
+        let store = DiagnosticReportStore(hangDirectory: hangDir, crashDirectory: crashDir)
+        store.reload()
+        XCTAssertEqual(store.reports.count, 1, "symlink must be filtered out")
+        XCTAssertEqual(store.reports[0].url.lastPathComponent, "Blackbird-target.ips")
+    }
+
+    func testSymlinkInHangDirIsRejected() throws {
+        // Memory: <1 KB. Wall: ~10 ms.
+        let target = hangDir.appendingPathComponent("hang-real.txt")
+        try "real hang".write(to: target, atomically: true, encoding: .utf8)
+        let symlink = hangDir.appendingPathComponent("hang-symlink.txt")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
+        let store = DiagnosticReportStore(hangDirectory: hangDir, crashDirectory: crashDir)
+        store.reload()
+        XCTAssertEqual(store.reports.count, 1)
+        XCTAssertEqual(store.reports[0].url.lastPathComponent, "hang-real.txt")
+    }
+
+    func testOneUnreadableFileDoesNotEmptyTheList() throws {
+        // Memory: <1 KB. Wall: ~20 ms.
+        // The earlier shape used `try?` on the directory enumeration AND on
+        // each per-file resource lookup, which collapsed permission failures
+        // into a silently-empty list. The current shape skips files that
+        // can't be stat'd and surfaces the rest. This test pins that.
+        try writeFile("hang-1.txt", in: hangDir, contents: "first")
+        try writeFile("hang-2.txt", in: hangDir, contents: "second")
+        let restricted = hangDir.appendingPathComponent("hang-3.txt")
+        try "third".write(to: restricted, atomically: true, encoding: .utf8)
+        // chmod 000 the third file so URLResourceValues fails on it.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o000))],
+            ofItemAtPath: restricted.path
+        )
+        defer {
+            // Restore so tearDown can clean up.
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o644))],
+                ofItemAtPath: restricted.path
+            )
+        }
+        let store = DiagnosticReportStore(hangDirectory: hangDir, crashDirectory: crashDir)
+        store.reload()
+        // The two readable files must still surface even if a sibling is
+        // permission-denied. The unreadable one is filtered out (not
+        // surfaced with `byteSize == 0` masquerading as "empty").
+        XCTAssertGreaterThanOrEqual(store.reports.count, 2,
+                                    "readable files must still surface despite a permission-denied sibling")
+        XCTAssertTrue(store.reports.allSatisfy {
+            ["hang-1.txt", "hang-2.txt", "hang-3.txt"].contains($0.url.lastPathComponent)
+        })
+    }
+
+    // MARK: - Mixed kinds
+
     func testMixedHangAndCrashReportsAreInterleavedByDate() throws {
         // Memory: <1 KB. Wall: ~30 ms.
         try writeFile("hang-old.txt", in: hangDir, contents: "old hang")

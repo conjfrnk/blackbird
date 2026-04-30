@@ -207,6 +207,54 @@ final class AccessibilityTests: XCTestCase {
                        .zero)
     }
 
+    // MARK: - Boundary cases for accessibilityString(for:)
+
+    func testStringForRangeAtEndIsEmptyString() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // {location: count, length: 0} is the canonical "insertion point at
+        // end" range that NSTextView returns "" for. Pin it explicitly.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc"])
+        let count = view.accessibilityNumberOfCharacters()
+        XCTAssertEqual(view.accessibilityString(for: NSRange(location: count, length: 0)),
+                       "",
+                       "end-of-text insertion-point range must return empty string, not nil")
+    }
+
+    func testStringForRangePastEndReturnsNil() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc"])
+        let count = view.accessibilityNumberOfCharacters()
+        // Length extending past end → out-of-bounds → nil.
+        XCTAssertNil(view.accessibilityString(for: NSRange(location: count - 1, length: 100)))
+        // Negative length → out-of-bounds → nil.
+        XCTAssertNil(view.accessibilityString(for: NSRange(location: 0, length: -1)))
+    }
+
+    // MARK: - Boundary cases for accessibilityRange(forLine:)
+
+    func testRangeForLineOnEmptyValueReturnsNotFound() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // An empty grid produces an empty value. accessibilityValue() on a
+        // single-row blank snapshot returns "" — no lines exist.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: [""])
+        XCTAssertEqual(view.accessibilityRange(forLine: 0).location, NSNotFound,
+                       "empty value has zero lines; line 0 must be NSNotFound")
+    }
+
+    func testRangeForLineOnSingleLineNoTrailingNewline() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // value = "abc" (no trailing \n). Line 0 spans the full string;
+        // no further lines.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc"])
+        XCTAssertEqual(view.accessibilityRange(forLine: 0),
+                       NSRange(location: 0, length: 3))
+        XCTAssertEqual(view.accessibilityRange(forLine: 1).location, NSNotFound)
+    }
+
     // MARK: - Astral-codepoint preservation (regression: emoji + CJK Ext-B)
 
     func testStringForRangeKeepsEmoji() throws {

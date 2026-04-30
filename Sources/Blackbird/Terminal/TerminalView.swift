@@ -118,7 +118,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// read content the user is no longer seeing).
     var currentSnapshot: BBSnapshot? {
         didSet {
+            // Reset both the value-cache identity AND the line-offsets
+            // table. They're correlated: lineOffsets is computed from the
+            // cached value, so any path that recomputes value MUST also
+            // discard the offsets. Without the lineOffsets reset, an
+            // a11y line accessor running between this didSet and the
+            // next `accessibilityValue()` call would build offsets
+            // against the OLD value and cache them under whatever
+            // identity gets stamped next.
             a11yCache.snapshotIdentity = nil
+            a11yCache.lineOffsets = nil
             // Find-match coordinates are relative to the buffer at the
             // time performSearch ran. Any snapshot swap may have scrolled
             // history, wrapped lines, or overwritten matched rows; rerun

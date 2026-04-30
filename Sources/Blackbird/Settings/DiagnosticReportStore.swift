@@ -18,7 +18,7 @@ import SwiftUI
 @MainActor
 final class DiagnosticReportStore: ObservableObject {
 
-    enum Kind: String, Equatable {
+    enum Kind: Equatable {
         case hang, crash
     }
 
@@ -80,20 +80,56 @@ final class DiagnosticReportStore: ObservableObject {
 
     private func enumerate(directory: URL, kind: Kind, accept: (String) -> Bool) -> [Report] {
         let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            // Missing directory is the normal "no reports yet" state — not
-            // an error. We can't distinguish "doesn't exist" from "exists
-            // but unreadable" without a separate stat, but both render to
-            // the same empty list, so don't log here.
+        let entries: [URL]
+        do {
+            entries = try fm.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [
+                    .contentModificationDateKey,
+                    .fileSizeKey,
+                    .isRegularFileKey,
+                    .isSymbolicLinkKey,
+                ],
+                options: [.skipsHiddenFiles]
+            )
+        } catch let error as NSError {
+            // ENOENT (directory missing) is the normal "no reports yet"
+            // state — first-launch users have no Logs/Blackbird/ until the
+            // first hang gets written. Stay silent in that case.
+            // EPERM/EACCES (TCC denial, parent dir permissions) and other
+            // failures are NOT normal — log so a user reporting "the
+            // Diagnostics tab is empty but I have hangs" can be diagnosed
+            // via `log show --predicate 'subsystem == "dev.conjfrnk.blackbird"
+            // && category == "diagnostics"'`.
+            if error.domain != NSCocoaErrorDomain || error.code != NSFileReadNoSuchFileError {
+                log.error("enumerate \(directory.path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
             return []
         }
         return entries.compactMap { url in
             guard accept(url.lastPathComponent) else { return nil }
-            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            let values = try? url.resourceValues(forKeys: [
+                .contentModificationDateKey,
+                .fileSizeKey,
+                .isRegularFileKey,
+                .isSymbolicLinkKey,
+            ])
+            // SECURITY: drop symlinks. Any process running as the user can
+            // place `~/Library/Logs/DiagnosticReports/Blackbird-foo.ips` →
+            // `/etc/passwd` (or any user-readable file). Without this guard,
+            // clicking Email Diagnostics on a planted symlink exfiltrates
+            // its target's contents to `conjfrnk@gmail.com` and Copy puts
+            // them on the user's pasteboard. The legitimate ReportCrash /
+            // MainThreadWatchdog writers always emit regular files, so
+            // symlink-named reports are inherently suspicious.
+            //
+            // We require `isRegularFile == true` AND `isSymbolicLink == false`
+            // — belt-and-suspenders against an APFS firmlink or hardlink
+            // edge that resolves to non-regular content. Files we can't
+            // stat are dropped (treated as suspicious-by-default).
+            guard values?.isRegularFile == true, values?.isSymbolicLink != true else {
+                return nil
+            }
             let mtime = values?.contentModificationDate ?? .distantPast
             let size = Int64(values?.fileSize ?? 0)
             return Report(kind: kind, url: url, modificationDate: mtime, byteSize: size)

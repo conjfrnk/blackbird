@@ -35,12 +35,15 @@ enum SparkleAlertOverride {
     /// Wrapped in `OSAllocatedUnfairLock` to match the project's canonical
     /// shape for shared mutable statics (sibling pattern of
     /// `MainThreadWatchdog.lastMainHeartbeat`, `WindowBlur.didLogBlurRC`,
-    /// `ScrollIndicator.didLogOutOfRange`, etc.). The `@MainActor` on the
-    /// enum already provides the same memory-model guarantee in practice,
-    /// but the lock makes the invariant survive a future drop of that
-    /// annotation (e.g. calling `install()` from a non-MainActor SwiftUI
-    /// context) without silently turning the F-S7-001 contract into a
-    /// data race.
+    /// `ScrollIndicator.didLogOutOfRange`, etc.). Today the `@MainActor`
+    /// annotation on the enum guarantees serial access; the lock is
+    /// belt-and-suspenders against a refactor that promotes a non-MainActor
+    /// caller. Note: the lock does NOT eliminate a potential
+    /// imp_removeBlock-while-prior-IMP-still-executing window — that
+    /// would only matter if `install()` ran while a Sparkle UI thread was
+    /// mid-call into the prior trampoline, which the @MainActor invariant
+    /// already prevents. If that invariant is dropped, the lock alone is
+    /// insufficient — defer the free instead.
     private static let installedBlockIMP =
         OSAllocatedUnfairLock<IMP?>(initialState: nil)
 
