@@ -47,6 +47,15 @@ enum SparkleAlertOverride {
     private static let installedBlockIMP =
         OSAllocatedUnfairLock<IMP?>(initialState: nil)
 
+    /// The runtime-owned original IMP captured the first time `install()`
+    /// runs. Used by `_resetForTests` so the test seam can restore the
+    /// class to its pre-install state instead of leaving a freed
+    /// trampoline pointer in the method slot. Nil before any install ran.
+    /// Production code never reads this — the original IMP is meaningful
+    /// only for test isolation.
+    private static let originalIMP =
+        OSAllocatedUnfairLock<IMP?>(initialState: nil)
+
     /// Invoked once during app launch. Idempotent — `method_setImplementation`
     /// is safe to call repeatedly. On re-install, the previous block IMP is
     /// freed via `imp_removeBlock` (F-S7-001); the very first install's prior
@@ -145,7 +154,14 @@ enum SparkleAlertOverride {
         // swap happens under one lock so a hypothetical concurrent
         // re-install can't observe a half-updated tracking state.
         installedBlockIMP.withLock { prior in
-            method_setImplementation(method, imp)
+            let runtimePrior = method_setImplementation(method, imp)
+            // Capture the runtime-owned original on first install so
+            // `_resetForTests` can restore it. After first install,
+            // `runtimePrior` is our previous IMP and is dropped (we'll
+            // free it via `imp_removeBlock` below).
+            originalIMP.withLock { orig in
+                if orig == nil { orig = runtimePrior }
+            }
             if let prior {
                 imp_removeBlock(prior)
             }
@@ -161,14 +177,24 @@ enum SparkleAlertOverride {
         installedBlockIMP.withLock { $0 }
     }
 
-    /// Test-only reset to make `install()` re-entrant across test methods.
-    /// Frees the currently-tracked IMP (mimicking what a real re-install
-    /// would do) and resets the tracking field. Does NOT restore the
-    /// original SPUStandardUserDriver IMP — there's no use case for that
-    /// in production, and the test only needs `installedBlockIMP` to be
-    /// observable / reset-able.
+    /// Test-only reset for cross-test isolation. Restores the runtime-
+    /// owned original IMP to the class slot (so the next dispatch on
+    /// `showUpdateNotFoundWithError:` lands in Sparkle's default body,
+    /// not on a freed trampoline), frees the IMP we minted, and clears
+    /// the tracking field. After this, calling `install()` again is
+    /// equivalent to a fresh first install: it re-captures the original
+    /// (which is now on the slot again) and tracks a fresh block IMP.
     internal static func _resetForTests() {
+        let cls: AnyClass = SPUStandardUserDriver.self
+        let sel = NSSelectorFromString("showUpdateNotFoundWithError:acknowledgement:")
+        guard let method = class_getInstanceMethod(cls, sel) else { return }
         installedBlockIMP.withLock { prior in
+            originalIMP.withLock { orig in
+                if let orig {
+                    method_setImplementation(method, orig)
+                }
+                orig = nil
+            }
             if let p = prior {
                 imp_removeBlock(p)
             }

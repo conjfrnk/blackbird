@@ -55,7 +55,10 @@ struct DiagnosticsView: View {
                 Self.footer("""
                     Reports are written to ~/Library/Logs/Blackbird (hang reports) \
                     and ~/Library/Logs/DiagnosticReports (crashes). Email Diagnostics \
-                    opens your default mail client; nothing is sent automatically.
+                    opens your default mail client; nothing is sent automatically. \
+                    Crash reports may include file paths under your home folder, \
+                    process arguments, and dyld image paths — review the compose \
+                    window before sending.
                     """)
             }
 
