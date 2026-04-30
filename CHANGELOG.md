@@ -8,16 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - Diagnostics tab in Settings — surfaces hang reports (from `~/Library/Logs/Blackbird/`) and macOS crash reports (from `~/Library/Logs/DiagnosticReports/`) with Reveal in Finder, Copy to Clipboard, and Email Diagnostics actions. No auto-upload, no third-party SDK, no backend.
-- Real input→draw latency CI gate (`latency-gate-real`) — uses an off-screen NSWindow harness so the probe observes actual `draw(in:)` latencies, not just probe-pipeline plumbing. Complements the existing `latency-gate` job.
 - VoiceOver navigation by character / word / line — `TerminalView` promoted from `.staticText` to `.textArea` with full character / line / range accessors (F-S5-021).
-- `docs/compat-matrix.md` documenting tested apps (Claude Code, vim, neovim, tmux, ssh, mosh, fzf, git pager, lazygit, gh, ranger, htop, btop, Emacs).
-- Three protocol-level compat regression tests pinning the byte-level contracts behind the matrix (XTGETTCAP, modifyOtherKeys, OSC 8 round-trip).
+- `docs/compat-matrix.md` documenting tested apps (Claude Code, vim, neovim, tmux, ssh, mosh, fzf, git pager, lazygit, gh, ranger, htop, btop, Emacs) and indexing the existing protocol-level pin tests (XTGETTCAP, modifyOtherKeys, OSC 8 round-trip, OSC 7 SSH trust, etc.) under one document.
 - `docs/voiceover-pass.md` — manual VoiceOver acceptance checklist.
 - `CHANGELOG.md` (this file).
 
+### Documented
+- End-to-end input→draw latency measurement procedure via the existing `scripts/run-with-probe.sh`. xctest can't acquire `CAMetalLayer` drawables and OS-level keystroke injection is forbidden by project rule, so an automated CI gate for real latency stays out of scope; the manual recipe (run-with-probe + 60s of typing → `latency n=500 p50=… p99=…` line in unified log) plus the 6 ms p50 / 20 ms p99 cut-blocking thresholds are now spelled out in `KNOWN_ISSUES.md`.
+
 ### Fixed
 - `SparkleAlertOverride.install()` no longer leaks the previously installed block IMP on re-install (F-S7-001).
-- `Preferences.migrateIfNeeded()` no longer overwrites a higher on-disk schema version with the current one. This preserves the "newer release ran here" breadcrumb during downgrade (F-S7-003).
 
 ## [0.1.17] - 2026-04-29
 

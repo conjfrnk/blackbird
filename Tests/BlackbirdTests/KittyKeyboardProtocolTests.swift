@@ -7,6 +7,10 @@ import XCTest
 /// from their unmodified forms — which breaks Claude Code, nvim 0.10+, and any
 /// TUI that negotiates kitty keyboard support.
 ///
+/// **Compat-matrix pin:** this file backs the Kitty keyboard flags row in
+/// `docs/compat-matrix.md`. `git grep "compat-matrix.md"` resolves to every
+/// test that gates a row in that doc.
+///
 /// Reference: https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement
 final class KittyKeyboardProtocolTests: XCTestCase {
 

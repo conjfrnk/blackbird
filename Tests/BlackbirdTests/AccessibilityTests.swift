@@ -257,16 +257,26 @@ final class AccessibilityTests: XCTestCase {
                        "v0.2 ships getter as empty — Selection's grid model can't be expressed as a single character range cleanly")
     }
 
-    func testSetSelectedRangeIsNoOp() throws {
-        // Memory: <1 KB. Wall: ~10 ms (one log emission).
+    func testSetSelectedRangeDoesNotCrashAcrossManyCalls() throws {
+        // Memory: <1 KB. Wall: ~10 ms.
+        // Pinning the no-op-AND-doesn't-blow-up contract: the setter is
+        // documented as a no-op + one-shot log. A regression that grew
+        // the setter into "let me try to mutate Selection" would surface
+        // either as a crash or as an assertion violation in Selection.
+        // Exercise the path 50× to also catch any one-shot latch shape
+        // that accidentally re-fires (which would log spam, not crash —
+        // but the log latch is process-wide, so re-firing here would
+        // also fire from the prior test's log emission and isn't a
+        // meaningful pin in xctest).
         TerminalView._resetSelectionSetterLogForTests()
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         view.installSnapshotForTests(rows: ["abc"])
-        // Should not crash. No way to assert "log was emitted" without
-        // capturing OSLog; we trust the one-shot guard's existence.
-        view.setAccessibilitySelectedTextRange(NSRange(location: 0, length: 2))
-        // Getter is still empty — setter didn't actually persist anything.
-        XCTAssertEqual(view.accessibilitySelectedTextRange(),
-                       NSRange(location: 0, length: 0))
+        for offset in 0..<50 {
+            view.setAccessibilitySelectedTextRange(NSRange(location: offset % 4, length: 1))
+        }
+        // The post-condition "getter still returns empty" is vacuous
+        // because the getter is hardcoded to NSRange(0, 0). Don't assert
+        // it — the meaningful assertion is "we got here without
+        // crashing", which XCTest implicitly checks.
     }
 }

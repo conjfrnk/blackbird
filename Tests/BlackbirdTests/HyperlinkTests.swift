@@ -4,6 +4,10 @@ import XCTest
 
 /// OSC 8 hyperlink coverage across the FFI → Swift snapshot → click path.
 ///
+/// **Compat-matrix pin:** this file backs the OSC 8 row in
+/// `docs/compat-matrix.md`. `git grep "compat-matrix.md"` resolves to every
+/// test that gates a row in that doc.
+///
 /// Three guarantees we pin here:
 ///
 ///  1. The Rust OSC 8 parser's link table reaches the Swift `BBSnapshot`

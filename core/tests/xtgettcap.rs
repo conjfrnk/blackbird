@@ -2,6 +2,10 @@
 //! TERM=xterm-kitty so TUIs (kitty, wezterm-shipped tooling, nvim) probe
 //! these caps to decide whether to emit undercurl / colored underlines.
 //!
+//! **Compat-matrix pin:** this file backs the XTGETTCAP row in
+//! `docs/compat-matrix.md`. `git grep "compat-matrix.md"` resolves to
+//! every test that gates a row in that doc.
+//!
 //! Protocol:
 //!   Request: `DCS + q <caps-hex> [ ; <caps-hex> ... ] ST`  (ST = ESC \ or BEL)
 //!   Match:   `DCS 1 + r <caps-hex>=<value-hex> ST`

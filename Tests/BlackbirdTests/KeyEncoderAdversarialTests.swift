@@ -6,6 +6,12 @@ import XCTest
 /// stress-tests the contract under inputs that the existing
 /// happy-path tests don't visit.
 ///
+/// **Compat-matrix pin:** this file backs the `modifyOtherKeys` row in
+/// `docs/compat-matrix.md`. The CSI 27 emit + suppression contract that
+/// Emacs / tmux / Neovim expect is asserted here. `git grep
+/// "compat-matrix.md"` resolves to every test that gates a row in that
+/// doc.
+///
 /// Pre-flight memory cost: every test allocates one `KeyEncoder`
 /// (no heap state), a small set of `Data` outputs, and at most a
 /// handful of UTF-8 byte sequences. No PTY, no large grids, no

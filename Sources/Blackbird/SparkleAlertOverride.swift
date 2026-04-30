@@ -2,6 +2,7 @@ import AppKit
 import OSLog
 import Sparkle
 import ObjectiveC.runtime
+import os
 
 /// Sparkle's default "up to date" alert is wordy: it shows the display
 /// version twice (e.g. "Blackbird 0.1.0 (0.1.0)") and tacks on a parenthetical
@@ -30,7 +31,18 @@ enum SparkleAlertOverride {
     /// to `imp_removeBlock`: only IMPs we created via
     /// `imp_implementationWithBlock` are eligible for removal. Discrimination
     /// is by nil-check on this field (nil ⇒ first install ⇒ skip the remove).
-    private static var installedBlockIMP: IMP?
+    ///
+    /// Wrapped in `OSAllocatedUnfairLock` to match the project's canonical
+    /// shape for shared mutable statics (sibling pattern of
+    /// `MainThreadWatchdog.lastMainHeartbeat`, `WindowBlur.didLogBlurRC`,
+    /// `ScrollIndicator.didLogOutOfRange`, etc.). The `@MainActor` on the
+    /// enum already provides the same memory-model guarantee in practice,
+    /// but the lock makes the invariant survive a future drop of that
+    /// annotation (e.g. calling `install()` from a non-MainActor SwiftUI
+    /// context) without silently turning the F-S7-001 contract into a
+    /// data race.
+    private static let installedBlockIMP =
+        OSAllocatedUnfairLock<IMP?>(initialState: nil)
 
     /// Invoked once during app launch. Idempotent — `method_setImplementation`
     /// is safe to call repeatedly. On re-install, the previous block IMP is
@@ -118,20 +130,25 @@ enum SparkleAlertOverride {
         // (so the prior IMP returned by `method_setImplementation` is the
         // runtime-owned original — leave it alone), non-nil on subsequent
         // calls (so the prior IMP is one we minted via
-        // `imp_implementationWithBlock` and must release).
-        let prior = installedBlockIMP
-        method_setImplementation(method, imp)
-        if let prior {
-            imp_removeBlock(prior)
+        // `imp_implementationWithBlock` and must release). The whole
+        // swap happens under one lock so a hypothetical concurrent
+        // re-install can't observe a half-updated tracking state.
+        installedBlockIMP.withLock { prior in
+            method_setImplementation(method, imp)
+            if let prior {
+                imp_removeBlock(prior)
+            }
+            prior = imp
         }
-        installedBlockIMP = imp
     }
 
     #if DEBUG
     /// Test-only accessor for the IMP we installed. Lets
     /// `SparkleAlertOverrideTests` assert that re-install replaces the
     /// tracked IMP. DEBUG-gated — release builds carry no test surface.
-    internal static var _installedBlockIMPForTests: IMP? { installedBlockIMP }
+    internal static var _installedBlockIMPForTests: IMP? {
+        installedBlockIMP.withLock { $0 }
+    }
 
     /// Test-only reset to make `install()` re-entrant across test methods.
     /// Frees the currently-tracked IMP (mimicking what a real re-install
@@ -140,10 +157,12 @@ enum SparkleAlertOverride {
     /// in production, and the test only needs `installedBlockIMP` to be
     /// observable / reset-able.
     internal static func _resetForTests() {
-        if let prior = installedBlockIMP {
-            imp_removeBlock(prior)
+        installedBlockIMP.withLock { prior in
+            if let p = prior {
+                imp_removeBlock(p)
+            }
+            prior = nil
         }
-        installedBlockIMP = nil
     }
     #endif
 }

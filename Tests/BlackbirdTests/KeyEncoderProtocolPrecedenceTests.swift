@@ -2,6 +2,10 @@ import XCTest
 @testable import Blackbird
 @testable import BBCore
 
+/// **Compat-matrix pin:** this file backs the Kitty / mOK / legacy precedence
+/// row in `docs/compat-matrix.md`. `git grep "compat-matrix.md"` resolves to
+/// every test that gates a row in that doc.
+///
 /// Pins the deterministic precedence rules between Blackbird's three
 /// keyboard-encoding paths:
 ///
