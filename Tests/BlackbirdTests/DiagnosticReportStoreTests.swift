@@ -151,6 +151,26 @@ final class DiagnosticReportStoreTests: XCTestCase {
 
     // MARK: - Security: reject symlinks
 
+    func testPrefixOnlyFilenamesAreRejected() throws {
+        // Memory: <1 KB. Wall: ~10 ms.
+        // `Blackbird-.ips`, `Blackbird-.crash`, and `hang-.txt` match the
+        // prefix+suffix gate but carry no timestamp content. They're
+        // either accidental zero-byte files or planted noise — surfacing
+        // them as legitimate rows would confuse the user. The length
+        // check in reload() requires SOMETHING between the prefix and
+        // suffix.
+        try writeFile("Blackbird-.ips", in: crashDir, contents: "")
+        try writeFile("Blackbird-.crash", in: crashDir, contents: "")
+        try writeFile("hang-.txt", in: hangDir, contents: "")
+        // A legitimate sibling so we know reload didn't bail entirely.
+        try writeFile("hang-1234.txt", in: hangDir, contents: "real")
+        let store = DiagnosticReportStore(hangDirectory: hangDir, crashDirectory: crashDir)
+        store.reload()
+        XCTAssertEqual(store.reports.count, 1,
+                       "only the legitimate hang-1234.txt should surface; prefix-only filenames are rejected")
+        XCTAssertEqual(store.reports[0].url.lastPathComponent, "hang-1234.txt")
+    }
+
     func testSymlinkInCrashDirIsRejected() throws {
         // Memory: <1 KB. Wall: ~10 ms (one regular file, one symlink).
         // Security: a planted symlink at ~/Library/Logs/DiagnosticReports/

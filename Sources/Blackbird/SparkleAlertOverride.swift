@@ -185,6 +185,16 @@ enum SparkleAlertOverride {
     /// equivalent to a fresh first install: it re-captures the original
     /// (which is now on the slot again) and tracks a fresh block IMP.
     internal static func _resetForTests() {
+        // Always clear tracking state, even if the selector lookup fails.
+        // Without this, an early return on a Sparkle API rename would leave
+        // a stale tracked IMP behind and the contract documented in the
+        // type doc ("clears the tracking field") would be violated. We
+        // can't restore the original to a method we can't find — but we
+        // can at least keep the tracking honest.
+        defer {
+            installedBlockIMP.withLock { $0 = nil }
+            originalIMP.withLock { $0 = nil }
+        }
         let cls: AnyClass = SPUStandardUserDriver.self
         let sel = NSSelectorFromString("showUpdateNotFoundWithError:acknowledgement:")
         guard let method = class_getInstanceMethod(cls, sel) else { return }
@@ -193,12 +203,10 @@ enum SparkleAlertOverride {
                 if let orig {
                     method_setImplementation(method, orig)
                 }
-                orig = nil
             }
             if let p = prior {
                 imp_removeBlock(p)
             }
-            prior = nil
         }
     }
     #endif

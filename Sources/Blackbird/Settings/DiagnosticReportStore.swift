@@ -65,15 +65,27 @@ final class DiagnosticReportStore: ObservableObject {
     /// modification date descending — newest first.
     func reload() {
         let hangs = enumerate(directory: hangDirectory, kind: .hang) { name in
-            // Hang reports written by `MainThreadWatchdog` follow `hang-<ts>.txt`.
-            name.hasPrefix("hang-") && name.hasSuffix(".txt")
+            // Hang reports written by `MainThreadWatchdog` follow
+            // `hang-<ts>.txt`. The length check rejects degenerate
+            // filenames like `hang-.txt` (prefix+suffix only with no
+            // timestamp content).
+            let prefix = "hang-"
+            let suffix = ".txt"
+            return name.hasPrefix(prefix)
+                && name.hasSuffix(suffix)
+                && name.count > prefix.count + suffix.count
         }
         let crashes = enumerate(directory: crashDirectory, kind: .crash) { name in
             // macOS writes `Blackbird-<ts>-<random>.ips` (modern) or
             // `Blackbird-<ts>-<random>.crash` (legacy). The crash directory
             // contains reports for every crashed process on the system, so
-            // filter by app prefix to surface only ours.
-            name.hasPrefix("Blackbird-") && (name.hasSuffix(".ips") || name.hasSuffix(".crash"))
+            // filter by app prefix to surface only ours. Length check
+            // rejects `Blackbird-.ips` and `Blackbird-.crash` (prefix-only
+            // filenames that would otherwise render as zero-byte rows).
+            let prefix = "Blackbird-"
+            return name.hasPrefix(prefix)
+                && (name.hasSuffix(".ips") || name.hasSuffix(".crash"))
+                && name.count > prefix.count + (name.hasSuffix(".ips") ? 4 : 6)
         }
         reports = (hangs + crashes).sorted { $0.modificationDate > $1.modificationDate }
     }
