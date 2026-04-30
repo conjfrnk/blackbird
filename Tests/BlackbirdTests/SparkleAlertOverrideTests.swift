@@ -64,19 +64,19 @@ final class SparkleAlertOverrideTests: XCTestCase {
                           "re-install must mint a fresh IMP and replace the tracking field; without this contract, every call leaks the prior block (F-S7-001)")
     }
 
-    func testInstalledIMPMatchesClassMethodImpl() {
+    func testInstalledIMPMatchesClassMethodImpl() throws {
         // Memory: < 64 KB. Wall: ~5 ms.
         // The IMP we track must be the same one currently installed on the
         // class — not a stale reference from a previous override life.
         SparkleAlertOverride.install()
-        let tracked = SparkleAlertOverride._installedBlockIMPForTests
-        XCTAssertNotNil(tracked)
+        let tracked = try XCTUnwrap(SparkleAlertOverride._installedBlockIMPForTests,
+                                    "install() must populate the tracking field")
 
         let cls: AnyClass = SPUStandardUserDriver.self
         let sel = NSSelectorFromString("showUpdateNotFoundWithError:acknowledgement:")
         let live = class_getMethodImplementation(cls, sel)
 
-        let trackedRaw = unsafeBitCast(tracked!, to: UnsafeRawPointer.self)
+        let trackedRaw = unsafeBitCast(tracked, to: UnsafeRawPointer.self)
         let liveRaw = unsafeBitCast(live, to: UnsafeRawPointer.self)
         XCTAssertEqual(trackedRaw, liveRaw,
                        "tracked IMP must match the live class IMP — divergence means a future re-install would free an IMP that's not actually installed")
