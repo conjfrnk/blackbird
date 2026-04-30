@@ -6,11 +6,13 @@
 # Contents are useful as reference during active work but not part of the
 # project history — never commit.
 audit/
-# Ignore docs/* (AI-generated scratchpads) but re-include curated dirs.
-# Git won't descend into an excluded directory, so the exclusion targets the
-# *contents* of docs/ rather than the dir itself.
+# Ignore docs/* (AI-generated scratchpads) but re-include curated dirs and
+# committed reference docs. Git won't descend into an excluded directory, so
+# the exclusion targets the *contents* of docs/ rather than the dir itself.
 docs/*
 !docs/benchmarks/
+!docs/compat-matrix.md
+!docs/voiceover-pass.md
 CLAUDE.md
 AGENTS.md
 .cursor/
