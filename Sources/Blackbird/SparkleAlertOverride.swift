@@ -113,7 +113,7 @@ enum SparkleAlertOverride {
             //
             // Modal interactions are not unit-testable in headless CI, so
             // there's no regression test for this — see audit ID #23.
-            // TODO(audit #23): revisit if SUUpdater grows a non-blocking API.
+            // TODO(audit #23): revisit if SPUUpdater grows a non-blocking API.
             let parentWindow = NSApp.keyWindow ?? NSApp.mainWindow
             if let window = parentWindow,
                window.attachedSheet == nil,

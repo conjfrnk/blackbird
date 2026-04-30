@@ -2150,11 +2150,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         /// Number of times `accessibilityValue()` walked the grid. Used by
         /// tests to assert the cache short-circuits repeat reads.
         var computations: Int = 0
-        /// Cumulative character offsets per line, computed lazily on first
+        /// Per-line UTF-16 code-unit offsets, computed lazily on first
         /// `accessibilityRange(forLine:)` / `accessibilityLine(for:)` call.
-        /// Element `i` is the character index of the FIRST character of
-        /// line `i` in `value`; the last element equals `value.count`.
-        /// `nil` until first line-related call after a snapshot swap.
+        /// Element `i` is the UTF-16 code-unit index of the FIRST character
+        /// of line `i` in `value`; the last element equals
+        /// `value.utf16.count` (NOT `value.count`, which is the grapheme-
+        /// cluster count and would diverge for any value containing emoji
+        /// or other multi-code-unit scalars). `nil` until first line-
+        /// related call after a snapshot swap.
+        ///
+        /// Why UTF-16 code units: NSAccessibility's `NSRange`-based API
+        /// is defined in terms of UTF-16 code units (matching NSTextView).
+        /// Using grapheme indices would silently mis-count whenever the
+        /// terminal renders an emoji.
         ///
         /// Why on the cache (not free): a VO line-by-line read traverses
         /// every line in order, calling `accessibilityRange(forLine:)`
