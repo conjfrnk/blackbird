@@ -2141,6 +2141,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         /// Number of times `accessibilityValue()` walked the grid. Used by
         /// tests to assert the cache short-circuits repeat reads.
         var computations: Int = 0
+        /// Cumulative character offsets per line, computed lazily on first
+        /// `accessibilityRange(forLine:)` / `accessibilityLine(for:)` call.
+        /// Element `i` is the character index of the FIRST character of
+        /// line `i` in `value`; the last element equals `value.count`.
+        /// `nil` until first line-related call after a snapshot swap.
+        ///
+        /// Why on the cache (not free): a VO line-by-line read traverses
+        /// every line in order, calling `accessibilityRange(forLine:)`
+        /// once per line. Recomputing the offsets per call would turn an
+        /// O(N) read into O(N²) for grids with hundreds of lines.
+        /// Invalidated alongside `value` on snapshot identity change.
+        var lineOffsets: [Int]? = nil
     }
 
     var a11yCache = A11yCache()

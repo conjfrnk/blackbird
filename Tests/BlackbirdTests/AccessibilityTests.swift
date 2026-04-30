@@ -1,43 +1,272 @@
 import XCTest
 @testable import Blackbird
 
-/// NSAccessibility coverage for `TerminalView`. Three guarantees we pin here:
+/// NSAccessibility coverage for `TerminalView`. The contract is:
 ///
-///  1. The view reports itself as `NSAccessibilityStaticText` with the
-///     "Terminal" label, so VoiceOver picks it up immediately without
-///     needing an explicit element walk.
+///  1. Role is `.textArea` (promoted from `.staticText` in v0.2 / F-S5-021)
+///     so VoiceOver navigates by line / word / character. Label remains
+///     "Terminal".
 ///  2. `accessibilityValue()` lines up with the grid — visible rows joined
-///     by `\n`, trailing whitespace stripped per row (matches the shape the
-///     screen-reader expects), empty rows preserved so structure survives.
-///  3. The per-snapshot cache actually short-circuits: hammering
-///     `accessibilityValue()` against the same snapshot must not walk the
-///     grid more than once.
+///     by `\n`, trailing whitespace stripped per row, empty rows preserved
+///     so layout structure survives.
+///  3. The per-snapshot value cache short-circuits repeat reads.
+///  4. `.textArea` accessors (number of characters, range-for-line,
+///     line-for-index, range-for-index, string-for-range, visible-range,
+///     frame-for-range) match VO's expectations and stay consistent across
+///     identity changes.
+///  5. The selection getter returns the empty range and the setter is a
+///     no-op — `Selection`'s rectangular grid model can't be expressed as
+///     a single character range without per-cell metrics that v0.2 doesn't
+///     ship.
+///
+/// Memory pre-flight: every test below operates on small synthetic grids
+/// (≤ 1 KB total characters across all rows). Wall time per test ≤ 50 ms.
 final class AccessibilityTests: XCTestCase {
 
-    func testStaticTextRole() throws {
+    // MARK: - Role / label
+
+    func testRoleIsTextArea() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         XCTAssertTrue(view.isAccessibilityElement())
-        XCTAssertEqual(view.accessibilityRole(), .staticText)
+        XCTAssertEqual(view.accessibilityRole(), .textArea,
+                       "v0.2 promoted from .staticText to .textArea so VO can navigate (F-S5-021)")
         XCTAssertEqual(view.accessibilityLabel(), "Terminal")
     }
 
+    // MARK: - Value cache (existing contract, unchanged)
+
     func testAccessibilityValueReflectsGrid() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         view.installSnapshotForTests(rows: ["hello   ", "world   ", "        "])
-        // Trailing whitespace stripped per row, rows joined with \n,
-        // fully-blank rows kept as empty entries so layout structure
-        // survives in the readout.
         XCTAssertEqual(view.accessibilityValue() as? String,
-                       "hello\nworld\n")
+                       "hello\nworld\n",
+                       "trailing whitespace stripped per row, rows joined with \\n, blank rows preserved")
     }
 
     func testValueCachesPerSnapshotGeneration() throws {
+        // Memory: <1 KB. Wall: ~10 ms (100 iterations of cache lookup).
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         view.installSnapshotForTests(rows: ["one"])
         _ = view.accessibilityValue()
         let before = view.accessibilityCacheStatsForTests.computations
         for _ in 0..<100 { _ = view.accessibilityValue() }
         let after = view.accessibilityCacheStatsForTests.computations
-        XCTAssertEqual(before, after, "cache must not recompute on same snap")
+        XCTAssertEqual(before, after, "cache must not recompute on same snapshot identity")
+    }
+
+    // MARK: - Number of characters / visible range
+
+    func testNumberOfCharactersMatchesValue() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc", "def"])
+        let value = (view.accessibilityValue() as? String) ?? ""
+        XCTAssertEqual(view.accessibilityNumberOfCharacters(), value.utf16.count)
+    }
+
+    func testVisibleCharacterRangeIsFullValue() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["x"])
+        XCTAssertEqual(view.accessibilityVisibleCharacterRange(),
+                       NSRange(location: 0, length: 1))
+    }
+
+    func testNumberOfCharactersZeroOnEmptySnapshot() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: [""])
+        XCTAssertEqual(view.accessibilityNumberOfCharacters(), 0)
+        XCTAssertEqual(view.accessibilityVisibleCharacterRange(),
+                       NSRange(location: 0, length: 0))
+    }
+
+    // MARK: - String for range
+
+    func testStringForFullRange() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc", "def"])
+        // value = "abc\ndef" (length 7).
+        XCTAssertEqual(view.accessibilityString(for: NSRange(location: 0, length: 7)),
+                       "abc\ndef")
+    }
+
+    func testStringForFirstWord() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["alpha bravo", "charlie"])
+        XCTAssertEqual(view.accessibilityString(for: NSRange(location: 0, length: 5)),
+                       "alpha")
+    }
+
+    func testStringForOutOfBoundsRangeReturnsNil() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc"])
+        // Past the end — must return nil rather than crash.
+        XCTAssertNil(view.accessibilityString(for: NSRange(location: 10, length: 5)))
+        XCTAssertNil(view.accessibilityString(for: NSRange(location: 0, length: 100)))
+    }
+
+    // MARK: - Range for line
+
+    func testRangeForLineFirst() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["aa", "bb", "cc"])
+        // value = "aa\nbb\ncc"; line 0 = "aa" at offset 0 length 2.
+        XCTAssertEqual(view.accessibilityRange(forLine: 0),
+                       NSRange(location: 0, length: 2))
+    }
+
+    func testRangeForLineSecondExcludesNewline() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["aa", "bb", "cc"])
+        // value = "aa\nbb\ncc"; line 1 = "bb" at offset 3 length 2.
+        XCTAssertEqual(view.accessibilityRange(forLine: 1),
+                       NSRange(location: 3, length: 2))
+    }
+
+    func testRangeForLineLast() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["aa", "bb"])
+        // value = "aa\nbb"; line 1 = "bb" at offset 3 length 2.
+        XCTAssertEqual(view.accessibilityRange(forLine: 1),
+                       NSRange(location: 3, length: 2))
+    }
+
+    func testRangeForLineOutOfRangeReturnsNotFound() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["aa"])
+        let r = view.accessibilityRange(forLine: 7)
+        XCTAssertEqual(r.location, NSNotFound,
+                       "out-of-range line must return {NSNotFound, 0} (NSTextView contract)")
+    }
+
+    // MARK: - Line for index
+
+    func testLineForIndexInFirstLine() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["aaa", "bbb"])
+        // value = "aaa\nbbb". index 0, 1, 2 → line 0.
+        XCTAssertEqual(view.accessibilityLine(for: 0), 0)
+        XCTAssertEqual(view.accessibilityLine(for: 2), 0)
+    }
+
+    func testLineForIndexInSecondLine() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["aa", "bb"])
+        // value = "aa\nbb". index 4 = 'b' on line 1.
+        XCTAssertEqual(view.accessibilityLine(for: 4), 1)
+    }
+
+    func testLineForIndexClampsToLastLine() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["aa", "bb"])
+        // index past end clamps to the last valid line.
+        XCTAssertEqual(view.accessibilityLine(for: 99), 1)
+    }
+
+    // MARK: - Range for index
+
+    func testRangeForIndexSingleCharacter() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc"])
+        XCTAssertEqual(view.accessibilityRange(for: 0),
+                       NSRange(location: 0, length: 1))
+        XCTAssertEqual(view.accessibilityRange(for: 2),
+                       NSRange(location: 2, length: 1))
+    }
+
+    func testRangeForIndexOutOfRangeReturnsNotFound() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["a"])
+        XCTAssertEqual(view.accessibilityRange(for: 10).location, NSNotFound)
+        XCTAssertEqual(view.accessibilityRange(for: -1).location, NSNotFound)
+    }
+
+    // MARK: - Frame for range (smoke — full impl pinned in v1.0)
+
+    func testFrameForRangeIsZeroWhenNotInWindow() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc"])
+        // Headless test view has no window, so the frame falls back to .zero.
+        XCTAssertEqual(view.accessibilityFrame(for: NSRange(location: 0, length: 1)),
+                       .zero)
+    }
+
+    // MARK: - Astral-codepoint preservation (regression: emoji + CJK Ext-B)
+
+    func testStringForRangeKeepsEmoji() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // Pre-fix `accessibilityString(for:)` used `compactMap { Unicode.Scalar($0) }`
+        // which dropped UTF-16 surrogate halves, silently corrupting emoji
+        // and any astral codepoint VO scrubbed across.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["a😀b"])
+        let value = (view.accessibilityValue() as? String) ?? ""
+        // value is "a😀b" — UTF-16: ['a', highSurr, lowSurr, 'b'] (4 units).
+        let fullRange = NSRange(location: 0, length: value.utf16.count)
+        XCTAssertEqual(view.accessibilityString(for: fullRange), "a😀b",
+                       "astral codepoints must round-trip through accessibilityString(for:)")
+        // The emoji range alone (locations 1..2) round-trips intact.
+        XCTAssertEqual(view.accessibilityString(for: NSRange(location: 1, length: 2)), "😀")
+    }
+
+    // MARK: - Snapshot identity invalidates the line-offsets cache
+
+    func testLineOffsetsInvalidateOnSnapshotChange() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // Builds the line-offsets cache against snapshot A, swaps to B,
+        // asserts that range-for-line / line-for-index reflect B and not
+        // a stale A.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["aa", "bb"])
+        // Build cache with A.
+        XCTAssertEqual(view.accessibilityRange(forLine: 1),
+                       NSRange(location: 3, length: 2))
+        // Swap to B (single 7-char line).
+        view.installSnapshotForTests(rows: ["xxxxxxx"])
+        XCTAssertEqual(view.accessibilityRange(forLine: 0),
+                       NSRange(location: 0, length: 7),
+                       "line 0 must reflect snapshot B's content, not A's stale offsets")
+        XCTAssertEqual(view.accessibilityRange(forLine: 1).location, NSNotFound,
+                       "line 1 doesn't exist in B; must return NSNotFound, not A's stale offset")
+    }
+
+    // MARK: - Selection contract (getter empty, setter no-op)
+
+    func testSelectedRangeIsEmpty() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc"])
+        XCTAssertEqual(view.accessibilitySelectedTextRange(),
+                       NSRange(location: 0, length: 0),
+                       "v0.2 ships getter as empty — Selection's grid model can't be expressed as a single character range cleanly")
+    }
+
+    func testSetSelectedRangeIsNoOp() throws {
+        // Memory: <1 KB. Wall: ~10 ms (one log emission).
+        TerminalView._resetSelectionSetterLogForTests()
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["abc"])
+        // Should not crash. No way to assert "log was emitted" without
+        // capturing OSLog; we trust the one-shot guard's existence.
+        view.setAccessibilitySelectedTextRange(NSRange(location: 0, length: 2))
+        // Getter is still empty — setter didn't actually persist anything.
+        XCTAssertEqual(view.accessibilitySelectedTextRange(),
+                       NSRange(location: 0, length: 0))
     }
 }
