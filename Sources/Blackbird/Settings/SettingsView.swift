@@ -60,9 +60,10 @@ public struct SettingsView: View {
     @ViewBuilder
     private var tabs: some View {
         let base = TabView {
-            appearanceTab.tabItem { Label("Appearance", systemImage: "paintpalette") }
-            behaviorTab.tabItem   { Label("Behavior",   systemImage: "keyboard") }
-            updatesTab.tabItem    { Label("Updates",    systemImage: "arrow.down.circle") }
+            appearanceTab.tabItem  { Label("Appearance",  systemImage: "paintpalette") }
+            behaviorTab.tabItem    { Label("Behavior",    systemImage: "keyboard") }
+            updatesTab.tabItem     { Label("Updates",     systemImage: "arrow.down.circle") }
+            DiagnosticsView().tabItem { Label("Diagnostics", systemImage: "stethoscope") }
         }
         if #available(macOS 15.0, *) {
             base.containerBackground(.clear, for: .window)

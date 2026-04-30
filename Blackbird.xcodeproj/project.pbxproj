@@ -75,6 +75,7 @@
 		92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */; };
 		92F85478B5B065F702AD717B /* MetalDeviceSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14E5F5AA20D171CAD16112AD /* MetalDeviceSelection.swift */; };
 		9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */; };
+		93C6141EA8E0FBB96A023E2C /* DiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB953F6C152888DF02CD2AB3 /* DiagnosticsView.swift */; };
 		94BFD61D338BCA15E5AD538B /* TabStripStressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C7486776E182C56E2C61173 /* TabStripStressTests.swift */; };
 		95D6A4034F6872A29F1474AF /* PowerAwareRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28AC18E4DFA1B4F34FA78C71 /* PowerAwareRendering.swift */; };
 		96E63D5EF8882BE8BF1568CF /* SparkleAlertOverrideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B8663C860AF68F9A6D150F8 /* SparkleAlertOverrideTests.swift */; };
@@ -219,6 +220,7 @@
 		A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHostTermination.swift; sourceTree = "<group>"; };
 		A8C36192F62C6E40A498D70D /* InlineRenameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineRenameTests.swift; sourceTree = "<group>"; };
 		AA3C166E3043F25B8791103E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		AB953F6C152888DF02CD2AB3 /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
 		AFE45249095A785FB78B5877 /* DiagnosticReportStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticReportStore.swift; sourceTree = "<group>"; };
 		B07A32BEBADF4A5789EFDCC8 /* FirstResponderRestoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstResponderRestoreTests.swift; sourceTree = "<group>"; };
 		B9C1078B5D0C0A032EC67282 /* SnapshotCoalescingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotCoalescingTests.swift; sourceTree = "<group>"; };
@@ -279,6 +281,7 @@
 			isa = PBXGroup;
 			children = (
 				AFE45249095A785FB78B5877 /* DiagnosticReportStore.swift */,
+				AB953F6C152888DF02CD2AB3 /* DiagnosticsView.swift */,
 				0D7DD21160AFF51FCA0B6374 /* Preferences.swift */,
 				3F7D804048B62FEB3D66F4F0 /* SettingsView.swift */,
 				C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */,
@@ -641,6 +644,7 @@
 				BF0ADDAAD252C3F8D7FD3F79 /* CellInstance.swift in Sources */,
 				2B00CBAD39BA9D79D29F1CEE /* CwdResolver.swift in Sources */,
 				A24A1DDD3199147984379869 /* DiagnosticReportStore.swift in Sources */,
+				93C6141EA8E0FBB96A023E2C /* DiagnosticsView.swift in Sources */,
 				75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */,
 				9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */,
 				1DFA371FD2502A8FA6AB320B /* HyperlinkResolver.swift in Sources */,

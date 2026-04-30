@@ -23,13 +23,17 @@ final class DiagnosticReportStore: ObservableObject {
     }
 
     struct Report: Identifiable, Equatable {
-        /// File URL doubles as identifier — unique per file, stable across
-        /// reloads as long as the file isn't moved/renamed.
-        let id: URL
         let kind: Kind
         let url: URL
         let modificationDate: Date
         let byteSize: Int64
+
+        /// File URL doubles as identifier — unique per file, stable across
+        /// reloads as long as the file isn't moved/renamed. Computed so we
+        /// don't store the same URL twice (a duplicated `id` field is a
+        /// future-refactor trap: a refactor that updates `url` without `id`
+        /// silently breaks deduplication in `ForEach`).
+        var id: URL { url }
     }
 
     /// Path RELATIVE to the user's home directory where `MainThreadWatchdog`
@@ -92,7 +96,7 @@ final class DiagnosticReportStore: ObservableObject {
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             let mtime = values?.contentModificationDate ?? .distantPast
             let size = Int64(values?.fileSize ?? 0)
-            return Report(id: url, kind: kind, url: url, modificationDate: mtime, byteSize: size)
+            return Report(kind: kind, url: url, modificationDate: mtime, byteSize: size)
         }
     }
 }
