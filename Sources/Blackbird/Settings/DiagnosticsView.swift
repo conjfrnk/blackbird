@@ -145,9 +145,16 @@ struct DiagnosticsView: View {
     /// the user's pasteboard. The legitimate writers (MainThreadWatchdog
     /// `sample(1)` output and macOS `.ips` JSON) only use printable ASCII
     /// + `\n`, so the substitution never touches real reports.
+    ///
+    /// Performance: stays in `String.UnicodeScalarView` end-to-end, reserves
+    /// capacity via `s.utf8.count` (O(1) on Swift's contiguous storage),
+    /// and avoids per-scalar `Character` boxing. A clean 16 MiB report at
+    /// the inline cap should hold the main thread for tens of ms, not
+    /// seconds.
     private static func stripControlCharacters(_ s: String) -> String {
-        var out = String()
-        out.reserveCapacity(s.count)
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(s.utf8.count)
+        let replacement = Unicode.Scalar(0xFFFD)!
         for scalar in s.unicodeScalars {
             let v = scalar.value
             // Allow newline (0x0A) and horizontal tab (0x09); strip every
@@ -155,12 +162,12 @@ struct DiagnosticsView: View {
             // (0x80-0x9F) which is where ANSI/VT escape control bytes live
             // when they bypass ESC-introducers.
             if (v < 0x20 && v != 0x0A && v != 0x09) || v == 0x7F || (v >= 0x80 && v <= 0x9F) {
-                out.append("\u{FFFD}")
+                out.append(replacement)
             } else {
-                out.append(Character(scalar))
+                out.append(scalar)
             }
         }
-        return out
+        return String(out)
     }
 
     private func reveal(_ report: DiagnosticReportStore.Report) {

@@ -232,6 +232,22 @@ extension TerminalView {
     /// Lazily build the per-line offset table. Caller responsible for
     /// invalidation — `accessibilityValue()` clears
     /// `a11yCache.lineOffsets = nil` on snapshot identity change.
+    ///
+    /// Contract: `offsets[i]` is the UTF-16 code-unit index of the FIRST
+    /// character of line `i`. The last entry is the past-the-end sentinel
+    /// (`= utf16.count`). Number of lines = `offsets.count - 1`. An empty
+    /// value produces `[0]` (zero lines, matching NSTextView's contract
+    /// for a totally-empty document).
+    ///
+    /// Trailing-newline semantics: a value ending in `\n` reports `n+1`
+    /// lines where `n` is the count of `\n`. The line after the final `\n`
+    /// is the empty trailing line, and `accessibilityRange(forLine: n)`
+    /// returns `{utf16.count, 0}`. Pre-fix, this was wrong: the code
+    /// suppressed the sentinel when `offsets.last == utf16.count`, which
+    /// hid the trailing empty line for any value ending in `\n` — the
+    /// dominant production shape (every shell screen with a blank row at
+    /// the bottom). VO line navigation stopped one line short of where
+    /// the cursor actually was.
     private func ensureLineOffsets() -> [Int] {
         if let cached = a11yCache.lineOffsets { return cached }
         let value = (accessibilityValue() as? String) ?? ""
@@ -244,7 +260,13 @@ extension TerminalView {
                 offsets.append(idx)
             }
         }
-        if offsets.last != utf16.count {
+        // Always append the past-the-end sentinel for non-empty values.
+        // Empty values keep `offsets == [0]` so `numLines` evaluates to 0.
+        // For values ending in `\n` the loop's final append is the START
+        // of the empty trailing line; the sentinel here bounds it. Without
+        // this unconditional append, "a\n" produced `[0, 2]` and reported
+        // 1 line when NSTextView's contract requires 2.
+        if !utf16.isEmpty {
             offsets.append(utf16.count)
         }
         a11yCache.lineOffsets = offsets

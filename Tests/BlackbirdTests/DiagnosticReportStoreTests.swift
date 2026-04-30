@@ -179,23 +179,26 @@ final class DiagnosticReportStoreTests: XCTestCase {
         XCTAssertEqual(store.reports[0].url.lastPathComponent, "hang-real.txt")
     }
 
-    func testOneUnreadableFileDoesNotEmptyTheList() throws {
+    func testReloadIsRobustToHostileSibling() throws {
         // Memory: <1 KB. Wall: ~20 ms.
-        // The earlier shape used `try?` on the directory enumeration AND on
-        // each per-file resource lookup, which collapsed permission failures
-        // into a silently-empty list. The current shape skips files that
-        // can't be stat'd and surfaces the rest. This test pins that.
+        // Scenario: a sibling with restrictive permissions next to legitimate
+        // reports. URLResourceValues for `.fileSizeKey` / `.isRegularFileKey`
+        // reads from the directory entry (st_size, st_mode in the inode),
+        // which remains accessible to the owner even at mode 000 — so the
+        // restricted file IS surfaced, just with byteSize visible. The
+        // contract this test pins is "one weird sibling does not break the
+        // whole list", not "permission-denied is filtered" (we cannot
+        // distinguish that from "directory entry is canonical truth"
+        // without opening the file).
         try writeFile("hang-1.txt", in: hangDir, contents: "first")
         try writeFile("hang-2.txt", in: hangDir, contents: "second")
         let restricted = hangDir.appendingPathComponent("hang-3.txt")
         try "third".write(to: restricted, atomically: true, encoding: .utf8)
-        // chmod 000 the third file so URLResourceValues fails on it.
         try FileManager.default.setAttributes(
             [.posixPermissions: NSNumber(value: Int16(0o000))],
             ofItemAtPath: restricted.path
         )
         defer {
-            // Restore so tearDown can clean up.
             try? FileManager.default.setAttributes(
                 [.posixPermissions: NSNumber(value: Int16(0o644))],
                 ofItemAtPath: restricted.path
@@ -203,14 +206,13 @@ final class DiagnosticReportStoreTests: XCTestCase {
         }
         let store = DiagnosticReportStore(hangDirectory: hangDir, crashDirectory: crashDir)
         store.reload()
-        // The two readable files must still surface even if a sibling is
-        // permission-denied. The unreadable one is filtered out (not
-        // surfaced with `byteSize == 0` masquerading as "empty").
-        XCTAssertGreaterThanOrEqual(store.reports.count, 2,
-                                    "readable files must still surface despite a permission-denied sibling")
-        XCTAssertTrue(store.reports.allSatisfy {
-            ["hang-1.txt", "hang-2.txt", "hang-3.txt"].contains($0.url.lastPathComponent)
-        })
+        // The two readable files must still surface — reload doesn't
+        // bail on the whole list because of one tricky sibling.
+        let names = store.reports.map { $0.url.lastPathComponent }
+        XCTAssertTrue(names.contains("hang-1.txt"))
+        XCTAssertTrue(names.contains("hang-2.txt"))
+        // Whether hang-3.txt surfaces depends on whether the directory-entry
+        // stat path was sufficient — we don't constrain that here.
     }
 
     // MARK: - Mixed kinds

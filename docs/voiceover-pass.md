@@ -111,9 +111,11 @@ the checklist above and record the result here:
 
 - `Sources/Blackbird/Terminal/TerminalView+Accessibility.swift` — role,
   accessors, selection no-op + log.
-- `Tests/BlackbirdTests/AccessibilityTests.swift` — 23 tests covering
+- `Tests/BlackbirdTests/AccessibilityTests.swift` — 30 tests covering
   role, value, line/char accessors, range conversions, selection
-  contract, snapshot-identity cache invalidation, and astral-codepoint
-  round-tripping.
+  contract, snapshot-identity cache invalidation, astral-codepoint
+  round-tripping, and trailing-newline line counting (so the dominant
+  production case — shell prompt on a blank bottom row — gets the
+  right line count for VO navigation).
 - `KNOWN_ISSUES.md` — v0.2 deferral entries reference this doc for the
   manual pass.

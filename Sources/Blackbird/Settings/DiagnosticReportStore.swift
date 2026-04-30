@@ -123,11 +123,13 @@ final class DiagnosticReportStore: ObservableObject {
             // MainThreadWatchdog writers always emit regular files, so
             // symlink-named reports are inherently suspicious.
             //
-            // We require `isRegularFile == true` AND `isSymbolicLink == false`
-            // — belt-and-suspenders against an APFS firmlink or hardlink
-            // edge that resolves to non-regular content. Files we can't
-            // stat are dropped (treated as suspicious-by-default).
-            guard values?.isRegularFile == true, values?.isSymbolicLink != true else {
+            // Both checks use explicit `== true` / `== false` (not `!= true`)
+            // so that a `nil` resource value — which means "stat succeeded
+            // but the key wasn't populated", possible on edge filesystems —
+            // is treated as suspicious-by-default and dropped. Files we
+            // can't stat at all are also dropped via the `isRegularFile`
+            // gate.
+            guard values?.isRegularFile == true, values?.isSymbolicLink == false else {
                 return nil
             }
             let mtime = values?.contentModificationDate ?? .distantPast

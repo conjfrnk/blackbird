@@ -255,6 +255,58 @@ final class AccessibilityTests: XCTestCase {
         XCTAssertEqual(view.accessibilityRange(forLine: 1).location, NSNotFound)
     }
 
+    func testRangeForLineOnTrailingBlankRow() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // value = "a\n" (single content row with trailing blank). NSTextView
+        // contract: 2 lines — line 0 = {0,1} ("a"), line 1 = {2,0} (empty
+        // trailing). Without the ensureLineOffsets fix, line 1 returned
+        // NSNotFound, hiding the trailing blank from VO line navigation —
+        // the dominant production case for any shell screen with a blank
+        // row at the bottom.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["a", ""])
+        XCTAssertEqual(view.accessibilityRange(forLine: 0),
+                       NSRange(location: 0, length: 1),
+                       "line 0 = 'a' before the newline")
+        XCTAssertEqual(view.accessibilityRange(forLine: 1),
+                       NSRange(location: 2, length: 0),
+                       "line 1 = empty trailing line at offset 2")
+        XCTAssertEqual(view.accessibilityRange(forLine: 2).location, NSNotFound,
+                       "line 2 doesn't exist; clamps to NSNotFound")
+    }
+
+    func testRangeForLineOnAccessibilityValueReflectsGridShape() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // The grid `["hello   ", "world   ", "        "]` joins to
+        // "hello\nworld\n" — three rows but value retains only two
+        // newlines because trailing whitespace is stripped per row and
+        // the all-blank row collapses to "". NSTextView contract: 3
+        // lines (0 = "hello", 1 = "world", 2 = ""). VO must reach line 2
+        // to read the cursor position when the prompt sits on a blank
+        // bottom row.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["hello   ", "world   ", "        "])
+        XCTAssertEqual(view.accessibilityRange(forLine: 0),
+                       NSRange(location: 0, length: 5))
+        XCTAssertEqual(view.accessibilityRange(forLine: 1),
+                       NSRange(location: 6, length: 5))
+        XCTAssertEqual(view.accessibilityRange(forLine: 2),
+                       NSRange(location: 12, length: 0),
+                       "line 2 is the empty trailing line — VO needs this for shell prompts on blank rows")
+    }
+
+    func testRangeForLineOnLeadingBlankRow() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // value = "\na" — leading blank then content. Line 0 should be
+        // empty (just the newline boundary), line 1 should be "a".
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installSnapshotForTests(rows: ["", "a"])
+        XCTAssertEqual(view.accessibilityRange(forLine: 0),
+                       NSRange(location: 0, length: 0))
+        XCTAssertEqual(view.accessibilityRange(forLine: 1),
+                       NSRange(location: 1, length: 1))
+    }
+
     // MARK: - Astral-codepoint preservation (regression: emoji + CJK Ext-B)
 
     func testStringForRangeKeepsEmoji() throws {

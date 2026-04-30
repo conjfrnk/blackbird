@@ -116,7 +116,15 @@ enum SparkleAlertOverride {
                 return
             }
 
-            if NSApp.modalWindow != nil || !NSApp.isActive {
+            // Drop the alert if anything modal is in flight or the app
+            // isn't foreground. The third branch (parentWindow has an
+            // attached sheet but no app-modal session) was previously
+            // missing — execution would fall through to runModal() and
+            // deadlock against the existing sheet, exactly the case the
+            // sheet-path guard above means to prevent. (audit #23)
+            if NSApp.modalWindow != nil
+                || !NSApp.isActive
+                || (parentWindow?.attachedSheet != nil) {
                 logger.warning(
                     "Sparkle 'up to date' alert dropped: another modal is active or app is not foreground"
                 )
