@@ -22,8 +22,20 @@ enum SparkleAlertOverride {
         category: "SparkleAlertOverride"
     )
 
+    /// Last block IMP we installed via `imp_implementationWithBlock`. Tracked
+    /// so a re-install can call `imp_removeBlock` on the prior IMP — without
+    /// it, every re-call leaks the previous block (F-S7-001). The runtime-
+    /// owned original SPUStandardUserDriver IMP returned by the FIRST
+    /// `method_setImplementation` is NOT tracked here and must NOT be passed
+    /// to `imp_removeBlock`: only IMPs we created via
+    /// `imp_implementationWithBlock` are eligible for removal. Discrimination
+    /// is by nil-check on this field (nil ⇒ first install ⇒ skip the remove).
+    private static var installedBlockIMP: IMP?
+
     /// Invoked once during app launch. Idempotent — `method_setImplementation`
-    /// is safe to call repeatedly with the same block.
+    /// is safe to call repeatedly. On re-install, the previous block IMP is
+    /// freed via `imp_removeBlock` (F-S7-001); the very first install's prior
+    /// IMP is the runtime-owned original and is left untouched.
     static func install() {
         let cls: AnyClass = SPUStandardUserDriver.self
         let sel = NSSelectorFromString("showUpdateNotFoundWithError:acknowledgement:")
@@ -101,6 +113,37 @@ enum SparkleAlertOverride {
             ack()
         }
         let imp = imp_implementationWithBlock(block as Any)
+        // F-S7-001: free the previously-installed block IMP, if any. We
+        // discriminate by `installedBlockIMP`: nil on the very first call
+        // (so the prior IMP returned by `method_setImplementation` is the
+        // runtime-owned original — leave it alone), non-nil on subsequent
+        // calls (so the prior IMP is one we minted via
+        // `imp_implementationWithBlock` and must release).
+        let prior = installedBlockIMP
         method_setImplementation(method, imp)
+        if let prior {
+            imp_removeBlock(prior)
+        }
+        installedBlockIMP = imp
     }
+
+    #if DEBUG
+    /// Test-only accessor for the IMP we installed. Lets
+    /// `SparkleAlertOverrideTests` assert that re-install replaces the
+    /// tracked IMP. DEBUG-gated — release builds carry no test surface.
+    internal static var _installedBlockIMPForTests: IMP? { installedBlockIMP }
+
+    /// Test-only reset to make `install()` re-entrant across test methods.
+    /// Frees the currently-tracked IMP (mimicking what a real re-install
+    /// would do) and resets the tracking field. Does NOT restore the
+    /// original SPUStandardUserDriver IMP — there's no use case for that
+    /// in production, and the test only needs `installedBlockIMP` to be
+    /// observable / reset-able.
+    internal static func _resetForTests() {
+        if let prior = installedBlockIMP {
+            imp_removeBlock(prior)
+        }
+        installedBlockIMP = nil
+    }
+    #endif
 }
