@@ -127,6 +127,20 @@ struct DiagnosticsView: View {
             Self.log.error("copy read failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
+        // Post-read size check defends against a TOCTOU window — if the
+        // file grew between reload() (which captured `report.byteSize`)
+        // and `Data(contentsOf:)`, the pre-flight check above would have
+        // passed. Real-world hang reports are written atomically by
+        // sample(1) and ReportCrash, so this should never fire — flag it
+        // if it does so we know an adversarial logger is appending mid-
+        // read.
+        if data.count > Int(Self.inlineLoadCapBytes) {
+            let mb = Double(data.count) / (1024 * 1024)
+            lastError = String(format: "%@ grew to %.1f MB during read — too large for inline copy. Use Reveal in Finder to attach the file directly.",
+                               report.url.lastPathComponent, mb)
+            Self.log.notice("copy refused mid-read: \(report.url.lastPathComponent, privacy: .public) read \(data.count, privacy: .public) bytes (cap \(Self.inlineLoadCapBytes, privacy: .public))")
+            return false
+        }
         guard let text = String(data: data, encoding: .utf8) else {
             lastError = "\(report.url.lastPathComponent) contains non-text bytes. Use Reveal in Finder to attach the file directly."
             Self.log.error("copy decode failed: \(report.url.lastPathComponent, privacy: .public) is not UTF-8")
