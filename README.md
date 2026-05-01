@@ -47,6 +47,14 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 | ⌘-drag            | Move window                      |
 | ⌘ + right-drag    | Resize from nearest corner       |
 
+## Install
+
+Download the signed, notarized DMG from
+[blackbird-terminal.com](https://blackbird-terminal.com) or the
+[Releases page](https://github.com/conjfrnk/blackbird/releases/latest).
+
+Auto-updates ship through Sparkle once installed.
+
 ## Building
 
 Requirements: macOS 14+, Xcode 16.2, Rust stable with both Apple targets, [`xcodegen`](https://github.com/yonaskolb/XcodeGen).

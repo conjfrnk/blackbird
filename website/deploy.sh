@@ -36,6 +36,13 @@ aws s3 cp icon-512.png "s3://${BUCKET}/icon-512.png" \
   --content-type "image/png" \
   --profile "$PROFILE"
 
+# OpenGraph card. Referenced with ?v= in HTML; bump the query string in
+# index.html when regenerating so chat previews refresh.
+aws s3 cp og-image.png "s3://${BUCKET}/og-image.png" \
+  --cache-control "public,max-age=86400" \
+  --content-type "image/png" \
+  --profile "$PROFILE"
+
 aws s3 cp styles.css "s3://${BUCKET}/styles.css" \
   --cache-control "public,max-age=86400" \
   --content-type "text/css; charset=utf-8" \

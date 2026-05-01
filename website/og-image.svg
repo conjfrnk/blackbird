@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#282828"/>
+  <text x="560" y="320"
+        font-family="-apple-system, SF Pro Display, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-weight="600" font-size="120" fill="#EBDBB2"
+        letter-spacing="-3">Blackbird</text>
+  <text x="563" y="380"
+        font-family="-apple-system, SF Pro Display, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-weight="400" font-size="36" fill="#BDAE93"
+        letter-spacing="-0.5">A fast, native macOS terminal.</text>
+  <text x="563" y="438"
+        font-family="-apple-system, SF Pro Text, Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-weight="400" font-size="22" fill="#A89984"
+        letter-spacing="0.4">blackbird-terminal.com</text>
+</svg>
