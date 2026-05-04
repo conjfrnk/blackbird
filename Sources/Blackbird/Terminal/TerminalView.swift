@@ -801,6 +801,43 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// iTerm2, which both leave breathing room below the prompt.
     public static let bottomContentInsetPoints: CGFloat = 10
 
+    /// Space reserved on the left and right of the grid so text never kisses
+    /// the window edge. Mirrored on both sides — total horizontal padding is
+    /// `2 * horizontalContentInsetPoints`. Sub-cell pixel leftover from
+    /// pixel-precise window resize gets absorbed into the right side, so the
+    /// effective right inset floats from `horizontalContentInsetPoints` to
+    /// `horizontalContentInsetPoints + cellWidth - 1`.
+    public static let horizontalContentInsetPoints: CGFloat = 8
+
+    /// Top-left pixel origin of cell `(row, col)` in this view's local
+    /// (top-down) coordinate space. Single source of truth for the
+    /// grid → view mapping; every callsite that previously did
+    /// `col * cellWidth` and `row * cellHeight` directly should route
+    /// through this helper so the inset can never drift out of sync.
+    public func cellOriginPx(row: Int, col: Int) -> CGPoint {
+        let x = Self.horizontalContentInsetPoints + CGFloat(col) * metrics.cellWidth
+        let y = titlebarOnlyTopInset + CGFloat(row) * metrics.cellHeight
+        return CGPoint(x: x, y: y)
+    }
+
+    /// Inverse of `cellOriginPx`. Maps a view-local (top-down) point to a
+    /// `(row, col)` cell coordinate within the visible grid (no scrollback
+    /// awareness; selection sites that need history use
+    /// `Selection.bufferPoint(forView:…, leftInsetPoints:)` instead).
+    /// Points inside the left/top inset clamp to `col 0` / `row 0`.
+    public func cellAt(point: CGPoint) -> (row: Int, col: Int) {
+        let cw = metrics.cellWidth
+        let ch = metrics.cellHeight
+        guard cw > 0, ch > 0 else { return (0, 0) }
+        let xInGrid = point.x - Self.horizontalContentInsetPoints
+        let yInGrid = point.y - titlebarOnlyTopInset
+        let rawCol = Int(max(0, xInGrid) / cw)
+        let rawRow = Int(max(0, yInGrid) / ch)
+        let col = max(0, min(rawCol, 100_000))
+        let row = max(0, min(rawRow, 100_000))
+        return (row, col)
+    }
+
     private func propagateResize(async asyncResize: Bool = false) {
         guard let session else { return }
         // `.fullSizeContentView` means our bounds include the titlebar region —
