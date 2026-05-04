@@ -840,15 +840,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     private func propagateResize(async asyncResize: Bool = false) {
-        guard let session else { return }
         // `.fullSizeContentView` means our bounds include the titlebar region —
         // subtract it (via titlebarOnlyTopInset) so we don't size the grid as
-        // though we had titlebar-height extra rows of real estate.
+        // though we had titlebar-height extra rows of real estate. Sub-cell
+        // pixel leftover from pixel-precise window resize gets absorbed into
+        // the right inset (the inset's effective right side floats from
+        // `horizontalContentInsetPoints` to `+ cellWidth - 1`).
         let usableHeight = max(
             metrics.cellHeight,
             bounds.height - titlebarOnlyTopInset - Self.bottomContentInsetPoints
         )
-        let grid = metrics.grid(forPixelSize: CGSize(width: bounds.width, height: usableHeight))
+        let usableWidth = max(
+            metrics.cellWidth,
+            bounds.width - 2 * Self.horizontalContentInsetPoints
+        )
+        let grid = metrics.grid(forPixelSize: CGSize(width: usableWidth, height: usableHeight))
         guard grid.cols > 0, grid.rows > 0 else { return }
         // `grid` is bounded by CellMetrics.sanePx (1M px / min cell size),
         // so in theory cols/rows can exceed UInt16.max on a degenerate
@@ -861,6 +867,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
         guard size != lastPropagatedSize else { return }
         lastPropagatedSize = size
+        // Without an attached session there's nothing to forward to. The
+        // size is still recorded above so resize-math tests can assert
+        // against it without spinning up a real PTY.
+        guard let session else { return }
         // Drag path uses sync `resize` so each frame renders at the right
         // grid size (avoids one-frame-at-old-grid jitter). Font-change path
         // (and any other non-drag caller) uses `resizeAsync` to keep the
@@ -873,6 +883,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             session.resize(to: size)
         }
     }
+
+    #if DEBUG
+    /// DEBUG-only accessor so unit tests can assert what the most recent
+    /// `propagateResize` call computed for the grid.
+    public func lastPropagatedSizeForTesting() -> PTY.Size? { lastPropagatedSize }
+    #endif
 
     // MARK: - Rendering
 
