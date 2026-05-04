@@ -389,7 +389,7 @@ extension TerminalView: NSTextInputClient {
         row = cursorRowInView()
         col = cursorColInView()
         #endif
-        let xPoints = CGFloat(col) * cw
+        let xPoints = TerminalView.horizontalContentInsetPoints + CGFloat(col) * cw
         // Renderer renders row 0 at the top. In AppKit (flipped = false)
         // Y=0 sits at the *bottom*, so mirror: the cell's top-left in view
         // coords is (bounds.height - topInset - (row+1)*ch).
