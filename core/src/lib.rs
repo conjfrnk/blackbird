@@ -681,6 +681,10 @@ struct OscScanner<'a> {
     /// BBTerm so the one-shot-per-class log is per-instance rather
     /// than process-wide.
     osc7_reject_logged: &'a mut [bool; 8],
+    /// One-shot latch for the OSC 133 D non-digit reject path
+    /// (audit L1 + reviewer follow-up). Mirrors the per-instance
+    /// stance L3 established for OSC 7.
+    osc133_d_nondigit_logged: &'a mut bool,
 }
 
 /// Per-terminal sliding-window rate limiter for OSC 133 prompt marks.
@@ -1257,6 +1261,14 @@ impl OscScanner<'_> {
             && !payload.is_empty()
             && !payload.iter().all(|b| b.is_ascii_digit())
         {
+            // Mirror L3's per-instance one-shot logging stance:
+            // first reject of this class on this BBTerm produces a
+            // breadcrumb; subsequent rejects stay silent so a flood
+            // can't drown the log.
+            if !*self.osc133_d_nondigit_logged {
+                *self.osc133_d_nondigit_logged = true;
+                eprintln!("[blackbird_core] OSC 133 D rejected (non-digit payload)");
+            }
             return;
         }
 
@@ -1437,6 +1449,11 @@ pub struct BBTerm {
     /// reject. Per-instance flags restore one-shot-per-session log
     /// semantics without re-introducing log flood.
     osc7_reject_logged: [bool; 8],
+    /// One-shot latch for the OSC 133 D non-digit reject path (audit
+    /// L1 + reviewer follow-up). Same per-instance / one-shot rule
+    /// as `osc7_reject_logged` but only one class so a single bool
+    /// suffices.
+    osc133_d_nondigit_logged: bool,
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
     /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
     /// 256+ allocations, but a hostile stream can fan replies across many
@@ -1777,6 +1794,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             prompt_mark_rate: PromptMarkRateState::new(),
             osc7_rate: Osc7RateState::new(),
             osc7_reject_logged: [false; 8],
+            osc133_d_nondigit_logged: false,
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
         });
@@ -1913,6 +1931,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     prompt_mark_rate: &mut bb.prompt_mark_rate,
                     osc7_rate: &mut bb.osc7_rate,
                     osc7_reject_logged: &mut bb.osc7_reject_logged,
+                    osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
@@ -1937,6 +1956,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             prompt_mark_rate: &mut bb.prompt_mark_rate,
             osc7_rate: &mut bb.osc7_rate,
                     osc7_reject_logged: &mut bb.osc7_reject_logged,
+                    osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
         };
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);

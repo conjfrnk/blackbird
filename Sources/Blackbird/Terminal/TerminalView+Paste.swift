@@ -74,7 +74,13 @@ extension TerminalView {
         // (handled above) protects modern TUIs; this guard catches the
         // unprotected case at a bare shell prompt. Opt-in: default off
         // preserves the long-standing terminal behaviour.
-        if Preferences.shared.confirmMultiLinePaste, bytes.contains(0x0A) {
+        // Gate also matches lone CR (0x0D): a clipboard like
+        // `foo\rbar\rbaz` slips past LF detection but the
+        // `convertLoneCRToLF(bytes)` call below turns each `\r` into
+        // `\n`, executing each fragment as its own command. Same
+        // injection class as LF — keep the warning symmetric.
+        if Preferences.shared.confirmMultiLinePaste,
+           bytes.contains(0x0A) || bytes.contains(0x0D) {
             let alert = NSAlert()
             alert.messageText = "Paste multiple lines?"
             alert.informativeText = "The clipboard contains line breaks. Each line will execute as a separate command at the shell prompt."

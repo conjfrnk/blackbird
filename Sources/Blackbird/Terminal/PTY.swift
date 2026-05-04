@@ -344,6 +344,26 @@ public final class PTY {
         // 6. Executable path as a C string for execv's first arg.
         let executableCStr = strdup(executable)
         defer { free(executableCStr) }
+        // Reviewer follow-up to H2 (silent-failure-hunter L-2): under
+        // genuine strdup OOM the child's `execv(executableCStr, ...)`
+        // would receive NULL and the surrounding `_exit(127)` swallows
+        // the cause. Now that strdup runs in the parent (where logging
+        // is safe), make the OOM visible and abort early. Other
+        // strdups (envKeysC entries, homeDirCStr, initialCwdCStr) can
+        // tolerate NULL — the child path's `if let` guards skip them
+        // gracefully — so we only abort on the one strdup that has no
+        // fallback (executable is required by execv). cArgv NULL
+        // entries are also non-recoverable; if any of those failed,
+        // subsequent execv would crash the child with a malformed
+        // argv, so check them too.
+        if executableCStr == nil
+            || cArgv.dropLast().contains(where: { $0 == nil })
+        {
+            Self.logger.error(
+                "PTY.spawn: strdup returned NULL for executable / argv — out of memory; aborting fork attempt"
+            )
+            throw Error.forkFailed(errno: ENOMEM)
+        }
         // Pass nil for termios so forkpty uses the kernel's TTYDEF_* defaults
         // from <sys/ttydefaults.h>. That gives us correct c_cc values:
         // VINTR=3, VQUIT=28, VSUSP=26, VEOF=4, VERASE=0x7F, VKILL=21, plus
@@ -380,15 +400,21 @@ public final class PTY {
 
         if pid == 0 {
             // === Post-fork-pre-exec: strictly POSIX async-signal-safe ===
-            // Audit H2. Anything beyond the documented signal-safe list
-            // (signal, sigaction, sigprocmask, sigemptyset, _exit, exec*,
-            // close, dup2, getenv, setenv, unsetenv, chdir, stat, fcntl,
-            // sysconf, write, read) risks deadlocking the child on a
-            // malloc/dispatch/Mach-port lock the parent's other threads
-            // were holding at fork time. All Swift Array / Dictionary /
-            // String / os.Logger / getpwuid work was completed in the
-            // parent above; the child only indexes into pre-built
-            // C-string arrays.
+            // Audit H2. Anything beyond the practical Darwin-safe set —
+            // POSIX async-signal-safe primitives (signal, sigaction,
+            // sigprocmask, sigemptyset, _exit, exec*, close, dup2,
+            // chdir, fcntl, sysconf, write, read) plus the libc
+            // routines that have no internal locks on Darwin
+            // (setenv / getenv / unsetenv per the Apple libc source) —
+            // risks deadlocking the child on a malloc/dispatch/
+            // Mach-port lock the parent's other threads were holding
+            // at fork time. POSIX classifies setenv/getenv/unsetenv as
+            // unsafe in general; on Darwin they are practically safe
+            // because they don't take cross-thread locks, and iTerm2 /
+            // Terminal.app rely on the same behaviour. All Swift
+            // Array / Dictionary / String / os.Logger / getpwuid work
+            // was completed in the parent above; the child only
+            // indexes into pre-built C-string arrays.
 
             // Scrub launchd / XPC / CoreFoundation plumbing variables
             // that leak from the GUI app into the child shell. iTerm2
