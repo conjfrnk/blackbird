@@ -1009,23 +1009,42 @@ final class TabStripView: NSView {
         // titlebar-tabs F15.
         let controller = targetWindow.windowController as? MainWindowController
 
-        let rename = NSMenuItem(
-            title: "Rename…",
-            action: #selector(MainWindowController.renameActiveTab(_:)),
-            keyEquivalent: ""
-        )
-        rename.target = controller
-        menu.addItem(rename)
+        // Audit L9. NSMenu does NOT call `validateMenuItem` for context
+        // menus built via `menu(for:)` — only for menu-bar menus reached
+        // through the responder chain. Without filtering at build time,
+        // "Rename…" and "Reset to Auto" appear enabled even when the
+        // window's session has been torn down (shell exited mid-close)
+        // or when no override is currently active. Both selectors then
+        // hit `guard let session` / `guard … != nil` and silently no-op,
+        // misleading the user. Mirror MainWindowController.validateMenuItem
+        // logic at the build site so the items are simply absent when
+        // they wouldn't fire usefully.
+        let session = controller?.session
+        if session != nil {
+            let rename = NSMenuItem(
+                title: "Rename…",
+                action: #selector(MainWindowController.renameActiveTab(_:)),
+                keyEquivalent: ""
+            )
+            rename.target = controller
+            menu.addItem(rename)
+        }
 
-        let reset = NSMenuItem(
-            title: "Reset to Auto",
-            action: #selector(MainWindowController.resetActiveTabTitle(_:)),
-            keyEquivalent: ""
-        )
-        reset.target = controller
-        menu.addItem(reset)
+        if session?.titleOverride != nil {
+            let reset = NSMenuItem(
+                title: "Reset to Auto",
+                action: #selector(MainWindowController.resetActiveTabTitle(_:)),
+                keyEquivalent: ""
+            )
+            reset.target = controller
+            menu.addItem(reset)
+        }
 
-        menu.addItem(.separator())
+        // Only emit the separator if at least one item was added above —
+        // a leading separator on a context menu looks broken.
+        if !menu.items.isEmpty {
+            menu.addItem(.separator())
+        }
 
         // Close — dupes what the hover `×` does, but is useful on a
         // context menu for discoverability and for users who never hover.
