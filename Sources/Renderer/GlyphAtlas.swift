@@ -586,6 +586,20 @@ public final class GlyphAtlas {
     ) {
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
+        // Audit L16. We rasterize emoji into an sRGB context even on
+        // wide-gamut Display P3 panels (every MacBook Pro since 2016,
+        // every Retina iMac since 2019). Apple Color Emoji ships with
+        // P3-native colors that get clipped to sRGB gamut here; on a
+        // P3 display, vivid flag/skin-tone colors are visibly less
+        // saturated than the same emoji rendered by Safari or Notes.
+        // We accept the trade because the rest of the render
+        // pipeline is sRGB end-to-end (CAMetalLayer.colorspace pinned
+        // to sRGB, atlas + render targets `.bgra8Unorm`, cell blends
+        // operate on sRGB-encoded floats). Switching emoji alone to
+        // P3 would create a per-cell color-space mismatch that the
+        // shader can't blend correctly. A unit-wide pipeline switch
+        // to Display P3 is the proper remediation when fidelity
+        // becomes the priority.
         let cs = CGColorSpace(name: CGColorSpace.sRGB)
             ?? CGColorSpaceCreateDeviceRGB()
         // premultipliedFirst + byteOrder32Little = BGRA bytes in memory,
