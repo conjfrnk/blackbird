@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-04
+
+### Changed
+- Window resize is now pixel-precise. Drag from any edge or corner to any size — no more cell-multiple snap. The renderer's existing live-resize viewport stretch keeps the in-between frames smooth, and SIGWINCH is throttled to one fire per cell-boundary cross via the `lastPropagatedSize` dedup.
+- Grid reserves an 8pt left + 8pt right inset between text and window edge so glyphs no longer kiss the chrome. Sub-cell pixel leftover from pixel-precise resize is absorbed into the right inset rather than producing a partial column.
+- `contentMinSize` floor recomputes with the new horizontal inset; the font-size change path carries the new formula too, so bumping the font still respects a usable 20-col / 4-row minimum.
+
+### Fixed
+- `MainWindowController.startSession` used raw view bounds for the initial PTY grid; on launch the shell saw +1–2 cols too many and any output before the first layout pass wrapped at the wrong column count. Both call sites (`startSession` and `propagateResize`) now route through the shared `TerminalView.usableViewSize` helper, so the start size and the first SIGWINCH agree by construction.
+- New public `TerminalView.cellAt(point:)` coordinate helper hardens against NaN / ±Infinity / absurd-magnitude input the same way `Selection.bufferPoint(forView:)` does — stray Core Animation values from misbehaving input devices clamp to the origin sentinel instead of trapping at `Int(NaN)`.
+- The XTerm mouse-protocol report path (`sendMouseEvent`) now subtracts the horizontal inset before the col divide, so clicks reported to TUI apps (vim, htop) match the rendered glyph positions.
+
+### Internal
+- New `TerminalView.cellOriginPx(row:col:)` and `cellAt(point:)` helpers are the single source of truth for grid↔view coordinate conversion. `MetalRenderer` gains `setLeftInsetPoints` mirroring `setTopInsetPoints`, with `leftInsetPoints` folded into `FrameKey` and `CacheKey` so a re-inset invalidates both per-frame and per-row caches.
+- `Selection.bufferPoint(forView:…, leftInsetPoints:)` makes the inset parameter required (no default) so a caller can never silently get an 8pt-off selection.
+
 ## [0.2.1] - 2026-05-03
 
 ### Security
