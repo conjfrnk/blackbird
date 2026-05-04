@@ -174,6 +174,7 @@ final class PreferencesMigrationTests: XCTestCase {
         // F-S7 finding references `schemaVersionKey` and "currentSchemaVersion"
         // but the actual on-disk key is implementation-defined.
         let candidateKeys = [
+            "bb.prefsSchemaVersion",
             "bb.schemaVersion",
             "bb.SchemaVersion",
             "bb.preferences.schemaVersion",
@@ -222,15 +223,15 @@ final class PreferencesMigrationTests: XCTestCase {
 
     // MARK: - F-S7-003 runtime regression test (uses internal seam)
 
-    /// Drives `Preferences.migrateIfNeeded(in:)` against an isolated
-    /// `UserDefaults` suite so we don't touch the shared singleton's
-    /// state. Pre-writes a schema version > `currentSchemaVersion`
-    /// (simulating a future-schema → older-binary downgrade), runs
-    /// the migration code path, and asserts the older binary did NOT
-    /// clobber the high-water mark.
+    /// Drives `Preferences.migrateIfNeeded(in:domain:)` against an
+    /// isolated `UserDefaults` suite so we don't touch the shared
+    /// singleton's state. Pre-writes a schema version >
+    /// `currentSchemaVersion` (simulating a future-schema → older-binary
+    /// downgrade), runs the migration code path, and asserts the older
+    /// binary did NOT clobber the high-water mark.
     ///
     /// Why this matters (re-statement of the bug fixed by the new
-    /// `internal static func migrateIfNeeded(in:)`):
+    /// `internal static func migrateIfNeeded(in:domain:)`):
     ///   1. User runs v(N+1) which writes schemaVersion = N+1.
     ///   2. User downgrades to vN (currentSchemaVersion = N).
     ///   3. Old code took `stored=N+1 > current=N`, ran the early-
@@ -259,8 +260,10 @@ final class PreferencesMigrationTests: XCTestCase {
         // Same key the production code uses. Match the source-of-truth
         // string exactly — if Preferences.swift renames it, this test
         // (and any user with a stored version) will need a migration of
-        // its own.
-        let schemaKey = "prefsSchemaVersion"
+        // its own. H-8 (2026-05-03) moved the key from `prefsSchemaVersion`
+        // to `bb.prefsSchemaVersion` so a `defaults write -g` write to
+        // NSGlobalDomain can't bypass the migration.
+        let schemaKey = "bb.prefsSchemaVersion"
 
         // Stamp a "future" schema version: currentSchemaVersion + 1.
         // currentSchemaVersion is `public static let`, so we can read it
@@ -269,7 +272,7 @@ final class PreferencesMigrationTests: XCTestCase {
         suite.set(futureVersion, forKey: schemaKey)
 
         // Drive the migration code path against the isolated suite.
-        Preferences.migrateIfNeeded(in: suite)
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
 
         // The high-water mark must survive. The fix says: on downgrade,
         // leave the key alone. So we expect EXACTLY `futureVersion` back.
@@ -315,20 +318,20 @@ final class PreferencesMigrationTests: XCTestCase {
         }
         defer { suite.removePersistentDomain(forName: suiteName) }
 
-        let schemaKey = "prefsSchemaVersion"
+        let schemaKey = "bb.prefsSchemaVersion"
         XCTAssertNil(
             suite.persistentDomain(forName: suiteName)?[schemaKey],
             "Test pre-condition: fresh suite must have no persistent value"
         )
 
-        Preferences.migrateIfNeeded(in: suite)
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
 
         let stamped = suite.persistentDomain(forName: suiteName)?[schemaKey] as? Int
         XCTAssertEqual(
             stamped,
             Preferences.currentSchemaVersion,
             """
-            Migration on a fresh suite must stamp `prefsSchemaVersion =
+            Migration on a fresh suite must stamp `bb.prefsSchemaVersion =
             currentSchemaVersion`. EI-02: leaving the key unstamped (the
             previous behavior, relying on the registered default) hid
             the silent-bypass bug where legacy v1 installs never ran
@@ -354,7 +357,7 @@ final class PreferencesMigrationTests: XCTestCase {
         suite.set("Solarized", forKey: "theme")
         suite.set(15.0, forKey: "fontSize")
 
-        Preferences.migrateIfNeeded(in: suite)
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
 
         XCTAssertEqual(
             suite.string(forKey: "bb.theme"),
@@ -373,6 +376,116 @@ final class PreferencesMigrationTests: XCTestCase {
         XCTAssertNil(
             suite.object(forKey: "fontSize"),
             "v1→v2 must remove the legacy unprefixed key"
+        )
+    }
+
+    // MARK: - H-8 (audit 2026-05-03) — schema-version key bootstrap
+    //
+    // The schema-version key moved from unprefixed `prefsSchemaVersion`
+    // (vulnerable to `defaults write -g prefsSchemaVersion 99` poisoning
+    // via NSGlobalDomain) to `bb.prefsSchemaVersion`. On first launch
+    // with the fix, the bootstrap path promotes the legacy unprefixed
+    // value forward and removes it from the persistent domain. After
+    // that one-shot, every read and write uses the prefixed key.
+
+    /// H-8 bootstrap (pre-fix → post-fix transition): a persistent
+    /// domain that holds only the legacy `prefsSchemaVersion` key
+    /// must, after migration, hold only the new `bb.prefsSchemaVersion`
+    /// key with the same value, and the legacy key must be gone.
+    func test_h8_bootstrap_promotesLegacyUnprefixedSchemaKey() throws {
+        let suiteName = "blackbird.tests.migration.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        // Pre-fix state: legacy unprefixed key sits at v2 in the
+        // persistent domain. Use `setPersistentDomain` so the value
+        // lands in the same domain `persistentDomain(forName:)` reads.
+        let legacyKey = "prefsSchemaVersion"
+        let prefixedKey = "bb.prefsSchemaVersion"
+        suite.setPersistentDomain([legacyKey: 2], forName: suiteName)
+
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
+
+        let domain = suite.persistentDomain(forName: suiteName) ?? [:]
+        XCTAssertEqual(
+            domain[prefixedKey] as? Int, 2,
+            "H-8 bootstrap must promote legacy `prefsSchemaVersion` to `bb.prefsSchemaVersion` with the same value"
+        )
+        XCTAssertNil(
+            domain[legacyKey],
+            "H-8 bootstrap must remove the legacy `prefsSchemaVersion` from the persistent domain"
+        )
+    }
+
+    /// H-8 fresh-install: a persistent domain with neither key should,
+    /// after migration, hold `bb.prefsSchemaVersion = currentSchemaVersion`
+    /// and nothing under the legacy name.
+    func test_h8_freshInstall_stampsPrefixedSchemaKey() throws {
+        let suiteName = "blackbird.tests.migration.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        let legacyKey = "prefsSchemaVersion"
+        let prefixedKey = "bb.prefsSchemaVersion"
+        let pre = suite.persistentDomain(forName: suiteName) ?? [:]
+        XCTAssertNil(pre[legacyKey], "Pre-condition: fresh suite has no legacy key")
+        XCTAssertNil(pre[prefixedKey], "Pre-condition: fresh suite has no prefixed key")
+
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
+
+        let post = suite.persistentDomain(forName: suiteName) ?? [:]
+        XCTAssertEqual(
+            post[prefixedKey] as? Int, Preferences.currentSchemaVersion,
+            "H-8 fresh-install must stamp `bb.prefsSchemaVersion = currentSchemaVersion`"
+        )
+        XCTAssertNil(
+            post[legacyKey],
+            "H-8 fresh-install must not write the legacy key"
+        )
+    }
+
+    /// H-8 NSGlobalDomain isolation: a `defaults write -g
+    /// prefsSchemaVersion 99` would land in NSGlobalDomain, which the
+    /// search list of `defaults.integer(forKey:)` walks but
+    /// `persistentDomain(forName:)` does not. Verify the bootstrap reads
+    /// the persistent domain only — the global write must NOT be
+    /// promoted, and the migration must run normally on the fresh suite.
+    /// We can't actually mutate NSGlobalDomain in a sandboxed test
+    /// process (writes get scoped to the test bundle, not the system
+    /// global domain), but we can simulate the hazard: pre-write the
+    /// legacy key to the suite's `register(defaults:)` registration
+    /// domain (which `persistentDomain(forName:)` also ignores) and
+    /// verify the bootstrap doesn't promote that.
+    func test_h8_doesNotPromoteRegistrationDomainSchemaKey() throws {
+        let suiteName = "blackbird.tests.migration.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        // Land the value in the registration domain. `integer(forKey:)`
+        // walks the search list and would see 99; `persistentDomain` does
+        // not — so the bootstrap must not see 99 either.
+        suite.register(defaults: ["prefsSchemaVersion": 99])
+
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
+
+        let post = suite.persistentDomain(forName: suiteName) ?? [:]
+        XCTAssertNotEqual(
+            post["bb.prefsSchemaVersion"] as? Int, 99,
+            "H-8: registration-domain `prefsSchemaVersion` must NOT be promoted to `bb.prefsSchemaVersion`"
+        )
+        // The migration ran normally and stamped current.
+        XCTAssertEqual(
+            post["bb.prefsSchemaVersion"] as? Int, Preferences.currentSchemaVersion,
+            "H-8: with no legacy value in the persistent domain, the migration walks normally and stamps current"
         )
     }
 
@@ -679,7 +792,8 @@ final class PreferencesMigrationTests: XCTestCase {
         let d = UserDefaults.standard
 
         // Snapshot the schema key + the enum we mutate, restore on exit.
-        let schemaKey = "prefsSchemaVersion"
+        // Key renamed to `bb.prefsSchemaVersion` per audit H-8 (2026-05-03).
+        let schemaKey = "bb.prefsSchemaVersion"
         let originalSchema = d.object(forKey: schemaKey)
         let originalThemeRaw = p.themeRaw
         defer {
@@ -751,7 +865,8 @@ final class PreferencesMigrationTests: XCTestCase {
         let p = Preferences.shared
         let d = UserDefaults.standard
 
-        let schemaKey = "prefsSchemaVersion"
+        // Key renamed per audit H-8 (2026-05-03).
+        let schemaKey = "bb.prefsSchemaVersion"
         let originalSchema = d.object(forKey: schemaKey)
         let originalThemeRaw = p.themeRaw
         defer {
@@ -775,9 +890,10 @@ final class PreferencesMigrationTests: XCTestCase {
         // Drain so the observer's repair runs.
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
 
-        // The repair must reset to Theme.defaultTheme.rawValue.
+        // The repair must reset to Theme.gruvbox.rawValue (M4 audit
+        // 2026-05-03 aligned the fallback to the registered default).
         XCTAssertEqual(
-            p.themeRaw, Theme.defaultTheme.rawValue,
+            p.themeRaw, Theme.gruvbox.rawValue,
             """
             Audit H-8: at stored == current schema version, the
             existing enum-rawValue repair must STILL run — that's the
@@ -969,8 +1085,8 @@ final class PreferencesMigrationTests: XCTestCase {
         let p = Preferences.shared
         let d = UserDefaults.standard
         // Use a known schema version (NOT a downgrade) so the gate
-        // permits the repair.
-        let schemaKey = "prefsSchemaVersion"
+        // permits the repair. Key renamed per audit H-8 (2026-05-03).
+        let schemaKey = "bb.prefsSchemaVersion"
         let originalSchema = d.object(forKey: schemaKey)
         let originalThemeRaw = p.themeRaw
         defer {
@@ -997,13 +1113,14 @@ final class PreferencesMigrationTests: XCTestCase {
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
 
         XCTAssertEqual(
-            p.themeRaw, Theme.defaultTheme.rawValue,
+            p.themeRaw, Theme.gruvbox.rawValue,
             """
             Audit L-28: an external CLI write of an unknown enum
             rawValue must be repaired by handleDefaultsChange (matching
             the init-time repair). Without this, the SwiftUI Picker
             renders an empty row and the user can't recover without
-            a relaunch. Got: \(p.themeRaw).
+            a relaunch. The fallback now matches the registered default
+            (Theme.gruvbox per audit M4, 2026-05-03). Got: \(p.themeRaw).
             """
         )
     }

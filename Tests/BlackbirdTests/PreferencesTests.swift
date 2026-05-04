@@ -797,4 +797,202 @@ final class PreferencesTests: XCTestCase {
             "Same-value guard must pin writeCount to 1 across bridge re-entries; got \(writeCount). If > 1, a Preferences.objectWillChange sink somewhere is writing UserDefaults without a same-value guard — this will beachball Settings in production."
         )
     }
+
+    // MARK: - M4 (audit 2026-05-03) — repair fallbacks match registered defaults
+    //
+    // `repairEnumRawValues` used to fall back to `Theme.defaultTheme.rawValue`
+    // ("Default") and `ThemeMode.auto.rawValue` ("auto") for corrupted
+    // values, but the @AppStorage init defaults and the `register(defaults:)`
+    // table both use `Theme.gruvbox.rawValue` ("Gruvbox") and
+    // `ThemeMode.dark.rawValue` ("dark"). Aligning the fallbacks closes
+    // a UI surprise: a tampered plist would silently flip the user's
+    // theme to a different default than the one shown on first launch.
+
+    /// M4 source-level pin: the theme + themeMode repair targets must
+    /// match the `register(defaults:)` values. A regression that re-
+    /// diverges them would only surface on a corrupted-rawValue path,
+    /// which is rare enough that runtime coverage alone is unreliable.
+    func test_m4_repairFallbacks_matchRegisteredDefaults() throws {
+        let prefsURL = try Self.locatePreferencesSwift()
+        let src = try String(contentsOf: prefsURL, encoding: .utf8)
+
+        // The repair function must resolve to gruvbox / dark. The
+        // earlier (audit-flagged) shape resolved to defaultTheme / auto.
+        XCTAssertFalse(
+            src.contains("let target = Theme.defaultTheme.rawValue"),
+            "M4: repairEnumRawValues must not fall back to Theme.defaultTheme — registered default is Theme.gruvbox"
+        )
+        XCTAssertFalse(
+            src.contains("let target = ThemeMode.auto.rawValue"),
+            "M4: repairEnumRawValues must not fall back to ThemeMode.auto — registered default is ThemeMode.dark"
+        )
+    }
+
+    /// M4 runtime — write a corrupted theme rawValue and verify the
+    /// observer-driven repair lands on `Theme.gruvbox.rawValue` (the
+    /// registered default), NOT `Theme.defaultTheme.rawValue` (the
+    /// audit-flagged divergent value).
+    ///
+    /// Gated under `BB_RUN_STRESS_TESTS` for the same cumulative-ASan
+    /// CATransaction-pop SEGV reason as the other observer-path tests
+    /// in PreferencesMigrationTests.
+    func test_m4_themeRepair_landsOnGruvbox() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "RunLoop-pumping repair test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1")
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+        // Make sure the observer's downgrade gate doesn't skip the repair.
+        let schemaKey = "bb.prefsSchemaVersion"
+        let originalSchema = d.object(forKey: schemaKey)
+        let originalThemeRaw = p.themeRaw
+        defer {
+            if let originalSchema {
+                d.set(originalSchema, forKey: schemaKey)
+            } else {
+                d.removeObject(forKey: schemaKey)
+            }
+            p.themeRaw = originalThemeRaw
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        d.set(Preferences.currentSchemaVersion, forKey: schemaKey)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        d.set("garbage_theme_\(UUID().uuidString)", forKey: "bb.theme")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+
+        XCTAssertEqual(
+            p.themeRaw, Theme.gruvbox.rawValue,
+            "M4: corrupted bb.theme must repair to Theme.gruvbox.rawValue (registered default), got \(p.themeRaw)"
+        )
+    }
+
+    /// M4 runtime — same shape as the theme test, for themeMode. The
+    /// audit-flagged divergence: repair fell back to `auto`, registered
+    /// default is `dark`.
+    func test_m4_themeModeRepair_landsOnDark() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "RunLoop-pumping repair test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1")
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+        let schemaKey = "bb.prefsSchemaVersion"
+        let originalSchema = d.object(forKey: schemaKey)
+        let originalThemeModeRaw = p.themeModeRaw
+        defer {
+            if let originalSchema {
+                d.set(originalSchema, forKey: schemaKey)
+            } else {
+                d.removeObject(forKey: schemaKey)
+            }
+            p.themeModeRaw = originalThemeModeRaw
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        d.set(Preferences.currentSchemaVersion, forKey: schemaKey)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        d.set("garbage_themeMode_\(UUID().uuidString)", forKey: "bb.themeMode")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+
+        XCTAssertEqual(
+            p.themeModeRaw, Preferences.ThemeMode.dark.rawValue,
+            "M4: corrupted bb.themeMode must repair to ThemeMode.dark.rawValue (registered default), got \(p.themeModeRaw)"
+        )
+    }
+
+    // MARK: - M5 (audit 2026-05-03) — didSet re-entry guard
+    //
+    // `fontSize.didSet` and `translucency.didSet` recursively self-
+    // assign when the value is out of range (`fontSize = clamped`).
+    // The recursive write re-fires `didSet`, which is the structural
+    // shape of the 982b719 SwiftUI feedback loop. Adding a re-entry
+    // boolean guard makes the inner `didSet` short-circuit explicitly
+    // — and pins that the outer write produces no more than the
+    // expected number of UserDefaults notifications.
+
+    /// M5 source-level pin: the re-entry guard fields must exist for
+    /// both clamped properties. A regression that drops them would
+    /// re-open the latent feedback-loop hazard.
+    func test_m5_clampingGuardFields_existInSource() throws {
+        let prefsURL = try Self.locatePreferencesSwift()
+        let src = try String(contentsOf: prefsURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("clampingFontSize"),
+            "M5: fontSize re-entry guard `clampingFontSize` must remain in Preferences.swift"
+        )
+        XCTAssertTrue(
+            src.contains("clampingTranslucency"),
+            "M5: translucency re-entry guard `clampingTranslucency` must remain in Preferences.swift"
+        )
+        XCTAssertTrue(
+            src.contains("guard !clampingFontSize else { return }"),
+            "M5: fontSize didSet must short-circuit when re-entered via the recursive clamp write"
+        )
+        XCTAssertTrue(
+            src.contains("guard !clampingTranslucency else { return }"),
+            "M5: translucency didSet must short-circuit when re-entered via the recursive clamp write"
+        )
+    }
+
+    /// M5 runtime — counts UserDefaults notifications produced by an
+    /// out-of-range fontSize write. The recursive clamp produces at
+    /// most 2 set() calls (the user's 999 + the clamped 32); the
+    /// re-entry guard pins it at 2 and prevents an unbounded loop.
+    /// Without the guard, the inner didSet would NOT loop (the OLD
+    /// `if clamped != fontSize` short-circuit also stopped recursion),
+    /// but a future change that drops the inner short-circuit without
+    /// the guard would silently regress into 982b719's loop. This
+    /// runtime test guards against >2 notifications, the canonical
+    /// signature of a runaway clamp.
+    func test_m5_outOfRangeWrite_producesBoundedNotifications() {
+        let p = Preferences.shared
+        let original = p.fontSize
+        defer { p.fontSize = original }
+
+        var fired = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: nil
+        ) { _ in fired += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        p.fontSize = 999.0
+        // No runloop pump — UserDefaults.didChangeNotification is
+        // posted synchronously per `defaults.set`. Asserting the count
+        // immediately after the write avoids the cumulative-ASan
+        // CATransaction-pop SEGV mode.
+        XCTAssertEqual(
+            p.fontSize, 32.0, accuracy: 1e-9,
+            "M5: out-of-range fontSize must clamp to 32"
+        )
+        XCTAssertLessThanOrEqual(
+            fired, 2,
+            "M5: out-of-range fontSize write must produce at most 2 UserDefaults notifications (original + clamped); got \(fired). > 2 is the signature of a runaway clamp loop."
+        )
+    }
+
+    /// M5 runtime — same shape as the fontSize test, for translucency.
+    /// Asserts the re-entry guard caps the notification count at 2.
+    func test_m5_outOfRangeTranslucency_producesBoundedNotifications() {
+        let p = Preferences.shared
+        let original = p.translucency
+        defer { p.translucency = original }
+
+        var fired = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: nil
+        ) { _ in fired += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        p.translucency = -5.0
+        XCTAssertEqual(
+            p.translucency, 1.0, accuracy: 1e-9,
+            "M5: out-of-range translucency must clamp to 1"
+        )
+        XCTAssertLessThanOrEqual(
+            fired, 2,
+            "M5: out-of-range translucency write must produce at most 2 UserDefaults notifications (original + clamped); got \(fired). > 2 is the signature of a runaway clamp loop."
+        )
+    }
 }

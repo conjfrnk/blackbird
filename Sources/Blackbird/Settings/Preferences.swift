@@ -11,11 +11,12 @@ public final class Preferences: ObservableObject {
 
     // MARK: - Schema version
     //
-    // `prefsSchemaVersion` is the integer on-disk version of the Preferences
-    // layout. Bump it whenever a pref key is renamed, a pref's type changes,
-    // or an enum rawValue migrates (e.g. `BellStyle.visual` → `.audioVisual`).
-    // `migrateIfNeeded()` walks the stored version forward to `currentSchemaVersion`,
-    // one version at a time, then writes the new version back.
+    // `bb.prefsSchemaVersion` is the integer on-disk version of the
+    // Preferences layout. Bump it whenever a pref key is renamed, a pref's
+    // type changes, or an enum rawValue migrates (e.g. `BellStyle.visual`
+    // → `.audioVisual`). `migrateIfNeeded()` walks the stored version
+    // forward to `currentSchemaVersion`, one version at a time, then
+    // writes the new version back.
     //
     // v1 → v2: moved every key behind a `bb.` prefix so Blackbird's settings no
     // longer collide with `defaults write -g <key>` writes in NSGlobalDomain
@@ -25,7 +26,14 @@ public final class Preferences: ObservableObject {
     // dev.conjfrnk.blackbird` returns a dump that's self-identifying.
     // (settings F3)
     public static let currentSchemaVersion: Int = 2
-    private static let schemaVersionKey = "prefsSchemaVersion"
+    // Audit H-8: the schema-version key sits under the `bb.` namespace so
+    // a `defaults write -g prefsSchemaVersion 99` can't reach into our
+    // search list and force the migration seam to think we're already
+    // current. The legacy unprefixed name is bootstrapped forward (and
+    // then removed from the persistent domain) on first launch with the
+    // fix — see `migrateIfNeeded(in:domain:)`.
+    private static let schemaVersionKey = "bb.prefsSchemaVersion"
+    private static let legacySchemaVersionKey = "prefsSchemaVersion"
 
     // MARK: - Key prefix (settings F3)
     //
@@ -101,11 +109,24 @@ public final class Preferences: ObservableObject {
             // ceiling at 32 makes the model and the UI agree by
             // construction; no other code reads `fontSize` expecting a
             // value above 32.
+            //
+            // Re-entry guard: writing to `fontSize` from inside its own
+            // `didSet` re-fires the observer (and double-fires the
+            // SwiftUI @AppStorage objectWillChange / UserDefaults write),
+            // which is the 982b719 feedback-loop pattern. Skip the
+            // recursive write entirely when we're already inside a
+            // clamping pass — the outer `didSet` already produced the
+            // user-visible objectWillChange.
+            guard !clampingFontSize else { return }
             let normalised = fontSize.isFinite ? fontSize : 13
             let clamped = max(9, min(32, normalised))
-            if clamped != fontSize { fontSize = clamped }
+            guard clamped != fontSize else { return }
+            clampingFontSize = true
+            defer { clampingFontSize = false }
+            fontSize = clamped
         }
     }
+    private var clampingFontSize = false
     @AppStorage("bb.cursorBlink")    public var cursorBlink: Bool = false
     @AppStorage("bb.bell")           public var bellRaw: String = BellStyle.visual.rawValue
     @AppStorage("bb.cursorShape")    public var cursorShapeRaw: String = CursorShape.followShell.rawValue
@@ -141,11 +162,18 @@ public final class Preferences: ObservableObject {
             // NaN / ±Infinity fall to the opaque end (1) rather than the
             // middle — a tampered plist shouldn't surprise the user with
             // see-through windows out of nowhere.
+            //
+            // Re-entry guard: same shape as fontSize — see comment there.
+            guard !clampingTranslucency else { return }
             let normalised = translucency.isFinite ? translucency : 1
             let clamped = max(1, min(10, normalised))
-            if clamped != translucency { translucency = clamped }
+            guard clamped != translucency else { return }
+            clampingTranslucency = true
+            defer { clampingTranslucency = false }
+            translucency = clamped
         }
     }
+    private var clampingTranslucency = false
 
     public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }
@@ -224,7 +252,7 @@ public final class Preferences: ObservableObject {
             // 0, the seam treats 0 as "needs walk", `migrateV1toV2`
             // copies legacy keys (no-op when none exist), and the seam
             // stamps the current version on completion. This also makes
-            // `migrateIfNeeded(in:)` testable: a fresh
+            // `migrateIfNeeded(in:domain:)` testable: a fresh
             // `UserDefaults(suiteName:)` truly reads 0 and exercises
             // the v1→v2 path.
             Preferences.k("theme"):             Theme.gruvbox.rawValue,
@@ -429,9 +457,17 @@ public final class Preferences: ObservableObject {
     }
 
     /// Repair every enum-backed @AppStorage string whose stored value
-    /// doesn't match a known case. Reset to the documented default,
-    /// matching the derived getter's `?? .default` fallback so the
-    /// SwiftUI Picker can render the row and the model + UI agree.
+    /// doesn't match a known case. Reset to the value the
+    /// `register(defaults:)` table seeds — `Theme.gruvbox`, `ThemeMode.dark`,
+    /// etc. — so the repaired raw matches what a fresh-install user
+    /// would see and the SwiftUI Picker can render the row.
+    ///
+    /// M4 (2026-05-03) realigned the theme + themeMode fallbacks here
+    /// from `Theme.defaultTheme` / `ThemeMode.auto` (the derived getter's
+    /// `?? .` fallback) to the registered defaults. The mismatch only
+    /// surfaces on a corrupted-rawValue path, but when it did the user's
+    /// theme silently flipped to a different value than the one shown on
+    /// first launch.
     ///
     /// Same-value guards on every branch — required by
     /// `feedback_swiftui_userdefaults_feedback_loop.md` because both
@@ -445,17 +481,16 @@ public final class Preferences: ObservableObject {
     /// observer caller MUST read disk because @AppStorage's
     /// non-`View`-host cache lags behind external `defaults.set(…)`
     /// writes (see `handleDefaultsChange` header). Reading from
-    /// `defaults` is correct on both paths and matches the registered-
-    /// default fallback the @AppStorage init-default would produce.
+    /// `defaults` is correct on both paths.
     private static func repairEnumRawValues(in prefs: Preferences, defaults: UserDefaults) {
         let themeRaw = defaults.string(forKey: k("theme")) ?? Theme.gruvbox.rawValue
         if Theme(rawValue: themeRaw) == nil {
-            let target = Theme.defaultTheme.rawValue
+            let target = Theme.gruvbox.rawValue
             if themeRaw != target { prefs.themeRaw = target }
         }
         let themeModeRaw = defaults.string(forKey: k("themeMode")) ?? ThemeMode.dark.rawValue
         if ThemeMode(rawValue: themeModeRaw) == nil {
-            let target = ThemeMode.auto.rawValue
+            let target = ThemeMode.dark.rawValue
             if themeModeRaw != target { prefs.themeModeRaw = target }
         }
         let bellRaw = defaults.string(forKey: k("bell")) ?? BellStyle.visual.rawValue
@@ -524,10 +559,17 @@ public final class Preferences: ObservableObject {
     ///         fallthrough
     /// default: break
     /// }
-    /// UserDefaults.standard.set(stored, forKey: Preferences.schemaVersionKey)
+    /// defaults.set(stored, forKey: Preferences.schemaVersionKey)
     /// ```
     private func migrateIfNeeded() {
-        Preferences.migrateIfNeeded(in: UserDefaults.standard)
+        // The persistent-domain name is the app's bundle identifier; that's
+        // where `UserDefaults.standard` reads/writes its on-disk values
+        // when the search list isn't shadowed. Tests use the seam directly
+        // with their own suite name. (H-8 bootstrap path)
+        Preferences.migrateIfNeeded(
+            in: UserDefaults.standard,
+            domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+        )
     }
 
     /// Testable seam for `migrateIfNeeded()`. Drives the same migration
@@ -535,7 +577,10 @@ public final class Preferences: ObservableObject {
     /// downgrade / upgrade pathways in isolated suites without touching
     /// `UserDefaults.standard`. Keep this `internal`, not `public` —
     /// production code should always go through the no-arg instance method.
-    /// (F-S7-003 regression seam)
+    /// `domain` is the persistent-domain name the H-8 bootstrap reads via
+    /// `defaults.persistentDomain(forName:)`; pass the bundle identifier
+    /// for `UserDefaults.standard`, the suite name for tests.
+    /// (F-S7-003 regression seam, H-8 bootstrap path)
     ///
     /// F-S7-003 fix — DOWNGRADE-SAFETY INVARIANT
     /// =========================================
@@ -555,14 +600,27 @@ public final class Preferences: ObservableObject {
     /// tolerate unknown keys via the registered-default + enum-fallback
     /// machinery (`Theme(rawValue:) ?? .defaultTheme`, etc.), so leaving
     /// a higher version number on disk is safe.
-    internal static func migrateIfNeeded(in defaults: UserDefaults) {
+    internal static func migrateIfNeeded(in defaults: UserDefaults, domain: String) {
+        // H-8 bootstrap: the schema-version key was renamed from
+        // `prefsSchemaVersion` to `bb.prefsSchemaVersion` to keep it out
+        // of the global-domain search path. On first launch with the
+        // fix, look up the OLD key in the app's PERSISTENT DOMAIN — not
+        // via `defaults.integer(forKey:)`, which walks NSGlobalDomain
+        // and would let `defaults write -g prefsSchemaVersion 99` poison
+        // the migration seam — then copy its value forward and remove
+        // the legacy key from the persistent domain. After this one-shot,
+        // every read goes to the prefixed key.
+        bootstrapSchemaVersionKey(in: defaults, domain: domain)
+
         // `integer(forKey:)` returns 0 if the key is absent. Now that
         // we no longer register `schemaVersionKey` in NSRegistrationDomain
         // (audit EI-02), 0 unambiguously means "no schema version has
         // ever been stamped to this defaults instance" — treat as v0,
         // walk through every migration step, and stamp current at the
         // end. A non-zero `stored` is an actual persistent-domain value
-        // we trust verbatim.
+        // we trust verbatim. The new prefixed key (`bb.prefsSchemaVersion`)
+        // can't be hit by a `defaults write -g <name>` because the
+        // global-domain reader strips the `bb.` prefix from nothing.
         let stored = defaults.integer(forKey: Preferences.schemaVersionKey)
         guard stored < Preferences.currentSchemaVersion else {
             // Already current (stored == current) or NEWER (downgrade).
@@ -582,6 +640,25 @@ public final class Preferences: ObservableObject {
         }
         // Future steps slot in here: `if v < 3 { migrateV2toV3(...); v = 3 }` etc.
         defaults.set(v, forKey: Preferences.schemaVersionKey)
+    }
+
+    /// One-shot promotion of the legacy unprefixed `prefsSchemaVersion`
+    /// key to its `bb.`-prefixed counterpart. Reads through
+    /// `persistentDomain(forName:)` instead of `defaults.integer(forKey:)`
+    /// so a hostile `defaults write -g prefsSchemaVersion <n>` write to
+    /// NSGlobalDomain can't bypass the migration. Idempotent — the second
+    /// launch sees no legacy key in the persistent domain and short-
+    /// circuits. (audit H-8)
+    private static func bootstrapSchemaVersionKey(in defaults: UserDefaults, domain: String) {
+        guard let persistent = defaults.persistentDomain(forName: domain) else { return }
+        guard let legacyValue = persistent[Preferences.legacySchemaVersionKey] else { return }
+        // Prefer an already-stamped prefixed value if both keys ended up
+        // on disk (mid-upgrade-crash window). Either way, drop the legacy
+        // key from the persistent domain so the next launch short-circuits.
+        if persistent[Preferences.schemaVersionKey] == nil {
+            defaults.set(legacyValue, forKey: Preferences.schemaVersionKey)
+        }
+        defaults.removeObject(forKey: Preferences.legacySchemaVersionKey)
     }
 
     /// Copy every legacy unprefixed key into its `bb.`-prefixed counterpart
