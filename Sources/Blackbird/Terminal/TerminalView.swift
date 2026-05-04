@@ -2052,6 +2052,29 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 return false
             }
         }
+        // Audit M4. Group whose body contains a quantifier (`+`, `*`,
+        // or a brace `{n,…}`) AND is followed by another quantifier
+        // is the same exponential-backtrack class as `(a+)+` —
+        // `(a{1,})+`, `(.+){2,5}`, `(\w*){1,3}` etc. all fall here.
+        // The substring list above only catches the bare-quantifier
+        // form; the brace form was the documented gap.
+        // Body restriction `[^()]*` keeps this O(n) without nested
+        // backtracking. Non-capturing groups `(?:…)` survive in the
+        // raw pattern (the substring scan above runs against the
+        // `(?:`→`(` normalisation, but this regex runs against the
+        // unnormalised pattern); a non-capturing form like
+        // `(?:a{1,})+` still matches because `?:a{1,}` is a valid
+        // body — the `?:` falls inside `[^()]*` and the `{` is the
+        // body quantifier the regex looks for.
+        if let braceRe = try? NSRegularExpression(
+            pattern: #"\([^()]*[+*{][^()]*\)\s*[+*{]"#,
+            options: []
+        ) {
+            let ns = pattern as NSString
+            if braceRe.firstMatch(in: pattern, options: [], range: NSRange(location: 0, length: ns.length)) != nil {
+                return false
+            }
+        }
         // Defensive: more than 6 unbounded quantifiers (`+`, `*`,
         // `{n,}`) in a single query is a strong "this isn't a real find
         // query" signal. Counts apply to escaped metacharacters too —

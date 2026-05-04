@@ -387,6 +387,44 @@ final class FindRegexGuardTests: XCTestCase {
     // the wider net introduced by the heuristic-strengthening pass.
     // Audit findbar-selection F2.
 
+    func test_isReasonableRegexPattern_rejectsBraceQuantifiedNestedGroup() {
+        // Audit M4. The substring list above only catches `(a+)+`
+        // shapes. A brace quantifier inside a quantified group has
+        // the same exponential-backtrack profile but escapes the
+        // substring check.
+        for pattern in [
+            "(a{1,})+",
+            "(\\w{2,5})*",
+            "(.+){2,5}",
+            "(\\w*){1,3}",
+            "(\\d{0,9})+",
+        ] {
+            XCTAssertFalse(
+                TerminalView.isReasonableRegexPattern(pattern),
+                "brace-quantified nested-group ReDoS pattern must be rejected: \(pattern)"
+            )
+        }
+    }
+
+    func test_isReasonableRegexPattern_acceptsLegitimateBracePatterns() {
+        // Audit M4 negative-control. Brace quantifiers are perfectly
+        // fine outside the nested-quantifier shape; rejecting them
+        // wholesale would break legitimate length-bounded queries
+        // like `\d{3,5}` or `(abc){2,5}`.
+        for pattern in [
+            "a{2,5}",
+            "\\d{3,5}",
+            "(abc){2,5}",
+            "(foo){0,10}",
+            "[a-z]{2,}",
+        ] {
+            XCTAssertTrue(
+                TerminalView.isReasonableRegexPattern(pattern),
+                "legitimate brace-quantified pattern must be accepted: \(pattern)"
+            )
+        }
+    }
+
     func test_isReasonableRegexPattern_rejectsNestedQuantifierWithExtraGrouping() {
         // `(((a+)))+$` — extra grouping defeats the literal substring
         // check. The fix iterates redundant `((` / `))` collapses before
