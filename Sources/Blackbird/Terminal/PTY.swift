@@ -1217,6 +1217,27 @@ public final class PTY {
         // state is accessed.
         let pid = childPID
         let originalStartTime = childStartTime
+        // Audit L5. Insert SIGTERM between SIGHUP and SIGKILL so a
+        // process that traps SIGTERM for cleanup but not SIGHUP gets
+        // a chance to flush before the kernel-forced kill. No
+        // start-time check on this rung: SIGTERM is survivable by
+        // any well-behaved process, so even on the rare PID-reuse
+        // edge the stranger just receives a polite request to exit
+        // (versus SIGKILL which is unrecoverable). 100ms is half the
+        // total grace window — well-behaved shells respond to SIGHUP
+        // immediately and never reach this branch (kill(pid, 0)
+        // returns ESRCH).
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + .milliseconds(100)
+        ) {
+            guard kill(pid, 0) == 0 else { return }
+            let termRC = kill(pid, SIGTERM)
+            if termRC != 0 {
+                let savedErrno = errno
+                let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
+                Self.logger.log(level: level, "PTY.terminate intermediate SIGTERM: kill(\(pid, privacy: .public), SIGTERM) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
+            }
+        }
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + .milliseconds(200)
         ) {
