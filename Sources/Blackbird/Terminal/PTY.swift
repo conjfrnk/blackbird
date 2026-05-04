@@ -612,20 +612,28 @@ public final class PTY {
             return true
         }
         guard shouldStart else { return }
-        #if DEBUG
-        // Catch the M2 misuse case: startReading() before setOnBytes()
-        // means bytes are read from the kernel and silently dropped on
-        // the floor. The contract is "wire onBytes first" — production
-        // code does this in TerminalSession.wire(); a future caller who
-        // forgets gets a loud abort in DEBUG so the silent-dropped path
-        // doesn't ship. Release builds skip the assert (no behaviour
-        // change) since the dropped bytes are already self-evident in
-        // logs by virtue of the shell appearing dead.
-        assert(onBytes != nil,
-               "PTY.startReading() called before setOnBytes(_:); bytes will be silently dropped. Wire the closure first.")
-        #endif
         readQueue.async { [weak self] in
             guard let self else { return }
+            #if DEBUG
+            // Catch the M2 misuse case: startReading() before setOnBytes()
+            // means bytes are read from the kernel and silently dropped
+            // on the floor. The contract is "wire onBytes first" —
+            // production code does this in TerminalSession.wire(); a
+            // future caller who forgets gets a loud abort in DEBUG so
+            // the silent-dropped path doesn't ship.
+            //
+            // Checked HERE (inside readQueue.async) rather than at
+            // startReading()'s synchronous entry: setOnBytes is itself
+            // an `readQueue.async` write, so a synchronous check at
+            // entry would race the dispatch and trip even when the
+            // contract is upheld (the smoke-test failure pattern that
+            // was red on CI for many commits). Serial-queue ordering
+            // guarantees the setOnBytes assignment has landed by the
+            // time this block runs, so this is the correct moment to
+            // assert. Release builds skip the assert.
+            assert(self.onBytes != nil,
+                   "PTY.startReading() called before setOnBytes(_:); bytes will be silently dropped. Wire the closure first.")
+            #endif
             var buffer = [UInt8](repeating: 0, count: self.readBufferSize)
             while self.shouldKeepRunning() {
                 let n = buffer.withUnsafeMutableBufferPointer { buf -> Int in
