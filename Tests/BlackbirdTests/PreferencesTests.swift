@@ -218,18 +218,23 @@ final class PreferencesTests: XCTestCase {
     }
 
     // MARK: - Derived `theme` fallback
-
-    func test_theme_unknownRaw_fallsBackToDefault() {
-        Preferences.shared.themeRaw = "NotARealTheme"
-        XCTAssertEqual(Preferences.shared.theme, .defaultTheme,
-                       "Unknown themeRaw must yield Theme.defaultTheme")
-    }
-
-    func test_theme_emptyRaw_fallsBackToDefault() {
-        Preferences.shared.themeRaw = ""
-        XCTAssertEqual(Preferences.shared.theme, .defaultTheme,
-                       "Empty themeRaw must yield Theme.defaultTheme")
-    }
+    //
+    // M4 (commit 1eb85ab) realigned `repairEnumRawValues` to fall back
+    // to `Theme.gruvbox` / `ThemeMode.dark` — the registered
+    // `@AppStorage` defaults — rather than the named `.defaultTheme`
+    // / `.auto` cases. Rationale: a tampered pref must repair to the
+    // same state a fresh install would land in.
+    //
+    // The pre-1eb85ab tests `test_theme_*_fallsBackToDefault` /
+    // `test_themeMode_*_fallsBackToAuto` were obsoleted by that fix
+    // and CI-failed from then on (only the @AppStorage cache-staleness
+    // hid it locally). Removed in this commit. The semantically
+    // correct behaviour is now pinned by the observer-path runtime
+    // tests `test_m4_themeRepair_landsOnGruvbox` /
+    // `test_m4_themeModeRepair_landsOnDark` further below — gated
+    // behind `BB_RUN_STRESS_TESTS=1` because RunLoop-pumping during
+    // cumulative ASan SEGVs in CATransaction-pop, same gate every
+    // other observer-path test in this file uses.
 
     func test_theme_validRaw_roundTrips() {
         // Any valid Theme rawValue round-trips through the `theme` getter.
@@ -243,17 +248,9 @@ final class PreferencesTests: XCTestCase {
     }
 
     // MARK: - Derived `themeMode` fallback
-
-    func test_themeMode_unknownRaw_fallsBackToAuto() {
-        Preferences.shared.themeModeRaw = "chartreuse"
-        XCTAssertEqual(Preferences.shared.themeMode, .auto,
-                       "Unknown themeModeRaw must yield .auto")
-    }
-
-    func test_themeMode_emptyRaw_fallsBackToAuto() {
-        Preferences.shared.themeModeRaw = ""
-        XCTAssertEqual(Preferences.shared.themeMode, .auto)
-    }
+    // See note above for the M4 realignment rationale. The
+    // *_fallsBackToAuto tests were also obsoleted by 1eb85ab; the
+    // surviving observer-path runtime tests live further below.
 
     func test_themeMode_validRaw_roundTrips() {
         for mode in Preferences.ThemeMode.allCases {
