@@ -120,17 +120,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
         // User consented — skip the per-tab "process is still running" alert.
+        // The flag stays true through AppKit's synchronous batch-close
+        // sweep that follows `.terminateNow`, then is cleared in
+        // `applicationWillTerminate` (audit L10). The previous async-
+        // hop reset relied on no future delegate cancelling termination
+        // after `.terminateNow`; the synchronous reset in willTerminate
+        // is robust against that hypothetical and avoids leaving an
+        // async closure pending against a half-torn-down process.
         MainWindowController.bypassCloseConfirm = true
-        // Reset on the next runloop tick so the flag doesn't stick true
-        // forever if termination is later cancelled by a downstream save /
-        // document prompt. AppKit's batch-close sweep after `.terminateNow`
-        // runs synchronously on this same tick, so the bypass is still in
-        // force for every `windowShouldClose` callback triggered by the
-        // sweep; the async hop then clears the flag once the current
-        // runloop iteration drains. (main-window F5)
-        DispatchQueue.main.async {
-            MainWindowController.bypassCloseConfirm = false
-        }
         return .terminateNow
     }
 
@@ -270,6 +267,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         controllers.forEach { $0.terminateSessions() }
         controllers.removeAll()
+        // Audit L10. AppKit's batch-close sweep ran synchronously between
+        // `applicationShouldTerminate` returning `.terminateNow` and us
+        // arriving here, so every per-tab `windowShouldClose` saw
+        // `bypassCloseConfirm == true` as intended. Reset synchronously
+        // before process exit so a hypothetical downstream delegate that
+        // ever cancels termination doesn't leave the flag stuck on for
+        // the rest of the session.
+        MainWindowController.bypassCloseConfirm = false
     }
 
     /// macOS 14+ emits a runtime warning on launch when the delegate
