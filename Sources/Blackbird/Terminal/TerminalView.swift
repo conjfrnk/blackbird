@@ -2759,6 +2759,24 @@ extension TerminalView {
         let cleanedReplacement = Self.stripBidiOverrides(
             Self.sanitizePasteControls(Data(replacement.utf8))
         )
+        // Audit L20. sanitizePasteControls intentionally preserves LF
+        // (the paste path treats it as "user pressed Enter, run the
+        // line"). For find-replace at a non-bracketed-paste prompt
+        // the same posture is wrong — a replacement string typed or
+        // pasted into the Replace field with an embedded `\n` would
+        // execute the leading fragment as a separate command. The
+        // audit verdict was "local user input, no remote vector",
+        // but a Replace All across a buffer can amplify a single
+        // typo into many shell commands, and the find bar field
+        // doesn't visually represent the newline. Refuse with a
+        // transient message; the user re-types or re-pastes without
+        // the newline. A 0x0D in the cleaned bytes follows the same
+        // logic — pasteText's convertLoneCRToLF would just turn it
+        // into LF anyway.
+        if cleanedReplacement.contains(0x0A) || cleanedReplacement.contains(0x0D) {
+            findBar?.showTransientMessage("Refusing: replacement contains a line break")
+            return
+        }
         #if DEBUG
         if let capture = replaceByteCapture {
             capture(delBytes)

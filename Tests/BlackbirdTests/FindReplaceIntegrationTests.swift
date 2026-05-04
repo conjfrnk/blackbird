@@ -95,6 +95,54 @@ final class FindReplaceIntegrationTests: XCTestCase {
                        "Empty replacement still emits DEL bytes for the match span")
     }
 
+    func test_replaceCurrent_replacementWithLF_isRefused() throws {
+        // Audit L20. sanitizePasteControls intentionally preserves LF
+        // (paste path treats it as Enter). For find-replace at a non-
+        // bracketed-paste prompt the same posture is wrong — a `\n`
+        // in the replacement string would execute the leading
+        // fragment as a separate command. Refuse with a transient
+        // message; emit zero bytes.
+        let view = try makeView()
+        let snap = try liveSnapshot()
+
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
+
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+
+        view._invokeReplaceCurrentForTests(replacement: "foo\nbar")
+
+        XCTAssertTrue(
+            captured.isEmpty,
+            "replacement containing LF must be refused — got \(Array(captured)) bytes"
+        )
+    }
+
+    func test_replaceCurrent_replacementWithCR_isRefused() throws {
+        // Audit L20 (sibling). 0x0D survives `sanitizePasteControls`
+        // and is treated as Enter by raw / ICRNL-off shells, same
+        // command-injection class as LF. The find-replace gate
+        // rejects both.
+        let view = try makeView()
+        let snap = try liveSnapshot()
+
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
+
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+
+        view._invokeReplaceCurrentForTests(replacement: "foo\rbar")
+
+        XCTAssertTrue(
+            captured.isEmpty,
+            "replacement containing CR must be refused — got \(Array(captured)) bytes"
+        )
+    }
+
     func test_replaceCurrent_offInputLine_emitsNothing() throws {
         let view = try makeView()
         let snap = try liveSnapshot()
