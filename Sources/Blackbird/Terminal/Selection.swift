@@ -105,7 +105,7 @@ public func bufferPoint(
     cols: Int,
     rows: Int,
     historySize: Int,
-    leftInsetPoints: CGFloat = 0
+    leftInsetPoints: CGFloat
 ) -> BufferPoint {
     // L-17 / EC-6: cell dims are public-API divisors. A degenerate
     // 0 / NaN / -Inf would trap at `Int(safeX / cellWidth)` because

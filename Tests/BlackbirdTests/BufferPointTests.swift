@@ -29,7 +29,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, 0)
         XCTAssertEqual(p.col, 0)
@@ -49,7 +50,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, Int32(rows - 1))
         XCTAssertEqual(p.col, cols - 1)
@@ -71,7 +73,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.col, 5)
         XCTAssertEqual(p.line, 3)
@@ -89,7 +92,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.col, cols - 1)
         XCTAssertEqual(p.line, 0)
@@ -107,7 +111,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, Int32(rows - 1))
         XCTAssertEqual(p.col, 0)
@@ -127,7 +132,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertGreaterThanOrEqual(p.col, 0, "NaN viewportHeight must not trap")
         XCTAssertGreaterThanOrEqual(p.line, 0, "NaN viewportHeight must not trap")
@@ -155,7 +161,8 @@ final class BufferPointTests: XCTestCase {
                 displayOffset: 0,
                 cols: cols,
                 rows: rows,
-                historySize: 0
+                historySize: 0,
+                leftInsetPoints: 0
             )
             XCTAssertGreaterThanOrEqual(p.col, 0, "\(t) must not trap")
             XCTAssertGreaterThanOrEqual(p.line, 0, "\(t) must not trap")
@@ -173,7 +180,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.col, 0)
         XCTAssertEqual(p.line, 0)
@@ -190,7 +198,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 5,
             cols: cols,
             rows: rows,
-            historySize: 100  // big enough to not be the binding clamp
+            historySize: 100,  // big enough to not be the binding clamp
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, -5)
         XCTAssertEqual(p.col, 0)
@@ -207,7 +216,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 5,
             cols: cols,
             rows: rows,
-            historySize: 100
+            historySize: 100,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, -5)
         XCTAssertEqual(p.col, 0)
@@ -311,7 +321,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 100,
             cols: cols,
             rows: rows,
-            historySize: 100
+            historySize: 100,
+            leftInsetPoints: 0
         )
         // displayRow=0 - displayOffset=100 = rawLine -100. Clamps to
         // -historySize = -100 (the oldest retained line). Without the
@@ -332,7 +343,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 100,
             cols: cols,
             rows: rows,
-            historySize: 100
+            historySize: 100,
+            leftInsetPoints: 0
         )
         // Y above the view → safeY clamped → displayRow = 0.
         // rawLine = 0 - 100 = -100, clamped to max(-100, -100) = -100.
@@ -354,7 +366,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 999,
             cols: cols,
             rows: rows,
-            historySize: 100
+            historySize: 100,
+            leftInsetPoints: 0
         )
         // rawLine = -999, clamps to -100.
         XCTAssertEqual(p.line, -100)
@@ -372,7 +385,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 999,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, 0, "historySize=0 must clamp negative lines to 0")
     }
@@ -391,7 +405,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, 0)
         XCTAssertEqual(p.col, 0)
@@ -406,7 +421,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, 0)
         XCTAssertEqual(p.col, 0)
@@ -421,7 +437,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, 0)
         XCTAssertEqual(p.col, 0)
@@ -439,7 +456,8 @@ final class BufferPointTests: XCTestCase {
             displayOffset: 0,
             cols: cols,
             rows: rows,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
         XCTAssertEqual(p.line, 0)
         XCTAssertEqual(p.col, 0)
@@ -452,17 +470,19 @@ final class BufferPointTests: XCTestCase {
 
     // MARK: - leftInsetPoints
 
-    func test_leftInsetPoints_defaultZero_doesNotShift() {
-        // Default leftInsetPoints = 0 keeps every existing call site valid.
+    func test_leftInsetPoints_zero_doesNotShift() {
+        // leftInsetPoints = 0 disables the inset subtraction entirely;
+        // x = 80 maps to 80 / 10 = col 8 (the pre-feature behaviour).
         let bp = bufferPoint(
             forView: CGPoint(x: 80, y: 50),
             cellWidth: 10, cellHeight: 20,
             viewportHeight: 200,
             displayOffset: 0,
             cols: 80, rows: 24,
-            historySize: 0
+            historySize: 0,
+            leftInsetPoints: 0
         )
-        XCTAssertEqual(bp.col, 8) // 80 / 10 == col 8
+        XCTAssertEqual(bp.col, 8)
     }
 
     func test_leftInsetPoints_eight_shiftsColMappingByOne() {
