@@ -65,17 +65,38 @@ extension TerminalView {
             wrapped.append(Self.sanitizeBracketedPaste(bytes))
             wrapped.append(Data([0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]))  // ESC[201~
             session.send(wrapped)
-        } else {
-            // L4: when the foreground process is in raw / ICRNL-off mode
-            // (vim, less, fzf, most TUIs), a lone CR survives to the
-            // shell as `\r` and triggers Enter — same injection class as
-            // a raw LF from a hostile clipboard. `normalizePasteLineEndings`
-            // intentionally leaves lone CR alone (some apps want it as
-            // Enter), but bracketed paste protects via the markers; the
-            // non-bracketed branch is the exposed surface, so we override
-            // that prior decision here only.
-            session.send(Self.convertLoneCRToLF(bytes))
+            return
         }
+        // Audit L19. Non-bracketed paste of multi-line content sends LF
+        // bytes that the shell treats as Enter — each line executes
+        // immediately. A hostile clipboard with `\nrm -rf ~/Desktop\n`
+        // is the textbook paste-jacking primitive. Bracketed paste
+        // (handled above) protects modern TUIs; this guard catches the
+        // unprotected case at a bare shell prompt. Opt-in: default off
+        // preserves the long-standing terminal behaviour.
+        if Preferences.shared.confirmMultiLinePaste, bytes.contains(0x0A) {
+            let alert = NSAlert()
+            alert.messageText = "Paste multiple lines?"
+            alert.informativeText = "The clipboard contains line breaks. Each line will execute as a separate command at the shell prompt."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Paste")
+            alert.addButton(withTitle: "Cancel")
+            // App-modal runModal keeps the synchronous control flow we
+            // need here; window-modal `beginSheetModal` would force the
+            // function into an async / completion-handler shape just to
+            // dispatch the send(_:) on the same call site.
+            let response = alert.runModal()
+            guard response == .alertFirstButtonReturn else { return }
+        }
+        // L4: when the foreground process is in raw / ICRNL-off mode
+        // (vim, less, fzf, most TUIs), a lone CR survives to the
+        // shell as `\r` and triggers Enter — same injection class as
+        // a raw LF from a hostile clipboard. `normalizePasteLineEndings`
+        // intentionally leaves lone CR alone (some apps want it as
+        // Enter), but bracketed paste protects via the markers; the
+        // non-bracketed branch is the exposed surface, so we override
+        // that prior decision here only.
+        session.send(Self.convertLoneCRToLF(bytes))
     }
 
     /// Replace every standalone CR (0x0D) with LF (0x0A). CR-LF pairs are

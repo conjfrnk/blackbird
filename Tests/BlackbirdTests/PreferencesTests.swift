@@ -22,6 +22,7 @@ final class PreferencesTests: XCTestCase {
     private var savedAutoUpdateChecks: Bool = false
     private var savedOSC52Enabled: Bool = false
     private var savedColorQueryEnabled: Bool = false
+    private var savedConfirmMultiLinePaste: Bool = false
     private var savedTranslucency: Double = 0
 
     override class func setUp() {
@@ -64,6 +65,7 @@ final class PreferencesTests: XCTestCase {
         savedAutoUpdateChecks  = p.autoUpdateChecks
         savedOSC52Enabled      = p.osc52Enabled
         savedColorQueryEnabled = p.colorQueryEnabled
+        savedConfirmMultiLinePaste = p.confirmMultiLinePaste
         savedTranslucency      = p.translucency
     }
 
@@ -81,6 +83,7 @@ final class PreferencesTests: XCTestCase {
         p.autoUpdateChecks  = savedAutoUpdateChecks
         p.osc52Enabled      = savedOSC52Enabled
         p.colorQueryEnabled = savedColorQueryEnabled
+        p.confirmMultiLinePaste = savedConfirmMultiLinePaste
         p.translucency      = savedTranslucency
         super.tearDown()
     }
@@ -134,6 +137,7 @@ final class PreferencesTests: XCTestCase {
             "bb.theme", "bb.themeMode", "bb.fontName", "bb.fontSize", "bb.cursorBlink",
             "bb.bell", "bb.cursorShape", "bb.optionKey", "bb.confirmClose",
             "bb.autoUpdateChecks", "bb.osc52Enabled", "bb.colorQueryEnabled",
+            "bb.confirmMultiLinePaste",
             "bb.translucency",
         ]
         let missing = Set(declared).subtracting(tracked)

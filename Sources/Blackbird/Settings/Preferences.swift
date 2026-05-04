@@ -141,6 +141,17 @@ public final class Preferences: ObservableObject {
     /// integration (helix, some nvim clipboard providers) can opt in
     /// explicitly via Settings. See `SEC-001` in the v0.1.9 sweep triage.
     @AppStorage("bb.osc52Enabled")   public var osc52Enabled: Bool = false
+    /// Audit L19. When true, pasting text containing a newline (LF)
+    /// while the foreground process has NOT requested bracketed paste
+    /// pops a confirmation alert. Default off so the long-standing
+    /// "paste runs" behaviour is preserved unless the user opts in.
+    /// Modern TUIs (vim, nvim, less, fzf, ssh wrappers, claude) all
+    /// enable bracketed paste, so the warning only fires at a bare
+    /// shell prompt — the exact scenario where a hostile clipboard's
+    /// embedded newline would execute the next "line" as a separate
+    /// command. iTerm2's "Confirm when pasting more than N lines"
+    /// has the same shape; we keep it simple at one-line-or-more.
+    @AppStorage("bb.confirmMultiLinePaste") public var confirmMultiLinePaste: Bool = false
     /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. Off by default
     /// because the reply (`\e]10;rgb:…\e\\`) is routed back into the PTY
     /// where a misbehaving shell / zsh-vi-mode can interpret it as
