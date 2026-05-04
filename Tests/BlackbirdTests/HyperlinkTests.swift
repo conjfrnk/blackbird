@@ -809,6 +809,89 @@ final class HyperlinkTests: XCTestCase {
         )
     }
 
+    // MARK: - H3: embedded credentials in OSC 8 hyperlinks
+
+    /// Audit H3. A URL like `https://attacker:hunter2@apple.com/` passes
+    /// the host check (`URL.host == "apple.com"`) and the divergence
+    /// check (anchor host matches href host) — but `NSWorkspace.open`
+    /// then hands the credential-bearing URL to the browser, leaking
+    /// `attacker:hunter2` via URL bar / Referer / history. Reject
+    /// credential URLs at the policy gate before any of those surfaces
+    /// see them.
+    func testIsAllowed_rejectsURLWithUserAndPassword() {
+        guard let u = URL(string: "https://user:pass@example.com/") else {
+            XCTFail("URL(string:) should accept user:pass@ form")
+            return
+        }
+        XCTAssertFalse(
+            OSC8URLPolicy.isAllowed(u),
+            "URL with embedded user:pass credentials must be rejected"
+        )
+    }
+
+    /// Audit H3. The user-only form (`https://user@host/` with no
+    /// password) is the same exfil shape — the username component is
+    /// still attacker-controlled and still flows through the browser
+    /// surfaces. Reject when `URL.user` is non-empty regardless of
+    /// `URL.password`.
+    func testIsAllowed_rejectsURLWithUserOnly() {
+        guard let u = URL(string: "https://user@example.com/") else {
+            XCTFail("URL(string:) should accept user@ form")
+            return
+        }
+        XCTAssertFalse(
+            OSC8URLPolicy.isAllowed(u),
+            "URL with user-only credentials must be rejected"
+        )
+    }
+
+    /// Audit H3. Percent-encoded userinfo (`%75ser` for "user") parses
+    /// through Foundation: `URL.user` returns the decoded "user". Pin
+    /// that the credential gate sees the decoded form and rejects, so
+    /// a hostile remote can't bypass with `https://%75ser:pa%73s@host/`.
+    func testIsAllowed_rejectsURLWithPercentEncodedCredentials() {
+        guard let u = URL(string: "https://%75ser:pa%73s@example.com/") else {
+            XCTFail("URL(string:) should accept percent-encoded user:pass form")
+            return
+        }
+        XCTAssertNotNil(u.user, "Foundation must decode percent-encoded user before the gate sees it")
+        XCTAssertFalse(
+            OSC8URLPolicy.isAllowed(u),
+            "URL with percent-encoded credentials must be rejected after Foundation decodes them"
+        )
+    }
+
+    /// Audit H3. The redactor strips `user:pass@` from a URL string
+    /// before it reaches the hover tooltip's NSTextField. Path, query,
+    /// and fragment are preserved — only the userinfo is removed.
+    func testRedactCredentialsForDisplay_stripsUserAndPassword() {
+        XCTAssertEqual(
+            OSC8URLPolicy.redactCredentialsForDisplay("https://user:pass@example.com/path?q=1#frag"),
+            "https://example.com/path?q=1#frag",
+            "redactor must strip user:pass and preserve path/query/fragment"
+        )
+    }
+
+    /// Audit H3. Backward compatibility: a plain URL with no
+    /// credentials passes the gate AND the redactor returns it
+    /// unchanged. Pins that the H3 fix doesn't over-block legitimate
+    /// hyperlinks or mangle their display string.
+    func testCredentialFix_backwardCompatPlainURL() {
+        guard let u = URL(string: "https://example.com/path") else {
+            XCTFail("URL(string:) should accept plain https URL")
+            return
+        }
+        XCTAssertTrue(
+            OSC8URLPolicy.isAllowed(u),
+            "plain URL with no credentials must still pass the gate"
+        )
+        XCTAssertEqual(
+            OSC8URLPolicy.redactCredentialsForDisplay("https://example.com/path"),
+            "https://example.com/path",
+            "redactor must be a no-op on URLs without credentials"
+        )
+    }
+
     func testCmdClickFallsBackToRegexWhenNoOsc8() throws {
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         let opener = RecordingURLOpener()

@@ -69,6 +69,17 @@ enum OSC8URLPolicy {
     static func isAllowed(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         guard allowedSchemes.contains(scheme) else { return false }
+        // H3: reject embedded `user:pass@host` credentials before any
+        // other check. `URL.host` strips userinfo, so the host- and
+        // divergence-gates would otherwise pass `https://attacker:pw@apple.com/`
+        // and hand the credential URL to `NSWorkspace.open` (browser
+        // exfil via URL bar / Referer / history) and to the hover
+        // tooltip. Both `user` and `password` are checked: Foundation
+        // can populate them independently (e.g. `https://:pw@host/`
+        // sets password without user), so testing only `user` would
+        // miss the pw-only edge case.
+        if let user = url.user, !user.isEmpty { return false }
+        if let password = url.password, !password.isEmpty { return false }
         // Pass-3 C0 bypass fix: a URL like
         // `mailto:user@apple.com%08evil.com` round-trips through
         // Foundation: `absoluteString` keeps the percent-encoded `%08`
@@ -543,6 +554,24 @@ enum OSC8URLPolicy {
     /// `URL.path` is unsafe here).
     private static func mailtoEnvelope(_ url: URL) -> Substring {
         return mailtoEnvelope(fromAbsoluteString: url.absoluteString)
+    }
+
+    /// H3: strip `user:pass@` from a URL string before display. The
+    /// hover tooltip's NSTextField renders the OSC 8 href verbatim
+    /// (after C0/bidi scrub); without this redaction a hostile remote
+    /// could render `https://victim:secret@example.com/` and the
+    /// tooltip + AX surface + screen capture would disclose the
+    /// embedded secret. Returns the original string when URLComponents
+    /// can't parse it — fail-loud is preferable but the tooltip path
+    /// is best-effort, and this redactor sits AFTER `isAllowed` (which
+    /// already rejected credential URLs at the click gate), so this
+    /// helper protects only the display surface for any code path that
+    /// might surface a string before policy gating.
+    static func redactCredentialsForDisplay(_ urlString: String) -> String {
+        guard var comps = URLComponents(string: urlString) else { return urlString }
+        comps.user = nil
+        comps.password = nil
+        return comps.string ?? urlString
     }
 
     private static func mailtoEnvelope(fromAbsoluteString s: String) -> Substring {

@@ -446,7 +446,17 @@ extension TerminalView {
         // visually flip the rest of the line — defeating the
         // "hover-to-verify" gesture entirely. Same scrub policy as
         // paste, plus dropping TAB/LF/CR (single-line surface).
-        let scrubbed = Self.scrubURLForDisplay(urlString)
+        // H3: redact `user:pass@` credentials BEFORE the C0/bidi
+        // scrub. Even though `OSC8URLPolicy.isAllowed` now rejects
+        // credential URLs at the click gate, the hover tooltip surfaces
+        // the href on dwell — the policy gate runs at click time. A
+        // hostile remote whose href fails `isAllowed` won't paint a
+        // hover underline (`updateHover` already gates on the policy)
+        // so this is defence-in-depth: if any future code path surfaces
+        // a tooltip without the gate, embedded credentials still don't
+        // leak to the AX API or screen capture.
+        let redacted = OSC8URLPolicy.redactCredentialsForDisplay(urlString)
+        let scrubbed = Self.scrubURLForDisplay(redacted)
         // Clamp the displayed URL. A misbehaving remote could stuff
         // megabytes of OSC 8 target into the link table; sizing an
         // NSTextField against it would hang the UI and push the panel
