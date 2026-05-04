@@ -210,44 +210,26 @@ final class KeyEncoderAdversarialTests: XCTestCase {
 
     /// **TST-S3 gap (focus areas / Kitty flag 16) +
     /// TST-S3-001 [medium] (Flag 16 with multi-codepoint IME output):**
-    /// flag 16's text section emits `;<utf32>` per scalar. Existing
-    /// tests are single-scalar. Pin the multi-scalar shape so a
-    /// refactor that emits only the first scalar (silently dropping
-    /// the rest of the composition) is caught.
+    /// the encoder must not silently drop trailing scalars when an IME
+    /// commits a multi-scalar grapheme. Audit H4 chose UTF-8 fallback
+    /// over a CSI u + flag-16 text section because emitting bare UTF-8
+    /// is safer: any TUI that requested flag 8 already accepts UTF-8
+    /// text input as a fallback. The flag-16 path is reserved for the
+    /// single-scalar case where the base codepoint already carries the
+    /// grapheme.
     ///
     /// "é" decomposed as 'e' (U+0065) + combining acute (U+0301)
     /// is a realistic IME deliverable.
-    func test_flag16_multiScalar_emitsAllScalars() {
+    func test_flag16_multiScalar_fallsBackToUtf8() {
         let enc = KeyEncoder()
         let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAssociatedText]
-        // Plain (no shift): chars = "e\u{0301}", modifiers empty.
-        // Base codepoint is the first scalar 'e' = 101. Text section
-        // must include both scalars.
         let composed = "e\u{0301}"
         let out = enc.encode(chars: composed, modifiers: [], mode: mode)
-        // The exact wire format under "text != base" is
-        // `ESC [ <base> ; <mod> ; <text-scalars-joined> u`.
-        // For a non-elided multi-scalar text, the joiner is `:`
-        // per the Kitty spec ("text codepoints are colon-separated"),
-        // but Blackbird's existing single-scalar test
-        // `test_flag16_reportAssociatedText_shiftLetterEmitsText`
-        // showed the form `ESC[97;2;65u` (semicolon before text).
-        // We don't know which separator the implementation uses for
-        // multi-scalar text, so the assertion is structural: the
-        // output must (a) start with `ESC[101;1` (base + mod), and
-        // (b) include both `101` and `769` (decimal of U+0301)
-        // somewhere — neither scalar may be silently dropped.
-        let bytes = Array(out)
-
-        // Must start with ESC [ 101 ; (i.e. base = 101, mod = 1).
-        let expectedPrefix: [UInt8] = [0x1B, 0x5B] + Array("101;1".utf8)
-        XCTAssertTrue(bytes.starts(with: expectedPrefix),
-                      "flag 16 multi-scalar must lead with `ESC[101;1` (base + mod), got \(bytes)")
-
-        // Must include the second scalar's decimal (U+0301 = 769).
-        let secondScalar = Array("769".utf8)
-        XCTAssertTrue(byteSliceContains(bytes, secondScalar),
-                      "flag 16 multi-scalar must include second scalar (769) in text section, got \(bytes)")
+        XCTAssertEqual(out, Data(composed.utf8),
+                       "Multi-scalar under flag 8 must fall back to UTF-8 — not CSI u with truncated base")
+        // Negative: must NOT start with `ESC[` — the UTF-8 fallback is bare bytes.
+        XCTAssertFalse(Array(out).starts(with: [0x1B, 0x5B]),
+                       "UTF-8 fallback must not be a CSI u sequence")
     }
 
     /// Flag 16 elision: when the produced text matches the base
@@ -437,21 +419,5 @@ final class KeyEncoderAdversarialTests: XCTestCase {
         let csi27Prefix: [UInt8] = [0x1B, 0x5B] + Array("27;".utf8)
         XCTAssertFalse(Array(out).starts(with: csi27Prefix),
                        "Multi-scalar modifyOtherKeys must NOT emit a CSI 27 sequence")
-    }
-
-    // MARK: - Helpers
-
-    /// Returns true if `haystack` contains `needle` as a contiguous
-    /// byte subsequence. Tiny utility for the flag-16 multi-scalar
-    /// "must contain" assertion, which can't trivially express
-    /// "the bytes 7-6-9 appear somewhere" via existing Data API.
-    private func byteSliceContains(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
-        guard !needle.isEmpty, haystack.count >= needle.count else { return false }
-        for start in 0...(haystack.count - needle.count) {
-            if Array(haystack[start..<start + needle.count]) == needle {
-                return true
-            }
-        }
-        return false
     }
 }

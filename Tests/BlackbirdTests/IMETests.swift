@@ -262,6 +262,35 @@ final class IMETests: XCTestCase {
         XCTAssertEqual(pty.sent, Data("ABC".utf8))
     }
 
+    // MARK: - terminalCellWidth: VS-16 + keycap promotion (audit L5)
+
+    /// `❤️` is `U+2764 U+FE0F`. The base scalar U+2764 isn't in the wide
+    /// ranges, but VS-16 forces emoji presentation so the rendered grapheme
+    /// occupies two cells. Without the VS-16 promotion the preedit overlay
+    /// under-sizes by 50% and theme-bg leaks through the right half.
+    func testTerminalCellWidth_vs16HeartIsTwo() {
+        XCTAssertEqual(TerminalView.terminalCellWidth(of: "❤️"), 2)
+    }
+
+    /// `#️⃣` is `U+0023 U+FE0F U+20E3` — keycap. Neither U+0023 nor U+20E3
+    /// lives in the wide ranges, so the table-only path returns 1.
+    /// VS-16 + COMBINING ENCLOSING KEYCAP must promote to 2.
+    func testTerminalCellWidth_keycapHashIsTwo() {
+        XCTAssertEqual(TerminalView.terminalCellWidth(of: "#️⃣"), 2)
+    }
+
+    /// Plain ASCII regression — one cell.
+    func testTerminalCellWidth_asciiIsOne() {
+        XCTAssertEqual(TerminalView.terminalCellWidth(of: "a"), 1)
+    }
+
+    /// CJK regression — already-wide scalar (U+4E2D) must still report 2.
+    /// Pins the existing wide-range path so the VS-16/keycap promotion
+    /// can't accidentally regress it.
+    func testTerminalCellWidth_cjkIsTwo() {
+        XCTAssertEqual(TerminalView.terminalCellWidth(of: "中"), 2)
+    }
+
     private func makeViewAndFakePty(optionIsMeta: Bool = true) throws
         -> (TerminalView, RecordingPTY)
     {

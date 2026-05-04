@@ -150,6 +150,12 @@ public final class KeyEncoder {
         // contract by design — only TUIs that asked for it see it.
         // Ctrl+letter still routes through the collider branch below so
         // the colliders get lowercase-normalized codepoints.
+        // CSI u carries one base codepoint — IME-committed multi-scalar
+        // input (NFD `à`, keycaps, VS-16-paired emoji) falls back to plain
+        // UTF-8 to avoid silently dropping every scalar after the first.
+        if allKeys, chars.unicodeScalars.count > 1 {
+            return Data(chars.utf8)
+        }
         if allKeys, let scalar = chars.unicodeScalars.first,
            ctrlColliderCodepoint(for: scalar) == nil || !modifiers.contains(.control) {
             // Kitty's "all keys as CSI u" uses the lowercase of a letter

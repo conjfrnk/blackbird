@@ -656,4 +656,62 @@ final class KeyEncoderExtendedTests: XCTestCase {
             "Native mode + Option-only: still strips Option (modParam=1, no mods)"
         )
     }
+
+    // MARK: - H4. Flag 8 multi-scalar IME commit falls back to UTF-8
+
+    /// CSI u carries one base codepoint, so an IME commit of a decomposed
+    /// grapheme (NFD `à` = `\u{0061}\u{0300}`) under flag 8 must NOT emit
+    /// `ESC[97u` (which silently drops U+0300). The encoder falls back to
+    /// the bare UTF-8 bytes — every TUI that opted into flag 8 already
+    /// accepts UTF-8 text input, so this is the safe path.
+    func test_flag8_multiScalar_nfdGraveAccent_fallsBackToUtf8() {
+        let enc = KeyEncoder()
+        let composed = "\u{0061}\u{0300}"   // 'a' + COMBINING GRAVE = NFD à
+        XCTAssertEqual(
+            enc.encode(chars: composed, modifiers: [], mode: [.reportAllKeysAsEsc]),
+            Data(composed.utf8),
+            "NFD à under flag 8 must fall back to UTF-8, not silently truncate to ESC[97u"
+        )
+    }
+
+    /// Keycap `#️⃣` is `U+0023 U+FE0F U+20E3` — three scalars, one grapheme.
+    /// Under flag 8 the existing single-scalar path would emit `ESC[35u` and
+    /// drop VS-16 + COMBINING ENCLOSING KEYCAP, leaving the TUI to render
+    /// a bare `#`. UTF-8 fallback preserves the keycap.
+    func test_flag8_multiScalar_keycap_fallsBackToUtf8() {
+        let enc = KeyEncoder()
+        let keycap = "#\u{FE0F}\u{20E3}"
+        XCTAssertEqual(
+            enc.encode(chars: keycap, modifiers: [], mode: [.reportAllKeysAsEsc]),
+            Data(keycap.utf8),
+            "Keycap #️⃣ under flag 8 must fall back to UTF-8"
+        )
+    }
+
+    /// Regression: the multi-scalar fallback must NOT short-circuit the
+    /// single-scalar CSI u path. Plain unmodified `a` under flag 8 still
+    /// emits `ESC[97u`.
+    func test_flag8_singleScalarAscii_stillEmitsCsiU() {
+        let enc = KeyEncoder()
+        XCTAssertEqual(
+            enc.encode(chars: "a", modifiers: [], mode: [.reportAllKeysAsEsc]),
+            Data("\u{1B}[97u".utf8),
+            "Single-scalar 'a' under flag 8 must still emit ESC[97u"
+        )
+    }
+
+    /// Regression: the SINGLE-scalar precomposed `à` (U+00E0) is a grapheme
+    /// that's also one Unicode scalar — must take the single-scalar CSI u
+    /// path, NOT the multi-scalar UTF-8 fallback. The base codepoint goes
+    /// out unchanged (224 = 0xE0); flag 8 doesn't normalize Latin-1 to a
+    /// US-layout base.
+    func test_flag8_singleScalarPrecomposedGrave_takesSingleScalarPath() {
+        let enc = KeyEncoder()
+        let precomposed = "\u{00E0}"        // single scalar à
+        XCTAssertEqual(
+            enc.encode(chars: precomposed, modifiers: [], mode: [.reportAllKeysAsEsc]),
+            Data("\u{1B}[224u".utf8),
+            "Single-scalar U+00E0 must take the CSI u path, not UTF-8 fallback"
+        )
+    }
 }

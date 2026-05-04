@@ -551,8 +551,21 @@ extension TerminalView: NSTextInputClient {
         var total = 0
         for grapheme in string {
             var widest = 0
+            var promotesToWide = false
             for scalar in grapheme.unicodeScalars {
                 widest = max(widest, cellWidth(for: scalar))
+                // VS-16 (U+FE0F) forces the preceding base into emoji
+                // presentation, and U+20E3 builds keycap sequences
+                // (`#️⃣`, `1️⃣`). Neither base scalar is in our wide
+                // ranges (U+2764, U+0023, …) but the rendered grapheme
+                // occupies two cells. Don't let the per-scalar table
+                // miss them.
+                if scalar.value == 0xFE0F || scalar.value == 0x20E3 {
+                    promotesToWide = true
+                }
+            }
+            if promotesToWide && widest < 2 {
+                widest = 2
             }
             // A grapheme that's purely zero-width (e.g. an isolated
             // combining mark) still occupies no cells.
