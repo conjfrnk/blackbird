@@ -495,10 +495,15 @@ public final class PTY {
             // to chdir, exit 127 BEFORE execv runs.
             var chdired = false
             if let cwd = initialCwdCStr {
-                var st = stat()
-                if stat(cwd, &st) == 0 && (st.st_mode & S_IFDIR) != 0 {
-                    if chdir(cwd) == 0 { chdired = true }
-                }
+                // Audit L4: previously this was `stat() == 0 && S_IFDIR
+                // && chdir() == 0`. The pre-stat was both (a) redundant —
+                // chdir already returns ENOTDIR / ENOENT and we'd fall
+                // through anyway — and (b) a small TOCTOU window: a
+                // symlink swap between the stat and the chdir would let
+                // chdir land somewhere stat had not approved. Drop the
+                // pre-check; chdir's own return value is the only signal
+                // that matters here.
+                if chdir(cwd) == 0 { chdired = true }
             }
             if !chdired, let home = homeDirCStr, chdir(home) == 0 {
                 chdired = true
