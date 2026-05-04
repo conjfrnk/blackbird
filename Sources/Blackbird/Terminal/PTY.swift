@@ -268,6 +268,82 @@ public final class PTY {
         let versionStr = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0.0.0"
         let versionCStr = strdup(versionStr)
         defer { free(versionCStr) }
+        // Audit H2: pre-build everything the child needs in raw C-string
+        // form. The post-fork-pre-exec window forbids any call that
+        // takes a runtime lock the parent might have been holding at
+        // fork time — Swift `Array`/`Dictionary`/`String.contains`
+        // can dip into ARC retain/release on shared backing storage,
+        // `os.Logger` touches Mach-port subsystems, and `getpwuid`
+        // opens an XPC connection to opendirectoryd. Doing all that
+        // work here in the parent and passing only `UnsafeMutablePointer<CChar>`s
+        // through the fork keeps the child path strictly POSIX-safe.
+
+        // 1. Scrub list as C strings.
+        let scrubKeysC: [UnsafeMutablePointer<CChar>?] =
+            Self.scrubbedParentEnvVars.map { strdup($0) }
+        defer { scrubKeysC.forEach { if let p = $0 { free(p) } } }
+
+        // 2. Validate envOverrides here (Swift String/Dictionary work
+        //    is fine in the parent) and pack the survivors into two
+        //    parallel C-string arrays. Same NUL/`=`/empty-key checks
+        //    that previously ran in the child, plus the existing
+        //    log-on-reject discipline.
+        var envKeysC: [UnsafeMutablePointer<CChar>?] = []
+        var envValsC: [UnsafeMutablePointer<CChar>?] = []
+        for (k, v) in envOverrides {
+            if k.isEmpty || k.contains("\0") || k.contains("=") {
+                Self.logger.log(
+                    "PTY.spawn rejecting envOverride: invalid key (empty / contains NUL or '=')"
+                )
+                continue
+            }
+            if v.contains("\0") {
+                // SEC-015: env-key NAMES can themselves be sensitive
+                // (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`). Hash
+                // the key so unified-log readers see a stable
+                // identifier without the literal name.
+                Self.logger.log(
+                    "PTY.spawn rejecting envOverride for key=\(k, privacy: .private(mask: .hash)): value contains NUL"
+                )
+                continue
+            }
+            envKeysC.append(strdup(k))
+            envValsC.append(strdup(v))
+        }
+        defer {
+            envKeysC.forEach { if let p = $0 { free(p) } }
+            envValsC.forEach { if let p = $0 { free(p) } }
+        }
+
+        // 3. Resolve $HOME via getpwuid in the parent. getpwuid is
+        //    not async-signal-safe on Darwin (it opens an XPC
+        //    connection to opendirectoryd and may take internal
+        //    locks). Audit M2.
+        let homeDirCStr: UnsafeMutablePointer<CChar>? = {
+            if let pw = getpwuid(getuid()), let pwDir = pw.pointee.pw_dir {
+                return strdup(pwDir)
+            }
+            return nil
+        }()
+        defer { if let p = homeDirCStr { free(p) } }
+
+        // 4. Initial-cwd C string (if requested).
+        let initialCwdCStr: UnsafeMutablePointer<CChar>? = {
+            guard let cwd = initialWorkingDirectory, !cwd.isEmpty else { return nil }
+            return strdup(cwd)
+        }()
+        defer { if let p = initialCwdCStr { free(p) } }
+
+        // 5. Argv as a NULL-terminated C string array. The execv
+        //    argument is `char *const argv[]`; we materialise it
+        //    here so the child only does pointer-array indexing.
+        let cArgv: [UnsafeMutablePointer<CChar>?] =
+            ([executable] + arguments).map { strdup($0) } + [nil]
+        defer { cArgv.forEach { if let p = $0 { free(p) } } }
+
+        // 6. Executable path as a C string for execv's first arg.
+        let executableCStr = strdup(executable)
+        defer { free(executableCStr) }
         // Pass nil for termios so forkpty uses the kernel's TTYDEF_* defaults
         // from <sys/ttydefaults.h>. That gives us correct c_cc values:
         // VINTR=3, VQUIT=28, VSUSP=26, VEOF=4, VERASE=0x7F, VKILL=21, plus
@@ -303,31 +379,52 @@ public final class PTY {
         }
 
         if pid == 0 {
-            // Child: scrub inherited app env, set shell env, chdir, exec.
-            //
+            // === Post-fork-pre-exec: strictly POSIX async-signal-safe ===
+            // Audit H2. Anything beyond the documented signal-safe list
+            // (signal, sigaction, sigprocmask, sigemptyset, _exit, exec*,
+            // close, dup2, getenv, setenv, unsetenv, chdir, stat, fcntl,
+            // sysconf, write, read) risks deadlocking the child on a
+            // malloc/dispatch/Mach-port lock the parent's other threads
+            // were holding at fork time. All Swift Array / Dictionary /
+            // String / os.Logger / getpwuid work was completed in the
+            // parent above; the child only indexes into pre-built
+            // C-string arrays.
+
             // Scrub launchd / XPC / CoreFoundation plumbing variables
-            // that leak from the GUI app into the child shell. These
-            // confuse locale detection (__CF_USER_TEXT_ENCODING), make
-            // `ps` / `env` output noisy, can cause the shell's children
-            // to try to talk to the wrong XPC service (XPC_SERVICE_NAME),
-            // and occasionally trigger debugging modes in downstream tools
-            // (OS_ACTIVITY_DT_MODE). iTerm2 and Terminal.app strip the
-            // same set. unsetenv is async-signal-safe on Darwin.
-            for key in Self.scrubbedParentEnvVars {
-                unsetenv(key)
+            // that leak from the GUI app into the child shell. iTerm2
+            // and Terminal.app strip the same set. unsetenv is
+            // async-signal-safe on Darwin. We iterate via
+            // withUnsafeBufferPointer so the buffer pointer is borrowed
+            // (no ARC traffic, no allocator activity) and the body is
+            // pure POSIX calls.
+            scrubKeysC.withUnsafeBufferPointer { buf in
+                var i = 0
+                while i < buf.count {
+                    if let k = buf[i] { unsetenv(k) }
+                    i += 1
+                }
             }
+
             // Reset signal disposition. The GUI app can install handlers
             // (Sparkle, GrandCentralDispatch, CoreFoundation) and mask
             // signals the child needs delivered at default. A shell that
             // inherits a blocked SIGINT can't be Ctrl+C'd, SIGPIPE blocked
             // makes pipelines hang, SIGCHLD blocked stalls job control.
             // Reset everything to SIG_DFL and drop the signal mask.
+            // Unrolled (was `for sig in [SIGINT, ...]`) so we don't
+            // allocate a Swift Array literal in the child.
             var emptyMask = sigset_t()
             sigemptyset(&emptyMask)
             _ = sigprocmask(SIG_SETMASK, &emptyMask, nil)
-            for sig in [SIGINT, SIGQUIT, SIGTERM, SIGHUP, SIGPIPE, SIGCHLD, SIGWINCH, SIGTSTP] {
-                signal(sig, SIG_DFL)
-            }
+            signal(SIGINT, SIG_DFL)
+            signal(SIGQUIT, SIG_DFL)
+            signal(SIGTERM, SIG_DFL)
+            signal(SIGHUP, SIG_DFL)
+            signal(SIGPIPE, SIG_DFL)
+            signal(SIGCHLD, SIG_DFL)
+            signal(SIGWINCH, SIG_DFL)
+            signal(SIGTSTP, SIG_DFL)
+
             // Close every inherited fd above stderr. forkpty has already
             // rebound stdin/stdout/stderr to the slave pty; anything else
             // the parent app had open (Metal device libraries, font files,
@@ -348,41 +445,33 @@ public final class PTY {
             let rawMax = sysconf(Int32(_SC_OPEN_MAX))
             let openMax: Int = rawMax > 65_536 || rawMax <= 0 ? 65_536 : Int(rawMax)
             if openMax > 3 {
-                for fd in Int32(3)..<Int32(openMax) {
+                var fd: Int32 = 3
+                while fd < Int32(openMax) {
                     _ = Darwin.close(fd)
+                    fd += 1
                 }
             }
-            // Validate envOverrides before handing them to `setenv`. Swift
-            // String → C bridging truncates at the first NUL, so a key like
-            // `"PATH\0.malicious"` would silently reach `setenv` as `PATH`
-            // and an attacker-controlled value could be split on NUL. A
-            // key containing `=` is outright rejected by POSIX setenv but
-            // filtering it here keeps errno clean and the log readable.
-            // Logging rather than crashing: this runs post-fork-pre-exec
-            // where async-signal-safety matters and libc asserts aren't
-            // safe. os.Logger's underlying `os_log` is documented as
-            // async-signal-safe on Darwin.
-            for (k, v) in envOverrides {
-                if k.isEmpty || k.contains("\0") || k.contains("=") {
-                    Self.logger.log(
-                        "PTY.spawn rejecting envOverride: invalid key (empty / contains NUL or '=')"
-                    )
-                    continue
+
+            // Apply pre-validated envOverrides via raw C pointers.
+            // Validation (NUL / `=` / empty checks) and the os.Logger
+            // calls happened in the parent above; the survivors are in
+            // envKeysC[i] / envValsC[i] for 0 ≤ i < envKeysC.count.
+            envKeysC.withUnsafeBufferPointer { keysBuf in
+                envValsC.withUnsafeBufferPointer { valsBuf in
+                    var i = 0
+                    while i < keysBuf.count {
+                        if let k = keysBuf[i], let v = valsBuf[i] {
+                            setenv(k, v, 1)
+                        }
+                        i += 1
+                    }
                 }
-                if v.contains("\0") {
-                    // SEC-015: env-key NAMES can themselves be sensitive
-                    // (`AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`). Hash
-                    // the key so unified-log readers see a stable
-                    // identifier without the literal name.
-                    Self.logger.log(
-                        "PTY.spawn rejecting envOverride for key=\(k, privacy: .private(mask: .hash)): value contains NUL"
-                    )
-                    continue
-                }
-                setenv(k, v, 1)
             }
-            // TERM resolved in the parent so we don't call Foundation /
-            // Process APIs between fork and exec (not async-signal-safe).
+
+            // Standard env. String literals here are baked into the
+            // binary's text segment; the `setenv` arg is `const char *`
+            // so passing a Swift StaticString-backed pointer is fine —
+            // setenv copies the value internally.
             setenv("TERM", termCStr, 1)
             setenv("COLORTERM", "truecolor", 1)   // tells modern TUIs (nvim, tmux, claude-code) 24-bit color is safe
             setenv("TERM_PROGRAM", "Blackbird", 1)
@@ -391,57 +480,51 @@ public final class PTY {
             } else {
                 setenv("TERM_PROGRAM_VERSION", "0.0.0", 1)
             }
+
             // Pick the child's starting directory:
             //  1. Explicit `initialWorkingDirectory` (from ⌘T / ⌘N inherit)
             //     if it still resolves to a real directory.
-            //  2. The user's home via getpwuid — authoritative.
-            //  3. $HOME fallback if passwd lookup somehow fails.
+            //  2. The user's home via getpwuid — pre-resolved in parent
+            //     (audit M2), passed in as homeDirCStr.
+            //  3. $HOME fallback if passwd lookup somehow failed.
+            //  4. /tmp final defense.
             // Apps launched from Finder inherit cwd=`/` from launchd, which
             // would otherwise start the shell in /.
             //
             // Triple-failure abort (audit M8): if every candidate fails
-            // to chdir, exit 127 BEFORE execv runs. Otherwise the shell
-            // starts at whatever cwd the post-fork inherited (typically
-            // `/` under launchd, the working directory the user just
-            // left under cmd-T), which is silently wrong and confuses
-            // shell prompt / git / project tooling. _exit(127) matches
-            // the execv-failed path below; the parent sees a child that
-            // exited with 127 and surfaces the same UI as a missing
-            // shell binary.
+            // to chdir, exit 127 BEFORE execv runs.
             var chdired = false
-            if let cwd = initialWorkingDirectory, !cwd.isEmpty {
+            if let cwd = initialCwdCStr {
                 var st = stat()
                 if stat(cwd, &st) == 0 && (st.st_mode & S_IFDIR) != 0 {
                     if chdir(cwd) == 0 { chdired = true }
                 }
             }
-            if !chdired,
-               let pw = getpwuid(getuid()), pw.pointee.pw_dir != nil,
-               chdir(pw.pointee.pw_dir) == 0 {
+            if !chdired, let home = homeDirCStr, chdir(home) == 0 {
                 chdired = true
             }
             if !chdired,
-               let home = getenv("HOME"),
-               chdir(home) == 0 {
+               let envHome = getenv("HOME"),
+               chdir(envHome) == 0 {
                 chdired = true
             }
-            if !chdired {
-                // Final defense: try /tmp before giving up entirely. A
-                // shell starting in /tmp is unusual but harmless; a
-                // shell starting at `/` (launchd inheritance) is the
-                // pre-M8 silent failure we're avoiding here.
-                if chdir("/tmp") == 0 {
-                    chdired = true
-                }
+            if !chdired, chdir("/tmp") == 0 {
+                chdired = true
             }
             if !chdired {
                 _exit(127)
             }
-            // Build argv
-            let cArgv: [UnsafeMutablePointer<CChar>?] =
-                ([executable] + arguments).map { strdup($0) } + [nil]
-            defer { cArgv.forEach { if let p = $0 { free(p) } } }
-            execv(executable, cArgv)
+
+            // exec — argv was built by the parent. UnsafeBufferPointer
+            // borrow gives us a `char *const argv[]`-shaped pointer
+            // without any allocator activity in the child.
+            cArgv.withUnsafeBufferPointer { argvBuf in
+                // baseAddress is non-nil for a non-empty array; cArgv
+                // always contains at least `[executable, nil]`.
+                let argvPtr = UnsafeMutableRawPointer(mutating: argvBuf.baseAddress!)
+                    .assumingMemoryBound(to: UnsafeMutablePointer<CChar>?.self)
+                _ = execv(executableCStr, argvPtr)
+            }
             // If exec returns, it failed.
             _exit(127)
         }
