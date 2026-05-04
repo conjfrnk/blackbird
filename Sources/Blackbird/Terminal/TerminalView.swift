@@ -451,6 +451,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// `bufferPoint` share the same one-shot.
     static let mouseLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                     category: "mouse")
+
+    /// Production-visible channel for renderer-state mismatches that
+    /// the user can surface in support reports. Today this only flags a
+    /// failed atlas reconfigure on the font-change path — without it, a
+    /// user reporting "I changed font size and nothing happened" has no
+    /// breadcrumb the support engineer can correlate against.
+    static let rendererLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                       category: "renderer")
     static let didLogEarlyClick = OSAllocatedUnfairLock(initialState: false)
 
     /// One-shot warning for the M-17 pre-first-publish click race. Both
@@ -671,7 +679,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // atlas; otherwise grid math and glyph rasterisation would drift
         // apart (cells laid out at new size but drawn with an old-size
         // atlas → smeared / wrong-sized glyphs).
-        guard renderer.reconfigure(metrics: newMetrics, scale: scale) else { return }
+        guard renderer.reconfigure(metrics: newMetrics, scale: scale) else {
+            // Mirror the sibling `mtkView(_:drawableSizeWillChange:)`
+            // log: a failed reconfigure (e.g., MTLDevice couldn't allocate
+            // a larger atlas at the new font size) leaves the user staring
+            // at unchanged metrics with no audit trail. Surface enough
+            // context that a support reporter pasting `log show --predicate
+            // 'category == "renderer"'` can correlate the moment with a
+            // pref change.
+            Self.rendererLogger.error(
+                "syncFontFromPreferences reconfigure failed — keeping cellW=\(self.metrics.cellWidth, privacy: .public) cellH=\(self.metrics.cellHeight, privacy: .public); requested cellW=\(newMetrics.cellWidth, privacy: .public) cellH=\(newMetrics.cellHeight, privacy: .public) scale=\(scale, privacy: .public)"
+            )
+            return
+        }
         self.metrics = newMetrics
         if let window {
             // Window resize increments should follow the new cell size too.

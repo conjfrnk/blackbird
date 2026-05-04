@@ -258,6 +258,113 @@ final class TabStripStressTests: XCTestCase {
         XCTAssertEqual(addCount, 1)
     }
 
+    // MARK: - Keyboard close + synchronous tabs mutation (M7)
+
+    /// `deleteBackward` routes through `onCloseWindow`, which in
+    /// production calls `performClose` → `windowWillClose` →
+    /// `refreshAllTabBars` synchronously. The refresh re-enters
+    /// `update(tabs:selected:width:)` and shrinks `self.tabs` BEFORE
+    /// `deleteBackward` returns. Reading `tabs.count` after the close
+    /// (the pre-fix code) clamped against the post-mutation array,
+    /// so a close at the rightmost pill could leave `focusedPill`
+    /// pointing past the new tail. Pin: snapshot-then-clamp.
+    func test_deleteBackward_synchronousTabsMutation_clampsAgainstPriorIndex() {
+        let strip = makeStrip()
+        let tabs = makeStubWindows(3, prefix: "k")
+        strip.update(tabs: tabs, selected: tabs[0], width: 600)
+        strip.focusedPillForTesting = 2
+
+        // Simulate the production close path: the close handler
+        // synchronously rewrites `tabs` to drop the closing window.
+        var observed: [NSWindow] = []
+        strip.onCloseWindow = { closing in
+            observed.append(closing)
+            let remaining = tabs.filter { $0 !== closing }
+            strip.update(tabs: remaining, selected: remaining[0], width: 600)
+        }
+
+        strip.deleteBackwardForTesting()
+
+        XCTAssertEqual(observed, [tabs[2]],
+            "close handler must fire with the focused tab")
+        XCTAssertEqual(strip.pillCountForTesting, 2,
+            "synchronous refresh must have shrunk the pill array before deleteBackward returned")
+        XCTAssertEqual(strip.focusedPillForTesting, 1,
+            "focus must clamp to the new tail (index 1), not the pre-close index (2)")
+    }
+
+    /// Closing the only remaining tab leaves `focusedPill = nil` —
+    /// the post-fix code's empty-tabs branch. (We can't observe a pill
+    /// count of 0 directly because `layoutPills` floors at one pill
+    /// frame; what we DO assert is that the empty-tabs branch was
+    /// chosen, which is observable through `focusedPill = nil`.)
+    func test_deleteBackward_lastTab_clearsFocus() {
+        let strip = makeStrip()
+        let tabs = makeStubWindows(1, prefix: "lone")
+        strip.update(tabs: tabs, selected: tabs[0], width: 600)
+        strip.focusedPillForTesting = 0
+
+        // Use a sentinel-empty array; the close handler simulates
+        // production's collapse-to-nothing case.
+        let emptyHandler: (NSWindow) -> Void = { _ in
+            strip.update(tabs: [], selected: tabs[0], width: 600)
+        }
+        strip.onCloseWindow = emptyHandler
+
+        strip.deleteBackwardForTesting()
+
+        XCTAssertNil(strip.focusedPillForTesting,
+            "closing the last tab must drop keyboard focus")
+    }
+
+    // MARK: - truncatedString binary search measurement budget (M8)
+
+    /// `truncatedString` used to drop one character at a time and
+    /// re-measure, an O(N) measurement loop per pill per redraw. A
+    /// hostile remote pushing a 2 KB OSC 0/2 title froze the tab bar.
+    /// The fix binary-searches the prefix length, so the per-frame
+    /// cost is O(log N) — pin the measurement count budget.
+    func test_truncatedString_binarySearchMeasurementCount() {
+        let n = 1024
+        let title = String(repeating: "x", count: n)
+        var measureCalls = 0
+        // Each "x" is 7 pt at the title font; budget the pill at half
+        // the natural width so a strict prefix is the only fit.
+        let result = TabStripView.truncatedString(
+            title,
+            fitting: 200,
+            measure: { _ in
+                measureCalls += 1
+                // Make every probe the same: full-string measurement
+                // is a function of length.
+                return CGFloat(2_000)
+            }
+        )
+        XCTAssertTrue(result.hasSuffix("…"),
+            "long-title path must produce an ellipsis-suffixed prefix")
+        // Allow a small constant of slack for the early "does the full
+        // string fit" probe and the lo=hi exit. log2(1024) = 10.
+        XCTAssertLessThanOrEqual(measureCalls, 14,
+            "binary search must not exceed log₂(N) + small constant measurements (got \(measureCalls))")
+    }
+
+    /// With a generous width the full title must fit untouched (the
+    /// early-out path measure-once branch). Asserts no spurious
+    /// truncation when there's room.
+    func test_truncatedString_fitsUntouchedWhenRoomy() {
+        var measureCalls = 0
+        let title = "abc"
+        let result = TabStripView.truncatedString(
+            title,
+            fitting: 10_000,
+            measure: { _ in measureCalls += 1; return 10 }
+        )
+        XCTAssertEqual(result, title,
+            "title that fits must round-trip unchanged")
+        XCTAssertEqual(measureCalls, 1,
+            "fits-cleanly path must measure exactly once")
+    }
+
     // MARK: - Rapid update under active edit
 
     /// Mixed width + identity churn under an active edit: one

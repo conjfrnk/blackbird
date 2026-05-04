@@ -459,6 +459,16 @@ final class TabStripView: NSView {
     /// geometry tracks the tab list without exposing the internal
     /// `pillFrames` array publicly.
     var pillCountForTesting: Int { pillFrames.count }
+    /// Test hook — read/write `focusedPill` so the keyboard-close path
+    /// (`deleteBackward`) can be exercised without driving the AppKit
+    /// responder chain.
+    var focusedPillForTesting: Int? {
+        get { focusedPill }
+        set { focusedPill = newValue }
+    }
+    /// Test hook — invoke the keyboard-close path directly. AppKit's
+    /// `interpretKeyEvents` plumbing isn't available to a headless XCTest.
+    @objc func deleteBackwardForTesting() { deleteBackward(nil) }
     #endif
 
     // MARK: - Drawing
@@ -583,16 +593,49 @@ final class TabStripView: NSView {
     }
 
     private func truncatedString(_ s: String, fitting width: CGFloat) -> String {
+        Self.truncatedString(s, fitting: width, measure: Self.measureWidth)
+    }
+
+    /// Binary-search the longest prefix that fits. The previous per-pill
+    /// per-frame loop dropped one character at a time and re-measured —
+    /// O(N) measurements for an N-character title. A 2 KB hostile OSC 0/2
+    /// title froze the strip on every redraw. Halving the search space
+    /// per probe is O(log N) measurements, capped further upstream by
+    /// `TerminalSession`'s 256-grapheme OSC title cap.
+    ///
+    /// Preserves the original "at least one character before the ellipsis
+    /// when the string itself doesn't fit" floor — if even one-char-plus-
+    /// ellipsis is wider than the pill, we still return that rather than
+    /// a bare ellipsis (matches the pre-fix visual).
+    static func truncatedString(_ s: String,
+                                fitting width: CGFloat,
+                                measure: (String) -> CGFloat) -> String {
         guard width > 20 else { return "" }
-        let attrs: [NSAttributedString.Key: Any] = [.font: Self.titleFont]
-        var current = s
-        if (current as NSString).size(withAttributes: attrs).width <= width { return current }
-        // Reserve room for the ellipsis.
-        while current.count > 1,
-              ((current + "…") as NSString).size(withAttributes: attrs).width > width {
-            current.removeLast()
+        let chars = Array(s)
+        if chars.isEmpty { return s }
+        if measure(s) <= width { return s }
+
+        // Search inclusive range [1, chars.count - 1] for the largest k
+        // such that prefix(k) + "…" fits. Floor at 1 preserves the
+        // original's "always at least one character + ellipsis" output
+        // even when the pill is too narrow to fit even that.
+        var lo = 1
+        var hi = max(1, chars.count - 1)
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            let candidate = String(chars[..<mid]) + "…"
+            if measure(candidate) <= width {
+                lo = mid
+            } else {
+                hi = mid - 1
+            }
         }
-        return current + "…"
+        return String(chars[..<lo]) + "…"
+    }
+
+    private static func measureWidth(_ s: String) -> CGFloat {
+        let attrs: [NSAttributedString.Key: Any] = [.font: Self.titleFont]
+        return (s as NSString).size(withAttributes: attrs).width
     }
 
     private func closeHotspot(in pillRect: NSRect) -> NSRect {
@@ -864,16 +907,20 @@ final class TabStripView: NSView {
 
     override func deleteBackward(_ sender: Any?) {
         guard let idx = focusedPill, idx < tabs.count else { return }
-        // Close the focused tab; keep focus on the same index (which
-        // now points at the next-over tab after the close).
+        // `onCloseWindow?` routes through `performClose(nil)` which
+        // synchronously fires `windowWillClose` → `terminateSessions` →
+        // `refreshAllTabBars`, mutating `self.tabs` (and `focusedPill`
+        // via that refresh) before we return. Snapshot the pre-close
+        // state so the post-close clamp lands on the right pill — reading
+        // `focusedPill` / `tabs.count` after the close would clamp
+        // against already-mutated state.
+        let priorIndex = idx
         let closing = tabs[idx]
         onCloseWindow?(closing)
-        // Don't mutate `focusedPill` here — the close triggers a tab
-        // group refresh that calls `update(tabs:selected:width:)`, and
-        // we want the focus to land on the closest surviving pill.
-        // Clamp in a follow-up so out-of-bounds reads don't crash.
-        if let idx = focusedPill, idx >= tabs.count {
-            focusedPill = max(0, tabs.count - 1)
+        if tabs.isEmpty {
+            focusedPill = nil
+        } else {
+            focusedPill = min(priorIndex, tabs.count - 1)
         }
         needsDisplay = true
     }

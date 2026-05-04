@@ -91,9 +91,8 @@ struct DiagnosticsView: View {
 
     // MARK: - Actions
 
-    /// Copy the report's text contents to the pasteboard. Returns `true`
-    /// on success. Sets `lastError` on failure (read error OR non-text
-    /// content OR oversized file).
+    /// Copy the report's text contents to the pasteboard. Sets `lastError`
+    /// on failure (read error OR non-text content OR oversized file).
     ///
     /// Crash report files (`.ips` modern format is JSON; older `.crash` is
     /// plain text) are expected to be UTF-8 — we surface a clear error
@@ -113,8 +112,19 @@ struct DiagnosticsView: View {
     /// would otherwise pose as inert text and, when pasted into another
     /// terminal emulator, re-execute the escape sequence. The defense
     /// is shallow but cheap.
-    @discardableResult
-    private func copy(_ report: DiagnosticReportStore.Report) -> Bool {
+    private func copy(_ report: DiagnosticReportStore.Report) {
+        Task { @MainActor in
+            _ = await loadSanitizedAndCopy(report)
+        }
+    }
+
+    /// Worker shared by Copy and Email Diagnostics. Runs the disk read
+    /// and the per-byte control-char scan on a detached background task
+    /// so a 16 MB report on a network home directory can't beachball
+    /// Settings. Returns `true` after the pasteboard write completes;
+    /// `false` (with `lastError` set) on every failure path.
+    @MainActor
+    private func loadSanitizedAndCopy(_ report: DiagnosticReportStore.Report) async -> Bool {
         if report.byteSize > Self.inlineLoadCapBytes {
             let mb = Double(report.byteSize) / (1024 * 1024)
             lastError = String(format: "%@ is %.1f MB — too large for inline copy. Use Reveal in Finder to attach the file directly.",
@@ -122,38 +132,75 @@ struct DiagnosticsView: View {
             Self.log.notice("copy refused: \(report.url.lastPathComponent, privacy: .public) is \(report.byteSize, privacy: .public) bytes (cap \(Self.inlineLoadCapBytes, privacy: .public))")
             return false
         }
-        let data: Data
-        do {
-            data = try Data(contentsOf: report.url)
-        } catch {
-            lastError = "Could not read \(report.url.lastPathComponent): \(error.localizedDescription)"
-            Self.log.error("copy read failed: \(error.localizedDescription, privacy: .public)")
+        let url = report.url
+        let cap = Int(Self.inlineLoadCapBytes)
+        let outcome = await Self.loadAndSanitize(url: url, cap: cap)
+
+        switch outcome {
+        case .success(let sanitized):
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(sanitized, forType: .string)
+            lastError = nil
+            return true
+        case .failure(.read(let message)):
+            lastError = "Could not read \(report.url.lastPathComponent): \(message)"
+            Self.log.error("copy read failed: \(message, privacy: .public)")
             return false
-        }
-        // Post-read size check defends against a TOCTOU window — if the
-        // file grew between reload() (which captured `report.byteSize`)
-        // and `Data(contentsOf:)`, the pre-flight check above would have
-        // passed. Real-world hang reports are written atomically by
-        // sample(1) and ReportCrash, so this should never fire — flag it
-        // if it does so we know an adversarial logger is appending mid-
-        // read.
-        if data.count > Int(Self.inlineLoadCapBytes) {
-            let mb = Double(data.count) / (1024 * 1024)
+        case .failure(.grewDuringRead(let bytes)):
+            let mb = Double(bytes) / (1024 * 1024)
             lastError = String(format: "%@ grew to %.1f MB during read — too large for inline copy. Use Reveal in Finder to attach the file directly.",
                                report.url.lastPathComponent, mb)
-            Self.log.notice("copy refused mid-read: \(report.url.lastPathComponent, privacy: .public) read \(data.count, privacy: .public) bytes (cap \(Self.inlineLoadCapBytes, privacy: .public))")
+            Self.log.notice("copy refused mid-read: \(report.url.lastPathComponent, privacy: .public) read \(bytes, privacy: .public) bytes (cap \(Self.inlineLoadCapBytes, privacy: .public))")
             return false
-        }
-        guard let text = String(data: data, encoding: .utf8) else {
+        case .failure(.notUTF8):
             lastError = "\(report.url.lastPathComponent) contains non-text bytes. Use Reveal in Finder to attach the file directly."
             Self.log.error("copy decode failed: \(report.url.lastPathComponent, privacy: .public) is not UTF-8")
             return false
         }
-        let sanitized = Self.stripControlCharacters(text)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(sanitized, forType: .string)
-        lastError = nil
-        return true
+    }
+
+    /// Read + sanitize on a detached background task. Internal so tests
+    /// can verify the work runs off the main thread without going through
+    /// SwiftUI's @State machinery for `lastError` / pasteboard side effects.
+    static func loadAndSanitize(url: URL, cap: Int) async -> Result<String, LoadError> {
+        let (result, _) = await loadAndSanitizeForTesting(url: url, cap: cap)
+        return result
+    }
+
+    /// Same as `loadAndSanitize` but additionally returns whether the
+    /// detached worker actually executed off the main thread. Tests use
+    /// the second tuple element to pin the M6 invariant; production
+    /// callers go through `loadAndSanitize` and ignore the flag.
+    static func loadAndSanitizeForTesting(url: URL, cap: Int) async -> (Result<String, LoadError>, ranOffMain: Bool) {
+        await Task.detached {
+            let ranOffMain = !Thread.isMainThread
+            let data: Data
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                return (.failure(.read(error.localizedDescription)), ranOffMain)
+            }
+            // Post-read size check defends against a TOCTOU window — if the
+            // file grew between reload() (which captured `report.byteSize`)
+            // and `Data(contentsOf:)`, the pre-flight check above would have
+            // passed. Real-world hang reports are written atomically by
+            // sample(1) and ReportCrash, so this should never fire — flag it
+            // if it does so we know an adversarial logger is appending mid-
+            // read.
+            if data.count > cap {
+                return (.failure(.grewDuringRead(data.count)), ranOffMain)
+            }
+            guard let text = String(data: data, encoding: .utf8) else {
+                return (.failure(.notUTF8), ranOffMain)
+            }
+            return (.success(Self.stripControlCharacters(text)), ranOffMain)
+        }.value
+    }
+
+    enum LoadError: Error, Sendable, Equatable {
+        case read(String)
+        case grewDuringRead(Int)
+        case notUTF8
     }
 
     /// Replace C0 / C1 control characters (other than `\n` and `\t`) with
@@ -232,28 +279,31 @@ struct DiagnosticsView: View {
     /// when it does work (Mail's compose window with attachment) and is
     /// indistinguishable when it doesn't.
     private func email(_ report: DiagnosticReportStore.Report) {
-        // Stage 1 — copy. If reading or decoding fails, abort so we don't
-        // open a mail compose window with stale clipboard contents.
-        guard copy(report) else { return }
+        Task { @MainActor in
+            // Stage 1 — copy. If reading or decoding fails, abort so we
+            // don't open a mail compose window with stale clipboard
+            // contents.
+            guard await loadSanitizedAndCopy(report) else { return }
 
-        // Stage 2 — mailto. URLQueryItem percent-encodes per RFC 3986 but
-        // mail clients are inconsistent about treating `+` as space; the
-        // explicit encoding below adds a belt-and-suspenders pass for the
-        // subject line, which contains a filename that can have `+`, `&`,
-        // `?`, or non-ASCII.
-        let subject = "Blackbird \(versionString()) diagnostic — \(report.url.lastPathComponent)"
-        let body = "Diagnostic copied to clipboard — paste below this line, then describe what you were doing.\n\n"
-        let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&?#=/"))
-        guard let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: allowed),
-              let encodedBody = body.addingPercentEncoding(withAllowedCharacters: allowed),
-              let url = URL(string: "mailto:conjfrnk@gmail.com?subject=\(encodedSubject)&body=\(encodedBody)") else {
-            lastError = "Report copied to clipboard. Could not construct the mail URL — paste manually into a new message."
-            return
-        }
-        if NSWorkspace.shared.open(url) {
-            lastError = "Report copied to clipboard. Paste into your email."
-        } else {
-            lastError = "Could not open a mail client. The report is on your clipboard; paste it into your email manually."
+            // Stage 2 — mailto. URLQueryItem percent-encodes per RFC 3986
+            // but mail clients are inconsistent about treating `+` as
+            // space; the explicit encoding below adds a belt-and-
+            // suspenders pass for the subject line, which contains a
+            // filename that can have `+`, `&`, `?`, or non-ASCII.
+            let subject = "Blackbird \(versionString()) diagnostic — \(report.url.lastPathComponent)"
+            let body = "Diagnostic copied to clipboard — paste below this line, then describe what you were doing.\n\n"
+            let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&?#=/"))
+            guard let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: allowed),
+                  let encodedBody = body.addingPercentEncoding(withAllowedCharacters: allowed),
+                  let url = URL(string: "mailto:conjfrnk@gmail.com?subject=\(encodedSubject)&body=\(encodedBody)") else {
+                lastError = "Report copied to clipboard. Could not construct the mail URL — paste manually into a new message."
+                return
+            }
+            if NSWorkspace.shared.open(url) {
+                lastError = "Report copied to clipboard. Paste into your email."
+            } else {
+                lastError = "Could not open a mail client. The report is on your clipboard; paste it into your email manually."
+            }
         }
     }
 

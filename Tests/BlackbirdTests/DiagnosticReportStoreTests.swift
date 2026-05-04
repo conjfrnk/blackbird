@@ -270,4 +270,109 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let url = directory.appendingPathComponent(name)
         try contents.write(to: url, atomically: true, encoding: .utf8)
     }
+
+    // MARK: - DiagnosticsView.loadAndSanitize off-main dispatch (M6)
+
+    /// `DiagnosticsView.copy` used to call `Data(contentsOf:)` synchronously
+    /// on `@MainActor`. A 3 MB hang report on a network-mounted home would
+    /// stall Settings UI for seconds. The fix routes the read + per-byte
+    /// control-char scan through `Task.detached`. Round-trip a small
+    /// file as the basic correctness pin.
+    func testLoadAndSanitizeRoundtripsSmallFile() async throws {
+        // Memory: ~4 KB on disk; <1 KB peak RSS. Wall: <50 ms.
+        try writeFile("hang-tiny.txt", in: hangDir, contents: "hello world\n")
+        let url = hangDir.appendingPathComponent("hang-tiny.txt")
+        XCTAssertTrue(Thread.isMainThread,
+            "test runs on @MainActor — pre-condition for the off-main check")
+        let result = await DiagnosticsView.loadAndSanitize(
+            url: url, cap: 16 * 1024 * 1024
+        )
+        guard case .success(let text) = result else {
+            return XCTFail("expected sanitized success, got \(result)")
+        }
+        XCTAssertEqual(text, "hello world\n")
+    }
+
+    /// The worker must execute on a non-main thread. The previous
+    /// implementation called `Data(contentsOf:)` synchronously on
+    /// `@MainActor`, which beachballed Settings on a network-mounted
+    /// home directory; M6 reroutes through `Task.detached`.
+    func testLoadAndSanitizeRunsOffMainThread() async throws {
+        // Memory: ~4 KB on disk; <1 KB peak RSS. Wall: <50 ms.
+        try writeFile("hang-thread.txt", in: hangDir, contents: "main-thread probe")
+        let url = hangDir.appendingPathComponent("hang-thread.txt")
+        XCTAssertTrue(Thread.isMainThread,
+            "test runs on @MainActor — pre-condition for the off-main check")
+        let (result, ranOffMain) = await DiagnosticsView.loadAndSanitizeForTesting(
+            url: url, cap: 16 * 1024 * 1024
+        )
+        guard case .success = result else {
+            return XCTFail("expected sanitized success, got \(result)")
+        }
+        XCTAssertTrue(ranOffMain,
+            "loadAndSanitize must dispatch the disk read + per-byte scan off the main thread")
+    }
+
+    /// A 4 MB synthetic report must round-trip via `loadAndSanitize`
+    /// in well under a second. Catches a regression where the read or
+    /// scan moves back onto the main thread (the `await` would still
+    /// complete but RunLoop wouldn't process other main work concurrently;
+    /// the proxy here is wall time).
+    func testLoadAndSanitizeOnLargeFileReturnsQuickly() async throws {
+        // Memory: ~4 MB on disk + ~4 MB Data peak in detached task ≈ 12 MB
+        //         transient RSS (Data + UTF-8 String + sanitized scalar
+        //         array). Well under our 256 MB per-test budget. Wall:
+        //         50–500 ms locally, generous on CI.
+        let payload = String(repeating: "a", count: 4 * 1024 * 1024)
+        try writeFile("hang-bulk.txt", in: hangDir, contents: payload)
+        let url = hangDir.appendingPathComponent("hang-bulk.txt")
+        let start = Date()
+        let result = await DiagnosticsView.loadAndSanitize(
+            url: url, cap: 16 * 1024 * 1024
+        )
+        let elapsed = Date().timeIntervalSince(start)
+        guard case .success(let text) = result else {
+            return XCTFail("expected sanitized success, got \(result)")
+        }
+        XCTAssertEqual(text.count, 4 * 1024 * 1024)
+        XCTAssertLessThan(elapsed, 5.0,
+            "4 MB read+sanitize must not stall — the work must be dispatched off main")
+    }
+
+    /// Files larger than the inline cap must surface as a typed error.
+    /// The cap bound is enforced inside the detached task as a TOCTOU
+    /// guard (post-read size check); this pins that contract.
+    func testLoadAndSanitizeRejectsOversizeAfterRead() async throws {
+        // Memory: ~64 KB on disk; <100 KB transient. Wall: <50 ms.
+        let payload = String(repeating: "b", count: 64 * 1024)
+        try writeFile("hang-large.txt", in: hangDir, contents: payload)
+        let url = hangDir.appendingPathComponent("hang-large.txt")
+        // Set the cap below the actual file size so the post-read TOCTOU
+        // branch fires inside the worker.
+        let result = await DiagnosticsView.loadAndSanitize(url: url, cap: 32 * 1024)
+        if case .failure(.grewDuringRead(let bytes)) = result {
+            XCTAssertEqual(bytes, 64 * 1024)
+        } else {
+            XCTFail("expected .grewDuringRead, got \(result)")
+        }
+    }
+
+    func testLoadAndSanitizeStripsControlBytes() async throws {
+        // Memory: <1 KB. Wall: <20 ms.
+        // Plant an OSC-introducer byte sequence; sanitiser should
+        // collapse it to U+FFFD so a clipboard paste into another
+        // terminal can't re-execute the escape.
+        let raw = "before\u{1B}]52;c;abc\u{07}after"
+        try writeFile("hang-bel.txt", in: hangDir, contents: raw)
+        let url = hangDir.appendingPathComponent("hang-bel.txt")
+        let result = await DiagnosticsView.loadAndSanitize(
+            url: url, cap: 16 * 1024 * 1024
+        )
+        guard case .success(let text) = result else {
+            return XCTFail("expected sanitized success, got \(result)")
+        }
+        XCTAssertFalse(text.contains("\u{1B}"), "ESC must be replaced")
+        XCTAssertFalse(text.contains("\u{07}"), "BEL must be replaced")
+        XCTAssertTrue(text.contains("\u{FFFD}"), "U+FFFD substitution must appear")
+    }
 }
