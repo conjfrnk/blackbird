@@ -114,7 +114,23 @@ enum SparkleAlertOverride {
             // Modal interactions are not unit-testable in headless CI, so
             // there's no regression test for this — see audit ID #23.
             // TODO(audit #23): revisit if SPUUpdater grows a non-blocking API.
-            let parentWindow = NSApp.keyWindow ?? NSApp.mainWindow
+            //
+            // Audit L11. NSApp.keyWindow can be the Settings window if the
+            // user clicked "Check for Updates Now" from Settings → Updates.
+            // Attaching the "up to date" sheet to Settings is visually
+            // wrong and dismisses awkwardly when the user closes Settings
+            // mid-presentation. Prefer the first eligible terminal window
+            // (a MainWindowController's window without an attached sheet)
+            // before falling back to keyWindow / mainWindow — that gives
+            // the alert a stable visual home regardless of where the
+            // check was triggered.
+            let preferredTerminalWindow = NSApp.windows.first { window in
+                guard window.windowController is MainWindowController else { return false }
+                return window.isVisible && window.attachedSheet == nil
+            }
+            let parentWindow = preferredTerminalWindow
+                ?? NSApp.keyWindow
+                ?? NSApp.mainWindow
             if let window = parentWindow,
                window.attachedSheet == nil,
                NSApp.modalWindow == nil,
