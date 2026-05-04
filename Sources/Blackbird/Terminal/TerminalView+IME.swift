@@ -372,9 +372,6 @@ extension TerminalView: NSTextInputClient {
     func cursorCellRectInView() -> NSRect {
         let cw = metrics.cellWidth
         let ch = metrics.cellHeight
-        // Renderer adds `topInsetPoints` to every cell. Mirror that so the
-        // preedit anchor lines up with where the cursor is actually drawn.
-        let topInset = CGFloat(titlebarOnlyTopInset)
         let row: Int
         let col: Int
         #if DEBUG
@@ -389,13 +386,15 @@ extension TerminalView: NSTextInputClient {
         row = cursorRowInView()
         col = cursorColInView()
         #endif
-        let xPoints = TerminalView.horizontalContentInsetPoints + CGFloat(col) * cw
+        // Route through the cell↔view single-source-of-truth helper so
+        // the inset (horizontal + titlebar) can never drift between this
+        // anchor and the renderer's drawn cursor.
+        let origin = cellOriginPx(row: row, col: col)
         // Renderer renders row 0 at the top. In AppKit (flipped = false)
         // Y=0 sits at the *bottom*, so mirror: the cell's top-left in view
-        // coords is (bounds.height - topInset - (row+1)*ch).
-        let yPointsFromTop = topInset + CGFloat(row) * ch
-        let yPointsFromBottom = max(0, bounds.height - yPointsFromTop - ch)
-        return NSRect(x: xPoints, y: yPointsFromBottom, width: cw, height: ch)
+        // coords is (bounds.height - origin.y - ch).
+        let yPointsFromBottom = max(0, bounds.height - origin.y - ch)
+        return NSRect(x: origin.x, y: yPointsFromBottom, width: cw, height: ch)
     }
 
     /// Live cursor row in the visible grid. When scrolled-back into history

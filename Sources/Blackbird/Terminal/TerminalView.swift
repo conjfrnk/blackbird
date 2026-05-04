@@ -1440,6 +1440,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // AppKit's phantom tab-bar bookkeeping.
         let currentTop = Float(titlebarOnlyTopInset)
         renderer.setTopInsetPoints(currentTop)
+        // Sibling of setTopInsetPoints — keep the two inset setters in
+        // lockstep so a layout-transition race that runs draw(in:) before
+        // layout() can't paint cells at the unset default of x=0 for one
+        // frame. Cheap (no per-frame state, no FrameKey churn since
+        // currentLeftInset is constant for the view's lifetime).
+        renderer.setLeftInsetPoints(Float(Self.horizontalContentInsetPoints))
         if currentTop != lastSafeAreaTop {
             lastSafeAreaTop = currentTop
             // SIGWINCH must NOT run synchronously from the MTKViewDelegate
