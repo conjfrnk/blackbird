@@ -464,8 +464,9 @@ public final class TerminalSession: ObservableObject {
     // MARK: - Prompt navigation
 
     /// Record the (history, grid row) position at which an OSC 133 A
-    /// fired. Called on main from the event switch; takes a snapshot
-    /// synchronously via the core queue so the reading is consistent.
+    /// fired. Called on main from the event switch; the snapshot read
+    /// is dispatched async to coreQueue so a heavy feed backlog can't
+    /// block main while we wait for `bbterm.snapshot()` to drain.
     /// A new prompt resets `promptCursor` to nil so the next jump
     /// starts from the newest mark.
     private func recordPromptStart() {
@@ -475,15 +476,26 @@ public final class TerminalSession: ObservableObject {
         // demonstrates a precedent for handlers calling back into us off
         // their queue. Fail loud if a future caller lands here on coreQueue.
         dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
-            return
+        // Audit L7. Was `coreQueue.sync(execute: bbterm.snapshot)` —
+        // under heavy streaming output the sync would block main
+        // until every queued feed ahead of us drained. The audit
+        // acknowledged "missing a line or two of drift is negligible";
+        // hand the snapshot off async, then hop back to main to
+        // mutate `promptMarks` / `promptCursor` (those fields are
+        // owned by main).
+        coreQueue.async { [weak self] in
+            guard let self else { return }
+            guard let snap = self.bbterm.snapshot() else { return }
+            let mark = PromptMark(historySize: snap.historySize, gridRow: snap.cursorRow)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.promptMarks.append(mark)
+                if self.promptMarks.count > Self.promptMarkCap {
+                    self.promptMarks.removeFirst(self.promptMarks.count - Self.promptMarkCap)
+                }
+                self.promptCursor = nil
+            }
         }
-        let mark = PromptMark(historySize: snap.historySize, gridRow: snap.cursorRow)
-        promptMarks.append(mark)
-        if promptMarks.count > Self.promptMarkCap {
-            promptMarks.removeFirst(promptMarks.count - Self.promptMarkCap)
-        }
-        promptCursor = nil
     }
 
     /// Scroll the viewport to the previous recorded prompt. First press
