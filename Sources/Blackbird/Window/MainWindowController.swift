@@ -283,7 +283,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // subscriber will replace this the moment the shell sets its own.
         window?.title = (shell as NSString).lastPathComponent
         let metrics = view.metrics
-        let grid = metrics.grid(forPixelSize: view.bounds.size)
+        // Mirror `TerminalView.propagateResize` exactly — share the
+        // formula via `usableViewSize` so the start-size and the first
+        // SIGWINCH from `propagateResize` can never disagree. Earlier
+        // this used raw `view.bounds.size` which over-counted by ~2 cols
+        // on launch; the shell would emit a wider prompt that wrapped
+        // wrong until the first layout pass corrected it.
+        let usable = TerminalView.usableViewSize(
+            forBounds: view.bounds.size,
+            titlebarTopInset: view.titlebarOnlyTopInset,
+            metrics: metrics
+        )
+        let grid = metrics.grid(forPixelSize: usable)
         do {
             // `clamping:` avoids a trap on pathological bounds. See the
             // equivalent fix in `TerminalView.applyResizeIfNeeded` — with

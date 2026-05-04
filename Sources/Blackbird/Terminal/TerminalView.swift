@@ -836,22 +836,35 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return (row, col)
     }
 
-    private func propagateResize(async asyncResize: Bool = false) {
-        // `.fullSizeContentView` means our bounds include the titlebar region —
-        // subtract it (via titlebarOnlyTopInset) so we don't size the grid as
-        // though we had titlebar-height extra rows of real estate. Sub-cell
-        // pixel leftover from pixel-precise window resize gets absorbed into
-        // the right inset (the inset's effective right side floats from
-        // `horizontalContentInsetPoints` to `+ cellWidth - 1`).
-        let usableHeight = max(
-            metrics.cellHeight,
-            bounds.height - titlebarOnlyTopInset - Self.bottomContentInsetPoints
-        )
+    /// Strip the titlebar (top), bottom corner clearance, and L+R inset
+    /// from a raw view-bounds size to get the rectangle that actually
+    /// hosts the grid. Single source of truth for the formula — both
+    /// `propagateResize` and `MainWindowController.startSession` route
+    /// through it so the start-size and the first SIGWINCH can never
+    /// disagree on what "usable area" means.
+    public static func usableViewSize(
+        forBounds bounds: CGSize,
+        titlebarTopInset: CGFloat,
+        metrics: CellMetrics
+    ) -> CGSize {
         let usableWidth = max(
             metrics.cellWidth,
             bounds.width - 2 * Self.horizontalContentInsetPoints
         )
-        let grid = metrics.grid(forPixelSize: CGSize(width: usableWidth, height: usableHeight))
+        let usableHeight = max(
+            metrics.cellHeight,
+            bounds.height - titlebarTopInset - Self.bottomContentInsetPoints
+        )
+        return CGSize(width: usableWidth, height: usableHeight)
+    }
+
+    private func propagateResize(async asyncResize: Bool = false) {
+        let usable = Self.usableViewSize(
+            forBounds: bounds.size,
+            titlebarTopInset: titlebarOnlyTopInset,
+            metrics: metrics
+        )
+        let grid = metrics.grid(forPixelSize: usable)
         guard grid.cols > 0, grid.rows > 0 else { return }
         // `grid` is bounded by CellMetrics.sanePx (1M px / min cell size),
         // so in theory cols/rows can exceed UInt16.max on a degenerate
