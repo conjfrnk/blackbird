@@ -204,6 +204,60 @@ final class TerminalViewTests: XCTestCase {
                       "Flipping Option Key to Meta must rebuild the encoder with optionIsMeta=true")
     }
 
+    /// Test-only NSResponder that counts keyDown invocations. Wired
+    /// as `TerminalView.nextResponder` in tests that need to assert
+    /// the view forwarded an event up the responder chain.
+    private final class KeyEventCounter: NSResponder {
+        var keyDownCount = 0
+        override func keyDown(with event: NSEvent) {
+            keyDownCount += 1
+        }
+    }
+
+    func test_systemFunctionKey_forwardsToSuperWhenEncoderProducesNoBytes() throws {
+        // Audit M3. F13–F24 and Mac system keys (brightness, media,
+        // eject) report empty `charactersIgnoringModifiers` (or a
+        // private-use scalar) which the encoder turns into empty
+        // Data. Without a super-forward in keyDown, the event was
+        // silently consumed: the shell never saw it AND AppKit's
+        // menu chain / accelerator handlers never saw it either,
+        // so e.g. F15 brightness-up was swallowed while Blackbird
+        // was key.
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let recorder = RecordingPTY()
+        view.ptyRecorderForTests = recorder
+
+        // Wire a counter responder as the next responder in the chain
+        // so a `super.keyDown(with:)` lands somewhere observable.
+        // NSResponder's default keyDown forwards to nextResponder, so
+        // installing a counting responder downstream proves the
+        // forward happened.
+        let counter = KeyEventCounter()
+        view.nextResponder = counter
+
+        // Synthesize an F15 keyDown. F15 has keyCode 113 on macOS.
+        // characters / charactersIgnoringModifiers are empty for
+        // brightness-up on most layouts.
+        let f15Event = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: 113
+        ))
+        view.keyDown(with: f15Event)
+
+        XCTAssertTrue(recorder.sent.isEmpty,
+                      "F15 must not produce PTY bytes; recorder captured \(Array(recorder.sent))")
+        XCTAssertEqual(counter.keyDownCount, 1,
+                       "F15 with empty encoded bytes must fall through to super.keyDown so AppKit's responder chain sees the event (audit M3)")
+    }
+
     func test_commandKeyDoesNotSendToPty() throws {
         try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
                       "RunLoop-pumping test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the runtime invariant")

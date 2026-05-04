@@ -1785,7 +1785,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             )
         }
         #endif
-        if !bytes.isEmpty { sendToSession(bytes) }
+        if !bytes.isEmpty {
+            sendToSession(bytes)
+            return
+        }
+        // Audit M3. Encoder produced no bytes — typical for F13–F24
+        // and Mac system keys (brightness, media, eject) where
+        // `event.charactersIgnoringModifiers` is empty or a private-
+        // use scalar that doesn't map to a shell-meaningful sequence.
+        // Without the super-forward, AppKit's responder chain never
+        // sees the event: F15 brightness-up (and similar) is silently
+        // swallowed while Blackbird is key. Mirroring keyUp's
+        // empty-bytes fall-through (line ~1828) lets the menu chain
+        // and accelerator handlers process the system key.
+        super.keyDown(with: event)
     }
 
     /// Key release. Only surfaces bytes when Kitty progressive-enhancement
