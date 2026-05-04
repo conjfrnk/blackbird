@@ -6,6 +6,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-05-04
+
+Cumulative bug-fix and hardening release. Audit-driven sweep of the Rust VT core, the PTY layer, the renderer, and the input pipeline; every audit finding (2 High, 4 Medium, 20 Low) addressed in 26 commits + 1 reviewer follow-up.
+
+### Reliability
+- **Fixed**: SIGPIPE on the PTY master fd no longer kills Blackbird. Writing a keystroke or IME commit during the moment the slave fd closes (typical at shell exit) used to deliver SIGPIPE and terminate the entire app via the default disposition. `F_SETNOSIGPIPE` on the master fd now converts the same condition to EPIPE on the syscall, which `writeRawLocked` already handles. (H1)
+- **Fixed**: Post-fork-pre-exec child path no longer calls Swift `Array`/`Dictionary`/`String`/`os.Logger`/`getpwuid`. Any of those could deadlock on a malloc / dispatch / Mach-port lock the parent's other threads were holding at fork time. All such work hoisted to the parent; the child path is now strictly POSIX async-signal-safe. (H2 + M2)
+- **Fixed**: HUP-ignoring shells (`trap '' HUP`) are no longer immortal when the spawn-time `proc_pidinfo` failed. Previously the SIGKILL escalation skipped on missing start-time to avoid PID-reuse risk; the resulting leaked tab is the worse failure. SIGKILL now fires anyway with a logged breadcrumb. (M1)
+- **Changed**: Force-kill ladder is now SIGHUP → SIGTERM (100 ms) → SIGKILL (200 ms), matching Terminal.app and iTerm2. Total user-visible close latency unchanged. (L5)
+
+### Input
+- **Fixed**: F13–F24 and Mac system keys (brightness, media, eject) now reach AppKit's responder chain instead of being silently swallowed. (M3)
+- **Changed**: Find/regex ReDoS heuristic catches brace-quantified nested groups (`(a{1,})+`, `(.+){2,5}`, etc.). The 250 ms timeout is the actual safety net; this is the cheap first-pass. (M4)
+- **Fixed**: Find-replace refuses replacement strings containing newlines (LF or CR). A `\n` in the Replace field would otherwise execute the leading fragment as a separate shell command. (L20)
+- **Added**: Opt-in `bb.confirmMultiLinePaste` preference (default off). When on, a non-bracketed-paste with embedded LF or CR pops a confirmation alert. (L19)
+
+### Security / hygiene
+- **Fixed**: OSC 133 D prompt-mark events are dropped when the exit-code payload contains non-ASCII-digit bytes. A hostile shell emitting `OSC 133;D;abc ST` no longer reaches Swift as a corrupt String. Per-instance one-shot log breadcrumb. (L1, reviewer follow-up)
+- **Fixed**: OSC 7 reject-log latches are per-`BBTerm` rather than process-wide. Sibling tabs (or fresh shells in the same tab) now each get the breadcrumb on first occurrence instead of being silently suppressed. (L3)
+- **Fixed**: Pill context menu (`Rename…`, `Reset to Auto`) hides items when no session — NSMenu doesn't run `validateMenuItem` on context menus, so the items previously appeared enabled but silently no-op'd. (L9)
+- **Changed**: Sparkle "you're up to date" alert prefers a terminal window over the Settings window if the check was triggered from Settings → Updates. (L11)
+
+### Robustness
+- **Fixed**: `BBTerm.setColor(slot:)` clamps out-of-range `Int` (negative or > 65535) instead of trapping. Hand-edited theme JSON or preference can no longer crash the app. (L2)
+- **Fixed**: Drop the redundant `stat` before `chdir` in the post-fork child — closes a TOCTOU window and a non-AS-safe call. (L4)
+- **Fixed**: `recordPromptStart` no longer blocks main on the feed backlog under heavy streaming output; snapshot read is dispatched async to coreQueue. (L7)
+- **Fixed**: `publishTitle` reads `displayTitle` inside the main-async block instead of capturing a snapshot before the hop, eliminating a torn-update window for back-to-back title changes. (L6)
+- **Fixed**: `spawnedAt` cross-queue race closed by promoting the field from `var` to `let` and threading it through init. (L8)
+- **Fixed**: `bypassCloseConfirm` resets synchronously in `applicationWillTerminate` instead of via an async closure that races process teardown. (L10)
+- **Fixed**: `hideTabBarViews` no longer mutates the frame of AppKit-private tab bar views; relies on `isHidden` alone. (L12)
+
+### Renderer / hygiene
+- **Added**: Stride pin for `CursorUniforms` (mirrors the existing `CellInstance` pin) so a Swift/Metal struct desync fails loudly at first render rather than scrambling cursor draws. (L17)
+- **Added**: Precondition that `cursorColor.w == 1.0` in `setCursorColor`. The cursor pipeline is built without blending; alpha < 1 would write a transparent hole. (L14)
+- **Added**: Debug assertion that a flush-orphan slot index isn't already in `freeNarrowSlots` — guards against a future regression where two glyphs alias the same atlas region. (L15)
+- **Documented**: DIM (`SGR 2`) is intentionally halved in sRGB-encoded space, consistent with the rest of the sRGB pipeline. (L13)
+- **Documented**: Color-emoji raster path is intentionally sRGB even on Display P3 panels — pipeline-wide sRGB consistency vs. emoji-fidelity trade-off. (L16)
+
+### Scripts
+- **Fixed**: `make-appcast.sh` enumerates DMGs via shell glob array instead of `for x in $(ls ...)` — whitespace-safe by construction. (L18)
+
+### CI / process
+- Restored CI to green for the first time since v0.2.0:
+  - `cargo fmt` drift across the OSC scanner / OSC 133 paths.
+  - Four `PreferencesTests` `*_fallsBackToDefault*` cases obsoleted by commit 1eb85ab; the semantically correct repair-target tests already exist behind `BB_RUN_STRESS_TESTS=1`.
+  - Test-quality lint baseline bumped to 17 (two pre-existing `XCTAssertNotNil` smoke checks from commit 69c5bb2).
+  - Smoke test's `setOnBytes`-before-`startReading` assertion moved into `readQueue.async` so it observes serial-queue-ordered state instead of racing the dispatch.
+
 ## [0.2.2] - 2026-05-04
 
 ### Changed
