@@ -1237,25 +1237,39 @@ public final class PTY {
             // recycled stranger. The guards below treat "can't
             // verify" as "skip", which is the safe direction.
             guard let original = originalStartTime else {
-                // No start-time was captured at spawn (audit H-1).
-                // `bsdProcessStartTime` can transiently fail at fork
-                // for any kernel-info reason — proc_pidinfo races a
-                // partially-set-up process, EPERM under sandbox, etc.
-                // Without a baseline we cannot prove the pid still
-                // belongs to our child, so we MUST NOT escalate: if
-                // the child exited inside the 200ms grace window and
-                // macOS recycled its pid, an unconditional SIGKILL
-                // here would terminate the unrelated stranger. Skip
-                // is the safe-by-default direction; the read loop's
-                // SIGHUP will still tear down a well-behaved child,
-                // and a HUP-ignoring child without a start-time
-                // baseline is the rare-rare case we accept lingering
-                // over killing the wrong process. The pre-M9
-                // unconditional-kill comment that lived here was
-                // wrong by today's standards.
-                Self.logger.log(
-                    "PTY.terminate skipping SIGKILL pid=\(pid, privacy: .public) (no start-time captured at spawn)"
-                )
+                // Audit M1. `bsdProcessStartTime` failed at spawn —
+                // proc_pidinfo can race a partially-set-up process,
+                // hit EPERM under sandbox changes, or just glitch.
+                // Without a baseline we can't compare current start-
+                // time to prove the pid still belongs to our child.
+                //
+                // The pre-M1 stance was "skip SIGKILL to avoid
+                // killing a recycled-pid stranger." That posture
+                // has the worse failure mode: a HUP-ignoring child
+                // (e.g. `trap '' HUP`) becomes immortal — the read
+                // loop never sees EOF, waitpid is never called,
+                // master fd leaks, and the user can't close the
+                // tab. PID reuse on macOS within a 200ms window is
+                // already vanishingly rare (the kernel cycles
+                // through pid space and biases away from immediate
+                // reuse); skipping SIGKILL trades that microscopic
+                // risk for a definite leak.
+                //
+                // Send SIGKILL anyway, matching the posture of the
+                // read-loop's own local SIGKILL escalation (line
+                // ~687) which fires without a start-time check.
+                // Log loudly so any rare PID-reuse incident can be
+                // correlated with this code path.
+                let killRC = kill(pid, SIGKILL)
+                if killRC != 0 {
+                    let savedErrno = errno
+                    let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
+                    Self.logger.log(level: level, "PTY.terminate unverified SIGKILL: kill(\(pid, privacy: .public), SIGKILL) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public)) (no start-time captured at spawn)")
+                } else {
+                    Self.logger.log(
+                        "PTY.terminate unverified SIGKILL pid=\(pid, privacy: .public) (no start-time captured at spawn — accepted PID-reuse risk in exchange for not leaking a HUP-ignoring child)"
+                    )
+                }
                 return
             }
             guard let current = Self.bsdProcessStartTime(pid: pid) else {
