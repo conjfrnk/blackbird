@@ -1575,6 +1575,28 @@ impl Drop for HandlerInFlightGuard {
 /// (2026-04-29).
 static HANDLER_REENTRY_LOGGED: Once = Once::new();
 
+/// Returns `true` when the calling FFI entry point would alias the outer
+/// `&mut Term` borrow held by `bb_term_input` (or any other entry currently
+/// dispatching through `CallbackCell::fire`). Audit H-5 (2026-05-03):
+/// every entry point that reborrows `&mut *term` / `&*term` consults this
+/// before the reborrow so a misbehaving callback that synchronously calls
+/// back into a `bb_term_*` function bails out cleanly instead of producing
+/// a second mutable alias of the alacritty `Term`. The first re-entry on
+/// process lifetime is logged once via `HANDLER_REENTRY_LOGGED`; later
+/// hits are silent so a sustained regression doesn't flood the log.
+fn ffi_reentry_blocked(entry: &str) -> bool {
+    if !FFI_HANDLER_IN_FLIGHT.with(|c| c.get()) {
+        return false;
+    }
+    HANDLER_REENTRY_LOGGED.call_once(|| {
+        eprintln!(
+            "[blackbird_core] {entry} called from inside event handler — \
+             dropping re-entrant call to avoid &mut Term alias. Audit H-5."
+        );
+    });
+    true
+}
+
 /// Panic-swallowing guard for contexts where no `BBTerm` exists yet
 /// (`bb_term_new`'s allocation path, `bb_term_free`'s destructor).
 fn guard_no_term<T>(fallback: T, f: impl FnOnce() -> T) -> T {
@@ -1611,6 +1633,17 @@ const MAX_DIM: u16 = 1000;
 /// materialises in practice — but the cap is real defence against a runaway
 /// caller. 200k lines covers dense Claude Code / build-log workloads.
 const SCROLLBACK_MAX: u32 = 200_000;
+/// Per-call row cap on `bb_term_text_range`. Without the cap a single FFI
+/// call against a `SCROLLBACK_MAX × MAX_DIM = 200 000 × 1000` grid would
+/// allocate `MAX_DIM` bytes per row × that many rows ≈ 200 MB transient on
+/// one call — easy DoS amplification because every row gets its own
+/// `String` plus the final join. 65 536 covers any realistic copy
+/// selection (the tallest sane scrollback selection is the visible
+/// viewport, ~1 000 rows; whole-history copies are typically capped by
+/// the grid's `SCROLLBACK_MAX = 200 000`, so 65 536 leaves a generous
+/// 32× margin over plausible interactive selections while bounding
+/// worst-case heap to ~64 MB before the join). Audit M-1 (2026-05-03).
+const MAX_TEXT_RANGE_ROWS: u32 = 65_536;
 
 /// Create a new terminal. Returns null on invalid input or internal error.
 ///
@@ -1765,32 +1798,23 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         if term.is_null() || len == 0 || bytes.is_null() {
             return;
         }
-        // Audit M-9 follow-up (2026-04-29): re-entry catch one frame
-        // earlier than the Swift-side `BBTerm.isInsideEventDispatch`
-        // precondition. If the user callback (currently on stack via
-        // `CallbackCell::fire`) synchronously called back into
-        // `bb_term_input`, the outer `&mut Term` borrow held by the
-        // outer call is still live. Bailing here drops the input
-        // bytes silently (they're already bytes the parser saw) but
-        // critically prevents the second `&mut *term` reborrow below
-        // from aliasing.
+        // Audit M-9 follow-up (2026-04-29) + H-5 (2026-05-03): re-entry
+        // catch one frame earlier than the Swift-side
+        // `BBTerm.isInsideEventDispatch` precondition. If the user
+        // callback (currently on stack via `CallbackCell::fire`)
+        // synchronously called back into `bb_term_input`, the outer
+        // `&mut Term` borrow held by the outer call is still live.
+        // Bailing here drops the input bytes silently (they're already
+        // bytes the parser saw) but critically prevents the second
+        // `&mut *term` reborrow below from aliasing.
         //
-        // One-shot warning + early return is the right shape: a
-        // panic here would be caught by `guard_with_term` and
-        // dispatched back to the same callback we're trying to
-        // protect, defeating the purpose. The Swift precondition
-        // still backstops this for cases the cell.fire path didn't
-        // mark (e.g. event dispatch from outside `fire`, or future
-        // entry-point coverage). `bb_term_input` is the canonical
-        // re-entry vector — every bytes-in path runs the VT parser,
-        // which fires events.
-        if FFI_HANDLER_IN_FLIGHT.with(|c| c.get()) {
-            HANDLER_REENTRY_LOGGED.call_once(|| {
-                eprintln!(
-                    "[blackbird_core] bb_term_input called from inside event handler — \
-                     dropping re-entrant input to avoid &mut Term alias. Audit M-9."
-                );
-            });
+        // One-shot warning + early return is the right shape: a panic
+        // here would be caught by `guard_with_term` and dispatched back
+        // to the same callback we're trying to protect, defeating the
+        // purpose. Audit H-5 extended the same gate to every other
+        // entry point that reborrows `&mut *term` / `&*term`; the
+        // helper centralises the latch read and one-shot log.
+        if ffi_reentry_blocked("bb_term_input") {
             return;
         }
         // Audit L-11 (2026-04-29): defense-in-depth against
@@ -2295,6 +2319,9 @@ pub unsafe extern "C" fn bb_term_resize2(
         if term.is_null() || cols == 0 || rows == 0 {
             return fallback;
         }
+        if ffi_reentry_blocked("bb_term_resize2") {
+            return fallback;
+        }
         // Floor + ceiling on dimensions. See module-level `MIN_DIM` /
         // `MAX_DIM` for rationale. Symmetric with `bb_term_new` (audit H-7).
         let bb = &mut *term;
@@ -2355,6 +2382,9 @@ pub unsafe extern "C" fn bb_term_set_event_cb(
 ) {
     guard_with_term(term, (), || {
         if term.is_null() {
+            return;
+        }
+        if ffi_reentry_blocked("bb_term_set_event_cb") {
             return;
         }
         (*term).callback.set(cb, ctx);
@@ -2592,6 +2622,9 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         if term.is_null() {
             return std::ptr::null();
         }
+        if ffi_reentry_blocked("bb_term_take_snapshot") {
+            return std::ptr::null();
+        }
         let bb = &mut *term;
 
         // Drain the damage set BEFORE reading the grid. `Term::damage` takes
@@ -2647,13 +2680,14 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // allocations for the intern table.
         const OSC8_URI_MAX: usize = 4096;
         const OSC8_TOTAL_INTERN_BYTES_CAP: usize = 1024 * 1024;
-        // Phase 1 state: dedup'd URIs in insertion order, parallel
-        // dedup map keyed by `&str`. `local_uri_to_id` borrows from
-        // entries in `phase1_uris` (via `String::as_str`)? No — we
-        // store a fresh `String` clone in the map's key so it can
-        // outlive the alacritty Hyperlink borrow each iteration.
-        let mut phase1_uris: Vec<String> = Vec::new();
-        let mut local_uri_to_id: std::collections::HashMap<String, u16> =
+        // Phase 1 state: dedup'd URIs in insertion order, plus a parallel
+        // dedup map sharing the same allocation. Audit L-7 (2026-05-03):
+        // wrap each unique URI in `Arc<str>` once and clone the Arc into
+        // both the vec and the dedup map — cloning an Arc is one atomic
+        // increment, much cheaper than the prior shape that allocated a
+        // fresh `String` per side (one `to_owned`, one `clone`).
+        let mut phase1_uris: Vec<Arc<str>> = Vec::new();
+        let mut local_uri_to_id: std::collections::HashMap<Arc<str>, u16> =
             std::collections::HashMap::new();
         for indexed in grid.display_iter() {
             let link_id: u16 = match indexed.cell.hyperlink() {
@@ -2672,8 +2706,8 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                         0
                     } else {
                         let id = (phase1_uris.len() + 1) as u16; // 1-based; 0 = no link
-                        let owned = uri.to_owned();
-                        local_uri_to_id.insert(owned.clone(), id);
+                        let owned: Arc<str> = Arc::from(uri);
+                        local_uri_to_id.insert(Arc::clone(&owned), id);
                         phase1_uris.push(owned);
                         id
                     }
@@ -2739,19 +2773,22 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             links.push(sentinel);
             local_to_final.push(0); // local 0 reserved for "no link"
             for uri in &phase1_uris {
+                let uri_str: &str = uri.as_ref();
                 let cstr_arc: Option<Arc<std::ffi::CStr>> = if let Some(existing) =
-                    bb.uri_cstr_cache.get(uri).cloned()
+                    bb.uri_cstr_cache.get(uri_str).cloned()
                 {
                     Some(existing)
-                } else if bb.uri_cache_bytes.saturating_add(uri.len()) > OSC8_TOTAL_INTERN_BYTES_CAP
+                } else if bb.uri_cache_bytes.saturating_add(uri_str.len())
+                    > OSC8_TOTAL_INTERN_BYTES_CAP
                 {
                     None
                 } else {
-                    match std::ffi::CString::new(uri.as_str()) {
+                    match std::ffi::CString::new(uri_str) {
                         Ok(cs) => {
                             let arc: Arc<std::ffi::CStr> = cs.into();
-                            bb.uri_cstr_cache.insert(uri.clone(), Arc::clone(&arc));
-                            bb.uri_cache_bytes += uri.len();
+                            bb.uri_cstr_cache
+                                .insert(uri_str.to_owned(), Arc::clone(&arc));
+                            bb.uri_cache_bytes += uri_str.len();
                             Some(arc)
                         }
                         Err(_) => None,
@@ -2941,6 +2978,9 @@ pub unsafe extern "C" fn bb_term_set_color_query_enabled(term: *mut BBTerm, enab
         if term.is_null() {
             return;
         }
+        if ffi_reentry_blocked("bb_term_set_color_query_enabled") {
+            return;
+        }
         (*term).color_query_enabled = enabled != 0;
     })
 }
@@ -2963,6 +3003,9 @@ pub unsafe extern "C" fn bb_term_set_color_query_enabled(term: *mut BBTerm, enab
 pub unsafe extern "C" fn bb_term_current_mode(term: *mut BBTerm) -> u32 {
     guard_with_term(term, 0u32, || {
         if term.is_null() {
+            return 0;
+        }
+        if ffi_reentry_blocked("bb_term_current_mode") {
             return 0;
         }
         let bb = &*term;
@@ -3072,6 +3115,9 @@ pub unsafe extern "C" fn bb_term_scroll(term: *mut BBTerm, delta: i32) {
         if term.is_null() || delta == 0 {
             return;
         }
+        if ffi_reentry_blocked("bb_term_scroll") {
+            return;
+        }
         let bb = &mut *term;
         use alacritty_terminal::grid::Scroll;
         bb.term.scroll_display(Scroll::Delta(delta));
@@ -3094,6 +3140,9 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
         if term.is_null() {
             return;
         }
+        if ffi_reentry_blocked("bb_term_scroll_to_bottom") {
+            return;
+        }
         let bb = &mut *term;
         use alacritty_terminal::grid::Scroll;
         bb.term.scroll_display(Scroll::Bottom);
@@ -3114,6 +3163,9 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
 pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
     guard_with_term(term, (), || {
         if term.is_null() {
+            return;
+        }
+        if ffi_reentry_blocked("bb_term_clear_all") {
             return;
         }
         let bb = &mut *term;
@@ -3183,6 +3235,9 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
 pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, rgb: u32) {
     guard_with_term(term, (), || {
         if term.is_null() {
+            return;
+        }
+        if ffi_reentry_blocked("bb_term_set_named_color") {
             return;
         }
         let bb = &mut *term;
@@ -3298,6 +3353,9 @@ pub unsafe extern "C" fn bb_term_text_range(
         if term.is_null() {
             return std::ptr::null_mut();
         }
+        if ffi_reentry_blocked("bb_term_text_range") {
+            return std::ptr::null_mut();
+        }
         use alacritty_terminal::index::{Column, Line};
 
         let bb = &*term;
@@ -3327,7 +3385,23 @@ pub unsafe extern "C" fn bb_term_text_range(
         // core/fuzz) would otherwise spin ~4 billion loop iterations that
         // each do nothing but bounds-check and increment.
         let iter_start = s_line.max(topmost);
-        let iter_end = e_line.min(bottommost);
+        let mut iter_end = e_line.min(bottommost);
+
+        // Audit M-1 (2026-05-03): bound the per-call allocation so a
+        // single FFI request can't drive an O(rows × cols) heap
+        // amplification. Without the cap a 200 000-row scrollback ×
+        // 1000-col grid yields ~200 MB transient on one call. Truncate
+        // (preserve the head of the requested range, drop the tail)
+        // rather than fail outright — every realistic selection fits
+        // well under the cap, and truncation keeps user-visible behaviour
+        // stable instead of returning null on legitimate huge selections.
+        // i64 arithmetic side-steps the i32::MIN/MAX overflow case the
+        // post-clamp range can still expose if the grid spans the full
+        // i32 range.
+        let span = (iter_end as i64).saturating_sub(iter_start as i64);
+        if span >= MAX_TEXT_RANGE_ROWS as i64 {
+            iter_end = iter_start.saturating_add((MAX_TEXT_RANGE_ROWS - 1) as i32);
+        }
 
         // Collect each line's emitted text, then join with '\n' at the end.
         let mut lines: Vec<String> = Vec::new();
@@ -3527,6 +3601,9 @@ pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
 #[cfg(any(test, feature = "test-only"))]
 pub unsafe extern "C" fn bb_term_test_only_panic(term: *mut BBTerm) {
     guard_with_term(term, (), || {
+        if ffi_reentry_blocked("bb_term_test_only_panic") {
+            return;
+        }
         panic!("intentional test panic");
     });
 }
