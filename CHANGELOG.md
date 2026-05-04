@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-03
+
+### Security
+- OSC 8 hyperlinks with embedded credentials (`https://user:pass@host/`) are now rejected at the policy gate. `URL.host` strips userinfo before the IDN homograph and divergence checks ran, so credential-bearing URLs previously sailed through to `NSWorkspace.open` (passed to the system browser in plaintext) and to the hover tooltip (visible via the AX API and screen capture). The redactor strips userinfo via `URLComponents` before display (audit H3).
+
+### Fixed
+- IME multi-scalar commits (NFD `à`, keycap `#️⃣`, VS-16 emoji like `❤️`) no longer drop trailing scalars under Kitty flag 8 (`reportAllKeysAsEsc`); multi-scalar input falls back to UTF-8 instead of emitting a single-codepoint CSI u (H4).
+- Window minimize/restore no longer leaves the surface frozen on a stale frame: `lastFrameKey` advances atomically only after a successful drawable + encoder, so nil-drawable bails leave the skip-cache pinned to the last actually-encoded frame (H7).
+- Atlas saturation flush no longer tears glyphs on the flush frame: a flush barrier drains in-flight GPU command buffers before the shared-storage textures are overwritten (H6).
+- `bb.prefsSchemaVersion` replaces the unprefixed `prefsSchemaVersion`; a global `defaults write -g prefsSchemaVersion <n>` can no longer permanently bypass schema migrations via NSGlobalDomain (H8). One-shot bootstrap promotes the legacy key from the app's persistent domain on first launch.
+- Corrupted `themeRaw` / `themeModeRaw` values now repair to `Gruvbox` / `dark` (the registered defaults), not `Default` / `auto` — a tampered pref no longer recovers to a different state than a fresh install (M4).
+- VS-16-paired emoji (`❤️`) and keycap sequences (`#️⃣`) measure as 2 cells in the IME preedit overlay (L5).
+- Lone CR (0x0D) on the non-bracketed-paste branch converts to LF before reaching the PTY; a hostile clipboard payload with `cmd\r` no longer triggers Enter under raw-mode TUIs where ICRNL is off (L4).
+- Tab strip: closing a focused tab snapshots focus before the synchronous close mutates `tabs.count` (M7). Long titles now use binary-search truncation; OSC 0/2 titles are capped at 256 graphemes at ingress so a hostile remote can't blow up per-frame measurement cost (M8).
+- Diagnostics copy/email reads + sanitizes off the main thread; the Settings UI no longer stalls for seconds on a 16 MB report (M6).
+- `BBTerm.resize` returns `Size?` — nil signals the Rust panic fallback so callers skip TIOCSWINSZ and the kernel winsize stays in lockstep with the (unchanged) grid (M3).
+- PTY no longer drops bytes the shell emits before `onBytes` is wired; `setOnBytes` + `startReading()` are now a documented pair, and the optional-closure storage data race is closed (M2).
+- `installKittyTerminfoIfNeeded` now checks `tic` exit status; a hostile pre-planted `xterm-kitty` terminfo entry can no longer survive a failed re-install — falls back to `xterm-256color` (L1).
+- OSC 7 `.unknown` classification logs the reason once per `.local→.unknown` transition; the latch re-arms on each `.local` so reconnect cycles each get a breadcrumb (L3).
+- Font-slider `renderer.reconfigure` failure now logs an error breadcrumb in Release builds (L2).
+- `fontSize` / `translucency` `didSet` use re-entry boolean guards so out-of-range writes don't double-fire `UserDefaults.set` and `objectWillChange` — closes the latent 982b719-class feedback-loop pattern (M5). `PTY.terminate()` collapses check + set into one `stateQueue.sync` (L6).
+
+### Internal
+- Rust core: `FFI_HANDLER_IN_FLIGHT` re-entry latch extended from `bb_term_input` to every entry point that reborrows `&mut BBTerm` (clear_all, resize2, set_named_color, take_snapshot, scroll, scroll_to_bottom, text_range, current_mode, set_event_cb, set_color_query_enabled, test_only_panic). A misbehaving callback synchronously calling one of those previously aliased the outer mutable borrow — UB by Rust's borrow rules (H5).
+- Rust core: `bb_term_text_range` truncates iteration at 65,536 rows so a malformed FFI request can't allocate ~200 MB transient on a saturated 200k-row scrollback (M1). URI intern dedupe uses `Arc<str>` to halve per-snapshot allocations (L7).
+- Release tooling: `make-appcast.sh` filters prerelease DMGs before `sort -V` (would otherwise misship rc as GA — C1); `smoke.sh` captures wait exit and fails on crash-on-launch (H1); `release.sh` propagates Info.plist read failure rather than shipping `Blackbird-0.0.0.dmg` (H2); appcast `pubDate` derived from the tag commit timestamp so retries are byte-identical (M11); STRAY checks use anchored `grep -Fxv` (M10); `trap EXIT` cleanup added for DMG mounts and tempdirs (M9).
+
+## [0.2.0] - 2026-05-01
+
 ### Added
 - Diagnostics tab in Settings — surfaces hang reports (from `~/Library/Logs/Blackbird/`) and macOS crash reports (from `~/Library/Logs/DiagnosticReports/`) with Reveal in Finder, Copy to Clipboard, and Email Diagnostics actions. No auto-upload, no third-party SDK, no backend.
 - VoiceOver navigation by character / word / line — `TerminalView` promoted from `.staticText` to `.textArea` with full character / line / range accessors (F-S5-021).
