@@ -232,8 +232,14 @@ public final class BBTerm {
     /// A DEBUG `assertionFailure` still fires on a zero input so legacy
     /// callers that were relying on the old precondition catch the drift
     /// during development.
+    ///
+    /// Audit M3: returns `nil` when `bb_term_resize2` reports the panic
+    /// fallback `(0, 0, 0)` (the handle is null OR a panic was caught
+    /// by the Rust core). Callers driving `TIOCSWINSZ` must NOT fall
+    /// back to the requested dims on nil — kernel winsize would desync
+    /// from the grid. Skip the ioctl and keep the prior winsize instead.
     @discardableResult
-    public func resize(to size: Size) -> Size {
+    public func resize(to size: Size) -> Size? {
         #if DEBUG
         if size.cols == 0 || size.rows == 0 {
             assertionFailure(
@@ -258,14 +264,16 @@ public final class BBTerm {
                 }
             }
         }
-        guard let h = handle else { return Size(cols: clampedCols, rows: clampedRows) }
+        guard let h = handle else { return nil }
         let result = bb_term_resize2(h, clampedCols, clampedRows)
         // The wrapper-side clamp guarantees a non-zero (cols, rows) reach
         // the FFI, so a `(0, 0, 0)` return now exclusively signals the
-        // null-handle / panic fallback path. Fall through to returning
-        // the clamped request, which itself describes a usable grid.
+        // panic fallback path the Rust core's `catch_unwind` returns when
+        // the resize aborted. Surface that to the caller as `nil` so the
+        // PTY's TIOCSWINSZ doesn't drift away from the actually-applied
+        // grid dimensions.
         if result.applied_cols == 0 || result.applied_rows == 0 {
-            return Size(cols: clampedCols, rows: clampedRows)
+            return nil
         }
         return Size(cols: result.applied_cols, rows: result.applied_rows)
     }

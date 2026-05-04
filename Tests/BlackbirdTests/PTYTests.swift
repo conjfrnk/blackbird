@@ -41,14 +41,15 @@ final class PTYTests: XCTestCase {
         let exp = expectation(description: "got bytes")
         var collected = Data()
         var fulfilled = false
-        pty.onBytes = { [weak pty] chunk in
+        pty.setOnBytes { [weak pty] chunk in
             collected.append(chunk)
             if collected.count >= 5, !fulfilled {
                 fulfilled = true
-                pty?.onBytes = nil
+                pty?.setOnBytes(nil)
                 exp.fulfill()
             }
         }
+        pty.startReading()
 
         wait(for: [exp], timeout: 3.0)
         XCTAssertEqual(String(data: collected.prefix(5), encoding: .utf8), "hello")
@@ -69,15 +70,16 @@ final class PTYTests: XCTestCase {
         let exp = expectation(description: "echoed")
         var seen = Data()
         var fulfilled = false
-        pty.onBytes = { [weak pty] chunk in
+        pty.setOnBytes { [weak pty] chunk in
             seen.append(chunk)
             // sh echoes the command before running it.
             if seen.contains("exit".data(using: .utf8)!), !fulfilled {
                 fulfilled = true
-                pty?.onBytes = nil
+                pty?.setOnBytes(nil)
                 exp.fulfill()
             }
         }
+        pty.startReading()
 
         pty.write("exit\n".data(using: .utf8)!)
         wait(for: [exp], timeout: 3.0)
@@ -139,14 +141,15 @@ final class PTYTests: XCTestCase {
         let exp = expectation(description: "child env")
         var out = Data()
         var fulfilled = false
-        pty.onBytes = { [weak pty] chunk in
+        pty.setOnBytes { [weak pty] chunk in
             out.append(chunk)
             if out.contains(Data("]".utf8)), !fulfilled {
                 fulfilled = true
-                pty?.onBytes = nil
+                pty?.setOnBytes(nil)
                 exp.fulfill()
             }
         }
+        pty.startReading()
         wait(for: [exp], timeout: 3.0)
         let line = String(data: out, encoding: .utf8) ?? ""
         XCTAssertTrue(
@@ -168,6 +171,8 @@ final class PTYTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
+        // Audit M2: kick the read loop so terminate() reaps the child.
+        pty.startReading()
         let group = DispatchGroup()
         let concurrentQ = DispatchQueue(
             label: "test.concurrent", attributes: .concurrent
@@ -230,7 +235,7 @@ final class PTYTests: XCTestCase {
         var sawResized = false
         let resized = expectation(description: "resized size")
         let lock = NSLock()
-        pty.onBytes = { chunk in
+        pty.setOnBytes { chunk in
             lock.lock()
             out.append(chunk)
             let text = String(data: out, encoding: .utf8) ?? ""
@@ -248,6 +253,7 @@ final class PTYTests: XCTestCase {
             }
             lock.unlock()
         }
+        pty.startReading()
         // 10 s (not the 3 s used by the simpler PTY tests above) because
         // this path is heavier: fork + /bin/sh exec + `stty size` + trap
         // registration before `initial` can fulfill, and TIOCSWINSZ →
@@ -271,5 +277,96 @@ final class PTYTests: XCTestCase {
         lock.unlock()
         XCTAssertTrue(line.contains("40 120"),
                       "post-resize stty must report new dims; saw: \(line)")
+    }
+
+    /// Audit L1: a non-zero `tic` exit MUST short-circuit before the
+    /// `infocmp` probe. A pre-planted hostile `xterm-kitty` entry would
+    /// otherwise survive — the probe succeeds against the attacker's
+    /// entry and the child gets `TERM=xterm-kitty` against terminfo
+    /// nobody installed. The decision helper takes a probe closure so
+    /// we can drive both branches without running `tic`.
+    func test_kittyTerminfoDecision_ticFailureForcesFallback_evenIfProbeWouldSucceed() {
+        var probeCalled = false
+        let probe: () -> Bool = {
+            probeCalled = true
+            return true  // simulate hostile pre-planted entry — probe succeeds
+        }
+        let result = PTY.decideKittyTerminfoAvailability(ticExit: 1, probe: probe)
+        XCTAssertFalse(
+            result,
+            "tic non-zero exit must force xterm-256color fallback regardless of probe outcome"
+        )
+        XCTAssertFalse(
+            probeCalled,
+            "tic failure must short-circuit before probing — pre-planted entries must not be trusted"
+        )
+    }
+
+    /// Audit L1 happy path: tic exit 0 + successful probe yields the
+    /// xterm-kitty TERM. Pins that the success branch still works.
+    func test_kittyTerminfoDecision_ticSuccessAndProbeSuccess_returnsTrue() {
+        let result = PTY.decideKittyTerminfoAvailability(ticExit: 0, probe: { true })
+        XCTAssertTrue(result, "tic=0 + probe=true should return true")
+    }
+
+    /// Audit L1: tic exit 0 + probe failure also yields fallback. The
+    /// probe is the load-bearing check when tic succeeded — without it
+    /// we'd advertise xterm-kitty to a child whose ncurses can't find
+    /// the entry.
+    func test_kittyTerminfoDecision_ticSuccessButProbeFails_returnsFalse() {
+        let result = PTY.decideKittyTerminfoAvailability(ticExit: 0, probe: { false })
+        XCTAssertFalse(result, "tic=0 + probe=false should return false (fallback)")
+    }
+
+    /// Audit M2: bytes the shell emits before the consumer wires `onBytes`
+    /// must NOT be dropped on the floor. The contract changed: `PTY.spawn`
+    /// no longer starts the read loop; `startReading()` is the explicit
+    /// trigger that the consumer must call AFTER `setOnBytes`.
+    ///
+    /// Concretely: spawn a shell that prints "hello" immediately, sleep
+    /// to let the kernel actually buffer those bytes, then wire `onBytes`
+    /// and start the read loop. Without M2 (loop started in init), the
+    /// reader would drain the pipe into a nil callback and "hello" would
+    /// vanish. With the fix, the reader is dormant until `startReading()`
+    /// fires and "hello" lands in the consumer's collected buffer.
+    func test_bytesEmittedBeforeOnBytesWired_areNotDropped() throws {
+        try Self.skipIfFlakyOnCI()
+        let pty = try PTY.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "printf hello"],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        // Give the shell time to print + the kernel to buffer the bytes
+        // before any reader could possibly drain them. Without M2 the
+        // init-time read loop would drain into a nil onBytes here.
+        let pump = expectation(description: "child prints + kernel buffers")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+            pump.fulfill()
+        }
+        wait(for: [pump], timeout: 1.0)
+
+        // Now wire the consumer and start the loop. The captured 'hello'
+        // must arrive — bytes pre-existed in the pipe before this point.
+        let exp = expectation(description: "got bytes after deferred startReading")
+        var collected = Data()
+        var fulfilled = false
+        pty.setOnBytes { [weak pty] chunk in
+            collected.append(chunk)
+            if collected.count >= 5, !fulfilled {
+                fulfilled = true
+                pty?.setOnBytes(nil)
+                exp.fulfill()
+            }
+        }
+        pty.startReading()
+
+        wait(for: [exp], timeout: 3.0)
+        XCTAssertEqual(
+            String(data: collected.prefix(5), encoding: .utf8), "hello",
+            "PTY must buffer pre-wire bytes until startReading() fires; M2 regression"
+        )
+
+        pty.terminate()
     }
 }

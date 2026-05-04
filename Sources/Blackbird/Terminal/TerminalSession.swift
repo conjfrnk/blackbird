@@ -30,6 +30,19 @@ public final class TerminalSession: ObservableObject {
     private static let osc52Logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                             category: "osc52")
 
+    /// Diagnostics for resize panic-fallbacks (M3) and OSC 7 dropped-on-
+    /// `.unknown` classification (L3). Both are non-fatal events the
+    /// support engineer needs visible in `log stream` without spamming
+    /// the unified log on each occurrence.
+    private static let sessionLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                              category: "session")
+    /// One-shot latch for the OSC 7 `.unknown` drop log (L3). Per
+    /// session — a hot-reconfigure that flips classification back to
+    /// `.local` and then back to `.unknown` would otherwise miss the
+    /// breadcrumb on the second `.unknown`. We accept that miss; the
+    /// alternative (no latch at all) floods the log on every shell `cd`.
+    private var loggedUnknownNamespaceDrop = false
+
     /// Shorthand. Routed through `StartupTelemetry.isEnabled` at each
     /// call site so Release builds don't emit diagnostic chatter unless
     /// the user opted in with `BLACKBIRD_STARTUP_LOG=1`.
@@ -135,13 +148,32 @@ public final class TerminalSession: ObservableObject {
         return oscTitle.isEmpty ? nil : oscTitle
     }
 
+    /// Maximum grapheme-cluster length retained from an OSC 0/2 title.
+    /// A hostile remote that emits `\e]0;` + 2 KB of text + `\e\\` would
+    /// otherwise feed `TabStripView.truncatedString` a multi-thousand-
+    /// character search space on every titlebar redraw — even with the
+    /// binary-search truncation, per-frame `NSString.size(withAttributes:)`
+    /// scales with layout cost on the full string. 256 graphemes is well
+    /// past any legitimate shell-emitted title (`hostname:dir$` style
+    /// fits in 80) and keeps the per-frame cost bounded.
+    public static let oscTitleMaxGraphemes = 256
+
     /// Called by the event router when the shell emits OSC 0/2. Keeps
     /// `oscTitle` and the published `title` in sync. Harmless to call with
     /// the same string twice — the `@Published` will still fire, which is
     /// fine; downstream is idempotent.
     public func applyOscTitle(_ newValue: String) {
-        oscTitle = newValue
+        oscTitle = Self.cappedOscTitle(newValue)
         publishTitle()
+    }
+
+    /// Truncate at `oscTitleMaxGraphemes` so the per-frame pill layout
+    /// stays bounded regardless of payload size. Counted in graphemes so
+    /// combining marks aren't split across a truncation boundary.
+    static func cappedOscTitle(_ value: String) -> String {
+        if value.count <= oscTitleMaxGraphemes { return value }
+        let prefix = value.prefix(oscTitleMaxGraphemes)
+        return String(prefix) + "…"
     }
 
     /// Recompute `displayTitle` and republish on the `@Published title`
@@ -494,6 +526,14 @@ public final class TerminalSession: ObservableObject {
     /// tests can assert exact walk behaviour.
     internal var _testPromptCursor: Int? { promptCursor }
 
+    /// Audit L3: exposes the per-session one-shot latch so tests can
+    /// assert "two `.unknown` OSC 7 events flip the latch exactly once".
+    /// Setter is provided so a test can also reset between scenarios.
+    internal var _testLoggedUnknownNamespaceDrop: Bool {
+        get { loggedUnknownNamespaceDrop }
+        set { loggedUnknownNamespaceDrop = newValue }
+    }
+
     /// Exposes the Preferences Combine subscription so the
     /// `test_terminate_cancelsPreferencesSubscription` regression can
     /// assert it goes nil after `terminate()`. Internal-only — production
@@ -576,8 +616,17 @@ public final class TerminalSession: ObservableObject {
         let clamped = Self.clampResize(size)
         var newSnap: BBSnapshot?
         coreQueue.sync {
-            let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows))
-            self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
+            // Audit M3: when bb_term_resize2 panics, BBTerm.resize returns
+            // nil. Skip TIOCSWINSZ so the kernel winsize stays in lockstep
+            // with the grid (which kept its prior dims). Snapshot still
+            // publishes so the renderer doesn't stall.
+            if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
+                self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
+            } else {
+                Self.sessionLogger.warning(
+                    "BBTerm.resize returned nil (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
+                )
+            }
             newSnap = self.bbterm.snapshot()
         }
         guard let newSnap else { return }
@@ -615,8 +664,15 @@ public final class TerminalSession: ObservableObject {
             guard let self else { return }
             // Same Bug #3/#9 ordering as the sync `resize(to:)`: bbterm
             // first, then pty with the actually-applied (post-clamp) dims.
-            let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows))
-            self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
+            // Audit M3 sibling of the sync path: nil => Rust panic
+            // fallback, skip TIOCSWINSZ.
+            if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
+                self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
+            } else {
+                Self.sessionLogger.warning(
+                    "BBTerm.resize (async) returned nil (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
+                )
+            }
             guard let snap = self.bbterm.snapshot() else { return }
             self.publishPendingSnapshot(snap)
         }
@@ -887,11 +943,11 @@ public final class TerminalSession: ObservableObject {
 
     private func wire() {
         // INVARIANT: every `pty` hookup in this method MUST use optional
-        // chaining (`pty?.onBytes = …`). Headless test sessions run with
-        // `pty == nil` and call `wire()` to get bbterm event dispatch; a
-        // forced unwrap here will crash those tests. If you need eager
-        // PTY setup, gate it with `if let pty { … }` and state why in a
-        // comment — don't drop the guard.
+        // chaining (`pty?.setOnBytes(…)`, `pty?.startReading()`). Headless
+        // test sessions run with `pty == nil` and call `wire()` to get
+        // bbterm event dispatch; a forced unwrap here will crash those
+        // tests. If you need eager PTY setup, gate it with `if let pty
+        // { … }` and state why in a comment — don't drop the guard.
 
         // Apply the current OSC 10/11/12 color-query preference to the
         // core. Core default is off for security reasons; user opt-in
@@ -940,12 +996,18 @@ public final class TerminalSession: ObservableObject {
         // `coreQueue.sync` — the classic same-queue-sync deadlock. With
         // both weak captures the chain is broken: when self is gone, the
         // queued block becomes a no-op.
-        pty?.onBytes = { [weak self] data in
+        //
+        // Audit M2: setOnBytes serialises the assignment through PTY's
+        // readQueue, then startReading() launches the loop. The order
+        // matters: bytes the shell emits before the loop starts cannot
+        // race past the closure assignment.
+        pty?.setOnBytes { [weak self] data in
             guard let self else { return }
             self.coreQueue.async { [weak self] in
                 self?.feed(data)
             }
         }
+        pty?.startReading()
 
         // When the child exits (natural or SIGHUP), publish the exit code.
         pty?.onExit = { [weak self] code in
@@ -1093,8 +1155,32 @@ public final class TerminalSession: ObservableObject {
                     // Cost: one syscall to read fg pgroup + at most ~256
                     // node BFS (capped). Per `cd` only; well under the
                     // frame budget on main.
-                    if case .local = self.classifyForegroundNamespace() {
+                    let classification = self.classifyForegroundNamespace()
+                    switch classification {
+                    case .local:
                         self.lastKnownCwd = path
+                        // Re-arm the L3 latch on each .local transition so
+                        // a subsequent .local → .unknown cycle logs again.
+                        // Without this, a real-world ssh-disconnect-then-
+                        // reconnect-then-disconnect-again leaves only the
+                        // first breadcrumb and support engineers see no
+                        // log for the second loss.
+                        self.loggedUnknownNamespaceDrop = false
+                    case .remote:
+                        break
+                    case .unknown(let reason):
+                        // Audit L3: drop OSC 7 silently on every emit
+                        // would leave a support engineer with no
+                        // breadcrumb when ⌘T inheritance "isn't picking
+                        // up the cwd". Surface the reason once per
+                        // .local→.unknown transition so unified-log
+                        // readers see why without flooding on every cd.
+                        if !self.loggedUnknownNamespaceDrop {
+                            self.loggedUnknownNamespaceDrop = true
+                            Self.sessionLogger.notice(
+                                "OSC 7 dropped: foreground namespace classified .unknown (\(reason, privacy: .public)); ⌘T cwd inheritance disabled until classification recovers"
+                            )
+                        }
                     }
                 case .promptMark(let kind, let exitCode):
                     // Shell integration: A = prompt start, B = command start,

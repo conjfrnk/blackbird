@@ -66,8 +66,29 @@ extension TerminalView {
             wrapped.append(Data([0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]))  // ESC[201~
             session.send(wrapped)
         } else {
-            session.send(bytes)
+            // L4: when the foreground process is in raw / ICRNL-off mode
+            // (vim, less, fzf, most TUIs), a lone CR survives to the
+            // shell as `\r` and triggers Enter — same injection class as
+            // a raw LF from a hostile clipboard. `normalizePasteLineEndings`
+            // intentionally leaves lone CR alone (some apps want it as
+            // Enter), but bracketed paste protects via the markers; the
+            // non-bracketed branch is the exposed surface, so we override
+            // that prior decision here only.
+            session.send(Self.convertLoneCRToLF(bytes))
         }
+    }
+
+    /// Replace every standalone CR (0x0D) with LF (0x0A). CR-LF pairs are
+    /// already collapsed to LF by `normalizePasteLineEndings`, so any CR
+    /// reaching this function is a lone CR. Audit L4.
+    static func convertLoneCRToLF(_ input: Data) -> Data {
+        guard input.contains(0x0D) else { return input }
+        var out = Data()
+        out.reserveCapacity(input.count)
+        for b in input {
+            out.append(b == 0x0D ? 0x0A : b)
+        }
+        return out
     }
 
     /// Collapse CRLF → LF in pasted content. Cross-platform clipboards (Windows,

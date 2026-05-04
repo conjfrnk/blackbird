@@ -25,7 +25,20 @@ public final class PTY {
     }
 
     /// Invoked with raw output bytes from the child. Called on the read queue.
-    public var onBytes: ((Data) -> Void)?
+    /// Mutate via `setOnBytes(_:)` so writes are serialised against the read
+    /// loop's reads — a bare property setter races the consumer's load and
+    /// can drop bytes emitted between assignment and the next loop iteration.
+    public private(set) var onBytes: ((Data) -> Void)?
+
+    /// Serialise `onBytes` mutations through the read queue so the read
+    /// loop never observes a half-published closure pointer. Audit M2:
+    /// pairs with the deferred `startReading()` so a consumer can wire
+    /// up before the first byte flows.
+    public func setOnBytes(_ closure: ((Data) -> Void)?) {
+        readQueue.async { [weak self] in
+            self?.onBytes = closure
+        }
+    }
 
     /// Invoked once after the child process has exited and been reaped.
     /// Fires whether the exit was natural (shell typed `exit`) or induced by
@@ -156,13 +169,43 @@ public final class PTY {
         task.arguments = ["-x", "-o", dst.path, src.path]
         task.standardOutput = Pipe()
         task.standardError = Pipe()
+        let ticStatus: Int32
         do {
             try task.run()
             task.waitUntilExit()
+            ticStatus = task.terminationStatus
         } catch {
             return false
         }
-        return infocmpSucceeds(term: "xterm-kitty")
+        return decideKittyTerminfoAvailability(
+            ticExit: ticStatus,
+            probe: { Self.infocmpSucceeds(term: "xterm-kitty") }
+        )
+    }
+
+    /// Decision helper for L1: given a `tic` exit status and a callable
+    /// `infocmp` probe, determine whether the child should be told
+    /// `TERM=xterm-kitty`. Surfaced as a static so the audit's mock-the-
+    /// Task test can drive it without running `tic`. The caller is
+    /// responsible for actually running `tic` and providing the probe;
+    /// this function only owns the policy.
+    static func decideKittyTerminfoAvailability(
+        ticExit: Int32,
+        probe: () -> Bool
+    ) -> Bool {
+        // Audit L1: a non-zero `tic` exit means the install didn't land
+        // (TCC denial, ENOSPC, malformed source). DON'T fall through to
+        // the `infocmp` probe — a hostile pre-planted `xterm-kitty`
+        // entry would otherwise let the probe succeed and we'd hand the
+        // child `TERM=xterm-kitty` against an attacker-controlled
+        // terminfo. Bail out and the caller falls back to xterm-256color.
+        if ticExit != 0 {
+            Self.logger.error(
+                "PTY.installKittyTerminfoIfNeeded: tic exit=\(ticExit, privacy: .public) — falling back to xterm-256color (will not trust pre-existing terminfo)"
+            )
+            return false
+        }
+        return probe()
     }
 
     /// True when `infocmp <term>` exits 0 — i.e. ncurses can find the entry.
@@ -416,7 +459,10 @@ public final class PTY {
         // success on the recycled PID even though it isn't ours.
         // Comparing start times rules out that race. Audit M9.
         self.childStartTime = Self.bsdProcessStartTime(pid: childPID)
-        self.startReading()
+        // Audit M2: do NOT call startReading() here. The consumer
+        // (TerminalSession.wire / direct test caller) must wire onBytes
+        // first via `setOnBytes(_:)`, then invoke `startReading()` so
+        // the first bytes the shell emits aren't dropped on the floor.
     }
 
     deinit {
@@ -425,7 +471,30 @@ public final class PTY {
 
     // MARK: - Reading
 
-    private func startReading() {
+    /// Idempotent — repeated calls past the first dispatch a no-op. The
+    /// first call dispatches the read loop on `readQueue`; subsequent
+    /// calls bail under `stateQueue.sync`. Audit M2.
+    private var readLoopStarted = false
+
+    public func startReading() {
+        let shouldStart = stateQueue.sync { () -> Bool in
+            if readLoopStarted { return false }
+            readLoopStarted = true
+            return true
+        }
+        guard shouldStart else { return }
+        #if DEBUG
+        // Catch the M2 misuse case: startReading() before setOnBytes()
+        // means bytes are read from the kernel and silently dropped on
+        // the floor. The contract is "wire onBytes first" — production
+        // code does this in TerminalSession.wire(); a future caller who
+        // forgets gets a loud abort in DEBUG so the silent-dropped path
+        // doesn't ship. Release builds skip the assert (no behaviour
+        // change) since the dropped bytes are already self-evident in
+        // logs by virtue of the shell appearing dead.
+        assert(onBytes != nil,
+               "PTY.startReading() called before setOnBytes(_:); bytes will be silently dropped. Wire the closure first.")
+        #endif
         readQueue.async { [weak self] in
             guard let self else { return }
             var buffer = [UInt8](repeating: 0, count: self.readBufferSize)
@@ -968,9 +1037,35 @@ public final class PTY {
 
     // MARK: - Teardown
 
+    #if DEBUG
+    /// Test-only counter incremented exactly once each time `terminate()`
+    /// observes `wasRunning == true` and proceeds past the L6 gate. A
+    /// regression that re-introduced the non-atomic check-then-set would
+    /// let two concurrent callers each increment this — pinning it at
+    /// exactly 1 after N concurrent terminate()s is the L6 invariant.
+    private(set) var _testTerminateBodyRanCount: Int = 0
+    #endif
+
     public func terminate() {
-        guard shouldKeepRunning() else { return }
-        markStopped()
+        // Audit L6: atomic check-and-clear of `_isRunning`. The prior
+        // `shouldKeepRunning() ... markStopped()` shape was two
+        // independent stateQueue.sync round-trips; concurrent
+        // `terminate()` callers could both read `true` and double-fire
+        // SIGHUP / start two SIGKILL escalations. Combine into one
+        // critical section that returns the prior value.
+        let wasRunning: Bool = stateQueue.sync {
+            let prev = _isRunning
+            _isRunning = false
+            return prev
+        }
+        guard wasRunning else { return }
+        #if DEBUG
+        // Increment under stateQueue so concurrent terminates can't race
+        // each other writing to the counter. The L6 fix means at most one
+        // caller observes `wasRunning == true`, so the counter ends at 1
+        // regardless of how many concurrent terminates fire.
+        stateQueue.sync { _testTerminateBodyRanCount += 1 }
+        #endif
         // Send SIGHUP to the child to make the blocked read(2) in the read
         // queue return. The read queue is the sole owner of masterFD's close
         // and the child's reap — see startReading(). This avoids racing close()

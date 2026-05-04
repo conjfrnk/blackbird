@@ -61,6 +61,10 @@ final class PTYLifetimeRaceTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
+        // Audit M2: spawn no longer auto-starts the read loop. Drive the
+        // loop so terminate()'s teardown path (close fd + waitpid) actually
+        // runs — without this the test would leak an fd and a zombie.
+        pty.startReading()
 
         // Wait briefly so /bin/sh is actually running (tcgetpgrp() against
         // a freshly-spawned PTY before the child setpgid()s can race).
@@ -112,6 +116,8 @@ final class PTYLifetimeRaceTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
+        // Audit M2: kick the read loop so terminate() reaps the child.
+        pty.startReading()
         defer { pty.terminate() }   // belt-and-braces in case of mid-test trap
 
         let group = DispatchGroup()
@@ -175,6 +181,8 @@ final class PTYLifetimeRaceTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
+        // Audit M2: kick the read loop so terminate() reaps the child.
+        pty.startReading()
         // Let the child settle.
         let pump = expectation(description: "settle")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { pump.fulfill() }
@@ -200,5 +208,52 @@ final class PTYLifetimeRaceTests: XCTestCase {
             // Touch the value to consume it.
             _ = cwd
         }
+    }
+
+    /// Audit L6: concurrent `terminate()` calls must each return cleanly,
+    /// but only ONE may proceed past the `wasRunning` gate to fire SIGHUP
+    /// / schedule the SIGKILL escalation. The pre-fix shape used
+    /// `shouldKeepRunning()` and `markStopped()` as two independent
+    /// stateQueue.sync round-trips — under contention both callers could
+    /// observe `_isRunning == true` and double-signal the child. Pin
+    /// the post-fix invariant via the `_testTerminateBodyRanCount`
+    /// debug counter: exactly 1 after N concurrent terminates.
+    func test_concurrentTerminate_runsTerminateBodyExactlyOnce() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_FLAKY_PTY_TESTS"] != "1",
+                      "PTY spawn flakes the xctest ASan runner in the full suite; run in isolation or set BB_RUN_FLAKY_PTY_TESTS=1")
+        let pty = try PTY.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 5"],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        // Audit M2: drive the read loop so terminate() reaps the child.
+        pty.startReading()
+        // Let the child settle so its pgroup exists.
+        let pump = expectation(description: "child settle")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { pump.fulfill() }
+        wait(for: [pump], timeout: 1.0)
+
+        // Fire 10 concurrent terminate() calls. The L6 fix means
+        // exactly ONE will observe `wasRunning == true` and increment
+        // the counter; the other 9 short-circuit on `guard wasRunning`.
+        let group = DispatchGroup()
+        let q = DispatchQueue(label: "test.terminate", attributes: .concurrent)
+        for _ in 0..<10 {
+            group.enter()
+            q.async {
+                pty.terminate()
+                group.leave()
+            }
+        }
+        let timedOut = group.wait(timeout: .now() + 3.0)
+        XCTAssertEqual(timedOut, .success, "concurrent terminate() must not deadlock")
+
+        XCTAssertEqual(
+            pty._testTerminateBodyRanCount, 1,
+            "L6: only one terminate() call may proceed past the wasRunning gate; "
+            + "got \(pty._testTerminateBodyRanCount). A regression to non-atomic "
+            + "check-then-set would let multiple callers double-signal the child."
+        )
     }
 }

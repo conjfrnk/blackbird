@@ -450,6 +450,63 @@ final class TerminalSessionTests: XCTestCase {
         )
     }
 
+    /// Audit L3: an OSC 7 dropped because of `.unknown` namespace
+    /// classification used to be silent — a support engineer reading
+    /// the unified log saw nothing about why ⌘T cwd inheritance had
+    /// stopped working. The fix logs the reason once per session via a
+    /// one-shot latch. Pin the latch behaviour: first `.unknown` sets
+    /// it, second `.unknown` keeps it set without re-firing the log
+    /// (we observe the latch state directly via the test seam, since
+    /// asserting on `os.Logger` output requires an OSLog signpost
+    /// reader we don't have in xctest).
+    func test_oscCwdUnknownNamespace_logsLatchFiresAtMostOnce() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "RunLoop-pumping test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the L3 latch invariant")
+        let session = TerminalSession.makeHeadlessForTests()
+        defer { session.terminate() }
+
+        XCTAssertFalse(
+            session._testLoggedUnknownNamespaceDrop,
+            "latch starts cleared so the first .unknown drop has a breadcrumb to log"
+        )
+
+        // Fire two OSC 7 events under .unknown classification.
+        session._testForegroundNamespaceOverride = .unknown(reason: "first")
+        session.feedBytesForTests(Data("\u{1b}]7;file:///some/path\u{1b}\\".utf8))
+        let first = expectation(description: "first OSC 7 dispatched to main")
+        DispatchQueue.main.async { first.fulfill() }
+        wait(for: [first], timeout: 1.0)
+
+        XCTAssertTrue(
+            session._testLoggedUnknownNamespaceDrop,
+            "first .unknown OSC 7 must flip the latch (log fired)"
+        )
+        XCTAssertNil(
+            session.lastKnownCwd,
+            ".unknown classification must continue to fail-closed (drop OSC 7)"
+        )
+
+        // Second event with a DIFFERENT reason. The latch must stay set
+        // (suppressing the second log) so we don't spam the unified log
+        // on every shell `cd`.
+        session._testForegroundNamespaceOverride = .unknown(reason: "second")
+        session.feedBytesForTests(Data("\u{1b}]7;file:///another/path\u{1b}\\".utf8))
+        let second = expectation(description: "second OSC 7 dispatched to main")
+        DispatchQueue.main.async { second.fulfill() }
+        wait(for: [second], timeout: 1.0)
+
+        XCTAssertTrue(
+            session._testLoggedUnknownNamespaceDrop,
+            "second .unknown OSC 7 must leave the latch set (log already fired once)"
+        )
+        XCTAssertNil(
+            session.lastKnownCwd,
+            "second .unknown classification must also drop OSC 7 (latch is just for logging)"
+        )
+
+        session._testForegroundNamespaceOverride = nil
+    }
+
     /// H-6: clearAll() must invalidate prompt-state slots that pointed
     /// into the now-deleted scrollback. Without this, post-clear ⌘[
     /// jumps to stale prompt indices and the OSC 133 ring keeps marks

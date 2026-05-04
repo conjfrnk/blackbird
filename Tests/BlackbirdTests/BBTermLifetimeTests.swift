@@ -295,6 +295,28 @@ final class BBTermLifetimeTests: XCTestCase {
         snaps.removeAll()
     }
 
+    // MARK: - M3: resize panic-fallback returns nil
+
+    /// Audit M3: `BBTerm.resize` returns `nil` when the FFI's panic-
+    /// fallback or null-handle path engages. Calling resize after
+    /// `terminate()` exercises the null-handle branch — the cleanest
+    /// way to drive the nil-return contract without mocking the C ABI.
+    /// Pre-fix the function returned the requested-after-clamp dims and
+    /// the caller (TerminalSession.resize) fed those to TIOCSWINSZ —
+    /// kernel winsize ended up out of sync with the grid (which was
+    /// torn down). With M3 the caller can detect nil and skip the
+    /// ioctl, keeping the kernel winsize aligned with the actual grid.
+    func test_resize_afterTerminate_returnsNil() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        term.terminate()  // null-handle branch — same shape as the panic fallback
+        let result = term.resize(to: .init(cols: 100, rows: 30))
+        XCTAssertNil(
+            result,
+            "BBTerm.resize on a terminated handle must return nil (M3); "
+            + "callers driving TIOCSWINSZ depend on this to avoid kernel-winsize drift"
+        )
+    }
+
     // MARK: - Invariant-after-error pseudo-fuzz
 
     /// pre-flight: ~1 KB feed, ~50 ms.

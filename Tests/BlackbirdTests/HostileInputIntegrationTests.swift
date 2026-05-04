@@ -151,6 +151,52 @@ final class HostileInputIntegrationTests: XCTestCase {
         XCTAssertFalse(step4.contains(0x0D), "CR must be gone after normalization")
     }
 
+    /// Audit L4: non-bracketed paste of `"foo\rbar"` must arrive as
+    /// `"foo\nbar"` — ICRNL on the line discipline maps lone CR → LF
+    /// regardless, so the helper normalises explicitly so byte-level
+    /// inspection (test, debugger, or a future shell that disables
+    /// ICRNL) sees the consistent shape. Bracketed paste is unchanged
+    /// — its markers already protect against CR-as-Enter.
+    func testNonBracketedPaste_loneCRConvertsToLF() {
+        // Lone CR (no LF after it) — `normalizePasteLineEndings` leaves
+        // it intact (CR-LF pairs collapse, but a lone CR survives), and
+        // `sanitizePasteControls` keeps CR (it's whitespace). The L4
+        // converter — applied only on the non-bracketed paste branch —
+        // is the layer that maps it to LF.
+        let input = Data("foo\rbar".utf8)
+        let normalized = TerminalView.normalizePasteLineEndings(input)
+        let sanitized = TerminalView.sanitizePasteControls(normalized)
+        let stripped = TerminalView.stripBidiOverrides(sanitized)
+        let nonBracketed = TerminalView.convertLoneCRToLF(stripped)
+        XCTAssertEqual(
+            nonBracketed, Data("foo\nbar".utf8),
+            "lone CR in non-bracketed paste must become LF (audit L4)"
+        )
+        // Sanity: bracketed paste does NOT run convertLoneCRToLF — the
+        // upstream sanitizer chain leaves the lone CR alone, and the
+        // bracketed markers protect against CR-as-Enter.
+        XCTAssertTrue(
+            stripped.contains(0x0D),
+            "lone CR must survive the upstream sanitizer chain (bracketed-paste path)"
+        )
+    }
+
+    /// L4 sibling: CR-LF pairs in the input still collapse to LF via
+    /// `normalizePasteLineEndings` and don't get double-converted by
+    /// `convertLoneCRToLF`. This pins that the new helper only acts
+    /// when normalisation has already run.
+    func testNonBracketedPaste_crlfStillCollapsesToSingleLF() {
+        let input = Data("foo\r\nbar".utf8)
+        let normalized = TerminalView.normalizePasteLineEndings(input)
+        let sanitized = TerminalView.sanitizePasteControls(normalized)
+        let stripped = TerminalView.stripBidiOverrides(sanitized)
+        let nonBracketed = TerminalView.convertLoneCRToLF(stripped)
+        XCTAssertEqual(
+            nonBracketed, Data("foo\nbar".utf8),
+            "CRLF must collapse to a single LF (no spurious doubling)"
+        )
+    }
+
     /// OSC 52 clipboard writes (shell → system clipboard) run through a
     /// 2-step scrub chain before reaching NSPasteboard:
     /// `stripBidiOverrides(sanitizePasteControls(data))`.

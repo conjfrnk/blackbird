@@ -54,7 +54,7 @@ final class BBTermTests: XCTestCase {
             estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
         )
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
-        let applied = term.resize(to: .init(cols: 1500, rows: 1500))
+        let applied = try XCTUnwrap(term.resize(to: .init(cols: 1500, rows: 1500)))
         XCTAssertEqual(applied.cols, 1000, "applied cols must reflect the clamp ceiling, not the request")
         XCTAssertEqual(applied.rows, 1000, "applied rows must reflect the clamp ceiling, not the request")
         // And the snapshot must agree — defence in depth: the returned
@@ -71,7 +71,7 @@ final class BBTermTests: XCTestCase {
     /// the same way as the oversized case, in the opposite direction.
     func test_undersizedResize_returnsFlooredDims_notRequested() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
-        let applied = term.resize(to: .init(cols: 1, rows: 1))
+        let applied = try XCTUnwrap(term.resize(to: .init(cols: 1, rows: 1)))
         XCTAssertEqual(applied.cols, 2, "applied cols must reflect the floor clamp")
         XCTAssertEqual(applied.rows, 2, "applied rows must reflect the floor clamp")
     }
@@ -241,14 +241,14 @@ final class BBTermTests: XCTestCase {
         // the contract "no process abort + returns clamped dims"
         // holds in Release; DEBUG callers learn at the assertion.
         #if !DEBUG
-        let appliedZero = term.resize(to: .init(cols: 0, rows: 0))
+        let appliedZero = try XCTUnwrap(term.resize(to: .init(cols: 0, rows: 0)))
         XCTAssertEqual(appliedZero.cols, BBTerm.MIN_DIM)
         XCTAssertEqual(appliedZero.rows, BBTerm.MIN_DIM)
         #endif
         // Sub-floor (1, 1) request — this shape never tripped the
         // precondition (it required strict zero), so it ran in DEBUG
         // and Release alike. Must clamp up to MIN_DIM.
-        let appliedSubFloor = term.resize(to: .init(cols: 1, rows: 1))
+        let appliedSubFloor = try XCTUnwrap(term.resize(to: .init(cols: 1, rows: 1)))
         XCTAssertEqual(appliedSubFloor.cols, BBTerm.MIN_DIM, "cols clamp up to MIN_DIM")
         XCTAssertEqual(appliedSubFloor.rows, BBTerm.MIN_DIM, "rows clamp up to MIN_DIM")
         // Snapshot agrees — the grid the renderer is going to paint
@@ -268,7 +268,7 @@ final class BBTermTests: XCTestCase {
             estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
         )
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
-        let applied = term.resize(to: .init(cols: BBTerm.MAX_DIM + 1, rows: BBTerm.MAX_DIM + 1))
+        let applied = try XCTUnwrap(term.resize(to: .init(cols: BBTerm.MAX_DIM + 1, rows: BBTerm.MAX_DIM + 1)))
         XCTAssertEqual(applied.cols, BBTerm.MAX_DIM, "cols clamp down to MAX_DIM")
         XCTAssertEqual(applied.rows, BBTerm.MAX_DIM, "rows clamp down to MAX_DIM")
     }
