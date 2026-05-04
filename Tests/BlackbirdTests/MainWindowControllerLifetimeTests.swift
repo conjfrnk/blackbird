@@ -252,6 +252,30 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
         XCTAssertEqual(win.contentMinSize.height, expectedH, accuracy: 0.001)
     }
 
+    /// Pixel-precise resize: AppKit's default `contentResizeIncrements` of
+    /// `(1, 1)` means "every pixel is a valid drag stop." A regression that
+    /// re-introduces a cell-multiple snap would set this to (cellW, cellH)
+    /// and the window would feel quantised again.
+    func test_freshWindow_hasUnconstrainedResizeIncrements() throws {
+        Self.acquireControllerSlot()
+        defer { Self.releaseControllerSlot() }
+
+        let controller = MainWindowController(
+            initialWorkingDirectory: nil,
+            autosaveFrame: false
+        )
+        defer {
+            controller.terminateSessions()
+            controller.window?.close()
+        }
+
+        let win = try XCTUnwrap(controller.window)
+        XCTAssertEqual(
+            win.contentResizeIncrements, NSSize(width: 1, height: 1),
+            "MainWindowController must not pin contentResizeIncrements to a cell size"
+        )
+    }
+
     // MARK: - F-S6-014: begin-rename index race against stale tab order
 
     /// Pre-flight: NO real MainWindowController. Drives the strip directly

@@ -694,15 +694,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         self.metrics = newMetrics
         if let window {
-            // Window resize increments should follow the new cell size too.
-            window.contentResizeIncrements = NSSize(
-                width: newMetrics.cellWidth,
-                height: newMetrics.cellHeight
-            )
-            // Keep contentMinSize in sync. Otherwise bumping the font up
-            // doesn't prevent the user from dragging the window below the
-            // new font's 20-col / 4-row minimum — they'd end up with a
-            // window too small to read comfortably.
+            // Pixel-precise resize: no contentResizeIncrements re-set here
+            // either (the original setter shipped before pixel-precise drag).
+            // Keep contentMinSize in sync with the new cell size; otherwise
+            // bumping the font up doesn't prevent the user from dragging
+            // the window below the new font's 20-col / 4-row minimum — they'd
+            // end up with a window too small to read comfortably.
             window.contentMinSize = NSSize(
                 width: newMetrics.cellWidth * 20 + 2 * Self.horizontalContentInsetPoints,
                 height: newMetrics.cellHeight * 4 + 28 + Self.bottomContentInsetPoints

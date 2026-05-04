@@ -248,14 +248,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             width: m.cellWidth * 20 + 2 * TerminalView.horizontalContentInsetPoints,
             height: m.cellHeight * 4 + 28 + TerminalView.bottomContentInsetPoints
         )
-        // Snap window size to whole-cell increments during drag. Eliminates
-        // the transient blank-edge/clip effect you'd otherwise see while the
-        // shell catches up with SIGWINCH after a sub-cell pointer movement.
-        // Same approach Terminal.app and iTerm use.
-        window.contentResizeIncrements = NSSize(
-            width: m.cellWidth,
-            height: m.cellHeight
-        )
+        // Pixel-precise resize: no contentResizeIncrements here. The renderer's
+        // viewport stretch (used during live resize) keeps the in-between
+        // frames smooth, and propagateResize's lastPropagatedSize dedup means
+        // SIGWINCH fires once per cell-boundary cross. Sub-cell leftover at
+        // the right is absorbed by the new horizontalContentInsetPoints inset.
 
         // Keyboard input routes to the TerminalView.
         window.makeFirstResponder(view)
