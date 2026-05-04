@@ -59,4 +59,15 @@ final class HorizontalInsetHelperTests: XCTestCase {
         let cell = view.cellAt(point: centre)
         XCTAssertEqual(cell.col, 7)
     }
+
+    func test_layout_passesLeftInsetToRenderer() throws {
+        let view = try makeView()
+        view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(
+            view.renderer.leftInsetPointsForTesting(),
+            Float(TerminalView.horizontalContentInsetPoints),
+            accuracy: 0.001,
+            "TerminalView.layout() must propagate horizontalContentInsetPoints to renderer.setLeftInsetPoints"
+        )
+    }
 }

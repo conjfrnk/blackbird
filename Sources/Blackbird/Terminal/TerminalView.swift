@@ -742,6 +742,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let bottom = Self.bottomContentInsetPoints
         let top = titlebarOnlyTopInset
         renderer.setTopInsetPoints(Float(top))
+        renderer.setLeftInsetPoints(Float(Self.horizontalContentInsetPoints))
         let width: CGFloat = 10
         scrollIndicator.frame = NSRect(
             x: bounds.width - width,
