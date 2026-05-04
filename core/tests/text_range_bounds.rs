@@ -142,7 +142,10 @@ fn text_range_caps_huge_request_at_max_rows() {
         // i32::MIN/MAX/u16::MAX endpoints are exactly the worst-case
         // shape an out-of-bounds caller would produce.
         let raw = bc::bb_term_text_range(term, i32::MIN, 0, i32::MAX, u16::MAX, 0);
-        assert!(!raw.is_null(), "huge text_range must succeed via truncation");
+        assert!(
+            !raw.is_null(),
+            "huge text_range must succeed via truncation"
+        );
 
         let bytes = if (*raw).len == 0 || (*raw).bytes.is_null() {
             &[][..]

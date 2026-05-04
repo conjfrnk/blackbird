@@ -1101,7 +1101,11 @@ impl OscScanner<'_> {
         }
 
         let Some(decoded) = percent_decode(path_bytes) else {
-            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_PERCENT_DECODE, "percent_decode");
+            osc7_reject(
+                self.osc7_reject_logged,
+                OSC7_REJECT_PERCENT_DECODE,
+                "percent_decode",
+            );
             return;
         };
         // Spec (2026-04-17-blackbird-gaps-design.md §4.1): "Malformed UTF-8
@@ -1152,7 +1156,11 @@ impl OscScanner<'_> {
         // OSC 7 specifies an absolute path; relative paths are illegal
         // by spec.
         if !decoded_str.starts_with('/') {
-            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_NON_ABSOLUTE, "non_absolute");
+            osc7_reject(
+                self.osc7_reject_logged,
+                OSC7_REJECT_NON_ABSOLUTE,
+                "non_absolute",
+            );
             return;
         }
         for component in std::path::Path::new(decoded_str).components() {
@@ -1257,10 +1265,7 @@ impl OscScanner<'_> {
         // OSC 7 cwd path which already refuses control bytes.
         // Drop the whole event when the payload is non-numeric —
         // we'd rather omit the exit code than display garbage.
-        if kind_byte == b'D'
-            && !payload.is_empty()
-            && !payload.iter().all(|b| b.is_ascii_digit())
-        {
+        if kind_byte == b'D' && !payload.is_empty() && !payload.iter().all(|b| b.is_ascii_digit()) {
             // Mirror L3's per-instance one-shot logging stance:
             // first reject of this class on this BBTerm produces a
             // breadcrumb; subsequent rejects stay silent so a flood
@@ -1955,8 +1960,8 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             modify_other_keys: &mut bb.modify_other_keys,
             prompt_mark_rate: &mut bb.prompt_mark_rate,
             osc7_rate: &mut bb.osc7_rate,
-                    osc7_reject_logged: &mut bb.osc7_reject_logged,
-                    osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
+            osc7_reject_logged: &mut bb.osc7_reject_logged,
+            osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
         };
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);
@@ -2826,26 +2831,25 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             local_to_final.push(0); // local 0 reserved for "no link"
             for uri in &phase1_uris {
                 let uri_str: &str = uri.as_ref();
-                let cstr_arc: Option<Arc<std::ffi::CStr>> = if let Some(existing) =
-                    bb.uri_cstr_cache.get(uri_str).cloned()
-                {
-                    Some(existing)
-                } else if bb.uri_cache_bytes.saturating_add(uri_str.len())
-                    > OSC8_TOTAL_INTERN_BYTES_CAP
-                {
-                    None
-                } else {
-                    match std::ffi::CString::new(uri_str) {
-                        Ok(cs) => {
-                            let arc: Arc<std::ffi::CStr> = cs.into();
-                            bb.uri_cstr_cache
-                                .insert(uri_str.to_owned(), Arc::clone(&arc));
-                            bb.uri_cache_bytes += uri_str.len();
-                            Some(arc)
+                let cstr_arc: Option<Arc<std::ffi::CStr>> =
+                    if let Some(existing) = bb.uri_cstr_cache.get(uri_str).cloned() {
+                        Some(existing)
+                    } else if bb.uri_cache_bytes.saturating_add(uri_str.len())
+                        > OSC8_TOTAL_INTERN_BYTES_CAP
+                    {
+                        None
+                    } else {
+                        match std::ffi::CString::new(uri_str) {
+                            Ok(cs) => {
+                                let arc: Arc<std::ffi::CStr> = cs.into();
+                                bb.uri_cstr_cache
+                                    .insert(uri_str.to_owned(), Arc::clone(&arc));
+                                bb.uri_cache_bytes += uri_str.len();
+                                Some(arc)
+                            }
+                            Err(_) => None,
                         }
-                        Err(_) => None,
-                    }
-                };
+                    };
                 match cstr_arc {
                     Some(arc) => {
                         let final_id = links.len() as u16;
