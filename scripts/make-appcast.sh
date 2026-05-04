@@ -48,9 +48,17 @@ fi
 # on the version segment using `sort -V` (GNU/BSD versionsort), which
 # correctly orders "0.10.0" after "0.9.0" — plain `sort` would not.
 # Audit F-S8-008 / SFH-027.
+#
+# `sort -V` inverts semver for prereleases: it places "0.2.0" BEFORE
+# "0.2.0-rc.1" because the hyphen sorts after end-of-string in version
+# bytes, but semver §11 says "0.2.0-rc.1 < 0.2.0". Restrict the regex
+# to GA versions (no hyphen suffix) so a leftover prerelease DMG can't
+# shadow the real release. Operators publishing a prerelease drive
+# make-appcast.sh against a dist/ that contains only that prerelease
+# DMG, so this restriction is safe.
 DMG=""
 for candidate in $(ls dist/Blackbird-*.dmg 2>/dev/null \
-                       | sed -E 's|^dist/Blackbird-(.*)\.dmg$|\1|' \
+                       | sed -nE 's|^dist/Blackbird-([0-9]+\.[0-9]+\.[0-9]+)\.dmg$|\1|p' \
                        | sort -V); do
     DMG="dist/Blackbird-${candidate}.dmg"
 done
@@ -70,6 +78,11 @@ VERSION="$(echo "$DMG_NAME" | sed -E 's/^Blackbird-(.*)\.dmg$/\1/')"
 # [0,1,2] < [1] and hides the update. Mount the DMG read-only, read the
 # plist, detach. Requires nothing beyond built-in macOS tools.
 MOUNT_POINT="$(mktemp -d -t blackbird-dmg)"
+# Install cleanup before attach so a PlistBuddy or `set -e` abort still
+# detaches the DMG (otherwise an interrupted run leaves stale mounts in
+# /Volumes that block subsequent attaches with "resource busy"). Both
+# operations are idempotent; the success-path tail re-runs them.
+trap 'hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true; rmdir "$MOUNT_POINT" 2>/dev/null || true' EXIT
 # `-owners off` avoids a root-owner warning on read-only mounts; `-nobrowse`
 # hides the volume from Finder so this doesn't spam the sidebar.
 hdiutil attach "$DMG" -nobrowse -noverify -noautoopen -readonly -owners off \
@@ -112,8 +125,13 @@ fi
 # rather than splitting into argv. Audit scripts-release F8.
 SIG_LINE="$("$SIGN_UPDATE_PATH" "$DMG")"
 
-# PubDate in RFC 822 format, as Sparkle expects.
-PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
+# PubDate in RFC 822 format, as Sparkle expects. Honor APPCAST_PUB_DATE
+# from the environment so callers (publish-update.sh) can derive a stable
+# value from the tag's commit timestamp; without that, two re-runs of the
+# same vX.Y.Z would emit different appcast bytes and break the
+# "re-run is idempotent" contract publish-update.sh relies on for
+# post-S3-failure recovery.
+PUB_DATE="${APPCAST_PUB_DATE:-$(date -u +"%a, %d %b %Y %H:%M:%S +0000")}"
 
 URL="${APPCAST_BASE_URL%/}/$DMG_NAME"
 

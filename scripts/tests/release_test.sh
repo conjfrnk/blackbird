@@ -39,6 +39,66 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 test_start "release_test.sh"
 
+# ---------------------------------------------------------------------------
+# CASE — H1: smoke.sh's `wait || true` after `kill` hides crash-on-launch.
+# The script SIGTERMs the app at the 3s mark and expects exit 143 (128+15)
+# or 0; any other exit is a crash and must fail the smoke test.
+#
+# Hermetic harness: redirect HOME so smoke.sh's hardcoded DerivedData lookup
+# resolves into a fixture tree, place a bash script as the "Blackbird"
+# binary so we can control its exit code, set BB_SKIP_RESIGN=1 so the
+# `security find-identity` block is skipped.
+# ---------------------------------------------------------------------------
+
+case_smoke_crash_detection() {
+    local tmp; tmp="$(mk_tmp bb-smoke-h1)"
+    trap "rm -rf '$tmp'" RETURN
+
+    local derived="$tmp/Library/Developer/Xcode/DerivedData/Blackbird-fakehash"
+    local app_macos="$derived/Build/Products/Debug/Blackbird.app/Contents/MacOS"
+    mkdir -p "$app_macos"
+    # Crash-on-launch fake: emit a diagnostic to stderr, exit 134 (SIGABRT).
+    # smoke.sh's `sleep 3; kill` won't reach this binary because it's
+    # already dead — `wait` returns the original abort code, NOT 143.
+    cat >"$app_macos/Blackbird" <<'CRASH'
+#!/usr/bin/env bash
+echo "fake Blackbird: dyld: Library not loaded: @rpath/Sparkle.framework" >&2
+exit 134
+CRASH
+    chmod +x "$app_macos/Blackbird"
+
+    local log; log="$(mktemp)"
+    local rc=0
+    (
+        export HOME="$tmp"
+        export BB_SKIP_RESIGN=1
+        bash "$BB_REPO_ROOT/scripts/smoke.sh"
+    ) >"$log" 2>&1 || rc=$?
+
+    if [[ "$rc" == "0" ]]; then
+        fail "H1: smoke.sh exited 0 despite app exiting 134 (mask via 'wait || true')"
+        head -20 "$log" | sed 's/^/      | /' >&2
+    else
+        pass "H1: smoke.sh detects crash-on-launch (rc=$rc)"
+    fi
+
+    # The captured stderr from the fake binary should surface in the log
+    # so the operator can debug. The fix's diagnostic prints the captured
+    # stderr tail when wait_rc isn't 0/143.
+    if grep -q "dyld: Library not loaded" "$log"; then
+        pass "H1: smoke.sh surfaces captured app stderr on crash"
+    else
+        fail "H1: smoke.sh swallowed the crashed app's stderr"
+        tail -20 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
+# Smoke-detection test runs unconditionally — it's pure shell with no
+# real codesign / xcodebuild dependencies.
+case_smoke_crash_detection
+
 if [[ "${BB_TEST_RELEASE_FAILURE:-0}" != "1" ]]; then
     echo "    skip: release.sh failure-path tests are opt-in via BB_TEST_RELEASE_FAILURE=1"
     echo "          (F-S8-001 codesign-log swallow + M-11 Team ID pin regression-guards;"
@@ -102,6 +162,9 @@ STUB
     #              -derivedDataPath "$DIST_DIR/DerivedData" archive ...
     #   xcodebuild -exportArchive ... -exportPath "$EXPORT_DIR" ...
     # We just fabricate the resulting layout the post-archive code expects.
+    # BB_TEST_BAD_PLIST=1 in the environment causes the export step to write
+    # an empty / corrupted Info.plist, which is the H2 failure-mode regression
+    # guard for `|| echo "0.0.0"` masking a PlistBuddy read failure.
     cat >"$root/stub-bin/xcodebuild" <<'STUB'
 #!/usr/bin/env bash
 # Detect "archive" vs "-exportArchive" mode from args.
@@ -125,7 +188,10 @@ case "$mode" in
         # downstream script reads.
         APP="$export_path/Blackbird.app"
         mkdir -p "$APP/Contents/Frameworks/Sparkle.framework"
-        cat >"$APP/Contents/Info.plist" <<PLIST
+        if [[ "${BB_TEST_BAD_PLIST:-0}" == "1" ]]; then
+            : > "$APP/Contents/Info.plist"
+        else
+            cat >"$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -137,6 +203,7 @@ case "$mode" in
 </dict>
 </plist>
 PLIST
+        fi
         ;;
 esac
 exit 0
@@ -365,8 +432,48 @@ case_team_id_match() {
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# CASE — H2: PlistBuddy read failure must abort, not silently coerce to
+# "0.0.0" and ship Blackbird-0.0.0.dmg through the rest of the pipeline.
+# Drive the export-step xcodebuild stub to write an empty Info.plist;
+# PlistBuddy will fail; release.sh must exit non-zero with a diagnostic
+# AND must not have produced a Blackbird-0.0.0.dmg in dist/.
+# ---------------------------------------------------------------------------
+
+case_plistbuddy_no_zero_fallback() {
+    local tmp; tmp="$(mk_tmp bb-rel-h2)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_release_fixture "$tmp" "right-team" "F2B95Q4CT8"
+
+    local log; log="$(mktemp)"
+    local rc=0
+    (
+        cd "$tmp"
+        export PATH="$tmp/stub-bin:$PATH"
+        export BB_TEST_BAD_PLIST=1
+        unset DEVELOPER_ID APPLE_ID APP_SPECIFIC_PASSWORD TEAM_ID || true
+        bash "$tmp/scripts/release.sh"
+    ) >"$log" 2>&1 || rc=$?
+
+    if [[ "$rc" == "0" ]]; then
+        fail "H2: release.sh exited 0 with broken Info.plist"
+        head -40 "$log" | sed 's/^/      | /' >&2
+    else
+        pass "H2: release.sh aborts when PlistBuddy can't read Info.plist (rc=$rc)"
+    fi
+
+    if [[ -e "$tmp/dist/Blackbird-0.0.0.dmg" ]]; then
+        fail "H2: release.sh produced Blackbird-0.0.0.dmg from masked PlistBuddy failure"
+    else
+        pass "H2: no Blackbird-0.0.0.dmg artifact slipped past the broken-plist check"
+    fi
+    rm -f "$log"
+}
+
 case_codesign_log_swallow
 case_team_id_mismatch
 case_team_id_match
+case_plistbuddy_no_zero_fallback
 
 test_end

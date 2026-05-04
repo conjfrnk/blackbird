@@ -124,13 +124,21 @@ if [[ ! -d "$APP_DST/Contents/Frameworks/Sparkle.framework" ]]; then
     exit 1
 fi
 
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DST/Contents/Info.plist" 2>/dev/null || echo "0.0.0")"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DST/Contents/Info.plist")"
+if [[ -z "$VERSION" ]]; then
+    echo "!! release.sh: empty CFBundleShortVersionString in $APP_DST/Contents/Info.plist" >&2
+    exit 1
+fi
 DMG_NAME="Blackbird-${VERSION}.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
 
 echo "==> Packaging DMG ($DMG_NAME)"
 rm -f "$DMG_PATH"
 TMP_DMG_DIR="$(mktemp -d)"
+# Install cleanup before cp so a `set -e` abort during cp/hdiutil still
+# removes the staging dir. The trailing `rm -rf` on the success path is
+# now redundant-but-harmless (idempotent).
+trap 'rm -rf "$TMP_DMG_DIR"' EXIT
 cp -R "$APP_DST" "$TMP_DMG_DIR/"
 ln -s /Applications "$TMP_DMG_DIR/Applications"
 hdiutil create \

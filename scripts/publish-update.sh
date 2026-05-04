@@ -176,8 +176,22 @@ TMP_APPCAST="$(mktemp -t blackbird-appcast.XXXXXX)"
 # hdiutil failure inside make-appcast, OOM, SIGINT). On the success path
 # the `mv` consumes the tempfile so the trap's `rm` is a no-op.
 trap 'rm -f "$TMP_APPCAST"' EXIT
+# Derive pubDate from the tag's committer timestamp so two runs of the
+# same vX.Y.Z produce byte-identical appcast XML. Without this, the
+# "idempotent retry after S3 failure" contract below is a lie: a
+# wall-clock pubDate forces a new git diff every re-run. Use the Unix
+# timestamp + `date -u` to get the same zero-padded UTC RFC 822 shape
+# Sparkle's parser expects ("EEE, dd MMM yyyy HH:mm:ss +0000") and that
+# the existing committed appcast already uses.
+TAG_COMMIT_TS="$(git log -1 --format=%ct "$TAG")"
+if [[ -z "$TAG_COMMIT_TS" ]]; then
+    echo "!! could not read commit timestamp for tag $TAG" >&2
+    exit 1
+fi
+TAG_PUB_DATE="$(date -u -r "$TAG_COMMIT_TS" +"%a, %d %b %Y %H:%M:%S +0000")"
 APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}" \
   APPCAST_FEED_URL="https://blackbird-terminal.com/appcast.xml" \
+  APPCAST_PUB_DATE="$TAG_PUB_DATE" \
   bash scripts/make-appcast.sh --full > "$TMP_APPCAST"
 mv -f "$TMP_APPCAST" website/appcast.xml
 
@@ -200,7 +214,12 @@ sed -i '' -E "s|(blackbird_core )v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|\1v${
 sed -i '' -E "s|(\"softwareVersion\": \")[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\")|\1${VERSION}\3|" website/index.html
 # Sanity: every "v[X.Y.Z]" semver token in the file should now be the
 # new version. If any older token survived, one of the anchors regressed.
-STRAY="$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' website/index.html | grep -Fv "v${VERSION}" || true)"
+# Use `grep -Fxv` (whole-line match) on each extracted token, since
+# extraction guarantees one token per line. Plain `grep -Fv "v${VERSION}"`
+# is a substring filter — with VERSION=0.2.0 it would strip both "v0.2.0"
+# AND "v0.2.0-rc.1" (the latter contains the former) and silently miss
+# the stale prerelease residue.
+STRAY="$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' website/index.html | grep -Fxv "v${VERSION}" || true)"
 if [[ -n "$STRAY" ]]; then
     echo "!! website/index.html still contains older v-prefixed version token(s):" >&2
     echo "$STRAY" | sed 's/^/   /' >&2
@@ -212,7 +231,7 @@ fi
 # strings ("macOS 14.0", "minimumSystemVersion": "14.0"), so anchor on
 # the JSON-LD field name to avoid false-positive bait. The third sed
 # above is the only writer; this is the matching guard.
-STRAY_SOFTWARE_VERSION="$(grep -oE '"softwareVersion": "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"' website/index.html | grep -Fv "\"softwareVersion\": \"${VERSION}\"" || true)"
+STRAY_SOFTWARE_VERSION="$(grep -oE '"softwareVersion": "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"' website/index.html | grep -Fxv "\"softwareVersion\": \"${VERSION}\"" || true)"
 if [[ -n "$STRAY_SOFTWARE_VERSION" ]]; then
     echo "!! website/index.html JSON-LD softwareVersion slot is stale:" >&2
     echo "$STRAY_SOFTWARE_VERSION" | sed 's/^/   /' >&2

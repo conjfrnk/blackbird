@@ -182,6 +182,11 @@ STUB
     # status` / `git diff --cached`.
     (cd "$root" && git add website/appcast.xml \
         && git -c commit.gpgsign=false commit -q -m "seed appcast")
+    # Tag the seed commit as v0.2.0 — the version every test case in
+    # this file passes to publish-update.sh. The script's deterministic
+    # pubDate code path reads `git log -1 --format=%ct "$TAG"` and would
+    # fail without a tag in the fixture's repo.
+    (cd "$root" && git tag v0.2.0)
 }
 
 run_publish_update() {
@@ -764,6 +769,80 @@ HTML
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# CASE 10 — M10: STRAY check uses anchored / whole-line match so a
+# prerelease token of the same MAJOR.MINOR.PATCH (e.g. "v0.2.0-rc.1") is
+# NOT swallowed when VERSION=0.2.0. With the old `grep -Fv "v${VERSION}"`
+# substring filter, "v0.2.0-rc.1" contains "v0.2.0" and gets dropped from
+# the STRAY set, hiding stale prerelease residue. Seed an index.html with
+# all three sed-anchor sites already at v0.2.0 (so the seds find nothing
+# to rewrite) plus a stale "v0.2.0-rc.1" token in an HTML comment that no
+# anchor touches. Run publish-update.sh; the STRAY scan must catch the
+# prerelease residue and exit non-zero.
+# ---------------------------------------------------------------------------
+case_stray_check_prerelease_substring() {
+    local tmp; tmp="$(mk_tmp bb-pub-10)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+
+    cat >"$tmp/stub-bin/codesign" <<'STUB'
+#!/usr/bin/env bash
+mode=""
+for arg in "$@"; do
+    case "$arg" in
+        --display) mode="display" ;;
+    esac
+done
+case "$mode" in
+    display)
+        cat <<'EOF'
+Executable=/path/to/Blackbird.dmg
+TeamIdentifier=F2B95Q4CT8
+EOF
+        ;;
+esac
+exit 0
+STUB
+    chmod +x "$tmp/stub-bin/codesign"
+
+    cat >"$tmp/website/index.html" <<'HTML'
+<!doctype html>
+<html><head>
+<!-- prior beta link: v0.2.0-rc.1 -->
+<script type="application/ld+json">
+{"softwareVersion": "0.2.0"}
+</script>
+</head>
+<body>
+<div class="reqs">Apple Silicon and Intel · v0.2.0</div>
+<div class="row dim">Compiling blackbird_core v0.2.0</div>
+</body></html>
+HTML
+
+    (cd "$tmp" && git add website/index.html \
+        && git -c commit.gpgsign=false commit -q -m "seed prerelease-residue index.html")
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "M10: STRAY check catches prerelease residue 'v0.2.0-rc.1' with VERSION=0.2.0 (rc=$rc)"
+    else
+        fail "M10: STRAY substring filter silently dropped 'v0.2.0-rc.1' (regression)"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "v0.2.0-rc.1" "$log"; then
+        pass "M10: diagnostic names the stale prerelease token"
+    else
+        fail "M10: diagnostic should include the stale token"
+        tail -20 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
 case_atomic_appcast
 case_arg_validation
 case_push_then_deploy
@@ -773,5 +852,6 @@ case_verify_stapler_reject
 case_verify_format_change
 case_jsonld_softwareversion_rewritten
 case_jsonld_softwareversion_stray_guard
+case_stray_check_prerelease_substring
 
 test_end

@@ -230,9 +230,43 @@ case_full_xml_wellformed() {
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# CASE 5 — C1 (semver inversion). `sort -V` orders "0.2.0-rc.1" AFTER
+# "0.2.0" — opposite of semver §11. The selector must NOT pick the
+# prerelease DMG when a same-MAJOR.MINOR.PATCH GA DMG also sits in dist/.
+# Regression-guard for the prerelease-shadows-release bug.
+# ---------------------------------------------------------------------------
+case_dmg_selection_semver_prerelease() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-5)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+
+    printf 'fake dmg 0.2.0\n' > "$tmp/dist/Blackbird-0.2.0.dmg"
+    printf 'fake dmg 0.2.0-rc.1\n' > "$tmp/dist/Blackbird-0.2.0-rc.1.dmg"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_make_appcast "$tmp" "$log")"
+    assert_eq "$rc" "0" "make-appcast.sh exits 0 with GA + prerelease DMGs"
+
+    local picked
+    picked="$(grep -oE 'Blackbird-[0-9A-Za-z.-]+\.dmg' "$log" | head -1 || true)"
+    if [[ "$picked" == "Blackbird-0.2.0.dmg" ]]; then
+        pass "C1: GA DMG selected over same-version prerelease (sort -V semver inversion)"
+    elif [[ "$picked" == "Blackbird-0.2.0-rc.1.dmg" ]]; then
+        fail "C1: prerelease DMG shadowed the GA — sort -V picked '0.2.0-rc.1' over '0.2.0'"
+    else
+        fail "C1: unexpected DMG selection '$picked'"
+        head -20 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
 case_dmg_selection_deterministic
 case_missing_base_url
 case_no_dmgs
 case_full_xml_wellformed
+case_dmg_selection_semver_prerelease
 
 test_end

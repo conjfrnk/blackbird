@@ -41,10 +41,28 @@ else
     codesign --force --sign "$RESIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
 fi
 
-# Launch, give it 3 seconds, then TERM. Expect clean exit.
-"$APP" &
+# Launch, give it 3 seconds, then TERM. Expect SIGTERM exit (128+15=143)
+# or clean exit (0) if the app raced ahead of the kill. Anything else —
+# crash on launch, dyld reject, signal != 15 — is a smoke failure.
+APP_STDERR="$(mktemp -t bb-smoke-stderr.XXXXXX)"
+trap 'rm -f "$APP_STDERR"' EXIT
+
+"$APP" 2>"$APP_STDERR" &
 APP_PID=$!
 sleep 3
 kill "$APP_PID" 2>/dev/null || true
-wait "$APP_PID" 2>/dev/null || true
-echo "smoke ok"
+wait_rc=0
+wait "$APP_PID" 2>/dev/null || wait_rc=$?
+case "$wait_rc" in
+    0|143)
+        echo "smoke ok (exit $wait_rc)"
+        ;;
+    *)
+        echo "!! smoke FAILED: app exited $wait_rc (expected 0 or 143 SIGTERM)" >&2
+        if [[ -s "$APP_STDERR" ]]; then
+            echo "!! captured stderr (last 20 lines):" >&2
+            tail -20 "$APP_STDERR" >&2
+        fi
+        exit 1
+        ;;
+esac
