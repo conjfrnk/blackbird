@@ -50,7 +50,11 @@ public final class TerminalSession: ObservableObject {
     /// Absolute time the session's PTY was spawned. First-byte and
     /// first-snapshot timestamps reference this baseline so the log
     /// reads as "spawn → first byte N ms" instead of raw clock.
-    private var spawnedAt: CFTimeInterval = 0
+    /// Audit L8: was a `var` written from `start(shell:)` on the
+    /// caller's thread and read from `feed(_:)` on coreQueue with
+    /// no synchronization. Promote to `let` and pass through init
+    /// — the value is fixed at construction so there's no race.
+    private let spawnedAt: CFTimeInterval
     /// Set once when the first PTY byte arrives so the read path stops
     /// re-logging on every chunk. Session-local: each new tab starts its
     /// own clock.
@@ -276,8 +280,7 @@ public final class TerminalSession: ObservableObject {
             initialWorkingDirectory: initialWorkingDirectory
         )
         let tSpawn = CACurrentMediaTime()
-        let s = TerminalSession(bbterm: bb, pty: pty)
-        s.spawnedAt = tSpawn
+        let s = TerminalSession(bbterm: bb, pty: pty, spawnedAt: tSpawn)
         let coreMs = (tCore - t0) * 1000
         let ptyMs = (tSpawn - tCore) * 1000
         if StartupTelemetry.isEnabled {
@@ -292,9 +295,10 @@ public final class TerminalSession: ObservableObject {
         case coreInitFailed
     }
 
-    private init(bbterm: BBTerm, pty: PTY) {
+    private init(bbterm: BBTerm, pty: PTY, spawnedAt: CFTimeInterval) {
         self.bbterm = bbterm
         self.pty = pty
+        self.spawnedAt = spawnedAt
         let q = DispatchQueue(label: "blackbird.core")
         let token = ObjectIdentifier(bbterm)
         q.setSpecific(key: Self.coreQueueKey, value: token)
@@ -325,6 +329,8 @@ public final class TerminalSession: ObservableObject {
     private init(headlessBBTerm bb: BBTerm) {
         self.bbterm = bb
         self.pty = nil
+        // Headless test sessions never log spawn-relative timing.
+        self.spawnedAt = CACurrentMediaTime()
         let q = DispatchQueue(label: "blackbird.core")
         let token = ObjectIdentifier(bb)
         q.setSpecific(key: Self.coreQueueKey, value: token)
