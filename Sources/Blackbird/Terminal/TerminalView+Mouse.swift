@@ -619,7 +619,11 @@ extension TerminalView {
         // than after — the scrollWheel path already uses this pattern.
         guard loc.x.isFinite, loc.y.isFinite else { return }
         let rowY = (bounds.height - titlebarOnlyTopInset - loc.y) / metrics.cellHeight
-        let colX = loc.x / metrics.cellWidth
+        // Subtract the L inset so a click at view-x=horizontalContentInsetPoints
+        // maps to col 0 (matches the renderer's cell origin). Negative results
+        // collapse via the max(0, …) clamp below — clicks inside the inset
+        // strip report col 0, never a phantom -1.
+        let colX = (loc.x - TerminalView.horizontalContentInsetPoints) / metrics.cellWidth
         // Clamp to a sane cell range so oversized coordinates (user
         // scrolled the window off the right edge of a 200k-col display)
         // don't overflow Int32 when encodeMouseReport stringifies them.
