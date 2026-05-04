@@ -677,6 +677,10 @@ struct OscScanner<'a> {
     /// M-7 — `classifyForegroundNamespace()` proc_listpids amplification).
     /// Same threading reason as `prompt_mark_rate`.
     osc7_rate: &'a mut Osc7RateState,
+    /// Per-class reject-log latches (audit L3). Threaded in from
+    /// BBTerm so the one-shot-per-class log is per-instance rather
+    /// than process-wide.
+    osc7_reject_logged: &'a mut [bool; 8],
 }
 
 /// Per-terminal sliding-window rate limiter for OSC 133 prompt marks.
@@ -1016,21 +1020,20 @@ const OSC7_REJECT_TRAVERSAL: usize = 7;
 /// silent `return` paths in `handle_osc7` made an attacker / shell-misbehaving
 /// regression invisible. One-shot per class so a sustained flood doesn't
 /// drown the log; the first reject of each shape produces a breadcrumb.
-static OSC7_REJECT_LOGGED: [Once; 8] = [
-    Once::new(),
-    Once::new(),
-    Once::new(),
-    Once::new(),
-    Once::new(),
-    Once::new(),
-    Once::new(),
-    Once::new(),
-];
-fn osc7_reject(class: usize, name: &str) {
-    if let Some(latch) = OSC7_REJECT_LOGGED.get(class) {
-        latch.call_once(|| {
+///
+/// Audit L3: latches live in `BBTerm` rather than a process-wide static.
+/// Pre-fix, the first BBTerm to fire each rejection class consumed the
+/// `Once` for the whole process; sibling tabs (or the same tab on a
+/// fresh shell) silently dropped the same reject — a multi-tab session
+/// that hits one class on tab 1 lost the breadcrumb on tabs 2..N.
+/// Per-instance bool flags restore one-shot-per-tab semantics without
+/// re-introducing log floods.
+fn osc7_reject(latches: &mut [bool; 8], class: usize, name: &str) {
+    if let Some(slot) = latches.get_mut(class) {
+        if !*slot {
+            *slot = true;
             eprintln!("[blackbird_core] OSC 7 rejected ({})", name);
-        });
+        }
     }
 }
 
@@ -1089,12 +1092,12 @@ impl OscScanner<'_> {
         // legitimate cwd updates) but BEFORE `percent_decode` (so the
         // allocation work still benefits from rate-limiting).
         if !self.osc7_rate.allow() {
-            osc7_reject(OSC7_REJECT_RATE, "rate");
+            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_RATE, "rate");
             return;
         }
 
         let Some(decoded) = percent_decode(path_bytes) else {
-            osc7_reject(OSC7_REJECT_PERCENT_DECODE, "percent_decode");
+            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_PERCENT_DECODE, "percent_decode");
             return;
         };
         // Spec (2026-04-17-blackbird-gaps-design.md §4.1): "Malformed UTF-8
@@ -1104,7 +1107,7 @@ impl OscScanner<'_> {
         // UTF-8 bytes — Swift wraps the pointer in a Swift String which
         // assumes UTF-8 validity.
         let Ok(decoded_str) = std::str::from_utf8(&decoded) else {
-            osc7_reject(OSC7_REJECT_UTF8, "utf8");
+            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_UTF8, "utf8");
             return;
         };
         // Reject embedded NUL bytes. `%00` is valid UTF-8 and slips past
@@ -1113,7 +1116,7 @@ impl OscScanner<'_> {
         // hostile payload truncate what downstream consumers see when
         // they cast through a C API. TST-S1-014.
         if decoded.contains(&0) {
-            osc7_reject(OSC7_REJECT_NUL, "nul");
+            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_NUL, "nul");
             return;
         }
         // Reject every other ASCII control byte (0x01..=0x1F, 0x7F) too.
@@ -1122,7 +1125,7 @@ impl OscScanner<'_> {
         // log shippers, or any downstream parser that doesn't pre-scrub.
         // Symmetric defense with the title path. Audit M13.
         if decoded.iter().any(|&b| b < 0x20 || b == 0x7F) {
-            osc7_reject(OSC7_REJECT_CONTROL, "control");
+            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_CONTROL, "control");
             return;
         }
         // Reject Unicode bidi-control / zero-width / invisible-payload
@@ -1133,7 +1136,7 @@ impl OscScanner<'_> {
         // the actual filesystem target is what Finder will open). Same
         // codepoint list the Swift paste sanitizer strips. Audit M2.
         if contains_bidi_or_invisible(decoded.as_slice()) {
-            osc7_reject(OSC7_REJECT_BIDI, "bidi");
+            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_BIDI, "bidi");
             return;
         }
         // Audit synthesis #13 — path-traversal via percent-encoded `..`.
@@ -1145,14 +1148,14 @@ impl OscScanner<'_> {
         // OSC 7 specifies an absolute path; relative paths are illegal
         // by spec.
         if !decoded_str.starts_with('/') {
-            osc7_reject(OSC7_REJECT_NON_ABSOLUTE, "non_absolute");
+            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_NON_ABSOLUTE, "non_absolute");
             return;
         }
         for component in std::path::Path::new(decoded_str).components() {
             match component {
                 // The standard parent-dir component.
                 std::path::Component::ParentDir => {
-                    osc7_reject(OSC7_REJECT_TRAVERSAL, "traversal");
+                    osc7_reject(self.osc7_reject_logged, OSC7_REJECT_TRAVERSAL, "traversal");
                     return;
                 }
                 // Defensive paranoia for the `\..` shape on
@@ -1161,7 +1164,7 @@ impl OscScanner<'_> {
                 // higher layer mis-parsed components, but we'd still
                 // refuse it.
                 std::path::Component::Normal(s) if s.as_encoded_bytes() == b".." => {
-                    osc7_reject(OSC7_REJECT_TRAVERSAL, "traversal");
+                    osc7_reject(self.osc7_reject_logged, OSC7_REJECT_TRAVERSAL, "traversal");
                     return;
                 }
                 _ => {}
@@ -1426,6 +1429,14 @@ pub struct BBTerm {
     /// `Osc7RateState`. Persisted across `bb_term_input` calls — same
     /// rationale as `prompt_mark_rate`.
     osc7_rate: Osc7RateState,
+    /// OSC 7 reject-log latches, one bool per `OSC7_REJECT_*` class
+    /// index. Audit L3: pre-fix these were a process-wide
+    /// `static [Once; 8]`, so the first BBTerm in the process to hit
+    /// each rejection class consumed the latch and sibling tabs (or
+    /// reborn shells in the same tab) silently dropped the same
+    /// reject. Per-instance flags restore one-shot-per-session log
+    /// semantics without re-introducing log flood.
+    osc7_reject_logged: [bool; 8],
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
     /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
     /// 256+ allocations, but a hostile stream can fan replies across many
@@ -1765,6 +1776,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             modify_other_keys: 0,
             prompt_mark_rate: PromptMarkRateState::new(),
             osc7_rate: Osc7RateState::new(),
+            osc7_reject_logged: [false; 8],
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
         });
@@ -1900,6 +1912,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     modify_other_keys: &mut bb.modify_other_keys,
                     prompt_mark_rate: &mut bb.prompt_mark_rate,
                     osc7_rate: &mut bb.osc7_rate,
+                    osc7_reject_logged: &mut bb.osc7_reject_logged,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
@@ -1923,6 +1936,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             modify_other_keys: &mut bb.modify_other_keys,
             prompt_mark_rate: &mut bb.prompt_mark_rate,
             osc7_rate: &mut bb.osc7_rate,
+                    osc7_reject_logged: &mut bb.osc7_reject_logged,
         };
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);
