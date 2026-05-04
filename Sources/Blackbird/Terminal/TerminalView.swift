@@ -819,16 +819,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     /// Inverse of `cellOriginPx`. Maps a view-local (top-down) point to a
-    /// `(row, col)` cell coordinate within the visible grid (no scrollback
-    /// awareness; selection sites that need history use
-    /// `Selection.bufferPoint(forView:…, leftInsetPoints:)` instead).
-    /// Points inside the left/top inset clamp to `col 0` / `row 0`.
+    /// `(row, col)` cell coordinate. **Does not know the live grid size** —
+    /// row/col are only clamped to a generic 100_000-cell sanity cap, so
+    /// callers that need a tight `[0, cols)` / `[0, rows)` clamp must
+    /// re-clamp against the current `BBSnapshot`. Selection sites that
+    /// also need scrollback awareness should use
+    /// `Selection.bufferPoint(forView:…, leftInsetPoints:)` instead.
+    /// Points inside the left/top inset clamp to `col 0` / `row 0`;
+    /// non-finite or absurd-magnitude inputs clamp to the origin sentinel
+    /// rather than trapping at `Int(NaN)` / `Int(±Inf)`.
     public func cellAt(point: CGPoint) -> (row: Int, col: Int) {
         let cw = metrics.cellWidth
         let ch = metrics.cellHeight
         guard cw > 0, ch > 0 else { return (0, 0) }
-        let xInGrid = point.x - Self.horizontalContentInsetPoints
-        let yInGrid = point.y - titlebarOnlyTopInset
+        // Mirror `Selection.bufferPoint(forView:…)`'s defensive clamp so a
+        // stray Core Animation NaN or a misbehaving input device can't
+        // crash the app at `Int(NaN)` / `Int(±Inf)`. Same `sanePx` ceiling.
+        let sanePx: CGFloat = 1_000_000
+        let safeX = point.x.isFinite ? min(max(0, point.x), sanePx) : 0
+        let safeY = point.y.isFinite ? min(max(0, point.y), sanePx) : 0
+        let xInGrid = safeX - Self.horizontalContentInsetPoints
+        let yInGrid = safeY - titlebarOnlyTopInset
         let rawCol = Int(max(0, xInGrid) / cw)
         let rawRow = Int(max(0, yInGrid) / ch)
         let col = max(0, min(rawCol, 100_000))

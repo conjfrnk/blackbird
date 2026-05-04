@@ -70,4 +70,36 @@ final class HorizontalInsetHelperTests: XCTestCase {
             "TerminalView.layout() must propagate horizontalContentInsetPoints to renderer.setLeftInsetPoints"
         )
     }
+
+    // MARK: - cellAt input hardening (silent-failure-hunter HIGH 1)
+
+    func test_cellAt_nanX_clampsColToZero_doesNotTrap() throws {
+        let view = try makeView()
+        let cell = view.cellAt(point: CGPoint(x: CGFloat.nan, y: 100))
+        // NaN x → safeX = 0 → col 0. row is independent and follows y.
+        XCTAssertEqual(cell.col, 0)
+    }
+
+    func test_cellAt_infinityX_returnsOriginSentinel() throws {
+        let view = try makeView()
+        let cell = view.cellAt(point: CGPoint(x: CGFloat.infinity, y: 100))
+        // .infinity is non-finite → safeX clamps to 0 → col 0 after the
+        // inset subtraction and max(0, …) clamp.
+        XCTAssertEqual(cell.col, 0)
+    }
+
+    func test_cellAt_negativeInfinityY_returnsOriginSentinel() throws {
+        let view = try makeView()
+        let cell = view.cellAt(point: CGPoint(x: 100, y: -CGFloat.infinity))
+        XCTAssertEqual(cell.row, 0)
+    }
+
+    func test_cellAt_absurdlyHugeFiniteX_doesNotTrap() throws {
+        let view = try makeView()
+        // 1e20 is finite but Int(1e20 / cellWidth) is unrepresentable.
+        // The sanePx clamp must absorb this before the divide.
+        let cell = view.cellAt(point: CGPoint(x: 1e20, y: 100))
+        XCTAssertGreaterThanOrEqual(cell.col, 0)
+        XCTAssertLessThanOrEqual(cell.col, 100_000)
+    }
 }
