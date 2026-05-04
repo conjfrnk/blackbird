@@ -214,6 +214,31 @@ final class BBTermTests: XCTestCase {
         )
     }
 
+    /// Audit L2. The previous Swift bridge used `UInt16(slot)` which
+    /// trapped on negative `Int` and on values > 65535. A theme JSON
+    /// or hand-edited preference passing a negative slot would crash
+    /// the whole app; the Rust side already drops out-of-range slots
+    /// silently, so the Swift bridge should match that contract.
+    func test_setColor_negativeSlotDoesNotTrap() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 5, rows: 2)))
+        // Negative slots: pre-fix these triggered a Swift integer
+        // conversion fatal error before reaching Rust at all. Post-
+        // fix they clamp to 0 (valid) and Rust's bounds check
+        // either applies them as foreground or silently drops them.
+        term.setColor(slot: -1, rgb: 0xFF_0000)
+        term.setColor(slot: -42, rgb: 0x00_FF00)
+        term.setColor(slot: Int.min, rgb: 0x00_00FF)
+        // Way-too-large positive slots also clamp via UInt16.max
+        // rather than trapping.
+        term.setColor(slot: Int.max, rgb: 0xAB_CDEF)
+        let snap = try XCTUnwrap(term.snapshot())
+        XCTAssertEqual(
+            snap.cols * snap.rows,
+            snap.cellCount,
+            "term state intact after clamped setColor calls"
+        )
+    }
+
     /// pre-flight: ~80 cells; ~5 ms.
     ///
     /// Audit L-18 / EC-7 (2026-04-29): pre-fix, BBTerm.resize hard-

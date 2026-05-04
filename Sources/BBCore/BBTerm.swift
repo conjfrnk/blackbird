@@ -318,9 +318,15 @@ public final class BBTerm {
     }
 
     /// Update one palette slot. See BBCore.h for slot conventions.
+    /// Audit L2: clamp the Int slot down to UInt16 so a caller passing
+    /// a negative slot or a value > 65535 doesn't trap on the bridge.
+    /// The Rust side bounds-checks against the live palette length and
+    /// silently ignores anything beyond it; mirroring that
+    /// "out-of-range becomes no-op" contract on the Swift side avoids
+    /// fatal-error termination on otherwise harmless misuse.
     public func setColor(slot: Int, rgb: UInt32) {
         guard let h = handle else { return }
-        bb_term_set_named_color(h, UInt16(slot), rgb)
+        bb_term_set_named_color(h, UInt16(clamping: max(0, slot)), rgb)
     }
 
     /// Enable or disable OSC 10 / 11 / 12 `?` reply behaviour. Off by
