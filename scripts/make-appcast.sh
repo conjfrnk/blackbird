@@ -57,11 +57,34 @@ fi
 # make-appcast.sh against a dist/ that contains only that prerelease
 # DMG, so this restriction is safe.
 DMG=""
-for candidate in $(ls dist/Blackbird-*.dmg 2>/dev/null \
-                       | sed -nE 's|^dist/Blackbird-([0-9]+\.[0-9]+\.[0-9]+)\.dmg$|\1|p' \
-                       | sort -V); do
-    DMG="dist/Blackbird-${candidate}.dmg"
+# Audit L18: enumerate via shell glob into an array rather than
+# `for x in $(ls ...)`. The previous shape was vulnerable to word-
+# splitting on filenames with spaces / globs and could pick up
+# unintended paths if dist/ was a shared workspace; glob expansion
+# is whitespace-safe by construction, and the regex below still
+# rejects any candidate whose name doesn't match the strict
+# `Blackbird-N.N.N.dmg` GA-only shape.
+shopt -s nullglob
+DMG_CANDIDATES=( dist/Blackbird-*.dmg )
+shopt -u nullglob
+DMG_VERSIONS=()
+# Empty-array guard: under `set -u` (set at the top of this script),
+# `"${DMG_CANDIDATES[@]}"` traps as unbound-variable when the glob
+# matched nothing. The `+` alt-expansion form returns nothing if the
+# array is unset/empty so the for-loop iterates zero times instead.
+for candidate in ${DMG_CANDIDATES[@]+"${DMG_CANDIDATES[@]}"}; do
+    base="$(basename "$candidate")"
+    if [[ "$base" =~ ^Blackbird-([0-9]+\.[0-9]+\.[0-9]+)\.dmg$ ]]; then
+        DMG_VERSIONS+=( "${BASH_REMATCH[1]}" )
+    fi
 done
+if [[ ${#DMG_VERSIONS[@]} -gt 0 ]]; then
+    # Sort the versions numerically and take the highest; mirrors
+    # the prior `sort -V | tail -n1` behavior without going through
+    # a subshell pipeline that would lose DMG on assignment.
+    PICKED="$(printf '%s\n' "${DMG_VERSIONS[@]}" | sort -V | tail -n1)"
+    DMG="dist/Blackbird-${PICKED}.dmg"
+fi
 if [[ -z "$DMG" || ! -f "$DMG" ]]; then
     echo "!! No DMG found in dist/. Run scripts/release.sh first." >&2
     exit 1
