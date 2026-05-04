@@ -182,13 +182,23 @@ public final class TerminalSession: ObservableObject {
     /// any thread hop to main if needed. A nil value means "no real title
     /// to set" — the sink falls back to the current window.title (shell
     /// basename) instead of overwriting it with a placeholder.
+    ///
+    /// Audit L6: when called off main, recompute `displayTitle` INSIDE
+    /// the main-async block rather than capturing a snapshot before the
+    /// hop. The two underlying fields (`oscTitle`, `titleOverride`) are
+    /// both written from main, so reading them off main is itself a
+    /// data race; reading them on main inside the delivery closure
+    /// also closes a small ordering window where two rapid title
+    /// writes (one from a feed event, one from a `titleOverride`
+    /// setter) could interleave their captured snapshots and deliver
+    /// the older value last.
     private func publishTitle() {
-        let value: String? = displayTitle
         if Thread.isMainThread {
-            self.title = value
+            self.title = displayTitle
         } else {
             DispatchQueue.main.async { [weak self] in
-                self?.title = value
+                guard let self else { return }
+                self.title = self.displayTitle
             }
         }
     }
