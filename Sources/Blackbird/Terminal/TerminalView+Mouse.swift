@@ -244,7 +244,8 @@ extension TerminalView {
             displayOffset: snap.displayOffset,
             cols: snap.cols,
             rows: snap.rows,
-            historySize: snap.historySize
+            historySize: snap.historySize,
+            leftInsetPoints: TerminalView.horizontalContentInsetPoints
         )
     }
 
@@ -576,7 +577,8 @@ extension TerminalView {
             displayOffset: snap.displayOffset,
             cols: snap.cols,
             rows: snap.rows,
-            historySize: snap.historySize
+            historySize: snap.historySize,
+            leftInsetPoints: TerminalView.horizontalContentInsetPoints
         )
     }
 

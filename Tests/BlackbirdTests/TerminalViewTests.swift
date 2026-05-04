@@ -319,8 +319,11 @@ final class TerminalViewTests: XCTestCase {
         // AppKit's origin is bottom-left; TerminalView uses flipped
         // coordinates for grid math. Place the click at the center
         // of (col, row) so any rounding on either side stays inside
-        // the intended cell.
-        let x = CGFloat(col) * view.metrics.cellWidth + view.metrics.cellWidth / 2
+        // the intended cell. The +horizontalContentInsetPoints offset
+        // matches the renderer's cell origin (cellOriginPx).
+        let x = TerminalView.horizontalContentInsetPoints
+            + CGFloat(col) * view.metrics.cellWidth
+            + view.metrics.cellWidth / 2
         let y = CGFloat(row) * view.metrics.cellHeight + view.metrics.cellHeight / 2
         return NSPoint(x: x, y: y)
     }
