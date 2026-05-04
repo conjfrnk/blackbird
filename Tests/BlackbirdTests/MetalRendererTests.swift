@@ -598,4 +598,125 @@ final class MetalRendererTests: XCTestCase {
         XCTAssertEqual(renderer.metricsGeneration, gen1 &+ 1,
             "second reconfigure must bump metricsGeneration again")
     }
+
+    // MARK: - H7: drawable-failure must not advance the skip-cache
+    //
+    // `lastFrameKey` is the renderer's frame-skip cache key; when the
+    // current FrameKey matches `lastFrameKey` `render(in:)` short-
+    // circuits without re-encoding. Pre-fix, `lastFrameKey` was
+    // written BEFORE drawable acquisition — so a frame that bailed
+    // on `view.currentDrawable == nil` (window minimised, drawable
+    // pool exhausted) recorded its FrameKey, causing the next call
+    // with an identical FrameKey to silently skip and never recover.
+    // The fix moves the `lastFrameKey` write to AFTER successful
+    // drawable + descriptor + command-buffer + encoder acquisition,
+    // so an early return leaves `lastFrameKey` pinned to the
+    // previous *encoded* frame.
+
+    /// Counting subclass: returns nil for `currentDrawable` (forces
+    /// the failure path) and tallies how many times the property
+    /// was queried. The skip-cache short-circuit returns BEFORE
+    /// touching `currentDrawable`, so a poisoned cache shows up as
+    /// "queried fewer times than render() was called". A healthy
+    /// cache (post-fix) queries `currentDrawable` on every call.
+    private final class CountingNoDrawableMTKView: MTKView {
+        var currentDrawableQueries: Int = 0
+        override var currentDrawable: CAMetalDrawable? {
+            currentDrawableQueries += 1
+            return nil
+        }
+        override var currentRenderPassDescriptor: MTLRenderPassDescriptor? { nil }
+    }
+
+    /// Regression for audit H7. Drive multiple drawable-failed
+    /// `render(in:)` calls with an identical snapshot. Pre-fix,
+    /// the second call would short-circuit on `frameKey ==
+    /// lastFrameKey` (set during the first failed attempt) and the
+    /// renderer would freeze: every subsequent call hit the skip
+    /// path, so even when a drawable became available no encode
+    /// would happen until something else invalidated the cache.
+    /// Post-fix, the failed first call leaves `lastFrameKey`
+    /// unchanged, so the second call enters the encode path again
+    /// (and fails the same way — but does NOT skip).
+    ///
+    /// Discriminator: `currentDrawable` is queried only on the
+    /// encode-attempt path. The skip-cache short-circuit returns
+    /// before reaching `view.currentDrawable`. So a poisoned cache
+    /// tallies fewer drawable queries than render calls.
+    func test_render_drawableFailure_doesNotPoisonSkipCache() throws {
+        let device = try requireMetalDevice()
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = CountingNoDrawableMTKView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 192),
+            device: device
+        )
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
+        let snapshot = try makeSmallSnapshot(text: "h7-regression")
+
+        // Drive five renders with the IDENTICAL snapshot. Each one
+        // must reach `view.currentDrawable` (and bail when it
+        // returns nil). Pre-fix only the first call would touch
+        // currentDrawable; the next four would short-circuit on
+        // the now-poisoned skip cache, leaving the count at 1.
+        // Post-fix every call goes through the drawable check,
+        // count == 5.
+        let renderCalls = 5
+        for _ in 0..<renderCalls {
+            renderer.render(in: view, snapshot: snapshot, focused: true)
+            XCTAssertTrue(renderer.didFrameSkipLastRender,
+                          "every drawable-failed render must report didFrameSkipLastRender = true")
+        }
+
+        XCTAssertEqual(
+            view.currentDrawableQueries, renderCalls,
+            "every render() with a fresh drawable must attempt drawable acquisition; "
+            + "if this count is < \(renderCalls), the H7 regression is back: a "
+            + "drawable-failed render poisoned `lastFrameKey` and subsequent renders "
+            + "with the same FrameKey now short-circuit on the skip-cache without "
+            + "ever re-attempting encode."
+        )
+
+        // Final: atlas still responds to lookups. Regression guard
+        // against a state corruption that would surface as a freed
+        // texture or stale cache after the failed-render barrage.
+        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("h")))
+    }
+
+    /// Companion: pins the H7 contract more directly. After a single
+    /// drawable-failed render, a SECOND render with the identical
+    /// state must again attempt drawable acquisition — proving the
+    /// failed first frame did NOT advance `lastFrameKey`. Pre-fix
+    /// would skip the second drawable query.
+    func test_render_failedFrame_doesNotAdvanceLastFrameKey() throws {
+        let device = try requireMetalDevice()
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = CountingNoDrawableMTKView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 192),
+            device: device
+        )
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
+        let snapshot = try makeSmallSnapshot(text: "stable-h7")
+
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+        let queriesAfterFirst = view.currentDrawableQueries
+        XCTAssertEqual(queriesAfterFirst, 1,
+                       "first render must attempt drawable acquisition exactly once")
+
+        // Second render with the IDENTICAL state. Post-fix the cache
+        // was NOT advanced on the first call's failure, so this call
+        // also enters the drawable path. Pre-fix, the cache was
+        // poisoned and this call short-circuits without touching
+        // currentDrawable.
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+        XCTAssertEqual(
+            view.currentDrawableQueries, queriesAfterFirst + 1,
+            "second render with identical state must also attempt drawable "
+            + "acquisition — the failed first frame must not have advanced "
+            + "the skip-cache (audit H7)"
+        )
+    }
 }

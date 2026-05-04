@@ -248,6 +248,16 @@ public final class MetalRenderer {
     /// the `render` call (today: main).
     public private(set) var didFrameSkipLastRender: Bool = false
 
+    #if DEBUG
+    /// Test-only seam: force `lastFrameKey` to advance even when drawable
+    /// acquisition fails. Used by `CmdHoverHighlightTests` (and similar)
+    /// to verify FrameKey's Equatable contract via Mirror reflection in
+    /// offscreen test environments where `view.currentDrawable == nil`.
+    /// Production paths leave this `false`, preserving the H7 invariant
+    /// that `lastFrameKey` records only actually-encoded frames.
+    public var _testForceFrameKeyAdvanceOnFailedDrawable: Bool = false
+    #endif
+
     /// Strict subset of FrameKey fields that decide whether a prior frame's
     /// per-row cache is still visually correct: everything in FrameKey
     /// EXCEPT `snapshotSeq`, `cursorRow`, and `cursorCol`. Snapshot
@@ -586,6 +596,20 @@ public final class MetalRenderer {
         self.metricsGeneration = 1
         self.instanceBuffers = buffers
         self.instanceCapacities = [startCap, startCap, startCap]
+        // Wire the H6 GPU-CPU race barrier AFTER all stored properties
+        // are initialized — the closure captures self, and Swift's
+        // definite-init analysis forbids capturing self while any
+        // stored property is still unset. Saturation flush rewrites
+        // slot 0 of the shared-storage atlas textures; a no-op
+        // `commit + waitUntilCompleted` here drains every prior frame's
+        // command buffer so the GPU can no longer be sampling the slot
+        // we're about to overwrite. Cost: one frame stall on the rare
+        // flush event (saturation = hostile input).
+        atlas.flushBarrier = { [weak self] in
+            guard let self, let drain = self.commandQueue.makeCommandBuffer() else { return }
+            drain.commit()
+            drain.waitUntilCompleted()
+        }
         // Warm ASCII + box-drawing into the atlas before the first draw so
         // no user keystroke pays for the CTLineCreate path on the hot
         // first-paint. Safe: this is a plain call into `lookupOrInsert`,
@@ -632,6 +656,15 @@ public final class MetalRenderer {
         // by construction. Audit M-20.
         self.metricsGeneration &+= 1
         self.atlas = a
+        // Re-wire the H6 saturation-flush barrier on the new atlas (the
+        // old closure captured the renderer but lived on the prior
+        // atlas instance, which is now released). Same drain semantics
+        // as init — see the longer comment there.
+        a.flushBarrier = { [weak self] in
+            guard let self, let drain = self.commandQueue.makeCommandBuffer() else { return }
+            drain.commit()
+            drain.waitUntilCompleted()
+        }
         // Re-warm the new atlas so the post-resize first repaint doesn't
         // pay for CoreText rasterisation of every visible character.
         a.prewarmCommonGlyphs()
@@ -1199,9 +1232,6 @@ public final class MetalRenderer {
             didFrameSkipLastRender = true
             return
         }
-        didFrameSkipLastRender = false
-
-        lastFrameKey = frameKey
 
         // Lock a slot BEFORE acquiring the drawable. Flipping this order
         // (drawable-first) was attempted as metal-renderer F20 and
@@ -1231,9 +1261,30 @@ public final class MetalRenderer {
             // that the GPU did not actually paint a frame, so they
             // don't record a phantom zero-latency sample for the
             // pending keystroke.
+            //
+            // `lastFrameKey` is NOT advanced on this path. The skip-cache
+            // invariant is "lastFrameKey records the last *encoded*
+            // frame"; advancing it here would let the next call short-
+            // circuit on `frameKey == lastFrameKey` and never re-encode
+            // — a windowed minimise + identical state could freeze the
+            // surface. Leaving it unchanged guarantees the next render
+            // attempt enters the encode path again. Audit H7.
             didFrameSkipLastRender = true
+            #if DEBUG
+            if _testForceFrameKeyAdvanceOnFailedDrawable {
+                lastFrameKey = frameKey
+            }
+            #endif
             return
         }
+
+        // Drawable + descriptor + command buffer + encoder all live —
+        // we are committed to encoding this frame. Advance the skip-
+        // cache atomically with that commitment so an early-return
+        // above leaves `lastFrameKey` pinned to the previous successful
+        // frame. Audit H7.
+        didFrameSkipLastRender = false
+        lastFrameKey = frameKey
 
         // Signal the slot free when the GPU finishes reading it. Must be
         // registered before `commit()` so there's no race with an immediate

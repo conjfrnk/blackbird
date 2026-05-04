@@ -113,6 +113,21 @@ public final class GlyphAtlas {
     /// (negligible). Logger is `os.Logger` so it's eligible for Release
     /// per `feedback_nslog_private_format`. Audit M-6 (2026-04-29).
     private var saturationHits: Int = 0
+    /// Hook invoked synchronously immediately before a saturation flush
+    /// rewrites slot 0. Set by `MetalRenderer` to drain in-flight command
+    /// buffers via `commit + waitUntilCompleted`, so the GPU can no
+    /// longer be sampling the slot we're about to overwrite when CPU
+    /// `texture.replace` runs against `.storageMode = .shared`. Without
+    /// this barrier the flush frame can tear: the prior frame's encoded
+    /// commands hold pre-flush UVs into slot 0 while the new
+    /// rasterisation lands in the same shared-memory bytes. One-frame
+    /// stall on the rare flush event; saturation is hostile-input
+    /// territory anyway. Audit H6. `internal(set)` so only Renderer-module
+    /// code (or test code via `@testable`) can install the closure —
+    /// prevents external callers from clobbering the renderer's barrier.
+    /// Called synchronously on the same thread as `lookupOrInsert`; in
+    /// production that thread is main.
+    public internal(set) var flushBarrier: (() -> Void)?
     private static let logger = Logger(
         subsystem: "dev.conjfrnk.blackbird", category: "atlas"
     )
@@ -294,6 +309,14 @@ public final class GlyphAtlas {
                     "atlas saturated at \(self.capacityGlyphs, privacy: .public); flush hit #\(self.saturationHits, privacy: .public); trigger U+\(String(format: "%04X", scalar.value), privacy: .public) wide=\(wide ? 1 : 0, privacy: .public) bold=\(style.bold ? 1 : 0, privacy: .public) italic=\(style.italic ? 1 : 0, privacy: .public); orphan slots=\(self.freeNarrowSlots.count, privacy: .public)"
                 )
             }
+            // Drain any GPU work still reading the pre-flush atlas
+            // before CPU `texture.replace` overwrites slot 0. The mono
+            // and color textures use `.storageMode = .shared`, so CPU
+            // writes are visible to the GPU immediately; without the
+            // barrier the prior frame's command buffer can sample slot
+            // 0 with old UVs while the new rasterisation lands in the
+            // same shared bytes, producing a torn glyph. Audit H6.
+            flushBarrier?()
             byKey.removeAll(keepingCapacity: true)
             nextSlot = 0
             slot = 0

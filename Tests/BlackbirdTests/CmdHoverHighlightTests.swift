@@ -147,6 +147,11 @@ final class CmdHoverHighlightTests: XCTestCase {
         let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        // H7: production renders only advance lastFrameKey on actually-
+        // encoded frames; this offscreen test view returns nil drawable
+        // so we use the DEBUG seam to still observe FrameKey's Equatable
+        // discrimination on cmdHover* fields.
+        renderer._testForceFrameKeyAdvanceOnFailedDrawable = true
         let view = makeOffscreenView(device: device)
         let snapshot = try makeSmallSnapshot(text: "see https://example.com here")
 

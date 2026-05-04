@@ -366,6 +366,156 @@ final class GlyphAtlasInvariantTests: XCTestCase {
                        "repeated lookup must return identical isWide flag")
     }
 
+    // MARK: - H6: saturation flush GPU-CPU race barrier
+    //
+    // The atlas textures use `.storageMode = .shared`. When the atlas
+    // saturates and slot 0 is rewritten, a still-in-flight GPU command
+    // buffer can be sampling slot 0 with pre-flush UVs while CPU
+    // `texture.replace` overwrites the same shared bytes — a torn
+    // glyph in the saturation-flush frame. Fix: invoke `flushBarrier`
+    // (set by MetalRenderer to `commit + waitUntilCompleted`)
+    // immediately before the rewrite, draining in-flight frames.
+    //
+    // The contract test below pins behaviour we can verify without a
+    // GPU: the barrier is invoked exactly once per saturation flush,
+    // synchronously before `byKey` is cleared, and post-flush every
+    // pre-flush key returns either nil OR an entry at the new
+    // generation. The integration with MetalRenderer's drain command
+    // is exercised by the broader render tests.
+    //
+    // Memory pre-flight: capacity 4 atlas, mono+color textures
+    // ≈ 2.3 KiB total. Trivial.
+
+    /// The saturation flush invokes `flushBarrier` exactly once per
+    /// flush event, synchronously, BEFORE `byKey` and `nextSlot` are
+    /// reset — so a renderer wiring `commandQueue.commit +
+    /// waitUntilCompleted` to the barrier drains in-flight GPU work
+    /// before slot 0's shared-storage bytes get rewritten. Audit H6.
+    func test_saturationFlush_invokesFlushBarrierBeforeRewriting() throws {
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(GlyphAtlas(
+            device: device, metrics: metrics, capacityGlyphs: 4, scale: 1
+        ))
+
+        // Capture state AT the barrier-fire moment. The barrier MUST
+        // fire before the generation bump; otherwise it has fired
+        // after `byKey.removeAll()` and `texture.replace` would also
+        // run after — re-introducing the GPU-CPU race the barrier
+        // exists to prevent.
+        var barrierFiredCount = 0
+        var generationAtBarrier: UInt64 = .max
+        atlas.flushBarrier = { [weak atlas] in
+            guard let atlas else { return }
+            barrierFiredCount += 1
+            generationAtBarrier = atlas.generation
+        }
+
+        // Fill to capacity (4 narrow glyphs).
+        for cp: UInt32 in 0x41...0x44 {
+            let s = try XCTUnwrap(UnicodeScalar(cp))
+            _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: s))
+        }
+        XCTAssertEqual(barrierFiredCount, 0,
+                       "barrier must NOT fire on routine insert — only on saturation flush")
+        XCTAssertEqual(atlas.generation, 0,
+                       "no flush yet, generation pinned at 0")
+
+        // Overflow → flush. Barrier MUST fire once, before the
+        // generation bump.
+        let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
+        _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: overflow))
+        XCTAssertEqual(barrierFiredCount, 1,
+                       "barrier must fire exactly once on the saturation flush")
+        XCTAssertEqual(generationAtBarrier, 0,
+                       "barrier must fire BEFORE generation is bumped — otherwise a "
+                       + "renderer relying on the barrier to drain in-flight frames "
+                       + "drains too late, after the slot rewrite has already begun")
+        XCTAssertEqual(atlas.generation, 1,
+                       "generation must bump after the flush")
+
+        // A second flush fires the barrier a second time — confirms
+        // the hook isn't single-shot.
+        for cp: UInt32 in 0x46...0x48 {
+            _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: try XCTUnwrap(UnicodeScalar(cp))))
+        }
+        let overflow2 = try XCTUnwrap(UnicodeScalar(0x49 as UInt32))
+        _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: overflow2))
+        XCTAssertEqual(barrierFiredCount, 2,
+                       "second saturation flush must fire the barrier again")
+        XCTAssertEqual(atlas.generation, 2)
+    }
+
+    /// Post-flush invariant: any pre-flush key either returns nil
+    /// (atlas was cleared and the caller hasn't re-inserted yet) or
+    /// an entry produced under the new generation. A torn-glyph bug
+    /// would surface as a stale `Entry` reusing pre-flush UVs while
+    /// `generation` had already advanced; pin the contract that the
+    /// renderer keys row caches against `(snapshot, generation)`.
+    func test_saturationFlush_preFlushLookupsRouteThroughNewGeneration() throws {
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(GlyphAtlas(
+            device: device, metrics: metrics, capacityGlyphs: 4, scale: 1
+        ))
+
+        // Insert four pre-flush keys.
+        for cp: UInt32 in 0x41...0x44 {
+            let s = try XCTUnwrap(UnicodeScalar(cp))
+            _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: s))
+        }
+        let genBeforeFlush = atlas.generation
+
+        // Force flush.
+        let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
+        _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: overflow))
+        XCTAssertGreaterThan(atlas.generation, genBeforeFlush,
+                             "saturation flush must bump generation")
+
+        // Re-look up the first pre-flush key. Two valid outcomes:
+        //   1. Cache hit at the SAME UV (atlas re-rasterised the
+        //      pre-flush key into the same slot at the new generation
+        //      — fine, the row cache invalidates on generation change)
+        //   2. Fresh insert at a different UV (atlas dropped the
+        //      pre-flush mapping on flush)
+        // Either way, the lookup MUST succeed (non-nil). A torn
+        // post-flush state where the atlas returns the pre-flush
+        // entry but slot 0 has been rewritten with new bytes would
+        // manifest as a non-crash but visually-wrong frame; the
+        // generation bump is the renderer's signal to invalidate.
+        let firstScalar = try XCTUnwrap(UnicodeScalar(0x41 as UInt32))
+        let postFlush = try XCTUnwrap(
+            atlas.lookupOrInsert(scalar: firstScalar),
+            "post-flush re-insert of an evicted scalar must succeed"
+        )
+        XCTAssertGreaterThanOrEqual(postFlush.uvOrigin.x, 0)
+        XCTAssertLessThanOrEqual(postFlush.uvOrigin.x + postFlush.uvSize.x, 1.001)
+    }
+
+    /// Defensive: if no `flushBarrier` is wired (e.g. atlas used in
+    /// isolation by a future test or a non-renderer caller), the
+    /// saturation flush must still complete without crashing. The
+    /// barrier is an *opt-in* race-mitigation hook, not a
+    /// correctness precondition.
+    func test_saturationFlush_withNoBarrier_doesNotCrash() throws {
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        let atlas = try XCTUnwrap(GlyphAtlas(
+            device: device, metrics: metrics, capacityGlyphs: 4, scale: 1
+        ))
+        // No `atlas.flushBarrier = …` — explicitly unset.
+        for cp: UInt32 in 0x41...0x44 {
+            _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: try XCTUnwrap(UnicodeScalar(cp))))
+        }
+        // Force flush without a barrier wired. Must succeed.
+        let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
+        XCTAssertNotNil(atlas.lookupOrInsert(scalar: overflow))
+        XCTAssertEqual(atlas.generation, 1)
+    }
+
     /// `lookupOrInsert` must not crash or return invalid UVs when
     /// the same scalar is looked up under both `wide` flags. Whether
     /// the atlas keys on `scalar.value` alone (cache HIT on the
