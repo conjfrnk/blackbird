@@ -120,6 +120,68 @@ fn osc_133_fragmented_across_feed_calls_resolves_once() {
 }
 
 #[test]
+fn osc_133_d_rejects_non_digit_payload() {
+    // Audit L1. The vte parser already strips C0 control bytes from
+    // OSC bodies, so the realistic remaining hostile-shell case is a
+    // non-digit *printable* payload (e.g. letters or punctuation
+    // injected to corrupt the displayed exit code). Pre-fix this
+    // reached Swift as a String alongside the prompt-mark UI.
+    unsafe {
+        let term = bb_term_new(10, 3, 100);
+        let cap = install_capture(term);
+        // Payload "abc" — printable, non-digit. Must be rejected.
+        let seq = b"\x1b]133;D;abc\x1b\\";
+        bb_term_input(term, seq.as_ptr(), seq.len());
+        let events = cap.lock().unwrap().events.clone();
+        let marks = collect_marks(&events);
+        assert!(
+            marks.is_empty(),
+            "non-digit D payload should drop the PromptMark event entirely: {marks:?}"
+        );
+        bb_term_free(term);
+    }
+}
+
+#[test]
+fn osc_133_d_rejects_partial_digit_payload() {
+    // A payload that's mostly digits but contains a single non-digit
+    // printable byte still gets dropped. Better to omit the exit code
+    // than to ship a partially-readable string to the navigation UI.
+    unsafe {
+        let term = bb_term_new(10, 3, 100);
+        let cap = install_capture(term);
+        // Payload "13a" — two digits + letter. Must be rejected.
+        let seq = b"\x1b]133;D;13a\x1b\\";
+        bb_term_input(term, seq.as_ptr(), seq.len());
+        let events = cap.lock().unwrap().events.clone();
+        let marks = collect_marks(&events);
+        assert!(
+            marks.is_empty(),
+            "D payload with non-digit byte must be rejected: {marks:?}"
+        );
+        bb_term_free(term);
+    }
+}
+
+#[test]
+fn osc_133_d_with_empty_payload_still_fires() {
+    // The audit fix only rejects non-empty non-digit payloads.
+    // `OSC 133 ; D ST` with no exit code is a valid emission for
+    // shells that don't track exit codes — still useful as a
+    // navigation marker.
+    unsafe {
+        let term = bb_term_new(10, 3, 100);
+        let cap = install_capture(term);
+        let seq = b"\x1b]133;D\x07";
+        bb_term_input(term, seq.as_ptr(), seq.len());
+        let events = cap.lock().unwrap().events.clone();
+        let marks = collect_marks(&events);
+        assert_eq!(marks, vec![(4, String::new())]);
+        bb_term_free(term);
+    }
+}
+
+#[test]
 fn unknown_sub_kind_is_silently_ignored() {
     // `OSC 133 ; Z ST` — shouldn't crash and shouldn't fire an event.
     unsafe {

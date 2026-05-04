@@ -1239,6 +1239,24 @@ impl OscScanner<'_> {
         let cap = exit_code_bytes.len().min(16);
         let payload = &exit_code_bytes[..cap];
 
+        // Audit L1. Validate the D-kind payload as ASCII decimal digits
+        // before delivering. A hostile shell can emit OSC 133;D;<bytes>
+        // ST with arbitrary control characters; the Swift consumer
+        // turns the payload into a String for display alongside the
+        // prompt-mark UI. Non-digit bytes (NUL, ESC, OSC re-entry,
+        // bidi controls) reach Swift as a String containing those
+        // bytes' UTF-8 replacement-character interpretation, which
+        // can confuse downstream rendering. Be symmetric with the
+        // OSC 7 cwd path which already refuses control bytes.
+        // Drop the whole event when the payload is non-numeric —
+        // we'd rather omit the exit code than display garbage.
+        if kind_byte == b'D'
+            && !payload.is_empty()
+            && !payload.iter().all(|b| b.is_ascii_digit())
+        {
+            return;
+        }
+
         let ev = BBEvent {
             kind: BBEventKind::PromptMark,
             payload: payload.as_ptr(),
