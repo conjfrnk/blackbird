@@ -276,7 +276,21 @@ public final class GlyphAtlas {
                 // the common `col == slotCols - 1` case that's exactly
                 // one slot; a theoretical multi-slot gap from a future
                 // >2-slot wide glyph is also handled.
+                //
+                // Audit L15. The append is conditional on the slot not
+                // already being in `freeNarrowSlots`. Currently
+                // unreachable — the saturation flush wipes the array
+                // on every overflow and `nextSlot` only ever moves
+                // forward — but a future change that moves the
+                // alignment skip above the flush check, or any other
+                // non-monotonic pointer math, could land the same
+                // index here twice. `popLast()` would then hand the
+                // same slot to two different glyphs (atlas region
+                // alias). The assertion fires loud in DEBUG to catch
+                // the regression at the introduction site.
                 for orphan in slot..<(slot / slotCols + 1) * slotCols {
+                    assert(!freeNarrowSlots.contains(orphan),
+                           "freeNarrowSlots double-append for slot=\(orphan); two glyphs would alias the same atlas region")
                     freeNarrowSlots.append(orphan)
                 }
                 slot = (slot / slotCols + 1) * slotCols
