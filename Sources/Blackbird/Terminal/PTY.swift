@@ -452,6 +452,21 @@ public final class PTY {
     private init(masterFD: Int32, childPID: pid_t) {
         self.masterFD = masterFD
         self.childPID = childPID
+        // Suppress SIGPIPE on writes to this fd. Without F_SETNOSIGPIPE
+        // a write to a master whose slave has already closed (the
+        // typical condition during shell-exit teardown) delivers
+        // SIGPIPE to the writing thread, whose default disposition
+        // terminates the entire process — a single keystroke or IME
+        // commit racing the shell exit can take Blackbird down. With
+        // the flag set the same condition produces EPIPE on the
+        // syscall, which writeRawLocked logs and treats as fatal for
+        // that one write rather than the whole process. Audit H1.
+        if Darwin.fcntl(masterFD, F_SETNOSIGPIPE, 1) < 0 {
+            let savedErrno = errno
+            Self.logger.error(
+                "PTY.init: F_SETNOSIGPIPE failed errno=\(savedErrno, privacy: .public) fd=\(masterFD, privacy: .public) — process is at risk of SIGPIPE-termination on master writes after slave close"
+            )
+        }
         // Capture the child's BSD start time at spawn so the SIGKILL
         // escalation in `terminate()` can detect PID reuse: if the
         // 200ms grace window outlives our child AND macOS recycles
@@ -817,6 +832,14 @@ public final class PTY {
     /// canonical wrappers without exposing a mutable knob to production.
     static var remoteShellBinaryBasenamesForTests: Set<String> {
         remoteShellBinaryBasenames
+    }
+
+    /// Test-only: returns the F_GETNOSIGPIPE state of the master fd.
+    /// Pins the H1 fix that PTY.init applies F_SETNOSIGPIPE so a
+    /// future refactor that drops the fcntl call breaks CI before
+    /// it ships.
+    func _testGetNoSigPipeFlag() -> Int32 {
+        return Darwin.fcntl(masterFD, F_GETNOSIGPIPE)
     }
     #endif
 

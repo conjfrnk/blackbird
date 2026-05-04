@@ -87,6 +87,48 @@ final class PTYTests: XCTestCase {
         pty.terminate()
     }
 
+    func test_masterFDHasNoSigPipeSet() throws {
+        // Audit H1: PTY.init must apply F_SETNOSIGPIPE to the master
+        // fd. Without it, writing to a master whose slave has been
+        // closed (typical at shell exit) delivers SIGPIPE — the
+        // process default disposition terminates the entire app, so
+        // a single keystroke racing the shell exit can take Blackbird
+        // down. With the flag set the same condition produces EPIPE,
+        // which writeRawLocked logs and treats as fatal for that one
+        // write only.
+        try Self.skipIfFlakyOnCI()
+        let pty = try PTY.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 1"],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        defer { pty.terminate() }
+        XCTAssertEqual(pty._testGetNoSigPipeFlag(), 1,
+                       "PTY master fd must have F_SETNOSIGPIPE applied (H1)")
+    }
+
+    func test_F_SETNOSIGPIPE_platformPrimitive() throws {
+        // Defense-in-depth on top of test_masterFDHasNoSigPipeSet:
+        // exercise the platform fcntl primitive in-process so a
+        // future macOS that stops exposing F_SETNOSIGPIPE breaks
+        // CI before any user-visible regression.
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        XCTAssertEqual(Darwin.openpty(&master, &slave, nil, nil, nil), 0,
+                       "openpty should succeed on a healthy host")
+        defer {
+            _ = Darwin.close(master)
+            _ = Darwin.close(slave)
+        }
+        XCTAssertEqual(Darwin.fcntl(master, F_GETNOSIGPIPE), 0,
+                       "F_NOSIGPIPE should be off by default on a fresh master fd")
+        XCTAssertEqual(Darwin.fcntl(master, F_SETNOSIGPIPE, 1), 0,
+                       "F_SETNOSIGPIPE should succeed on a master fd")
+        XCTAssertEqual(Darwin.fcntl(master, F_GETNOSIGPIPE), 1,
+                       "After F_SETNOSIGPIPE(1), F_GETNOSIGPIPE should return 1")
+    }
+
     func test_scrubbedParentEnvVars_coversKnownLeaks() {
         // Pin the env-scrub list. These launchd / XPC / CoreFoundation
         // variables leak from the GUI app's context into the child shell
