@@ -223,6 +223,35 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
                             + "(crash regression pin)")
     }
 
+    // MARK: - contentMinSize / contentResizeIncrements (free-resize feature)
+
+    /// `MainWindowController` initialiser must reserve space for the new 8pt
+    /// L+R inset in its `contentMinSize` floor — otherwise the user can drag
+    /// below `20·cellW + 16` and the grid loses cols below the usable
+    /// minimum.
+    func test_contentMinSize_includesHorizontalInset() throws {
+        Self.acquireControllerSlot()
+        defer { Self.releaseControllerSlot() }
+
+        let controller = MainWindowController(
+            initialWorkingDirectory: nil,
+            autosaveFrame: false
+        )
+        defer {
+            controller.terminateSessions()
+            controller.window?.close()
+        }
+
+        let win = try XCTUnwrap(controller.window)
+        let view = try XCTUnwrap(win.contentView as? TerminalView)
+        let cw = view.metrics.cellWidth
+        let ch = view.metrics.cellHeight
+        let expectedW = cw * 20 + 2 * TerminalView.horizontalContentInsetPoints
+        let expectedH = ch * 4 + 28 + TerminalView.bottomContentInsetPoints
+        XCTAssertEqual(win.contentMinSize.width, expectedW, accuracy: 0.001)
+        XCTAssertEqual(win.contentMinSize.height, expectedH, accuracy: 0.001)
+    }
+
     // MARK: - F-S6-014: begin-rename index race against stale tab order
 
     /// Pre-flight: NO real MainWindowController. Drives the strip directly

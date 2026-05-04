@@ -704,7 +704,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // new font's 20-col / 4-row minimum — they'd end up with a
             // window too small to read comfortably.
             window.contentMinSize = NSSize(
-                width: newMetrics.cellWidth * 20,
+                width: newMetrics.cellWidth * 20 + 2 * Self.horizontalContentInsetPoints,
                 height: newMetrics.cellHeight * 4 + 28 + Self.bottomContentInsetPoints
             )
         }

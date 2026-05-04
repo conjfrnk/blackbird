@@ -245,7 +245,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // top of the 4-row grid.
         let m = view.metrics
         window.contentMinSize = NSSize(
-            width: m.cellWidth * 20,
+            width: m.cellWidth * 20 + 2 * TerminalView.horizontalContentInsetPoints,
             height: m.cellHeight * 4 + 28 + TerminalView.bottomContentInsetPoints
         )
         // Snap window size to whole-cell increments during drag. Eliminates
