@@ -104,7 +104,8 @@ public func bufferPoint(
     displayOffset: Int,
     cols: Int,
     rows: Int,
-    historySize: Int
+    historySize: Int,
+    leftInsetPoints: CGFloat = 0
 ) -> BufferPoint {
     // L-17 / EC-6: cell dims are public-API divisors. A degenerate
     // 0 / NaN / -Inf would trap at `Int(safeX / cellWidth)` because
@@ -135,7 +136,13 @@ public func bufferPoint(
     // CellMetrics.grid exactly.
     let sanePx: CGFloat = 1_000_000
     let safeY = localPoint.y.isFinite ? min(max(0, localPoint.y), sanePx) : 0
-    let safeX = localPoint.x.isFinite ? min(max(0, localPoint.x), sanePx) : 0
+    // Subtract the renderer's left inset BEFORE the max(0, …) clamp so a
+    // finite localPoint inside the inset region (x < leftInsetPoints)
+    // collapses to col 0 rather than producing a negative col.
+    let insetSubtractedX = localPoint.x.isFinite
+        ? localPoint.x - leftInsetPoints
+        : 0
+    let safeX = insetSubtractedX.isFinite ? min(max(0, insetSubtractedX), sanePx) : 0
     let safeVH = viewportHeight.isFinite ? min(max(0, viewportHeight), sanePx) : 0
     let displayRow = max(0, Int((safeVH - safeY) / cellHeight))
     let col = max(0, min(cols - 1, Int(safeX / cellWidth)))

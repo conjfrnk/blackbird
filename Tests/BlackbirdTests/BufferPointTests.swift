@@ -449,4 +449,61 @@ final class BufferPointTests: XCTestCase {
     //
     // (See ScrollIndicatorTests for the geometry; the math itself is a
     // saturating clamp on `displayOffset / max(historySize, 1)`.)
+
+    // MARK: - leftInsetPoints
+
+    func test_leftInsetPoints_defaultZero_doesNotShift() {
+        // Default leftInsetPoints = 0 keeps every existing call site valid.
+        let bp = bufferPoint(
+            forView: CGPoint(x: 80, y: 50),
+            cellWidth: 10, cellHeight: 20,
+            viewportHeight: 200,
+            displayOffset: 0,
+            cols: 80, rows: 24,
+            historySize: 0
+        )
+        XCTAssertEqual(bp.col, 8) // 80 / 10 == col 8
+    }
+
+    func test_leftInsetPoints_eight_shiftsColMappingByOne() {
+        // With leftInsetPoints = 8, x = 80 maps to (80 - 8) / 10 = col 7.
+        let bp = bufferPoint(
+            forView: CGPoint(x: 80, y: 50),
+            cellWidth: 10, cellHeight: 20,
+            viewportHeight: 200,
+            displayOffset: 0,
+            cols: 80, rows: 24,
+            historySize: 0,
+            leftInsetPoints: 8
+        )
+        XCTAssertEqual(bp.col, 7)
+    }
+
+    func test_leftInsetPoints_pointInsideInset_clampsToCol0() {
+        // x = 4pt is inside the 8pt inset. Should clamp to col 0, not negative.
+        let bp = bufferPoint(
+            forView: CGPoint(x: 4, y: 50),
+            cellWidth: 10, cellHeight: 20,
+            viewportHeight: 200,
+            displayOffset: 0,
+            cols: 80, rows: 24,
+            historySize: 0,
+            leftInsetPoints: 8
+        )
+        XCTAssertEqual(bp.col, 0)
+    }
+
+    func test_leftInsetPoints_atBoundary_mapsToCol0() {
+        // x = 8pt sits exactly at col 0's left edge.
+        let bp = bufferPoint(
+            forView: CGPoint(x: 8, y: 50),
+            cellWidth: 10, cellHeight: 20,
+            viewportHeight: 200,
+            displayOffset: 0,
+            cols: 80, rows: 24,
+            historySize: 0,
+            leftInsetPoints: 8
+        )
+        XCTAssertEqual(bp.col, 0)
+    }
 }
