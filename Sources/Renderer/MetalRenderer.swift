@@ -502,6 +502,7 @@ public final class MetalRenderer {
         // crash here on layout drift rather than rendering scrambled UVs.
         // F-S4-001 — the test-target call site never ran in production.
         _pinCellInstanceLayout()
+        _pinCursorUniformsLayout()
         // Audit follow-up (2026-04-29): the L-6 fix surfaced PSO failures
         // via NSError logging at the two `try device.makeRenderPipelineState`
         // catch sites. The `init?` body has six other failure paths that
@@ -1695,3 +1696,29 @@ struct CursorUniforms {
     var shape: UInt32       // 0 = block, 1 = bar, 2 = underline, 3 = hidden
     var _pad: Float         // keeps struct layout / alignment stable
 }
+
+/// Audit L17. Mirror the `_cellInstanceLayoutPinned` precondition for
+/// `CursorUniforms`. Swift inserts 8 bytes of alignment padding before
+/// `color: SIMD4<Float>` (which requires 16-byte alignment) — total
+/// stride is 64 bytes. The matching `CursorUniforms` struct in
+/// `Shaders.metal` (around line 230) MUST stay byte-compatible: a
+/// silent field addition on either side scrambles every cursor draw
+/// and presents as "cursor renders at wrong screen position with
+/// wrong color" — exactly the silent-corruption class the layout pin
+/// catches at first render.
+///
+/// If this fires after a deliberate change: update Shaders.metal's
+/// mirror struct first, rebuild, and only then update the constant.
+private let _cursorUniformsLayoutPinned: Void = {
+    precondition(MemoryLayout<CursorUniforms>.stride == 64,
+                 "CursorUniforms stride drifted from the 64-byte contract "
+                 + "mirrored in Shaders.metal — update the shader struct "
+                 + "BEFORE widening this number. Actual stride: "
+                 + "\(MemoryLayout<CursorUniforms>.stride)")
+    precondition(MemoryLayout<CursorUniforms>.alignment == 16,
+                 "CursorUniforms must keep 16-byte alignment so SIMD4 fields "
+                 + "land on Metal's natural alignment.")
+}()
+
+@inline(never)
+func _pinCursorUniformsLayout() { _ = _cursorUniformsLayoutPinned }
