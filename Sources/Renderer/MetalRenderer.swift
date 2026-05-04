@@ -436,7 +436,21 @@ public final class MetalRenderer {
         let r = Float((rgb >> 16) & 0xFF) * Self.inv255
         let g = Float((rgb >> 8)  & 0xFF) * Self.inv255
         let b = Float(rgb & 0xFF) * Self.inv255
-        cursorColor = SIMD4<Float>(r, g, b, 1.0)
+        // Audit L14. The cursor render pipeline (line ~573) is built
+        // with the default no-blend state — opaque overwrite of the
+        // already-composited cell layer. That's correct as long as
+        // `cursorColor.w == 1.0`. A non-opaque cursor color would
+        // write alpha < 1 into the bgra8Unorm framebuffer and the
+        // CALayer compositor would let the window background bleed
+        // through the cursor rectangle (definitely not the user's
+        // intent for a "translucent cursor"). This setter is the
+        // sole entry point to the field; pin the invariant here so
+        // any future RGBA-accepting overload that omits the
+        // hardcoded `1.0` would have to consciously re-enable
+        // blending on the pipeline.
+        let color = SIMD4<Float>(r, g, b, 1.0)
+        precondition(color.w == 1.0, "cursorColor must be opaque (cursor pipeline has no blending — see audit L14)")
+        cursorColor = color
     }
 
     /// Replace the accent colour used for link-hover underlines. Themes
