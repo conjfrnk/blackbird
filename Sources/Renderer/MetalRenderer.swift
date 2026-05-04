@@ -158,6 +158,21 @@ public final class MetalRenderer {
 
     public func setTopInsetPoints(_ points: Float) { topInsetPoints = points }
 
+    /// Horizontal offset (in points) added to every cell and cursor x-coord.
+    /// TerminalView passes its `horizontalContentInsetPoints` here on each
+    /// `layout()`. Mirrors `topInsetPoints` exactly — default zero keeps
+    /// pre-feature behaviour for tests that build a renderer without a
+    /// TerminalView.
+    private var leftInsetPoints: Float = 0.0
+
+    public func setLeftInsetPoints(_ points: Float) { leftInsetPoints = points }
+
+    #if DEBUG
+    /// DEBUG-only accessor for unit tests asserting the renderer received
+    /// the correct inset value from TerminalView.layout().
+    public func leftInsetPointsForTesting() -> Float { leftInsetPoints }
+    #endif
+
     /// Whether the cursor should blink when the window is focused. When on,
     /// the cursor renders for the first half of each ~1.06 s cycle and is
     /// skipped for the second half. The cycle resets every time the cursor
@@ -214,6 +229,11 @@ public final class MetalRenderer {
         /// and dragging hover/selection/cursor uniforms out of alignment.
         let displayOffset: UInt32
         let topInsetPoints: Float
+        /// Horizontal inset in points. Folded in for the same reason as
+        /// `topInsetPoints` — a re-inset (theoretically possible if the
+        /// font-size pref ever drives a different inset constant) must
+        /// invalidate the per-frame skip cache.
+        let leftInsetPoints: Float
         let defaultBgRgb: UInt32
         let backgroundOpacity: Float
         let keepBgOpaque: Bool
@@ -288,6 +308,8 @@ public final class MetalRenderer {
         /// against the wrong selection / hover state.
         let displayOffset: UInt32
         let topInsetPoints: Float
+        /// Horizontal inset in points. Same rationale as `FrameKey.leftInsetPoints`.
+        let leftInsetPoints: Float
         let defaultBgRgb: UInt32
         let backgroundOpacity: Float
         let keepBgOpaque: Bool
@@ -878,7 +900,7 @@ public final class MetalRenderer {
                 effectiveHasBg = true
             }
 
-            let xPx = Float(col) * cellW
+            let xPx = Float(col) * cellW + leftInsetPoints
             let yPx = Float(row) * cellH + topInsetPoints
 
             // WIDE_CHAR_SPACER / LEADING_WIDE_CHAR_SPACER sit to the right
@@ -1211,6 +1233,7 @@ public final class MetalRenderer {
             // Audit M-16 / UR follow-up (2026-04-29).
             displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
             topInsetPoints: topInsetPoints,
+            leftInsetPoints: leftInsetPoints,
             defaultBgRgb: defaultBgRgb,
             backgroundOpacity: backgroundOpacity,
             keepBgOpaque: keepBgOpaque,
@@ -1442,6 +1465,7 @@ public final class MetalRenderer {
                 // negative-detected warning. Audit M-16 (2026-04-29).
                 displayOffset: Self.clampDisplayOffset(snap.displayOffset),
                 topInsetPoints: topInsetPoints,
+                leftInsetPoints: leftInsetPoints,
                 defaultBgRgb: defaultBgRgb,
                 backgroundOpacity: backgroundOpacity,
                 keepBgOpaque: keepBgOpaque,
@@ -1545,7 +1569,7 @@ public final class MetalRenderer {
             if cursorOnScreen && !useCellInvertedCursor {
                 var cu = CursorUniforms(
                     viewportPx: viewportPoints,
-                    cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth),
+                    cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + leftInsetPoints,
                                               Float(screenCursorRow) * Float(metrics.cellHeight) + topInsetPoints),
                     cellSizePx: cellSizePoints,
                     color: cursorColor,
