@@ -60,7 +60,7 @@ extension TerminalView {
         // directly preserves the link path on healthy drags.
         let paths = items.compactMap { url -> String? in
             guard url.isFileURL else { return nil }
-            return url.path
+            return Self.sanitizeDropPath(url.path)
         }
         return performDropOfPaths(paths)
     }
@@ -121,6 +121,39 @@ extension TerminalView {
     /// pure transform without constructing an NSDraggingInfo fake.
     static func shellQuote(_ path: String) -> String {
         "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Strip C0 control bytes (0x00–0x1F) and DEL (0x7F) from a dropped
+    /// URL's path before passing it to `shellQuote`. CVE-class fix:
+    ///
+    /// HFS+/APFS filenames legally contain LF (0x0A) and CR (0x0D). A
+    /// hostile pasteboard provider — a sandboxed peer app, or a
+    /// synthesised drop from a script using NSPasteboard APIs — can
+    /// hand us a `file://` URL whose path is `/tmp/x\nrm -rf ~`.
+    /// `shellQuote` wraps that in single quotes (`'/tmp/x\nrm -rf ~'`),
+    /// but the LF byte survives the wrap unchanged. Downstream,
+    /// `pasteText` runs `sanitizePasteControls`, which **whitelists
+    /// 0x0A** as legitimate paste content (correct for user-typed
+    /// paste from `pbpaste`-style flows). `convertLoneCRToLF`
+    /// preserves the LF, the shell sees Enter, and the bytes after
+    /// the newline execute as a fresh command. One drag → arbitrary
+    /// command execution.
+    ///
+    /// The drag-drop path is *data*, not user-typed paste — the user
+    /// never typed a literal newline into a Finder filename. The
+    /// `sanitizePasteControls` whitelist for LF/CR doesn't apply here;
+    /// strip every C0 control plus DEL up-front so the post-quote
+    /// payload can't carry an Enter to the shell. TAB (0x09) is also
+    /// in C0 but real filenames are exceptionally unlikely to need it
+    /// and a TAB at the shell prompt triggers tab-completion — strip
+    /// it too.
+    static func sanitizeDropPath(_ s: String) -> String {
+        String(s.unicodeScalars.filter { scalar in
+            let v = scalar.value
+            // Strip C0 controls (0x00–0x1F) and DEL (0x7F).
+            if v < 0x20 || v == 0x7F { return false }
+            return true
+        })
     }
 
     /// Join N dropped file paths into a single space-separated,

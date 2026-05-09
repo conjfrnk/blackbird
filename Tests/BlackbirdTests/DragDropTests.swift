@@ -161,4 +161,113 @@ final class DragDropTests: XCTestCase {
         XCTAssertFalse(view.hasMarkedText(),
                        "drop must clear the IME preedit before pasting bytes")
     }
+
+    // MARK: - Drop-path control-byte scrub (CVE-class)
+    //
+    // HFS+/APFS filenames legally contain C0 controls (LF, CR, ESC, …).
+    // A hostile pasteboard provider — sandboxed peer app, NSPasteboard
+    // synthesiser, or any process with the right entitlement — can hand
+    // us a `file://` URL whose path embeds those bytes. `shellQuote`
+    // wraps in single quotes but does NOT remove embedded controls;
+    // the post-quote `pasteText` pipeline whitelists 0x0A / 0x0D as
+    // legitimate paste (correct for user-typed paste from pbpaste-
+    // style flows) and `convertLoneCRToLF` preserves the LF, so a
+    // drop of `/tmp/x\nrm -rf ~` reaches the shell as Enter →
+    // arbitrary command execution.
+    //
+    // Memory cost: each test allocates a single TerminalView + headless
+    // session and one short-string paste; trivial — well under a kB.
+
+    /// Embedded LF in a dropped URL's path must NOT survive into the
+    /// paste payload. If 0x0A reached the shell at a bare prompt, the
+    /// bytes after the newline would execute as a fresh command — one
+    /// drag, arbitrary command execution.
+    func test_drop_stripsEmbeddedLF_fromPath() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let session = TerminalSession.makeHeadlessForTests()
+        view.session = session
+        var pastes: [String] = []
+        view.pasteTextRecorderForTests = { pastes.append($0) }
+
+        // URL(fileURLWithPath:) accepts embedded LF — HFS+ filenames
+        // legally contain it. `.path` round-trips the byte intact, so
+        // this matches what a hostile pasteboard provider would deliver
+        // through `readObjects(forClasses: [NSURL.self], ...)`.
+        let hostile = URL(fileURLWithPath: "/tmp/x\nrm -rf ~")
+        view.performDropOfPaths([Self.sanitizedDropPath(from: hostile)])
+
+        XCTAssertEqual(pastes.count, 1, "exactly one paste should be issued")
+        let payload = pastes[0]
+        XCTAssertFalse(payload.unicodeScalars.contains(where: { $0.value == 0x0A }),
+                       "LF (0x0A) must be stripped from dropped URL paths before quoting")
+        XCTAssertFalse(payload.unicodeScalars.contains(where: { $0.value == 0x0D }),
+                       "CR (0x0D) must not appear either")
+    }
+
+    /// Symmetric to the LF case: a CR byte (0x0D) embedded in a dropped
+    /// URL path would survive `shellQuote`, then be turned into LF by
+    /// `convertLoneCRToLF` in the non-bracketed paste path — same RCE.
+    /// Strip CR for the same reason and at the same layer.
+    func test_drop_stripsEmbeddedCR_fromPath() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let session = TerminalSession.makeHeadlessForTests()
+        view.session = session
+        var pastes: [String] = []
+        view.pasteTextRecorderForTests = { pastes.append($0) }
+
+        let hostile = URL(fileURLWithPath: "/tmp/x\rrm -rf ~")
+        view.performDropOfPaths([Self.sanitizedDropPath(from: hostile)])
+
+        XCTAssertEqual(pastes.count, 1)
+        let payload = pastes[0]
+        XCTAssertFalse(payload.unicodeScalars.contains(where: { $0.value == 0x0D }),
+                       "CR (0x0D) must be stripped from dropped URL paths before quoting")
+        XCTAssertFalse(payload.unicodeScalars.contains(where: { $0.value == 0x0A }),
+                       "no LF should be introduced either (would be created by the CR→LF converter downstream)")
+    }
+
+    /// ESC (0x1B) embedded in a dropped path would re-introduce the
+    /// paste-injection class fixed by `sanitizeBracketedPaste`: an
+    /// attacker emits a path containing `ESC[201~ rm -rf ~` to close
+    /// the bracketed-paste window early and execute the trailing
+    /// bytes. The drop layer is the right place to catch this — once
+    /// the ESC reaches the paste pipeline the shellQuote single-quote
+    /// wrap doesn't help (the ESC byte is preserved verbatim).
+    func test_drop_stripsEmbeddedESC_fromPath() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let session = TerminalSession.makeHeadlessForTests()
+        view.session = session
+        var pastes: [String] = []
+        view.pasteTextRecorderForTests = { pastes.append($0) }
+
+        let hostile = URL(fileURLWithPath: "/tmp/x\u{001B}[201~rm -rf ~")
+        view.performDropOfPaths([Self.sanitizedDropPath(from: hostile)])
+
+        XCTAssertEqual(pastes.count, 1)
+        let payload = pastes[0]
+        XCTAssertFalse(payload.unicodeScalars.contains(where: { $0.value == 0x1B }),
+                       "ESC (0x1B) must be stripped from dropped URL paths before quoting")
+    }
+
+    /// Belt-and-braces unit check on the helper itself: every C0 byte
+    /// (0x00–0x1F) plus DEL (0x7F) must be removed; printable bytes
+    /// pass through unchanged.
+    func test_sanitizeDropPath_stripsC0AndDEL() {
+        let raw = "/a\u{0000}b\u{0009}c\u{000A}d\u{000D}e\u{001B}f\u{001F}g\u{007F}h"
+        let scrubbed = TerminalView.sanitizeDropPath(raw)
+        for scalar in scrubbed.unicodeScalars {
+            XCTAssertFalse(scalar.value < 0x20 || scalar.value == 0x7F,
+                           "C0/DEL byte 0x\(String(scalar.value, radix: 16)) survived sanitizeDropPath")
+        }
+        XCTAssertEqual(scrubbed, "/abcdefgh",
+                       "non-control bytes must pass through untouched, in order")
+    }
+
+    /// Helper: take the same code path as `performDragOperation` —
+    /// `url.path` -> `sanitizeDropPath` — so the integration tests
+    /// above exercise the production scrubber rather than re-implementing
+    /// it inline. Keeps the scrub policy in one place.
+    private static func sanitizedDropPath(from url: URL) -> String {
+        TerminalView.sanitizeDropPath(url.path)
+    }
 }
