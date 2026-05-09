@@ -1,4 +1,12 @@
-//! v0.1.9 sweep — Track C: opt-in stress / soak coverage.
+//! v0.1.9 sweep — Track C: opt-in stress / probe coverage.
+//!
+//! NOTE on naming: this file was previously `sweep_soak.rs`. It is a
+//! short-burst probe (3–30 s wall-clock), NOT a soak. A real soak is
+//! hours of continuous input. The probes here are sized to surface
+//! bugs quickly under `cargo test --ignored`, not to simulate a real
+//! long-running session. See `core/tests/sweep_soak_60s.rs` for the
+//! 60-second wall-clock soak (also `#[ignore]`-gated, but actually
+//! does what its name says).
 //!
 //! These tests are GATED behind `#[ignore]` so they don't fire under
 //! the default `cargo test` run. The intent is opt-in evidence of
@@ -7,35 +15,35 @@
 //! `core/tests/throughput.rs` and `core/tests/long_session_memory.rs`.
 //!
 //! Run with:
-//!   cargo test --release -p blackbird_core --test sweep_soak \
+//!   cargo test --release -p blackbird_core --test sweep_probe \
 //!     -- --ignored --nocapture
 //!
-//! The throughput soak measures bytes/sec over a fixed wall-clock
-//! window (no `Sleep`, no I/O); the parser-state-stability soak
+//! The throughput probe measures bytes/sec over a fixed wall-clock
+//! window (no `Sleep`, no I/O); the parser-state-stability probe
 //! exercises the full FFI surface in random sequences derived from a
 //! deterministic PRNG.
 //!
 //! Pre-flight summary:
 //!
-//! - throughput soak: 6 MiB in-RAM payload, ~3 s (default
+//! - throughput probe: 6 MiB in-RAM payload, ~3 s (default
 //!   `WALL_BUDGET_MS`); peak resident < 50 MiB.
-//! - parser-state soak: 50,000 mixed FFI calls, ~30 s; peak resident
+//! - parser-state probe: 50,000 mixed FFI calls, ~30 s; peak resident
 //!   < 50 MiB.
 //!
-//! NOT a 60-second wall-clock sweep — that would add brittle CI
-//! variance. The shape is "do enough work to surface a leak"; if the
-//! caller wants longer, they can multiply the loop counts.
+//! These are PROBES, not soaks. The shape is "do enough work to
+//! surface a leak in seconds"; if you want a real wall-clock soak,
+//! see `sweep_soak_60s.rs`.
 
 use std::time::Instant;
 
 use blackbird_core as bc;
 
 // ---------------------------------------------------------------------------
-// Track C: throughput soak — sustained mixed-workload run
+// Track C: throughput probe — sustained mixed-workload run
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "soak; opt in with --ignored"]
+#[ignore = "probe; opt in with --ignored"]
 fn soak_mixed_workload_throughput_no_panic_no_unbounded_growth() {
     // pre-flight: ~6 MiB payload + ~10 MiB peak (200×60 grid), ~3 s.
     // The shape: build a 6 MiB payload of mixed content (plain text,
@@ -85,7 +93,7 @@ fn soak_mixed_workload_throughput_no_panic_no_unbounded_growth() {
             chunk_count += 1;
             if chunk_count % 64 == 0 {
                 let snap = bc::bb_term_take_snapshot(term);
-                assert!(!snap.is_null(), "snapshot must remain reachable mid-soak");
+                assert!(!snap.is_null(), "snapshot must remain reachable mid-probe");
                 bc::bb_snap_release(snap);
             }
         }
@@ -100,7 +108,7 @@ fn soak_mixed_workload_throughput_no_panic_no_unbounded_growth() {
         assert_eq!(
             cells_len,
             cols * rows,
-            "post-soak cells_len {} ≠ cols*rows ({}*{})",
+            "post-probe cells_len {} ≠ cols*rows ({}*{})",
             cells_len,
             cols,
             rows
@@ -111,7 +119,7 @@ fn soak_mixed_workload_throughput_no_panic_no_unbounded_growth() {
     let elapsed = start.elapsed();
 
     eprintln!(
-        "soak throughput: {} MiB in {:.2}s = {:.1} MiB/s",
+        "probe throughput: {} MiB in {:.2}s = {:.1} MiB/s",
         PAYLOAD_BYTES / (1024 * 1024),
         elapsed.as_secs_f64(),
         (PAYLOAD_BYTES as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0)
@@ -119,7 +127,7 @@ fn soak_mixed_workload_throughput_no_panic_no_unbounded_growth() {
 
     assert!(
         elapsed.as_secs() < TIME_BUDGET_SEC,
-        "soak exceeded {} s wall-clock budget — suspect catastrophic regression \
+        "probe exceeded {} s wall-clock budget — suspect catastrophic regression \
          (took {:?})",
         TIME_BUDGET_SEC,
         elapsed
@@ -127,11 +135,11 @@ fn soak_mixed_workload_throughput_no_panic_no_unbounded_growth() {
 }
 
 // ---------------------------------------------------------------------------
-// Track C: parser-state soak — many FFI calls in a deterministic mix
+// Track C: parser-state probe — many FFI calls in a deterministic mix
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "soak; opt in with --ignored"]
+#[ignore = "probe; opt in with --ignored"]
 fn soak_50k_mixed_ffi_calls_remain_consistent() {
     // pre-flight: ~10 MiB peak (one 200×60 grid + transient
     // snapshots), ~30 s. Verifies that 50k mixed FFI operations don't
@@ -239,7 +247,7 @@ fn soak_50k_mixed_ffi_calls_remain_consistent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "soak; opt in with --ignored"]
+#[ignore = "probe; opt in with --ignored"]
 fn soak_retain_release_high_ratio_no_leak() {
     // pre-flight: ~5 MiB peak (one snapshot held + many transient retains),
     // ~5 s. Pin that one snapshot can be retained-then-released 10k
