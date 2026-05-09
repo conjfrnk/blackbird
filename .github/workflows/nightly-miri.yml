@@ -1,0 +1,128 @@
+# Nightly miri — UB hunter for the FFI snapshot lifecycle.
+#
+# Why this workflow exists
+# ------------------------
+# Blackbird's `core` crate exposes a retained-snapshot model across the
+# Rust↔Swift FFI boundary (`bb_snap_retain` / `bb_snap_release`,
+# core/src/lib.rs ~2926/2948) plus a thread-local `FFI_HANDLER_IN_FLIGHT`
+# re-entry latch that defends every `*mut BBTerm` entry point against the
+# "callback synchronously re-enters the term while a `&mut Term` is still
+# on stack" UB hole (audit H-5, M-9). Both classes — snapshot-after-free
+# and aliased `&mut` via re-entry — are precisely what miri (Rust's
+# experimental UB interpreter) catches well, and what `cargo test` under
+# native codegen will silently miss.
+#
+# Why nightly, not on every PR
+# ----------------------------
+# 1. miri requires the `nightly` toolchain — it cannot run on the pinned
+#    1.85.0 stable channel that PR CI uses. Mixing channels per-job
+#    inflates cache pressure and toolchain-install time.
+# 2. miri's interpreter is 10-100x slower than native execution. A single
+#    small FFI test (`handler_reentry_guard`, 7 cases, ~1 ms each native)
+#    runs in single-digit minutes under miri; a full-suite miri run is
+#    multi-hour territory. PR feedback loops can't absorb that.
+# 3. miri occasionally regresses against new nightly compilers (a stricter
+#    aliasing model lands and previously-clean code newly fails).
+#    Quarantining miri to a scheduled job keeps that flake class out of
+#    the merge path; we treat a miri failure as a real signal but
+#    investigate it asynchronously.
+# 4. Cost: PR CI already has six macos-14 jobs. A nightly cadence amortises
+#    miri's runtime over once-per-day, not per-push.
+#
+# Canonical target: `handler_reentry_guard`
+# -----------------------------------------
+# This test (core/tests/handler_reentry_guard.rs) is the densest place in
+# the codebase for the exact UB classes miri is best at: it deliberately
+# drives synchronous re-entry into every `*mut BBTerm` FFI entry point
+# from inside an event callback, then asserts both the documented
+# fallback return AND that the outer term state is intact. Under native
+# execution we can only assert the observable side-effects; miri also
+# checks that no aliased `&mut Term` was ever materialised, retroactively
+# pinning the H-5 fix's correctness rather than just its observable
+# behaviour. Each test owns a single 20x5 BBTerm with no large
+# allocations or spawned threads — perfect for miri's slow path.
+#
+# Adding more tests later
+# -----------------------
+# Append additional `cargo +nightly miri test --test <name>` invocations
+# to the run step below. Good candidates as they're written or hardened:
+#   - `sweep_fuzz_ffi`         (FFI surface fuzz; verify miri-clean
+#                               locally before adding — some libfuzzer
+#                               or proptest patterns can trip miri's
+#                               thread/allocator model).
+#   - `decrqm`, `dirty_rows`, `osc52_readback` — pure-Rust tests that
+#     exercise the snapshot lifecycle and would catch use-after-free in
+#     `bb_snap_release` / `bb_snap_retain`.
+# Always run candidates locally first
+# (`cargo +nightly miri test -p blackbird_core --test <name>`); a noisy
+# miri failure on a non-canonical target should be filed as a separate
+# audit item, not absorbed into this workflow.
+
+name: Nightly miri
+
+on:
+  # 06:00 UTC = 02:00 EDT / 23:00 PDT — low-traffic window for both
+  # Connor's working hours and GHA macos-14 runner contention.
+  schedule:
+    - cron: "0 6 * * *"
+  # Manual trigger for on-demand verification (e.g. after touching FFI
+  # code that we want a fast sanity check on without waiting for the
+  # nightly run).
+  workflow_dispatch:
+
+# Read-only by default — same posture as ci.yml. miri is pure
+# verification; no need for any write scope.
+permissions:
+  contents: read
+
+# A second push to the same branch (or a manual re-trigger) cancels the
+# in-flight miri run. Saves runner minutes — the previous run's signal
+# is stale anyway.
+concurrency:
+  group: nightly-miri-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  miri:
+    name: miri — handler_reentry_guard (FFI re-entry UB)
+    runs-on: macos-14
+    # miri is 10-100x slower than native. The single canonical target
+    # fits in <30 min comfortably; 60 min is headroom for nightly
+    # toolchain regressions that slow the interpreter further. If this
+    # ever times out, the right response is to investigate the slowdown,
+    # not to bump the cap.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # `dtolnay/rust-toolchain@nightly` is the same action ci.yml uses
+      # for the cargo-fuzz job (line 388). `components: miri, rust-src`
+      # — miri requires both to construct its instrumented stdlib.
+      - name: Install Rust nightly + miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
+          components: miri, rust-src
+          targets: aarch64-apple-darwin
+
+      # Cache mostly cold-starts — miri uses its own `target/miri-*`
+      # subdir and rebuilds the stdlib per nightly bump — but the
+      # cache still helps for in-day re-runs and shared crates-index
+      # state. Same workspace key as ci.yml so we share with it.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # `cargo miri setup` builds miri's interpreter-instrumented
+      # stdlib once per (toolchain, target) pair. Splitting it into its
+      # own step makes the slowdown legible in the GHA timeline rather
+      # than appearing as inexplicable startup time on the test step.
+      - name: Initialise miri (build instrumented stdlib)
+        run: cargo +nightly miri setup
+
+      # `--no-fail-fast` so we see every failing case in one run rather
+      # than bisecting via repeated nightly invocations. Each case is
+      # independent in `handler_reentry_guard.rs` — see file header.
+      - name: cargo miri test handler_reentry_guard
+        run: cargo +nightly miri test -p blackbird_core --test handler_reentry_guard --no-fail-fast
