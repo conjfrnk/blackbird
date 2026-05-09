@@ -719,4 +719,451 @@ final class MetalRendererTests: XCTestCase {
             + "the skip-cache (audit H7)"
         )
     }
+
+    // MARK: - P4.12: backing-scale change + GPU device-loss defensive pins
+    //
+    // User-impact reviewer flagged two unverified paths that surface as
+    // crashes today:
+    //
+    //   1. Backing-scale change (Retina ↔ 1× ↔ 3×): user drags the
+    //      Blackbird window between displays of different pixel
+    //      densities. `mtkView(_:drawableSizeWillChange:)` in
+    //      TerminalView.swift recomputes the new scale and calls
+    //      `MetalRenderer.reconfigure(metrics:scale:)`. The atlas must
+    //      rasterise at the new pixel resolution AND the renderer must
+    //      reset its frame-skip / per-row caches so the next frame
+    //      doesn't reuse stale glyph IDs whose UV layout was issued
+    //      against the old atlas. The reconfigure path was previously
+    //      tested only at a single scale (test_reconfigureWithFreshMetricsSucceeds
+    //      above); these tests exercise the cross-scale sweep that a
+    //      laptop-on-external-monitor workflow hits routinely.
+    //
+    //   2. GPU device removal (eGPU hot-unplug): a Thunderbolt eGPU
+    //      enclosure can be disconnected mid-session. Today the GPU
+    //      selection policy avoids `isRemovable` devices entirely (see
+    //      MetalDeviceSelectionTests.test_rejectsRemovableEvenIfLowPower),
+    //      so the eGPU is never picked in the first place — but a
+    //      future "pick GPU in Settings" feature that honours user
+    //      overrides would expose us. The defensive line of last resort
+    //      is the `currentDrawable == nil` guard inside `render(in:)`:
+    //      a removed device returns nil drawables, and the renderer
+    //      must take the early-return path without crashing. We can't
+    //      simulate `MTLDevice` loss directly in xctest (no clean mock
+    //      surface for a real `MTLDevice`), so we PIN the source-level
+    //      defensive properties so a future refactor that strips them
+    //      trips a test.
+    //
+    // Memory pre-flight per `feedback_test_memory_safety`:
+    //   GlyphAtlas at scale s with 4096-cell capacity uses roughly
+    //   (8 * s)² * (16 * s)² bytes for the mono texture (R8) plus 4×
+    //   that for the color texture (BGRA8). At 13pt:
+    //     scale 1.0 →   ~3 MB total atlas (mono+color)
+    //     scale 2.0 →  ~15 MB total atlas
+    //     scale 3.0 →  ~33 MB total atlas
+    //   reconfigure() peaks at 2× during the swap (old + new alive).
+    //   Worst case in the 2 → 1 → 3 sweep: 33 + 15 = ~48 MB peak,
+    //   well within the 256 MB per-test budget. Wall-clock < 100 ms
+    //   per test on an M1 (atlas init is ~10-20 ms; we do at most
+    //   three).
+
+    /// A backing-scale change is the most common atlas reconfigure
+    /// path in real use: a laptop user with an external 1× monitor
+    /// drags Blackbird between the laptop's Retina (2×) and the
+    /// external (1×) displays. Each transition fires
+    /// `mtkView(_:drawableSizeWillChange:)` (TerminalView.swift:1395),
+    /// which calls `renderer.reconfigure(metrics:scale:newScale)`.
+    ///
+    /// What the renderer must do:
+    ///   1. Rebuild the GlyphAtlas at the new pixel resolution so
+    ///      glyphs stay sharp (atlas.scale == newScale post-call).
+    ///   2. Reset the frame-skip cache so the very next render
+    ///      doesn't short-circuit on a FrameKey from before the
+    ///      scale change — those cached UVs were issued against the
+    ///      previous atlas's slot layout and pointing them at the
+    ///      new texture would silently render wrong glyphs.
+    ///
+    /// Pre-fix (audit M-20 + UR-1) the second invariant relied on a
+    /// single explicit `lastFrameKey = nil` line inside reconfigure.
+    /// We can't read `lastFrameKey` (private), but we CAN observe via
+    /// `CountingNoDrawableMTKView` whether the render attempted to
+    /// acquire a drawable. The skip-cache short-circuit returns BEFORE
+    /// reaching `view.currentDrawable`, so a poisoned cache reads as
+    /// "queried fewer times than render() was called". A reconfigure
+    /// that fails to reset `lastFrameKey` would let the post-reconfigure
+    /// render short-circuit on the prior FrameKey and silently ship
+    /// glyphs at the wrong scale.
+    ///
+    /// Note: `didFrameSkipLastRender` is overloaded in production —
+    /// it's set to true on BOTH the skip-cache short-circuit AND the
+    /// drawable-acquire-failed path. The drawable-query count is
+    /// the only public signal that distinguishes them; we use the
+    /// same trick H7's tests use (CountingNoDrawableMTKView).
+    @MainActor
+    func test_reconfigure_acrossScales_resetsAtlasAndSkipCache() throws {
+        let device = try requireMetalDevice()
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = CountingNoDrawableMTKView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 192),
+            device: device
+        )
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
+        let snapshot = try makeSmallSnapshot(text: "scale-sweep")
+
+        // Pre-condition: render once at the renderer's default scale
+        // (2.0) to populate the frame-skip cache. The render itself
+        // takes the no-drawable path, but FrameKey/CacheKey state is
+        // still updated up to the drawable-acquire point.
+        XCTAssertEqual(renderer.atlas.scale, 2.0, "init seeds scale=2.0")
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+        let queriesAfterFirst = view.currentDrawableQueries
+        XCTAssertEqual(queriesAfterFirst, 1, "first render attempts drawable acquisition once")
+
+        // Drag to 1× display (e.g. external monitor). The atlas must
+        // rebuild at the new scale; the cell pixel dimensions shrink.
+        XCTAssertTrue(
+            renderer.reconfigure(metrics: metrics, scale: 1.0),
+            "reconfigure to 1.0× must succeed on any host with a working GPU"
+        )
+        XCTAssertEqual(renderer.atlas.scale, 1.0, "atlas.scale must track the requested scale")
+        let pxAt1x = renderer.atlas.cellPxHeight
+
+        // The next render must NOT short-circuit on the previous
+        // FrameKey — the atlas swap invalidated everything. If the
+        // skip-cache wasn't reset by reconfigure, this render would
+        // skip BEFORE touching currentDrawable and the query count
+        // would stay flat at 1. Post-reconfigure (correct) the
+        // render enters the encode path, queries currentDrawable
+        // (gets nil here), and bails — count goes to 2.
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+        XCTAssertEqual(
+            view.currentDrawableQueries, queriesAfterFirst + 1,
+            "post-reconfigure render must reach the drawable-acquire path — "
+            + "if the cache wasn't reset by reconfigure(metrics:scale:), the "
+            + "FrameKey would still match lastFrameKey and the render would "
+            + "short-circuit before currentDrawable, leaving the count flat. "
+            + "Audit UR-1: reconfigure must invalidate lastFrameKey in lockstep "
+            + "with the atlas swap."
+        )
+
+        // Drag to 3× display (Liquid Retina XDR external). The atlas
+        // rebuilds again at the new pixel density.
+        XCTAssertTrue(
+            renderer.reconfigure(metrics: metrics, scale: 3.0),
+            "reconfigure to 3.0× must succeed (Liquid Retina XDR is real hardware)"
+        )
+        XCTAssertEqual(renderer.atlas.scale, 3.0)
+        let pxAt3x = renderer.atlas.cellPxHeight
+        XCTAssertGreaterThan(
+            pxAt3x, pxAt1x,
+            "3× cells must be larger in pixels than 1× cells (rendered at full pixel resolution)"
+        )
+
+        // One more render to confirm the second reconfigure also
+        // reset the skip-cache. Same observable as before: the
+        // drawable query count must advance.
+        let queriesBeforeThird = view.currentDrawableQueries
+        renderer.render(in: view, snapshot: snapshot, focused: true)
+        XCTAssertEqual(
+            view.currentDrawableQueries, queriesBeforeThird + 1,
+            "render after the 1→3 reconfigure must also reach the drawable path"
+        )
+
+        // Atlas survives the full 2 → 1 → 3 sweep and still answers
+        // glyph lookups. Regression guard against a swap that frees
+        // the new atlas's texture or strands a stale reference.
+        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("s")))
+    }
+
+    /// Defensive: backing-scale boundary inputs must be rejected
+    /// rather than crashing. `mtkView(_:drawableSizeWillChange:)`
+    /// already guards against `bounds.width == 0` and `newScale <= 0`
+    /// at the call site (TerminalView.swift:1403-1405), but the
+    /// renderer's `reconfigure(metrics:scale:)` is also reachable from
+    /// other paths (font-size sync, future settings UI). The atlas
+    /// initializer rejects scale ≤ 0 (GlyphAtlas.swift:139); the
+    /// renderer surfaces that as `false` so callers can keep their
+    /// own state in sync.
+    ///
+    /// Trapping rather than returning false would crash the whole
+    /// process on a degenerate input from a future refactor — this
+    /// pins the safer behaviour. Tested via reconfigure (atlas init
+    /// is internal; the renderer's wrapper is what we care about).
+    @MainActor
+    func test_reconfigure_zeroScale_returnsFalseAndDoesNotCrash() throws {
+        let device = try requireMetalDevice()
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let originalScale = renderer.atlas.scale
+
+        // Zero scale: GlyphAtlas init returns nil (degenerate cell
+        // size), so reconfigure must return false and leave the
+        // renderer in its previous state. Atomicity invariant from
+        // the reconfigure doc-comment: "metrics only change if the
+        // new atlas built successfully".
+        XCTAssertFalse(
+            renderer.reconfigure(metrics: metrics, scale: 0.0),
+            "scale = 0 must be rejected — GlyphAtlas guards against zero-pixel cells"
+        )
+        XCTAssertEqual(
+            renderer.atlas.scale, originalScale,
+            "rejected reconfigure must NOT swap the atlas; previous one stays in place"
+        )
+
+        // Negative scale: same rejection path. Pin separately so a
+        // future refactor that loosens one but not the other (e.g.
+        // adds an `abs()` call) trips here.
+        XCTAssertFalse(
+            renderer.reconfigure(metrics: metrics, scale: -1.0),
+            "negative scale must be rejected — pixel dimensions can't be negative"
+        )
+        XCTAssertEqual(renderer.atlas.scale, originalScale)
+
+        // After two failed reconfigures the renderer must still be
+        // usable. Regression guard against a partial-mutation bug
+        // that left metrics or generation counters in a half-updated
+        // state on the rejection path.
+        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("z")))
+    }
+
+    /// Source pin: GPU device-loss surfaces as `view.currentDrawable
+    /// == nil`. The renderer's defence is the guard at line ~1302 of
+    /// MetalRenderer.swift:
+    ///
+    ///   guard let drawable = view.currentDrawable, ... else {
+    ///     inflightSemaphore.signal(); return
+    ///   }
+    ///
+    /// A future refactor that removes this guard (e.g. force-
+    /// unwrapping `view.currentDrawable!` in a "fix latency" PR)
+    /// would crash on eGPU hot-unplug, window minimisation, or
+    /// drawable-pool exhaustion — none of which are testable from
+    /// xctest because they require actual hardware events or system
+    /// state. Pin the guard's existence at the source level so the
+    /// regression surfaces as a CI failure rather than a customer
+    /// crash report.
+    ///
+    /// Why a source pin instead of a runtime test: simulating
+    /// MTLDevice loss requires either:
+    ///   - a real eGPU enclosure (not present in CI),
+    ///   - mocking MTLDevice (no clean Swift mock surface; MTLDevice
+    ///     is a system-defined protocol with hundreds of methods and
+    ///     opaque internal state),
+    ///   - or a private API like `MTLDebugDevice` (Apple-internal,
+    ///     not stable).
+    /// The runtime tests above (test_render_drawableFailure_*,
+    /// test_render_failedFrame_*) already exercise the nil-drawable
+    /// PATH via `CountingNoDrawableMTKView`. This source pin asserts
+    /// that the production code STILL HAS the defensive check that
+    /// makes those tests meaningful in the first place.
+    func test_metalRenderer_drawablePathHasNilGuard_sourcePin() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Renderer/MetalRenderer.swift")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: url.path),
+            "MetalRenderer.swift not found at \(url.path) — `#filePath` arithmetic broke; "
+            + "fix path resolution rather than downgrading to XCTSkip (matches the policy in "
+            + "MetalDrawableCountSourcePinTests.locateTerminalViewSwift)"
+        )
+        let src = try String(contentsOf: url, encoding: .utf8)
+
+        // The defensive guard. Two regressions to guard against:
+        //   (a) Removing the `guard let drawable = view.currentDrawable`
+        //       line entirely, replacing with `let drawable = view.currentDrawable!`.
+        //   (b) Replacing the guard with `view.currentDrawable ??
+        //       fallbackDrawable` where `fallbackDrawable` is itself
+        //       not validated — same crash, one indirection deeper.
+        //
+        // We pin the literal pattern. A refactor that legitimately
+        // restructures the path (e.g. extracts a helper function)
+        // must update this test to point at the new shape.
+        XCTAssertTrue(
+            src.contains("guard let drawable = view.currentDrawable"),
+            """
+            MetalRenderer.swift no longer guards `view.currentDrawable` for nil. \
+            This is the defensive line of last resort for GPU device loss \
+            (eGPU hot-unplug, window minimisation, surface invalidation). \
+            Removing it exposes Blackbird to crash-on-device-loss; if you \
+            intentionally restructured the drawable-acquire path, update this \
+            test to pin the new shape.
+            """
+        )
+
+        // Companion: the `inflightSemaphore.signal()` path on guard
+        // failure. Without the signal, the next render() blocks
+        // forever on `inflightSemaphore.wait()` because the slot
+        // we claimed before the guard never gets released. Audit
+        // metal-renderer F20 reverted a "drawable-first" attempt
+        // for exactly this reason.
+        XCTAssertTrue(
+            src.contains("inflightSemaphore.signal()"),
+            """
+            MetalRenderer.swift no longer signals the inflight semaphore on \
+            drawable-acquire failure. A render() that claims a slot via wait() \
+            and then bails on `currentDrawable == nil` MUST signal back, or \
+            the 3-slot ring leaks one slot per failed frame and the 4th call \
+            blocks forever (audit metal-renderer F20).
+            """
+        )
+
+        // Proximity pin: the nil-drawable guard and the inflight-
+        // semaphore signal MUST live in the same code path. The two
+        // separate substring checks above pass independently even
+        // if a future refactor moves them into unrelated branches —
+        // e.g. the guard stays in `render(in:)` but the signal
+        // migrates to a deinit handler, leaving the failed-render
+        // path with no signal at all. Walk forward from the guard
+        // line (only the FIRST occurrence — the test relies on
+        // there being exactly one such guard in this file; adding
+        // a second one is itself a flag worth investigating) and
+        // assert `inflightSemaphore.signal()` appears within 50
+        // lines. 50 is generous: the production path runs ~30
+        // lines from guard to signal; doubling that lets a future
+        // refactor reorganise the body without flaking, but still
+        // catches a structural separation.
+        let lines = src.split(separator: "\n", omittingEmptySubsequences: false)
+        var guardLineIdx: Int? = nil
+        for (idx, line) in lines.enumerated() {
+            if line.contains("guard let drawable = view.currentDrawable") {
+                guardLineIdx = idx
+                break
+            }
+        }
+        if let guardIdx = guardLineIdx {
+            let scanWindow = 50
+            let endIdx = min(guardIdx + scanWindow, lines.count)
+            var foundSignal = false
+            for idx in guardIdx..<endIdx {
+                if lines[idx].contains("inflightSemaphore.signal()") {
+                    foundSignal = true
+                    break
+                }
+            }
+            XCTAssertTrue(
+                foundSignal,
+                "the nil-drawable guard and the inflight-semaphore signal must " +
+                "be in the same code path; they appear too far apart in the " +
+                "file. Found `guard let drawable = view.currentDrawable` at " +
+                "line \(guardIdx + 1) (1-based) but no `inflightSemaphore.signal()` " +
+                "within the next \(scanWindow) lines. A refactor that separates " +
+                "them — e.g. moves the signal into a deinit handler or a different " +
+                "function — re-opens the slot-leak shape that audit F20 fixed: " +
+                "render() claims a slot via wait(), bails on nil drawable, and " +
+                "the slot is never released. Restore proximity or update this " +
+                "test to point at the new co-located pair."
+            )
+        }
+        // If guardLineIdx is nil the substring assertion above already
+        // failed with a more actionable message; no need to fail twice.
+    }
+
+    /// Source pin: the GPU-selection policy excludes removable
+    /// (eGPU) devices. This is the FIRST line of defence against
+    /// eGPU hot-unplug — by never picking the eGPU in the first
+    /// place, we don't have to handle its removal mid-session.
+    /// `MetalDeviceSelectionTests.test_rejectsRemovableEvenIfLowPower`
+    /// pins this BEHAVIOURALLY; this test pins it at the SOURCE
+    /// level so a future refactor that removes the `!$0.isRemovable`
+    /// predicate trips a second test (defence in depth).
+    ///
+    /// The doc-comment on `chooseGPU` also documents the rationale
+    /// — that documentation is itself load-bearing because it's the
+    /// only signal a future engineer has that the predicate is a
+    /// safety property rather than a stylistic choice. Pin its
+    /// substring so a refactor that strips the comment also fails.
+    func test_chooseGPU_excludesRemovable_sourcePin() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Renderer/MetalDeviceSelection.swift")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: url.path),
+            "MetalDeviceSelection.swift not found at \(url.path)"
+        )
+        let src = try String(contentsOf: url, encoding: .utf8)
+
+        // The selection predicate. Whitespace tolerant via separate
+        // substring checks for the two halves so a future reformat
+        // (e.g. multi-line predicate) doesn't break the pin.
+        XCTAssertTrue(
+            src.contains("isLowPower") && src.contains("!$0.isRemovable"),
+            """
+            chooseGPU(from:) no longer excludes removable devices. eGPU \
+            hot-unplug would tear down all MTLResources bound to the \
+            removed device, crashing the renderer. The `!$0.isRemovable` \
+            predicate is the FIRST line of defence — restore it before \
+            shipping. Memory file: project_release_adhoc_sparkle_crash.md \
+            and the doc-comment on chooseGPU.
+            """
+        )
+
+        // Rationale comment must mention eGPU / removable / unplug
+        // so the predicate's intent survives a future audit.
+        // Tolerant: any of these substrings is sufficient signal.
+        let mentionsEgpu = src.contains("eGPU") || src.contains("Removable eGPU")
+            || src.contains("removable")
+        XCTAssertTrue(
+            mentionsEgpu,
+            """
+            chooseGPU(from:) doc-comment no longer references eGPU / removable / \
+            unplug. This rationale is the only signal a future engineer has \
+            that `!$0.isRemovable` is a safety property (preventing \
+            mid-session device loss) rather than a stylistic choice. Restore.
+            """
+        )
+    }
+
+    /// GAP NOTE for v1.0 (P4.12 follow-up):
+    ///
+    /// We do NOT have a runtime test that injects a nil MTLDevice
+    /// into MetalRenderer.init or simulates a `MTLDeviceWasRemovedNotification`.
+    /// The blockers:
+    ///
+    ///   - MTLDevice is an Apple system protocol; mocking it requires
+    ///     stubbing dozens of methods (makeBuffer, makeTexture,
+    ///     makeCommandQueue, makeDefaultLibrary, …) that the renderer
+    ///     calls during init. A faithful mock would be hundreds of
+    ///     lines of test code with its own bug surface.
+    ///
+    ///   - Simulating MTLDeviceWasRemovedNotification requires posting
+    ///     to the system NotificationCenter from a private-API path
+    ///     that Apple doesn't document. Even if it worked, no Blackbird
+    ///     code today subscribes to that notification — the renderer
+    ///     would not respond to the simulated event.
+    ///
+    /// What we DO have:
+    ///
+    ///   - MetalDeviceSelectionTests pins the `!$0.isRemovable`
+    ///     predicate behaviourally, so an eGPU is never picked.
+    ///   - test_metalRenderer_drawablePathHasNilGuard_sourcePin (above)
+    ///     pins the `currentDrawable == nil` defensive guard at the
+    ///     source level.
+    ///   - test_render_drawableFailure_doesNotPoisonSkipCache + its
+    ///     companion exercise the nil-drawable PATH at runtime via
+    ///     CountingNoDrawableMTKView.
+    ///
+    /// What v1.0 should add (out of scope for P4.12):
+    ///
+    ///   - A "managed Metal device" abstraction layer behind an internal
+    ///     protocol (mirroring GPUDeviceProperties), so a fake-device
+    ///     test seam exists without mocking MTLDevice itself.
+    ///   - Subscribe to MTLDeviceWasRemovedNotification at app launch
+    ///     and surface a user-visible "GPU was disconnected; using
+    ///     fallback" alert. Useful for the future "pick GPU in Settings"
+    ///     feature (which would re-introduce the eGPU pick path).
+    ///
+    /// This documentation is itself the test artifact for the gap;
+    /// no XCTAssert call here. Co-located with the source pins so
+    /// it surfaces during P4.12 follow-up triage.
+    func test_metalRenderer_deviceLossSimulation_documentedGap() {
+        // Intentional no-op: see doc-comment above for the gap
+        // analysis. This method exists so the comment is co-located
+        // with the rest of the device-loss tests — `xcrun xctest
+        // --list-tests` will surface it next to the others.
+    }
 }

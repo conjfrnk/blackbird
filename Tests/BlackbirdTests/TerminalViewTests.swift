@@ -259,8 +259,6 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_commandKeyDoesNotSendToPty() throws {
-        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
-                      "RunLoop-pumping test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the runtime invariant")
         // Byte-level assertion of the ⌘-isolation invariant. The view's
         // keyDown fast-returns on `.command`-flagged events before the
         // session / encoder / sendToSession path runs; hooking the
@@ -268,6 +266,14 @@ final class TerminalViewTests: XCTestCase {
         // that path. No real PTY is needed because the ⌘ branch returns
         // before the `guard let session` check — so a headless view with
         // a nil session is sufficient and matches IMETests' pattern.
+        //
+        // Skip-as-pass triage 2026-05-09: the previous defensive
+        // `wait(for:)` post-keyDown was speculative — the .command
+        // branch in `TerminalView.keyDown` is `super.keyDown(with:); return`,
+        // both synchronous, with no DispatchQueue.async hop. The
+        // recorder check therefore sees the final state immediately.
+        // Dropping the runloop pump lets this test run on every PR
+        // without the cumulative-ASan CATransaction hazard.
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
         let recorder = RecordingPTY()
         view.ptyRecorderForTests = recorder
@@ -295,11 +301,9 @@ final class TerminalViewTests: XCTestCase {
             keyCode: 8
         ))
         view.keyDown(with: cmdCEvent)
-
-        // Give the runloop a hop in case any stray async path posted bytes.
-        let settle = expectation(description: "settle")
-        DispatchQueue.main.async { settle.fulfill() }
-        wait(for: [settle], timeout: 1.0)
+        // No runloop pump: the .command branch is fully synchronous
+        // (`super.keyDown(with:); return`), so the recorder reflects
+        // the final state by the time `view.keyDown(...)` returns.
 
         XCTAssertTrue(recorder.sent.isEmpty,
                       "⌘C must never produce PTY bytes; recorder captured \(Array(recorder.sent))")
@@ -318,30 +322,36 @@ final class TerminalViewTests: XCTestCase {
     /// on a headless session but the selection-mode routing is
     /// grid-independent (it only picks between `.character`,
     /// `.word`, `.line`, `.rectangular` based on click shape).
+    ///
+    /// Skip-as-pass triage 2026-05-09: the previous incarnation of
+    /// this helper waited on `session.$snapshot` for the initial
+    /// publish — that runloop pump is what gated the four selection-
+    /// mode tests behind `BB_RUN_STRESS_TESTS`. The actual mouseDown
+    /// path (`TerminalView+Mouse.swift::mouseDown(with:)` →
+    /// `bufferPointFromEvent`) handles `currentSnapshot == nil`
+    /// gracefully (returns the origin BufferPoint sentinel and warns
+    /// once via `logEarlyClickOnce`), and the assertions in this
+    /// file only inspect `view.selection?.mode`, which is decided
+    /// purely from `event.clickCount` + `event.modifierFlags`. The
+    /// snapshot-wait was therefore load-bearing for nothing — drop
+    /// it, and the whole class can run on every PR without the
+    /// cumulative-ASan CATransaction hazard the gate was protecting
+    /// against.
     private func makeViewForSelection() throws -> TerminalView {
-        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
-                      "RunLoop-pumping selection-mouse test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the selection-mode invariants")
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let view = TerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 480),
             device: device
         )
-        // Headless session: no forkpty, no shell. BBTerm still publishes
-        // its initial (2×2) snapshot which the view consumes, so
-        // `currentSnapshot` is non-nil by the time the test's mouseDown
-        // lands.
+        // Headless session has no PTY; assigning it wires the
+        // Combine subscription so future @Published snapshot landings
+        // would update `currentSnapshot`. We don't wait for the
+        // initial publish: mouseDown's selection-mode decision is
+        // grid-independent (see helper doc above), and waiting was
+        // the one runloop pump the cumulative-ASan gate disliked.
         let session = TerminalSession.makeHeadlessForTests()
         addTeardownBlock { session.terminate() }
         view.session = session
-        let exp = expectation(description: "initial snapshot")
-        var c: AnyCancellable?
-        c = session.$snapshot.sink { s in
-            if s != nil {
-                c?.cancel()
-                exp.fulfill()
-            }
-        }
-        wait(for: [exp], timeout: 3.0)
         return view
     }
 
