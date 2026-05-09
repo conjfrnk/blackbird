@@ -566,11 +566,7 @@ fn cup_position_with_args_lands_correctly() {
     unsafe {
         let term = setup_term(COLS, ROWS, SCROLLBACK);
         feed(term, b"\x1b[10;25H");
-        assert_eq!(
-            snap_cursor(term),
-            (9, 24),
-            "CUP 10;25 must land at (9, 24)"
-        );
+        assert_eq!(snap_cursor(term), (9, 24), "CUP 10;25 must land at (9, 24)");
         // Missing args → defaults (1;1) per spec.
         feed(term, b"\x1b[H");
         assert_eq!(
@@ -786,10 +782,7 @@ fn el_0_erase_cursor_to_eol() {
         seed_grid(term, 5);
         feed(term, b"\x1b[3;40H\x1b[K");
         let row2 = read_row_chars(term, 2);
-        assert!(
-            row2.starts_with("ABCDE"),
-            "row 2 prefix preserved by EL 0"
-        );
+        assert!(row2.starts_with("ABCDE"), "row 2 prefix preserved by EL 0");
         assert_eq!(
             &row2.as_bytes()[39..],
             &b" ".repeat((COLS - 39) as usize)[..],
@@ -1030,7 +1023,7 @@ fn decsc_decrc_round_trip_position() {
         let term = setup_term(COLS, ROWS, SCROLLBACK);
         feed(term, b"\x1b[10;20H");
         feed(term, b"\x1b7"); // DECSC
-        // Move somewhere else.
+                              // Move somewhere else.
         feed(term, b"\x1b[1;1H");
         assert_eq!(snap_cursor(term), (0, 0), "moved to (0,0) before restore");
         feed(term, b"\x1b8"); // DECRC
