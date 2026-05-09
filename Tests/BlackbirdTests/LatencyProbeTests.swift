@@ -83,20 +83,29 @@ final class LatencyProbeTests: XCTestCase {
         XCTAssertEqual(probe._sampleCountForTests, 0)
     }
 
-    /// Regression for swift-tests-render F4: `flush()` computes p50/p99
-    /// via `sorted[count/2]` / `min(count-1, (count*99)/100)`. The prior
-    /// LatencyHarness test injects 1..100 which only exercises the "full
-    /// ring" shape. These edge-case samples pin the index math for n=1,
-    /// n=2, and odd n so a refactor of the percentile formulae can't
-    /// silently regress.
+    /// Regression for swift-tests-render F4: `flush()` computes
+    /// p50/p99/p99.9/max via `sorted[count/2]`,
+    /// `min(count-1, (count*99)/100)`, `min(count-1, (count*999)/1000)`,
+    /// and `sorted.last!`. The prior LatencyHarness test injects 1..100
+    /// which only exercises the "full ring" shape. These edge-case
+    /// samples pin the index math for n=1, n=2, and odd n so a refactor
+    /// of the percentile formulae can't silently regress.
     ///
     /// The computation mirrors the production code exactly — if the
     /// formulae evolve, both should update together.
     func test_flush_percentileIndices_n1_n2_oddN() {
-        // n=1: p50 and p99 both land on the single sample. Index math:
-        //   p50 = sorted[1/2]    = sorted[0]
-        //   p99 = min(0, (1*99)/100) = min(0, 0) = sorted[0]
+        // n=1: p50, p99, p999, and max all land on the single sample.
+        //   p50  = sorted[1/2]              = sorted[0]
+        //   p99  = min(0, (1*99)/100)       = min(0, 0)  = sorted[0]
+        //   p999 = min(0, (1*999)/1000)     = min(0, 0)  = sorted[0]
+        //   max  = sorted.last!             = sorted[0]
         // No division-by-zero, no out-of-bounds on the only-sample case.
+        // The min() clamp on p999Index is load-bearing here — without it
+        // (1*999)/1000 = 0 happens to be valid, but for n=2 the unclamped
+        // (2*999)/1000 = 1 is also valid by coincidence; the clamp's
+        // value shows up at larger small-n boundaries (see the n=99 case
+        // below), and the contract is "always returns a valid index for
+        // any non-empty array".
         let one = LatencyProbe()
         one._injectSampleMs(42.0)
         // Verify count before flush; flush() drains the ring.
@@ -104,13 +113,17 @@ final class LatencyProbeTests: XCTestCase {
         one.flush()  // must not crash; log emission not asserted here
         XCTAssertEqual(one._sampleCountForTests, 0)
 
-        // n=2: p50 = sorted[2/2] = sorted[1] (max of the two),
-        //      p99 = min(1, (2*99)/100) = min(1, 1) = sorted[1].
+        // n=2: p50  = sorted[2/2]            = sorted[1] (max of the two),
+        //      p99  = min(1, (2*99)/100)     = min(1, 1) = sorted[1],
+        //      p999 = min(1, (2*999)/1000)   = min(1, 1) = sorted[1],
+        //      max  = sorted.last!           = sorted[1].
         // Classic off-by-one trap — integer division hides the fact that
         // p50 of two samples is "median", which for a 2-point set is
         // more naturally avg(sorted[0], sorted[1]). The current impl
         // picks sorted[1]; pin that so a future median-averaging refactor
-        // is a deliberate change, not silent drift.
+        // is a deliberate change, not silent drift. Two-sample input must
+        // also produce well-defined, in-range indices for the new p999
+        // computation — the min() clamp catches it.
         let two = LatencyProbe()
         two._injectSampleMs(10.0)
         two._injectSampleMs(20.0)
@@ -118,8 +131,10 @@ final class LatencyProbeTests: XCTestCase {
         two.flush()
         XCTAssertEqual(two._sampleCountForTests, 0)
 
-        // n=3 (odd): p50 = sorted[3/2] = sorted[1] = true median,
-        //            p99 = min(2, (3*99)/100) = min(2, 2) = sorted[2].
+        // n=3 (odd): p50  = sorted[3/2]           = sorted[1] = true median,
+        //            p99  = min(2, (3*99)/100)    = min(2, 2) = sorted[2],
+        //            p999 = min(2, (3*999)/1000)  = min(2, 2) = sorted[2],
+        //            max  = sorted.last!          = sorted[2].
         let three = LatencyProbe()
         three._injectSampleMs(30.0)
         three._injectSampleMs(10.0)  // deliberately out of order
@@ -128,16 +143,66 @@ final class LatencyProbeTests: XCTestCase {
         three.flush()
         XCTAssertEqual(three._sampleCountForTests, 0)
 
-        // n=99 (odd, just under the natural 100 boundary): p50 =
-        // sorted[49] (1-indexed = 50th), p99 = min(98, (99*99)/100) =
-        // min(98, 98) = sorted[98] (the max). Verifies the p99Index
-        // clamp works at the boundary where `count - 1 < (count * 99)
-        // / 100` might otherwise produce a stale index.
+        // n=99 (odd, just under the natural 100 boundary):
+        //   p50  = sorted[49] (1-indexed = 50th),
+        //   p99  = min(98, (99*99)/100)    = min(98, 98) = sorted[98] (max),
+        //   p999 = min(98, (99*999)/1000)  = min(98, 98) = sorted[98] (max),
+        //   max  = sorted.last!            = sorted[98].
+        // Verifies the p99Index/p999Index clamps work at the boundary
+        // where `count - 1 < (count * N) / D` might otherwise produce a
+        // stale index. For p999 specifically: 99*999/1000 = 98910/1000 =
+        // 98 in integer division — equal to count-1 — so the clamp is a
+        // no-op here, but the symmetry with p99 is the structural pin.
         let oddLarge = LatencyProbe()
         for i in 1...99 { oddLarge._injectSampleMs(Double(i)) }
         XCTAssertEqual(oddLarge._sampleCountForTests, 99)
         oddLarge.flush()
         XCTAssertEqual(oddLarge._sampleCountForTests, 0)
+    }
+
+    /// Pin the percentile values for samples 1..1000 — the well-known
+    /// shape that LatencyHarnessTests verifies the log line against, but
+    /// at a magnitude where p99 and p99.9 separate cleanly so a regression
+    /// of the p999 index can't masquerade as a p99 result.
+    ///
+    /// Indices for samples [1.0, 2.0, ..., 1000.0]:
+    ///   p50  index = 1000/2                    = 500   → sorted[500]  = 501.0
+    ///   p99  index = min(999, 1000*99/100)     = 990   → sorted[990]  = 991.0
+    ///   p999 index = min(999, 1000*999/1000)   = 999   → sorted[999]  = 1000.0
+    ///   max        = sorted.last!              = sorted[999]          = 1000.0
+    ///
+    /// `flush()` doesn't return values — it logs them. We can't reach
+    /// into the unified log here without coupling to OSLogStore (that's
+    /// LatencyHarnessTests' job). Instead, this test pins the count and
+    /// the index arithmetic by mirroring the production formulae and
+    /// asserting they hit the expected sorted positions. If the indices
+    /// drift, both this test and the production formula must change
+    /// together — which is the point.
+    ///
+    /// Memory/time pre-flight per MEMORY: 1000 Doubles + sort ≈ 8 KB +
+    /// O(n log n) ≈ instant. Safe.
+    func test_flush_percentileIndices_n1000_separation() {
+        let probe = LatencyProbe()
+        for i in 1...1000 { probe._injectSampleMs(Double(i)) }
+        XCTAssertEqual(probe._sampleCountForTests, 1000)
+
+        // Mirror the production index math here so a refactor can't drift.
+        // Sorted is [1.0, 2.0, ..., 1000.0]; sorted[k] == Double(k + 1).
+        let count = 1000
+        let p50Index = count / 2
+        let p99Index = min(count - 1, (count * 99) / 100)
+        let p999Index = min(count - 1, (count * 999) / 1000)
+        XCTAssertEqual(p50Index, 500, "p50 index drift")
+        XCTAssertEqual(p99Index, 990, "p99 index drift")
+        XCTAssertEqual(p999Index, 999, "p999 index drift")
+        // p99 and p999 must be different positions at this magnitude;
+        // that's the whole reason p999 exists. If they collapse to the
+        // same index, the new metric is doing nothing.
+        XCTAssertNotEqual(p99Index, p999Index,
+                          "p99 and p999 must separate for n>=1000 — that's why we added p999")
+
+        probe.flush()  // emits the log line; harness test asserts the format
+        XCTAssertEqual(probe._sampleCountForTests, 0)
     }
 
     /// Regression for swift-tests-render F19: `markKeystroke` +

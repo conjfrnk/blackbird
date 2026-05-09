@@ -9,9 +9,15 @@
 #
 # The test drives 50 synthetic markKeystroke→markPresented pairs under
 # BB_LATENCY_PROBE=1, forces a flush, and the probe logs:
-#   latency n=50 p50=<x>ms p99=<y>ms
+#   latency n=50 p50=<x>ms p99=<y>ms p999=<w>ms max=<z>ms
 # to the unified log (subsystem dev.conjfrnk.blackbird, category latency).
-# This script parses that line and asserts thresholds.
+# This script parses that line and asserts thresholds on p50/p99.
+#
+# p999 + max are extracted and printed for visibility but NOT gated yet —
+# we need a few baseline runs of real-world data before we know what the
+# tail looks like in CI. Adding a gate without that data would either
+# false-fail at random or false-pass at infinity. The follow-up will add
+# LATENCY_P999_MS / LATENCY_MAX_MS once we have a baseline.
 set -euo pipefail
 
 P50_THRESHOLD_MS="${LATENCY_P50_MS:-3.0}"
@@ -47,15 +53,33 @@ echo "--- unified log entries (latency category, last 60s) ---"
 cat "$LOG_OUT" || true
 echo "---"
 
-# Parse the most recent p50 and p99 values from the log line:
-#   latency n=50 p50=0.00ms p99=0.00ms
-p50="$(grep -Eo 'p50=[0-9.]+ms' "$LOG_OUT" | tail -1 | sed 's/p50=//;s/ms//' || true)"
-p99="$(grep -Eo 'p99=[0-9.]+ms' "$LOG_OUT" | tail -1 | sed 's/p99=//;s/ms//' || true)"
+# Parse the most recent p50/p99/p999/max values from the log line:
+#   latency n=50 p50=0.00ms p99=0.00ms p999=0.00ms max=0.00ms
+#
+# Word-boundary anchors (`\b`) on p999/p99/max keep them disjoint:
+# without `\b` before `p99=`, `p999=...` would match the trailing
+# substring `99=...ms`. macOS grep doesn't support `\b` portably, so we
+# use `[[:space:]]` as the explicit boundary — every field is
+# space-separated in the log line.
+p50="$(grep -Eo '(^| )p50=[0-9.]+ms' "$LOG_OUT" | tail -1 | sed 's/.*p50=//;s/ms//' || true)"
+p99="$(grep -Eo '(^| )p99=[0-9.]+ms' "$LOG_OUT" | tail -1 | sed 's/.*p99=//;s/ms//' || true)"
+p999="$(grep -Eo '(^| )p999=[0-9.]+ms' "$LOG_OUT" | tail -1 | sed 's/.*p999=//;s/ms//' || true)"
+max="$(grep -Eo '(^| )max=[0-9.]+ms' "$LOG_OUT" | tail -1 | sed 's/.*max=//;s/ms//' || true)"
 
 if [[ -z "$p50" || -z "$p99" ]]; then
   echo "latency gate: no probe samples found in unified log" >&2
   echo "  (log_show output was $(wc -l < "$LOG_OUT") lines)" >&2
   exit 2
+fi
+
+# p999 + max are informational only — print them so we can collect
+# baselines from CI logs, but don't fail the build on them. Once we have
+# data, follow-up will add LATENCY_P999_MS / LATENCY_MAX_MS gates that
+# reflect realistic thresholds.
+if [[ -n "$p999" && -n "$max" ]]; then
+  echo "tail (informational, not gated): p999=${p999} ms  max=${max} ms"
+else
+  echo "tail (informational, not gated): p999=<missing> max=<missing> — log line format may have drifted" >&2
 fi
 
 awk -v p50="$p50" -v p99="$p99" \

@@ -104,8 +104,33 @@ public final class LatencyProbe {
         if shouldFlush { flush() }
     }
 
-    /// Compute + log p50 and p99 over the ring, clear the ring. Safe to call
-    /// from any thread; safe to call when empty (early return under lock).
+    /// Index for the `numerator/denominator`-th percentile of a sorted
+    /// array of `count` samples, clamped to `[0, count - 1]`. Extracted
+    /// so adding new percentiles (p9999, etc.) only touches one place
+    /// rather than three sites in `flush()` plus mirrored copies in the
+    /// percentile-index tests.
+    ///
+    /// The `min(count - 1, ...)` clamp is kept for refactor robustness;
+    /// not strictly load-bearing today since `(count * num) / den` for
+    /// `num <= den` is mathematically `<= count`, and integer division
+    /// of `(count * 999) / 1000` for any `count >= 1` always yields
+    /// `<= count - 1`. But future code that swaps the ratio (e.g.
+    /// `count * 1001 / 1000` for an extrapolated tail estimate) would
+    /// otherwise blow up at the index access — the clamp shields that.
+    private static func percentileIndex(count: Int, numerator: Int, denominator: Int) -> Int {
+        min(count - 1, (count * numerator) / denominator)
+    }
+
+    /// Compute + log p50, p99, p99.9, and max over the ring, clear the ring.
+    /// Safe to call from any thread; safe to call when empty (early return
+    /// under lock).
+    ///
+    /// Why p99.9 + max in addition to p50/p99: a 50-sample ring's p99 is just
+    /// `sorted[count*99/100]` — a single 200ms outlier on real keystroke
+    /// traffic is `1/50 = 2%` of samples, so even a glaring user-visible
+    /// glitch would not move p99 unless it dominated 1% of the window. The
+    /// tail (p99.9 + max) makes those outliers visible without growing the
+    /// ring or adding allocations.
     public func flush() {
         lock.lock()
         guard !samplesMs.isEmpty else { lock.unlock(); return }
@@ -113,9 +138,26 @@ public final class LatencyProbe {
         samplesMs.removeAll(keepingCapacity: true)
         lock.unlock()
         let sorted = snapshot.sorted()
-        let p50 = sorted[sorted.count / 2]
-        let p99Index = min(sorted.count - 1, (sorted.count * 99) / 100)
+        let p50Index = Self.percentileIndex(count: sorted.count, numerator: 50, denominator: 100)
+        let p50 = sorted[p50Index]
+        let p99Index = Self.percentileIndex(count: sorted.count, numerator: 99, denominator: 100)
         let p99 = sorted[p99Index]
+        // p99.9 mirrors the p99 idiom exactly — same `percentileIndex` helper
+        // so a 1- or 2-sample ring resolves to a valid index instead of an
+        // out-of-range crash. With small n this collapses to the last sample
+        // (== max), which is the right behaviour: there's no 99.9th percentile
+        // of 1 sample distinct from "the sample".
+        let p999Index = Self.percentileIndex(count: sorted.count, numerator: 999, denominator: 1000)
+        let p999 = sorted[p999Index]
+        // `sorted.last ?? p99` rather than `sorted.last!`: the early-return
+        // above currently guarantees non-empty, but a refactor that swaps
+        // the early-return and the snapshot capture would silently turn a
+        // force-unwrap into a crash at runtime. The fallback to `p99` is
+        // sensible because (a) when the ring is non-empty, `sorted.last`
+        // equals the last-indexed value which equals or exceeds `p99`, and
+        // (b) when the ring is empty we never reach here. The fallback is
+        // for future-proofing the contract without depending on it today.
+        let maxMs = sorted.last ?? p99
         // `log(...)` rather than `info(...)`: .info level is NOT persisted
         // to OSLogStore by default on macOS (only streamed to live
         // listeners), which makes the format-pin test unable to find the
@@ -124,7 +166,7 @@ public final class LatencyProbe {
         // The probe is env-gated (BB_LATENCY_PROBE=1 or
         // `_forceEnableForTests`), so production users never see these
         // emissions regardless of level.
-        log.log("latency n=\(snapshot.count, privacy: .public) p50=\(p50, format: .fixed(precision: 2), privacy: .public)ms p99=\(p99, format: .fixed(precision: 2), privacy: .public)ms")
+        log.log("latency n=\(snapshot.count, privacy: .public) p50=\(p50, format: .fixed(precision: 2), privacy: .public)ms p99=\(p99, format: .fixed(precision: 2), privacy: .public)ms p999=\(p999, format: .fixed(precision: 2), privacy: .public)ms max=\(maxMs, format: .fixed(precision: 2), privacy: .public)ms")
     }
 
     /// For tests: inject samples without going through the timing path.

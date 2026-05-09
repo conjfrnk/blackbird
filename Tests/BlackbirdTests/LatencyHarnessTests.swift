@@ -87,13 +87,21 @@ final class LatencyHarnessTests: XCTestCase {
 
     // MARK: - Log-line format pinning (audit F5)
     //
-    // `bench-latency.sh` extracts p50/p99 via:
+    // `bench-latency.sh` extracts p50/p99/p999/max via:
     //     grep -Eo 'p50=[0-9.]+ms'
     //     grep -Eo 'p99=[0-9.]+ms'
+    //     grep -Eo 'p999=[0-9.]+ms'
+    //     grep -Eo 'max=[0-9.]+ms'
     // If `LatencyProbe.flush()` ever renames those fields (e.g. `p50_ms=`)
     // or drops the `ms` suffix, CI would fail to parse values and either
     // false-pass (empty parse → 0 ≤ threshold) or false-fail. Pin the format
     // against the same regex the shell script uses.
+    //
+    // p999 + max were added to surface tail outliers that p99 hides on a
+    // 50-sample ring (a single 200ms glitch is 2% of 50 samples, well
+    // below the p99 boundary). They must show up in the log line in this
+    // exact form so the bench script can extract them without drifting
+    // from the production format.
 
     /// Read the unified-log entries that `LatencyProbe.flush()` emits, and
     /// return the most recent message matching `subsystem == our subsystem`
@@ -132,10 +140,16 @@ final class LatencyHarnessTests: XCTestCase {
         LatencyProbe.shared._forceEnableForTests()
         defer { LatencyProbe.shared._disableAfterTests() }
 
-        // Inject a known set so p50/p99 are deterministic: [1, 2, ..., 100].
-        // Expected sorted stats: p50 = sorted[50] = 51 (flush uses
-        // `sorted[count/2]`), p99 = sorted[99] = 100 (flush uses
-        // `min(count-1, (count*99)/100)` = min(99, 99) = 99).
+        // Inject a known set so p50/p99/p999/max are deterministic: [1..100].
+        // Expected sorted stats:
+        //   p50  = sorted[100/2]            = sorted[50]  = 51 (flush uses
+        //                                                       `sorted[count/2]`)
+        //   p99  = min(99, (100*99)/100)    = sorted[99]  = 100
+        //   p999 = min(99, (100*999)/1000)  = sorted[99]  = 100
+        //          (collapses to max at n=100; the values separate at n=1000,
+        //          which LatencyProbeTests.test_flush_percentileIndices_n1000_separation
+        //          covers.)
+        //   max  = sorted.last!             = sorted[99]  = 100
         for i in 1...100 {
             LatencyProbe.shared._injectSampleMs(Double(i))
         }
@@ -152,16 +166,23 @@ final class LatencyHarnessTests: XCTestCase {
             throw XCTSkip("OSLogStore not readable in this test host — skip format pin")
         }
 
-        // The exact regexes bench-latency.sh uses. If either of these
+        // The exact regexes bench-latency.sh uses. If any of these
         // stops matching, CI breaks at a different layer and would
-        // silently mis-parse. Pinning both here catches the drift in
+        // silently mis-parse. Pinning all four here catches the drift in
         // the unit suite before the shell script does.
         //
         // `grep -Eo` ≈ POSIX extended regex; Swift's NSRegularExpression
         // is effectively a superset. Compile strictness matches the
         // shell pattern.
-        let p50Regex = try NSRegularExpression(pattern: "p50=[0-9.]+ms")
-        let p99Regex = try NSRegularExpression(pattern: "p99=[0-9.]+ms")
+        //
+        // p999 must use a word-boundary anchor (`\bp999=`) — without it,
+        // `p99=<...>ms p999=<...>ms` would let the `p99=[0-9.]+ms` regex
+        // match the `99=...` substring of `p999=...`. Anchoring on a
+        // word boundary before the `p` keeps `p99` and `p999` distinct.
+        let p50Regex = try NSRegularExpression(pattern: "\\bp50=[0-9.]+ms")
+        let p99Regex = try NSRegularExpression(pattern: "\\bp99=[0-9.]+ms")
+        let p999Regex = try NSRegularExpression(pattern: "\\bp999=[0-9.]+ms")
+        let maxRegex = try NSRegularExpression(pattern: "\\bmax=[0-9.]+ms")
         let lineRange = NSRange(line.startIndex..., in: line)
 
         XCTAssertNotNil(
@@ -172,6 +193,14 @@ final class LatencyHarnessTests: XCTestCase {
             p99Regex.firstMatch(in: line, range: lineRange),
             "flush line must contain `p99=<num>ms` — bench-latency.sh depends on this: \(line)"
         )
+        XCTAssertNotNil(
+            p999Regex.firstMatch(in: line, range: lineRange),
+            "flush line must contain `p999=<num>ms` — bench-latency.sh depends on this: \(line)"
+        )
+        XCTAssertNotNil(
+            maxRegex.firstMatch(in: line, range: lineRange),
+            "flush line must contain `max=<num>ms` — bench-latency.sh depends on this: \(line)"
+        )
 
         // Also pin `n=<count>` so the shell can report the sample count.
         let nRegex = try NSRegularExpression(pattern: "n=[0-9]+")
@@ -180,9 +209,10 @@ final class LatencyHarnessTests: XCTestCase {
             "flush line must contain `n=<count>` — \(line)"
         )
 
-        // Sanity: with samples 1..100, p50 should round to "51.00" and p99
-        // to "100.00" at 2-decimal precision. If flush() ever changes the
-        // percentile math this assertion flips; that's the intended tripwire.
+        // Sanity: with samples 1..100, all of p50, p99, p999, max round to
+        // their expected values at 2-decimal precision. If flush() ever
+        // changes the percentile math these assertions flip; that's the
+        // intended tripwire.
         XCTAssertTrue(
             line.contains("p50=51.00ms"),
             "p50 should equal 51.00 for samples 1..100 (got line: \(line))"
@@ -190,6 +220,16 @@ final class LatencyHarnessTests: XCTestCase {
         XCTAssertTrue(
             line.contains("p99=100.00ms"),
             "p99 should equal 100.00 for samples 1..100 (got line: \(line))"
+        )
+        // p999 collapses to max at n=100 because (100*999)/1000 = 99 = count-1.
+        // Pinning the same value here is intentional — it's the n=100 contract.
+        XCTAssertTrue(
+            line.contains("p999=100.00ms"),
+            "p999 should equal 100.00 for samples 1..100 (got line: \(line))"
+        )
+        XCTAssertTrue(
+            line.contains("max=100.00ms"),
+            "max should equal 100.00 for samples 1..100 (got line: \(line))"
         )
     }
 }

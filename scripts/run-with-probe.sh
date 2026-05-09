@@ -10,7 +10,9 @@
 #
 # While it runs:
 #   - Type continuously in Blackbird for ~60s to fill the 500-sample
-#     latency ring → `latency n=500 p50=X p99=Y` line appears in the stream.
+#     latency ring → `latency n=500 p50=X p99=Y p999=W max=Z` line appears
+#     in the stream. p999 + max surface tail outliers that p99 of a small
+#     ring would miss.
 #   - fps lines report every second with min/mean/max frame interval and
 #     which screen is rendering (ProMotion vs fixed-60 Hz).
 #   - Crash / assert / Fatal lines are caught regardless of the filter.
