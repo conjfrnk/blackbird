@@ -74,7 +74,18 @@ jobs:
 
   xcode:
     name: Xcode — build + test
-    runs-on: macos-14
+    # Matrix the AppKit/Metal-affected jobs across Sonoma + Sequoia so OS
+    # major regressions in NSWindow / CAMetalLayer / NSEvent surface on
+    # PR CI rather than via a v1.0 user. macos-14 = Sonoma (Xcode 15.x
+    # default but we pin 16.2), macos-15 = Sequoia (Xcode 16.x default).
+    # Rust-only and trend-tracking jobs stay single-OS — see their inline
+    # comments. macos-26 (Tahoe) deliberately excluded until it's GA on
+    # GHA; trying to provision a non-GA image fails the workflow.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
     needs: rust
     steps:
       - uses: actions/checkout@v4
@@ -203,8 +214,46 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Honesty disclosure (P4.6 latency-gate-as-theater fix, 2026-05-09):
+  #
+  # This job pins the LatencyProbe log-line FORMAT and the
+  # `bench-latency.sh` regex that consumes it. It does NOT measure
+  # real keypress→pixel latency. The harness it runs
+  # (`LatencyHarnessTests`) calls `markKeystroke()` and
+  # `markPresented()` back-to-back in a tight loop, so the measured
+  # delta is ~0 µs and the LATENCY_P50_MS=6.0 / LATENCY_P99_MS=20.0
+  # thresholds below are unreachable. The gate exists to catch
+  # regressions in the probe's plumbing — log-line shape, percentile
+  # arithmetic, env-var gating, OSLogStore-readable level — not in
+  # the user-visible latency itself.
+  #
+  # Why the format-pin is non-trivial: a rename like `p50_ms=` or a
+  # missing `ms` suffix would silently false-pass the bench script's
+  # `grep -Eo` parsers (empty parse → 0 ≤ threshold → "OK"). The
+  # tests + this gate together ensure that drift fails loudly here
+  # and in `LatencyHarnessTests::testFlushLogLineMatchesBenchLatencyRegex`
+  # at the same time.
+  #
+  # Why we can't measure real latency on PR CI: synthesizing real
+  # keypress→pixel input requires a windowed `MTKView` plus a real
+  # `CVDisplayLink`. xctest hosts run offscreen and can't acquire a
+  # `CAMetalLayer` drawable, so `view.draw()` short-circuits and the
+  # measured timing reflects nothing the user would see.
+  #
+  # Real latency is measured nightly under `nightly-soak.yml`'s
+  # `swift-soak` job via `RealLatencyProbeWindowedTests`, which is
+  # gated behind `BB_RUN_LATENCY_PROBE=1` (only the nightly workflow
+  # sets it). That test creates an actual `NSWindow` + `MTKView`,
+  # synthesizes `NSEvent.keyDown` events through `NSApp.sendEvent`,
+  # pumps the runloop until the renderer presents real frames, and
+  # asserts the probe collected non-trivial samples.
+  #
+  # KNOWN_ISSUES.md ("End-to-end input→draw latency gate") documents
+  # this distinction explicitly. If you change the job name below,
+  # also update the cross-reference in KNOWN_ISSUES.md and in the
+  # `bench-latency.sh` header.
   latency-gate:
-    name: Latency gate — p50/p99 regression check
+    name: Latency probe plumbing format pin
     runs-on: macos-14
     needs: xcode
     steps:
@@ -245,12 +294,24 @@ jobs:
       - name: Build Rust core (universal)
         run: scripts/build-core.sh
 
-      - name: Latency gate
+      - name: Latency probe plumbing format pin
+        # See the comment block above the job for why this is plumbing-
+        # only and where the real measurement lives. The thresholds
+        # below gate the synthetic ~0 µs harness so any drift in the
+        # probe's percentile math is caught here, but they say nothing
+        # about user-visible latency.
         run: LATENCY_P50_MS=6.0 LATENCY_P99_MS=20.0 scripts/bench-latency.sh
 
   swift-release-universal:
     name: Xcode — Release build (arm64 + x86_64 universal)
-    runs-on: macos-14
+    # Matrixed for the same reason as `xcode` above — universal Release
+    # builds can hit OS-major-specific linker / framework regressions
+    # (CoreGraphics, AppKit, CryptoKit) that Debug doesn't surface.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
     needs: rust
     steps:
       - uses: actions/checkout@v4
@@ -480,7 +541,15 @@ jobs:
 
   smoke:
     name: Smoke — launch, 3s, SIGTERM
-    runs-on: macos-14
+    # Matrixed across Sonoma + Sequoia: a launch-time AppKit / dyld /
+    # hardened-runtime regression specific to one macOS major would
+    # otherwise reach v1.0 users with zero CI signal. `needs: xcode`
+    # waits for ALL xcode matrix combos by default — that's intended.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
     needs: xcode
     steps:
       - uses: actions/checkout@v4

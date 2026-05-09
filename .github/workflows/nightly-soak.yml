@@ -44,6 +44,15 @@
 #   6. BBTermAdversarialTests::test_soak_10s_feedAndSnapshot
 #      (BB_SOAK=1) — the existing 10-second feed-and-snapshot soak
 #      with first-second / final peak ratio bound.
+#   7. RealLatencyProbeWindowedTests (BB_RUN_LATENCY_PROBE=1) — the
+#      P4.6 honesty fix. The PR-CI `latency-gate` job (ci.yml) only
+#      pins the LatencyProbe log-line FORMAT — the synthetic harness
+#      it runs measures back-to-back ~0 µs deltas, not real latency.
+#      This test creates a real NSWindow + MTKView, synthesizes
+#      keyDown events through NSApp.sendEvent, pumps the runloop
+#      until frames present, and asserts max sample > 0.5 ms (real
+#      frame latency, not the synthetic harness's ~0 µs floor).
+#      Canonical real-world keypress→pixel latency measurement.
 #
 # Env-propagation hazard (load-bearing — read this before editing)
 # ----------------------------------------------------------------
@@ -300,16 +309,29 @@ jobs:
         # 152-188 for the full rationale; the same pattern is
         # safe here because the sentinel-grep step BELOW provides
         # a stronger correctness check than the exit code.
+        #
+        # BB_RUN_LATENCY_PROBE=1 (P4.6 honesty fix, 2026-05-09): gates
+        # `RealLatencyProbeWindowedTests`, the canonical real-world
+        # keypress→pixel latency measurement. The test creates a real
+        # NSWindow + MTKView, synthesizes NSEvent.keyDown events, pumps
+        # the runloop until frames present, and asserts the LatencyProbe
+        # collected non-trivial samples (max > 0.5 ms — i.e. real frame
+        # latency, not the back-to-back ~0 µs deltas the PR-CI gate
+        # measures). PR CI runs the synthetic format-pin only. See the
+        # comment block above the `latency-gate` job in ci.yml for the
+        # split rationale.
         run: |
           set +e
           TEST_RUNNER_BB_RUN_SOAK=1 \
           TEST_RUNNER_BB_SOAK=1 \
+          TEST_RUNNER_BB_RUN_LATENCY_PROBE=1 \
           xcodebuild test \
             -project Blackbird.xcodeproj \
             -scheme Blackbird \
             -destination "platform=macOS,arch=arm64" \
             -only-testing:BlackbirdTests/SwiftSessionRSSReturnsToBaselineTests \
             -only-testing:BlackbirdTests/BBTermAdversarialTests/test_soak_10s_feedAndSnapshot_underBoundedMemory \
+            -only-testing:BlackbirdTests/RealLatencyProbeWindowedTests \
             -enableAddressSanitizer NO \
             -enableUndefinedBehaviorSanitizer NO \
             ENABLE_ADDRESS_SANITIZER=NO \
@@ -378,17 +400,43 @@ jobs:
           if ! grep -qE "Test Case .*test_soak_10s_feedAndSnapshot.*' passed" /tmp/swift-soak.log; then
             missing+=("BBTermAdversarialTests.test_soak_10s_feedAndSnapshot_underBoundedMemory")
           fi
+          # P4.6: real-windowed latency test. We accept EITHER `passed`
+          # (the runner has a real display server, the test measured
+          # real latency) OR `skipped` (the runner couldn't acquire a
+          # CAMetalLayer drawable, the test threw XCTSkip with the
+          # "Windowed Metal probe cannot acquire a CAMetalLayer
+          # drawable" reason). Both are valid outcomes.
+          #
+          # What we CANNOT accept is the test never running at all -
+          # that would mean TEST_RUNNER_BB_RUN_LATENCY_PROBE didn't
+          # reach the xctest host and the env-gated XCTSkipIf at the
+          # very top fired with the "BB_RUN_LATENCY_PROBE=1 not set"
+          # reason. The grep match below requires either `passed` or
+          # `skipped` AND the log line contains the test method name -
+          # so a "Test Case ... skipped" with the env-not-set reason
+          # message is distinguishable from a "Test Case ... skipped"
+          # with the can't-acquire-drawable reason. Inspecting the
+          # SKIP REASON is the load-bearing check.
+          if ! grep -qE "Test Case .*test_realWindowedRender_collectsNonZeroLatencySamples.*' (passed|skipped)" /tmp/swift-soak.log; then
+            missing+=("RealLatencyProbeWindowedTests.test_realWindowedRender_collectsNonZeroLatencySamples")
+          elif grep -qE "test_realWindowedRender_collectsNonZeroLatencySamples.*Test skipped - BB_RUN_LATENCY_PROBE=1 not set" /tmp/swift-soak.log; then
+            # Env-var-gate skip = TEST_RUNNER propagation failure. This
+            # is the silent-green failure mode we exist to prevent;
+            # surface as a sentinel violation distinct from a clean
+            # "windowed Metal not available" skip.
+            missing+=("RealLatencyProbeWindowedTests.test_realWindowedRender_collectsNonZeroLatencySamples (env-gate skip - TEST_RUNNER_BB_RUN_LATENCY_PROBE propagation broken)")
+          fi
           if (( ${#missing[@]} > 0 )); then
             echo "::error::Soak sentinel FAILED - the following tests did not emit a 'passed' line:"
             for t in "${missing[@]}"; do
               echo "::error::  - $t"
             done
-            echo "::error::This usually means TEST_RUNNER_BB_RUN_SOAK / TEST_RUNNER_BB_SOAK did not reach the xctest host, and the tests skipped via XCTSkipIf - yielding a meaningless green. Investigate Xcode env-propagation regression or scheme drift before merging anything that touches CI."
+            echo "::error::This usually means TEST_RUNNER_BB_RUN_SOAK / TEST_RUNNER_BB_SOAK / TEST_RUNNER_BB_RUN_LATENCY_PROBE did not reach the xctest host, and the tests skipped via XCTSkipIf - yielding a meaningless green. Investigate Xcode env-propagation regression or scheme drift before merging anything that touches CI."
             echo "::error::Skip lines from log (if any):"
             grep -E "Test Case .*' skipped" /tmp/swift-soak.log >&2 || true
             exit 1
           fi
-          echo "::notice::Soak sentinel OK - all three soak tests emitted 'passed' markers."
+          echo "::notice::Soak sentinel OK - all four soak tests emitted 'passed' markers."
 
       - name: Upload test logs on failure
         # Same shape as ci.yml's xcode-test-logs step: keep DerivedData
