@@ -311,6 +311,173 @@ jobs:
           lipo -info "$BIN" | tee /tmp/lipo.out
           grep -Eq 'arm64 x86_64|x86_64 arm64' /tmp/lipo.out
 
+  smoke-x86_64:
+    name: Smoke (x86_64) — Rosetta launch, 3s, SIGTERM
+    # Audit (Phase 1): "Universal binaries ship to Intel users with zero
+    # test signal on x86_64." Every other test invocation in this file
+    # runs `arch=arm64`; without this gate, half the shipped binary has
+    # no smoke signal and Intel users are the canary for any
+    # x86_64-specific regression (linker errors, missing dylibs, init
+    # crashes that don't reproduce under arm64). The macos-14 GHA runner
+    # is arm64, but Rosetta 2 transparently translates x86_64 binaries —
+    # good enough to catch *gross* regressions even though it isn't a
+    # real Intel CPU.
+    runs-on: macos-14
+    # Sequenced after swift-release-universal so a broken Release build
+    # fails the universal job first (clearer signal). We still rebuild
+    # below — ci.yml doesn't upload the Release .app as an artifact, so
+    # the dependency is purely for ordering/fail-fast, not artifact
+    # reuse. If we ever upload Release artifacts, switch to download +
+    # drop the rebuild.
+    needs: swift-release-universal
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rosetta is preinstalled on macos-14 GHA runners as of 2024-Q4,
+      # but the install command is idempotent and cheap when it's
+      # already present — leave it as a defensive belt-and-suspenders
+      # so this job doesn't silently regress to "arch refused to run
+      # x86_64" if Apple/GHA ever ship a runner image without Rosetta.
+      # The `|| true` swallows the "Rosetta is already installed"
+      # exit-code variations across runner image revs.
+      - name: Ensure Rosetta is available
+        run: |
+          softwareupdate --install-rosetta --agree-to-license || true
+          # Sanity-check: confirm we can actually run an x86_64 binary
+          # before we bother building. /usr/bin/true ships as fat with
+          # both slices, so `arch -x86_64 /usr/bin/true` exercises the
+          # translator end-to-end.
+          arch -x86_64 /usr/bin/true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        # Same drift gate as every other Xcode-touching job — a PR that
+        # updates project.yml without regenerating pbxproj (or vice
+        # versa) is a silent divergence we never want to reach Release
+        # config. Audit xcode-project F1.
+        run: |
+          xcodegen generate
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
+            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+            echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            exit 1
+          fi
+
+      - name: Build Rust core (universal)
+        run: scripts/build-core.sh
+
+      - name: xcodebuild build (Release, universal)
+        # Mirrors swift-release-universal's xcodebuild invocation
+        # exactly. We rebuild rather than reuse because ci.yml doesn't
+        # upload the Release .app as an artifact today; if/when it
+        # does, replace this step with actions/download-artifact.
+        run: |
+          xcodebuild build \
+            -project Blackbird.xcodeproj \
+            -scheme Blackbird \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Smoke launch under Rosetta (x86_64 slice)
+        # Cold-cache cost: Rosetta translates the binary on first launch
+        # into ~/Library/Caches; this can take ~5–10 s for a Swift app
+        # of Blackbird's size. The 3 s sleep below is *post-launch*, so
+        # the wall-clock budget for this step is dominated by translate
+        # time, not the sleep. Subsequent launches in the same job
+        # (none today) would hit the cache and finish in <1 s.
+        #
+        # Each CI run is a fresh checkout in a fresh runner, so the
+        # Rosetta cache is always cold here — every run pays the
+        # translation cost once.
+        #
+        # Treat exit codes 0 (raced past the SIGTERM), 130 (SIGINT,
+        # 128+2), and 143 (SIGTERM, 128+15) as success; anything else
+        # is a launch crash, dyld reject, init failure, or arch refused.
+        run: |
+          set -euo pipefail
+          DD="$(find "$HOME/Library/Developer/Xcode/DerivedData" -maxdepth 1 -type d -name 'Blackbird-*' | head -1)"
+          BIN="$DD/Build/Products/Release/Blackbird.app/Contents/MacOS/Blackbird"
+          if [[ ! -x "$BIN" ]]; then
+            echo "::error::Release binary missing at $BIN" >&2
+            exit 1
+          fi
+
+          # Confirm the x86_64 slice is actually present before we try
+          # to invoke it under Rosetta — otherwise `arch -x86_64` would
+          # fail with a confusing "Bad CPU type" error that obscures
+          # the real diagnosis (universal-binary build regression).
+          # swift-release-universal already verified arm64+x86_64 are
+          # both present, but this job rebuilt independently so we
+          # re-check rather than trust upstream state.
+          lipo -info "$BIN" | tee /tmp/lipo-x86_64-smoke.out
+          if ! grep -Eq '(^|[^a-zA-Z0-9_])x86_64([^a-zA-Z0-9_]|$)' /tmp/lipo-x86_64-smoke.out; then
+            echo "::error::x86_64 slice missing from $BIN — universal build regressed" >&2
+            exit 1
+          fi
+
+          # Re-sign the bundle ad-hoc. The Release xcodebuild above
+          # disables signing (CODE_SIGNING_ALLOWED=NO), which on macOS
+          # produces an *unsigned* mach-o — Rosetta requires a valid
+          # signature (even ad-hoc) to translate-and-launch. `codesign
+          # --sign -` writes an ad-hoc signature in place; CI doesn't
+          # have a real identity and doesn't need one (the runner is
+          # the launching session, no Gatekeeper quarantine bit).
+          codesign --force --sign - "$BIN"
+
+          APP_STDERR="$(mktemp -t bb-x86_64-smoke-stderr.XXXXXX)"
+          trap 'rm -f "$APP_STDERR"' EXIT
+
+          # Spec asked for `arch -x86_64 "$BIN" --version` first as a
+          # cheap version-check, but Blackbird is a GUI app: it has no
+          # --version handler, so unknown args are ignored and the
+          # NSApplication run loop starts (i.e., it's not cheap — it
+          # spawns the same process the real smoke spawns). Skipping
+          # that step; the launch+SIGTERM below is the meaningful
+          # signal and the lipo + Rosetta-sanity checks above already
+          # cover "x86_64 slice exists and the translator works."
+          echo "==> launching x86_64 slice under Rosetta: $BIN"
+          arch -x86_64 "$BIN" 2>"$APP_STDERR" &
+          APP_PID=$!
+          sleep 3
+          kill -TERM "$APP_PID" 2>/dev/null || true
+          wait_rc=0
+          wait "$APP_PID" 2>/dev/null || wait_rc=$?
+          case "$wait_rc" in
+            0|130|143)
+              echo "::notice::x86_64 smoke ok (exit $wait_rc)"
+              ;;
+            *)
+              echo "::error::x86_64 smoke FAILED: app exited $wait_rc (expected 0, 130 SIGINT, or 143 SIGTERM)" >&2
+              if [[ -s "$APP_STDERR" ]]; then
+                echo "::error::captured stderr (last 40 lines):" >&2
+                tail -40 "$APP_STDERR" >&2
+              fi
+              exit 1
+              ;;
+          esac
+
   smoke:
     name: Smoke — launch, 3s, SIGTERM
     runs-on: macos-14
