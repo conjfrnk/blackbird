@@ -656,14 +656,17 @@ final class SingleSessionSteadyStateLeakTests: XCTestCase {
             }
             return String(format: "%@: %.1f MiB", label, Double(rss) / (1024.0 * 1024.0))
         }
-        return "Single-session steady-state \(kind) gate (\(trippedGate)) tripped. RSS trace: "
-            + mibStrings.joined(separator: ", ")
-            + ". A 5 KiB-per-iter leak in the steady-state path is the canonical shape "
-            + "this gate catches — start with a Combine subscription on `@Published snapshot` "
-            + "that retains the prior BBSnapshot, or an OSC ring (link table, prompt marks) "
-            + "that grows unbounded. Cross-check the churn sibling "
-            + "(`SwiftSessionRSSReturnsToBaselineTests`): if churn passes and this fails, "
-            + "the leak is steady-state-only — i.e. the session's lifecycle wouldn't surface "
-            + "it. Mirrors the Rust gate at `core/tests/long_session_memory.rs:160-171`."
+        let trace = mibStrings.joined(separator: ", ")
+        let header = "Single-session steady-state \(kind) gate (\(trippedGate)) tripped. RSS trace: \(trace)."
+        let guidance = """
+             A 5 KiB-per-iter leak in the steady-state path is the canonical shape \
+            this gate catches — start with a Combine subscription on `@Published snapshot` \
+            that retains the prior BBSnapshot, or an OSC ring (link table, prompt marks) \
+            that grows unbounded. Cross-check the churn sibling \
+            (`SwiftSessionRSSReturnsToBaselineTests`): if churn passes and this fails, \
+            the leak is steady-state-only — i.e. the session's lifecycle wouldn't surface \
+            it. Mirrors the Rust gate at `core/tests/long_session_memory.rs:160-171`.
+            """
+        return header + guidance
     }
 }
