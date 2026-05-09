@@ -418,10 +418,7 @@ fn multiple_decrqm_queries_in_one_input_each_get_response() {
     let writes = run(b"\x1b[?25$p\x1b[?1004$p");
     assert_eq!(
         writes,
-        vec![
-            b"\x1b[?25;1$y".to_vec(),
-            b"\x1b[?1004;2$y".to_vec(),
-        ],
+        vec![b"\x1b[?25;1$y".to_vec(), b"\x1b[?1004;2$y".to_vec(),],
         "two DECRQM queries must produce two replies in order; got {:?}",
         writes
     );
@@ -563,7 +560,8 @@ fn decrqm_every_named_private_mode_replies_with_known_state() {
     for &(mode, label) in modes {
         let writes = run(format!("\x1b[?{mode}$p").as_bytes());
         assert_eq!(
-            writes.len(), 1,
+            writes.len(),
+            1,
             "{label} (?{mode}) must produce exactly one reply; got {writes:?}"
         );
         let reply = &writes[0];

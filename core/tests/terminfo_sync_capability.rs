@@ -32,9 +32,8 @@ fn terminfo_path() -> PathBuf {
 #[test]
 fn terminfo_advertises_dec_2026_sync_not_legacy_kitty_dcs() {
     let path = terminfo_path();
-    let contents = fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("failed to read terminfo file at {}: {}", path.display(), e)
-    });
+    let contents = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read terminfo file at {}: {}", path.display(), e));
 
     // Required: the conditional DEC mode 2026 form. `%?` ... `%t` ... `%e`
     // ... `%;` is terminfo's if/then/else; param 1 == 1 emits BSU, else

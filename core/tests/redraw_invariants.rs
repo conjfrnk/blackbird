@@ -77,7 +77,10 @@ unsafe fn drive_and_dump(feed_fn: impl FnOnce(*mut bc::BBTerm)) -> Vec<Vec<char>
     let cap_ptr = Arc::into_raw(cap.clone()) as *mut c_void;
 
     let term = bc::bb_term_new(COLS, ROWS, 100);
-    assert!(!term.is_null(), "bb_term_new must succeed for {COLS}×{ROWS}");
+    assert!(
+        !term.is_null(),
+        "bb_term_new must succeed for {COLS}×{ROWS}"
+    );
     bc::bb_term_set_event_cb(term, Some(capture_cb), cap_ptr);
 
     feed_fn(term);
@@ -196,7 +199,8 @@ fn ink_2j_redraw_short_frame_no_residue() {
         });
         let footers = count_rows_containing(&grid, "FOOTER");
         assert_eq!(
-            footers, 1,
+            footers,
+            1,
             "Ink-style 2J redraw must leave exactly 1 FOOTER. Got {footers}.\n{}",
             dump_grid(&grid)
         );
@@ -216,7 +220,8 @@ fn ink_2j_redraw_frame_at_viewport_bottom_no_residue() {
         });
         let footers = count_rows_containing(&grid, "FOOTER");
         assert_eq!(
-            footers, 1,
+            footers,
+            1,
             "2J redraw at viewport bottom must leave 1 FOOTER. Got {footers}.\n{}",
             dump_grid(&grid)
         );
@@ -237,7 +242,8 @@ fn ink_2j_redraw_oversize_frame_no_visible_residue() {
         });
         let footers = count_rows_containing(&grid, "FOOTER");
         assert_eq!(
-            footers, 1,
+            footers,
+            1,
             "Oversize-frame redraws must keep visible viewport clean. \
              Got {footers}.\n{}",
             dump_grid(&grid)
@@ -261,7 +267,8 @@ fn ink_2j_redraw_with_trailing_newline_no_residue() {
         });
         let footers = count_rows_containing(&grid, "FOOTER");
         assert_eq!(
-            footers, 1,
+            footers,
+            1,
             "Trailing-newline scroll case must still leave 1 FOOTER on the \
              visible grid (older copies must scroll into history). Got \
              {footers}.\n{}",
@@ -287,7 +294,8 @@ fn ink_eraselines_redraw_correct_count_no_residue() {
         });
         let footers = count_rows_containing(&grid, "FOOTER");
         assert_eq!(
-            footers, 1,
+            footers,
+            1,
             "Correct-count eraseLines must leave 1 FOOTER. Got {footers}.\n{}",
             dump_grid(&grid)
         );
@@ -304,7 +312,10 @@ fn ink_eraselines_redraw_correct_count_no_residue() {
 fn two_segment_static_above_dynamic_footer_no_leak() {
     unsafe {
         let grid = drive_and_dump(|term| {
-            feed(term, b"AGENT 0\r\nAGENT 1\r\nAGENT 2\r\nAGENT 3\r\nAGENT 4\r\nFOOTER");
+            feed(
+                term,
+                b"AGENT 0\r\nAGENT 1\r\nAGENT 2\r\nAGENT 3\r\nAGENT 4\r\nFOOTER",
+            );
             // Three redraws of just the footer line: \r → start of line,
             // ESC[2K → erase line, then reprint.
             for _ in 0..3 {
@@ -313,7 +324,8 @@ fn two_segment_static_above_dynamic_footer_no_leak() {
         });
         let footers = count_rows_containing(&grid, "FOOTER");
         assert_eq!(
-            footers, 1,
+            footers,
+            1,
             "Two-segment redraw must leave 1 FOOTER. Got {footers}.\n{}",
             dump_grid(&grid)
         );
@@ -397,7 +409,12 @@ unsafe fn capture_frame(term: *mut bc::BBTerm) -> Frame {
     buf.truncate(n);
     let cursor = ((*snap).cursor_row, (*snap).cursor_col);
     bc::bb_snap_release(snap);
-    Frame { rows: row_text, damage_full, damaged: buf, cursor }
+    Frame {
+        rows: row_text,
+        damage_full,
+        damaged: buf,
+        cursor,
+    }
 }
 
 fn rows_that_actually_changed(a: &Frame, b: &Frame) -> Vec<u16> {
