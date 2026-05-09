@@ -108,8 +108,7 @@ mod macos {
         // rate this gives ~3 MiB/s, which is the documented sustained
         // throughput for the pre-flight cost calc above.
         let plain = b"the quick brown fox jumps over the lazy dog 0123456789\n";
-        let sgr: &[u8] =
-            b"\x1b[1;31mERROR\x1b[0m \x1b[3mfile=/var/log/system.log line=42\x1b[0m\n";
+        let sgr: &[u8] = b"\x1b[1;31mERROR\x1b[0m \x1b[3mfile=/var/log/system.log line=42\x1b[0m\n";
         let osc7 = b"\x1b]7;file:///Users/connor/projects/blackbird\x1b\\\n";
         let osc8: &[u8] = b"\x1b]8;;https://blackbird-terminal.com/\x1b\\link\x1b]8;;\x1b\\\n";
         let cjk = "日本語 ログ メッセージ with ASCII tail\n".as_bytes();

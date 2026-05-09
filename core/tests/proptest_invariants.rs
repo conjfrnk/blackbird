@@ -210,8 +210,7 @@ unsafe fn snapshot_cells(snap: *const bc::BBSnap) -> Vec<Vec<u32>> {
 /// keyboard-stack pushes, not DECSET); those have their own dedicated
 /// regression tests and don't fit the "DECSET h ↔ DECSET l" roundtrip
 /// shape.
-const ROUNDTRIPABLE_DECSET_PARAMS: &[u32] =
-    &[1049, 1, 2004, 1000, 1003, 1002, 1006, 1004];
+const ROUNDTRIPABLE_DECSET_PARAMS: &[u32] = &[1049, 1, 2004, 1000, 1003, 1002, 1006, 1004];
 
 // ─────────────────────────────────────────────────────────────────────
 // Invariant 1: Parse idempotence over split points
