@@ -136,12 +136,20 @@ final class CmdLetterInterceptMatrixTests: XCTestCase {
         ("w", false, .interceptedByMenu, "Window > Close"),
         ("x", false, .interceptedByMenu, "Edit > Cut"),
         ("y", false, .forwardedToSuper,  "unbound"),
-        // PRODUCT-BUG (2026-05-09): Edit > Undo's keyEquivalent is bound,
-        // but `Selector(("undo:"))` is not implemented anywhere in
-        // Blackbird's responder chain — AppKit greys out the menu and
-        // the chord beeps. Flag-pinned with `.menuBindingDeadOnArrival`
-        // so a future fix that wires real undo support flips the matrix.
-        ("z", false, .menuBindingDeadOnArrival, "Edit > Undo (PRODUCT-BUG: undo: selector unimplemented; AppKit disables item, chord beeps)"),
+        // PRODUCT-BUG-FIX (2026-05-09): Previously pinned as
+        // `.menuBindingDeadOnArrival` because `Edit > Undo` was wired
+        // to `Selector(("undo:"))` with no responder implementing it,
+        // which left users with a greyed menu item and an NSBeep on
+        // every ⌘Z. Resolution: removed the menu item entirely
+        // (terminals have no editable document; matches Terminal.app
+        // and iTerm2 — neither ships Edit > Undo/Redo). With no menu
+        // binding and no view-level handler, ⌘Z now lands in the
+        // standard "unbound ⌘-letter" bucket alongside ⌘B / ⌘D / etc.
+        // See `AppDelegate+Menu.swift` `buildEditMenu()` for the
+        // reasoning. The `.menuBindingDeadOnArrival` enum case is
+        // kept as a reusable pin shape for future regressions of the
+        // same form.
+        ("z", false, .forwardedToSuper,  "unbound — Edit > Undo intentionally absent (terminals have no edit document)"),
 
         // Cmd+Shift+letter
         ("a", true,  .forwardedToSuper,  "unbound"),
@@ -169,11 +177,11 @@ final class CmdLetterInterceptMatrixTests: XCTestCase {
         ("w", true,  .interceptedByMenu, "Window > Close Window"),
         ("x", true,  .forwardedToSuper,  "unbound"),
         ("y", true,  .forwardedToSuper,  "unbound"),
-        // PRODUCT-BUG (2026-05-09): Edit > Redo's keyEquivalent is bound
-        // (literal 'Z' implies shift), but `Selector(("redo:"))` is not
-        // implemented anywhere in Blackbird's responder chain — see ⌘Z
-        // entry above for the same root cause.
-        ("z", true,  .menuBindingDeadOnArrival, "Edit > Redo (PRODUCT-BUG: redo: selector unimplemented; AppKit disables item, chord beeps)"),
+        // PRODUCT-BUG-FIX (2026-05-09): see ⌘Z entry above. `Edit > Redo`
+        // had the same dead-selector shape (`Selector(("redo:"))` with
+        // no responder); the menu item was removed in lockstep with
+        // Undo. ⌘⇧Z now falls to the unbound chord path.
+        ("z", true,  .forwardedToSuper,  "unbound — Edit > Redo intentionally absent (terminals have no edit document)"),
     ]
 
     // MARK: - Helpers

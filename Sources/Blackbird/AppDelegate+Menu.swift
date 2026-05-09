@@ -141,9 +141,21 @@ extension AppDelegate {
         // Selectors route to the first responder; TerminalView implements
         // copy(_:), paste(_:), and selectAll(_:), plus validateMenuItem
         // gating on whether a selection / clipboard payload exists.
-        menu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        menu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
-        menu.addItem(.separator())
+        //
+        // No Undo / Redo: a terminal has no editable document and no
+        // operation stack to walk. Wiring `Edit > Undo` to
+        // `Selector(("undo:"))` (and Redo to `redo:`) used to ship a
+        // grey, unactionable menu item — no responder implemented
+        // either selector, so AppKit disabled the items via
+        // `validateMenuItem` while still presenting them as
+        // affordances. Following Terminal.app and iTerm2 (neither has
+        // Edit > Undo/Redo), we omit the items entirely. ⌘Z / ⌘⇧Z
+        // now land in the AppKit "no menu binding, no view handler"
+        // bucket alongside ⌘B / ⌘D / etc.: TerminalView's `.command`
+        // early-return suppresses any PTY bytes, and the chord
+        // bottoms out at `super.keyDown` exactly like every other
+        // unbound ⌘-letter chord (CmdLetterInterceptMatrixTests pins
+        // the resulting `.forwardedToSuper` outcome).
         menu.addItem(withTitle: "Cut",   action: #selector(NSText.cut(_:)),   keyEquivalent: "x")
         menu.addItem(withTitle: "Copy",  action: #selector(NSText.copy(_:)),  keyEquivalent: "c")
         menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
