@@ -25,3 +25,10 @@ memchr = "2"
 # workspace lockfile already fixes the exact version in practice, but
 # this makes the floor explicit for consumers without the lockfile.
 cbindgen = "=0.27.0"
+
+[dev-dependencies]
+# Property-based testing for FFI invariants (parse idempotence over split
+# points, snapshot diff round-trip, mode set/reset, scroll roundtrip).
+# 1.x range — semver-compatible patches/minors are accepted; cargo deny's
+# `wildcards = "deny"` rule allows numeric-prefix requirements like "1".
+proptest = "1"
