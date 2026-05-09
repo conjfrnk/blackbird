@@ -289,8 +289,8 @@ final class ThemeResolutionTests: XCTestCase {
                      "Theme(rawValue:) must be case-sensitive; lower-case 'gruvbox' must NOT match `Gruvbox`")
         XCTAssertNil(Theme(rawValue: "GRUVBOX"),
                      "Theme(rawValue:) must be case-sensitive; upper-case 'GRUVBOX' must NOT match `Gruvbox`")
-        XCTAssertNotNil(Theme(rawValue: "Gruvbox"),
-                        "Theme(rawValue: \"Gruvbox\") must resolve to .gruvbox (positive control)")
+        XCTAssertEqual(Theme(rawValue: "Gruvbox"), .gruvbox,
+                       "Theme(rawValue: \"Gruvbox\") must resolve to .gruvbox (positive control)")
     }
 
     /// Null bytes and control characters — the shape of a binary-data
