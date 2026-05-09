@@ -357,6 +357,19 @@ public final class TerminalSession: ObservableObject {
             self.feed(bytes)
         }
     }
+
+    /// Test-only synchronous snapshot accessor. Drives the same code path
+    /// as the production `recordPromptStart` / `scroll` / `clearAll` etc.
+    /// `coreQueue.sync(execute: bbterm.snapshot)` but does **not** publish
+    /// to `@Published snapshot` — the goal is to exercise the
+    /// `bb_term_take_snapshot` + `BBSnapshot` retain dance in isolation,
+    /// without the main-queue dispatch and `objectWillChange` retain
+    /// behaviour the published path would add. Used by
+    /// `SingleSessionSteadyStateLeakTests` to churn snapshots against a
+    /// long-lived session and pin the steady-state retain shape.
+    func takeSnapshotForTests() -> BBSnapshot? {
+        return coreQueue.sync { self.bbterm.snapshot() }
+    }
     #endif
 
     deinit {

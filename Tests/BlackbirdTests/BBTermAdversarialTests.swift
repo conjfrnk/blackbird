@@ -467,6 +467,10 @@ final class BBTermAdversarialTests: XCTestCase {
             _ = term.snapshot()
             iterations += 1
             let rss = currentResidentSetSize()
+            XCTAssertGreaterThan(
+                rss, 0,
+                "task_info() returned 0 — measurement failed mid-test, not a passing run"
+            )
             if Date() < firstSecondDeadline {
                 firstSecondPeak = max(firstSecondPeak, rss)
             }
@@ -502,6 +506,8 @@ private struct AdversarialRNG: RandomNumberGenerator {
 
 // `currentResidentSetSize()` lives in `RSSProbe.swift` (shared with
 // `SwiftSessionRSSReturnsToBaselineTests`). Returns 0 on syscall
-// failure; this soak's 4× headroom + 50 MiB buffer tolerates that
-// gracefully, but the Swift RSS gate asserts > 0 to fail loud — see
-// the comment on the shared helper.
+// failure. The soak's 4× + 50 MiB headroom looks like it tolerates
+// rss=0 gracefully, but `firstSecondPeak * 4 + 50 MiB` degenerates to
+// ~50 MiB if firstSecondPeak is also 0 — i.e. a passing run for any
+// modest finalPeak. Per the comment on the shared helper, every read
+// here is guarded with `XCTAssertGreaterThan(rss, 0, …)` to fail loud.
