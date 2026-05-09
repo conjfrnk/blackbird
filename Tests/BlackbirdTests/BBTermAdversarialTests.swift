@@ -1,6 +1,5 @@
 import XCTest
 import Foundation
-import Darwin.Mach
 @testable import Blackbird
 @testable import BBCore
 
@@ -501,17 +500,8 @@ private struct AdversarialRNG: RandomNumberGenerator {
     }
 }
 
-/// Best-effort current-process resident set size in bytes. Used only
-/// in the BB_SOAK soak test — not a precise measurement, just a
-/// "growing unboundedly?" signal. Returns 0 if the syscall fails (the
-/// test's invariant tolerates that gracefully via the 4x headroom).
-private func currentResidentSetSize() -> UInt64 {
-    var info = mach_task_basic_info()
-    var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
-    let kr: kern_return_t = withUnsafeMutablePointer(to: &info) {
-        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-            task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-        }
-    }
-    return kr == KERN_SUCCESS ? UInt64(info.resident_size) : 0
-}
+// `currentResidentSetSize()` lives in `RSSProbe.swift` (shared with
+// `SwiftSessionRSSReturnsToBaselineTests`). Returns 0 on syscall
+// failure; this soak's 4× headroom + 50 MiB buffer tolerates that
+// gracefully, but the Swift RSS gate asserts > 0 to fail loud — see
+// the comment on the shared helper.
