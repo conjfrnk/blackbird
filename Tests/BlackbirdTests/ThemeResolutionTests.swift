@@ -277,27 +277,20 @@ final class ThemeResolutionTests: XCTestCase {
                        "Unicode themeRaw must produce a valid 16-entry ansi palette")
     }
 
-    /// Case-mismatched rawValue. The enum's rawValues are PascalCase
-    /// ("Gruvbox"), so a lower-case input must miss the lookup and
-    /// fall back. Catches a regression where a future
-    /// `caseInsensitiveCompare` slips into `Theme(rawValue:)`.
-    @MainActor
-    func test_resolvedPalette_lowercaseRawIsTreatedAsUnknown() {
-        // Memory: <1 KB. Wall: ~2 ms.
-        Preferences.shared.themeRaw = "gruvbox"
-        Preferences.shared.themeModeRaw = "dark"
-        let resolved = ThemeManager.shared.resolvedPalette
-        XCTAssertEqual(resolved.ansi.count, 16,
-                       "Lower-case rawValue is unknown; must produce a valid 16-entry palette")
-        // Specifically NOT the gruvbox dark palette — the enum is
-        // case-sensitive by design; if a future change introduces case-
-        // insensitive matching this test will catch it (and the fixer
-        // can decide whether that's a bug).
-        let gruvbox = Theme.gruvbox.palette(dark: true)
-        XCTAssertNotEqual(
-            resolved, gruvbox,
-            "Lower-case 'gruvbox' must NOT silently match `Gruvbox` — Theme(rawValue:) is case-sensitive by design"
-        )
+    /// The enum's rawValues are PascalCase ("Gruvbox"), so a lower-case
+    /// input must miss the lookup. Pure-enum unit test — going through
+    /// `Preferences.shared` would race `repairEnumRawValues` (the
+    /// UserDefaults-change observer that overwrites unknown rawValues
+    /// to `Gruvbox` before the assertion can read), which is exactly
+    /// what this test was written to detect a regression of NOT.
+    func test_theme_rawValueIsCaseSensitive() {
+        // Memory: <1 KB. Wall: ~1 ms.
+        XCTAssertNil(Theme(rawValue: "gruvbox"),
+                     "Theme(rawValue:) must be case-sensitive; lower-case 'gruvbox' must NOT match `Gruvbox`")
+        XCTAssertNil(Theme(rawValue: "GRUVBOX"),
+                     "Theme(rawValue:) must be case-sensitive; upper-case 'GRUVBOX' must NOT match `Gruvbox`")
+        XCTAssertNotNil(Theme(rawValue: "Gruvbox"),
+                        "Theme(rawValue: \"Gruvbox\") must resolve to .gruvbox (positive control)")
     }
 
     /// Null bytes and control characters — the shape of a binary-data
@@ -350,25 +343,32 @@ final class ThemeResolutionTests: XCTestCase {
                           "Both-corrupt fallback must not have fg == bg")
     }
 
-    /// Pin the EXACT fallback target. `Preferences.theme` (the derived
-    /// getter) returns `.defaultTheme` for an unknown rawValue (M4
-    /// audit aligned the *repair* path to `.gruvbox`, but the
-    /// in-memory `theme` getter still uses `.defaultTheme` as the
-    /// nil-coalesce target). Pin that contract so a future drift in
-    /// the fallback is obvious.
-    @MainActor
-    func test_preferences_themeGetter_fallsBackToDefaultTheme() {
-        // Memory: <1 KB. Wall: ~2 ms.
-        Preferences.shared.themeRaw = "NotAKnownTheme"
-        XCTAssertEqual(
-            Preferences.shared.theme, Theme.defaultTheme,
+    /// Source pin for the `Preferences.theme` getter formula. The M4
+    /// audit aligned the repair path to `.gruvbox` while leaving the
+    /// in-memory derived getter on `.defaultTheme` as its nil-coalesce
+    /// target — the contract is "the formula is `?? .defaultTheme`,
+    /// not `?? .gruvbox`". A runtime test would race the repair
+    /// observer (it overwrites unknown rawValues before the assertion
+    /// can read), so we pin the source literal instead, mirroring the
+    /// M4 source-pin pattern in PreferencesTests.
+    func test_preferences_themeGetter_sourcePin_fallsBackToDefaultTheme() {
+        // Memory: <1 KB. Wall: ~1 ms.
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // BlackbirdTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // repo root
+            .appendingPathComponent("Sources/Blackbird/Settings/Preferences.swift")
+        guard let src = try? String(contentsOf: url, encoding: .utf8) else {
+            XCTFail("Could not locate Preferences.swift via #filePath at \(url.path) — source pin cannot run")
+            return
+        }
+        XCTAssertTrue(
+            src.contains("Theme(rawValue: themeRaw) ?? .defaultTheme"),
             """
-            Preferences.theme getter must fall back to .defaultTheme on \
-            unknown rawValue. The repair path (repairEnumRawValues) \
-            stamps .gruvbox to disk, but the in-memory derived getter \
-            uses .defaultTheme as its nil-coalesce target. Drift here \
-            would change the user-visible behaviour during the window \
-            between the corrupt write and the observer-driven repair.
+            Preferences.theme getter must use `Theme(rawValue: themeRaw) ?? .defaultTheme` as its formula. \
+            Drift to `?? .gruvbox` (or anything else) would change the user-visible behaviour during the \
+            window between a corrupt write and the observer-driven repair (M4 audit). Update both this \
+            test and the formula in Sources/Blackbird/Settings/Preferences.swift if you intend to change it.
             """
         )
     }
