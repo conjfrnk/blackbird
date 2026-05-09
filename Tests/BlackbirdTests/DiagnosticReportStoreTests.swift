@@ -199,6 +199,95 @@ final class DiagnosticReportStoreTests: XCTestCase {
         XCTAssertEqual(store.reports[0].url.lastPathComponent, "hang-real.txt")
     }
 
+    // MARK: - Hostile environments (v1.0 robustness)
+
+    /// Simulate a `chmod 000` parent directory — the closest unit-test analog
+    /// of "full disk" for the read/list path. The store's enumeration goes
+    /// through `FileManager.contentsOfDirectory(at:)`, which returns
+    /// EACCES/EPERM as an `NSError` on a permission-denied parent. The
+    /// production code logs and returns `[]` — no fatal, no crash.
+    ///
+    /// Memory pre-flight: one temp directory created + chmod'd back +
+    /// removed in tearDown via the existing `tearDownWithError`. < 1 KB
+    /// allocations. Wall: ~10 ms (chmod is a single syscall).
+    ///
+    /// Why a chmod 000 directory and not a literal full-disk simulation:
+    /// macOS sandboxed test bundles can't reliably `mkdir` on a read-only
+    /// volume to drive ENOSPC. The contract we pin — "permission-denied
+    /// surfaces as empty list, not a crash" — is the same contract the
+    /// "first-launch user with no Logs/Blackbird" path relies on, and is
+    /// exactly what `enumerate(...)` already handles via the catch arm.
+    func testEnumerationSurvivesPermissionDeniedDirectory() throws {
+        // Memory: <1 KB. Wall: ~15 ms.
+        let denied = try makeTempDirectory()
+        defer {
+            // Restore so tearDown's removeItem actually clears the temp.
+            // If the chmod-back fails (e.g. process killed mid-test), the
+            // tearDown's `try?` swallows the second-order failure and the
+            // OS reaps temp later.
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: NSNumber(value: Int16(0o755))],
+                ofItemAtPath: denied.path
+            )
+            try? FileManager.default.removeItem(at: denied)
+        }
+        // Plant a real file BEFORE chmod'ing — proves the store would have
+        // surfaced it on a healthy directory but doesn't on a denied one.
+        try writeFile("hang-1234.txt", in: denied, contents: "would have surfaced")
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o000))],
+            ofItemAtPath: denied.path
+        )
+        let store = DiagnosticReportStore(hangDirectory: denied, crashDirectory: crashDir)
+        // The contract: no crash, no propagated error, returns empty (or
+        // the readable subset only). The deny-directory branch in
+        // `enumerate(...)` returns `[]` after logging.
+        store.reload()
+        // Whether the planted file surfaces depends on whether macOS lets
+        // the owner read its own 000 directory under sandboxing — this
+        // varies. The hard contract is count-based: at MOST the single
+        // planted file can surface. Anything > 1 implies enumeration
+        // wandered into the crash dir or returned phantom rows. We
+        // expect 0 under chmod 000 on apfs+sandboxed xctest, but pin a
+        // tight upper bound rather than an empty enum-tag check that
+        // would be vacuously true on an empty collection.
+        XCTAssertLessThanOrEqual(
+            store.reports.count, 1,
+            "denied directory must yield at most the single planted file; we expect 0 under chmod 000, but the upper bound is the load-bearing pin"
+        )
+        // The crash directory is untouched and healthy — reload's
+        // crash-side branch must still resolve cleanly to no rows.
+        XCTAssertEqual(
+            store.reports.filter { $0.kind == .crash }.count, 0,
+            "untouched crash directory must resolve to zero rows independently of the hang side"
+        )
+    }
+
+    /// Simulate write-denied / unwritable destination: a directory whose
+    /// parent doesn't exist. This is the exact shape of a "fresh user
+    /// with no `~/Library/Logs/Blackbird/`" but pushed one step deeper —
+    /// the parent directory we configured doesn't exist either. The
+    /// `enumerate(...)` catch arm must classify this as ENOENT (not log
+    /// it) and return `[]`. No surprise alerts, no crash.
+    ///
+    /// Memory pre-flight: <1 KB. Wall: ~5 ms.
+    func testEnumerationSurvivesNonExistentParentChain() {
+        // Memory: <1 KB. Wall: ~5 ms.
+        let nonexistentChain = hangDir
+            .appendingPathComponent("does")
+            .appendingPathComponent("not")
+            .appendingPathComponent("exist")
+        let store = DiagnosticReportStore(
+            hangDirectory: nonexistentChain,
+            crashDirectory: nonexistentChain
+        )
+        store.reload()
+        XCTAssertEqual(
+            store.reports.count, 0,
+            "deeply-nonexistent paths must resolve to empty, not crash"
+        )
+    }
+
     func testReloadIsRobustToHostileSibling() throws {
         // Memory: <1 KB. Wall: ~20 ms.
         // Scenario: a sibling with restrictive permissions next to legitimate

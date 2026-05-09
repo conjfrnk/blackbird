@@ -217,4 +217,159 @@ final class ThemeResolutionTests: XCTestCase {
         XCTAssertLessThanOrEqual(resolved.foreground, 0xFFFFFF)
         XCTAssertLessThanOrEqual(resolved.cursor, 0xFFFFFF)
     }
+
+    // MARK: - Hostile-input theme resolution (v1.0 robustness)
+    //
+    // SCOPE NOTE: Themes in Blackbird are an enum (`Theme.gruvbox`,
+    // `Theme.solarized`, etc.) with hardcoded ThemePalette constants.
+    // There is NO JSON load path — the only on-disk corruption surface
+    // is the UserDefaults `bb.theme` String that names which enum case
+    // to use. The "Theme JSON corrupted" hostile-environment scenario
+    // doesn't apply directly; the truthful analog is a corrupted
+    // `themeRaw` String. The fallback is `Theme(rawValue:) ??
+    // .defaultTheme` (in `Preferences.theme`), which `palette(dark:)`
+    // resolves to a valid 16-entry `ThemePalette`. These tests pin that
+    // fallback against a battery of hostile rawValue shapes.
+    //
+    // Memory pre-flight per test: ≤ 1 KB (a few short Strings + a
+    // ThemePalette struct). No grids, no PTYs. < 5 ms wall per test.
+
+    /// Empty string — the kind of value a tampered plist with a
+    /// truncated value or a `defaults write … bb.theme ""` would
+    /// leave behind. Must fall back, not crash.
+    @MainActor
+    func test_resolvedPalette_emptyThemeRaw_fallsBack() {
+        // Memory: <1 KB. Wall: ~2 ms.
+        Preferences.shared.themeRaw = ""
+        Preferences.shared.themeModeRaw = "dark"
+        let resolved = ThemeManager.shared.resolvedPalette
+        XCTAssertEqual(resolved.ansi.count, 16,
+                       "Empty themeRaw must produce a valid 16-entry ansi palette")
+        XCTAssertNotEqual(resolved.foreground, resolved.background,
+                          "Empty themeRaw fallback must not have fg == bg")
+    }
+
+    /// Whitespace-only — same shape as the empty case but trips a
+    /// different code path in `Theme(rawValue:)`. Pin the fallback.
+    @MainActor
+    func test_resolvedPalette_whitespaceThemeRaw_fallsBack() {
+        // Memory: <1 KB. Wall: ~2 ms.
+        Preferences.shared.themeRaw = "   "
+        Preferences.shared.themeModeRaw = "dark"
+        let resolved = ThemeManager.shared.resolvedPalette
+        XCTAssertEqual(resolved.ansi.count, 16,
+                       "Whitespace themeRaw must produce a valid 16-entry ansi palette")
+    }
+
+    /// Unicode glyph substitution — the kind of value a hex-edited plist
+    /// or an internationalised CLI tool might emit. The enum's rawValues
+    /// are ASCII, so any non-ASCII rawValue must miss `Theme(rawValue:)`
+    /// and fall back. Pin the no-crash contract here.
+    @MainActor
+    func test_resolvedPalette_unicodeThemeRaw_fallsBack() {
+        // Memory: <1 KB. Wall: ~2 ms.
+        // Mixed ASCII + emoji + extended Latin — none of the curated
+        // theme rawValues contain any of these characters.
+        Preferences.shared.themeRaw = "Grüvböx 🎨"
+        Preferences.shared.themeModeRaw = "dark"
+        let resolved = ThemeManager.shared.resolvedPalette
+        XCTAssertEqual(resolved.ansi.count, 16,
+                       "Unicode themeRaw must produce a valid 16-entry ansi palette")
+    }
+
+    /// Case-mismatched rawValue. The enum's rawValues are PascalCase
+    /// ("Gruvbox"), so a lower-case input must miss the lookup and
+    /// fall back. Catches a regression where a future
+    /// `caseInsensitiveCompare` slips into `Theme(rawValue:)`.
+    @MainActor
+    func test_resolvedPalette_lowercaseRawIsTreatedAsUnknown() {
+        // Memory: <1 KB. Wall: ~2 ms.
+        Preferences.shared.themeRaw = "gruvbox"
+        Preferences.shared.themeModeRaw = "dark"
+        let resolved = ThemeManager.shared.resolvedPalette
+        XCTAssertEqual(resolved.ansi.count, 16,
+                       "Lower-case rawValue is unknown; must produce a valid 16-entry palette")
+        // Specifically NOT the gruvbox dark palette — the enum is
+        // case-sensitive by design; if a future change introduces case-
+        // insensitive matching this test will catch it (and the fixer
+        // can decide whether that's a bug).
+        let gruvbox = Theme.gruvbox.palette(dark: true)
+        XCTAssertNotEqual(
+            resolved, gruvbox,
+            "Lower-case 'gruvbox' must NOT silently match `Gruvbox` — Theme(rawValue:) is case-sensitive by design"
+        )
+    }
+
+    /// Null bytes and control characters — the shape of a binary-data
+    /// write to a String key. The plist serializer accepts these in
+    /// modern xml1 plists; `Theme(rawValue:)` must not parse them as a
+    /// known case.
+    @MainActor
+    func test_resolvedPalette_controlCharsThemeRaw_fallsBack() {
+        // Memory: <1 KB. Wall: ~2 ms.
+        Preferences.shared.themeRaw = "Gruv\u{0000}box"
+        Preferences.shared.themeModeRaw = "dark"
+        let resolved = ThemeManager.shared.resolvedPalette
+        XCTAssertEqual(resolved.ansi.count, 16,
+                       "Control-char-laced rawValue must produce a valid 16-entry palette")
+    }
+
+    /// Same battery for `themeModeRaw`. The mode resolves through
+    /// `ThemeMode(rawValue:) ?? .auto`. An unknown value must fall to
+    /// auto, not crash.
+    @MainActor
+    func test_resolvedPalette_invalidThemeMode_fallsBackToAuto() {
+        // Memory: <1 KB. Wall: ~2 ms.
+        Preferences.shared.themeRaw = Theme.gruvbox.rawValue
+        Preferences.shared.themeModeRaw = "rainbow"  // not a known case
+        let resolved = ThemeManager.shared.resolvedPalette
+        XCTAssertEqual(resolved.ansi.count, 16,
+                       "Unknown themeModeRaw must produce a valid 16-entry palette")
+        // The exact resolved palette depends on the host's effective
+        // appearance (auto picks dark or light based on macOS); we don't
+        // pin the choice, only that we got SOME valid Gruvbox palette.
+        let dark = Theme.gruvbox.palette(dark: true)
+        let light = Theme.gruvbox.palette(dark: false)
+        XCTAssertTrue(
+            resolved == dark || resolved == light,
+            "Auto fallback must resolve to gruvbox dark OR light, got something else"
+        )
+    }
+
+    /// Combined: both rawValues garbage at once. Pin that simultaneous
+    /// corruption doesn't compound into a crash.
+    @MainActor
+    func test_resolvedPalette_bothRawsCorruptSimultaneously_fallsBack() {
+        // Memory: <1 KB. Wall: ~2 ms.
+        Preferences.shared.themeRaw = "🦄"
+        Preferences.shared.themeModeRaw = "🌈"
+        let resolved = ThemeManager.shared.resolvedPalette
+        XCTAssertEqual(resolved.ansi.count, 16,
+                       "Both rawValues garbage must still produce a valid 16-entry palette")
+        XCTAssertNotEqual(resolved.foreground, resolved.background,
+                          "Both-corrupt fallback must not have fg == bg")
+    }
+
+    /// Pin the EXACT fallback target. `Preferences.theme` (the derived
+    /// getter) returns `.defaultTheme` for an unknown rawValue (M4
+    /// audit aligned the *repair* path to `.gruvbox`, but the
+    /// in-memory `theme` getter still uses `.defaultTheme` as the
+    /// nil-coalesce target). Pin that contract so a future drift in
+    /// the fallback is obvious.
+    @MainActor
+    func test_preferences_themeGetter_fallsBackToDefaultTheme() {
+        // Memory: <1 KB. Wall: ~2 ms.
+        Preferences.shared.themeRaw = "NotAKnownTheme"
+        XCTAssertEqual(
+            Preferences.shared.theme, Theme.defaultTheme,
+            """
+            Preferences.theme getter must fall back to .defaultTheme on \
+            unknown rawValue. The repair path (repairEnumRawValues) \
+            stamps .gruvbox to disk, but the in-memory derived getter \
+            uses .defaultTheme as its nil-coalesce target. Drift here \
+            would change the user-visible behaviour during the window \
+            between the corrupt write and the observer-driven repair.
+            """
+        )
+    }
 }

@@ -1079,6 +1079,187 @@ final class PreferencesMigrationTests: XCTestCase {
     /// `themeRaw` forever; the Picker renders empty. Post-fix: the
     /// observer reverts to `Theme.defaultTheme.rawValue` (matching
     /// the derived getter's `?? .defaultTheme` fallback).
+    // MARK: - Hostile-environment plist corruption (v1.0 robustness)
+    //
+    // SCOPE NOTE: `UserDefaults` is implemented on top of CFPreferences,
+    // which deserialises a binary plist on read. A truncated /
+    // mid-key-corrupted plist file shows up at the
+    // `persistentDomain(forName:)` level as either a `nil` domain
+    // (parser bailed) or a partial domain (parser recovered). Either way,
+    // the contract Blackbird ships against is "missing keys fall back to
+    // the registered defaults at `register(defaults:)` time." This test
+    // pins that contract by simulating both shapes against an isolated
+    // `UserDefaults` suite.
+    //
+    // We can't actually write a malformed binary plist to a suite from
+    // a sandboxed test process — `UserDefaults(suiteName:)` writes
+    // through CFPreferences, which always emits a well-formed file.
+    // The closest in-process simulation is `removePersistentDomain` (=
+    // "the file disappeared / parser returned empty") and a
+    // setPersistentDomain with a partial dictionary (= "the parser
+    // recovered some, lost others"). The contract under test is the
+    // same: missing keys must fall back, present keys must round-trip,
+    // never crash.
+    //
+    // Memory pre-flight: each test creates one isolated UserDefaults
+    // suite, writes ≤ 5 keys, then drops the suite via
+    // `removePersistentDomain`. < 4 KB allocations. < 50 ms wall.
+
+    /// Simulate a plist that lost EVERYTHING (parser bailed mid-file or
+    /// the file was zero-length). After migration, the suite must hold
+    /// only the schema-version stamp; readers fall back to the registered
+    /// defaults via `register(defaults:)` in `Preferences.init()`. The
+    /// migration code must run cleanly on the empty domain — no crash.
+    func test_truncatedPlist_emptyDomain_migrationStampsAndKeysFallBack() throws {
+        // Memory: <2 KB. Wall: ~10 ms.
+        let suiteName = "blackbird.tests.truncatedplist.empty.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        // Pre-condition: suite is genuinely empty (no persistent values).
+        let pre = suite.persistentDomain(forName: suiteName) ?? [:]
+        XCTAssertTrue(pre.isEmpty, "fresh suite must be empty before the test runs")
+
+        // Drive the migration. The seam treats stored=0 as "needs walk"
+        // and runs `migrateV1toV2` (no-op on empty), then stamps the
+        // schema key. No crash on the empty domain.
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
+
+        let post = suite.persistentDomain(forName: suiteName) ?? [:]
+        XCTAssertEqual(
+            post["bb.prefsSchemaVersion"] as? Int,
+            Preferences.currentSchemaVersion,
+            "migration on an empty domain must stamp bb.prefsSchemaVersion"
+        )
+
+        // None of the user-visible pref keys should be present in the
+        // PERSISTENT domain — readers fall back to registered defaults.
+        // (Registered defaults live in the volatile registration domain
+        // and are SEPARATE from the persistent dict we read here.)
+        XCTAssertNil(post["bb.theme"],
+                     "no theme key should be persisted after empty-plist migration")
+        XCTAssertNil(post["bb.fontSize"],
+                     "no fontSize key should be persisted after empty-plist migration")
+        XCTAssertNil(post["bb.cursorBlink"],
+                     "no cursorBlink key should be persisted after empty-plist migration")
+    }
+
+    /// Simulate a plist where the parser recovered some keys but lost
+    /// others mid-file (truncated mid-key). The migration must walk
+    /// without crashing on the partial domain; the surviving values
+    /// are preserved; the missing ones fall through to registered
+    /// defaults at read time (not exercised at this layer — that's
+    /// covered by `Preferences.init` registration tests in
+    /// PreferencesTests).
+    func test_truncatedPlist_partialDomain_migrationDoesNotCrash() throws {
+        // Memory: <2 KB. Wall: ~10 ms.
+        let suiteName = "blackbird.tests.truncatedplist.partial.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        // Plant a domain that "survived partial corruption": some
+        // legitimate keys present, others missing entirely. Use both
+        // legacy unprefixed names AND prefixed names so the migration
+        // walks the v1→v2 copy step against the partial set.
+        suite.setPersistentDomain(
+            [
+                // Legacy unprefixed name with a valid value — should be
+                // copied forward to bb.theme then deleted from the
+                // unprefixed slot.
+                "theme": "Solarized",
+                // A Bool key under the legacy unprefixed name.
+                "cursorBlink": true,
+                // The schema version is missing — simulating the
+                // truncation lost the version stamp.
+            ],
+            forName: suiteName
+        )
+
+        // Migration on the partial domain must not crash.
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
+
+        let post = suite.persistentDomain(forName: suiteName) ?? [:]
+
+        // Schema stamp must be present after walk.
+        XCTAssertEqual(
+            post["bb.prefsSchemaVersion"] as? Int,
+            Preferences.currentSchemaVersion,
+            "migration on a partial domain must stamp bb.prefsSchemaVersion"
+        )
+        // Legacy keys promoted to prefixed.
+        XCTAssertEqual(
+            post["bb.theme"] as? String, "Solarized",
+            "v1→v2 must copy legacy `theme` to `bb.theme` even on a partial domain"
+        )
+        XCTAssertEqual(
+            post["bb.cursorBlink"] as? Bool, true,
+            "v1→v2 must copy legacy `cursorBlink` to `bb.cursorBlink` even on a partial domain"
+        )
+        // Legacy keys removed.
+        XCTAssertNil(post["theme"],
+                     "v1→v2 must remove the legacy unprefixed `theme` from a partial domain")
+        XCTAssertNil(post["cursorBlink"],
+                     "v1→v2 must remove the legacy unprefixed `cursorBlink` from a partial domain")
+        // Keys we never wrote stay absent — readers fall back to
+        // registered defaults at the Preferences.init layer.
+        XCTAssertNil(post["bb.fontSize"],
+                     "absent fontSize key stays absent after partial-plist migration; reader uses registered default")
+        XCTAssertNil(post["bb.bell"],
+                     "absent bell key stays absent after partial-plist migration; reader uses registered default")
+    }
+
+    /// Simulate a plist that holds a wrong-type value for a numeric key
+    /// (the post-truncation parser recovered "fontSize=true" by
+    /// mis-aligning the type tag, or a hostile `defaults write -bool`
+    /// landed). `Preferences.sanitizeStoredTypes` removes the offending
+    /// value so the registered default takes over. Pin that contract
+    /// against both the prefixed and the legacy unprefixed slot —
+    /// upgrade migrations carry forward whatever's there, so a wrong-
+    /// type legacy value would otherwise survive the v1→v2 copy.
+    ///
+    /// We can't call `sanitizeStoredTypes` directly (it's `private`),
+    /// but `Preferences.shared` runs it in init — touching the singleton
+    /// against an isolated suite is forbidden, so we test the outcome
+    /// against `UserDefaults.standard` via a unique key prefix. To stay
+    /// out of the singleton's persistent state we use a key NOBODY else
+    /// reads — verifying the policy "remove wrong-type numeric values"
+    /// applies at the seam we DO have direct access to: a hand-written
+    /// numeric key set with a String value, then read back via
+    /// `defaults.double(forKey:)` returns 0 (the failsafe), proving the
+    /// type-coercion fallback is benign even before `sanitizeStoredTypes`
+    /// runs.
+    func test_truncatedPlist_wrongTypeNumericValue_failsafeReturnsZero() throws {
+        // Memory: <1 KB. Wall: ~5 ms.
+        // Use a unique key that won't collide with bb.* prefs the singleton
+        // reads. We're pinning the FOUNDATION-level failsafe: a hostile
+        // String stored under a numeric key reads as 0, never crashes.
+        // This is the bedrock contract `sanitizeStoredTypes` builds on.
+        let probeKey = "blackbird.tests.numeric.wrongtype.\(UUID().uuidString)"
+        let d = UserDefaults.standard
+        defer { d.removeObject(forKey: probeKey) }
+
+        d.set("not-a-number", forKey: probeKey)
+        // No crash; bridging returns 0 for non-numeric strings.
+        let read = d.double(forKey: probeKey)
+        XCTAssertEqual(
+            read, 0.0, accuracy: 1e-9,
+            "Foundation's KVC bridge returns 0 for a wrong-type numeric read, not a crash. This is the bedrock failsafe Preferences.sanitizeStoredTypes builds on."
+        )
+        // The object IS still there as a String — sanitizeStoredTypes
+        // removes it on next Preferences.init, but at the raw seam
+        // tested here we just verify the read doesn't fault.
+        XCTAssertNotNil(
+            d.object(forKey: probeKey),
+            "the wrong-type value is still on disk; sanitization happens at Preferences.init time, not at every read"
+        )
+    }
+
     func test_externalDefaultsWrite_unknownEnumRawValue_revertsToDefault() throws {
         try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
                       "RunLoop-pumping external-defaults test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the L-28 runtime assertion")
