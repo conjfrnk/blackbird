@@ -1,0 +1,352 @@
+# Nightly TSAN — concurrency race hunter for the Swift session/PTY layer.
+#
+# Why this workflow exists
+# ------------------------
+# The Blackbird core has multiple concurrency hot-spots that crash-only
+# testing (i.e. waiting for a real thread race to manifest as an
+# observable crash) cannot reliably surface:
+#
+#   (a) `coreQueue.sync(execute: snapshot)` racing with feed paths —
+#       BBTerm wraps a Rust core under a serial queue, but every
+#       Swift-side reader still has to take the queue. A stray reader
+#       on a different queue would currently only crash if it tripped
+#       a Rust-side panic; TSAN catches the unsynchronised access at
+#       the Swift level, before any side-effect is visible.
+#   (b) F-S5-001 fd-close-vs-introspection windows — file descriptors
+#       being closed on the io_queue while another queue is mid-read /
+#       fstat'ing them. Without TSAN this can only be reproduced by
+#       eyeballing a stochastic dogfood crash.
+#   (c) Combine sink reentry — Preferences.objectWillChange.sink writes
+#       back into UserDefaults; if a sink ever reentered itself across
+#       threads the resulting beachball would look like contention but
+#       leave no race report. TSAN flags the read/write conflict
+#       directly.
+#
+# Without this workflow these would only surface as production crashes
+# in dogfood. TSAN nightly turns the dogfood debug loop into a CI
+# signal.
+#
+# Why TSAN nightly, not on every PR
+# ---------------------------------
+# Same reason ASan is disabled on PR CI (see ci.yml:117-144 for the
+# full whack-a-mole history): the macos-14 GHA runner has a per-process
+# VM-mapping ceiling that the cumulative sanitiser-instrumentation
+# overhead at xctest-bundle load time exceeds once the suite reaches
+# ~900 tests. TSAN has the SAME loader-overhead profile as ASan — its
+# shadow map is a different shape but the bundle-load arithmetic that
+# tipped over ASan tips over TSAN too.
+#
+# The escape hatch is a curated subset: 8 test classes, ~55 tests
+# total, well under the empirical ceiling. Each class was chosen
+# because it explicitly exercises a concurrency boundary:
+#
+#   - PTYLifetimeRaceTests       : explicit race-repro suite (4 tests)
+#   - SessionShutdownBarrierTests: termination ordering        (2 tests)
+#   - TerminalSessionAdversarial : concurrent feed/snapshot    (6 tests)
+#   - SnapshotCoalescingTests    : burst write coalescing      (4 tests)
+#   - MainThreadWatchdogTests    : main-thread budget bounds   (8 tests)
+#   - PTYTests                   : concurrent write paths      (12 tests)
+#   - BBTermLifetimeTests        : wrapper lifetime under churn(12 tests)
+#   - MainWindowControllerLT     : window lifetime             (7 tests)
+#
+# Adding more tests
+# -----------------
+# Append additional `-only-testing:BlackbirdTests/<ClassName>` lines to
+# the xcodebuild invocation. CAVEAT: each new line adds load to the
+# instrumented test-host. The 900+ ceiling that drove ASan's removal
+# from PR CI applies here too, with a smaller margin given TSAN's
+# shadow-memory cost. Before adding a class:
+#   1. Verify it's actually concurrency-heavy (touches multiple queues
+#      or threads). TSAN gives no signal on single-threaded tests but
+#      still pays the instrumentation cost.
+#   2. Run it locally with TSAN once
+#      (`xcodebuild test -enableThreadSanitizer YES
+#                        -only-testing:BlackbirdTests/<NewClass>`)
+#      to make sure it's clean — adding a flaky class to the nightly
+#      makes every other class's signal harder to read.
+#   3. If the subset grows past ~12 classes / ~200 tests, expect the
+#      same xctest-restart-loop / "nano zone abandoned" failures that
+#      took ASan off PR CI; at that point split into multiple jobs.
+#
+# What a TSAN warning looks like
+# ------------------------------
+# In xcodebuild output:
+#
+#     ==================
+#     WARNING: ThreadSanitizer: data race (pid=12345)
+#       Read of size 8 at 0x0001234abcde by thread T2:
+#         #0 -[BBTerm snapshot] BBTerm.swift:142
+#         ...
+#       Previous write of size 8 at 0x0001234abcde by thread T1:
+#         #0 BBTerm.feed(_:) BBTerm.swift:98
+#         ...
+#     SUMMARY: ThreadSanitizer: data race BBTerm.swift:142
+#     ==================
+#
+# xcodebuild does NOT exit non-zero on a TSAN warning by default — the
+# test that triggered it might still XCTAssert through. We grep
+# /tmp/tsan.log for "ThreadSanitizer:" after the run and fail the job
+# explicitly if found, regardless of xcodebuild's exit code.
+#
+# Env-var propagation (LOAD-BEARING)
+# ----------------------------------
+# Several of the 8 enumerated test classes have XCTSkipIf gates on
+# env vars (BB_RUN_FLAKY_PTY_TESTS for PTYLifetimeRaceTests; BB_RUN_STRESS_TESTS
+# for SnapshotCoalescingTests, SessionShutdownBarrierTests, and
+# TerminalSessionAdversarialTests). Without propagation, those tests
+# silently skip and TSAN instruments nothing meaningful. We propagate
+# both via the TEST_RUNNER_BB_* prefix that xctest forwards to the
+# test host (same mechanism as nightly-soak.yml's TEST_RUNNER_BB_RUN_SOAK).
+#
+# Sentinel grep
+# -------------
+# After the xcodebuild run, we grep /tmp/tsan.log for a `Test Case ... passed`
+# line PER CLASS. Missing = the class didn't actually execute (env-var
+# regression, scheme drift, runner-image change). The pattern mirrors
+# nightly-soak.yml:367-391. We also fail loud on any `Test Case ... skipped`
+# line whose class is in our 8-class list — that means the env-var
+# propagation broke and we'd accept a meaningless green otherwise.
+#
+# Three TSAN signal forms
+# -----------------------
+# We grep for THREE distinct strings — `WARNING: ThreadSanitizer:`,
+# `SUMMARY: ThreadSanitizer:`, and `data race`. Redundant but cheap. A
+# future Apple sanitiser-output rename is unlikely to nuke all three at
+# once; if Apple changes one (e.g. drops the `WARNING:` prefix in a
+# future Xcode), the other two still surface the race. Better to false-
+# positive than false-negative on a race-detector job.
+
+name: Nightly TSAN
+
+on:
+  # 08:00 UTC = 04:00 EDT / 01:00 PDT — staggered after nightly-miri
+  # (06:00) and the soak job (07:00) so we don't pile three macos-14
+  # runs onto contended runners simultaneously.
+  schedule:
+    - cron: "0 8 * * *"
+  # Manual trigger for on-demand verification (e.g. after touching
+  # concurrency code we want a fast race-check on without waiting for
+  # the nightly run).
+  workflow_dispatch:
+
+# Read-only by default — same posture as ci.yml + nightly-miri.yml.
+# TSAN is pure verification; no need for any write scope.
+permissions:
+  contents: read
+
+# A second push to the same branch (or a manual re-trigger) cancels
+# the in-flight TSAN run. Saves runner minutes — the previous run's
+# signal is stale anyway.
+concurrency:
+  group: nightly-tsan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tsan:
+    name: TSAN — concurrency race hunter (curated subset)
+    runs-on: macos-14
+    # TSAN-instrumented tests run ~3-5x slower than uninstrumented; the
+    # 8-class / ~55-test subset measures ~10-20 min wall at macos-14
+    # pace. 60 min is headroom for runner contention and toolchain
+    # regressions. If this ever times out, the right response is to
+    # investigate the slowdown, not to bump the cap.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        # Same drift gate as ci.yml — a TSAN-only failure is still
+        # actionable signal, but only if the project we're testing
+        # matches what's described in project.yml.
+        run: |
+          xcodegen generate
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
+            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+            echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            exit 1
+          fi
+
+      - name: Build Rust core (universal)
+        run: scripts/build-core.sh
+
+      # TSAN test invocation. Several non-obvious moving parts:
+      #
+      # 1. TSAN and ASan are mutually exclusive at runtime (their
+      #    shadow-memory layouts conflict — the second one to load
+      #    aborts). The `Blackbird` scheme has
+      #    `enableAddressSanitizer: true` (project.yml:186) and
+      #    `enableUBSanitizer: true` (project.yml:187), so we MUST
+      #    override both at the build settings level
+      #    (`ENABLE_ADDRESS_SANITIZER=NO` /
+      #     `ENABLE_UNDEFINED_BEHAVIOR_SANITIZER=NO`) AND at the
+      #    xcodebuild test-action flags (`-enableAddressSanitizer NO`
+      #    / `-enableUndefinedBehaviorSanitizer NO`). The build-setting
+      #    override controls what `-fsanitize=...` flags the compiler
+      #    emits; the test-action flag controls whether xctest runs
+      #    the host with the runtime hooked. Skip either and the run
+      #    aborts at xctest startup with a sanitiser-conflict crash.
+      #
+      # 2. We DON'T modify project.yml — the scheme stays ASan/UBSan
+      #    enabled so local Xcode dev runs and PR CI keep their
+      #    documented behaviour. TSAN is a CI-only override.
+      #
+      # 3. `-only-testing:BlackbirdTests/<Class>` constrains the test
+      #    bundle to the listed classes only. Each line adds one class
+      #    to the allow-list (intersection semantics). The 8 classes
+      #    listed here were picked for being concurrency-heavy; see the
+      #    file header for the full rationale + how to add more.
+      #
+      # 4. `tee /tmp/tsan.log` so the explicit
+      #    "WARNING: ThreadSanitizer:" grep after the run can scan the
+      #    captured output. xcodebuild exit code alone is insufficient
+      #    — TSAN warnings don't fail the test that triggered them
+      #    unless that test happens to also XCTAssert on the racy state.
+      - name: xcodebuild test (TSAN, curated subset)
+        # TEST_RUNNER_BB_RUN_FLAKY_PTY_TESTS=1 unlocks PTYLifetimeRaceTests
+        # (4/4 tests are XCTSkipIf-gated on BB_RUN_FLAKY_PTY_TESTS).
+        # TEST_RUNNER_BB_RUN_STRESS_TESTS=1 unlocks SnapshotCoalescingTests
+        # (4/4 in setUp) and the skip-gated tests in
+        # SessionShutdownBarrierTests + TerminalSessionAdversarialTests.
+        # Without these env vars the previous TSAN job ran a fraction of
+        # the intended suite and accepted a meaningless green; the
+        # sentinel grep below now refuses to ship that posture.
+        run: |
+          set +e
+          TEST_RUNNER_BB_RUN_FLAKY_PTY_TESTS=1 \
+          TEST_RUNNER_BB_RUN_STRESS_TESTS=1 \
+          xcodebuild test \
+            -project Blackbird.xcodeproj \
+            -scheme Blackbird \
+            -destination "platform=macOS,arch=arm64" \
+            -enableAddressSanitizer NO \
+            -enableThreadSanitizer YES \
+            -enableUndefinedBehaviorSanitizer NO \
+            ENABLE_ADDRESS_SANITIZER=NO \
+            ENABLE_THREAD_SANITIZER=YES \
+            ENABLE_UNDEFINED_BEHAVIOR_SANITIZER=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -only-testing:BlackbirdTests/PTYLifetimeRaceTests \
+            -only-testing:BlackbirdTests/SessionShutdownBarrierTests \
+            -only-testing:BlackbirdTests/TerminalSessionAdversarialTests \
+            -only-testing:BlackbirdTests/SnapshotCoalescingTests \
+            -only-testing:BlackbirdTests/MainThreadWatchdogTests \
+            -only-testing:BlackbirdTests/PTYTests \
+            -only-testing:BlackbirdTests/BBTermLifetimeTests \
+            -only-testing:BlackbirdTests/MainWindowControllerLifetimeTests \
+            2>&1 | tee /tmp/tsan.log
+          xcb_rc="${PIPESTATUS[0]}"
+          set -e
+
+          # Grep for TSAN warnings independently of xcodebuild's exit.
+          # A TSAN warning is a hard fail signal even if every
+          # XCTAssert passed — the race exists in production code
+          # regardless of whether this particular test happened to
+          # observe its consequences.
+          #
+          # Three signals checked: `WARNING: ThreadSanitizer:`,
+          # `SUMMARY: ThreadSanitizer:`, and `data race`. Redundant on
+          # current Apple toolchains but cheap; a future rename of any
+          # one form is unlikely to silence all three. See the workflow
+          # header for rationale.
+          if grep -qE "(WARNING: ThreadSanitizer:|SUMMARY: ThreadSanitizer:|data race)" /tmp/tsan.log; then
+            echo "::error::ThreadSanitizer reported one or more data races. Failing job."
+            grep -B 2 -A 20 -E "(WARNING: ThreadSanitizer:|SUMMARY: ThreadSanitizer:|data race)" /tmp/tsan.log >&2 || true
+            exit 1
+          fi
+
+          if [[ "$xcb_rc" -ne 0 ]]; then
+            echo "::error::xcodebuild exited $xcb_rc (no TSAN warning detected — likely a test failure or infra issue)."
+            exit "$xcb_rc"
+          fi
+
+          echo "::notice::TSAN run clean — no ThreadSanitizer warnings, xcodebuild exited 0."
+
+      - name: Sentinel — verify each TSAN class actually executed (not skipped)
+        # LOAD-BEARING. See the env-propagation hazard in the workflow
+        # header. PTYLifetimeRaceTests is 100 % skip-gated on
+        # BB_RUN_FLAKY_PTY_TESTS; SnapshotCoalescingTests is 100 %
+        # skip-gated on BB_RUN_STRESS_TESTS (gate is in setUp).
+        # Without the TEST_RUNNER_BB_* env-var propagation above, those
+        # two classes silently skip every test, TSAN instruments
+        # nothing concurrency-relevant for them, and the workflow
+        # accepts a meaningless green. This step refuses that
+        # posture: each class must emit AT LEAST one
+        # `Test Case '...passed' line. We also fail if any class
+        # emits a `skipped` line (means the env-var propagation
+        # regressed).
+        #
+        # Why per-class instead of per-method: every method-level
+        # rename touches the workflow; per-class is the right
+        # granularity for "did this test class actually run". If a
+        # class is renamed, the `-only-testing` filter above also
+        # needs an update, so the coupling is correct.
+        #
+        # Mirrors nightly-soak.yml:337-391.
+        run: |
+          set -e
+          if [[ ! -f /tmp/tsan.log ]]; then
+            echo "::error::xcodebuild log /tmp/tsan.log missing — previous step did not produce expected output."
+            exit 1
+          fi
+          classes=(
+            PTYLifetimeRaceTests
+            SessionShutdownBarrierTests
+            TerminalSessionAdversarialTests
+            SnapshotCoalescingTests
+            MainThreadWatchdogTests
+            PTYTests
+            BBTermLifetimeTests
+            MainWindowControllerLifetimeTests
+          )
+          missing=()
+          skipped=()
+          for cls in "${classes[@]}"; do
+            if ! grep -qE "Test Case '-\[BlackbirdTests\.${cls} .*' passed" /tmp/tsan.log; then
+              missing+=("$cls")
+            fi
+            if grep -qE "Test Case '-\[BlackbirdTests\.${cls} .*' skipped" /tmp/tsan.log; then
+              skipped+=("$cls")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::TSAN sentinel FAILED — the following classes did NOT emit any 'passed' line:"
+            for c in "${missing[@]}"; do echo "::error::  - $c"; done
+            echo "::error::This usually means the TEST_RUNNER_BB_RUN_FLAKY_PTY_TESTS / TEST_RUNNER_BB_RUN_STRESS_TESTS env vars did not propagate to the xctest host, the class was renamed without updating the only-testing filter, or the xctest bundle didn't load this class. Investigate before merging anything that touches CI."
+            exit 1
+          fi
+          if (( ${#skipped[@]} > 0 )); then
+            echo "::error::TSAN sentinel FAILED — the following classes emitted 'skipped' lines (env-var propagation broken):"
+            for c in "${skipped[@]}"; do echo "::error::  - $c"; done
+            echo "::error::A skipped test in this curated set means TSAN instrumented nothing concurrency-relevant for that class. Investigate the TEST_RUNNER_BB_* propagation."
+            grep -E "Test Case .*' skipped" /tmp/tsan.log >&2 || true
+            exit 1
+          fi
+          echo "::notice::TSAN sentinel OK — all 8 classes executed at least one test and none skipped."
+
+      - name: Upload TSAN log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tsan-log-${{ github.run_id }}
+          path: /tmp/tsan.log
+          if-no-files-found: warn
+          retention-days: 14

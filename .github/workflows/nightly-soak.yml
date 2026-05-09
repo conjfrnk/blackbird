@@ -1,0 +1,408 @@
+# Nightly soak — heavy memory / RSS / FD / leak gates that don't run on PR CI.
+#
+# Why this workflow exists
+# ------------------------
+# Connor's launch is 2026-07-01. A user running Blackbird as their daily
+# driver opens a tab in the morning and expects the same shell session
+# to be there at end of day — sometimes the next day. A 0.1 MiB/iter
+# Combine retain bug or a slow-leaked dispatch source is invisible at
+# PR-CI horizons (the rust-memory job tops out at 128 iterations on the
+# Rust side; the Swift side was unmeasured before P1.5). It would only
+# surface as user reports of "Blackbird memory crept up over the day."
+#
+# Phase 1 + Phase 2 of the v0.2 hardening plan landed gates capable of
+# catching those leaks, but we deliberately scoped them OUT of PR CI:
+#   - Rust gates (`#[ignore]`-annotated, opt-in via `cargo test --
+#     --ignored`): release-only, serial, ~5 min wall each. Inflating
+#     PR feedback by 20 min for a class of bug that a nightly will
+#     catch within 24 h is bad economics for the merge loop.
+#   - Swift soak gates (env-gated `BB_RUN_SOAK=1` / `BB_SOAK=1`): same
+#     reasoning — per-iter dispatch-queue teardown chatter doesn't
+#     earn its keep on a per-PR basis.
+# This workflow is the place those gates run. Once-a-day cadence keeps
+# the signal fresh enough to bisect against the day's commits, without
+# burning runner minutes on every push.
+#
+# Gates this workflow covers
+# --------------------------
+# Rust (rust-soak job):
+#   1. long_session_memory   — RSS gate over 128 new/free + churn cycles
+#   2. long_session_resources — FD + thread count return-to-baseline
+#                                over 1024 cycles (P2.5 gate)
+#   3. sweep_soak_60s         — 60-second escape-byte fuzz against a
+#                                live BBTerm to find protocol-level
+#                                state corruption that fast suites miss
+#   4. throughput             — parser MB/s floor (also runs on PR CI
+#                                under rust-throughput; re-running
+#                                here gives a daily trend signal on
+#                                the same hardware class)
+# Swift (swift-soak job):
+#   5. SwiftSessionRSSReturnsToBaselineTests (BB_RUN_SOAK=1) — the
+#      P1.5 Swift counterpart to the Rust long_session_memory gate.
+#      32 iterations of {create headless session, feed 1 MiB,
+#      terminate} with absolute + delta-of-deltas RSS checks.
+#   6. BBTermAdversarialTests::test_soak_10s_feedAndSnapshot
+#      (BB_SOAK=1) — the existing 10-second feed-and-snapshot soak
+#      with first-second / final peak ratio bound.
+#
+# Env-propagation hazard (load-bearing — read this before editing)
+# ----------------------------------------------------------------
+# `xcodebuild test` does NOT propagate the calling shell's environment
+# to the xctest host process by default. If we naively wrote
+# `BB_RUN_SOAK=1 xcodebuild test ...`, ProcessInfo.processInfo.environment
+# inside the test process would not see BB_RUN_SOAK, the
+# `XCTSkipIf(env["BB_RUN_SOAK"] != "1", ...)` guard at the top of
+# `SwiftSessionRSSReturnsToBaselineTests.swift:130` would fire, the
+# soak tests would skip silently, and the workflow would go green
+# while covering nothing — exactly the silent-failure mode this
+# workflow exists to prevent.
+#
+# The canonical, documented mechanism (xcodebuild(1) man page, "TEST_RUNNER_<VAR>"):
+#   TEST_RUNNER_BB_RUN_SOAK=1 xcodebuild test ...
+#   -> xctest sees env["BB_RUN_SOAK"] == "1" (prefix stripped).
+# We use this form below. It is independent of any project.yml
+# scheme-level env config and works on Xcode 16.2 (the version
+# pinned by ci.yml's `sudo xcode-select -s /Applications/Xcode_16.2.app`).
+#
+# Belt-and-braces: the final step of the swift-soak job greps the
+# captured xcodebuild log for evidence the soak tests actually RAN
+# (not skipped). xcodebuild emits a deterministic
+# `Test Case '-[...] passed` line for each successful test. If
+# TEST_RUNNER_<VAR> propagation broke (Xcode regression, scheme
+# rewrite, runner-image drift), the test would skip — yielding a
+# `Test Case ... skipped (BB_RUN_SOAK=1 not set; ...)` line instead.
+# We grep for the passed marker and fail the job loudly if it's
+# missing, preventing a silent green.
+#
+# How to add a new gate
+# ---------------------
+# Rust: add a `#[ignore]`-annotated test under core/tests/, then add
+# a single line to the rust-soak `Run` step matching the existing
+# `cargo test -p blackbird_core --release --test <name> -- --ignored
+# --nocapture --test-threads=1` shape. No env vars needed; the
+# `--ignored` flag is the gate.
+# Swift: add `try XCTSkipIf(env["BB_<NAME>"] != "1", ...)` at the top
+# of the test function, then in this workflow:
+#   1. Add `TEST_RUNNER_BB_<NAME>=1 \` to the `xcodebuild test`
+#      invocation in the swift-soak job.
+#   2. Append `-only-testing:BlackbirdTests/<TestClassName>` if
+#      it's in a new test class.
+#   3. Update the sentinel grep to expect a passed line from the
+#      new test class as well (or rely on the existing
+#      class-coverage; the marker already verifies the workflow
+#      isn't silently skipping ALL soak tests).
+
+name: Nightly - soak / leak gates
+
+on:
+  # 07:00 UTC = 03:00 EDT / 00:00 PDT. Picked one hour after
+  # nightly-miri (06:00 UTC) so the two heavy nightlies don't
+  # contend for macos-14 runner availability when GitHub's hosted
+  # runner pool is tight. Both finish well within their 60-min
+  # caps, so even back-to-back start times wouldn't actually
+  # collide on runner allocation - but staggering keeps the
+  # signal-to-noise on per-job timing clean if we ever start
+  # measuring runner-startup latency as a regression signal.
+  schedule:
+    - cron: "0 7 * * *"
+  # Manual trigger so we can verify the workflow on demand after
+  # touching gate code (e.g. tightening a tolerance or adding a
+  # new soak test) without waiting overnight for the next run.
+  workflow_dispatch:
+
+# Read-only by default - same posture as ci.yml and nightly-miri.yml.
+# This workflow is pure verification; no need for any write scope.
+permissions:
+  contents: read
+
+# A second push to the same branch (or a manual re-trigger) cancels
+# the in-flight run. Saves runner minutes - the previous run's
+# signal is stale. Mirrors nightly-miri.yml.
+concurrency:
+  group: nightly-soak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-soak:
+    name: Rust - long-session memory + resource + sweep soak gates
+    runs-on: macos-14
+    # Per-job 60-min cap. Empirically each `--ignored` gate runs
+    # 1-5 min on macos-14; the 60 s sweep_soak_60s adds 60 s wall;
+    # total wall is well under 30 min. 60 min is headroom for a
+    # nightly toolchain regression that slows release-mode codegen
+    # or for runner-image churn on cargo cache hydrate. If this
+    # ever times out, investigate the slowdown - don't bump the cap.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # Same toolchain as ci.yml's `rust` and `rust-memory`
+        # jobs (1.85.0). Mismatching channels between PR CI and
+        # nightly soak risks a regression that only reproduces
+        # on one channel - defeats the bisect signal.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache cargo
+        # Shared cache key with ci.yml so the rust-memory and
+        # rust-resources PR-CI jobs warm this nightly's cache
+        # (and vice versa). Cache hits keep wall under 5 min
+        # for the toolchain + crates-index + target/ hydration.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # The four gates run sequentially as separate steps so we
+      # see all results in the GHA timeline as separate timing
+      # rows, and so a single early failure surfaces immediately
+      # rather than waiting through the rest of the suite.
+      # `--release` matches the PR CI rust-memory + rust-resources
+      # jobs exactly - the gates were tuned against release-mode
+      # codegen and would have different RSS / timing baselines
+      # under debug.
+      #
+      # `--test-threads=1` on the memory + resources + sweep_soak
+      # gates: parallel runs would cross-contaminate process-wide
+      # RSS / FD / thread-list measurements. Throughput is
+      # CPU-bound and benefits from parallel; we omit the flag
+      # there.
+      - name: Run long-session memory gate
+        # Rust counterpart of the Swift session-drop test below.
+        # Asserts new/input/snapshot/free + snapshot-churn loops
+        # don't leak RSS via mach_task_basic_info. See
+        # core/tests/long_session_memory.rs for the absolute
+        # 32 MiB cap + delta-of-deltas idiom.
+        run: cargo test -p blackbird_core --release --test long_session_memory -- --ignored --nocapture --test-threads=1
+
+      - name: Run long-session FD + thread gate
+        # P2.5: catches leaks that wouldn't show as RSS growth -
+        # a `mem::forget`-ed File or per-BBTerm worker thread
+        # that burns FDs / threads cycle-by-cycle until the
+        # process hits ulimit -n. Asserts return-to-baseline
+        # over 1024 bb_term_new/free cycles.
+        run: cargo test -p blackbird_core --release --test long_session_resources -- --ignored --nocapture --test-threads=1
+
+      - name: Run 60s sweep soak
+        # P1.6: 60-second escape-byte fuzz against a live BBTerm.
+        # Catches protocol-level state corruption that the fast
+        # `sweep_probe` suite (run on PR CI) doesn't have wall
+        # budget for. Renamed from sweep_soak.rs in P1.6.
+        run: cargo test -p blackbird_core --release --test sweep_soak_60s -- --ignored --nocapture --test-threads=1
+
+      - name: Run parser throughput gate (trend signal)
+        # Already runs on PR CI under `rust-throughput`. Re-running
+        # here on the same once-a-day cadence on the same hardware
+        # class gives a clean trend dataset for "is throughput
+        # silently regressing?" - bisecting throughput drift across
+        # PR-CI runs is messy because PR runs vary by branch +
+        # baseline + cache state. The nightly run is comparable
+        # day-over-day. Cheap (under 30 s wall), so no reason to
+        # skip it for cost.
+        run: cargo test -p blackbird_core --release --test throughput -- --ignored --nocapture
+
+  swift-soak:
+    name: Swift - RSS-returns-to-baseline + 10s feed/snapshot soak
+    runs-on: macos-14
+    # 60-min cap - see rust-soak for rationale. Swift soak is
+    # ~10 min wall (toolchain + xcodegen + universal core build +
+    # xcodebuild test for two test classes including 32x1 MiB
+    # session iterations + 10 s adversarial soak); 60 min is
+    # headroom for runner-image churn on Xcode select / brew install.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # Needed to build libblackbird_core.a for the Swift link
+        # step. Same toolchain pin as ci.yml's xcode job.
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Select Xcode 16.2
+        # Same Xcode pin as ci.yml's xcode/smoke/latency-gate jobs.
+        # Xcode version drift across CI lanes risks a Swift compiler
+        # change that only reproduces on one - and would defeat the
+        # nightly soak's bisect signal.
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        # Mirror ci.yml's drift gate exactly. The pbxproj is
+        # tracked in git AND auto-generated; without this gate a
+        # PR that updates only one would silently diverge the two,
+        # and the nightly is one of the places that divergence
+        # would surface (different test set selected, different
+        # link order, etc).
+        run: |
+          xcodegen generate
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
+            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml -" >&2
+            echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            exit 1
+          fi
+
+      - name: Build Rust core (universal)
+        run: scripts/build-core.sh
+
+      - name: xcodebuild test - soak suites only
+        # See header for the env-propagation hazard. Summary:
+        # `xcodebuild test` does NOT pass the calling shell's env
+        # to the xctest host. The `TEST_RUNNER_<VAR>` shape is the
+        # documented (xcodebuild(1) man page) mechanism: xcodebuild
+        # strips the `TEST_RUNNER_` prefix and injects the variable
+        # into the test runner's environment. Confirmed working
+        # on Xcode 16.2.
+        #
+        # We pass BOTH BB_RUN_SOAK (gate for SwiftSessionRSSReturnsToBaselineTests)
+        # AND BB_SOAK (gate for BBTermAdversarialTests::test_soak_10s_*)
+        # so the single test action covers both Swift soak gates.
+        #
+        # `-only-testing` filters to the two soak test groups only;
+        # without this filter we'd run the entire 900+ test PR-CI
+        # suite (which is what ci.yml exists for). The nightly soak
+        # is exclusively for the env-gated and `#[ignore]`-gated
+        # tests that PR CI deliberately skips.
+        #
+        # CODE_SIGNING_ALLOWED=NO and the empty CODE_SIGN_IDENTITY
+        # mirror ci.yml/scripts/test.sh - the runner has no
+        # code-signing identity and doesn't need one for xctest.
+        #
+        # ASan / UBSan are explicitly OFF here for the same reason
+        # they're off on ci.yml's xcode job: the scheme enables
+        # them by default (project.yml:181-187) and the cumulative
+        # ASan instrumentation overhead at xctest-bundle load time
+        # has tripped the macos-14 runner's VM-mapping ceiling.
+        # Soak tests do NOT need ASan - the gates here are about
+        # RSS leakage, FD / thread leakage, and cumulative state
+        # corruption. ASan catches different bugs (heap UB, OOB
+        # reads); those are covered by ci.yml's debug + release
+        # cargo test runs and by the nightly miri job for the
+        # FFI re-entry surface.
+        #
+        # `set +e` / result-based check: same infra-quirk
+        # absorption as ci.yml - the macos-14 runner occasionally
+        # exits the test host with a phantom non-zero on a
+        # successful pass. We trust the test-result lines in the
+        # log, not the xcodebuild exit code. See ci.yml lines
+        # 152-188 for the full rationale; the same pattern is
+        # safe here because the sentinel-grep step BELOW provides
+        # a stronger correctness check than the exit code.
+        run: |
+          set +e
+          TEST_RUNNER_BB_RUN_SOAK=1 \
+          TEST_RUNNER_BB_SOAK=1 \
+          xcodebuild test \
+            -project Blackbird.xcodeproj \
+            -scheme Blackbird \
+            -destination "platform=macOS,arch=arm64" \
+            -only-testing:BlackbirdTests/SwiftSessionRSSReturnsToBaselineTests \
+            -only-testing:BlackbirdTests/BBTermAdversarialTests/test_soak_10s_feedAndSnapshot_underBoundedMemory \
+            -enableAddressSanitizer NO \
+            -enableUndefinedBehaviorSanitizer NO \
+            ENABLE_ADDRESS_SANITIZER=NO \
+            ENABLE_UNDEFINED_BEHAVIOR_SANITIZER=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            2>&1 | tee /tmp/swift-soak.log
+          xcb_rc="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$xcb_rc" -eq 0 ]]; then
+            echo "::notice::xcodebuild exited cleanly."
+          else
+            # Same infra-quirk absorption as ci.yml: trust the test
+            # result lines, not the exit code. The sentinel-grep
+            # step below is the load-bearing correctness check.
+            if grep -q "Test Suite 'Selected tests' passed" /tmp/swift-soak.log \
+               && ! grep -qE "Test Case .* failed" /tmp/swift-soak.log; then
+              echo "::notice::All test suites passed; xcodebuild exited $xcb_rc due to an infra restart with no per-test failure attributed. Treating as success."
+            else
+              echo "::error::xcodebuild exited $xcb_rc and either a test failed or the suites didn't report passed."
+              exit "$xcb_rc"
+            fi
+          fi
+
+      - name: Sentinel - verify soak tests actually ran (not skipped)
+        # LOAD-BEARING. See the env-propagation hazard in the
+        # workflow header. If TEST_RUNNER_BB_RUN_SOAK=1 doesn't
+        # reach the xctest host (Xcode regression, scheme rewrite,
+        # runner-image drift), the soak tests will SKIP silently
+        # via their XCTSkipIf guards and the workflow goes green
+        # without exercising the gates it exists to run.
+        #
+        # xcodebuild emits a deterministic line per executed test:
+        #   Test Case '-[BlackbirdTests.<Class> <method>]' passed (X.XXXs).
+        # And per-skipped test:
+        #   Test Case '-[BlackbirdTests.<Class> <method>]' skipped (X.XXXs).
+        # We grep for the `passed` form on the soak test method
+        # names. Missing = the soak gates didn't actually run, fail
+        # the job loudly so we investigate rather than silently
+        # accepting a meaningless green.
+        #
+        # Why this is more robust than a `print("RSS_BASELINE: ...")`
+        # marker in test code: we don't have to touch test code (the
+        # test file is in Phase 1 and intentionally landed without
+        # this marker; bundling test edits into a CI-only change
+        # would muddy the bisect surface), and xcodebuild's `passed`
+        # line is documented and stable across Xcode versions.
+        #
+        # If a soak test name changes, this grep needs an update.
+        # That's the right coupling: a renamed test means the
+        # workflow's `-only-testing` filter would also be wrong,
+        # and both should be updated together.
+        run: |
+          set -e
+          if [[ ! -f /tmp/swift-soak.log ]]; then
+            echo "::error::xcodebuild log /tmp/swift-soak.log missing - previous step did not produce expected output."
+            exit 1
+          fi
+          missing=()
+          if ! grep -qE "Test Case .*test_terminalSessionDrop_returnsRssToBaseline.*' passed" /tmp/swift-soak.log; then
+            missing+=("SwiftSessionRSSReturnsToBaselineTests.test_terminalSessionDrop_returnsRssToBaseline_under20MiB_overTenIterations")
+          fi
+          if ! grep -qE "Test Case .*test_bbtermDrop_returnsRssToBaseline.*' passed" /tmp/swift-soak.log; then
+            missing+=("SwiftSessionRSSReturnsToBaselineTests.test_bbtermDrop_returnsRssToBaseline_under20MiB_overTenIterations")
+          fi
+          if ! grep -qE "Test Case .*test_soak_10s_feedAndSnapshot.*' passed" /tmp/swift-soak.log; then
+            missing+=("BBTermAdversarialTests.test_soak_10s_feedAndSnapshot_underBoundedMemory")
+          fi
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Soak sentinel FAILED - the following tests did not emit a 'passed' line:"
+            for t in "${missing[@]}"; do
+              echo "::error::  - $t"
+            done
+            echo "::error::This usually means TEST_RUNNER_BB_RUN_SOAK / TEST_RUNNER_BB_SOAK did not reach the xctest host, and the tests skipped via XCTSkipIf - yielding a meaningless green. Investigate Xcode env-propagation regression or scheme drift before merging anything that touches CI."
+            echo "::error::Skip lines from log (if any):"
+            grep -E "Test Case .*' skipped" /tmp/swift-soak.log >&2 || true
+            exit 1
+          fi
+          echo "::notice::Soak sentinel OK - all three soak tests emitted 'passed' markers."
+
+      - name: Upload test logs on failure
+        # Same shape as ci.yml's xcode-test-logs step: keep DerivedData
+        # test logs available for 7 days when a soak fails so we can
+        # inspect xctest-host crash logs / per-iteration RSS samples
+        # without re-running. Also include /tmp/swift-soak.log so the
+        # raw xcodebuild output (which our sentinel grep reads) is
+        # preserved for post-mortem.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-soak-logs-${{ github.run_id }}
+          path: |
+            ~/Library/Developer/Xcode/DerivedData/**/Logs/Test
+            /tmp/swift-soak.log
+          if-no-files-found: ignore
+          retention-days: 7
