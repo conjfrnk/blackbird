@@ -21,3 +21,24 @@ path = "fuzz_targets/fuzz_term_input.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_text_range"
+path = "fuzz_targets/fuzz_text_range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_reply_storm"
+path = "fuzz_targets/fuzz_reply_storm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_resize2"
+path = "fuzz_targets/fuzz_resize2.rs"
+test = false
+doc = false
+bench = false
