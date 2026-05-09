@@ -473,6 +473,36 @@ jobs:
         # deterministic.
         run: cargo test -p blackbird_core --test long_session_memory --release -- --ignored --nocapture --test-threads=1
 
+  rust-resources:
+    name: Rust — long-session FD + thread gate
+    runs-on: macos-14
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # Sibling gate to rust-memory above: that one watches RSS, this one
+      # watches non-memory OS handles. A regression that mem::forgets a
+      # File or spawns a worker thread per BBTerm wouldn't necessarily
+      # show up as RSS growth in 128 iterations, but would burn FDs /
+      # threads cycle by cycle until the process hits ulimit -n or a
+      # thread cap mid-session. Asserts return-to-baseline (modulo small
+      # absolute slop) across 1024 bb_term_new/free cycles.
+      - name: Run long-session FD + thread gate
+        # --test-threads=1: parallel runs would contaminate the
+        # process-wide FD table and thread list (the very things we
+        # measure); serial keeps absolute caps deterministic.
+        run: cargo test -p blackbird_core --test long_session_resources --release -- --ignored --nocapture --test-threads=1
+
   security-posture:
     name: Security posture — entitlements + hardened runtime
     runs-on: macos-14
