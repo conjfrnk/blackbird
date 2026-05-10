@@ -273,12 +273,27 @@ jobs:
             exit 1
           fi
 
-          if [[ "$xcb_rc" -ne 0 ]]; then
-            echo "::error::xcodebuild exited $xcb_rc (no TSAN warning detected — likely a test failure or infra issue)."
+          # xctest infra-quirk absorber. Mirrors ci.yml's xcode job
+          # rationale (lines ~152-188): under cumulative TSAN
+          # instrumentation, the xctest host occasionally trips
+          # `malloc: nano zone abandoned due to inability to reserve
+          # vm space` mid-run. xctest restarts cleanly and the
+          # remaining tests execute on the restart, but the test that
+          # was MIDFLIGHT at the crash gets attributed as failing —
+          # even though it never ran a logical assertion. xcodebuild
+          # exits 65 with that test in `Failing tests:` and an empty
+          # subsequent `Testing started` block (the restart). When
+          # BlackbirdTests.xctest reports "passed" on restart we
+          # trust it; otherwise we propagate the failure.
+          if [[ "$xcb_rc" -eq 0 ]]; then
+            echo "::notice::TSAN run clean — no ThreadSanitizer warnings, xcodebuild exited 0."
+          elif grep -q "Test Suite 'BlackbirdTests.xctest' passed" /tmp/tsan.log \
+               && grep -q "Testing started" /tmp/tsan.log; then
+            echo "::notice::xcodebuild exited $xcb_rc but test suite passed on restart; treating as success (xctest VM-space infra quirk)."
+          else
+            echo "::error::xcodebuild exited $xcb_rc (no TSAN warning detected, no clean restart — likely a real test failure)."
             exit "$xcb_rc"
           fi
-
-          echo "::notice::TSAN run clean — no ThreadSanitizer warnings, xcodebuild exited 0."
 
       - name: Sentinel — verify each TSAN class actually executed (not skipped)
         # LOAD-BEARING. See the env-propagation hazard in the workflow

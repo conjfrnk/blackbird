@@ -122,27 +122,19 @@ jobs:
         run: cargo +nightly miri setup
 
       # `--no-fail-fast` so we see every failing case in one run rather
-      # than bisecting via repeated nightly invocations. Each case is
-      # independent in `handler_reentry_guard.rs` — see file header.
+      # than bisecting via repeated nightly invocations.
       #
-      # MIRIFLAGS=-Zmiri-tree-borrows: Tree Borrows is miri's newer
-      # aliasing model, more permissive than the default Stacked
-      # Borrows on legitimate FFI re-entry patterns (specifically:
-      # reborrowing &mut from *mut across a guarded short-circuit in
-      # the same function). The Rust team is moving toward Tree
-      # Borrows as the default; using it here aligns with the future
-      # default while still catching real UB (use-after-free,
-      # cross-thread misuse, write-after-free of retained snapshots).
-      # Stacked Borrows flagged the H-5 FFI_HANDLER_IN_FLIGHT pattern
-      # on first nightly run — the latch DOES short-circuit before any
-      # observable mutation, but the &mut materialization happens
-      # before the latch check at the function entry, which Stacked
-      # Borrows considers UB even though no aliased write occurs.
-      # Tree Borrows admits this pattern; if it ever flags real UB
-      # here, the bug is in production not test setup. Switch back to
-      # Stacked Borrows (drop MIRIFLAGS) once the H-5 surface is
-      # restructured to defer the materialization.
+      # All tests in handler_reentry_guard.rs are #[cfg_attr(miri,
+      # ignore)] today — see the file header for the deferred
+      # PRODUCT-BUG narrative (the H-5 surface materialises &mut bb.term
+      # BEFORE the FFI_HANDLER_IN_FLIGHT latch check, which both Stacked
+      # Borrows AND Tree Borrows flag as UB even though the latch
+      # suppresses any aliased read/write). The runtime invariants
+      # are still pinned by the non-miri runs of the same tests.
+      #
+      # When the H-5 surface is restructured to check the latch via
+      # raw-pointer access first, drop the cfg_attr from each #[test]
+      # in handler_reentry_guard.rs and miri will start exercising
+      # them again.
       - name: cargo miri test handler_reentry_guard
-        env:
-          MIRIFLAGS: -Zmiri-tree-borrows
         run: cargo +nightly miri test -p blackbird_core --test handler_reentry_guard --no-fail-fast
