@@ -305,9 +305,18 @@ jobs:
         # nothing concurrency-relevant for them, and the workflow
         # accepts a meaningless green. This step refuses that
         # posture: each class must emit AT LEAST one
-        # `Test Case '...passed' line. We also fail if any class
-        # emits a `skipped` line (means the env-var propagation
-        # regressed).
+        # `Test Case '...passed' line.
+        #
+        # We do NOT additionally fail on `skipped` lines per-class,
+        # because several classes have legitimate per-test skips (TCC
+        # denial in MainThreadWatchdogTests::test_briefHang_*, the
+        # >256 MB allocation budget skip in BBTermLifetimeTests::
+        # test_resize_clampsToDocumentedRange, and the headless-
+        # xctest skips in MainWindowControllerLifetimeTests). Those
+        # legitimate skips do not indicate env-prop regression — the
+        # absence-of-passed check above already catches that case
+        # because the class would emit zero `passed` lines if the
+        # env-gate on its setUp tripped.
         #
         # Why per-class instead of per-method: every method-level
         # rename touches the workflow; per-class is the right
@@ -333,13 +342,9 @@ jobs:
             MainWindowControllerLifetimeTests
           )
           missing=()
-          skipped=()
           for cls in "${classes[@]}"; do
             if ! grep -qE "Test Case '-\[BlackbirdTests\.${cls} .*' passed" /tmp/tsan.log; then
               missing+=("$cls")
-            fi
-            if grep -qE "Test Case '-\[BlackbirdTests\.${cls} .*' skipped" /tmp/tsan.log; then
-              skipped+=("$cls")
             fi
           done
           if (( ${#missing[@]} > 0 )); then
@@ -348,14 +353,7 @@ jobs:
             echo "::error::This usually means the TEST_RUNNER_BB_RUN_FLAKY_PTY_TESTS / TEST_RUNNER_BB_RUN_STRESS_TESTS env vars did not propagate to the xctest host, the class was renamed without updating the only-testing filter, or the xctest bundle didn't load this class. Investigate before merging anything that touches CI."
             exit 1
           fi
-          if (( ${#skipped[@]} > 0 )); then
-            echo "::error::TSAN sentinel FAILED — the following classes emitted 'skipped' lines (env-var propagation broken):"
-            for c in "${skipped[@]}"; do echo "::error::  - $c"; done
-            echo "::error::A skipped test in this curated set means TSAN instrumented nothing concurrency-relevant for that class. Investigate the TEST_RUNNER_BB_* propagation."
-            grep -E "Test Case .*' skipped" /tmp/tsan.log >&2 || true
-            exit 1
-          fi
-          echo "::notice::TSAN sentinel OK — all 8 classes executed at least one test and none skipped."
+          echo "::notice::TSAN sentinel OK — all 8 classes emitted at least one passed line. Per-test legitimate skips are tolerated."
 
       - name: Upload TSAN log on failure
         if: failure()
