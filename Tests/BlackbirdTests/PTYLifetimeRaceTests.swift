@@ -61,9 +61,13 @@ final class PTYLifetimeRaceTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
-        // Audit M2: spawn no longer auto-starts the read loop. Drive the
-        // loop so terminate()'s teardown path (close fd + waitpid) actually
-        // runs — without this the test would leak an fd and a zombie.
+        // Audit M2: spawn no longer auto-starts the read loop. Wire a
+        // no-op onBytes (this test cares about the lifecycle, not the
+        // bytes), then drive the loop so terminate()'s teardown path
+        // (close fd + waitpid) actually runs — without this the test
+        // would leak an fd and a zombie. The startReading() body asserts
+        // setOnBytes was called first (PTY.swift:634, M2 misuse guard).
+        pty.setOnBytes { _ in }
         pty.startReading()
 
         // Wait briefly so /bin/sh is actually running (tcgetpgrp() against
@@ -116,7 +120,9 @@ final class PTYLifetimeRaceTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
-        // Audit M2: kick the read loop so terminate() reaps the child.
+        // Audit M2: setOnBytes (no-op — lifecycle test, bytes ignored)
+        // then kick the read loop so terminate() reaps the child.
+        pty.setOnBytes { _ in }
         pty.startReading()
         defer { pty.terminate() }   // belt-and-braces in case of mid-test trap
 
@@ -181,7 +187,9 @@ final class PTYLifetimeRaceTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
-        // Audit M2: kick the read loop so terminate() reaps the child.
+        // Audit M2: setOnBytes (no-op — lifecycle test, bytes ignored)
+        // then kick the read loop so terminate() reaps the child.
+        pty.setOnBytes { _ in }
         pty.startReading()
         // Let the child settle.
         let pump = expectation(description: "settle")
@@ -227,7 +235,9 @@ final class PTYLifetimeRaceTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
-        // Audit M2: drive the read loop so terminate() reaps the child.
+        // Audit M2: setOnBytes (no-op — lifecycle test, bytes ignored)
+        // then drive the read loop so terminate() reaps the child.
+        pty.setOnBytes { _ in }
         pty.startReading()
         // Let the child settle so its pgroup exists.
         let pump = expectation(description: "child settle")

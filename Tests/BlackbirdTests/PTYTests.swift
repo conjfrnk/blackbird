@@ -213,7 +213,11 @@ final class PTYTests: XCTestCase {
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
-        // Audit M2: kick the read loop so terminate() reaps the child.
+        // Audit M2: setOnBytes (no-op — concurrent-write test, byte
+        // content ignored) then kick the read loop so terminate() reaps
+        // the child. PTY.startReading() asserts setOnBytes was called
+        // first (PTY.swift:634, M2 misuse guard).
+        pty.setOnBytes { _ in }
         pty.startReading()
         let group = DispatchGroup()
         let concurrentQ = DispatchQueue(
