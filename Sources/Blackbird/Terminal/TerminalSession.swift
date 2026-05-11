@@ -687,23 +687,17 @@ public final class TerminalSession: ObservableObject {
             newSnap = self.bbterm.snapshot()
         }
         guard let newSnap else { return }
-        if Thread.isMainThread {
-            self.snapshot = newSnap
-        } else {
-            // Mirror publishPendingSnapshot's shape: weak self + post-hop
-            // isTerminated re-check under publishLock. Without this the
-            // closure strongly retains the session across the main hop and
-            // can write `@Published` after terminate() had its chance to
-            // tear consumers down (sibling of M-1 / F11).
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.publishLock.lock()
-                let terminated = self.isTerminated
-                self.publishLock.unlock()
-                guard !terminated else { return }
-                self.snapshot = newSnap
-            }
-        }
+        // Audit fix-#07 (2026-05-11): route through publishImmediate so the
+        // post-resize snapshot honours the H8 user-action-wins invariant.
+        // Previously this path wrote `self.snapshot = newSnap` directly,
+        // leaving `pendingSnapshot` alone — a feed-driven coalescer queued
+        // before the resize would fire AFTER our inline write and clobber
+        // the new-grid frame with pre-resize content. publishImmediate
+        // clears `pendingSnapshot=nil` under publishLock first, dropping
+        // any in-flight coalescer; it also already mirrors the M-1 / F11
+        // isTerminated re-check on the off-main hop, so the prior inline
+        // termination guard is subsumed.
+        publishImmediate(newSnap)
     }
 
     /// Async sibling of `resize(to:)` for non-drag callers. Trades the
