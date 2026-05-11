@@ -230,6 +230,61 @@ final class CwdTests: XCTestCase {
         }
     }
 
+    /// Audit fix-#01 (2026-05-11): when proc_pidpath / proc_listpids fail
+    /// on the rootPID (e.g. the foreground process exited between
+    /// tcgetpgrp and the classification walk; sandbox-restricted target;
+    /// EPERM), the classifier must fail-CLOSED to `.unknown` rather than
+    /// falling through to `.local`. The OSC 7 trust gate accepts only
+    /// `.local`; a fail-open `.local` on a remote shell whose proc
+    /// metadata is briefly inaccessible would cause cwdChanged events to
+    /// be trusted as local, mis-pointing `lastKnownCwd` for ⌘T cwd
+    /// inheritance.
+    ///
+    /// Setup: pick a pid sentinel that's guaranteed unallocated on this
+    /// system (Darwin pid_max is configurable via sysctl but is well
+    /// under INT32_MAX in practice). proc_pidpath against an unallocated
+    /// pid returns -1 with errno=ESRCH — the real-syscall-failure shape
+    /// the fix-#01 strict probes detect. Pre-fix-#01 this returned
+    /// `.local` because the BFS fell through `executableBasename==nil`
+    /// and `childPIDs==[]` (silently treating syscall failure as "no
+    /// match"/"no children"). Post-fix it returns `.unknown(reason:
+    /// "proc_pidpath failed on rootPID ...")`.
+    ///
+    /// Using a spawned-then-reaped pid would race: macOS pid recycling
+    /// can hand the slot to a stranger process before our classifier
+    /// runs, and proc_pidpath would succeed against the stranger
+    /// (returning .local for the stranger's tree). The sentinel approach
+    /// is deterministic.
+    func testClassifyProcessTreeOnDefunctPIDReturnsUnknown() {
+        // Pid INT32_MAX is unambiguously above any kernel allocation —
+        // Darwin's PID_MAX is on the order of 100K on stock kernels.
+        // Verify proc_pidpath fails before driving the classifier, so a
+        // future kernel change that allocates very large pids surfaces
+        // here rather than producing a false-pass.
+        let sentinelPID: pid_t = pid_t.max
+        var buf = [CChar](repeating: 0, count: 4096)
+        let probe = proc_pidpath(sentinelPID, &buf, UInt32(buf.count))
+        // Darwin's proc_pidpath returns 0 OR -1 for unallocated pids
+        // (kernel may reject early with n=0, or fail with n=-1+errno).
+        // Either signal counts as the syscall-failure shape the strict
+        // probe must detect. A successful (n > 0) probe would mean the
+        // sentinel is actually a live pid on this host — pick a larger
+        // sentinel in that case.
+        XCTAssertLessThanOrEqual(
+            probe, 0,
+            "test setup: proc_pidpath against pid_t.max must signal failure (n <= 0); if your kernel allocates pid_t.max, pick a larger sentinel"
+        )
+        let result = PTY.classifyProcessTree(rootPID: sentinelPID)
+        switch result {
+        case .local:
+            XCTFail("classifyProcessTree on a syscall-failing pid must fail-CLOSED to .unknown, got .local — regression of audit fix-#01")
+        case .remote(let basename, _):
+            XCTFail("classifyProcessTree on a syscall-failing pid must not match remote; got .remote(\(basename))")
+        case .unknown:
+            break  // expected
+        }
+    }
+
     /// Basename-set membership: the remote-binary set contains the
     /// canonical wrappers we said it would. Without this, a refactor
     /// that accidentally narrowed the set (e.g., dropped `mosh-client`
