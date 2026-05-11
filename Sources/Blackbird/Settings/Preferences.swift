@@ -279,6 +279,14 @@ public final class Preferences: ObservableObject {
             Preferences.k("osc52Enabled"):      false,
             Preferences.k("colorQueryEnabled"): false,
             Preferences.k("translucency"):      5.0,
+            // Audit fix-#15: this default was declared above as
+            // @AppStorage("bb.confirmMultiLinePaste") but never registered.
+            // Without registration the default isn't visible to sibling
+            // tooling (defaults read shows the key as absent until first
+            // write) and is also absent from sanitizeStoredTypes' boolKeys
+            // sweep — a `defaults write … -string "foo"` would persist
+            // unsanitized while every other bool pref gets cleaned up.
+            Preferences.k("confirmMultiLinePaste"): false,
         ])
 
         // Type-guard pass. `@AppStorage<Double>` trusts the KVC getter — a
@@ -534,6 +542,11 @@ public final class Preferences: ObservableObject {
         let boolKeys = [
             "cursorBlink", "confirmClose", "autoUpdateChecks",
             "osc52Enabled", "colorQueryEnabled",
+            // Audit fix-#15: include confirmMultiLinePaste in the
+            // sanitize sweep so a wrong-typed CLI write (e.g. defaults
+            // write … -string yes) is stripped before the registered
+            // default is applied, matching sibling bool prefs.
+            "confirmMultiLinePaste",
         ]
         for name in numericDoubleKeys {
             for key in [k(name), name] {
