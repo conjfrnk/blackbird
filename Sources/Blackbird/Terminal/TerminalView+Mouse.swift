@@ -618,12 +618,25 @@ extension TerminalView {
         // `Int(NaN)` / `Int(±Inf)` trap. Guard before the cast rather
         // than after — the scrollWheel path already uses this pattern.
         guard loc.x.isFinite, loc.y.isFinite else { return }
-        let rowY = (bounds.height - titlebarOnlyTopInset - loc.y) / metrics.cellHeight
+        // Audit fix-#19 (2026-05-11): clamp magnitude to `sanePx` BEFORE
+        // the Int() cast. `Int(Double)` traps when the magnitude exceeds
+        // Int.max (~9.2e18 on 64-bit) — `loc.y` is finite but bounded only
+        // by Double.greatestFiniteMagnitude (~1.79e308), so a bridged
+        // CGPoint with a finite-but-absurd value (fault injection,
+        // accessibility tool synthesising motion, exotic tablet driver)
+        // would trap inside the `min(maxCol, Int(colX))` expression below.
+        // Selection.bufferPoint uses the same sanePx clamp pattern at
+        // Selection.swift:137 — mirror it here so both mouse paths are
+        // protected.
+        let sanePx: CGFloat = 1_000_000
+        let safeY = min(max(0, loc.y), sanePx)
+        let safeX = min(max(0, loc.x), sanePx)
+        let rowY = (bounds.height - titlebarOnlyTopInset - safeY) / metrics.cellHeight
         // Subtract the L inset so a click at view-x=horizontalContentInsetPoints
         // maps to col 0 (matches the renderer's cell origin). Negative results
         // collapse via the max(0, …) clamp below — clicks inside the inset
         // strip report col 0, never a phantom -1.
-        let colX = (loc.x - TerminalView.horizontalContentInsetPoints) / metrics.cellWidth
+        let colX = (safeX - TerminalView.horizontalContentInsetPoints) / metrics.cellWidth
         // Clamp to a sane cell range so oversized coordinates (user
         // scrolled the window off the right edge of a 200k-col display)
         // don't overflow Int32 when encodeMouseReport stringifies them.
