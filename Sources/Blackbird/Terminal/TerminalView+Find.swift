@@ -180,7 +180,11 @@ extension TerminalView {
     /// observe `findMatchesSeq == snap.sequenceID` the matches are
     /// known-good against `snap`.
     /// Audit findbar-selection F11.
-    private func refreshFindMatchesIfStale() {
+    /// Audit fix-#18 (2026-05-11): promoted from private to internal so
+    /// replaceAllMatches (in TerminalView.swift) can call it before
+    /// iterating cached col-real findMatches against a possibly newer
+    /// snapshot — the wide-char DEL overcount window the audit names.
+    func refreshFindMatchesIfStale() {
         guard !findQuery.isEmpty else { return }
         guard let snap = currentSnapshot else { return }
         if findMatchesSeq != snap.sequenceID {

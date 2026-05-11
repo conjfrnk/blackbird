@@ -2685,6 +2685,16 @@ extension TerminalView {
     /// matches are silently skipped, preserving the documented behaviour
     /// for non-wrapped off-line matches.
     func replaceAllMatches(with replacement: String) {
+        // Audit fix-#18 (2026-05-11): re-derive findMatches against the
+        // current snapshot before iterating. A user who scrolls between
+        // ⌘F's performSearch and clicking Replace All can have col-real
+        // findMatches (cell-walked, in-viewport branch) paired with a
+        // snapshot whose cursor is now off-viewport — sendReplacement's
+        // nonSpacerCellCount fallback then col-spans a wide-char match
+        // and overcounts DELs by one per wide glyph. advanceFind already
+        // calls refreshFindMatchesIfStale (TerminalView+Find.swift:162);
+        // replaceAllMatches needs the same discipline.
+        refreshFindMatchesIfStale()
         let matches = effectiveFindMatches()
         guard !matches.isEmpty else { return }
         guard let snap = effectiveSnapshot() else { return }
