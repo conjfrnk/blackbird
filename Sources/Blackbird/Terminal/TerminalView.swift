@@ -2696,10 +2696,22 @@ extension TerminalView {
         // trailing blanks. Refuse only when the prior row's last cell is
         // non-blank AND contains a match — otherwise fall through to the
         // scrollback-skip path. Audit findbar-selection F4.
+        //
+        // Audit fix-#08 (2026-05-11): the `row` parameter on
+        // BBSnapshot.character(at:row:) indexes the viewport cells array
+        // (0..rows-1), NOT the buffer-line coordinate space. cursorLine
+        // is live-grid-row-relative; the corresponding viewport-row when
+        // displayOffset > 0 is `cursorLine + displayOffset`. Without the
+        // offset addition, a scrolled-back user clicking Replace All
+        // would read a stray scrollback row's last cell instead of the
+        // line physically above the cursor, mis-firing the guard either
+        // way (false-negative leads to DEL bytes overshooting wrapped
+        // input — the very corruption the guard exists to prevent).
         let priorRow = cursorLine - 1
+        let priorViewportRow = Int(priorRow) + snap.displayOffset
         if matches.contains(where: { $0.line == priorRow }),
            snap.cols > 0,
-           let priorLastCell = snap.character(at: snap.cols - 1, row: Int(priorRow)),
+           let priorLastCell = snap.character(at: snap.cols - 1, row: priorViewportRow),
            !priorLastCell.isWhitespace {
             findBar?.showTransientMessage("Refusing: matches span a possible wrapped input line")
             return
