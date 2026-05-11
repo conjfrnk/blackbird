@@ -103,6 +103,15 @@ public final class TerminalSession: ObservableObject {
 
     private static let promptMarkCap = 200
 
+    /// Audit fix-#22: drop a prompt mark when its absolute buffer line has
+    /// been evicted from scrollback (i.e. more than this many lines have
+    /// been written past the mark). Matches BBTerm's default scrollback
+    /// floor; users with smaller configs may see marks dropped slightly
+    /// earlier than strictly necessary, which is safe (loss of a UI
+    /// affordance, no correctness defect). Sessions with larger scrollback
+    /// keep their marks for the full retention.
+    private static let scrollbackEvictionThreshold: Int = 100_000
+
     /// Position of a recorded prompt in buffer coordinates.
     public struct PromptMark: Equatable, Hashable {
         /// History size (scrollback line count) at the moment the prompt
@@ -618,6 +627,24 @@ public final class TerminalSession: ObservableObject {
         // coreQueue and hit the sync self-deadlock invisibly.
         dispatchPrecondition(condition: .notOnQueue(coreQueue))
         guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
+            return
+        }
+        // Audit fix-#22 (2026-05-11): drop marks whose absolute buffer
+        // line has been evicted from scrollback. Once
+        // (snap.historySize - mark.historySize) exceeds the scrollback
+        // cap, the original prompt's line has been discarded; the
+        // existing target-arithmetic + min-clamp still produces a
+        // valid offset but it lands on whatever line happens to be at
+        // that position (mid-output, not the prompt). Walking back
+        // through the cycle then jumps to arbitrary interior lines
+        // rather than progressive prompts. Drop the now-orphaned mark
+        // and let the cycle promotion re-enter on the next press.
+        let elapsed = snap.historySize - mark.historySize
+        if elapsed > Self.scrollbackEvictionThreshold {
+            promptMarks.removeAll { $0 == mark }
+            if let cursor = promptCursor, cursor >= promptMarks.count {
+                promptCursor = promptMarks.isEmpty ? nil : promptMarks.count - 1
+            }
             return
         }
         let target = max(0, snap.historySize - mark.historySize - mark.gridRow)
