@@ -1052,20 +1052,24 @@ public final class TerminalSession: ObservableObject {
         // readQueue, then startReading() launches the loop. The order
         // matters: bytes the shell emits before the loop starts cannot
         // race past the closure assignment.
-        pty?.setOnBytes { [weak self] data in
-            guard let self else { return }
-            self.coreQueue.async { [weak self] in
-                self?.feed(data)
-            }
-        }
-        pty?.startReading()
-
-        // When the child exits (natural or SIGHUP), publish the exit code.
-        pty?.onExit = { [weak self] code in
-            self?.exitCode = code
-        }
-
-        // Route bbterm events (title/bell/fatal) to published properties.
+        //
+        // Audit fix-#06 (2026-05-11) — HANDLER-INSTALL-RACE: the bbterm
+        // event handler MUST be installed before any byte path that
+        // could feed bbterm.input. The read loop calls onBytes →
+        // coreQueue.async → feed → bbterm.input, which fires events
+        // through the C trampoline → BBTerm.dispatch. Without a handler
+        // installed, BBTerm.dispatch's `guard let handler else { return }`
+        // silently drops events. The shell typically emits OSC 7 / OSC
+        // 0/2 / DA1 reply within 10-30 ms of spawn (zsh vcs_info,
+        // starship, oh-my-zsh, fish themed prompts) — exactly the
+        // window between startReading() and the original onEvent
+        // assignment. Equally, the two-word Swift closure assignment
+        // to BBTerm.handler is not atomic vs a concurrent trampoline
+        // read on the coreQueue worker thread.
+        // Fix: install bbterm.onEvent and pty.onExit BEFORE setOnBytes
+        // /startReading so the dispatch chain is fully wired when bytes
+        // arrive. setOnBytes and startReading also stay in order (M2)
+        // so the read-loop closure is installed before the loop runs.
         bbterm.onEvent { [weak self] event in
             guard let self else { return }
             // Terminal → shell replies (DSR, DA1, DA2, DECRPM) must round-
@@ -1261,6 +1265,26 @@ public final class TerminalSession: ObservableObject {
                 }
             }
         }
+
+        // When the child exits (natural or SIGHUP), publish the exit code.
+        // Audit fix-#06: now wired BEFORE startReading() so a fast-fail
+        // shell (e.g. child _exit(127) immediately on launch) can't fire
+        // teardown's main hop with self.onExit == nil.
+        pty?.onExit = { [weak self] code in
+            self?.exitCode = code
+        }
+
+        // Audit M2 (now subsumed under fix-#06): setOnBytes serialises the
+        // assignment through PTY's readQueue, then startReading() launches
+        // the loop. The bbterm event handler installed ABOVE means any
+        // dispatch triggered by the first byte already has a target.
+        pty?.setOnBytes { [weak self] data in
+            guard let self else { return }
+            self.coreQueue.async { [weak self] in
+                self?.feed(data)
+            }
+        }
+        pty?.startReading()
 
         // Take an initial snapshot so observers have something on screen.
         // Routed through the coalescer so ordering against the first real
