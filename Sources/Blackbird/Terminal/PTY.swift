@@ -293,25 +293,27 @@ public final class PTY {
         // is safe) so the child path stays strictly POSIX/async-signal-
         // safe; matching keys are appended to scrubKeysC and unsetenv'd
         // alongside the static list.
+        // `environ` is `UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>`
+        // on Darwin — non-Optional at the outer level (always non-null in
+        // a hosted process), terminated by a nil entry in the array.
         var matchedPrefixedKeys: [String] = []
-        if let envPtr = environ {
-            var i = 0
-            while let entry = envPtr[i] {
-                let s = String(cString: entry)
-                if let eq = s.firstIndex(of: "=") {
-                    let key = String(s[..<eq])
-                    if key.hasPrefix("BLACKBIRD_") || key.hasPrefix("BB_") {
-                        // Avoid duplicating any explicit entry already
-                        // present in scrubbedParentEnvVars (today none of
-                        // the namespaced names overlap, but defend against
-                        // a future addition).
-                        if !Self.scrubbedParentEnvVars.contains(key) {
-                            matchedPrefixedKeys.append(key)
-                        }
+        let envPtr = environ
+        var i = 0
+        while let entry = envPtr[i] {
+            let s = String(cString: entry)
+            if let eq = s.firstIndex(of: "=") {
+                let key = String(s[..<eq])
+                if key.hasPrefix("BLACKBIRD_") || key.hasPrefix("BB_") {
+                    // Avoid duplicating any explicit entry already
+                    // present in scrubbedParentEnvVars (today none of
+                    // the namespaced names overlap, but defend against
+                    // a future addition).
+                    if !Self.scrubbedParentEnvVars.contains(key) {
+                        matchedPrefixedKeys.append(key)
                     }
                 }
-                i += 1
             }
+            i += 1
         }
         let scrubKeysC: [UnsafeMutablePointer<CChar>?] =
             (Self.scrubbedParentEnvVars + matchedPrefixedKeys).map { strdup($0) }
