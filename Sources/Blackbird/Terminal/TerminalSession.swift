@@ -504,10 +504,26 @@ public final class TerminalSession: ObservableObject {
         // owned by main).
         coreQueue.async { [weak self] in
             guard let self else { return }
+            // Audit fix-#11 (2026-05-11): mirror the F11 / M-1 / L-1
+            // termination-gate pattern that feed / publishPendingSnapshot /
+            // applyPalette use. Without this, a coreQueue.async block
+            // already in flight when terminate() runs would still capture
+            // a snapshot and queue a main-hop append, mutating
+            // promptMarks on a session whose consumers are tearing down.
+            self.publishLock.lock()
+            let terminated = self.isTerminated
+            self.publishLock.unlock()
+            if terminated { return }
             guard let snap = self.bbterm.snapshot() else { return }
             let mark = PromptMark(historySize: snap.historySize, gridRow: snap.cursorRow)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // Re-check on the main hop: terminate() could have run
+                // between the coreQueue body and main drain.
+                self.publishLock.lock()
+                let terminatedNow = self.isTerminated
+                self.publishLock.unlock()
+                if terminatedNow { return }
                 self.promptMarks.append(mark)
                 if self.promptMarks.count > Self.promptMarkCap {
                     self.promptMarks.removeFirst(self.promptMarks.count - Self.promptMarkCap)
