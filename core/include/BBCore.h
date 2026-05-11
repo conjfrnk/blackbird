@@ -745,9 +745,21 @@ struct BBString *bb_term_text_range(struct BBTerm *term,
  * the null guard can't catch it. Successful releases zero the magic so a
  * subsequent double-release is detected cheaply.
  *
+ * Audit fix-#25 (2026-05-11): the magic check + zero is performed via
+ * `AtomicU64::compare_exchange` (`AcqRel`/`Acquire`), so two threads
+ * racing release on the same pointer cannot both observe
+ * `BB_STRING_MAGIC` before either's zero-write lands. Exactly one
+ * thread's CAS succeeds and proceeds to `Box::from_raw`; the loser
+ * observes the zeroed sentinel and short-circuits, avoiding the
+ * double-free that the previous non-atomic `ptr::read` + `ptr::write`
+ * sequence permitted. The struct field stays `u64` (no cbindgen header
+ * churn) and is accessed atomically via `AtomicU64::from_ptr`.
+ *
  * # Safety
  * `s` must have been returned by `bb_term_text_range` and not previously
- * released. Passing null is a no-op.
+ * released. Passing null is a no-op. Concurrent calls from multiple
+ * threads on the SAME pointer are tolerated: the CAS singles out one
+ * caller as the actual freer.
  *
  * Panics inside this function are caught by `catch_unwind` and swallowed
  * silently (no `BBTerm` context is available). The function returns unit as
