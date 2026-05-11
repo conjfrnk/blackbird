@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// A full theme palette. Values are 0xRRGGBB; alpha is always opaque —
 /// terminals don't composite window transparency beyond the solid bg.
@@ -9,11 +10,31 @@ public struct ThemePalette: Equatable, Sendable {
     /// 16 ANSI colors — 0..7 = normal, 8..15 = bright.
     public var ansi: [UInt32]
 
+    private static let themeLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "theme")
+
     public init(background: UInt32, foreground: UInt32, cursor: UInt32, ansi: [UInt32]) {
         precondition(ansi.count == 16, "ansi must have 16 entries")
         self.background = background
         self.foreground = foreground
-        self.cursor = cursor
+        // Audit fix-#14 (2026-05-11): the original DEBUG-only asserts ship
+        // an invisible-cursor palette in release. The author explicitly
+        // didn't want to crash on a user-supplied theme with poor contrast
+        // (see comment block below), so the release path now snaps the
+        // cursor to the foreground color when its contrast against bg
+        // falls below 1.25 — that floor is much looser than the WCAG
+        // text threshold and only catches the degenerate "cursor RGB ==
+        // background RGB" case. A warning is emitted via os.Logger so
+        // the regression is visible in the unified log without breaking
+        // the user's session.
+        let cursorBg = Self.contrastRatio(fg: cursor, bg: background)
+        if cursorBg < 1.25 {
+            Self.themeLogger.warning(
+                "Theme palette cursor/background contrast \(cursorBg, format: .fixed(precision: 2)) < 1.25 — snapping cursor to foreground (was 0x\(String(cursor, radix: 16), privacy: .public), now 0x\(String(foreground, radix: 16), privacy: .public))"
+            )
+            self.cursor = foreground
+        } else {
+            self.cursor = cursor
+        }
         self.ansi = ansi
         #if DEBUG
         // Check the three "first-class" colors for glaring misconfiguration
@@ -25,15 +46,12 @@ public struct ThemePalette: Equatable, Sendable {
         // themes may dip to ~3-4 and still be legible for UI-chrome text).
         // The cursor check requires any contrast at all against the bg so
         // a cursor that blends into the background ships a visible warning
-        // during test runs. Release builds skip the guard entirely —
-        // ThemePalette is value-type and re-validated on every swap, which
-        // is unnecessary work in release and would also crash on a
-        // user-supplied theme with poor contrast rather than degrade.
-        // (settings F6)
+        // during test runs. Release builds rely on the snap-to-foreground
+        // fallback above instead of crashing — ThemePalette is value-type
+        // and re-validated on every swap. (settings F6 + fix-#14)
         let fgBg = Self.contrastRatio(fg: foreground, bg: background)
         assert(fgBg >= 3.0,
                "Theme palette foreground/background contrast \(fgBg) < 3:1")
-        let cursorBg = Self.contrastRatio(fg: cursor, bg: background)
         assert(cursorBg >= 1.25,
                "Theme palette cursor/background contrast \(cursorBg) < 1.25:1 — cursor is invisible")
         #endif
