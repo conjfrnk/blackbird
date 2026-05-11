@@ -199,34 +199,80 @@ public func wordRange(
         return nil
     }
     let cols = snapshot.cols
-    func ch(_ c: Int) -> Character? { snapshot.character(at: c, row: row) }
+
+    // Audit fix-#02 (2026-05-11): walk via BBSnapshot.cellKind so spacer
+    // cells (continuation of a wide glyph) are skipped through rather
+    // than treated as word-terminators. character(at:row:) collapses
+    // .spacer and .empty into nil, so the previous walk broke at the
+    // first spacer — double-clicking the leading half of `中文` selected
+    // only `中` because ch(1)==nil. cellKind distinguishes them.
+    func kindAt(_ c: Int) -> BBSnapshot.CellKind {
+        snapshot.cellKind(at: c, row: row)
+    }
+    func characterAt(_ c: Int) -> Character? {
+        if case .character(let ch) = kindAt(c) { return ch }
+        return nil
+    }
 
     // Wide-char (CJK, wide emoji) cells occupy two columns; the trailing
-    // column has ch=0 (spacer) even though the logical word continues
-    // through it. If the click landed on the trailing half, back up one
-    // to the leading cell so the expansion finds the real character —
-    // otherwise double-click on the right half of "中" returned nil and
-    // the selection didn't expand. Audit findbar-selection F36.
+    // column is a spacer. If the click landed on a spacer, back up to
+    // the leading character cell so the expansion finds the real word.
+    // Audit findbar-selection F36 + fix-#02.
     let anchorCol: Int
-    if ch(point.col) != nil {
+    switch kindAt(point.col) {
+    case .character:
         anchorCol = point.col
-    } else if point.col > 0, ch(point.col - 1) != nil {
-        anchorCol = point.col - 1
-    } else {
+    case .spacer:
+        // Trailing-half-of-wide-char click: walk left to the character.
+        // A run of leading-spacer cells is unusual but handled.
+        var c = point.col - 1
+        while c >= 0, case .spacer = kindAt(c) { c -= 1 }
+        guard c >= 0, case .character = kindAt(c) else { return nil }
+        anchorCol = c
+    case .empty, .invalid:
         return nil
     }
 
     // Point is on a blank / break / empty cell — there is no word to
     // expand. Return nil so callers (e.g. .word selection expansion) keep
     // their existing range instead of collapsing to a zero-width point.
-    guard let here = ch(anchorCol), !wordBreakers.contains(here) else {
+    guard let here = characterAt(anchorCol), !wordBreakers.contains(here) else {
         return nil
     }
 
+    // Backward walk: extend left over (character|spacer)+ until hitting
+    // an empty/invalid cell or a character that's a word-breaker.
     var l = anchorCol
-    while l > 0, let c = ch(l - 1), !wordBreakers.contains(c) { l -= 1 }
+    backwardLoop: while l > 0 {
+        switch kindAt(l - 1) {
+        case .character(let ch):
+            if wordBreakers.contains(ch) { break backwardLoop }
+            l -= 1
+        case .spacer:
+            // Continuation cell of a wide glyph at some earlier column —
+            // walk through it; the character itself will be evaluated
+            // on the next iteration.
+            l -= 1
+        case .empty, .invalid:
+            break backwardLoop
+        }
+    }
+
+    // Forward walk: extend right symmetrically. Final position is the
+    // last cell of the run (may be a trailing spacer for the rightmost
+    // wide glyph) so the visual selection covers the full glyph extent.
     var r = anchorCol
-    while r + 1 < cols, let c = ch(r + 1), !wordBreakers.contains(c) { r += 1 }
+    forwardLoop: while r + 1 < cols {
+        switch kindAt(r + 1) {
+        case .character(let ch):
+            if wordBreakers.contains(ch) { break forwardLoop }
+            r += 1
+        case .spacer:
+            r += 1
+        case .empty, .invalid:
+            break forwardLoop
+        }
+    }
 
     return (BufferPoint(line: point.line, col: l), BufferPoint(line: point.line, col: r))
 }

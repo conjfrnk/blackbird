@@ -226,7 +226,13 @@ final class WordRangeTests: XCTestCase {
         // "漢字" — two CJK chars, followed by a space separator.
         // Width handling varies across alacritty versions and
         // terminfo caps; what we pin is "wordRange returns a
-        // non-nil range starting at col 0".
+        // non-nil range starting at col 0 AND extending past the
+        // first CJK character when alacritty assigns wide width".
+        // Audit fix-#02 (2026-05-11): tightened from the previous
+        // (0...3).contains(endCol) check which accepted endCol==0 —
+        // i.e. the bug where the expansion broke at the trailing
+        // spacer of the first wide glyph. cellKind-based walking
+        // now skips over spacers, so wide CJK runs select as a unit.
         let snap = try snapshot(for: "漢字 end")
         // Click on the first char's leading cell (col 0).
         guard let r = wordRange(around: p(0), in: snap, displayOffset: 0) else {
@@ -234,15 +240,16 @@ final class WordRangeTests: XCTestCase {
             return
         }
         XCTAssertEqual(r.0.col, 0, "leading col should be 0")
-        // endCol is in [0, 3] depending on the CJK width policy in
-        // play. If it's 0 alacritty collapsed the pair to one cell
-        // each narrow (only `漢` covers col 0); 1 means narrow CJK
-        // (two cells total); 3 means wide CJK (four cells total).
-        // All are acceptable — the bug we guard against is "nil
-        // because col 1 has scalar 0 and expansion terminated early".
+        // endCol depends on alacritty's CJK width assignment:
+        //   narrow (1 cell each, 2 total): endCol == 1
+        //   wide   (2 cells each, 4 total): endCol == 3
+        //   half-wide (mixed): endCol == 2
+        // All three signal a successful expansion through BOTH
+        // characters. endCol == 0 is the post-fix-#02 regression
+        // signal: spacer broke the walk after only `漢`.
         XCTAssertTrue(
-            (0...3).contains(r.1.col),
-            "expansion endCol should be in [0, 3], got \(r.1.col)"
+            (1...3).contains(r.1.col),
+            "expansion must reach past the first CJK glyph (endCol in [1,3]); got \(r.1.col) — regression of audit fix-#02 (spacer broke the walk)"
         )
     }
 
