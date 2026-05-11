@@ -1635,14 +1635,32 @@ static HANDLER_REENTRY_LOGGED: Once = Once::new();
 /// a second mutable alias of the alacritty `Term`. The first re-entry on
 /// process lifetime is logged once via `HANDLER_REENTRY_LOGGED`; later
 /// hits are silent so a sustained regression doesn't flood the log.
+///
+/// Audit S1-043 / S2-011 / fix-#09 (2026-05-11): also short-circuits when
+/// a Fatal dispatch is in flight (`FFI_FATAL_IN_FLIGHT`). The Fatal path
+/// in `guard_with_term` holds `&*term` while invoking the user callback
+/// outside of `CallbackCell::fire` (so `FFI_HANDLER_IN_FLIGHT` is NOT
+/// engaged on that path). A Fatal handler that synchronously calls
+/// `bb_term_input` would otherwise reborrow `&mut *term`, aliasing the
+/// outer `&*term`, AND fire a nested event whose Swift dispatch would
+/// trip the release-mode `isInsideEventDispatch` precondition and abort
+/// the process. Treating both latches as equivalent re-entry signals
+/// keeps the Rust core defensive against either dispatch flavour.
 fn ffi_reentry_blocked(entry: &str) -> bool {
-    if !FFI_HANDLER_IN_FLIGHT.with(|c| c.get()) {
+    let in_handler = FFI_HANDLER_IN_FLIGHT.with(|c| c.get());
+    let in_fatal = FFI_FATAL_IN_FLIGHT.with(|c| c.get());
+    if !in_handler && !in_fatal {
         return false;
     }
     HANDLER_REENTRY_LOGGED.call_once(|| {
+        let path = if in_fatal {
+            "fatal dispatch"
+        } else {
+            "event handler"
+        };
         eprintln!(
-            "[blackbird_core] {entry} called from inside event handler — \
-             dropping re-entrant call to avoid &mut Term alias. Audit H-5."
+            "[blackbird_core] {entry} called from inside {path} — \
+             dropping re-entrant call to avoid &mut Term alias. Audit H-5/fix-#09."
         );
     });
     true
@@ -4666,6 +4684,88 @@ mod tests {
 
             bb_term_free(term);
             Arc::from_raw(state_ptr as *const State);
+        }
+    }
+
+    /// Audit S1-043 / S2-011 / fix-#09 (2026-05-11): a Fatal-event
+    /// handler that synchronously calls a non-panicking `bb_term_*`
+    /// FFI must be short-circuited by `ffi_reentry_blocked`. Without
+    /// this gate the inner call would proceed: it reborrows `&mut Term`
+    /// while the outer `guard_with_term` Fatal path still holds
+    /// `&*term`, fires events through `CallbackCell::fire`, and the
+    /// nested Swift `BBTerm.dispatch` would observe
+    /// `isInsideEventDispatch == true` (from the outer Fatal dispatch
+    /// that flipped it on entry) and trip its release-mode
+    /// `precondition`, aborting the whole process. The Rust guard
+    /// catches it one frame earlier so the inner call simply no-ops.
+    #[test]
+    fn ffi_call_inside_fatal_handler_is_dropped() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct State {
+            term: *mut BBTerm,
+            inner_input_attempted: Mutex<bool>,
+        }
+        unsafe impl Send for State {}
+        unsafe impl Sync for State {}
+
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            let state = &*(ctx as *const State);
+            if ev.kind == BBEventKind::Fatal {
+                let mut attempted = state.inner_input_attempted.lock().unwrap();
+                if !*attempted {
+                    *attempted = true;
+                    drop(attempted);
+                    // Re-enter the FFI with a non-panicking input. If
+                    // ffi_reentry_blocked doesn't honour FFI_FATAL_IN_FLIGHT,
+                    // the inner call proceeds, the parser processes 'X',
+                    // and the grid records it at row 0 col 0.
+                    let x: u8 = b'X';
+                    bb_term_input(state.term, &x as *const u8, 1);
+                }
+            }
+        }
+
+        let state = Box::into_raw(Box::new(State {
+            term: std::ptr::null_mut(),
+            inner_input_attempted: Mutex::new(false),
+        }));
+
+        unsafe {
+            let term = bb_term_new(20, 5, 100);
+            (*state).term = term;
+            bb_term_set_event_cb(term, Some(cb), state as *mut c_void);
+
+            // Trigger Fatal. The callback's nested bb_term_input("X") must
+            // be short-circuited by ffi_reentry_blocked.
+            bb_term_test_only_panic(term);
+
+            assert!(
+                *(*state).inner_input_attempted.lock().unwrap(),
+                "callback should have attempted the inner re-entry"
+            );
+
+            // Now verify the inner 'X' was DROPPED (parser never saw it).
+            // The snapshot must show cell (0,0) is empty (alacritty fills
+            // unset cells with the space/empty sentinel, ch=0x20). If the
+            // inner call ran, ch would be b'X' = 0x58.
+            let snap = bb_term_take_snapshot(term);
+            assert!(!snap.is_null(), "snapshot must succeed post-Fatal");
+            let cell0 = *((*snap).cells.add(0));
+            assert_ne!(
+                cell0.ch, b'X' as u32,
+                "re-entered bb_term_input from Fatal handler must be \
+                 dropped by ffi_reentry_blocked — got 'X' at (0,0), \
+                 meaning the inner call processed bytes while the outer \
+                 Fatal dispatch was still live (alias UB + Swift \
+                 precondition abort hazard)"
+            );
+            bb_snap_release(snap);
+
+            bb_term_set_event_cb(term, None, std::ptr::null_mut());
+            bb_term_free(term);
+            drop(Box::from_raw(state));
         }
     }
 
