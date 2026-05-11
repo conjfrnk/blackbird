@@ -43,8 +43,30 @@ public final class PTY {
     /// Invoked once after the child process has exited and been reaped.
     /// Fires whether the exit was natural (shell typed `exit`) or induced by
     /// `terminate()` (which sends SIGHUP). Called on the main queue exactly
-    /// once. Nil by default; callers opt in to observe.
-    public var onExit: ((Int32) -> Void)?
+    /// once. Nil by default; callers opt in via `setOnExit(_:)`.
+    ///
+    /// Audit fix-#17 (2026-05-11): promoted to `private(set)` and access
+    /// is now serialised through `readQueue` to mirror the `onBytes` /
+    /// `setOnBytes` shape. Previously a plain `var` mutated on whatever
+    /// thread the caller chose, while the read-loop teardown's
+    /// `DispatchQueue.main.async { self?.onExit?(...) }` block reads it
+    /// on main. Today's only writer (`TerminalSession.wire`) runs on
+    /// main, so happens-before holds via main's serial runloop; the
+    /// hardening is for a future off-main caller (Task-dispatched
+    /// `start(shell:)`) that would otherwise race the read-loop main hop.
+    public private(set) var onExit: ((Int32) -> Void)?
+
+    /// Audit fix-#17: setter that mirrors `setOnBytes`. The closure
+    /// assignment is enqueued on `readQueue` so the read-loop teardown's
+    /// main-async block, which reads `onExit`, has the assignment
+    /// happens-before its read via the readQueue → main dispatch chain
+    /// established at startReading time. Callers must use this setter
+    /// rather than touching `onExit` directly.
+    public func setOnExit(_ closure: ((Int32) -> Void)?) {
+        readQueue.async { [weak self] in
+            self?.onExit = closure
+        }
+    }
 
     /// Environment variables the GUI app inherits from launchd / XPC that
     /// we scrub before exec'ing the user's shell. Exposed as a static so

@@ -1297,7 +1297,13 @@ public final class TerminalSession: ObservableObject {
         // Audit fix-#06: now wired BEFORE startReading() so a fast-fail
         // shell (e.g. child _exit(127) immediately on launch) can't fire
         // teardown's main hop with self.onExit == nil.
-        pty?.onExit = { [weak self] code in
+        //
+        // Audit fix-#17 (2026-05-11): use setOnExit(_:) so the assignment
+        // is serialised through PTY.readQueue (mirroring setOnBytes).
+        // The read-loop teardown reads onExit on main via async-from-
+        // readQueue, so this gives us a happens-before chain even if a
+        // future caller dispatches start() off-main.
+        pty?.setOnExit { [weak self] code in
             self?.exitCode = code
         }
 
