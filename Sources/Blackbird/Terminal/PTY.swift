@@ -279,8 +279,42 @@ public final class PTY {
         // through the fork keeps the child path strictly POSIX-safe.
 
         // 1. Scrub list as C strings.
+        //
+        // Audit fix-#13 (2026-05-11): extend the fixed deny-list with a
+        // prefix sweep over Blackbird-namespaced parent envs (BLACKBIRD_*
+        // and BB_*). Today's surface (BLACKBIRD_STARTUP_LOG,
+        // BB_HANG_WATCHDOG, BB_LATENCY_PROBE, …) is configuration-only
+        // and benign to leak — but the deny-list pattern doesn't catch
+        // future contributors adding token-bearing variants
+        // (BLACKBIRD_API_KEY, BB_TOKEN, …) by default. Sweeping the
+        // current parent environ for matching prefixes catches every
+        // existing and future namespace member without further
+        // maintenance. Done in the parent (where Swift String iteration
+        // is safe) so the child path stays strictly POSIX/async-signal-
+        // safe; matching keys are appended to scrubKeysC and unsetenv'd
+        // alongside the static list.
+        var matchedPrefixedKeys: [String] = []
+        if let envPtr = environ {
+            var i = 0
+            while let entry = envPtr[i] {
+                let s = String(cString: entry)
+                if let eq = s.firstIndex(of: "=") {
+                    let key = String(s[..<eq])
+                    if key.hasPrefix("BLACKBIRD_") || key.hasPrefix("BB_") {
+                        // Avoid duplicating any explicit entry already
+                        // present in scrubbedParentEnvVars (today none of
+                        // the namespaced names overlap, but defend against
+                        // a future addition).
+                        if !Self.scrubbedParentEnvVars.contains(key) {
+                            matchedPrefixedKeys.append(key)
+                        }
+                    }
+                }
+                i += 1
+            }
+        }
         let scrubKeysC: [UnsafeMutablePointer<CChar>?] =
-            Self.scrubbedParentEnvVars.map { strdup($0) }
+            (Self.scrubbedParentEnvVars + matchedPrefixedKeys).map { strdup($0) }
         defer { scrubKeysC.forEach { if let p = $0 { free(p) } } }
 
         // 2. Validate envOverrides here (Swift String/Dictionary work
