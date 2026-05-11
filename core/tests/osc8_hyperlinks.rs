@@ -297,3 +297,48 @@ fn osc8_invalid_link_id_returns_null() {
         bb_term_free(term);
     }
 }
+
+#[test]
+fn osc8_uri_with_rlo_bidi_scalar_drops_attribution() {
+    // Audit S4-001 / fix-#03. A hostile remote can embed U+202E
+    // (RIGHT-TO-LEFT OVERRIDE) into the OSC 8 URI; Foundation's
+    // URL(string:) percent-encodes it, slipping the URI past the
+    // Swift-side `containsPercentEncodedControlBytes` gate (which only
+    // matches %00-%1F and %7F). The OSC 7 path rejects bidi scalars at
+    // ingest (lib.rs:1146) and the title path scrubs them
+    // (scrub_title_controls); OSC 8 must do the same — refusing to
+    // attribute the cell rather than passing the raw bytes through.
+    let seq = b"\x1b]8;;https://safe.com/login\xe2\x80\xaeextra\x1b\\X\x1b]8;;\x1b\\";
+    assert_eq!(
+        snap_link_for_cell(seq, 0, 0),
+        None,
+        "OSC 8 URI containing U+202E must drop attribution; current behaviour stores bytes verbatim"
+    );
+}
+
+#[test]
+fn osc8_uri_with_lrm_invisible_scalar_drops_attribution() {
+    // Sibling of `osc8_uri_with_rlo_bidi_scalar_drops_attribution`. U+200E
+    // (LEFT-TO-RIGHT MARK) is in the same rejection set per
+    // is_bidi_or_invisible_scalar — same OSC 7 / title parity intent.
+    let seq = b"\x1b]8;;https://safe.com/\xe2\x80\x8eextra\x1b\\X\x1b]8;;\x1b\\";
+    assert_eq!(
+        snap_link_for_cell(seq, 0, 0),
+        None,
+        "OSC 8 URI containing U+200E must drop attribution"
+    );
+}
+
+#[test]
+fn osc8_uri_with_safe_unicode_still_attributes() {
+    // Negative control for the bidi reject: a URI containing non-bidi
+    // unicode (e.g. percent-encoded host) must still attribute. Guards
+    // against an over-broad scrub that drops legitimate links.
+    let uri = "https://example.com/%E2%9C%93"; // ✓ checkmark, not in reject set
+    let seq = format!("\x1b]8;;{}\x1b\\X\x1b]8;;\x1b\\", uri);
+    assert_eq!(
+        snap_link_for_cell(seq.as_bytes(), 0, 0).as_deref(),
+        Some(uri),
+        "OSC 8 URI with safe unicode (percent-encoded checkmark) must still attribute"
+    );
+}

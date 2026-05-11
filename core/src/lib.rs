@@ -2754,6 +2754,21 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                     // we defensively treat an empty uri as "no link".
                     if uri.is_empty() || uri.len() > OSC8_URI_MAX {
                         0
+                    } else if contains_bidi_or_invisible(uri.as_bytes()) {
+                        // Audit S4-001 / fix-#03. Parity with the OSC 7 path
+                        // (lib.rs:1146) and the OSC 0/2 title scrubber
+                        // (scrub_title_controls): drop attribution for URIs
+                        // carrying raw bidi-override / invisible scalars.
+                        // Foundation's URL(string:) percent-encodes them on
+                        // the Swift side, slipping the URI past the
+                        // containsPercentEncodedControlBytes regex (which
+                        // matches %00-%1F and %7F only); QuickLook / future
+                        // chrome surfaces that render the raw stored bytes
+                        // would honour U+202E (RIGHT-TO-LEFT OVERRIDE) and
+                        // visually flip the URL the user reads. Rejecting
+                        // here matches the OSC 7 posture rather than relying
+                        // on every display-side consumer to scrub.
+                        0
                     } else if let Some(&id) = local_uri_to_id.get(uri) {
                         id
                     } else if phase1_uris.len() + 1 >= u16::MAX as usize {
