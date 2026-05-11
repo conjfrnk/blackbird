@@ -164,10 +164,19 @@ enum MainThreadWatchdog {
     /// survives reboots so post-hoc investigation works, and doesn't
     /// race with `/tmp` cleaners on very long sessions.
     private static func captureHangReport(age: Double) {
-        let ts = Int(Date().timeIntervalSince1970)
+        // Audit fix-#21 (2026-05-11): the previous filename used 1-second
+        // granularity (`Int(timeIntervalSince1970)`). Two hangs that recover
+        // and re-stall within the same wall-clock second produce identical
+        // paths; sample(1) -file opens with truncate semantics, silently
+        // clobbering the first trace. Append a per-process UUID component
+        // so each capture is unique even on collision and the first trace
+        // survives to disk for post-hoc investigation.
+        let now = Date().timeIntervalSince1970
+        let tsMs = Int64(now * 1000.0)
+        let unique = String(UUID().uuidString.prefix(8))
         let pid = getpid()
         let dir = logDirectory()
-        let file = "\(dir)/hang-\(ts).txt"
+        let file = "\(dir)/hang-\(tsMs)-\(pid)-\(unique).txt"
         logger.warning("main-thread hang \(age, format: .fixed(precision: 2), privacy: .public)s — writing \(file, privacy: .public)")
 
         // 2 seconds of sampling at default granularity — enough to catch
