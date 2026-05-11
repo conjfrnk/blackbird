@@ -2081,11 +2081,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // not perfect, but the cost of a false positive on a legitimate
         // query with seven quantifiers is "user uses a different tool",
         // versus the cost of a false negative which is a frozen UI.
+        //
+        // Audit fix-#10 (2026-05-11): also count nested optionals (`?`).
+        // The shape `a?a?a?…aaaa` (N optionals followed by N literals)
+        // produces 2^N backtracking branches in ICU's NFA engine —
+        // exponential blowup that the pre-fix gate let through because
+        // `?` wasn't in the quantCount tally. Treat `?` the same as
+        // `+`/`*`/`{`: 6 of them combined is the cap.
         var quantCount = 0
         var i = pattern.startIndex
         while i < pattern.endIndex {
             let c = pattern[i]
-            if c == "+" || c == "*" {
+            if c == "+" || c == "*" || c == "?" {
                 quantCount += 1
             } else if c == "{" {
                 // Treat any `{` as a possible quantifier; we don't
