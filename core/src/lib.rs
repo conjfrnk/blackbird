@@ -3312,10 +3312,15 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
 }
 
 /// Update one slot of the terminal's color palette. Slot indices match
-/// alacritty's `NamedColor` ordering: 0..=15 = 16 ANSI colors, 16..=255 =
-/// extended 256-palette, 256 = Foreground, 257 = Background, 258 = Cursor,
-/// 259 = BrightForeground, plus a few more (see alacritty's NamedColor enum).
-/// `rgb` is packed 0xRRGGBB.
+/// alacritty's `NamedColor` ordering (vte-0.15.0/src/ansi.rs): 0..=15 =
+/// 16 ANSI colors, 16..=255 = extended 256-palette, 256 = Foreground,
+/// 257 = Background, 258 = Cursor, 259..=266 = DimBlack..DimWhite,
+/// 267 = BrightForeground, 268 = DimForeground. `rgb` is packed
+/// 0xRRGGBB. Slot count is alacritty's `term::color::COUNT` (269 in
+/// 0.26); slots ≥ COUNT are silently ignored.
+/// (Pre-fix-#24 this doc said "259 = BrightForeground" — wrong; that
+/// slot is DimBlack. The correct mapping was confirmed against
+/// vte-0.15.0 source on 2026-05-11.)
 ///
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null `term` is a no-op. Slots

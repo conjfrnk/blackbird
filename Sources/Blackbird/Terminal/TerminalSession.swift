@@ -941,14 +941,59 @@ public final class TerminalSession: ObservableObject {
             for (i, c) in palette.ansi.enumerated() {
                 self.bbterm.setColor(slot: i, rgb: c)
             }
-            // NamedColor layout in alacritty 0.26:
+            // NamedColor layout in alacritty 0.26 (per vte-0.15.0/src/ansi.rs):
             //   256 = Foreground, 257 = Background, 258 = Cursor
+            //   259..=266 = DimBlack..DimWhite
+            //   267 = BrightForeground, 268 = DimForeground
             self.bbterm.setColor(slot: 256, rgb: palette.foreground)
             self.bbterm.setColor(slot: 257, rgb: palette.background)
             self.bbterm.setColor(slot: 258, rgb: palette.cursor)
+            // Audit fix-#24 (2026-05-11): without explicit writes for slots
+            // 267/268 the renderer falls through to named_color_rgb's
+            // hardcoded 0xEEEEEE for both BrightForeground and
+            // DimForeground (lib.rs:2513,2524). A TUI that emits bold
+            // default-fg (xterm bold-color path) or SGR 2 dim default-fg
+            // would render the xterm default regardless of theme — wrong
+            // under Solarized Dark / Catppuccin / Light variants where
+            // 0xEEEEEE clashes with the chosen palette. Derive from the
+            // theme's foreground: lighten 20% toward white for Bright,
+            // darken 30% toward black for Dim. Matches alacritty's own
+            // SGR-1 / SGR-2 expected behaviour reasonably well; users
+            // with explicit OSC 4/10 overrides for these slots still win
+            // because OSC writes land via the same setColor path.
+            let brightFg = Self.lightenRGB(palette.foreground, by: 0.20)
+            let dimFg = Self.darkenRGB(palette.foreground, by: 0.30)
+            self.bbterm.setColor(slot: 267, rgb: brightFg)
+            self.bbterm.setColor(slot: 268, rgb: dimFg)
             guard let snap = self.bbterm.snapshot() else { return }
             self.publishPendingSnapshot(snap)
         }
+    }
+
+    /// Audit fix-#24 helper: blend a 0xRRGGBB color toward white by
+    /// `factor` in [0, 1]. factor=0 returns the input unchanged;
+    /// factor=1 returns 0xFFFFFF. Saturating at 255 per channel.
+    private static func lightenRGB(_ rgb: UInt32, by factor: Double) -> UInt32 {
+        let r = Double((rgb >> 16) & 0xFF)
+        let g = Double((rgb >> 8) & 0xFF)
+        let b = Double(rgb & 0xFF)
+        let nr = UInt32(min(255.0, r + (255.0 - r) * factor).rounded())
+        let ng = UInt32(min(255.0, g + (255.0 - g) * factor).rounded())
+        let nb = UInt32(min(255.0, b + (255.0 - b) * factor).rounded())
+        return (nr << 16) | (ng << 8) | nb
+    }
+
+    /// Audit fix-#24 helper: blend a 0xRRGGBB color toward black by
+    /// `factor` in [0, 1]. factor=0 returns the input unchanged;
+    /// factor=1 returns 0x000000.
+    private static func darkenRGB(_ rgb: UInt32, by factor: Double) -> UInt32 {
+        let r = Double((rgb >> 16) & 0xFF)
+        let g = Double((rgb >> 8) & 0xFF)
+        let b = Double(rgb & 0xFF)
+        let nr = UInt32(max(0.0, r * (1.0 - factor)).rounded())
+        let ng = UInt32(max(0.0, g * (1.0 - factor)).rounded())
+        let nb = UInt32(max(0.0, b * (1.0 - factor)).rounded())
+        return (nr << 16) | (ng << 8) | nb
     }
 
     /// Extract text between two buffer points. Serialized through the core
