@@ -255,15 +255,23 @@ final class RealLatencyProbeWindowedTests: XCTestCase {
         // direct call ensures markKeystroke fires even in that
         // pathological host config.
         //
-        // Then between keystrokes we explicitly call view.draw() to
-        // drive `MetalRenderer.render(in:)` → markPresented through the
-        // SAME code path production uses, with real GPU work. This is
-        // what makes the timing "real" vs the synthetic harness: the
-        // renderer encodes a frame, submits a command buffer, and waits
-        // for a present semaphore — all of which takes real wall-clock
-        // time the user would see. The xctest virtual display may not
-        // drive a CVDisplayLink at vblank cadence, so explicit draw()
-        // is the load-bearing path here.
+        // After markKeystroke arms, we feed the same byte directly into
+        // the headless BBTerm via `feedBytesForTests`. In production the
+        // PTY would echo the keystroke back; the resulting snapshot
+        // change is what drives `MetalRenderer.render(in:)` past its
+        // frame-skip cache (FrameKey == lastFrameKey → no encode, no
+        // markPresented). Without this byte-feed, every draw after the
+        // first one short-circuits on identical FrameKey, `markPresented`
+        // never fires, and the probe stays empty — the failure mode the
+        // nightly soak surfaced on 2026-05-12 when the GHA virtual
+        // display finally granted us a drawable. Feeding the byte mirrors
+        // the production keypress→echo→render→pixel loop (including the
+        // round-trip latency that real users perceive).
+        //
+        // Then we pump 30 ms so the snapshot publish lands on main and
+        // any CVDisplayLink-driven draws fire, then explicit view.draw()
+        // backs up that path on hosts where the display link isn't
+        // firing at vblank cadence (xctest virtual display).
         let letters = Array("abcdefghij")
         for i in 0..<10 {
             let chars = String(letters[i])
@@ -282,8 +290,18 @@ final class RealLatencyProbeWindowedTests: XCTestCase {
             NSApp.sendEvent(keyEvent)
             view.keyDown(with: keyEvent)
 
-            // Pump briefly between keystrokes for any window-server
-            // driven draw hops; 30 ms is two ~60 Hz frames.
+            // Drive a snapshot change so the renderer's FrameKey skip
+            // cache doesn't short-circuit the next draw. ASCII printable
+            // for letters[i] always exists (a-j); feeding it advances
+            // the 2×2 BBTerm cursor and produces a fresh BBSnapshot
+            // (new sequenceID) which is what FrameKey compares on.
+            if let scalar = letters[i].asciiValue {
+                session.feedBytesForTests(Data([scalar]))
+            }
+
+            // Pump briefly between keystrokes for the snapshot publish
+            // to land on main + any window-server driven draw hops;
+            // 30 ms is two ~60 Hz frames.
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
 
             // Explicit draw exercises markPresented via real Metal work
