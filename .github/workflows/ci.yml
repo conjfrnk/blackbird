@@ -35,6 +35,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       - name: fmt
         run: cargo fmt --all -- --check
@@ -100,6 +101,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       - name: Select Xcode 16.2
         run: sudo xcode-select -s /Applications/Xcode_16.2.app
@@ -269,6 +271,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       - name: Select Xcode 16.2
         run: sudo xcode-select -s /Applications/Xcode_16.2.app
@@ -326,6 +329,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       - name: Select Xcode 16.2
         run: sudo xcode-select -s /Applications/Xcode_16.2.app
@@ -421,6 +425,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       - name: Select Xcode 16.2
         run: sudo xcode-select -s /Applications/Xcode_16.2.app
@@ -564,6 +569,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       - name: Select Xcode 16.2
         run: sudo xcode-select -s /Applications/Xcode_16.2.app
@@ -630,6 +636,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "core/fuzz -> target"
+          cache-bin: 'false'
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -674,6 +681,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       # --ignored picks up core/tests/throughput.rs, which is hidden from the
       # default `cargo test` run (release-only regression gate, not a
@@ -698,6 +706,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       # Asserts the new/input/snap/free and snapshot-churn loops don't leak
       # by measuring RSS via mach_task_basic_info. An actual leak shows up
@@ -725,6 +734,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       # Sibling gate to rust-memory above: that one watches RSS, this one
       # watches non-memory OS handles. A regression that mem::forgets a

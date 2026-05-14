@@ -113,6 +113,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-bin: 'false'
 
       # `cargo miri setup` builds miri's interpreter-instrumented
       # stdlib once per (toolchain, target) pair. Splitting it into its
