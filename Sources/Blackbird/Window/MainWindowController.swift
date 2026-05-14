@@ -111,13 +111,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// to inherit the previous tab's cwd.
     private let initialWorkingDirectory: String?
 
-    /// Whether this window should APPLY the autosaved frame at init.
-    /// Only the first window of a session does so — later ⌘T / ⌘N windows
-    /// keep AppKit's default cascade. Save behaviour is independent: ANY
-    /// window's user-driven resize / move updates the autosave key, so the
-    /// frame on disk always reflects the user's most recent intent
-    /// regardless of which window made the change. See `saveCurrentFrame`.
-    private let restoresFrameOnInit: Bool
+    /// True while `super.showWindow` is running — used to suppress
+    /// `saveCurrentFrame` for the cascade-induced `windowDidMove` that
+    /// `NSWindowController.shouldCascadeWindows = true` (the default)
+    /// fires during the first `showWindow`. Without this gate, opening
+    /// a ⌘N window writes the cascaded constructor-default 800×480
+    /// frame to the autosave key and clobbers the user's previously
+    /// saved size — the inverse of the close-time-clobber the
+    /// dropped `windowWillClose` save protected against. Caught in
+    /// the 2026-05-14 code-reviewer pass on the cross-window save fix.
+    private var isPerformingShowWindow = false
 
     /// User-defaults key every Blackbird main window persists its frame
     /// under. Hoisted to one place so the explicit save / restore drivers
@@ -128,7 +131,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     init(initialWorkingDirectory: String? = nil, autosaveFrame: Bool = true) {
         self.initialWorkingDirectory = initialWorkingDirectory
-        self.restoresFrameOnInit = autosaveFrame
         // `.fullSizeContentView` extends the content view (the Metal view) all
         // the way under the titlebar. Combined with `titlebarAppearsTransparent`
         // (set by TerminalView when translucent), the Metal clearColor fills the
@@ -269,7 +271,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     required init?(coder: NSCoder) { fatalError("not supported") }
 
     override func showWindow(_ sender: Any?) {
+        // `NSWindowController.shouldCascadeWindows` defaults to true,
+        // which makes `super.showWindow` call `setFrameTopLeftPoint` to
+        // offset the window from any sibling. That call fires
+        // `windowDidMove` synchronously — the delegate hook below now
+        // runs `saveCurrentFrame`, which would write the cascaded
+        // 800×480 ⌘N default frame to the autosave key and clobber
+        // the user's previously saved frame. Gate via a transient flag
+        // for the duration of the super call so the cascade-induced
+        // move doesn't reach defaults; user-driven moves after show
+        // see the flag cleared. (2026-05-14 review of 333abf9.)
+        isPerformingShowWindow = true
         super.showWindow(sender)
+        isPerformingShowWindow = false
         // Private CGS blur API needs a live windowNumber; windowNumber is
         // only assigned once the window is ordered in. The first theme
         // apply happens during init (before super), so the blur call then
@@ -472,8 +486,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// reflects the user's most recent resize / move regardless of which
     /// window made it. Idempotent: writing the same frame twice has no
     /// effect.
+    ///
+    /// Two gates suppress saves that would corrupt the persisted frame:
+    ///   1. `isPerformingShowWindow` — skips the cascade-induced
+    ///      `windowDidMove` that fires during `super.showWindow` (see
+    ///      the override below for the full diagnosis).
+    ///   2. `.fullScreen` styleMask — entering native fullscreen drives
+    ///      the frame to screen-size and fires `windowDidResize`; saving
+    ///      that frame would have the next launch open the window at
+    ///      screen-size *without* fullscreen mode, burying traffic
+    ///      lights and overlapping the menu bar. Save only the
+    ///      windowed-mode frame.
     private func saveCurrentFrame() {
+        guard !isPerformingShowWindow else { return }
         guard let win = window else { return }
+        guard !win.styleMask.contains(.fullScreen) else { return }
         win.saveFrame(usingName: Self.frameAutosaveName)
     }
 
