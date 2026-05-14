@@ -111,21 +111,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// to inherit the previous tab's cwd.
     private let initialWorkingDirectory: String?
 
-    /// Whether this window should participate in NSWindow frame autosave.
-    /// Only the first window of a session does — otherwise multiple windows
-    /// contending for the same autosave key clobber each other's position.
-    private let shouldAutosaveFrame: Bool
+    /// Whether this window should APPLY the autosaved frame at init.
+    /// Only the first window of a session does so — later ⌘T / ⌘N windows
+    /// keep AppKit's default cascade. Save behaviour is independent: ANY
+    /// window's user-driven resize / move updates the autosave key, so the
+    /// frame on disk always reflects the user's most recent intent
+    /// regardless of which window made the change. See `saveCurrentFrame`.
+    private let restoresFrameOnInit: Bool
 
-    /// User-defaults key the first window persists its frame under. Hoisted
-    /// to one place so the explicit save/restore drivers below and the
-    /// `setFrameAutosaveName` call in `init` can never drift apart — the
-    /// string IS the storage contract (AppKit prepends `"NSWindow Frame "`
-    /// and stores the result in `standardUserDefaults`).
+    /// User-defaults key every Blackbird main window persists its frame
+    /// under. Hoisted to one place so the explicit save / restore drivers
+    /// below and the `setFrameAutosaveName` call in `init` can never drift
+    /// apart — the string IS the storage contract (AppKit prepends
+    /// `"NSWindow Frame "` and stores the result in `standardUserDefaults`).
     static let frameAutosaveName: NSWindow.FrameAutosaveName = "BlackbirdMainWindow"
 
     init(initialWorkingDirectory: String? = nil, autosaveFrame: Bool = true) {
         self.initialWorkingDirectory = initialWorkingDirectory
-        self.shouldAutosaveFrame = autosaveFrame
+        self.restoresFrameOnInit = autosaveFrame
         // `.fullSizeContentView` extends the content view (the Metal view) all
         // the way under the titlebar. Combined with `titlebarAppearsTransparent`
         // (set by TerminalView when translucent), the Metal clearColor fills the
@@ -154,14 +157,29 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // answer in AppDelegate which tells the OS "we have nothing to
         // restore, and that's intentional." Audit main-window F23.
         window.isRestorable = false
+        // Every Blackbird main window registers the autosave name so its
+        // resize / move delegate hooks can update the persisted frame (see
+        // `windowDidResize` / `windowDidMove` below). Only the first window
+        // of a session APPLIES the saved frame at init — later ⌘T / ⌘N
+        // windows keep AppKit's default cascade so they don't stack
+        // exactly on top of the restored window.
+        //
+        // The implicit save-on-resize/move that AppKit normally hooks off
+        // `setFrameAutosaveName` does NOT fire reliably for this window's
+        // combination of `tabbingMode = .preferred`, `tabbingIdentifier`,
+        // `isRestorable = false`, and `isReleasedWhenClosed = false`. The
+        // user-visible bug was "type `exit`, relaunch, window appears at
+        // default size" — resizes never reached defaults. We drive the
+        // save explicitly from `windowDidResize` / `windowDidMove` (see
+        // `saveCurrentFrame` below) so persistence is independent of
+        // AppKit's hook firing, and is captured even when the user does
+        // all their resizing on a window other than the original — the
+        // 2026-05-12 dogfood report that motivated the cross-window save.
+        window.setFrameAutosaveName(Self.frameAutosaveName)
         if autosaveFrame {
-            // Only the first window persists its frame. New tabs/windows use
-            // AppKit's tab-group positioning or a cascaded default — having
-            // every window share one autosave name would race them.
-            //
             // TWO-STEP RESTORE:
-            //   1. `setFrameAutosaveName` registers the name (the storage
-            //      contract — AppKit will read/write under
+            //   1. `setFrameAutosaveName` (above) registers the name (the
+            //      storage contract — AppKit will read/write under
             //      `"NSWindow Frame <name>"` in standardUserDefaults).
             //   2. `setFrameUsingName` *applies* the saved frame to this
             //      window NOW, synchronously. Without this explicit apply,
@@ -173,18 +191,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             //      regresses for users whose saved frame referenced a
             //      now-missing display. Driving the apply ourselves keeps
             //      the nudge meaningful.
-            //
-            // The implicit save-on-resize/move that AppKit normally hooks
-            // off `setFrameAutosaveName` does NOT fire reliably for this
-            // window's combination of `tabbingMode = .preferred`,
-            // `tabbingIdentifier`, `isRestorable = false`, and
-            // `isReleasedWhenClosed = false`. The user-visible bug was
-            // "type `exit`, relaunch, window appears at default size" —
-            // resizes never reached defaults. We drive the save explicitly
-            // from `windowDidResize` / `windowDidMove` / `windowWillClose`
-            // (see `saveAutosaveFrameIfNeeded` below) so persistence is
-            // independent of AppKit's hook firing.
-            window.setFrameAutosaveName(Self.frameAutosaveName)
             window.setFrameUsingName(Self.frameAutosaveName)
             let nudged = nudgeFrameOntoVisibleScreen(
                 window.frame,
@@ -448,28 +454,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     func windowWillClose(_ notification: Notification) {
-        // Final flush of the frame to defaults before the window goes away.
-        // The shell-exit close path (`exit` typed in the shell →
-        // `deferredAutoCloseIfNeeded` → `performClose`) does NOT trigger
-        // `[NSApplication terminate:]`'s "save autosaved frames for all
-        // windows" private hook the way ⌘Q does — and AppKit's
-        // resize/move autosave hook isn't firing for this window's
-        // `tabbingMode = .preferred` config (see init for the full
-        // diagnosis). Without an explicit save here, every resize made
-        // during a session that's quit by typing `exit` is lost.
-        saveAutosaveFrameIfNeeded()
+        // No close-time `saveCurrentFrame` here: the resize / move delegate
+        // hooks already capture the live frame on every user-driven
+        // change, so close is purely redundant in the happy path — and
+        // *harmful* for an untouched ⌘N window whose frame is the
+        // constructor default (800×480). Saving on close would overwrite
+        // the user's previously-persisted size with that default, which
+        // was the 2026-05-12 dogfood-reported regression vector when we
+        // removed the per-window save gate.
         terminateSessions()
         onClose?()
     }
 
     /// Persist the live window frame under our autosave key. Called from
-    /// `windowDidResize`, `windowDidMove`, and `windowWillClose`. No-op
-    /// when `shouldAutosaveFrame == false` (tabs / ⌘N standalone windows
-    /// — only the first window of a session owns the autosave key, so
-    /// secondary windows must NOT clobber it on their own resize/move).
-    /// Idempotent: writing the same frame twice has no effect.
-    private func saveAutosaveFrameIfNeeded() {
-        guard shouldAutosaveFrame, let win = window else { return }
+    /// `windowDidResize` and `windowDidMove`. Every Blackbird main window
+    /// participates — the last writer wins, so the saved frame always
+    /// reflects the user's most recent resize / move regardless of which
+    /// window made it. Idempotent: writing the same frame twice has no
+    /// effect.
+    private func saveCurrentFrame() {
+        guard let win = window else { return }
         win.saveFrame(usingName: Self.frameAutosaveName)
     }
 
@@ -899,10 +903,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         refreshTabBar()
         // AppKit's implicit autosave-on-resize isn't firing for this
         // window's tabbing config (see init for the full diagnosis), so
-        // drive the save ourselves on every resize. Idempotent and
-        // gated on `shouldAutosaveFrame` so secondary windows don't
-        // clobber the first window's persisted frame.
-        saveAutosaveFrameIfNeeded()
+        // drive the save ourselves on every resize. Idempotent. ALL
+        // windows save — the saved frame on disk tracks the user's most
+        // recent resize regardless of which window owned it.
+        saveCurrentFrame()
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -911,7 +915,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // explicitly. Without this, the user's "drag the window to a
         // new corner of the screen, type `exit`" workflow loses the
         // new position on relaunch.
-        saveAutosaveFrameIfNeeded()
+        saveCurrentFrame()
     }
 
     // MARK: - Tab bar affordances

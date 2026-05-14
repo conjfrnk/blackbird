@@ -56,9 +56,9 @@ final class WindowFrameAutosaveTests: XCTestCase {
 
     /// Baseline: explicit `saveFrame(usingName:)` writes the current
     /// frame to standardUserDefaults under the documented key. This is
-    /// the primitive `MainWindowController.saveAutosaveFrameIfNeeded`
-    /// is built on; if AppKit ever changed its storage shape this
-    /// would catch it before the production path silently broke again.
+    /// the primitive `MainWindowController.saveCurrentFrame` is built
+    /// on; if AppKit ever changed its storage shape this would catch
+    /// it before the production path silently broke again.
     func test_saveFrameUsingName_writesFrameToDefaults() {
         let contentRect = NSRect(x: 100, y: 200, width: 800, height: 480)
         let styleMask: NSWindow.StyleMask = [.titled, .closable, .resizable]
@@ -140,6 +140,95 @@ final class WindowFrameAutosaveTests: XCTestCase {
             saved?.hasPrefix(prefix) ?? false,
             "saved frame must reflect the resize, not the initial frame (got: \(saved ?? "nil"))"
         )
+    }
+
+    /// Cross-window last-write-wins: when two NSWindow instances share the
+    /// same autosave name and each calls `saveFrame(usingName:)`, the
+    /// SECOND write overwrites the first. This pins the principle that
+    /// MainWindowController's post-2026-05-12 fix relies on — ANY window
+    /// can update the persisted frame, not just the launch-time first
+    /// window. Before the fix, `saveCurrentFrame` was gated on a
+    /// per-controller `shouldAutosaveFrame` flag that was only ever true
+    /// for the very first window; if the user closed that one and kept
+    /// working in a ⌘N/⌘T window, every subsequent resize was dropped
+    /// and relaunch came back at the stale frame. The fix removes the
+    /// gate so this test's assertion ("write from window B wins over
+    /// window A") is the contract production now depends on.
+    func test_saveFrameUsingName_lastWriteWinsAcrossWindows() throws {
+        // Pin both frames inside the main screen's visibleFrame so
+        // AppKit's screen-relocation logic in setFrameUsingName can't
+        // distort the round-trip on a multi-monitor host.
+        let mainScreen = try XCTUnwrap(NSScreen.main,
+            "test host has no main NSScreen")
+        let vis = mainScreen.visibleFrame
+        let frameA = NSRect(
+            x: vis.origin.x + 40,
+            y: vis.origin.y + 40,
+            width: min(CGFloat(900), floor(vis.width / 3)),
+            height: min(CGFloat(600), floor(vis.height / 3))
+        )
+        let frameB = NSRect(
+            x: vis.origin.x + 200,
+            y: vis.origin.y + 200,
+            width: min(CGFloat(1200), floor(vis.width / 2)),
+            height: min(CGFloat(750), floor(vis.height / 2))
+        )
+        XCTAssertNotEqual(frameA, frameB,
+            "test setup precondition: the two frames must differ")
+
+        // Window A — stand-in for the "first" window in a Blackbird
+        // session. Saves frame A.
+        let winA = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        winA.isReleasedWhenClosed = false
+        defer { winA.close() }
+        winA.setFrameAutosaveName(Self.testAutosaveName)
+        winA.setFrame(frameA, display: false)
+        winA.saveFrame(usingName: Self.testAutosaveName)
+        let savedAfterA = UserDefaults.standard.string(forKey: Self.defaultsKey)
+        XCTAssertNotNil(savedAfterA,
+            "window A's save must populate the autosave key")
+
+        // Window B — stand-in for a ⌘N or ⌘T window that the user
+        // resized AFTER closing (or alongside) window A. Saves frame B
+        // under the SAME autosave name. The pre-fix gate would have
+        // suppressed this save in production.
+        let winB = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        winB.isReleasedWhenClosed = false
+        defer { winB.close() }
+        winB.setFrameAutosaveName(Self.testAutosaveName)
+        winB.setFrame(frameB, display: false)
+        winB.saveFrame(usingName: Self.testAutosaveName)
+
+        let savedAfterB = UserDefaults.standard.string(forKey: Self.defaultsKey)
+        XCTAssertNotEqual(savedAfterA, savedAfterB,
+            "window B's save must overwrite window A's (last write wins)")
+
+        // A fresh window restores to frame B, NOT frame A. This is the
+        // user-visible contract: the most recently resized window's
+        // frame is what relaunch sees, regardless of which window made
+        // the change.
+        let restorer = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+            styleMask: [.titled, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        restorer.isReleasedWhenClosed = false
+        defer { restorer.close() }
+        XCTAssertTrue(restorer.setFrameUsingName(Self.testAutosaveName),
+            "setFrameUsingName must succeed when the key is populated")
+        XCTAssertEqual(restorer.frame, frameB,
+            "restored frame must match the LAST writer (frame B), not the earlier frame A")
     }
 
     // MARK: - Defaults → restore
