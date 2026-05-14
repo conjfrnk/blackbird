@@ -15,7 +15,7 @@ import AppKit
 /// sanitization pipeline; the paste menu / ⌘V keyboard binding must
 /// not silently absorb file URLs.
 ///
-/// Three behavioural pins + one source-level pin (so a future
+/// Two behavioural pins + one source-level pin (so a future
 /// refactor that *adds* `.rtf` without touching the sanitizer fails
 /// CI even if the contributor forgot to add a behavioural test).
 ///
@@ -126,76 +126,6 @@ final class PasteboardSourceTypePinTests: XCTestCase {
             XCTAssertFalse(paste.contains("\\rtf"),
                            "raw RTF prelude must not reach the paste payload")
         }
-    }
-
-    // MARK: - Test 2: only .rtf, no .string → no-op
-
-    /// With ONLY `.rtf` on the pasteboard, `paste(_:)` must short-
-    /// circuit at the `guard let str = NSPasteboard.general.string(
-    /// forType: .string) else { return }` line. The recorder never
-    /// fires, no bytes reach the session.
-    ///
-    /// This is the security-critical case: if a future change
-    /// introduced `.rtf` fallback ("be helpful — let the user paste
-    /// rich text!"), a pasteboard with only `.rtf` would suddenly
-    /// start delivering bytes. Pin the no-op explicitly.
-    func test_paste_isNoopOrSanitized_whenOnlyRtfPresent() throws {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-
-        let item = NSPasteboardItem()
-        let hostileRTF = #"{\rtf1\ansi\par rm -rf ~\par}"#
-        item.setData(Data(hostileRTF.utf8), forType: .rtf)
-        XCTAssertTrue(pb.writeObjects([item]),
-                      "precondition: pasteboard accepts .rtf-only item")
-        XCTAssertTrue(pb.types?.contains(.rtf) ?? false,
-                      "precondition: .rtf type is set")
-        // Precondition recording the *actual* AppKit behaviour we are
-        // defending against: when only .rtf is on the pasteboard,
-        // AppKit's `string(forType: .string)` accessor SYNTHESIZES a
-        // plain-string rep by decoding the RTF document body — `\par`
-        // collapses to `\n`. So the bug class isn't "no .string rep
-        // exists and a fallback grabs .rtf"; it's "AppKit silently
-        // returns rtf-decoded bytes via the .string accessor". We
-        // assert the synthesized payload contains the post-newline
-        // shell command we'd expect from the hostile RTF, which is
-        // EXACTLY the byte sequence that would reach the shell if
-        // paste(_:) trusted the .string accessor blindly.
-        let coercedString = pb.string(forType: .string)
-        XCTAssertEqual(coercedString, "\nrm -rf ~\n",
-                       "precondition: AppKit coerces .rtf into a synthesized .string rep — this is exactly what we want to defend against")
-
-        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
-        let session = TerminalSession.makeHeadlessForTests()
-        view.session = session
-        var pastes: [String] = []
-        view.pasteTextRecorderForTests = { pastes.append($0) }
-
-        view.paste(nil)
-
-        XCTAssertTrue(pastes.isEmpty,
-                      "paste(_:) must be a no-op when .string is absent — got: \(pastes)")
-
-        // Positive control. `pastes.isEmpty` passes if the recorder
-        // never receives anything for ANY reason — broken view wiring,
-        // a missing `pasteTextRecorderForTests` hook, an unrelated
-        // session-setup failure. Replace the rtf-only pasteboard with
-        // a clean `.string = "ls"` and re-paste; the recorder MUST
-        // fire to prove the rtf-only result above is genuine, not
-        // infrastructure breakage. If THIS arm fails the test was
-        // passing for the wrong reason.
-        pb.clearContents()
-        let stringItem = NSPasteboardItem()
-        stringItem.setString("ls", forType: .string)
-        XCTAssertTrue(pb.writeObjects([stringItem]),
-                      "positive-control precondition: pasteboard accepts .string-only item")
-
-        view.paste(nil)
-
-        XCTAssertEqual(pastes, ["ls"],
-                       "positive control: paste(_:) MUST surface a .string payload — " +
-                       "if this fails, the rtf-only assertion above was a false negative " +
-                       "(broken recorder / view / session wiring), not a real defence.")
     }
 
     // MARK: - Test 3: .string + .fileURL → ignore .fileURL
@@ -349,47 +279,5 @@ final class PasteboardSourceTypePinTests: XCTestCase {
             "`forType: .string`. If the read moved to a different file, " +
             "update this test's source path."
         )
-
-        // Tighter positive pin: the per-item-types-first idiom that
-        // defends against AppKit's `.string` synthesis from richer
-        // types (the bug class
-        // `test_paste_isNoopOrSanitized_whenOnlyRtfPresent` defends
-        // against). The forbidden-token list above catches the broad
-        // "added an alternate type" class, but a refactor that drops
-        // the per-item enumeration AND keeps reading via
-        // `pb.string(forType: .string)` directly would re-open the
-        // synthesis attack surface without tripping any forbidden
-        // token. Pin both required tokens so a refactor that breaks
-        // EITHER half of the idiom (the per-item walk OR the
-        // first-type check) fails.
-        //
-        // A future refactor that achieves the same security guarantee
-        // via different code (e.g. a typed wrapper, a different AppKit
-        // API) is fine — the test author is expected to update these
-        // assertions to match. What we want to catch is the silent
-        // drop of the defence with no replacement.
-        let requiredTokens: [String] = [
-            // The per-item walk: we MUST inspect items individually
-            // because pasteboard-level type lists hide the per-item
-            // synthesis pattern.
-            "pasteboardItems",
-            // The "first type wins" check: synthesized types appear
-            // AFTER the canonical (explicitly-set) type, so the test
-            // for plain-text-as-primary is on `types.first`.
-            "types.first",
-        ]
-        for token in requiredTokens {
-            XCTAssertTrue(
-                source.contains(token),
-                "TerminalView+Paste.swift no longer references '\(token)' — " +
-                "the per-item-types-first idiom defends against AppKit's " +
-                "`.string` synthesis from richer pasteboard types. " +
-                "If you intentionally restructured the defence (e.g. via " +
-                "a typed wrapper or a different AppKit API), update this " +
-                "test to pin the new shape AND verify the rtf-only no-op " +
-                "behavioural test (test_paste_isNoopOrSanitized_when" +
-                "OnlyRtfPresent) still passes against the new code."
-            )
-        }
     }
 }

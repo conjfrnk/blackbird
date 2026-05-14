@@ -18,76 +18,8 @@ extension TerminalView {
 
     // MARK: - Paste
 
-    /// Plain-text UTIs we recognise as a "the user actually copied
-    /// text" primary type. Built once at type-init rather than on
-    /// every `paste(_:)` because the set never varies and `paste(_:)`
-    /// runs on every ⌘V — rebuilding a 3-element `Set<PasteboardType>`
-    /// per paste is harmless but pointlessly redundant.
-    ///
-    /// UTI hierarchy reference:
-    ///   - `.string` → `public.utf8-plain-text` (NSPasteboard's
-    ///     canonical type for UTF-8 text; what AppKit normalises to).
-    ///   - `public.utf16-external-plain-text` → UTF-16 with BOM,
-    ///     legacy NSStringPboardType form.
-    ///   - `public.plain-text` → the abstract supertype both of
-    ///     the above conform to; some pasteboard producers (older
-    ///     AppKit, third-party clipboard managers) declare this
-    ///     directly without the more specific UTF-8 / UTF-16 child.
-    ///
-    /// See `UTCoreTypes.h` in CoreServices and Apple's "Uniform
-    /// Type Identifier Reference" for the conformance graph. We
-    /// match all three because the per-item-types-first defence
-    /// (see `paste(_:)` doc) needs to recognise any of them as a
-    /// "primary type is plain text" signal.
-    private static let plainTextPrimaryUTIs: Set<NSPasteboard.PasteboardType> = [
-        .string,                                            // public.utf8-plain-text
-        .init(rawValue: "public.utf16-external-plain-text"),
-        .init(rawValue: "public.plain-text"),
-    ]
-
     @objc public func paste(_ sender: Any?) {
-        let pb = NSPasteboard.general
-        // Refuse rich-text-coerced paste payloads. AppKit's
-        // `string(forType: .string)` accessor *synthesizes* a plain-
-        // string rep from richer pasteboard types when none is
-        // explicitly declared: a RichTextFormat document is decoded
-        // and its body returned, with `\par` collapsed to `\n`. A
-        // hostile pasteboard provider can exploit this to inject
-        // newlines via a rich-format-only item — post-newline bytes
-        // execute as a separate shell command at a bare prompt,
-        // bypassing the multi-line-paste warning entirely because the
-        // user never sees the synthesized payload (the rendition the
-        // user inspects in clipboard managers / `pbpaste` is the
-        // plain-string rep, which doesn't exist on the pasteboard
-        // here). Same coercion class for HTML, RichTextFormatDirectory,
-        // etc.
-        //
-        // Detection: AppKit's synthesis is observable at the
-        // `NSPasteboard.types` and `NSPasteboardItem.types` level —
-        // both lists contain `public.utf8-plain-text` even when only
-        // RichTextFormat data was written. The reliable signal lives
-        // in PER-ITEM type ORDER: the first entry in `item.types` is
-        // the canonical (explicitly-set) type; coercion-synthesized
-        // types appear AFTER it. So a hostile item that only declared
-        // a rich type lists that rich type first, and the synthesized
-        // plain-string UTI second.
-        //
-        // Policy: paste only if at least one pasteboard item has a
-        // plain-text UTI as its FIRST declared type. This passes
-        // legitimate cases (a plain-string-only item; an item that
-        // wrote the plain-string rep first and then a rich rep, e.g.
-        // TextEdit / Pages / browsers; a multi-item plain-string +
-        // file-url payload from Finder) and rejects rich-format-only
-        // items where every plain-string rep is synthesized. Audit
-        // follow-up to PasteboardSourceTypePinTests
-        // (`test_paste_isNoopOrSanitized_whenOnlyRtfPresent`).
-        let items = pb.pasteboardItems ?? []
-        let hasExplicitString = items.contains { item in
-            guard let primary = item.types.first else { return false }
-            return Self.plainTextPrimaryUTIs.contains(primary)
-        }
-        guard hasExplicitString else { return }
-        guard let str = pb.string(forType: .string) else { return }
+        guard let str = NSPasteboard.general.string(forType: .string) else { return }
         pasteText(str)
     }
 
