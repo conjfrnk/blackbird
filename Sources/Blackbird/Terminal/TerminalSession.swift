@@ -485,6 +485,17 @@ public final class TerminalSession: ObservableObject {
             guard let self, let bytes = self.bbterm.focusChangeBytes(focused: focused) else {
                 return
             }
+            // S2-010: gate on isTerminated so a focus-change dispatched
+            // before terminate() but processed after doesn't hand bytes
+            // to PTY.writeImmediate on a stopped session. PTY's own
+            // shouldKeepRunning() guard makes this a no-op today, but
+            // contracts that rely on a sibling subsystem's defensive
+            // check rot quietly when that sibling refactors. Mirrors
+            // the gate every other coreQueue.async path uses.
+            self.publishLock.lock()
+            let terminated = self.isTerminated
+            self.publishLock.unlock()
+            if terminated { return }
             self.pty?.writeImmediate(bytes)
         }
     }
@@ -1370,6 +1381,18 @@ public final class TerminalSession: ObservableObject {
         // single-dispatch path).
         coreQueue.async { [weak self] in
             guard let self else { return }
+            // S1-007: skip the snapshot work entirely when terminate()
+            // already ran. publishPendingSnapshot would gate the actual
+            // @Published write, but the upstream bbterm.snapshot() FFI
+            // call still allocates a BBSnap (Rust-side Arc) that the
+            // wrapper would then drop unobserved. The gate also stops a
+            // single trailing snapshot from landing on the @Published
+            // pipeline after consumers have torn down their sinks —
+            // observable in tests that race construct/terminate.
+            self.publishLock.lock()
+            let terminated = self.isTerminated
+            self.publishLock.unlock()
+            if terminated { return }
             if let snap = self.bbterm.snapshot() {
                 self.publishPendingSnapshot(snap)
             }
