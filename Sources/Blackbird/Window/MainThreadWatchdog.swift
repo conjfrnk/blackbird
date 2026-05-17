@@ -232,6 +232,72 @@ enum MainThreadWatchdog {
         }
     }
 
+    /// Audit S4-003 (2026-05-17): reap orphan `hang-*.txt.partial`
+    /// siblings left over from a prior session's force-quit during
+    /// `captureHangReport`'s 2 s sample(1) window.
+    ///
+    /// The S5-004 atomic-rename pattern protects Settings → Diagnostics
+    /// from surfacing a truncated trace, but the matching
+    /// `DiagnosticReportStore` filter requires the `.txt` suffix — a
+    /// `.partial` orphan is invisible to the user, never garbage-
+    /// collected, and accumulates silently across force-quit cycles.
+    /// Run at app startup; any partial older than `olderThan` is
+    /// reaped. The safety threshold keeps a concurrent in-flight
+    /// capture (vanishingly unlikely at launch, but cheap insurance)
+    /// from being reaped from under itself.
+    ///
+    /// Filename gate is the exact shape `captureHangReport` writes
+    /// (`hang-<tsMs>-<pid>-<uuid>.txt.partial`); arbitrary user-placed
+    /// `*.partial` files and other tools' `*.txt.partial` swap files
+    /// are out of scope.
+    static func pruneOrphanPartials(in directory: String, olderThan: TimeInterval = 60) {
+        let fm = FileManager.default
+        let entries: [String]
+        do {
+            entries = try fm.contentsOfDirectory(atPath: directory)
+        } catch let error as NSError {
+            // ENOENT (directory missing) is the normal first-launch state.
+            if error.domain != NSCocoaErrorDomain || error.code != NSFileReadNoSuchFileError {
+                logger.error("pruneOrphanPartials enumerate \(directory, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
+            return
+        }
+        let now = Date()
+        let prefix = "hang-"
+        let suffix = ".txt.partial"
+        for name in entries {
+            guard name.hasPrefix(prefix),
+                  name.hasSuffix(suffix),
+                  name.count > prefix.count + suffix.count
+            else { continue }
+            let path = "\(directory)/\(name)"
+            let attrs: [FileAttributeKey: Any]
+            do {
+                attrs = try fm.attributesOfItem(atPath: path)
+            } catch {
+                logger.error("pruneOrphanPartials stat \(path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                continue
+            }
+            guard let mtime = attrs[.modificationDate] as? Date else { continue }
+            if now.timeIntervalSince(mtime) <= olderThan {
+                // Younger than safety threshold — could be a live capture.
+                continue
+            }
+            do {
+                try fm.removeItem(atPath: path)
+                logger.log("pruned orphan \(name, privacy: .public)")
+            } catch {
+                logger.error("pruneOrphanPartials remove \(path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// No-arg variant: prune `~/Library/Logs/Blackbird/`. Call at app
+    /// startup from `App.applicationDidFinishLaunching`.
+    static func pruneOrphanPartials() {
+        pruneOrphanPartials(in: logDirectory(), olderThan: 60)
+    }
+
     /// Return (and create on demand) `~/Library/Logs/Blackbird/`. Falls
     /// back to `/tmp` only if the real directory can't be created — a
     /// hang report in `/tmp` is still better than dropping the sample
