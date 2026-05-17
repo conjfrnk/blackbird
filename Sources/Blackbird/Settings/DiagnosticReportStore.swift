@@ -120,12 +120,28 @@ final class DiagnosticReportStore: ObservableObject {
         }
         return entries.compactMap { url in
             guard accept(url.lastPathComponent) else { return nil }
-            let values = try? url.resourceValues(forKeys: [
-                .contentModificationDateKey,
-                .fileSizeKey,
-                .isRegularFileKey,
-                .isSymbolicLinkKey,
-            ])
+            let values: URLResourceValues?
+            do {
+                values = try url.resourceValues(forKeys: [
+                    .contentModificationDateKey,
+                    .fileSizeKey,
+                    .isRegularFileKey,
+                    .isSymbolicLinkKey,
+                ])
+            } catch {
+                // S2-008: prior code wrapped the call in `try?`, silently
+                // dropping a legitimate report whose stat raced
+                // contentsOfDirectory (transient EBUSY on a slow disk, a
+                // TCC re-evaluation, etc.). Users reporting "I hit a hang
+                // but Diagnostics is empty" had no breadcrumb. Log at
+                // error level so the directory-level + per-file failures
+                // both surface in `log stream --predicate 'subsystem ==
+                // "dev.conjfrnk.blackbird" && category == "diagnostics"'`.
+                log.error(
+                    "stat \(url.path, privacy: .public) failed: \(error.localizedDescription, privacy: .public) — dropping from diagnostics list"
+                )
+                return nil
+            }
             // SECURITY: drop symlinks. Any process running as the user can
             // place `~/Library/Logs/DiagnosticReports/Blackbird-foo.ips` →
             // `/etc/passwd` (or any user-readable file). Without this guard,
@@ -138,9 +154,7 @@ final class DiagnosticReportStore: ObservableObject {
             // Both checks use explicit `== true` / `== false` (not `!= true`)
             // so that a `nil` resource value — which means "stat succeeded
             // but the key wasn't populated", possible on edge filesystems —
-            // is treated as suspicious-by-default and dropped. Files we
-            // can't stat at all are also dropped via the `isRegularFile`
-            // gate.
+            // is treated as suspicious-by-default and dropped.
             guard values?.isRegularFile == true, values?.isSymbolicLink == false else {
                 return nil
             }
