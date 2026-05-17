@@ -333,7 +333,10 @@ public final class Preferences: ObservableObject {
         // the value is gone. On a non-downgrade (stored <= current) the
         // repair runs as before — that's the original "garbage from a
         // typo / hand-edited plist" recovery path, which we still want.
-        let storedSchemaVersion = defaults.integer(forKey: Preferences.schemaVersionKey)
+        let storedSchemaVersion = Preferences.storedSchemaVersion(
+            in: defaults,
+            domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+        )
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
             Preferences.repairEnumRawValues(in: self, defaults: defaults)
@@ -443,8 +446,13 @@ public final class Preferences: ObservableObject {
 
         // H-8 downgrade gate: skip the enum repair when the on-disk
         // schema version is ahead of the current binary. Same predicate
-        // as init.
-        let storedSchemaVersion = defaults.integer(forKey: Preferences.schemaVersionKey)
+        // as init. Reads via persistent-domain helper (audit S5-R-001)
+        // so a hostile `defaults write -g bb.prefsSchemaVersion 99` can't
+        // poison the gate.
+        let storedSchemaVersion = Preferences.storedSchemaVersion(
+            in: defaults,
+            domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+        )
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
             Preferences.repairEnumRawValues(in: self, defaults: defaults)
@@ -662,16 +670,19 @@ public final class Preferences: ObservableObject {
         // every read goes to the prefixed key.
         bootstrapSchemaVersionKey(in: defaults, domain: domain)
 
-        // `integer(forKey:)` returns 0 if the key is absent. Now that
-        // we no longer register `schemaVersionKey` in NSRegistrationDomain
-        // (audit EI-02), 0 unambiguously means "no schema version has
-        // ever been stamped to this defaults instance" — treat as v0,
-        // walk through every migration step, and stamp current at the
-        // end. A non-zero `stored` is an actual persistent-domain value
-        // we trust verbatim. The new prefixed key (`bb.prefsSchemaVersion`)
-        // can't be hit by a `defaults write -g <name>` because the
-        // global-domain reader strips the `bb.` prefix from nothing.
-        let stored = defaults.integer(forKey: Preferences.schemaVersionKey)
+        // `storedSchemaVersion` reads from the persistent domain only
+        // (audit S5-R-001) and returns 0 if the key is absent there.
+        // Now that we no longer register `schemaVersionKey` in
+        // NSRegistrationDomain (audit EI-02), 0 unambiguously means "no
+        // schema version has ever been stamped to this defaults
+        // instance" — treat as v0, walk through every migration step,
+        // and stamp current at the end. A non-zero `stored` is an
+        // actual persistent-domain value we trust verbatim. The earlier
+        // claim that `bb.`-prefixed keys are immune to `defaults write
+        // -g` was WRONG — NSGlobalDomain doesn't strip prefixes, it
+        // serves the literal key — so the persistent-domain-only read
+        // is the load-bearing defense, not the prefix.
+        let stored = Preferences.storedSchemaVersion(in: defaults, domain: domain)
         guard stored < Preferences.currentSchemaVersion else {
             // Already current (stored == current) or NEWER (downgrade).
             //
@@ -690,6 +701,26 @@ public final class Preferences: ObservableObject {
         }
         // Future steps slot in here: `if v < 3 { migrateV2toV3(...); v = 3 }` etc.
         defaults.set(v, forKey: Preferences.schemaVersionKey)
+    }
+
+    /// Read the stored schema version from the app's persistent domain
+    /// only — NOT via `defaults.integer(forKey:)` which walks the full
+    /// UserDefaults search list (app persistent → NSGlobalDomain →
+    /// registration). A hostile or accidental `defaults write -g
+    /// bb.prefsSchemaVersion <n>` to NSGlobalDomain would otherwise
+    /// elevate `storedSchemaVersion` to <n>, flip `isDowngrade` true at
+    /// Preferences-init time, and the S6-010 init-time numeric clamp
+    /// (M-14 / DI-7 recovery for tampered NaN / out-of-range fontSize /
+    /// translucency) would be silently skipped. Mirrors the same defense
+    /// already applied to `bootstrapSchemaVersionKey` (H-8) and
+    /// `migrateV1toV2` (S5-001). Audit S5-R-001.
+    ///
+    /// Returns 0 when the key is absent from the persistent domain,
+    /// matching `integer(forKey:)`'s contract for missing keys.
+    static func storedSchemaVersion(in defaults: UserDefaults, domain: String) -> Int {
+        guard let persistent = defaults.persistentDomain(forName: domain) else { return 0 }
+        if let n = persistent[Preferences.schemaVersionKey] as? NSNumber { return n.intValue }
+        return 0
     }
 
     /// One-shot promotion of the legacy unprefixed `prefsSchemaVersion`

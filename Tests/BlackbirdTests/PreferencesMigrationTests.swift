@@ -538,6 +538,126 @@ final class PreferencesMigrationTests: XCTestCase {
         )
     }
 
+    // MARK: - S5-R-001: storedSchemaVersion ignores registration domain
+    //
+    // Regression: `defaults.integer(forKey: Preferences.schemaVersionKey)`
+    // walks the full UserDefaults search list (app persistent → NSGlobalDomain
+    // → registration). A hostile `defaults write -g bb.prefsSchemaVersion 99`
+    // (or any registration-domain seeding of the key) elevates the read value
+    // to 99, flips `isDowngrade` true at Preferences-init time, and the
+    // S6-010 numeric clamp is silently skipped — a planted NaN /
+    // out-of-range `bb.fontSize` then propagates into the renderer
+    // unclamped. The H-8 fix narrowed the v1→v2 migration reads to
+    // `persistentDomain(forName:)`, but the storedSchemaVersion read used
+    // by the downgrade gate was not similarly narrowed.
+    //
+    // The CONTRACT we pin here (not the implementation): a static helper
+    // `Preferences.storedSchemaVersion(in:domain:)` returns the integer at
+    // `bb.prefsSchemaVersion` from the app's persistent domain ONLY, and
+    // returns 0 when the key is absent from the persistent domain —
+    // matching `integer(forKey:)`'s absent-key behavior — even when the
+    // key IS present in the registration domain. NSGlobalDomain cannot be
+    // exercised directly from a sandboxed test process (writes get scoped
+    // to the test bundle); the registration domain is the same-shape
+    // proxy used by `test_h8_doesNotPromoteRegistrationDomainSchemaKey`
+    // above. Both are layers `persistentDomain(forName:)` ignores, so
+    // pinning registration-domain isolation pins the NSGlobalDomain
+    // isolation by construction.
+
+    /// Empty suite, no writes anywhere: helper returns 0, matching
+    /// `integer(forKey:)`'s behavior for an absent key.
+    func test_storedSchemaVersion_returns0WhenKeyAbsentFromPersistentDomain() throws {
+        let suiteName = "blackbird.tests.s5r001.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(
+            Preferences.storedSchemaVersion(in: suite, domain: suiteName), 0,
+            "storedSchemaVersion must return 0 when bb.prefsSchemaVersion is absent from the persistent domain"
+        )
+    }
+
+    /// Persistent-domain write is seen by the helper: the happy path.
+    func test_storedSchemaVersion_returnsPersistentValueWhenSet() throws {
+        let suiteName = "blackbird.tests.s5r001.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        // `suite.set(_:forKey:)` writes to the suite's persistent domain,
+        // which is what `persistentDomain(forName:)` reads back.
+        suite.set(5, forKey: "bb.prefsSchemaVersion")
+
+        XCTAssertEqual(
+            Preferences.storedSchemaVersion(in: suite, domain: suiteName), 5,
+            "storedSchemaVersion must surface the value that lives in the persistent domain"
+        )
+    }
+
+    /// SMOKING GUN: a registration-domain `bb.prefsSchemaVersion = 99`
+    /// (the same-shape proxy for a hostile `defaults write -g
+    /// bb.prefsSchemaVersion 99` per the H-8 idiom) must be invisible to
+    /// the helper. Pre-fix, the equivalent `defaults.integer(forKey:)`
+    /// read returns 99 because the search list walks the registration
+    /// domain; post-fix, the persistent-domain read returns 0. This is
+    /// the read that decides `isDowngrade` — if it surfaces 99, the
+    /// init-time numeric clamp is skipped and a planted NaN fontSize
+    /// reaches the renderer.
+    func test_storedSchemaVersion_ignoresRegistrationDomainWrite() throws {
+        let suiteName = "blackbird.tests.s5r001.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        // Land 99 in the registration domain — the layer
+        // `persistentDomain(forName:)` does not walk. `integer(forKey:)`
+        // would see 99 and flip `isDowngrade` true at HEAD.
+        suite.register(defaults: ["bb.prefsSchemaVersion": 99])
+
+        XCTAssertEqual(
+            Preferences.storedSchemaVersion(in: suite, domain: suiteName), 0,
+            """
+            S5-R-001: a registration-domain bb.prefsSchemaVersion (proxy \
+            for `defaults write -g bb.prefsSchemaVersion 99`) must NOT \
+            surface through storedSchemaVersion — otherwise the downgrade \
+            gate flips true and the init-time fontSize/translucency clamp \
+            is skipped
+            """
+        )
+    }
+
+    /// When both layers hold a value, the persistent-domain value wins
+    /// and the registration-domain value is ignored. Pins the precedence
+    /// the contract guarantees: persistent domain only, no fallback to
+    /// the registration layer.
+    func test_storedSchemaVersion_persistentValueShadowsRegistrationDomain() throws {
+        let suiteName = "blackbird.tests.s5r001.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        suite.set(2, forKey: "bb.prefsSchemaVersion")
+        suite.register(defaults: ["bb.prefsSchemaVersion": 99])
+
+        XCTAssertEqual(
+            Preferences.storedSchemaVersion(in: suite, domain: suiteName), 2,
+            """
+            S5-R-001: when persistent and registration domains disagree, \
+            storedSchemaVersion must return the persistent-domain value \
+            (2) and ignore the registration-domain poison (99)
+            """
+        )
+    }
+
     // MARK: - F-S7-004: fontSize ceiling consistency
 
     /// F-S7-004 documents three competing fontSize ceilings:
