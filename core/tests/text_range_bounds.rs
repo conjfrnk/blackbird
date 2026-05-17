@@ -255,3 +255,104 @@ fn text_range_s_line_below_topmost_respects_start_col() {
         );
     }
 }
+
+/// S1-002: when the caller's `end_line` is past the bottommost row AND
+/// the clamped iteration collapses to a single row (`iter_start ==
+/// iter_end`), the prose-mode branch must still apply the start-row
+/// trim. At TAG `single_line` was tied to the caller's raw `s_line ==
+/// e_line`, so the collapsed over-bottom case fell into the start-row
+/// branch `(s_col, last_col, trim=true)` and trailing blanks were
+/// stripped. At HEAD `single_line = (iter_start == iter_end)` matches,
+/// dropping the row into the single-line branch
+/// `(s_col, e_col, trim=false)` and the trailing blanks leak through.
+///
+/// Repro: 3×3 grid, row 2 = "a  ". Selecting (2,0)..(99,2) must trim
+/// the two trailing spaces and return just "a".
+#[test]
+fn text_range_over_bottom_collapse_preserves_trim() {
+    unsafe {
+        let term = bc::bb_term_new(3, 3, 0);
+        assert!(!term.is_null());
+        // Row 0 = "r0r", row 1 = "r1r", row 2 = "a" (cols 1-2 unwritten,
+        // surface as blanks).
+        let input = b"r0r\r\nr1r\r\na";
+        bc::bb_term_input(term, input.as_ptr(), input.len());
+
+        // end_line=99 is past bottommost(=2). After clamping,
+        // iter_start = iter_end = 2 — the loop iterates exactly one row.
+        let raw = bc::bb_term_text_range(term, 2, 0, 99, 2, 0);
+        assert!(!raw.is_null());
+        let bytes: &[u8] = if (*raw).len == 0 || (*raw).bytes.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts((*raw).bytes, (*raw).len)
+        };
+        let got = std::str::from_utf8(bytes).unwrap_or_default().to_string();
+        bc::bb_string_release(raw);
+        bc::bb_term_free(term);
+
+        assert_eq!(
+            got, "a",
+            "S1-002: over-bottom request that collapses to one row after \
+             clamping must keep the start-row trim and strip trailing blanks; \
+             got: {got:?}"
+        );
+    }
+}
+
+/// S4-001: when MAX_TEXT_RANGE_ROWS engages and `iter_end` is moved to
+/// `iter_start + MAX - 1` (the cap row), the per-row branch's comparison
+/// must NOT treat the cap row as the end-row. At TAG the comparison
+/// used the caller's raw `e_line` — the cap row didn't match
+/// `line_i == e_line`, so it fell into the middle-row branch
+/// `(0, last_col, trim=true)` and the row was emitted in full. At HEAD
+/// the comparison uses `line_i == iter_end`, which DOES match the cap
+/// row, treating it as the end-row `(0, e_col, false)` and cropping to
+/// `e_col` — a column the user intended for the original (uncapped)
+/// final row, not for this arbitrary cap row.
+///
+/// Repro: 10-col × 4-row grid + 200 000 scrollback, 70 000 rows of
+/// `"AAAAAAAAAA"`. Select (i32::MIN, 0)..(i32::MAX, 2). The post-cap
+/// final row should still be a full "AAAAAAAAAA", not the 3-char "AAA"
+/// crop.
+#[test]
+fn text_range_row_cap_does_not_crop_capped_row_to_end_col() {
+    unsafe {
+        let term = bc::bb_term_new(10, 4, 200_000);
+        assert!(!term.is_null());
+
+        // 70 000 rows × 12 bytes = ~840 KB feed, comfortably above the
+        // MAX_TEXT_RANGE_ROWS = 65 536 cap so the cap is the binding
+        // constraint.
+        let mut buf = Vec::with_capacity(70_000 * 12);
+        for _ in 0..70_000 {
+            buf.extend_from_slice(b"AAAAAAAAAA\r\n");
+        }
+        bc::bb_term_input(term, buf.as_ptr(), buf.len());
+
+        // Worst-case caller shape: full i32 span with a small e_col.
+        let raw = bc::bb_term_text_range(term, i32::MIN, 0, i32::MAX, 2, 0);
+        assert!(
+            !raw.is_null(),
+            "huge text_range must succeed via truncation"
+        );
+        let bytes: &[u8] = if (*raw).len == 0 || (*raw).bytes.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts((*raw).bytes, (*raw).len)
+        };
+        let text = std::str::from_utf8(bytes).unwrap_or_default().to_string();
+        bc::bb_string_release(raw);
+        bc::bb_term_free(term);
+
+        // The cap row is the LAST emitted line. It should be a full
+        // 10-character row of A's, not cropped to e_col=2.
+        let last_line = text.rsplit('\n').next().unwrap_or("");
+        assert_eq!(
+            last_line, "AAAAAAAAAA",
+            "S4-001: when the MAX_TEXT_RANGE_ROWS cap fires, the cap row \
+             must keep middle-row (full-row) treatment instead of being \
+             cropped to the caller's end_col; got last line {last_line:?}"
+        );
+    }
+}
