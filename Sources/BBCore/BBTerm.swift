@@ -318,15 +318,19 @@ public final class BBTerm {
     }
 
     /// Update one palette slot. See BBCore.h for slot conventions.
-    /// Audit L2: clamp the Int slot down to UInt16 so a caller passing
-    /// a negative slot or a value > 65535 doesn't trap on the bridge.
-    /// The Rust side bounds-checks against the live palette length and
-    /// silently ignores anything beyond it; mirroring that
-    /// "out-of-range becomes no-op" contract on the Swift side avoids
-    /// fatal-error termination on otherwise harmless misuse.
+    /// Audit L2 + S6-009: out-of-range slots become no-ops rather than
+    /// trapping on the FFI bridge. The Rust side bounds-checks against
+    /// the live palette length and silently ignores anything beyond it,
+    /// but only for `slot >= COUNT`. Negative slots used to saturate
+    /// down to 0 via `UInt16(clamping: max(0, slot))` — which silently
+    /// rewrote the Black ANSI entry instead of being rejected. A theme
+    /// migration or hand-edited config that produces a negative sentinel
+    /// (e.g. -1 meaning "unset") would corrupt slot 0 with no log. Now
+    /// both `slot < 0` and `slot > UInt16.max` return early.
     public func setColor(slot: Int, rgb: UInt32) {
         guard let h = handle else { return }
-        bb_term_set_named_color(h, UInt16(clamping: max(0, slot)), rgb)
+        guard slot >= 0, slot <= Int(UInt16.max) else { return }
+        bb_term_set_named_color(h, UInt16(slot), rgb)
     }
 
     /// Enable or disable OSC 10 / 11 / 12 `?` reply behaviour. Off by

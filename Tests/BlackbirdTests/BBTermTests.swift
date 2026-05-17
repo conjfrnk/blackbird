@@ -214,22 +214,29 @@ final class BBTermTests: XCTestCase {
         )
     }
 
-    /// Audit L2. The previous Swift bridge used `UInt16(slot)` which
-    /// trapped on negative `Int` and on values > 65535. A theme JSON
-    /// or hand-edited preference passing a negative slot would crash
-    /// the whole app; the Rust side already drops out-of-range slots
-    /// silently, so the Swift bridge should match that contract.
+    /// Audit L2 + S6-009. The previous Swift bridge used `UInt16(slot)`
+    /// which trapped on negative `Int` and on values > 65535. A theme
+    /// JSON or hand-edited preference passing a negative slot would
+    /// crash the whole app; the Rust side already drops out-of-range
+    /// slots silently, so the Swift bridge should match that contract.
+    ///
+    /// S6-009 hardening: the original L2 fix used
+    /// `UInt16(clamping: max(0, slot))`, which silently demoted
+    /// `slot = -1` to `slot = 0` — overwriting the Black ANSI palette
+    /// entry instead of being rejected. A sentinel-style negative
+    /// (`-1` meaning "unset") would corrupt slot 0 with no log. The
+    /// guard now rejects `slot < 0` AND `slot > UInt16.max` outright;
+    /// the call becomes a clean no-op on both ends of the range.
     func test_setColor_negativeSlotDoesNotTrap() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 5, rows: 2)))
-        // Negative slots: pre-fix these triggered a Swift integer
-        // conversion fatal error before reaching Rust at all. Post-
-        // fix they clamp to 0 (valid) and Rust's bounds check
-        // either applies them as foreground or silently drops them.
+        // Negative slots: pre-L2 these trapped on Swift integer
+        // conversion. Post-L2 they clamped to 0 (overwriting Black).
+        // Post-S6-009 they are rejected as no-ops.
         term.setColor(slot: -1, rgb: 0xFF_0000)
         term.setColor(slot: -42, rgb: 0x00_FF00)
         term.setColor(slot: Int.min, rgb: 0x00_00FF)
-        // Way-too-large positive slots also clamp via UInt16.max
-        // rather than trapping.
+        // Way-too-large positive slots are similarly rejected rather
+        // than wrapping or trapping.
         term.setColor(slot: Int.max, rgb: 0xAB_CDEF)
         let snap = try XCTUnwrap(term.snapshot())
         XCTAssertEqual(
