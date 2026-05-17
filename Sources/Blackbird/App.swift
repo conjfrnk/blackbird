@@ -174,6 +174,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let installWatchdog = (hangEnv == "1")
         #endif
         if installWatchdog { MainThreadWatchdog.install() }
+        // S4-003 (2026-05-17): reap orphan hang-*.txt.partial siblings
+        // left over from a prior session's force-quit during the
+        // captureHangReport sample(1) window. These are invisible to
+        // the Settings → Diagnostics .txt-only filter and would
+        // otherwise accumulate silently in ~/Library/Logs/Blackbird/.
+        // Called regardless of installWatchdog because the orphan is
+        // from a PRIOR session that may have armed the watchdog even
+        // if this session doesn't.
+        MainThreadWatchdog.pruneOrphanPartials()
         // `installMainMenu` builds the full menu tree (including the
         // conditional Sparkle "Check for Updates…" item via
         // `insertSparkleMenuItem(into:)`) BEFORE publishing it as the
