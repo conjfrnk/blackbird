@@ -361,3 +361,40 @@ fn xtgettcap_nonhex_cap_does_not_echo_into_reply() {
         "non-hex cap must produce an empty-cap reply (no echo); got {joined_hex_bad:?}"
     );
 }
+
+/// S3-004: odd-length all-hex payloads are technically "pure hex"
+/// but represent a half-byte cap name (each cap byte = 2 hex digits).
+/// Echoing them produces a structurally well-formed reply with a
+/// malformed cap name. Reject as a separate malformed-input class
+/// alongside the non-hex case.
+#[test]
+fn xtgettcap_odd_length_hex_cap_does_not_echo_into_reply() {
+    // `ESC P + q 4 ESC \` — a single hex digit '4'. Pre-fix this
+    // echoed back as `ESC P 0 + r 4 ESC \` (well-formed reply, but
+    // "4" is half a byte). Post-fix it produces the same inert
+    // empty-cap reply as a non-hex payload.
+    let writes = run(b"\x1bP+q4\x1b\\");
+    let joined: Vec<u8> = writes.into_iter().flatten().collect();
+    assert_eq!(
+        joined,
+        b"\x1bP0+r\x1b\\",
+        "odd-length hex payload must produce empty-cap reply; got {joined:?}"
+    );
+
+    // `ESC P + q 415 ESC \` — 3 hex chars (A=41, then half-byte '5').
+    let writes2 = run(b"\x1bP+q415\x1b\\");
+    let joined2: Vec<u8> = writes2.into_iter().flatten().collect();
+    assert_eq!(
+        joined2,
+        b"\x1bP0+r\x1b\\",
+        "3-char hex payload (1 byte + half) must produce empty-cap reply; got {joined2:?}"
+    );
+
+    // Even-length pure-hex still works normally as a control.
+    let writes3 = run(b"\x1bP+q4142\x1b\\"); // "AB"
+    let joined3: Vec<u8> = writes3.into_iter().flatten().collect();
+    assert!(
+        joined3.windows(b"4142".len()).any(|w| w == b"4142"),
+        "even-length hex cap must still echo (control); got {joined3:?}"
+    );
+}

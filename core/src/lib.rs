@@ -917,14 +917,24 @@ unsafe fn dispatch_xtgettcap(cell: &CallbackCell, payload: &[u8]) {
 
 fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
     // Reject anything that isn't pure hex. XTGETTCAP specifies the payload
-    // as hex-encoded cap name bytes, but nothing upstream enforced it —
-    // an ssh'd attacker could smuggle `\x1b\\` (ST) or other control
-    // bytes inside the cap_hex echo of the DCS-0-r "unknown" response,
-    // terminating the DCS early and landing the tail bytes as top-level
-    // input (shell-injection primitive on the remote). Audit
-    // rust-core-1 F8. Unknown non-hex cap → reply with an empty cap
-    // name so the reply stays well-formed and the echo channel closes.
-    let is_valid_hex = !cap_hex.is_empty() && cap_hex.iter().all(|b| b.is_ascii_hexdigit());
+    // as hex-encoded cap name bytes (each cap name byte = 2 hex digits),
+    // but nothing upstream enforced it — an ssh'd attacker could smuggle
+    // `\x1b\\` (ST) or other control bytes inside the cap_hex echo of the
+    // DCS-0-r "unknown" response, terminating the DCS early and landing
+    // the tail bytes as top-level input (shell-injection primitive on the
+    // remote). Audit rust-core-1 F8. Unknown non-hex cap → reply with an
+    // empty cap name so the reply stays well-formed and the echo channel
+    // closes.
+    //
+    // S3-004: also require EVEN length. Odd-length all-hex payloads
+    // (e.g. a 3-char query, or a 4097-byte query truncated mid-pair)
+    // are still "pure hex" but echo as a malformed cap name with a
+    // half-byte at the tail — every legitimate downstream consumer
+    // expects paired hex digits. Reject as malformed alongside the
+    // non-hex case.
+    let is_valid_hex = !cap_hex.is_empty()
+        && cap_hex.len() % 2 == 0
+        && cap_hex.iter().all(|b| b.is_ascii_hexdigit());
     match (is_valid_hex, find_cap_value(cap_hex)) {
         (true, Some(value_hex)) => {
             // DCS 1 + r <cap>=<value> ST
