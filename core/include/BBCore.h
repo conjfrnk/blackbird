@@ -180,6 +180,32 @@ typedef uint32_t BBEventKind;
 #endif // __cplusplus
 
 /**
+ * Shape of the OSC 133 prompt/command mark the shell emitted.
+ *
+ * Values match the C enum layout — Swift casts these integers directly.
+ * A / B / C / D are the four standard kinds in the de-facto prompt-marks
+ * spec (Apple Terminal, iTerm2, kitty, Ghostty):
+ *   A = prompt start     — "I'm about to draw my prompt"
+ *   B = command start    — "prompt done, user is typing the command"
+ *   C = command output   — "user pressed enter, command is running"
+ *   D = command end      — "command finished, exit code follows"
+ * Numeric values start at 1 so 0 stays reserved for "no mark".
+ */
+enum BBPromptMarkKind
+#ifdef __cplusplus
+  : uint8_t
+#endif // __cplusplus
+ {
+  BB_PROMPT_MARK_KIND_A = 1,
+  BB_PROMPT_MARK_KIND_B = 2,
+  BB_PROMPT_MARK_KIND_C = 3,
+  BB_PROMPT_MARK_KIND_D = 4,
+};
+#ifndef __cplusplus
+typedef uint8_t BBPromptMarkKind;
+#endif // __cplusplus
+
+/**
  * Opaque handle exposed to Swift.
  *
  * `callback` and `color_queue` are shared with the owned `Term`'s

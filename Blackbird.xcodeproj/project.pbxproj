@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		007D6A6B8361AA725ACF9D0A /* OSC133Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D54AB14CA514CB4B38F0141 /* OSC133Tests.swift */; };
 		02007B68AC1EAE3435AF574C /* LatencyProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C1918604B5A7FA5FF34818C /* LatencyProbeTests.swift */; };
+		040EC525EB9390611B5CB0A4 /* FFIContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1F50B661E4AB6164DAC55FD /* FFIContractTests.swift */; };
 		066BC101049897C27F5BB3E5 /* osc133.zsh in Resources */ = {isa = PBXBuildFile; fileRef = 1178A5B3ED186EDB37EAB9E2 /* osc133.zsh */; };
 		0B6D85142353CF96BD4391D9 /* MetalDrawableCountSourcePinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F89FAA17C3055BBE6D0556C1 /* MetalDrawableCountSourcePinTests.swift */; };
 		10ED4F0567A44DC417CF66AD /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = D1D6B11109581801C6072917 /* AppIcon.icns */; };
@@ -255,6 +256,7 @@
 		BC563B552C1105D7EA9558F5 /* StartupTelemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupTelemetry.swift; sourceTree = "<group>"; };
 		BDAF66C9AB7E24C8E9869235 /* SwiftSessionRSSReturnsToBaselineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftSessionRSSReturnsToBaselineTests.swift; sourceTree = "<group>"; };
 		BDBE067E31FBB9F8651F3C50 /* MetalDeviceSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDeviceSelectionTests.swift; sourceTree = "<group>"; };
+		C1F50B661E4AB6164DAC55FD /* FFIContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIContractTests.swift; sourceTree = "<group>"; };
 		C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeResolutionTests.swift; sourceTree = "<group>"; };
 		C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
 		C735D6264882444369074ACB /* CellInstance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstance.swift; sourceTree = "<group>"; };
@@ -342,6 +344,7 @@
 				77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */,
 				0D94AD8A655DA72C5D57ED5E /* DiagnosticReportStoreTests.swift */,
 				55708BAFA22EAB8E62D45DF1 /* DragDropTests.swift */,
+				C1F50B661E4AB6164DAC55FD /* FFIContractTests.swift */,
 				952020A922B8A99F336257AD /* FindBarAltScreenTests.swift */,
 				D5AF4F844A7BAA90FB92C475 /* FindBarReplaceTests.swift */,
 				12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */,
@@ -750,6 +753,7 @@
 				66BDCBF186346C6913023FC5 /* DamageTrackingTests.swift in Sources */,
 				67E62A52456063618EA6931D /* DiagnosticReportStoreTests.swift in Sources */,
 				BF8C522F82650E26EE4BDBE7 /* DragDropTests.swift in Sources */,
+				040EC525EB9390611B5CB0A4 /* FFIContractTests.swift in Sources */,
 				A25683CF4210AC620DBBBB72 /* FindBarAltScreenTests.swift in Sources */,
 				E5A9050474676254C3FB3554 /* FindBarReplaceTests.swift in Sources */,
 				6A4A848FAF8BE625DC512F81 /* FindReplaceIntegrationTests.swift in Sources */,
