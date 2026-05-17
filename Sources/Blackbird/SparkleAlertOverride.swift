@@ -56,6 +56,21 @@ enum SparkleAlertOverride {
     private static let originalIMP =
         OSAllocatedUnfairLock<IMP?>(initialState: nil)
 
+    /// Build the "up to date" informative text. Extracted so the empty-
+    /// version path is unit-testable without an in-process Sparkle UI hop.
+    /// When `version` is empty (Info.plist missing CFBundleShortVersionString
+    /// — the EH-005 grep target), the version segment is omitted so the
+    /// user sees `"Blackbird is the latest version."` instead of the prior
+    /// `"Blackbird  is the latest version."` double-space malformation.
+    /// The fault log on the missing key fires separately and remains the
+    /// authoritative diagnostic. Audit S2-009.
+    internal static func upToDateMessage(name: String, version: String) -> String {
+        if version.isEmpty {
+            return "\(name) is the latest version."
+        }
+        return "\(name) \(version) is the latest version."
+    }
+
     /// Invoked once during app launch. Idempotent — `method_setImplementation`
     /// is safe to call repeatedly. On re-install, the previous block IMP is
     /// freed via `imp_removeBlock` (F-S7-001); the very first install's prior
@@ -99,7 +114,7 @@ enum SparkleAlertOverride {
             }()
             let alert = NSAlert()
             alert.messageText = "You're up to date"
-            alert.informativeText = "\(name) \(version) is the latest version."
+            alert.informativeText = Self.upToDateMessage(name: name, version: version)
             alert.alertStyle = .informational
             alert.addButton(withTitle: "OK")
 

@@ -81,4 +81,23 @@ final class SparkleAlertOverrideTests: XCTestCase {
         XCTAssertEqual(trackedRaw, liveRaw,
                        "tracked IMP must match the live class IMP — divergence means a future re-install would free an IMP that's not actually installed")
     }
+
+    // MARK: - upToDateMessage (S2-009)
+
+    /// When CFBundleShortVersionString is missing/empty, the inline format
+    /// `"\(name) \(version) is the latest version."` produced
+    /// `"Blackbird  is the latest version."` — a double-space malformation
+    /// the user sees instead of the intended diagnostic.
+    func testUpToDateMessage_emptyVersion_doesNotProduceDoubleSpace() {
+        let msg = SparkleAlertOverride.upToDateMessage(name: "Blackbird", version: "")
+        XCTAssertFalse(msg.contains("  "),
+                       "double-space malforms the alert text; got: \(msg)")
+        XCTAssertTrue(msg.contains("Blackbird"), "app name preserved")
+        XCTAssertTrue(msg.contains("latest"), "diagnostic shape preserved")
+    }
+
+    func testUpToDateMessage_normalVersion_includesIt() {
+        let msg = SparkleAlertOverride.upToDateMessage(name: "Blackbird", version: "0.2.5")
+        XCTAssertEqual(msg, "Blackbird 0.2.5 is the latest version.")
+    }
 }
