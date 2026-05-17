@@ -376,8 +376,7 @@ fn xtgettcap_odd_length_hex_cap_does_not_echo_into_reply() {
     let writes = run(b"\x1bP+q4\x1b\\");
     let joined: Vec<u8> = writes.into_iter().flatten().collect();
     assert_eq!(
-        joined,
-        b"\x1bP0+r\x1b\\",
+        joined, b"\x1bP0+r\x1b\\",
         "odd-length hex payload must produce empty-cap reply; got {joined:?}"
     );
 
@@ -385,8 +384,7 @@ fn xtgettcap_odd_length_hex_cap_does_not_echo_into_reply() {
     let writes2 = run(b"\x1bP+q415\x1b\\");
     let joined2: Vec<u8> = writes2.into_iter().flatten().collect();
     assert_eq!(
-        joined2,
-        b"\x1bP0+r\x1b\\",
+        joined2, b"\x1bP0+r\x1b\\",
         "3-char hex payload (1 byte + half) must produce empty-cap reply; got {joined2:?}"
     );
 
