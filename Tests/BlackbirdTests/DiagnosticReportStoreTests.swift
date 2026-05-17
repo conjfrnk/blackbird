@@ -462,6 +462,33 @@ final class DiagnosticReportStoreTests: XCTestCase {
         }
         XCTAssertFalse(text.contains("\u{1B}"), "ESC must be replaced")
         XCTAssertFalse(text.contains("\u{07}"), "BEL must be replaced")
+    }
+
+    /// S4-002: a planted hang/crash report containing bidi-override or
+    /// zero-width scalars must not survive Copy / Email Diagnostics. The
+    /// paste-side defender already strips these; the Copy path now must
+    /// have parity so Trojan-source-class strings can't ride out via
+    /// Blackbird-branded diagnostics into a bidi-rendering surface
+    /// (GitHub issue, Slack, Mail compose).
+    func testLoadAndSanitizeStripsBidiAndZeroWidth() async throws {
+        // Plant U+202E (RIGHT-TO-LEFT OVERRIDE) and U+200B (ZERO-WIDTH
+        // SPACE) inside an otherwise plausible diagnostic line.
+        let raw = "crashed: \u{202E}evil.sh\u{200B}#yldnerif_skool\nnext line"
+        try writeFile("hang-bidi.txt", in: hangDir, contents: raw)
+        let url = hangDir.appendingPathComponent("hang-bidi.txt")
+        let result = await DiagnosticsView.loadAndSanitize(
+            url: url, cap: 16 * 1024 * 1024
+        )
+        guard case .success(let text) = result else {
+            return XCTFail("expected sanitized success, got \(result)")
+        }
+        XCTAssertFalse(text.contains("\u{202E}"),
+                       "U+202E RIGHT-TO-LEFT OVERRIDE must be replaced")
+        XCTAssertFalse(text.contains("\u{200B}"),
+                       "U+200B ZERO-WIDTH SPACE must be replaced")
+        // Newline survives (legitimate diagnostic text uses it).
+        XCTAssertTrue(text.contains("\n"),
+                      "newline must be preserved for legibility")
         XCTAssertTrue(text.contains("\u{FFFD}"), "U+FFFD substitution must appear")
     }
 }

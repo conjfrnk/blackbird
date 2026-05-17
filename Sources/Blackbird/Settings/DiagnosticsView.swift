@@ -203,19 +203,28 @@ struct DiagnosticsView: View {
         case notUTF8
     }
 
-    /// Replace C0 / C1 control characters (other than `\n` and `\t`) with
-    /// the Unicode replacement character. Defense-in-depth: a planted
-    /// report should not be able to slip terminal escape sequences onto
-    /// the user's pasteboard. The legitimate writers (MainThreadWatchdog
+    /// Replace C0 / C1 control characters AND bidi / zero-width /
+    /// invisible scalars (other than `\n` and `\t`) with the Unicode
+    /// replacement character. Defense-in-depth: a planted report should
+    /// not be able to slip terminal escape sequences OR Trojan-source-
+    /// class bidi overrides onto the user's pasteboard when they Copy
+    /// or Email Diagnostics. The legitimate writers (MainThreadWatchdog
     /// `sample(1)` output and macOS `.ips` JSON) only use printable ASCII
     /// + `\n`, so the substitution never touches real reports.
+    ///
+    /// The bidi / zero-width set mirrors `TerminalView+Paste.swift`'s
+    /// `stripBidiOverrides` so the inbound-paste and outbound-copy paths
+    /// have symmetric coverage — otherwise a `\u{202E}`-flipped string
+    /// could survive Copy and reach a bidi-rendering target (GitHub
+    /// issue, Slack, Mail compose) where it visually misrepresents the
+    /// underlying bytes. Audit S4-002.
     ///
     /// Performance: stays in `String.UnicodeScalarView` end-to-end, reserves
     /// capacity via `s.utf8.count` (O(1) on Swift's contiguous storage),
     /// and avoids per-scalar `Character` boxing. A clean 16 MiB report at
     /// the inline cap should hold the main thread for tens of ms, not
     /// seconds.
-    private static func stripControlCharacters(_ s: String) -> String {
+    internal static func stripControlCharacters(_ s: String) -> String {
         var out = String.UnicodeScalarView()
         out.reserveCapacity(s.utf8.count)
         let replacement = Unicode.Scalar(0xFFFD)!
@@ -225,7 +234,24 @@ struct DiagnosticsView: View {
             // other C0 (0x00-0x1F) and DEL (0x7F) plus the C1 range
             // (0x80-0x9F) which is where ANSI/VT escape control bytes live
             // when they bypass ESC-introducers.
-            if (v < 0x20 && v != 0x0A && v != 0x09) || v == 0x7F || (v >= 0x80 && v <= 0x9F) {
+            let isControl = (v < 0x20 && v != 0x0A && v != 0x09)
+                || v == 0x7F
+                || (v >= 0x80 && v <= 0x9F)
+            // Bidi / zero-width / invisible formatting — Trojan-source set.
+            // Discrete scalars (soft hyphen, ALM, MVS, BOM, word joiner)
+            // plus the ZWSP/ZWNJ/ZWJ/LRM/RLM (200B–200F), LS/PS (2028/9),
+            // bidi formatting (202A–202E), bidi isolates (2066–2069), and
+            // the Plane-14 tag block (E0000–E007F).
+            let isInvisible = v == 0x00AD
+                || v == 0x061C
+                || v == 0x180E
+                || (v >= 0x200B && v <= 0x200F)
+                || (v >= 0x2028 && v <= 0x202E)
+                || v == 0x2060
+                || (v >= 0x2066 && v <= 0x2069)
+                || v == 0xFEFF
+                || (v >= 0xE0000 && v <= 0xE007F)
+            if isControl || isInvisible {
                 out.append(replacement)
             } else {
                 out.append(scalar)
