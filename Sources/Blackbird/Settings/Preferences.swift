@@ -298,7 +298,10 @@ public final class Preferences: ObservableObject {
         // below takes effect. Runs before the v1 → v2 migration so a
         // legacy unprefixed key with a wrong type is removed before the
         // migrator tries to carry it forward. (settings F7)
-        Preferences.sanitizeStoredTypes(in: defaults)
+        Preferences.sanitizeStoredTypes(
+            in: defaults,
+            domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+        )
 
         migrateIfNeeded()
 
@@ -548,7 +551,7 @@ public final class Preferences: ObservableObject {
     /// Covers both `bb.`-prefixed and legacy unprefixed names, so a user
     /// upgrading from v0.1.5 with a corrupted legacy key still gets cleaned
     /// up before the migration copies it forward. (settings F7)
-    private static func sanitizeStoredTypes(in defaults: UserDefaults) {
+    private static func sanitizeStoredTypes(in defaults: UserDefaults, domain: String) {
         let numericDoubleKeys = ["fontSize", "translucency"]
         let boolKeys = [
             "cursorBlink", "confirmClose", "autoUpdateChecks",
@@ -559,16 +562,28 @@ public final class Preferences: ObservableObject {
             // default is applied, matching sibling bool prefs.
             "confirmMultiLinePaste",
         ]
+        // S5-009: read from the persistent domain only, mirroring the
+        // S5-001 migration fix. `defaults.object(forKey:)` walks the
+        // full search list (app persistent → NSGlobalDomain →
+        // registration); a `defaults write -g fontSize -string foo`
+        // would otherwise trip the sanitize for an unprefixed key, but
+        // `removeObject(forKey:)` only writes to the app's persistent
+        // domain — so the global value persists, no work was done, and
+        // the user-visible behaviour was a misleading no-op.
+        // persistentDomain reads ONLY the app's domain, so we sanitize
+        // what we can actually mutate.
+        guard let persistent = defaults.persistentDomain(forName: domain) else { return }
+        let isNumericLike: (Any) -> Bool = { $0 is NSNumber }
         for name in numericDoubleKeys {
             for key in [k(name), name] {
-                if let v = defaults.object(forKey: key), !(v is NSNumber) {
+                if let v = persistent[key], !isNumericLike(v) {
                     defaults.removeObject(forKey: key)
                 }
             }
         }
         for name in boolKeys {
             for key in [k(name), name] {
-                if let v = defaults.object(forKey: key), !(v is NSNumber) {
+                if let v = persistent[key], !isNumericLike(v) {
                     defaults.removeObject(forKey: key)
                 }
             }
