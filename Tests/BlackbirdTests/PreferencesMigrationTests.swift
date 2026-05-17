@@ -379,6 +379,55 @@ final class PreferencesMigrationTests: XCTestCase {
         )
     }
 
+    /// S5-001: v1→v2 must read each legacy key from the persistent
+    /// domain, NOT from the full UserDefaults search list (which walks
+    /// app persistent → NSGlobalDomain → registration). A hostile or
+    /// accidental `defaults write -g theme "X"` would otherwise be
+    /// imported as `bb.theme` on first migration, silently substituting
+    /// the user's settings.
+    ///
+    /// Simulates NSGlobalDomain leakage by registering a "theme" default
+    /// against the isolated suite: `register(defaults:)` populates the
+    /// in-memory registration domain that `.object(forKey:)` walks, but
+    /// `persistentDomain(forName:)` does not see. Same observable
+    /// behavior shape as an unwanted `-g` write on a real system.
+    func test_v1ToV2_doesNotImportRegisteredOrGlobalDomainValues() throws {
+        let suiteName = "blackbird.tests.s5_001.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        // Plant a legacy value in the PERSISTENT domain — this should
+        // migrate correctly (positive control).
+        suite.set("Solarized", forKey: "theme")
+        // Plant a different value ONLY in the registration domain — this
+        // simulates an NSGlobalDomain leak. The persistent domain has no
+        // `fontName`; `.object(forKey:"fontName")` would see "ImpostedFromGlobal"
+        // via the search-list fallback. `persistentDomain(forName:)` does NOT.
+        suite.register(defaults: ["fontName": "ImpostedFromGlobal"])
+
+        Preferences.migrateIfNeeded(in: suite, domain: suiteName)
+
+        // (a) Positive control: persistent value WAS migrated.
+        XCTAssertEqual(
+            suite.persistentDomain(forName: suiteName)?["bb.theme"] as? String,
+            "Solarized",
+            "real persistent legacy value must be promoted to prefixed key"
+        )
+
+        // (b) KEY assertion: registered-domain value was NOT migrated.
+        // Before the fix, `defaults.object(forKey: "fontName")` returned
+        // "ImpostedFromGlobal" (via search-list walk) and the migration
+        // wrote it into bb.fontName. With the fix, only persistent values
+        // are imported.
+        XCTAssertNil(
+            suite.persistentDomain(forName: suiteName)?["bb.fontName"],
+            "registered-defaults / NSGlobalDomain values must NOT be imported into the prefixed namespace"
+        )
+    }
+
     // MARK: - H-8 (audit 2026-05-03) — schema-version key bootstrap
     //
     // The schema-version key moved from unprefixed `prefsSchemaVersion`

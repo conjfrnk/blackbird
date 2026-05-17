@@ -659,7 +659,7 @@ public final class Preferences: ObservableObject {
         }
         var v = stored
         if v < 2 {
-            migrateV1toV2(defaults: defaults)
+            migrateV1toV2(defaults: defaults, domain: domain)
             v = 2
         }
         // Future steps slot in here: `if v < 3 { migrateV2toV3(...); v = 3 }` etc.
@@ -702,10 +702,20 @@ public final class Preferences: ObservableObject {
     /// We unconditionally copy now. The mid-crash case becomes "legacy
     /// wins"; an exotic edge case which is no worse than the previous
     /// "legacy is silently dropped." (settings F3)
-    private static func migrateV1toV2(defaults: UserDefaults) {
+    private static func migrateV1toV2(defaults: UserDefaults, domain: String) {
+        // Read each legacy key from the persistent domain directly, NOT
+        // via `defaults.object(forKey:)` which walks the full search list
+        // (app persistent → NSGlobalDomain → registration). A hostile or
+        // accidental `defaults write -g theme "X"` / `defaults write -g
+        // fontSize 25` to NSGlobalDomain would otherwise be imported into
+        // `bb.theme` / `bb.fontSize` on first migration, silently
+        // substituting the user's settings. Mirrors the same defense
+        // applied to `bootstrapSchemaVersionKey` (audit H-8) extended
+        // to the legacy data keys. Audit S5-001.
+        guard let persistent = defaults.persistentDomain(forName: domain) else { return }
         for name in Preferences.legacyUnprefixedKeys {
             let prefixed = Preferences.k(name)
-            guard let legacy = defaults.object(forKey: name) else { continue }
+            guard let legacy = persistent[name] else { continue }
             defaults.set(legacy, forKey: prefixed)
             defaults.removeObject(forKey: name)
         }
