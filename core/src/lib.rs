@@ -3537,7 +3537,13 @@ pub unsafe extern "C" fn bb_term_text_range(
         // post-clamp range can still expose if the grid spans the full
         // i32 range.
         let span = (iter_end as i64).saturating_sub(iter_start as i64);
-        if span >= MAX_TEXT_RANGE_ROWS as i64 {
+        // Track cap-truncation separately from grid-clamp. iter_end after
+        // the cap is a hard-stop, NOT the user's intended end row —
+        // applying the end-row column-respect branch to the cap row would
+        // silently crop a mid-selection row to e_col (which was intended
+        // for the user's unreached final row). Audit S4-001.
+        let cap_truncated = span >= MAX_TEXT_RANGE_ROWS as i64;
+        if cap_truncated {
             iter_end = iter_start.saturating_add((MAX_TEXT_RANGE_ROWS - 1) as i32);
         }
 
@@ -3545,16 +3551,17 @@ pub unsafe extern "C" fn bb_term_text_range(
         let mut lines: Vec<String> = Vec::new();
 
         let rectangular = rect != 0;
-        // Compare against the CLAMPED iteration bounds, not the caller's
-        // raw s_line/e_line. When the caller asks for a range that
-        // extends past the grid (e.g. e_line = 9999 on a 3-row grid),
-        // iter_end gets clamped to bottommost but the per-row branch
-        // never matches `line_i == e_line` (=9999) and the last
-        // iterated row falls into the middle-row branch (full row)
-        // instead of the end-row branch (trim to e_col). Symmetric
-        // bug at the head when s_line is below topmost.
-        // Audit S5-002 / S5-003.
-        let single_line = iter_start == iter_end;
+        // The per-row branches compare line_i against iter_start /
+        // iter_end (the clamped iteration bounds) so callers whose raw
+        // s_line/e_line sat outside the grid still get column-respect on
+        // the clamped extremity rows (audit S5-002 / S5-003).
+        // But the iter-collapse case (iter_start == iter_end after a
+        // multi-row request was clamped to one row) must NOT be treated
+        // as a single-line pick — the user explicitly asked for multiple
+        // rows, so the start-row trim semantic still applies. Require
+        // both iteration collapse AND user-endpoint identity. Audit
+        // S1-002.
+        let single_line = iter_start == iter_end && s_line == e_line;
 
         if iter_start > iter_end {
             return bb_string_new(Vec::new());
@@ -3575,7 +3582,7 @@ pub unsafe extern "C" fn bb_term_text_range(
                 (s_col, e_col, false)
             } else if line_i == iter_start {
                 (s_col, last_col, true)
-            } else if line_i == iter_end {
+            } else if line_i == iter_end && !cap_truncated {
                 (0usize, e_col, false)
             } else {
                 (0usize, last_col, true)
