@@ -177,6 +177,18 @@ enum MainThreadWatchdog {
         let pid = getpid()
         let dir = logDirectory()
         let file = "\(dir)/hang-\(tsMs)-\(pid)-\(unique).txt"
+        // S5-004: sample(1) -file opens with O_TRUNC and writes
+        // incrementally over the 2 s window. If Blackbird is force-
+        // quit during that window (the typical user response to a
+        // visible beachball) the final-name file would be left half-
+        // written and surface in Settings → Diagnostics with no
+        // incomplete marker. Write to a `.partial` sibling first;
+        // only `FileManager.replaceItem`-rename to the final path
+        // after waitUntilExit returns cleanly. A mid-capture crash
+        // leaves the `.partial` (which DiagnosticReportStore's
+        // `hang-*.txt` filter ignores) instead of polluting the
+        // visible report list with a truncated trace.
+        let partialFile = "\(file).partial"
         logger.warning("main-thread hang \(age, format: .fixed(precision: 2), privacy: .public)s — writing \(file, privacy: .public)")
 
         // 2 seconds of sampling at default granularity — enough to catch
@@ -184,7 +196,7 @@ enum MainThreadWatchdog {
         // the hang itself.
         let proc = Process()
         proc.launchPath = "/usr/bin/sample"
-        proc.arguments = ["\(pid)", "2", "-file", file]
+        proc.arguments = ["\(pid)", "2", "-file", partialFile]
         // Sample's own stdout/stderr is noise; redirect to /dev/null so the
         // unified log only sees the watchdog's own line.
         proc.standardOutput = FileHandle(forWritingAtPath: "/dev/null")
@@ -192,9 +204,31 @@ enum MainThreadWatchdog {
         do {
             try proc.run()
             proc.waitUntilExit()
-            logger.warning("hang report ready: \(file, privacy: .public)")
+            // Promote the partial-named file to its final name. Using
+            // `moveItem` (not `replaceItem`) because the destination
+            // path is fresh per-capture (timestamp + UUID + pid in the
+            // name) — no existing file to replace, so we want a hard
+            // failure if something raced our path.
+            let fm = FileManager.default
+            do {
+                try fm.moveItem(atPath: partialFile, toPath: file)
+                logger.warning("hang report ready: \(file, privacy: .public)")
+            } catch {
+                logger.error(
+                    "hang report rename \(partialFile, privacy: .public) → \(file, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                )
+                // Best-effort cleanup of the partial so the user
+                // doesn't accumulate orphan `.partial` files. If this
+                // also fails, the next captureHangReport invocation
+                // is independent (fresh timestamp+UUID); the orphan
+                // is invisible to the Settings → Diagnostics filter.
+                try? fm.removeItem(atPath: partialFile)
+            }
         } catch {
             logger.error("sample(1) invocation failed: \(error.localizedDescription, privacy: .public)")
+            // Sample never ran; if -file opened anyway with truncate,
+            // remove the empty placeholder to keep the directory clean.
+            try? FileManager.default.removeItem(atPath: partialFile)
         }
     }
 

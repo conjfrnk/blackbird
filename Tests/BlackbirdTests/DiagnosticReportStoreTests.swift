@@ -49,6 +49,22 @@ final class DiagnosticReportStoreTests: XCTestCase {
 
     // MARK: - File detection
 
+    /// S5-004: MainThreadWatchdog now writes via a `.partial` sibling
+    /// and atomically renames to the final name only after sample(1)
+    /// exits cleanly. A mid-capture crash leaves the `.partial`
+    /// behind. The hang-report filter must NOT pick those up — the
+    /// truncated trace would otherwise surface in Settings →
+    /// Diagnostics indistinguishable from a complete report.
+    func testHangFiles_partialSuffix_isRejected() throws {
+        try writeFile("hang-good.txt", in: hangDir, contents: "complete trace")
+        try writeFile("hang-stuck.txt.partial", in: hangDir, contents: "<half-written>")
+        let store = DiagnosticReportStore(hangDirectory: hangDir, crashDirectory: crashDir)
+        store.reload()
+        XCTAssertEqual(store.reports.count, 1,
+                       "only the .txt hang report should surface; .partial files must be filtered out")
+        XCTAssertEqual(store.reports.first?.url.lastPathComponent, "hang-good.txt")
+    }
+
     func testHangFilesAreDetected() throws {
         // Memory: <1 KB. Wall: ~10 ms.
         try writeFile("hang-1234.txt", in: hangDir, contents: "trace A")
