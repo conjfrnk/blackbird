@@ -342,8 +342,19 @@ public final class Preferences: ObservableObject {
         // so a tampered plist with NaN / out-of-range values would
         // otherwise sneak past the clamp. Re-assigning the value triggers
         // the didSet chain and normalises once at launch.
-        fontSize = fontSize
-        translucency = translucency
+        //
+        // S6-010: also skip on downgrade. The same H-8 reasoning applies
+        // to numeric envelopes — if a future v(N+1) widens fontSize to
+        // 9...64 and the user picked 48, a vN binary would clamp that
+        // back to 32, and on re-upgrade the user's preference is gone.
+        // The "tampered plist" recovery only matters on the upgrade /
+        // same-version path; on downgrade, defer normalisation to the
+        // first in-session edit (which fires didSet via the normal
+        // Swift-assignment path).
+        if !isDowngrade {
+            fontSize = fontSize
+            translucency = translucency
+        }
 
         // Audit M-14 / DI-7, L-28 / MS-9 (2026-04-29): in-session
         // `didSet` clamps and the init-time enum repair both miss values
