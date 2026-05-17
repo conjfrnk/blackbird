@@ -176,3 +176,82 @@ fn text_range_caps_huge_request_at_max_rows() {
         bc::bb_term_free(term);
     }
 }
+
+/// S5-002: when the caller's `end_line` is past the bottommost grid
+/// row, the loop clamps `iter_end` to bottommost but the per-row
+/// branch's `line_i == e_line` comparison uses the pre-clamp `e_line`
+/// — so the final iterated row falls into the middle-row branch
+/// `(0, last_col, true)` instead of the end-row branch
+/// `(0, e_col, false)`. Result: the selection runs past the user's
+/// `end_col` on the final visible row.
+#[test]
+fn text_range_e_line_past_bottommost_respects_end_col() {
+    unsafe {
+        let term = bc::bb_term_new(10, 3, 100);
+        assert!(!term.is_null());
+        // Three rows × 10 cols. Each row's content is distinctive so
+        // we can tell the per-row branching apart. \r\n returns to col 0.
+        let input = b"aXXXXXXXXX\r\nbYYYYYYYYY\r\ncZZZZZZZZZ";
+        bc::bb_term_input(term, input.as_ptr(), input.len());
+
+        // Select (0,0)..(9999,2). end_line=9999 is far past the
+        // bottommost (which is at most row 2 on a 3-row grid with no
+        // scrollback). Expected: full row 0, full row 1, row 2 trimmed
+        // to col 2 → "aXXXXXXXXX\nbYYYYYYYYY\ncZZ".
+        let raw = bc::bb_term_text_range(term, 0, 0, 9999, 2, 0);
+        assert!(!raw.is_null());
+        let bytes: &[u8] = if (*raw).len == 0 || (*raw).bytes.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts((*raw).bytes, (*raw).len)
+        };
+        let got = std::str::from_utf8(bytes).unwrap_or_default().to_string();
+        bc::bb_string_release(raw);
+        bc::bb_term_free(term);
+
+        assert_eq!(
+            got, "aXXXXXXXXX\nbYYYYYYYYY\ncZZ",
+            "out-of-grid end_line must still respect end_col on the last \
+             actually-iterated row; got: {got:?}"
+        );
+    }
+}
+
+/// S5-003: symmetric to S5-002. When `start_line` is past the topmost
+/// grid row (more negative than the deepest scrollback row), the loop
+/// clamps `iter_start` up to topmost but the per-row branch's
+/// `line_i == s_line` comparison uses pre-clamp `s_line` — so the
+/// first iterated row falls into the middle-row branch
+/// `(0, last_col, true)` instead of the start-row branch
+/// `(s_col, last_col, true)`. Result: the user's start_col cue is
+/// dropped on the topmost rendered row.
+#[test]
+fn text_range_s_line_below_topmost_respects_start_col() {
+    unsafe {
+        let term = bc::bb_term_new(10, 3, 100);
+        assert!(!term.is_null());
+        let input = b"aXXXXXXXXX\r\nbYYYYYYYYY\r\ncZZZZZZZZZ";
+        bc::bb_term_input(term, input.as_ptr(), input.len());
+
+        // Select (-9999, 3)..(0, 9). start_line=-9999 is far below
+        // any reachable scrollback row (the grid has no scrollback
+        // here). topmost is 0. Expected: starts at row 0 col 3,
+        // trimmed-tail to col 9 → "XXXXXXX" (cols 3..=9 of row 0).
+        let raw = bc::bb_term_text_range(term, -9999, 3, 0, 9, 0);
+        assert!(!raw.is_null());
+        let bytes: &[u8] = if (*raw).len == 0 || (*raw).bytes.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts((*raw).bytes, (*raw).len)
+        };
+        let got = std::str::from_utf8(bytes).unwrap_or_default().to_string();
+        bc::bb_string_release(raw);
+        bc::bb_term_free(term);
+
+        assert_eq!(
+            got, "XXXXXXX",
+            "out-of-grid start_line must still respect start_col on the \
+             first actually-iterated row; got: {got:?}"
+        );
+    }
+}

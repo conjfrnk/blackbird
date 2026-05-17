@@ -3535,7 +3535,16 @@ pub unsafe extern "C" fn bb_term_text_range(
         let mut lines: Vec<String> = Vec::new();
 
         let rectangular = rect != 0;
-        let single_line = s_line == e_line;
+        // Compare against the CLAMPED iteration bounds, not the caller's
+        // raw s_line/e_line. When the caller asks for a range that
+        // extends past the grid (e.g. e_line = 9999 on a 3-row grid),
+        // iter_end gets clamped to bottommost but the per-row branch
+        // never matches `line_i == e_line` (=9999) and the last
+        // iterated row falls into the middle-row branch (full row)
+        // instead of the end-row branch (trim to e_col). Symmetric
+        // bug at the head when s_line is below topmost.
+        // Audit S5-002 / S5-003.
+        let single_line = iter_start == iter_end;
 
         if iter_start > iter_end {
             return bb_string_new(Vec::new());
@@ -3554,9 +3563,9 @@ pub unsafe extern "C" fn bb_term_text_range(
                 (s_col.min(e_col), s_col.max(e_col), false)
             } else if single_line {
                 (s_col, e_col, false)
-            } else if line_i == s_line {
+            } else if line_i == iter_start {
                 (s_col, last_col, true)
-            } else if line_i == e_line {
+            } else if line_i == iter_end {
                 (0usize, e_col, false)
             } else {
                 (0usize, last_col, true)
