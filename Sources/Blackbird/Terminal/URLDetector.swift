@@ -197,11 +197,61 @@ public enum URLDetector {
                     if trimmedLen > 0 {
                         continuation = String(continuation.prefix(trimmedLen))
                         let candidate = substring + continuation
-                        // Only accept the join when the joined text parses
-                        // as a URL. Otherwise the next-row content wasn't a
-                        // continuation after all and we emit the row's
-                        // original match unjoined.
-                        if URL(string: candidate) != nil {
+                        // Wrap-join is a display-vs-dispatch trade-off: the
+                        // highlighted span stops at the right edge (the user
+                        // only SEES the first-row portion) but the dispatched
+                        // URL carries the joined string. Five guards keep
+                        // the join honest. Audit S4-001 / cwd-hyperlink F9.
+                        //
+                        // (1) Joined URL must parse — sanity gate.
+                        // (2) Substring URL must parse AND have a non-empty
+                        //     host. A first-row substring that parses with
+                        //     `host == nil` (e.g. `https://?`) makes the
+                        //     host-equality check below evaluate `nil == nil`
+                        //     and admit arbitrary continuation hosts.
+                        //     `OSC8URLPolicy.isAllowed` would block it
+                        //     downstream, but the two gates must not be
+                        //     load-bearing for each other.
+                        // (3) host(substring) == host(joined). Blocks the
+                        //     classic S4-001 shape where the row-edge break
+                        //     landed mid-host: row N ends `https://apple.com`,
+                        //     row N+1 starts `.evil.com/login` → joined host
+                        //     `apple.com.evil.com` ≠ `apple.com` → REJECT.
+                        // (4) port(substring) == port(joined). Blocks the
+                        //     port-injection variant: substring
+                        //     `https://example.com` + continuation
+                        //     `:8080/admin` → joined host equals substring
+                        //     host but joined.port = 8080. The user saw the
+                        //     apex URL underlined; dispatching to a non-
+                        //     default port silently re-targets an internal
+                        //     console (`:8443`, `:9200`, `:6379`, etc.).
+                        // (5) Continuation's first character must NOT be one
+                        //     of `?`, `#`, `&`, `@`, `;`. These introduce
+                        //     query / fragment / userinfo / path-parameter
+                        //     structure that doesn't exist in the visible
+                        //     substring. The legitimate long-URL-path-wrap
+                        //     case (continuation starting with alnum / `/` /
+                        //     `.` / `-` / `_` / `~`) is unaffected.
+                        //
+                        // Acknowledged residual: a continuation that begins
+                        // with a benign char but contains `?`/`#` later
+                        // (e.g. `/oauth?return_to=evil`) still slips. That
+                        // shape is same-host injection — the trust target
+                        // matches what the user saw — and is bounded by the
+                        // remote endpoint's own redirect/SSO policy. The
+                        // structural fix would be to extend the highlight
+                        // across rows so the dispatched URL matches the
+                        // visible span; F9 notes that as a future
+                        // improvement.
+                        let urlStructureLeaders: Set<Character> = ["?", "#", "&", "@", ";"]
+                        if let joined = URL(string: candidate),
+                           let sub = URL(string: substring),
+                           let subHost = sub.host,
+                           !subHost.isEmpty,
+                           subHost == joined.host,
+                           sub.port == joined.port,
+                           let firstContChar = continuation.first,
+                           !urlStructureLeaders.contains(firstContChar) {
                             finalURLString = candidate
                             // Record how many leading columns of the next
                             // row were consumed so that row's own scan

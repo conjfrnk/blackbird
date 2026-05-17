@@ -368,6 +368,144 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(m.url.absoluteString, url)
     }
 
+    /// S4-001: A URL whose regex match happens to end exactly at the
+    /// last column of a row must NOT have the next row's leading
+    /// URL-safe characters concatenated onto its host. Today the
+    /// visible highlight stops at the row edge (`endCol == cols - 1`
+    /// on the first row), but `URLMatch.url` carries the joined
+    /// string — so the user sees `https://apple.com` highlighted and
+    /// clicks through to `https://apple.com.evil.com/login`. That's a
+    /// phishing / trust-display gap.
+    ///
+    /// Setup: 40-col grid. Pad with 23 spaces, then `https://apple.com`
+    /// (17 chars) — the URL lands at cols 23..=39. Then `\r\n` moves
+    /// the cursor explicitly to row 1 col 0 (rather than relying on
+    /// pending-wrap state, which could itself collapse the two rows
+    /// from the detector's perspective). Then `.evil.com/login` is
+    /// written at row 1 starting at col 0.
+    func test_scan_wrapJoin_doesNotChangeHostUnderRightEdge() throws {
+        let cols: UInt16 = 40
+        let url = "https://apple.com"
+        let pad = String(repeating: " ", count: Int(cols) - url.count)
+        XCTAssertEqual(pad.count + url.count, Int(cols),
+                       "setup: URL must end exactly at the last column")
+        let nextRow = ".evil.com/login"
+        // `\r\n` returns cursor to col 0 then drops to the next row,
+        // so `.evil.com/login` starts at row 1 col 0 — physically
+        // separate from the URL on row 0.
+        let snap = try snapshot(
+            from: "\(pad)\(url)\r\n\(nextRow)",
+            cols: cols,
+            rows: 5
+        )
+        let matches = URLDetector.scan(snapshot: snap)
+        // The detector must report at least one URLMatch covering the
+        // apple.com URL. (If no match is found at all, the test would
+        // be passing for the wrong reason — different bug shape.)
+        let appleMatch = try XCTUnwrap(
+            matches.first(where: { $0.url.absoluteString.contains("apple.com") }),
+            "expected a URLMatch covering apple.com on the first row, got \(matches.map { $0.url.absoluteString })"
+        )
+
+        // (a) KEY assertion: wrap-join must not change the host across
+        // the row boundary. Today this fails because the buggy join
+        // produces host == "apple.com.evil.com".
+        XCTAssertEqual(
+            appleMatch.url.host, "apple.com",
+            "wrap-join must not change the host across row boundary"
+        )
+
+        // (b) Visible highlight extent on the first row is unchanged —
+        // endCol stays at the last column of row 0, consistent with
+        // what the user sees underlined.
+        XCTAssertEqual(
+            appleMatch.endCol, Int(cols) - 1,
+            "endCol should land on the last column of row 0 (the visible highlight extent)"
+        )
+    }
+
+    /// S4-001 same-host residual: even when the host matches, a
+    /// continuation that starts with `?`, `#`, `&`, `@`, or `;`
+    /// introduces query / fragment / userinfo structure that the user
+    /// never saw in the underlined first-row span. A visible
+    /// `https://github.com/login` at the row edge silently joined with
+    /// `?return_to=https://evil.com` becomes an open-redirect dispatch
+    /// — same host, hidden payload. Reject those joins.
+    func test_scan_wrapJoin_rejectsContinuationStartingWithQuery() throws {
+        let cols: UInt16 = 40
+        let url = "https://github.com/login"   // 24 chars
+        let pad = String(repeating: " ", count: Int(cols) - url.count)
+        XCTAssertEqual(pad.count + url.count, Int(cols))
+        let nextRow = "?return_to=https://evil.com"
+        let snap = try snapshot(
+            from: "\(pad)\(url)\r\n\(nextRow)",
+            cols: cols,
+            rows: 5
+        )
+        let matches = URLDetector.scan(snapshot: snap)
+        let ghMatch = try XCTUnwrap(
+            matches.first(where: { $0.url.absoluteString.contains("github.com") }),
+            "expected a URLMatch covering github.com, got \(matches.map { $0.url.absoluteString })"
+        )
+        XCTAssertEqual(
+            ghMatch.url.absoluteString, url,
+            "wrap-join must not extend visible URL with a query the user didn't see"
+        )
+        XCTAssertNil(
+            ghMatch.url.query,
+            "no query component should slip in from the continuation row"
+        )
+    }
+
+    /// S4-001 port-injection residual: same host, but the continuation
+    /// begins with `:8080/admin`. Joined URL has port 8080 while the
+    /// substring had no explicit port — silently re-targets a non-
+    /// default port (internal admin console, dev server, etc.) from a
+    /// visible apex-host underline. Reject.
+    func test_scan_wrapJoin_rejectsPortInjection() throws {
+        let cols: UInt16 = 40
+        let url = "https://example.com"        // 19 chars
+        let pad = String(repeating: " ", count: Int(cols) - url.count)
+        XCTAssertEqual(pad.count + url.count, Int(cols))
+        let nextRow = ":8080/admin"
+        let snap = try snapshot(
+            from: "\(pad)\(url)\r\n\(nextRow)",
+            cols: cols,
+            rows: 5
+        )
+        let matches = URLDetector.scan(snapshot: snap)
+        let m = try XCTUnwrap(
+            matches.first(where: { $0.url.absoluteString.contains("example.com") }),
+            "expected a URLMatch covering example.com"
+        )
+        XCTAssertEqual(
+            m.url.absoluteString, url,
+            "wrap-join must not introduce a port the user didn't see"
+        )
+        XCTAssertNil(m.url.port,
+                     "no port should appear on the dispatched URL")
+    }
+
+    /// Legitimate long-URL same-host path wrap (patch-reviewer's
+    /// suggested case): a long GitHub URL whose path wraps at the row
+    /// edge must still join cleanly. This is the F9 feature the host-
+    /// invariance gate was designed to preserve.
+    func test_scan_wrapJoin_acceptsSameHostPathContinuation() throws {
+        let cols: UInt16 = 60
+        let head = "https://github.com/conjfrnk/blackbird/blob/main/very-long-pa"  // 60 chars
+        XCTAssertEqual(head.count, Int(cols),
+                       "setup: head URL exactly fills the first row")
+        let tail = "th/more/path.swift"
+        let snap = try snapshot(from: head + tail, cols: cols, rows: 5)
+        let matches = URLDetector.scan(snapshot: snap)
+        XCTAssertEqual(matches.count, 1,
+                       "same-host path wrap should produce exactly one joined match")
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertEqual(m.url.host, "github.com")
+        XCTAssertEqual(m.url.absoluteString, head + tail,
+                       "joined URL should be the full long path")
+    }
+
     /// Wrapped URL with trailing prose punctuation on the continuation row
     /// should trim the punctuation before joining.
     func test_scan_wrappedURL_trimsTrailingPunctuation() throws {
