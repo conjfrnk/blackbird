@@ -263,6 +263,30 @@ final class DragDropTests: XCTestCase {
                        "non-control bytes must pass through untouched, in order")
     }
 
+    /// S4-014: bidi / zero-width / invisible scalars in a dropped path
+    /// must be stripped. A pasteboard provider (sandboxed peer, web
+    /// drag) can hand a `file://` URL whose path contains U+202E
+    /// RIGHT-TO-LEFT OVERRIDE — the pasted shell-quoted line then
+    /// visually misrepresents the actual filename the shell receives.
+    /// Same Trojan-source class as the DiagnosticsView Copy fix
+    /// (S4-002).
+    func test_sanitizeDropPath_stripsBidiAndInvisible() {
+        let raw = "/tmp/\u{202E}gpj.dab.jpg\u{200B}/file\u{FEFF}.txt"
+        let scrubbed = TerminalView.sanitizeDropPath(raw)
+        let forbidden: Set<Unicode.Scalar> = [
+            "\u{202E}", "\u{200B}", "\u{FEFF}", "\u{202D}", "\u{2066}",
+            "\u{2067}", "\u{2068}", "\u{2069}", "\u{200E}", "\u{200F}",
+            "\u{00AD}",
+        ]
+        for scalar in scrubbed.unicodeScalars {
+            XCTAssertFalse(forbidden.contains(scalar),
+                           "bidi/invisible scalar U+\(String(scalar.value, radix: 16)) survived sanitizeDropPath")
+        }
+        // Visible non-control bytes survive in order.
+        XCTAssertEqual(scrubbed, "/tmp/gpj.dab.jpg/file.txt",
+                       "non-control / non-bidi scalars must pass through untouched, in order")
+    }
+
     /// Helper: take the same code path as `performDragOperation` —
     /// `url.path` -> `sanitizeDropPath` — so the integration tests
     /// above exercise the production scrubber rather than re-implementing

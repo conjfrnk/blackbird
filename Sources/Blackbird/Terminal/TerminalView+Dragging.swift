@@ -152,6 +152,26 @@ extension TerminalView {
             let v = scalar.value
             // Strip C0 controls (0x00–0x1F) and DEL (0x7F).
             if v < 0x20 || v == 0x7F { return false }
+            // Strip bidi / zero-width / invisible scalars. A pasteboard
+            // provider (sandboxed peer / web drag) can hand a `file://`
+            // URL whose path contains U+202E RIGHT-TO-LEFT OVERRIDE —
+            // the pasted line displays as `'/tmp/jpg.bad.jpg'` while
+            // the shell actually opens the byte-order-flipped real
+            // path. Same Trojan-source-class smuggling as the
+            // DiagnosticsView Copy path. Mirror the set used by
+            // `TerminalView+Paste.stripBidiOverrides` and
+            // `DiagnosticsView.stripControlCharacters` so all three
+            // sanitizer surfaces stay in lockstep. Audit S4-014.
+            if v == 0x00AD                          // soft hyphen
+                || v == 0x061C                      // Arabic Letter Mark
+                || v == 0x180E                      // Mongolian Vowel Sep
+                || (v >= 0x200B && v <= 0x200F)     // ZWSP/ZWNJ/ZWJ/LRM/RLM
+                || (v >= 0x2028 && v <= 0x202E)     // LS/PS + bidi formatting
+                || v == 0x2060                      // Word Joiner
+                || (v >= 0x2066 && v <= 0x2069)     // bidi isolates
+                || v == 0xFEFF                      // BOM / ZW no-break space
+                || (v >= 0xE0000 && v <= 0xE007F)   // Plane-14 tag block
+            { return false }
             return true
         })
     }
