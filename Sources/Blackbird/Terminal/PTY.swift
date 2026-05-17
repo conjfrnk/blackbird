@@ -108,6 +108,21 @@ public final class PTY {
         "CA_ASSERT_MAIN_THREAD_TRANSACTIONS",
     ]
 
+    /// True if `key` is in Blackbird's `BLACKBIRD_*` / `BB_*` namespace.
+    /// Case-insensitive: POSIX env names are conventionally uppercase
+    /// but the kernel doesn't enforce it, and a launcher (e.g.
+    /// `launchctl setenv bb_token …`) or parent script that exports a
+    /// lowercase variant would otherwise slip past a case-sensitive
+    /// sweep and leak into the spawned child shell. Audit S2-004.
+    ///
+    /// Exposed `internal` so unit tests can pin the case-insensitive
+    /// contract without paying for a full `posix_spawn` round-trip
+    /// (which is gated behind `BB_RUN_FLAKY_PTY_TESTS`).
+    internal static func isBlackbirdNamespacedEnvKey(_ key: String) -> Bool {
+        let upper = key.uppercased()
+        return upper.hasPrefix("BLACKBIRD_") || upper.hasPrefix("BB_")
+    }
+
     private let masterFD: Int32
     private let childPID: pid_t
     /// BSD start time of `childPID` captured at spawn. Used by
@@ -325,7 +340,7 @@ public final class PTY {
             let s = String(cString: entry)
             if let eq = s.firstIndex(of: "=") {
                 let key = String(s[..<eq])
-                if key.hasPrefix("BLACKBIRD_") || key.hasPrefix("BB_") {
+                if Self.isBlackbirdNamespacedEnvKey(key) {
                     // Avoid duplicating any explicit entry already
                     // present in scrubbedParentEnvVars (today none of
                     // the namespaced names overlap, but defend against

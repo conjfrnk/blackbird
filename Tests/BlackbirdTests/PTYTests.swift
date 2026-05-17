@@ -201,6 +201,29 @@ final class PTYTests: XCTestCase {
         pty.terminate()
     }
 
+    /// S2-004: PTY's BLACKBIRD_/BB_ namespace classifier must match
+    /// case-insensitively so a lowercase parent env var (e.g. one set
+    /// by `launchctl setenv bb_token …` or a parent shell script) is
+    /// included in the post-fork scrub list and doesn't leak into the
+    /// child shell. End-to-end coverage via `posix_spawn` lives under
+    /// the BB_RUN_FLAKY_PTY_TESTS gate; this unit test pins the
+    /// classifier directly so the contract is checked on every CI run.
+    func test_isBlackbirdNamespacedEnvKey_caseInsensitive() {
+        // Uppercase canonical.
+        XCTAssertTrue(PTY.isBlackbirdNamespacedEnvKey("BB_TOKEN"))
+        XCTAssertTrue(PTY.isBlackbirdNamespacedEnvKey("BLACKBIRD_THEME"))
+        // Lowercase / mixed — the S2-004 cases that previously slipped.
+        XCTAssertTrue(PTY.isBlackbirdNamespacedEnvKey("bb_token"))
+        XCTAssertTrue(PTY.isBlackbirdNamespacedEnvKey("Bb_Token"))
+        XCTAssertTrue(PTY.isBlackbirdNamespacedEnvKey("blackbird_theme"))
+        XCTAssertTrue(PTY.isBlackbirdNamespacedEnvKey("BlackBird_Theme"))
+        // Non-matches.
+        XCTAssertFalse(PTY.isBlackbirdNamespacedEnvKey("PATH"))
+        XCTAssertFalse(PTY.isBlackbirdNamespacedEnvKey("BBQ"))   // no underscore
+        XCTAssertFalse(PTY.isBlackbirdNamespacedEnvKey("BLACK"))
+        XCTAssertFalse(PTY.isBlackbirdNamespacedEnvKey(""))
+    }
+
     func test_concurrentWriteAndWriteImmediate_doesNotDeadlock() throws {
         try Self.skipIfFlakyOnCI()
         // Regression guard for the writeImmediate / write lock-order
