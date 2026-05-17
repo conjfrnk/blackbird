@@ -1489,6 +1489,16 @@ pub struct BBTerm {
     /// lengths, excluding the terminating NUL). Drives the
     /// `OSC8_TOTAL_INTERN_BYTES_CAP` gate in `bb_term_take_snapshot`.
     uri_cache_bytes: usize,
+    /// One-shot latch: have we already emitted the per-snapshot
+    /// `id-exhaustion` breadcrumb? OSC 8 link-id space is u16, leaving
+    /// 65 534 distinct URIs per snapshot before attribution is silently
+    /// dropped (lib.rs phase-1 link-build). The cap is essentially
+    /// unreachable on any realistic TUI but reachable by a hostile
+    /// remote emitting unique per-cell URIs; without an observability
+    /// hook, support engineers triaging "my OSC 8 links stopped working"
+    /// have no breadcrumb. Latch keeps the log one-shot per session to
+    /// avoid eprintln spam on a streaming hostile payload. Audit S2-014.
+    osc8_id_exhaustion_logged: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1813,6 +1823,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             callback,
             uri_cstr_cache: std::collections::HashMap::new(),
             uri_cache_bytes: 0,
+            osc8_id_exhaustion_logged: false,
             modify_other_keys: 0,
             prompt_mark_rate: PromptMarkRateState::new(),
             osc7_rate: Osc7RateState::new(),
@@ -2764,6 +2775,11 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let mut phase1_uris: Vec<Arc<str>> = Vec::new();
         let mut local_uri_to_id: std::collections::HashMap<Arc<str>, u16> =
             std::collections::HashMap::new();
+        // Track whether this snapshot ran out of u16 link ids so we can
+        // emit a one-shot diagnostic AFTER the grid borrow ends (the
+        // `bb.osc8_id_exhaustion_logged` field can't be touched while
+        // `grid` borrows `bb.term`). Audit S2-014.
+        let mut osc8_id_exhausted_this_snapshot = false;
         for indexed in grid.display_iter() {
             let link_id: u16 = match indexed.cell.hyperlink() {
                 Some(h) => {
@@ -2790,9 +2806,15 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                     } else if let Some(&id) = local_uri_to_id.get(uri) {
                         id
                     } else if phase1_uris.len() + 1 >= u16::MAX as usize {
-                        // Out of per-snapshot ids — drop attribution
-                        // silently. 65 534 links per snapshot is
-                        // already well past any realistic TUI.
+                        // Out of per-snapshot ids — drop attribution.
+                        // 65 534 links per snapshot is already well past
+                        // any realistic TUI; reaching the cap implies a
+                        // hostile remote emitting unique per-cell URIs.
+                        // Latch a one-shot breadcrumb (deferred until
+                        // after the grid borrow ends) so support
+                        // engineers triaging "my OSC 8 links stopped
+                        // working" have a signal. Audit S2-014.
+                        osc8_id_exhausted_this_snapshot = true;
                         0
                     } else {
                         let id = (phase1_uris.len() + 1) as u16; // 1-based; 0 = no link
@@ -2839,6 +2861,18 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         let _ = palette;
         // `local_uri_to_id` lives and dies with this snapshot.
         drop(local_uri_to_id);
+
+        // Deferred S2-014 breadcrumb: if any cell hit the u16 link-id
+        // ceiling during phase 1, log exactly once per BBTerm session.
+        // Mutating bb here is sound because the grid borrow ended above.
+        if osc8_id_exhausted_this_snapshot && !bb.osc8_id_exhaustion_logged {
+            bb.osc8_id_exhaustion_logged = true;
+            eprintln!(
+                "[blackbird_core] OSC 8 link-id cap (u16) saturated for this snapshot — \
+                 attribution silently dropped on cells past 65 534 distinct URIs. \
+                 Symptom: 'links stopped working'. One-shot per session."
+            );
+        }
 
         // Phase 2: intern the URIs collected in phase 1 against the
         // persistent cache. Entries survive across snapshots
