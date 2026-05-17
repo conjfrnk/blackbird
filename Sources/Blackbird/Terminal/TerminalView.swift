@@ -2037,14 +2037,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         for shape in dangerous where stripped.contains(shape) {
             return false
         }
-        // Alternation inside a quantified group — `(a|aa)+`, `(x|xx)*` —
-        // is the second textbook ReDoS class (overlapping alternatives).
-        // The pattern is `( <stuff> | <stuff> ) [+*]` with no nested
-        // parens in the body (good enough for the common case; nested
-        // alternation can still slip through but is much rarer in
-        // hostile-but-short find queries).
+        // Alternation inside a quantified group — `(a|aa)+`, `(x|xx)*`,
+        // `(a|aa|aaa)+` — is the second textbook ReDoS class (overlapping
+        // alternatives). The pattern matches `( <stuff> | <stuff> ) [+*]`
+        // with no nested parens. The earlier shape used `[^()|]*` for
+        // the branches, which required EXACTLY ONE `|` and silently let
+        // 3+ way alternations slip past the gate (audit S3-003). The
+        // body class is now `[^()]+` so the gate fires on any number of
+        // `|` separators while still permitting non-alternating groups
+        // (`(abc)+`, `(?:foo)+`) and rejecting nested parens.
         if let altRe = try? NSRegularExpression(
-            pattern: #"\([^()|]*\|[^()|]*\)\s*[+*]"#,
+            pattern: #"\([^()]+\|[^()]+\)\s*[+*]"#,
             options: []
         ) {
             let ns = pattern as NSString

@@ -464,6 +464,26 @@ final class FindRegexGuardTests: XCTestCase {
         )
     }
 
+    /// S3-003: the earlier gate's body class was `[^()|]*` which
+    /// required EXACTLY ONE `|` separator. 3+ way alternations slipped
+    /// through (`(a|aa|aaa)+x` reached the find engine and pegged it
+    /// until the 250 ms timeout fired). The body class is now
+    /// `[^()]+` so any number of `|` separators inside the group
+    /// triggers the gate.
+    func test_isReasonableRegexPattern_rejectsMultiwayAlternationInQuantifiedGroup() {
+        for pattern in [
+            "(a|aa|aaa)+",      // 3-way overlapping
+            "(a|b|c|d)+x",      // 4-way (non-overlapping, but still risky)
+            "(foo|bar|baz)*",
+            "(?:x|xx|xxx|xxxx)+",
+        ] {
+            XCTAssertFalse(
+                TerminalView.isReasonableRegexPattern(pattern),
+                "multi-way alternation inside quantified group must be rejected: \(pattern)"
+            )
+        }
+    }
+
     func test_isReasonableRegexPattern_rejectsExcessiveQuantifierCount() {
         // Defensive cap: more than 6 quantifiers in one query is a
         // strong "this isn't a legitimate find" signal.
