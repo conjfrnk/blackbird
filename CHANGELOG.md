@@ -2,11 +2,12 @@
 
 All notable changes to Blackbird are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
-adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Source is
+distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [0.2.6] - 2026-05-18
 
-Stress / edge audit follow-up: 18 audit findings closed and 3 regressions introduced by the in-flight fixes cleaned up before the tag. No new feature work — entirely correctness, sanitiser parity, and contract-shape fixes.
+Stress / edge audit follow-up: 19 audit findings closed across 17 commits, plus 3 regression tails (`S4-003`, `S1-002`/`S4-001`, `S5-R-001`) introduced by the in-flight fixes and cleaned up before the tag. No new feature work — entirely correctness, sanitiser parity, and contract-shape fixes.
 
 ### Security / hygiene
 - **Fixed**: OSC 8 wrap-join URL-host injection. The detector joined the next row's leading URL-safe text onto a match ending at the right edge, but the joined string was only used for dispatch — the underline stayed clamped to row N. A row ending `https://apple.com` followed by `.evil.com/login` opened `apple.com.evil.com/login` in `NSWorkspace` while the user saw only `apple.com` underlined. Wrap-join now requires scheme/host/port match and refuses URL-structure-leader continuations (`?`, `#`, `&`, `@`, `;`). (commit `0f05cd6`, [audit:S4-001])

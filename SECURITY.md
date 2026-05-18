@@ -187,3 +187,7 @@ address on the GitHub profile at https://github.com/conjfrnk.
 an unpatched vulnerability. Terminal emulators commonly parse untrusted
 output — an RCE report on the public tracker is a zero-day for every
 user running an older build.
+
+---
+
+Last reviewed 2026-05-18 against v0.2.6.

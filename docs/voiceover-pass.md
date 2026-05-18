@@ -101,8 +101,12 @@ For each, record `[x]` / `[!]` (caveat) / `[ ]` (untested).
 
 ## Sign-off
 
-Connor, or any beta user with VoiceOver experience, please run through
-the checklist above and record the result here:
+The automated `.textArea` contract (30 tests in
+`Tests/BlackbirdTests/AccessibilityTests.swift`) gates every PR; the
+checklist above is the manual VoiceOver pass on top of that contract.
+Status: deferred to v1.0 release acceptance — once a beta user with
+VoiceOver experience has worked through the checklist, record the
+result here.
 
 | Date | Tester | Pass? | Notes |
 |------|--------|-------|-------|

@@ -40,6 +40,7 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 | ⌘T / ⌘N / ⌘W      | New tab / new window / close tab |
 | ⌘1 … ⌘9           | Select tab 1–9                   |
 | ⌘⇧[ / ⌘⇧]         | Previous / next tab              |
+| ⌃⇥ / ⌃⇧⇥          | Cycle next / previous tab        |
 | ⌘,                | Settings                         |
 | ⌥⌘R               | Rename active tab                |
 | ⌘C / ⌘V / ⌘A      | Copy / paste / select all (incl. scrollback) |
@@ -57,6 +58,7 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 Download the signed, notarized DMG from
 [blackbird-terminal.com](https://blackbird-terminal.com) or the
 [Releases page](https://github.com/conjfrnk/blackbird/releases/latest).
+Universal binary — Apple Silicon and Intel, macOS 14 Sonoma or newer.
 
 Auto-updates ship through Sparkle once installed.
 
