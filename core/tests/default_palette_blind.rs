@@ -237,3 +237,145 @@ fn fresh_terminal_default_fg_bg_at_origin() {
         assert_eq!(rgb_24(bg), 0x000000, "fresh-term default bg = black");
     });
 }
+
+// ---------------------------------------------------------------
+// 256-color SGR path (Color::Indexed) — `\x1b[38;5;Nm`.
+//
+// This routes through a separate match arm in `color_to_rgb` that
+// the named-SGR tests above don't reach. cargo-mutants reported
+// 6 mutations in this arm (the bit-packing shift/OR) as unobserved
+// before this section was added.
+// ---------------------------------------------------------------
+
+#[test]
+fn indexed_color_slot_0_is_black() {
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;0m");
+        assert_eq!(rgb_24(fg), 0x000000, "slot 0 in 256-color cube is Black");
+    });
+}
+
+#[test]
+fn indexed_color_slot_1_is_red() {
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;1m");
+        assert_eq!(rgb_24(fg), 0xCC0000, "slot 1 in 256-color cube is Red");
+    });
+}
+
+#[test]
+fn indexed_color_slot_15_is_bright_white() {
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;15m");
+        assert_eq!(
+            rgb_24(fg),
+            0xEEEEEC,
+            "slot 15 in 256-color cube is BrightWhite"
+        );
+    });
+}
+
+#[test]
+fn indexed_color_slot_16_is_color_cube_origin() {
+    // Slot 16 in the 256-color palette is (0,0,0) — origin of the 6x6x6
+    // color cube. Slot 17 is (0,0,95) — first blue step. Pin both so an
+    // off-by-one in the cube math surfaces.
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;16m");
+        assert_eq!(rgb_24(fg), 0x000000, "slot 16 = cube origin (0,0,0)");
+    });
+}
+
+#[test]
+fn indexed_color_slot_17_is_first_blue_step() {
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;17m");
+        assert_eq!(rgb_24(fg), 0x00005F, "slot 17 = first blue step (0,0,95)");
+    });
+}
+
+#[test]
+fn indexed_color_slot_196_is_pure_red_cube_corner() {
+    // Slot 196 in the 6x6x6 cube is (5,0,0) — pure red corner.
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;196m");
+        assert_eq!(
+            rgb_24(fg),
+            0xFF0000,
+            "slot 196 = cube corner (5,0,0) = pure red"
+        );
+    });
+}
+
+#[test]
+fn indexed_color_slot_231_is_pure_white_cube_corner() {
+    // Slot 231 is the opposite corner of the cube — (5,5,5) = white.
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;231m");
+        assert_eq!(
+            rgb_24(fg),
+            0xFFFFFF,
+            "slot 231 = cube corner (5,5,5) = pure white"
+        );
+    });
+}
+
+#[test]
+fn indexed_color_slot_232_is_first_grayscale_step() {
+    // Slots 232..=255 are 24-step grayscale, starting at 0x080808.
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;232m");
+        assert_eq!(rgb_24(fg), 0x080808, "slot 232 = first grayscale step");
+    });
+}
+
+#[test]
+fn indexed_color_slot_255_is_last_grayscale_step() {
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;255m");
+        assert_eq!(rgb_24(fg), 0xEEEEEE, "slot 255 = last grayscale step");
+    });
+}
+
+// ---------------------------------------------------------------
+// Truecolor SGR (`\x1b[38;2;R;G;Bm`) — Color::Spec arm.
+//
+// Pins the bit-packing math: ((r << 16) | (g << 8) | b). Per-channel
+// overlap is impossible by construction (8-bit channels at disjoint
+// byte positions), so `|` vs `^` is an equivalent mutant on this
+// arm — but `<<` vs `>>` and shift offsets are catchable.
+// ---------------------------------------------------------------
+
+#[test]
+fn truecolor_fg_red_channel_only() {
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;2;255;0;0m");
+        assert_eq!(rgb_24(fg), 0xFF0000, "truecolor R=255 packed at bits 16-23");
+    });
+}
+
+#[test]
+fn truecolor_fg_green_channel_only() {
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;2;0;255;0m");
+        assert_eq!(rgb_24(fg), 0x00FF00, "truecolor G=255 packed at bits 8-15");
+    });
+}
+
+#[test]
+fn truecolor_fg_blue_channel_only() {
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;2;0;0;255m");
+        assert_eq!(rgb_24(fg), 0x0000FF, "truecolor B=255 packed at bits 0-7");
+    });
+}
+
+#[test]
+fn truecolor_fg_distinct_channels_round_trip() {
+    // R=0x12, G=0x34, B=0x56 — every byte different so a shift-swap
+    // mutation produces a different observable value.
+    with_term(|term| unsafe {
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;2;18;52;86m");
+        assert_eq!(rgb_24(fg), 0x123456, "truecolor 0x12/0x34/0x56 round-trips");
+    });
+}
