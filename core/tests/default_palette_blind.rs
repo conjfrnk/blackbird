@@ -379,3 +379,73 @@ fn truecolor_fg_distinct_channels_round_trip() {
         assert_eq!(rgb_24(fg), 0x123456, "truecolor 0x12/0x34/0x56 round-trips");
     });
 }
+
+// ---------------------------------------------------------------
+// Palette-override readback via SGR + cell.fg/bg.
+//
+// `bb_term_set_named_color(term, slot, rgb)` writes into the
+// internal palette array. Subsequent SGR-named or SGR-indexed
+// references should resolve to the overridden value rather than
+// the built-in default. This tests the bit-packing math in the
+// palette-override branches of `color_to_rgb` (the `if let Some(rgb)
+// = palette[idx]` arms), which the plain-SGR tests above skip
+// because they hit the fallback `else` branches.
+// ---------------------------------------------------------------
+
+#[test]
+fn override_then_indexed_sgr_packs_rgb_correctly() {
+    // Set palette slot 16 to a value with distinct per-byte channels so a
+    // shift-swap in the bit-packing math (`(r << 16) | (g << 8) | b`)
+    // produces an observable difference. 0xAB12CD: R=0xAB, G=0x12, B=0xCD.
+    with_term(|term| unsafe {
+        bb_term_set_named_color(term, 16, 0x00AB12CD);
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;16m");
+        assert_eq!(
+            rgb_24(fg),
+            0xAB12CD,
+            "palette[16] override must surface verbatim via SGR 256-color"
+        );
+    });
+}
+
+#[test]
+fn override_then_indexed_sgr_preserves_each_channel_independently() {
+    // Two slots, each isolating one channel position, so a shift-swap
+    // affecting only one position is caught even when other channels
+    // happen to be zero.
+    with_term(|term| unsafe {
+        bb_term_set_named_color(term, 17, 0x00800000); // R only
+        let (fg1, _) = fg_bg_at_origin(term, b"\x1b[38;5;17m");
+        assert_eq!(rgb_24(fg1), 0x800000, "R-only override at slot 17");
+    });
+    with_term(|term| unsafe {
+        bb_term_set_named_color(term, 18, 0x00008000); // G only
+        let (fg2, _) = fg_bg_at_origin(term, b"\x1b[38;5;18m");
+        assert_eq!(rgb_24(fg2), 0x008000, "G-only override at slot 18");
+    });
+    with_term(|term| unsafe {
+        bb_term_set_named_color(term, 19, 0x00000080); // B only
+        let (fg3, _) = fg_bg_at_origin(term, b"\x1b[38;5;19m");
+        assert_eq!(rgb_24(fg3), 0x000080, "B-only override at slot 19");
+    });
+}
+
+#[test]
+fn override_then_indexed_sgr_distinguishes_or_from_and() {
+    // 0xAB12CD: the `|` between (g<<8)=0x1200 and b=0xCD produces 0x12CD;
+    // an `&` mutation would collapse to 0. Pin the OR path explicitly.
+    with_term(|term| unsafe {
+        bb_term_set_named_color(term, 20, 0x00AB12CD);
+        let (fg, _) = fg_bg_at_origin(term, b"\x1b[38;5;20m");
+        assert_ne!(
+            fg & 0xFF,
+            0,
+            "B channel must be present in the OR result; an AND mutation would zero it"
+        );
+        assert_eq!(
+            rgb_24(fg) & 0x0000FFFF,
+            0x000012CD,
+            "(g<<8) | b combine must yield 0x12CD"
+        );
+    });
+}
