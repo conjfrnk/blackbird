@@ -4,6 +4,38 @@ All notable changes to Blackbird are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-05-18
+
+Stress / edge audit follow-up: 18 audit findings closed and 3 regressions introduced by the in-flight fixes cleaned up before the tag. No new feature work — entirely correctness, sanitiser parity, and contract-shape fixes.
+
+### Security / hygiene
+- **Fixed**: OSC 8 wrap-join URL-host injection. The detector joined the next row's leading URL-safe text onto a match ending at the right edge, but the joined string was only used for dispatch — the underline stayed clamped to row N. A row ending `https://apple.com` followed by `.evil.com/login` opened `apple.com.evil.com/login` in `NSWorkspace` while the user saw only `apple.com` underlined. Wrap-join now requires scheme/host/port match and refuses URL-structure-leader continuations (`?`, `#`, `&`, `@`, `;`). (commit `0f05cd6`, [audit:S4-001])
+- **Fixed**: Diagnostics Copy / Email-Diagnostics paths now strip bidi-override, zero-width, and invisible scalars on outbound text, matching the inbound paste sanitiser (Trojan Source parity). (commit `6f311e0`, [audit:S4-002])
+- **Fixed**: Drag-drop `sanitizeDropPath` extended to the same bidi / zero-width / invisible set. Three sanitiser surfaces (paste, copy/email, drop) now lockstep. (commit `abaaf76`, [audit:S4-014])
+- **Fixed**: Post-fork `BLACKBIRD_*` / `BB_*` env-prefix scrub is now case-insensitive. POSIX env names are conventionally uppercase but not enforced; a launcher exporting `bb_token` lowercase previously slipped the sweep. (commit `0d06837`, [audit:S2-004])
+- **Fixed**: `migrateV1toV2` reads legacy unprefixed keys via `persistentDomain(forName:)` instead of `defaults.object(forKey:)`. The latter walks NSGlobalDomain, so a stray `defaults write -g theme "X"` was being imported into `bb.theme` on first migration. (commit `97cca15`, [audit:S5-001])
+- **Fixed**: `sanitizeStoredTypes` reads via `persistentDomain(forName:)` so the wrong-type check and the follow-up `removeObject` touch the same domain. Sibling root-cause to S5-001. (commit `cd6a413`, [audit:S5-009])
+- **Fixed**: XTGETTCAP `cap_hex` echo rejects odd-length hex. The Kitty cap-query reply previously accepted any all-hex payload; a 3-byte query produced a structurally-well-formed reply containing a half-byte cap name. (commit `10abc52`, [audit:S3-004])
+- **Fixed**: Find regex alternation gate catches 3+ way alternations. The body class required exactly one `|` separator, so `(a|aa|aaa)+x` slipped through and pegged the find worker until the 250 ms async timeout fired. (commit `400c265`, [audit:S3-003])
+
+### Reliability / observability
+- **Fixed**: `MainThreadWatchdog.captureHangReport` writes to `<name>.txt.partial` and `moveItem`-renames after `sample(1)` exits cleanly. A force-quit during the 2 s sample window — typical user response to a visible beachball — previously left a truncated trace surfaced in Settings → Diagnostics indistinguishable from a complete report. (commit `7e65977`, [audit:S5-004])
+- **Fixed**: `MainThreadWatchdog.pruneOrphanPartials` reaps `hang-*.txt.partial` files older than 60 s at startup. Pairs with the atomic-rename fix: a force-quit during `sample(1)` leaves a `.partial` orphan that the Diagnostics-tab filter never surfaces, turning `~/Library/Logs/Blackbird/` into a silent disk ratchet. (commit `e1576d8`, [regression:S4-003])
+- **Fixed**: `DiagnosticReportStore` logs per-file `resourceValues` failures instead of silently dropping the entry. A transient I/O race (EBUSY, TCC re-evaluation) could make a legitimate hang report disappear from Settings → Diagnostics with no breadcrumb. (commit `a83d0e6`, [audit:S2-008])
+- **Fixed**: `focusChanged` and `wire()`'s initial-snapshot coreQueue hop both gate on `isTerminated` under `publishLock`, matching the canonical `feed` / `applyPalette` / `recordPromptStart` shape. Masked by downstream defences today; future refactors that drop the sibling defence no longer silently regress. (commit `fec7e77`, [audit:S2-010,S1-007])
+- **Fixed**: `bb_term_take_snapshot` logs once per session when the OSC 8 link-id `u16` cap saturates. Unreachable on realistic TUI traffic but reachable by a hostile remote emitting unique per-cell URIs; support engineers triaging "my OSC 8 links stopped working" now get a breadcrumb. (commit `1588fd8`, [audit:S2-014])
+- **Fixed**: `SparkleAlertOverride` "you're up to date" message omits the version segment cleanly when `CFBundleShortVersionString` is empty. Pre-fix a corrupted Info.plist produced `"Blackbird  is the latest version."` with a double space. (commit `8a8ede6`, [audit:S2-009])
+
+### Robustness / contracts
+- **Fixed**: `bb_term_text_range` honours the caller's start/end column on rows that fall outside the grid. The per-row branch compared `line_i` against the pre-clamp endpoints; an over-bottom selection emitted the full last row ignoring `e_col`, and an over-top selection dropped `s_col`. Comparison moved to the post-clamp `iter_start` / `iter_end`. (commit `4d0a8d1`, [audit:S5-002,S5-003])
+- **Fixed**: regression-fix tail on the above — `single_line` collapse on over-bottom multi-row requests dropped the start-row trim, and the `MAX_TEXT_RANGE_ROWS` cap firing routed `iter_end` to a hard-stop that the end-col branch then cropped against. Tracks `cap_truncated` separately and requires both iter-collapse and `s_line == e_line` for the `single_line` branch. (commit `a5eb565`, [regression:S1-002,S4-001])
+- **Fixed**: `Preferences.init` skips the init-time `fontSize` / `translucency` re-assign-to-clamp on schema downgrade. Matches the existing `repairEnumRawValues` downgrade-skip — a future v(N+1) widening of the `fontSize` envelope no longer gets clobbered back to the current binary's range. (commit `d053fb1`, [audit:S6-010])
+- **Fixed**: regression-fix tail on the above — the `isDowngrade` predicate read `storedSchemaVersion` via `defaults.integer(forKey:)` (walks NSGlobalDomain). A `defaults write -g bb.prefsSchemaVersion 99` elevated `storedSchemaVersion` to 99, flipped `isDowngrade` true, and silently skipped the numeric clamp protecting against a hand-edited `bb.fontSize = NaN`. New `storedSchemaVersion(in:domain:)` helper reads via `persistentDomain(forName:)` only. (commit `58973d2`, [regression:S5-R-001])
+- **Fixed**: `BBTerm.setColor(slot:)` rejects negative slots cleanly instead of `UInt16(clamping:)`-demoting them to 0 (which corrupted the Black ANSI palette entry). (commit `47b81ab`, [audit:S6-009])
+
+### FFI / contracts
+- **Fixed**: `BBPromptMarkKind` is exported into `BBCore.h` via `cbindgen.toml`'s `[export].include` list. Swift previously redeclared a parallel enum whose raw values had to match Rust's (1..4) with no header binding; new `FFIContractTests.testPromptMarkKind_rawValuesMatchExportedC` pins each Swift case against the imported C constant. (commit `a1072e8`, [audit:S6-001])
+
 ## [0.2.5] - 2026-05-14
 
 Dogfood-driven hotfix for two v0.2.4-introduced regressions that hit real-world use:
