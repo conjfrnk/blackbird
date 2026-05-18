@@ -7,9 +7,11 @@ someone using it.
 
 ## Setup
 
-1. Build Blackbird Debug:
+1. Build Blackbird Debug (fresh checkout — `project.yml` is canonical, the
+   `.xcodeproj` is gitignored):
    ```
    cd ~/projects/blackbird
+   xcodegen generate
    xcodebuild build -project Blackbird.xcodeproj -scheme Blackbird -configuration Debug -destination "platform=macOS,arch=arm64"
    ```
 2. Launch the resulting app from

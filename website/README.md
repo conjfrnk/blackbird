@@ -10,8 +10,13 @@ Plain static HTML — no build step. Gruvbox dark colors, app icon + wordmark, t
 ./deploy.sh
 ```
 
-Uploads the four files (`index.html`, `icon-512.png`, `favicon.svg`, `robots.txt`)
-to S3 with appropriate cache headers, then invalidates CloudFront.
+Uploads the splash assets (`index.html`, `404.html`, `styles.css`,
+`favicon.svg`, `icon-512.png`, `og-image.png`, `robots.txt`,
+`sitemap.xml`, `appcast.xml`) to S3 with appropriate cache headers,
+then invalidates CloudFront. The `appcast.xml` upload overlaps with
+`scripts/publish-update.sh`, which is the canonical release-side
+deployer; keeping it in `deploy.sh` lets the splash-page workflow stay
+self-contained when only the splash is being updated.
 
 Requires the `personal` AWS CLI profile.
 

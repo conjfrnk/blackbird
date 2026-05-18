@@ -52,7 +52,7 @@ protocol contracts those apps depend on are pinned by automated tests:
 | XTGETTCAP `TN`/`Co`/`RGB`/`Smulx`/`Setulc` | `core/tests/xtgettcap.rs` — Rust-side hex-byte assertions.        |
 | modifyOtherKeys `CSI 27;<mod>;<cp>~`     | `Tests/BlackbirdTests/KeyEncoderAdversarialTests.swift`             |
 | Kitty / mOK / legacy precedence          | `Tests/BlackbirdTests/KeyEncoderProtocolPrecedenceTests.swift`      |
-| Kitty keyboard flags 1 / 2 / 8 / 16      | `Tests/BlackbirdTests/KittyKeyboardProtocolTests.swift`             |
+| Kitty keyboard flags 1 / 2 / 8 / 16 †    | `Tests/BlackbirdTests/KittyKeyboardProtocolTests.swift`             |
 | OSC 8 emit + scrollback retain + click   | `Tests/BlackbirdTests/HyperlinkTests.swift`                         |
 | Cursor shape (DECSCUSR)                  | `Tests/BlackbirdTests/CursorShapeTests.swift`                       |
 | OSC 7 SSH trust gate                     | `Tests/BlackbirdTests/CwdTests.swift`                               |
@@ -66,8 +66,15 @@ If you intentionally bump a contract (e.g., adding a new XTGETTCAP cap),
 update the corresponding pin test in the same commit. CI will fail the build
 if the contract drifts without a test update.
 
+† Kitty flags row caveats live in `KNOWN_ISSUES.md` § "Kitty flag 4 / 16
+— US-layout only": flag 4 falls back to legacy on non-US layouts (Carbon
+`UCKeyTranslate` plumbing deferred); flag 16 elides associated-text when
+it equals the base codepoint and does not synthesize for IME multi-scalar
+commits.
+
 ## v0.2 ship status
 
 Compat doc shipped 2026-04-30 as part of v0.2 (spec
-`docs/superpowers/specs/2026-04-30-blackbird-v0.2-design.md`). Connor's first
-manual pass is open — record results inline above as rows are re-verified.
+`docs/superpowers/specs/2026-04-30-blackbird-v0.2-design.md`). Last
+reviewed 2026-05-18 against v0.2.6 — no row state changes in the
+v0.2.1–v0.2.6 window; all shipped work was correctness / hardening.

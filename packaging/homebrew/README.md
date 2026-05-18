@@ -39,10 +39,13 @@ brew style Casks/b/blackbird.rb
 
 ## On every release
 
-`release.sh` already updates the appcast. Once Blackbird is in
-`homebrew/cask`, `livecheck` (Sparkle strategy) auto-detects new
-versions and the cask gets bumped by Homebrew's autobump bot — no
+`scripts/publish-update.sh` generates and signs the appcast (via
+`scripts/make-appcast.sh`). Once Blackbird is in `homebrew/cask`,
+`livecheck` (Sparkle strategy) auto-detects new versions from the
+appcast and the cask gets bumped by Homebrew's autobump bot — no
 manual PR per release.
 
 For the in-tree copy here, bump `version` and `sha256` when cutting a
-release so contributors testing locally get the right artifact.
+release so contributors testing locally get the right artifact. The
+sha256 can be obtained from `shasum -a 256 dist/Blackbird-<ver>.dmg`
+after `scripts/cut-release.sh` produces the DMG.
