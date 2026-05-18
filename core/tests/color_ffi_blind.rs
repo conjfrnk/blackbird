@@ -195,7 +195,11 @@ fn enabled_value_two_is_treated_as_truthy() {
         bb_term_set_color_query_enabled(term, 2);
         feed(term, b"\x1b]10;?\x1b\\");
     });
-    assert_eq!(writes.len(), 1, "enabled=2 must enable replies (got {writes:?})");
+    assert_eq!(
+        writes.len(),
+        1,
+        "enabled=2 must enable replies (got {writes:?})"
+    );
     let (id, _, _, _) = parse_rgb_reply(&writes[0]);
     assert_eq!(id, 10, "reply identifier must match the OSC 10 query");
 }
@@ -206,7 +210,11 @@ fn enabled_value_ff_is_treated_as_truthy() {
         bb_term_set_color_query_enabled(term, 0xFF);
         feed(term, b"\x1b]10;?\x1b\\");
     });
-    assert_eq!(writes.len(), 1, "enabled=0xFF must enable replies (got {writes:?})");
+    assert_eq!(
+        writes.len(),
+        1,
+        "enabled=0xFF must enable replies (got {writes:?})"
+    );
     let (id, _, _, _) = parse_rgb_reply(&writes[0]);
     assert_eq!(id, 10);
 }

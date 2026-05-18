@@ -168,7 +168,10 @@ fn snapshot_fields_match_terminal_dimensions() {
                 (cols as usize) * (rows as usize),
                 "cells_len must equal cols*rows per header invariant ({cols}x{rows})"
             );
-            assert!(!(*snap).cells.is_null(), "cells must be non-null for any snapshot");
+            assert!(
+                !(*snap).cells.is_null(),
+                "cells must be non-null for any snapshot"
+            );
 
             bb_snap_release(snap);
             bb_term_free(term);
