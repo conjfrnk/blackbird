@@ -27,7 +27,7 @@ Blackbird is a macOS-only terminal emulator. Its attack surface is:
 Every paste runs through `normalizePasteLineEndings` →
 `sanitizePasteControls` → `stripBidiOverrides` →
 `sanitizeBracketedPaste` before reaching the PTY. Implemented in
-`Sources/Blackbird/Terminal/TerminalView.swift`. Tests in
+`Sources/Blackbird/Terminal/TerminalView+Paste.swift`. Tests in
 `Tests/BlackbirdTests/TerminalViewTests.swift` (`test_sanitize*`,
 `test_stripBidi*`, `test_paste*`).
 
@@ -111,9 +111,11 @@ tests in `core/tests/terminal_replies.rs`.
   request would allocate `rows × (cols + scrollback) × cell_size`
   bytes — 100+ GB, enough to lock up the host.
 - OSC 8 URI capped at 4 KiB per link (Rust, `bb_term_take_snapshot`).
-- Scrollback capped at 50 000 lines (Rust, `bb_term_new`) — 5× the
-  default Blackbird value (10 000). Paired with the 1000-col grid
-  ceiling, bounds per-terminal worst-case allocation at ~1.5 GB.
+- Scrollback capped at 200 000 lines (Rust, `SCROLLBACK_MAX` in
+  `bb_term_new`) — 2× the Blackbird default of 100 000 (Swift,
+  `BBTerm.init`). Paired with the 1000-col grid ceiling, this bounds
+  per-terminal worst-case allocation to a finite envelope rather than
+  growing unboundedly with PTY writes.
 - OSC 52 payload capped at 1 MiB (Swift,
   `TerminalSession.osc52MaxBytes`) — currently unreachable; OSC 52 is
   pinned `Disabled` in the Rust core. See "Output sanitization on
