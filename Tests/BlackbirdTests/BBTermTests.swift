@@ -8,9 +8,14 @@ final class BBTermTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
-    func test_initAndDeinit() {
-        let term = BBTerm(size: .init(cols: 80, rows: 24))
-        XCTAssertNotNil(term)
+    func test_initAndDeinit() throws {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
+        // Verify the constructed term reflects the requested dims rather than
+        // just "exists" — a regression that returned a 0-dim term but a
+        // non-null pointer would surface here.
+        let snap = try XCTUnwrap(term.snapshot())
+        XCTAssertEqual(snap.cols, 80, "snapshot cols must echo construction dims")
+        XCTAssertEqual(snap.rows, 24, "snapshot rows must echo construction dims")
         // deinit runs when scope exits
     }
 

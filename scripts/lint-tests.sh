@@ -22,8 +22,9 @@ cd "$REPO_ROOT"
 BASELINE_FILE=".test-lint-baseline"
 
 # Swift: bare XCTAssertNotNil(x) — i.e. no trailing `, "msg"` / no
-# comma before the closing paren. Crude but stable.
-swift_count=$(grep -Eohr 'XCTAssertNotNil\([^,)]+\)' Tests/BlackbirdTests/ | wc -l | tr -d ' ')
+# comma before the closing paren. Crude but stable. `|| true` so that
+# zero matches (grep exit 1) under `set -o pipefail` doesn't abort.
+swift_count=$({ grep -Eohr 'XCTAssertNotNil\([^,)]+\)' Tests/BlackbirdTests/ || true; } | wc -l | tr -d ' ')
 
 # Rust: `.is_some()` inside test files. Legitimate as a guard before
 # deeper assertions; but if it's the only assertion in a test, that's

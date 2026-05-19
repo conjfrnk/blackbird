@@ -25,10 +25,13 @@ final class GlyphAtlasTests: XCTestCase {
         let atlas = try XCTUnwrap(GlyphAtlas(
             device: device, metrics: metrics, capacityGlyphs: 4, scale: 1
         ))
-        // Fill to capacity.
+        // Fill to capacity. Each of the 4 inserts must succeed (atlas is
+        // sized for 4, no flush yet) and produce a mono-atlas entry.
         for cp: UInt32 in 0x41...0x44 {
             let s = try XCTUnwrap(UnicodeScalar(cp))
-            XCTAssertNotNil(atlas.lookupOrInsert(scalar: s))
+            let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: s))
+            XCTAssertFalse(entry.isColor, "ASCII U+\(String(cp, radix: 16)) must land in the mono atlas")
+            XCTAssertFalse(entry.isWide, "ASCII U+\(String(cp, radix: 16)) must occupy a single slot")
         }
         // Overflow MUST now succeed (post-flush slot 0 is free).
         let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
@@ -38,7 +41,8 @@ final class GlyphAtlasTests: XCTestCase {
         )
         // A glyph that was present pre-flush now re-inserts cleanly.
         let previously = try XCTUnwrap(UnicodeScalar(0x41 as UInt32))
-        XCTAssertNotNil(atlas.lookupOrInsert(scalar: previously))
+        let reEntry = try XCTUnwrap(atlas.lookupOrInsert(scalar: previously))
+        XCTAssertFalse(reEntry.isColor, "re-inserted ASCII must still land in mono atlas")
     }
 
     // MARK: - High-3: atlas generation bumps on saturation
@@ -693,13 +697,12 @@ final class GlyphAtlasTests: XCTestCase {
         let metrics = CellMetrics(font: font)
         let atlas = try XCTUnwrap(GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128))
 
-        let entry = atlas.lookupOrInsert(scalar: UnicodeScalar("H"))
-        XCTAssertNotNil(entry)
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: UnicodeScalar("H")))
         // UVs should be inside [0, 1] rect.
-        XCTAssertTrue(entry!.uvOrigin.x >= 0 && entry!.uvOrigin.x <= 1)
-        XCTAssertTrue(entry!.uvOrigin.y >= 0 && entry!.uvOrigin.y <= 1)
-        XCTAssertTrue(entry!.uvSize.x > 0 && entry!.uvSize.x <= 1)
-        XCTAssertTrue(entry!.uvSize.y > 0 && entry!.uvSize.y <= 1)
+        XCTAssertTrue(entry.uvOrigin.x >= 0 && entry.uvOrigin.x <= 1)
+        XCTAssertTrue(entry.uvOrigin.y >= 0 && entry.uvOrigin.y <= 1)
+        XCTAssertTrue(entry.uvSize.x > 0 && entry.uvSize.x <= 1)
+        XCTAssertTrue(entry.uvSize.y > 0 && entry.uvSize.y <= 1)
 
         // Read back the atlas texture and assert the rasterized cell has ink.
         let texture = atlas.texture

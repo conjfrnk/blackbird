@@ -51,7 +51,12 @@ final class FocusEventsTests: XCTestCase {
         // the host must stop sending focus escapes immediately.
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 1)))
         term.input("\u{1b}[?1004h")
-        XCTAssertNotNil(term.focusChangeBytes(focused: true))
+        // Mode 1004 enabled: focus-in must emit "\x1b[I" per the xterm spec.
+        XCTAssertEqual(
+            term.focusChangeBytes(focused: true),
+            Data([0x1b, 0x5b, 0x49]),
+            "focused=true with mode 1004 active must produce \\x1b[I"
+        )
         term.input("\u{1b}[?1004l")
         XCTAssertNil(term.focusChangeBytes(focused: true))
     }

@@ -253,7 +253,8 @@ final class CmdHoverHighlightTests: XCTestCase {
         // Atlas lookup after the hover flips must still work — a cache
         // invalidation bug that freed the atlas texture surfaces as a
         // nil here.
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("h")))
+        let hEntry = renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("h"))
+        XCTAssertFalse(hEntry?.isColor ?? true, "atlas must still answer mono-ASCII lookups after hover flips")
     }
 
     // MARK: - (2) URLDetector pin

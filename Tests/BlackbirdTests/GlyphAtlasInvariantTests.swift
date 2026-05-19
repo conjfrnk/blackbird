@@ -510,9 +510,11 @@ final class GlyphAtlasInvariantTests: XCTestCase {
         for cp: UInt32 in 0x41...0x44 {
             _ = try XCTUnwrap(atlas.lookupOrInsert(scalar: try XCTUnwrap(UnicodeScalar(cp))))
         }
-        // Force flush without a barrier wired. Must succeed.
+        // Force flush without a barrier wired. Must succeed and land in
+        // the mono atlas as an unwide entry.
         let overflow = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
-        XCTAssertNotNil(atlas.lookupOrInsert(scalar: overflow))
+        let overflowEntry = try XCTUnwrap(atlas.lookupOrInsert(scalar: overflow))
+        XCTAssertFalse(overflowEntry.isColor, "post-flush ASCII insert must remain mono")
         XCTAssertEqual(atlas.generation, 1)
     }
 

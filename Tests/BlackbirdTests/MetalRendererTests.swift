@@ -13,17 +13,20 @@ final class MetalRendererTests: XCTestCase {
     func test_rendererInitializesWithSystemDevice() throws {
         let device = try requireMetalDevice()
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
-        let renderer = MetalRenderer(device: device, metrics: metrics)
-        XCTAssertNotNil(renderer)
-        XCTAssertTrue(renderer!.device === device)
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        XCTAssertTrue(renderer.device === device,
+                      "renderer must surface the device it was constructed with")
+        XCTAssertGreaterThan(renderer.atlas.capacityGlyphs, 0,
+                             "atlas must be sized to at least one glyph slot")
     }
 
     func test_rendererPipelineStateLoads() throws {
         let device = try requireMetalDevice()
         // If init returns non-nil, both the library and the pipeline state loaded.
         let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
-        let renderer = MetalRenderer(device: device, metrics: metrics)
-        XCTAssertNotNil(renderer)
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        XCTAssertEqual(renderer.atlas.metrics.cellWidth, metrics.cellWidth,
+                       "pipeline must preserve the metrics it was constructed with")
     }
 
     func test_reconfigureWithFreshMetricsSucceeds() throws {
@@ -82,7 +85,9 @@ final class MetalRendererTests: XCTestCase {
         // After the flip-flip-flip, the atlas must still respond to
         // lookups. Regression guard against a blink-state flip that
         // accidentally frees the atlas texture.
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("c")))
+        let cEntry = try XCTUnwrap(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("c")))
+        XCTAssertFalse(cEntry.isColor, "ASCII 'c' must rasterize to the mono atlas, not the color path")
+        XCTAssertFalse(cEntry.isWide, "ASCII 'c' must occupy a single atlas slot, not a wide pair")
     }
 
     func test_rendererAcceptsSnapshotWithoutCrash() throws {
@@ -95,9 +100,11 @@ final class MetalRendererTests: XCTestCase {
         term.input("hello world")
         let snapshot = try XCTUnwrap(term.snapshot())
         _ = snapshot
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("h")))
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("e")))
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("H")))
+        for c in ["h", "e", "H"] {
+            let entry = try XCTUnwrap(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar(c)!))
+            XCTAssertFalse(entry.isColor, "ASCII '\(c)' must rasterize to mono atlas")
+            XCTAssertFalse(entry.isWide, "ASCII '\(c)' must be single-slot, not wide")
+        }
     }
 
     func test_rendererDeinitDrainsWithoutCrash() throws {
@@ -112,7 +119,8 @@ final class MetalRendererTests: XCTestCase {
         weak var weakRef: MetalRenderer?
         autoreleasepool {
             var renderer: MetalRenderer? = MetalRenderer(device: device, metrics: metrics)
-            XCTAssertNotNil(renderer)
+            XCTAssertTrue(renderer?.device === device,
+                          "renderer must surface its constructor device before being released")
             weakRef = renderer
             renderer = nil
         }
@@ -255,7 +263,8 @@ final class MetalRendererTests: XCTestCase {
         // Atlas must still respond to lookups after the invalidate+render
         // round trip. Regression guard against an invalidate() that
         // accidentally frees the atlas texture.
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("x")))
+        let xEntry = renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("x"))
+        XCTAssertFalse(xEntry?.isColor ?? true, "atlas must accept 'x' as a mono ASCII glyph after invalidate+render")
     }
 
     func test_render_withCursorBlinkEnabled_exercisesBlinkPhase() throws {
@@ -430,7 +439,8 @@ final class MetalRendererTests: XCTestCase {
         // Final sanity: renderer still responds to atlas queries after
         // 10 back-to-back ring rotations. A cache free or buffer
         // deallocation bug would surface here.
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("s")))
+        let sEntry1 = renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("s"))
+        XCTAssertFalse(sEntry1?.isColor ?? true, "atlas must accept 's' after 10 back-to-back ring rotations")
     }
 
     /// Regression for metal-renderer F20.
@@ -681,7 +691,8 @@ final class MetalRendererTests: XCTestCase {
         // Final: atlas still responds to lookups. Regression guard
         // against a state corruption that would surface as a freed
         // texture or stale cache after the failed-render barrage.
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("h")))
+        let hEntry = renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("h"))
+        XCTAssertFalse(hEntry?.isColor ?? true, "atlas must accept 'h' after the FrameKey skip-cache exercise")
     }
 
     /// Companion: pins the H7 contract more directly. After a single
@@ -873,7 +884,8 @@ final class MetalRendererTests: XCTestCase {
         // Atlas survives the full 2 → 1 → 3 sweep and still answers
         // glyph lookups. Regression guard against a swap that frees
         // the new atlas's texture or strands a stale reference.
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("s")))
+        let sEntry2 = renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("s"))
+        XCTAssertFalse(sEntry2?.isColor ?? true, "atlas must answer lookups after the 2 -> 1 -> 3 reconfigure sweep")
     }
 
     /// Defensive: backing-scale boundary inputs must be rejected
@@ -924,7 +936,8 @@ final class MetalRendererTests: XCTestCase {
         // usable. Regression guard against a partial-mutation bug
         // that left metrics or generation counters in a half-updated
         // state on the rejection path.
-        XCTAssertNotNil(renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("z")))
+        let zEntry = renderer.atlas.lookupOrInsert(scalar: UnicodeScalar("z"))
+        XCTAssertFalse(zEntry?.isColor ?? true, "atlas must remain usable after two failed reconfigures")
     }
 
     /// Source pin: GPU device-loss surfaces as `view.currentDrawable
