@@ -767,7 +767,11 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
-    private static func clampResize(_ size: Size) -> Size {
+    /// Documented floor 2, ceiling 1000 per axis. Visible to tests
+    /// (`@testable internal`) so a Swift-mutation-pass boundary test
+    /// can exercise the clamp directly without standing up a full
+    /// `TerminalSession` + PTY.
+    internal static func clampResize(_ size: Size) -> Size {
         let cols = min(1000, max(2, size.cols))
         let rows = min(1000, max(2, size.rows))
         return Size(cols: cols, rows: rows)
