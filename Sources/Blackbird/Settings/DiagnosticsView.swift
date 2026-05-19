@@ -80,13 +80,17 @@ struct DiagnosticsView: View {
         .onAppear { store.reload() }
     }
 
-    // Section-footer helper. Mirrors `SettingsView.footer(_:)` — without
-    // the explicit leading/full-width treatment, SwiftUI's grouped Form
-    // sizes footer text to its content and centers it under the section.
+    // Section-footer helper. Mirrors `SettingsView.footer(_:)` — see that
+    // helper's doc comment for why the HStack + Spacer + explicit
+    // `multilineTextAlignment(.leading)` is necessary instead of the simpler
+    // `frame(maxWidth: .infinity)`.
     private static func footer(_ text: String) -> some View {
-        Text(text)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(alignment: .top, spacing: 0) {
+            Text(text)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
     }
 
     // MARK: - Actions

@@ -34,16 +34,26 @@ public struct SettingsView: View {
         return short == build ? short : "\(short) (\(build))"
     }()
 
-    /// Section-footer helper text. Without an explicit
-    /// `frame(maxWidth: .infinity, alignment: .leading)` SwiftUI's grouped
-    /// Form on macOS sizes footer Text to its content and centers it under
-    /// the section, producing a narrow, ragged column drifting toward the
-    /// middle of the window. Forcing leading alignment at full width makes
-    /// the text wrap against the same right edge as the controls above.
+    /// Section-footer helper. SwiftUI's grouped Form on macOS treats a bare
+    /// `Text` in a footer as label-column content: it gets the narrow left
+    /// column and defaults `multilineTextAlignment` to `.center`, producing
+    /// the ragged centered column the user sees. `.frame(maxWidth: .infinity,
+    /// alignment: .leading)` alone doesn't fix it — that only says "accept
+    /// up to ∞ if offered," and the parent never offers more than the label
+    /// column. The HStack with a trailing `Spacer(minLength: 0)` is the
+    /// standard workaround: HStack is a flexible-width container the footer
+    /// parent does propose the full row to, and the Spacer absorbs whatever
+    /// is left of the Text so the Text pins leading.
+    /// `.multilineTextAlignment(.leading)` is the explicit override of the
+    /// Form's centered default — the HStack on its own would still leave
+    /// wrapped lines center-aligned within the Text's frame.
     private static func footer(_ text: String) -> some View {
-        Text(text)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(alignment: .top, spacing: 0) {
+            Text(text)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
     }
 
     public init() {}
