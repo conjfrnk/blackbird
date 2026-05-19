@@ -123,6 +123,36 @@ public final class PTY {
         return upper.hasPrefix("BLACKBIRD_") || upper.hasPrefix("BB_")
     }
 
+    /// Decode a `waitpid(2)` status word into the exit code surfaced via
+    /// `onExit`. Exposed `internal` so unit tests can pin every WIFEXITED
+    /// / WIFSIGNALED branch without spawning a real shell and waiting for
+    /// it to die (the only other way to reach this path from the public
+    /// API). Mutations on the shift offset / signum offset / WIFEXITED
+    /// gate previously escaped because no test could observe `onExit`
+    /// without standing up the whole spawn lifecycle.
+    ///
+    /// Contract:
+    ///   - `reaped == false` ⇒ `-1` (waitpid never confirmed reap)
+    ///   - WIFEXITED (low 7 bits clear) ⇒ `(status >> 8) & 0xff`
+    ///   - WIFSIGNALED (low 7 bits ≠ 0 and ≠ 0x7f) ⇒ `128 + signum`
+    ///   - WIFSTOPPED / unclassifiable ⇒ `-1`
+    internal static func decodeExitStatus(_ status: Int32, reaped: Bool) -> Int32 {
+        if !reaped { return -1 }
+        if (status & 0x7f) == 0 {
+            // WIFEXITED: low 7 bits clear means normal exit.
+            return (status >> 8) & 0xff
+        }
+        if (status & 0x7f) != 0x7f && (status & 0x7f) != 0 {
+            // WIFSIGNALED: low 7 bits are the terminating signal,
+            // and they're neither 0 (exited) nor 0x7f (stopped).
+            let signum = status & 0x7f
+            return 128 + signum
+        }
+        // WIFSTOPPED or otherwise unclassifiable — the child wasn't
+        // actually terminated. Treat as unknown.
+        return -1
+    }
+
     private let masterFD: Int32
     private let childPID: pid_t
     /// BSD start time of `childPID` captured at spawn. Used by
@@ -814,22 +844,7 @@ public final class PTY {
             //     e.g. a SIGSEGV (11) surfaces as 139, SIGKILL (9) as 137,
             //     letting a future crash-reporter distinguish "shell
             //     exited cleanly" from "shell died of signal").
-            let exitCode: Int32
-            if !reaped {
-                exitCode = -1
-            } else if (status & 0x7f) == 0 {
-                // WIFEXITED: low 7 bits clear means normal exit.
-                exitCode = (status >> 8) & 0xff
-            } else if (status & 0x7f) != 0x7f && (status & 0x7f) != 0 {
-                // WIFSIGNALED: low 7 bits are the terminating signal,
-                // and they're neither 0 (exited) nor 0x7f (stopped).
-                let signum = status & 0x7f
-                exitCode = 128 + signum
-            } else {
-                // WIFSTOPPED or otherwise unclassifiable — the child
-                // wasn't actually terminated. Treat as unknown.
-                exitCode = -1
-            }
+            let exitCode = Self.decodeExitStatus(status, reaped: reaped)
             DispatchQueue.main.async { [weak self] in
                 self?.onExit?(exitCode)
             }

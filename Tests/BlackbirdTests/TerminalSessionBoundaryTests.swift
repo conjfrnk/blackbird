@@ -108,4 +108,70 @@ final class TerminalSessionBoundaryTests: XCTestCase {
                       "count > cap must evict")
         XCTAssertFalse(cap - 1 > cap, "count < cap must NOT evict")
     }
+
+    // MARK: - PTY.decodeExitStatus — close M21 + M22
+
+    /// Closes Round-3 PTY mutation findings:
+    ///   M21: `(status >> 8) & 0xff` → `(status >> 7) & 0xff` — escaped
+    ///        because no test pinned a specific shell exit code.
+    ///   M22: `128 + signum` → `127 + signum` — same.
+    /// Both signal-exit code mappings are POSIX-standard; pinning the
+    /// concrete values makes any future shift / offset regression visible.
+
+    func test_decodeExitStatus_notReaped_returnsMinusOne() {
+        XCTAssertEqual(PTY.decodeExitStatus(0, reaped: false), -1,
+                       "unreaped status must surface as -1")
+    }
+
+    func test_decodeExitStatus_cleanExitCodeZero() {
+        // WIFEXITED with low 7 bits 0 and high 8 bits 0 → exit code 0.
+        XCTAssertEqual(PTY.decodeExitStatus(0x0000, reaped: true), 0)
+    }
+
+    func test_decodeExitStatus_cleanExitCodeFortyTwo() {
+        // POSIX-encoded: exit code in high 8 bits, low 7 bits clear.
+        // 42 << 8 == 0x2A00.
+        XCTAssertEqual(PTY.decodeExitStatus(0x2A00, reaped: true), 42,
+                       "WIFEXITED status 0x2A00 must decode to exit code 42")
+    }
+
+    func test_decodeExitStatus_cleanExitCodeMax() {
+        // Exit code 255: 255 << 8 == 0xFF00. Catches a shift swap that
+        // would shift the wrong distance and mangle the byte.
+        XCTAssertEqual(PTY.decodeExitStatus(0xFF00, reaped: true), 255,
+                       "WIFEXITED status 0xFF00 must decode to exit code 255")
+    }
+
+    func test_decodeExitStatus_signaledBySIGKILL() {
+        // POSIX: SIGKILL = 9, signaled exit code is 128 + signum = 137.
+        XCTAssertEqual(PTY.decodeExitStatus(9, reaped: true), 137,
+                       "WIFSIGNALED SIGKILL must surface as 137 (128 + 9)")
+    }
+
+    func test_decodeExitStatus_signaledBySIGTERM() {
+        // POSIX: SIGTERM = 15, signaled exit code is 128 + 15 = 143.
+        XCTAssertEqual(PTY.decodeExitStatus(15, reaped: true), 143,
+                       "WIFSIGNALED SIGTERM must surface as 143 (128 + 15)")
+    }
+
+    func test_decodeExitStatus_signaledBySIGINT() {
+        // POSIX: SIGINT = 2, signaled exit code is 128 + 2 = 130.
+        XCTAssertEqual(PTY.decodeExitStatus(2, reaped: true), 130)
+    }
+
+    func test_decodeExitStatus_stoppedReturnsMinusOne() {
+        // WIFSTOPPED: low 7 bits == 0x7f. Not a real termination; surface
+        // as -1.
+        XCTAssertEqual(PTY.decodeExitStatus(0x7f, reaped: true), -1,
+                       "WIFSTOPPED (low 7 bits 0x7f) must surface as -1")
+    }
+
+    func test_decodeExitStatus_signalNumberMaskedToLowSevenBits() {
+        // A status with high bits set in addition to the signum must still
+        // only use the low 7 bits for the signum. e.g. status = 0xFF09:
+        // low 7 bits = 9 (SIGKILL), high bits ignored. Catches a mutation
+        // that widens the mask.
+        XCTAssertEqual(PTY.decodeExitStatus(0xFF09, reaped: true), 137,
+                       "high bits beyond the low-7 signum must be ignored")
+    }
 }
