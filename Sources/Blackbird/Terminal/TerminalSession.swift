@@ -23,6 +23,15 @@ public final class TerminalSession: ObservableObject {
     /// and code-paste workflows.
     public static let osc52MaxBytes: Int = 1 * 1024 * 1024
 
+    /// Strict-greater-than gate on the OSC 52 payload size. Extracted
+    /// from the inline dispatch path so a unit test can pin the
+    /// boundary (`utf8Count == osc52MaxBytes` is INSIDE, not dropped)
+    /// without driving a 1 MiB payload through a real session — the
+    /// only other way to exercise this comparison from the public API.
+    internal static func osc52IsOversize(_ utf8Count: Int) -> Bool {
+        utf8Count > osc52MaxBytes
+    }
+
     /// `os.Logger` (not `NSLog`) so OSC 52 cap diagnostics survive the
     /// unified-log redaction NSLog incurs at runtime-format time.
     /// Declaration ungated (matching the call site, which logs in
@@ -1188,7 +1197,7 @@ public final class TerminalSession: ObservableObject {
             var osc52OversizeAtDispatch = false
             if case .osc52Clipboard(let text) = event,
                osc52EnabledAtDispatch,
-               text.utf8.count > Self.osc52MaxBytes {
+               Self.osc52IsOversize(text.utf8.count) {
                 osc52OversizeAtDispatch = true
                 Self.osc52Logger.info(
                     "OSC 52 payload \(text.utf8.count, privacy: .public) bytes exceeds \(Self.osc52MaxBytes, privacy: .public) cap — dropping"

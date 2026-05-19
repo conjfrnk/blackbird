@@ -61,37 +61,27 @@ final class TerminalSessionBoundaryTests: XCTestCase {
 
     // MARK: - M6: OSC 52 cap accepts payload of EXACTLY osc52MaxBytes
     //
-    // The gate at TerminalSession.swift:1187 reads `text.utf8.count >
-    // Self.osc52MaxBytes`. Off-by-one to `>=` would drop a payload of
-    // exactly the cap. We pin the boundary value here as a public
-    // contract — TerminalSession.osc52MaxBytes is the load-bearing
-    // constant; this test would catch any future change that flipped
-    // the comparison operator.
+    // The gate at TerminalSession.swift uses `osc52IsOversize`, extracted
+    // as `internal static` so a unit test can exercise the boundary
+    // directly without driving a 1 MiB payload through a real session.
+    // A mutation that flipped `>` to `>=` in `osc52IsOversize` would
+    // fail `test_osc52IsOversize_isStrictGreaterThan` below.
+
     func test_osc52MaxBytes_constantIsOneMebibyte() {
         XCTAssertEqual(TerminalSession.osc52MaxBytes, 1 * 1024 * 1024,
                        "OSC 52 cap is documented at 1 MiB; changes here must be deliberate")
     }
 
-    /// The cap is consulted with strict-greater-than: a payload AT the
-    /// cap is legal. Driving a full session-level OSC 52 emit + capture
-    /// at 1 MiB would be heavy for a unit test (~3 s in debug); instead
-    /// we pin the SHAPE of the gate by asserting both boundary values
-    /// against the constant: cap-1 must be inside, cap+1 must be outside.
-    /// The current `>` operator yields {true at cap+1, false at cap}; a
-    /// flip to `>=` would yield {true at cap+1, true at cap} — caught
-    /// by the explicit assertion on `cap` below.
-    func test_osc52_gate_uses_strict_greater_than() {
+    func test_osc52IsOversize_isStrictGreaterThan() {
         let cap = TerminalSession.osc52MaxBytes
-        // The gate in TerminalSession is `text.utf8.count > cap`. We
-        // replicate it locally to surface a mutation that flips it.
-        // Equivalent shape, ensures any rename of the constant doesn't
-        // silently desync the assertion.
-        XCTAssertFalse(cap > cap,
-                       "gate at cap must be FALSE (payload at exactly the cap is legal)")
-        XCTAssertTrue(cap + 1 > cap,
-                      "gate at cap+1 must be TRUE (over-cap is dropped)")
-        XCTAssertFalse(cap - 1 > cap,
-                       "gate at cap-1 must be FALSE")
+        XCTAssertFalse(TerminalSession.osc52IsOversize(cap),
+                       "payload at exactly the cap is legal — gate must be strict >")
+        XCTAssertTrue(TerminalSession.osc52IsOversize(cap + 1),
+                      "payload at cap+1 is oversized — must be dropped")
+        XCTAssertFalse(TerminalSession.osc52IsOversize(cap - 1),
+                       "payload below cap is legal")
+        XCTAssertFalse(TerminalSession.osc52IsOversize(0),
+                       "empty payload is legal")
     }
 
     // MARK: - M7: prompt-mark cap stabilises AT the cap, not below
