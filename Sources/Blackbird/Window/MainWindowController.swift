@@ -140,7 +140,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // body below.
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         let rect = NSRect(x: 0, y: 0, width: 800, height: 480)
-        let window = NSWindow(
+        // `TerminalWindow` (an NSWindow subclass) overrides selectNextTab /
+        // selectPreviousTab so ⌘⇧] / ⌘⇧[ cycle through the user-visible
+        // (pill) order rather than AppKit's `tabGroup.windows` arrival
+        // order. After a drag-reorder those two orders diverge — without
+        // the subclass the cycle keys would jump in arrival order and
+        // skip the user's permutation. Settings keeps using plain
+        // NSWindow; it doesn't tab.
+        let window = TerminalWindow(
             contentRect: rect,
             styleMask: style,
             backing: .buffered,

@@ -50,7 +50,14 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     /// Single-tab windows fall back to the modal path on the controller.
     func beginInlineRename(for window: NSWindow) {
         guard let group = window.tabGroup else { return }
-        let tabs = group.windows
+        // Pill index must come from the coordinator's VISUAL order
+        // (what the strip painted), not `group.windows`'s arrival
+        // order. After a drag-reorder the two diverge — using arrival
+        // order here would route the edit field onto a sibling pill,
+        // and the commit would `onCommitRename(wrongWindow, ...)`
+        // silently. The two-orderings-must-agree-at-every-positional-
+        // lookup invariant is the whole point of `TabOrderCoordinator`.
+        let tabs = TabOrderCoordinator.shared.orderedTabs(for: group)
         guard let idx = tabs.firstIndex(of: window) else { return }
         stripView.beginEditing(pillIndex: idx)
     }
@@ -78,7 +85,17 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     /// arithmetic.
     func refresh(availableWidth: CGFloat) {
         guard let window = hostWindow else { return }
-        let tabs = window.tabGroup?.windows ?? [window]
+        // Visual order is owned by `TabOrderCoordinator`, not by AppKit's
+        // `tabGroup.windows`. After a drag-reorder the two diverge; the
+        // pill strip is the user's source of truth, so the strip — and
+        // every position-based consumer (⌘1-9, ⌘⇧] / ⌘⇧[) — reads from
+        // the coordinator. Selection stays identity-based.
+        let tabs: [NSWindow]
+        if let group = window.tabGroup {
+            tabs = TabOrderCoordinator.shared.orderedTabs(for: group)
+        } else {
+            tabs = [window]
+        }
         let selected = window.tabGroup?.selectedWindow ?? window
         stripView.update(tabs: tabs, selected: selected, width: availableWidth)
         view.frame = NSRect(x: 0, y: 0, width: availableWidth, height: TabStripView.height)
@@ -110,6 +127,56 @@ final class TabStripView: NSView {
     private var totalWidth: CGFloat = 0
     private var pillFrames: [CGRect] = []
     private var addButtonFrame: CGRect = .zero
+
+    // MARK: - Drag-to-reorder state
+
+    /// Captured on `mouseDown` over a pill body when reorder is feasible
+    /// (≥ 2 tabs, not on the close hotspot, not entering inline-rename).
+    /// `mouseDragged` checks the threshold against `startPoint.x` to
+    /// decide whether to promote to a real reorder gesture.
+    fileprivate struct PendingDrag {
+        let pillIndex: Int
+        let startPoint: NSPoint
+        /// Horizontal offset inside the pill at mousedown — preserved so
+        /// the dragged pill stays anchored to where the user grabbed it
+        /// rather than snapping its left edge to the cursor.
+        let downOffsetX: CGFloat
+    }
+
+    /// Active drag — promoted from the `.armed` phase once the user
+    /// moves the cursor past `dragThreshold`. `currentIndex` is the
+    /// intermediate slot the dragged pill currently occupies; siblings
+    /// render shifted around that slot. `cursorX` is the live mouse X
+    /// used to draw the dragged pill under the cursor (clamped to
+    /// strip bounds).
+    fileprivate struct DragState {
+        let originalIndex: Int
+        let downOffsetX: CGFloat
+        var cursorX: CGFloat
+        var currentIndex: Int
+    }
+
+    /// Three-phase state machine for reorder gestures. The enum makes
+    /// the "armed but not yet dragging" vs "actively dragging" vs
+    /// "neither" distinction representable in the type system — the
+    /// previous two-optional encoding (`pendingDrag: ?`, `dragState: ?`)
+    /// admitted a representable-but-illegal `(nil, set)` fourth state.
+    /// `mouseDragged` reads + transitions; `mouseUp` always returns to
+    /// `.idle`.
+    fileprivate enum DragPhase {
+        case idle
+        case armed(PendingDrag)
+        case dragging(DragState)
+    }
+    private var dragPhase: DragPhase = .idle
+
+    /// Pixels of horizontal motion required before a mousedown is
+    /// promoted to a reorder drag. Anything smaller is treated as a
+    /// click and falls through to the existing select / close path. 5pt
+    /// matches the macOS-wide drag-recognition tolerance for AppKit
+    /// controls and is high enough to absorb hand-tremor without making
+    /// the gesture feel laggy.
+    private static let dragThreshold: CGFloat = 5
 
     // MARK: - Inline-edit state
 
@@ -191,6 +258,16 @@ final class TabStripView: NSView {
         let oldTitles: [String] = self.tabs.map { $0.title }
         if editingPill != nil, listShapeChanged {
             commitEdit()
+        }
+        // If a drag is in flight and the underlying tab list shape
+        // changed beneath it (sibling closed, new tab opened, post-
+        // commit reorder), the captured `originalIndex` no longer
+        // matches the strip — cancel cleanly rather than trying to
+        // reconcile. Skipped on the post-commit refresh because the
+        // commit path returned `dragPhase = .idle` in `mouseUp` before
+        // the notification fired.
+        if listShapeChanged, case .dragging = dragPhase {
+            cancelDragInProgress()
         }
         self.tabs = tabs
         self.selectedTab = selected
@@ -469,6 +546,31 @@ final class TabStripView: NSView {
     /// Test hook — invoke the keyboard-close path directly. AppKit's
     /// `interpretKeyEvents` plumbing isn't available to a headless XCTest.
     @objc func deleteBackwardForTesting() { deleteBackward(nil) }
+
+    /// Test hook — pill index armed for a potential reorder drag, or
+    /// `nil` when phase is `.idle` (no pill grabbed) or `.dragging`
+    /// (already promoted past `pendingDrag`).
+    var pendingDragPillIndexForTesting: Int? {
+        if case .armed(let p) = dragPhase { return p.pillIndex }
+        return nil
+    }
+
+    /// Test hook — active drag state, or `nil` when phase is not
+    /// `.dragging`. Tuple shape lets tests assert origin/target slot
+    /// transitions without reaching into the private `DragState`
+    /// struct. `cursorX` is the live mouse X used to anchor the
+    /// dragged-pill render.
+    var dragStateForTesting: (originalIndex: Int, currentIndex: Int, cursorX: CGFloat)? {
+        if case .dragging(let s) = dragPhase {
+            return (s.originalIndex, s.currentIndex, s.cursorX)
+        }
+        return nil
+    }
+
+    /// Test hook — pill frames laid out for the current `tabs`/`width`.
+    /// Lets a test pass realistic geometry into the static
+    /// `computeIntermediateIndex` helper without re-deriving it.
+    var pillFramesForTesting: [CGRect] { pillFrames }
     #endif
 
     // MARK: - Drawing
@@ -482,20 +584,84 @@ final class TabStripView: NSView {
         // Catppuccin-latte / Default-light.
         let tint = NSColor.labelColor
         let selectedBg = tint.withAlphaComponent(0.18).cgColor
+        // While a pill is being dragged it gets a slightly brighter fill
+        // than `selectedBg` — visible enough to read as "this is the one
+        // I'm holding", subtle enough to avoid the heavy "lifted card"
+        // look of a shadow or outline. Sits on top of siblings via the
+        // two-pass draw order below.
+        let draggedBg  = tint.withAlphaComponent(0.24).cgColor
         let hoverBg    = tint.withAlphaComponent(0.10).cgColor
         let inactiveBg = tint.withAlphaComponent(0.04).cgColor
         let textColor  = NSColor.labelColor
         let inactiveText = NSColor.secondaryLabelColor
 
-        for (i, w) in tabs.enumerated() where i < pillFrames.count {
-            let rect = pillFrames[i]
+        // Snapshot of the drag (if any) — captured once so every pill
+        // index in the loop sees a consistent state, and so the dragged
+        // pill draws LAST on top of siblings it visually overlaps.
+        let activeDrag: DragState?
+        if case .dragging(let s) = dragPhase {
+            activeDrag = s
+        } else {
+            activeDrag = nil
+        }
+        let drawOrder: [Int]
+        if let d = activeDrag {
+            drawOrder = (0..<tabs.count).filter { $0 != d.originalIndex } + [d.originalIndex]
+        } else {
+            drawOrder = Array(0..<tabs.count)
+        }
+
+        for i in drawOrder where i < tabs.count && i < pillFrames.count {
+            let w = tabs[i]
+            let rect: NSRect
+            let isDraggedPill: Bool
+            if let d = activeDrag {
+                if i == d.originalIndex {
+                    // Anchor the dragged pill to the cursor — `downOffsetX`
+                    // is the horizontal offset inside the pill where the
+                    // user grabbed it, so the pill doesn't snap-left to
+                    // the cursor on grab. Clamped so the pill never
+                    // crosses into the `+` button gutter or the leading
+                    // edge of the strip.
+                    let base = pillFrames[d.originalIndex]
+                    let maxX = max(
+                        0,
+                        totalWidth - Self.trailingInset - Self.addButtonWidth - Self.pillSpacing - base.width
+                    )
+                    let rawX = d.cursorX - d.downOffsetX
+                    let x = max(0, min(maxX, rawX))
+                    rect = NSRect(x: x, y: base.minY, width: base.width, height: base.height)
+                    isDraggedPill = true
+                } else {
+                    // Siblings render at their intermediate slot — they
+                    // appear to "make space" by shifting one slot toward
+                    // the dragged pill's origin.
+                    let slot = Self.intermediateSlot(originalIdx: i,
+                                                     draggedFrom: d.originalIndex,
+                                                     draggedTo: d.currentIndex)
+                    if slot < pillFrames.count {
+                        rect = pillFrames[slot]
+                    } else {
+                        rect = pillFrames[i]
+                    }
+                    isDraggedPill = false
+                }
+            } else {
+                rect = pillFrames[i]
+                isDraggedPill = false
+            }
             let isSelected = w === selectedTab
-            let isHovered = hoveredPill == i && !isEditing
+            // Hover state is meaningless during a drag — both the close
+            // hotspot and the lighter "hovered" fill would compete with
+            // the dragged-pill highlight for the user's eye.
+            let isHovered = hoveredPill == i && !isEditing && activeDrag == nil
             let isBeingEdited = editingPill == i
 
             let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).cgPath
             ctx.addPath(path)
-            if isSelected {
+            if isDraggedPill {
+                ctx.setFillColor(draggedBg)
+            } else if isSelected {
                 ctx.setFillColor(selectedBg)
             } else if isHovered {
                 ctx.setFillColor(hoverBg)
@@ -733,9 +899,206 @@ final class TabStripView: NSView {
                 onCloseWindow?(tabs[i])
             } else {
                 onSelectWindow?(tabs[i])
+                // Arm a potential reorder drag. Selection has already
+                // fired (matches today's click semantics — you don't
+                // grab a tab without focusing it first); `mouseDragged`
+                // promotes this to a real drag once the cursor moves
+                // past `dragThreshold`. Suppressed for: single-tab
+                // windows (no peer to reorder against), a click that
+                // also begins inline rename (clickCount ≥ 2), and any
+                // pill currently being renamed elsewhere — the field
+                // editor owns first responder and a drag would steal
+                // focus mid-edit.
+                let canReorder = tabs.count > 1
+                    && event.clickCount == 1
+                    && !isEditing
+                if canReorder {
+                    dragPhase = .armed(PendingDrag(
+                        pillIndex: i,
+                        startPoint: p,
+                        downOffsetX: p.x - rect.minX
+                    ))
+                }
             }
             return
         }
+    }
+
+    // MARK: - Drag-to-reorder
+
+    override func mouseDragged(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+
+        switch dragPhase {
+        case .idle:
+            return
+        case .armed(let pending):
+            // Below threshold — gesture is still potentially a click.
+            if abs(p.x - pending.startPoint.x) < Self.dragThreshold { return }
+            // Promote to an active drag. Snap the hover state off —
+            // we're not painting close hotspots or hover backgrounds
+            // while a drag is in flight, and stale hover indices would
+            // visibly linger under the moving pill.
+            hoveredPill = nil
+            hoveredClose = false
+            hoveredAdd = false
+            dragPhase = .dragging(DragState(
+                originalIndex: pending.pillIndex,
+                downOffsetX: pending.downOffsetX,
+                cursorX: p.x,
+                currentIndex: pending.pillIndex
+            ))
+            needsDisplay = true
+        case .dragging(var state):
+            // Bail out cleanly if the underlying tab list changed
+            // shape mid-gesture (a sibling closed, a new tab opened) —
+            // the original index no longer matches the strip.
+            guard state.originalIndex < tabs.count else {
+                cancelDragInProgress()
+                return
+            }
+            // Degenerate strip width (mid-gesture window collapse to ~0):
+            // `computeIntermediateIndex` can't compute a meaningful slot
+            // without a positive pill pitch. Hold the dragged pill at
+            // its original slot rather than yanking it to slot 0.
+            let newIndex = Self.computeIntermediateIndex(
+                cursorX: p.x,
+                downOffsetX: state.downOffsetX,
+                count: tabs.count,
+                pillFrames: pillFrames,
+                fallback: state.originalIndex
+            )
+            state.cursorX = p.x
+            state.currentIndex = newIndex
+            dragPhase = .dragging(state)
+            needsDisplay = true
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer {
+            dragPhase = .idle
+        }
+        // Click-only and pending-but-never-promoted gestures both clear
+        // out via the defer above — only the actively-dragging phase
+        // has a commit to consider.
+        guard case .dragging(let state) = dragPhase else { return }
+        // No-op when the user lifted on the original slot.
+        guard state.currentIndex != state.originalIndex else {
+            needsDisplay = true
+            return
+        }
+        // Defensive: tabs could have shrunk between the last
+        // `mouseDragged` (where we already checked) and `mouseUp`. The
+        // `update(tabs:)` cancellation path should have nilled the
+        // drag, but the gesture is on the same main thread as the KVO
+        // refresh so a synchronous interleave is theoretically possible
+        // on AppKit's part. Log so a regression is visible.
+        guard state.originalIndex < tabs.count else {
+            Self.dragLogger.notice("mouseUp: dragState.originalIndex \(state.originalIndex, privacy: .public) >= tabs.count \(self.tabs.count, privacy: .public); list shape changed between mouseDragged and mouseUp without an update(tabs:) refresh — investigate.")
+            needsDisplay = true
+            return
+        }
+        let target = tabs[state.originalIndex]
+        // Tab must still be in a group for the coordinator's
+        // group-keyed storage to accept the move. Drag-out (the user
+        // detaching the window) is the documented way `tabGroup` goes
+        // nil mid-drag; treat the reorder as discarded rather than
+        // trying to commit against the now-standalone window.
+        guard let group = target.tabGroup else {
+            Self.dragLogger.notice("mouseUp: dragged window's tabGroup went nil mid-drag (detached?); discarding reorder")
+            needsDisplay = true
+            return
+        }
+        TabOrderCoordinator.shared.move(window: target,
+                                        to: state.currentIndex,
+                                        in: group)
+        // The coordinator's `orderDidChange` notification drives
+        // `refreshAllTabBars()` — every sibling strip in the group
+        // repaints with the new permutation. Setting `needsDisplay` here
+        // covers the (rare) case where notification delivery is delayed
+        // past the next paint pass: we want the dragged pill to settle
+        // into its new slot immediately even if the refresh hasn't
+        // landed yet.
+        needsDisplay = true
+    }
+
+    /// Hard-cancel an in-flight drag without committing. Used when the
+    /// list shape changes underneath the gesture so we don't try to
+    /// reorder against a stale index.
+    private func cancelDragInProgress() {
+        dragPhase = .idle
+        needsDisplay = true
+    }
+
+    /// `os.Logger` for drag diagnostics — kept separate from
+    /// `focusLogger` so the categories don't bleed into each other in
+    /// the unified log. Used to surface "should-never-happen but did"
+    /// branches in `mouseUp` that would otherwise discard a reorder
+    /// gesture silently.
+    private static let dragLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                           category: "tabDrag")
+
+    /// Compute which slot the dragged pill is currently over, given the
+    /// live cursor X and the offset within the pill where the user
+    /// grabbed it. The dragged pill's anchor X is `cursorX - downOffsetX`;
+    /// the slot is the one whose CENTER is closest to the pill's center
+    /// (anchor + pillW/2). Clamped to `[0, count-1]`.
+    ///
+    /// Static + pure so unit tests can drive every transition with a
+    /// synthetic `pillFrames` array — no NSWindows, no NSEvents, no
+    /// strip instance needed.
+    internal static func computeIntermediateIndex(cursorX: CGFloat,
+                                                  downOffsetX: CGFloat,
+                                                  count: Int,
+                                                  pillFrames: [CGRect],
+                                                  fallback: Int = 0) -> Int {
+        guard count > 0, !pillFrames.isEmpty else { return fallback }
+        let pillW = pillFrames[0].width
+        let pillCenter = (cursorX - downOffsetX) + pillW / 2
+        // Slot i's center = pillFrames[i].midX. Find the slot whose
+        // center is nearest to pillCenter. Equal-width pills means we
+        // can compute directly from the first slot's origin.
+        let firstOriginX = pillFrames[0].minX
+        let slotPitch: CGFloat = (count > 1 && pillFrames.count > 1)
+            ? (pillFrames[1].minX - pillFrames[0].minX)
+            : pillW
+        // Degenerate input: zero-width strip (window collapsed mid-
+        // drag) or two pills at the same origin. Return the caller's
+        // fallback (typically `state.originalIndex`) so the dragged
+        // pill holds its slot — silently snapping to slot 0, the old
+        // behaviour, would commit a reorder the user didn't intend on
+        // the next mouseUp.
+        guard slotPitch > 0 else { return fallback }
+        let rawIndex = (pillCenter - (firstOriginX + pillW / 2)) / slotPitch
+        let rounded = Int(rawIndex.rounded())
+        return max(0, min(count - 1, rounded))
+    }
+
+    /// Where pill `originalIdx` renders during a drag, given the dragged
+    /// pill moved from `draggedFrom` to `draggedTo`. The dragged pill
+    /// itself is returned as `draggedTo`; the displaced siblings shift
+    /// by one slot toward the source. Pure helper; tests reach it via
+    /// `@testable import Blackbird`.
+    internal static func intermediateSlot(originalIdx: Int,
+                                          draggedFrom: Int,
+                                          draggedTo: Int) -> Int {
+        if originalIdx == draggedFrom { return draggedTo }
+        if draggedFrom == draggedTo { return originalIdx }
+        if draggedFrom < draggedTo {
+            // Dragged moved right: siblings in (draggedFrom, draggedTo]
+            // shift one slot left.
+            if originalIdx > draggedFrom, originalIdx <= draggedTo {
+                return originalIdx - 1
+            }
+        } else {
+            // Dragged moved left: siblings in [draggedTo, draggedFrom)
+            // shift one slot right.
+            if originalIdx >= draggedTo, originalIdx < draggedFrom {
+                return originalIdx + 1
+            }
+        }
+        return originalIdx
     }
 
     /// Right-click also auto-promotes the strip via AppKit's NSWindow
@@ -944,6 +1307,11 @@ final class TabStripView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        // Hover state freezes during a drag: the dragged-pill highlight
+        // is the user's focus point, and a stale `×` hotspot appearing
+        // on a sibling pill mid-drag would compete with it. `mouseDragged`
+        // is the only event we care about while a drag is live.
+        if case .dragging = dragPhase { return }
         let p = convert(event.locationInWindow, from: nil)
         let prevPill = hoveredPill
         let prevClose = hoveredClose
@@ -970,6 +1338,12 @@ final class TabStripView: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
+        // Cursor leaving the strip's tracking area while a drag is in
+        // flight is normal — AppKit still routes mouseDragged events to
+        // us no matter where the cursor lives. Don't clobber hover
+        // state (already cleared at drag start anyway) and don't trigger
+        // a redraw.
+        if case .dragging = dragPhase { return }
         if hoveredPill != nil || hoveredAdd || hoveredClose {
             hoveredPill = nil
             hoveredAdd = false

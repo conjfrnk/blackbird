@@ -93,6 +93,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var autoUpdateObserver: AnyCancellable?
 
+    /// Lifetime-owns the `TabOrderCoordinator.orderDidChange` observer
+    /// installed in `applicationDidFinishLaunching`. Stored so the
+    /// closure that refreshes every controller's pill strip on a
+    /// drag-reorder doesn't get released the runloop tick after install.
+    private var tabOrderObserver: NSObjectProtocol?
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
@@ -229,6 +235,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     ctrl.updater.automaticallyChecksForUpdates = desired
                 }
             }
+        // A drag-reorder in any window's pill strip commits the new
+        // permutation to `TabOrderCoordinator` and posts a notification
+        // (object = NSWindowTabGroup). Sibling tabs in the same group
+        // need to repaint their strips so the visual order is consistent
+        // across every member of the group; the simplest correct path is
+        // to refresh every controller — refresh is keyed by tab group, so
+        // unrelated windows are no-ops. Stored on the delegate so it
+        // lives for the app's lifetime.
+        tabOrderObserver = NotificationCenter.default.addObserver(
+            forName: TabOrderCoordinator.orderDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshAllTabBars()
+        }
         // First-launch window has no source session to inherit from, so
         // pass the ⌘N "fresh start" cwd (nil → $HOME). Same policy.
         let controller = createTerminalController(cwd: CwdResolver.forNewWindow())
@@ -444,7 +465,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             return
         }
-        let tabs = window.tabbedWindows ?? [window]
+        // Visual (pill) order, not AppKit's arrival order — see
+        // TabOrderCoordinator. `tabbedWindows` is system order and would
+        // route ⌘1-9 against the system permutation after the user has
+        // dragged a pill, jumping to a tab whose pill sits elsewhere.
+        let tabs: [NSWindow]
+        if let group = window.tabGroup {
+            tabs = TabOrderCoordinator.shared.orderedTabs(for: group)
+        } else {
+            tabs = [window]
+        }
         let index = item.tag - 1
         guard index >= 0, index < tabs.count else {
             Self.menuLogger.debug(
@@ -525,7 +555,20 @@ extension AppDelegate: NSMenuItemValidation {
         switch item.action {
         case #selector(selectTab(_:)):
             guard let win = ownedKeyWindow() else { return false }
-            let tabs = win.tabbedWindows ?? [win]
+            // Mirror the action body's lookup — both must agree on
+            // "what counts as a tab" and "in what order". Using
+            // `tabbedWindows` here while the action consults the
+            // coordinator would let a brief reconciliation lag (close
+            // → next read) enable a menu item whose action would then
+            // guard-fail silently. Counts converge instantly in
+            // practice but the inconsistency is gratuitous; both
+            // paths go through the coordinator.
+            let tabs: [NSWindow]
+            if let group = win.tabGroup {
+                tabs = TabOrderCoordinator.shared.orderedTabs(for: group)
+            } else {
+                tabs = [win]
+            }
             return item.tag >= 1 && item.tag <= tabs.count
         case #selector(closeWindow(_:)):
             return ownedKeyWindow() != nil
