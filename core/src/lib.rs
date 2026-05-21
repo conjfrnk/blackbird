@@ -2088,7 +2088,6 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
             // Drop silently — matching the PromptMarkRateState pattern.
             continue;
         }
-        bb.color_query_reply_window_count += 1;
 
         let slot: Option<alacritty_terminal::vte::ansi::Rgb> =
             if entry.index < alacritty_terminal::term::color::COUNT {
@@ -2111,6 +2110,12 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
             len: bytes.len(),
             i32_arg: 0,
         });
+        // Audit fix-#14 (2026-05-21): increment AFTER successful fire so
+        // a user-callback panic (caught by guard_with_term's outer
+        // catch_unwind) doesn't leave the rate-limit counter desynced
+        // from actual deliveries. Cumulative count over the window now
+        // reflects only replies that the callback observed.
+        bb.color_query_reply_window_count += 1;
     }
 }
 
