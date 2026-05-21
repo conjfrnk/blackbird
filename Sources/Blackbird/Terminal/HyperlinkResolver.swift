@@ -186,8 +186,37 @@ enum OSC8URLPolicy {
         // %00-%1F covers all C0 controls (NUL through US incl. BS, HT,
         // LF, CR, ESC). %7F covers DEL. Hex digits are case-insensitive
         // because Foundation may emit either case in absoluteString.
-        let pattern = #"%(?i)(0[0-9A-F]|1[0-9A-F]|7F)"#
-        return s.range(of: pattern, options: .regularExpression) != nil
+        //
+        // Audit fix-#09 (2026-05-21): also reject percent-encoded UTF-8
+        // sequences for the C1 control range (U+0080..U+009F → %C2%80..
+        // %C2%9F) and the bidi/invisible formatting controls (notably
+        // %E2%80%AE / RLO and the rest of U+2028..U+202E). The Rust
+        // core's contains_bidi_or_invisible catches raw UTF-8 bytes of
+        // those scalars in the OSC 8 URI but does not catch the
+        // percent-encoded form — Foundation's URL(string:) preserves
+        // the encoding in absoluteString. Without this gate the URL
+        // flows verbatim to NSWorkspace.open / NSPasteboard.general
+        // (right-click → Copy Link), letting a URL-decoding downstream
+        // consumer render bidi-flipped text. Modern browsers display
+        // the literal percent-encoded form so the practical visible
+        // spoof is bounded, but mailing the URL to Mail compose / a
+        // bidi-rendering surface re-introduces the spoof.
+        let c0DelPattern = #"%(?i)(0[0-9A-F]|1[0-9A-F]|7F)"#
+        // C1 controls: %C2 followed by %8X or %9X.
+        let c1Pattern = #"%(?i)C2%(8[0-9A-F]|9[0-9A-F])"#
+        // U+2028..U+202F (LS, PS, LRE, RLE, PDF, LRO, RLO, WJ):
+        // %E2%80 followed by %A8..%AF.
+        // U+2066..U+2069 (bidi isolates): %E2%81 followed by %A6..%A9.
+        // U+200B..U+200F (ZW joiners / LRM / RLM): %E2%80 followed by
+        // %8B..%8F.
+        let bidi80Pattern = #"%(?i)E2%80%(A[8-9A-F]|8[B-F])"#
+        let bidi81Pattern = #"%(?i)E2%81%A[6-9]"#
+        for pattern in [c0DelPattern, c1Pattern, bidi80Pattern, bidi81Pattern] {
+            if s.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     /// True when the host contains non-ASCII characters or looks like an
