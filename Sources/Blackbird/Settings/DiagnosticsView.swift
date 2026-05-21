@@ -244,8 +244,13 @@ struct DiagnosticsView: View {
             // Bidi / zero-width / invisible formatting — Trojan-source set.
             // Discrete scalars (soft hyphen, ALM, MVS, BOM, word joiner)
             // plus the ZWSP/ZWNJ/ZWJ/LRM/RLM (200B–200F), LS/PS (2028/9),
-            // bidi formatting (202A–202E), bidi isolates (2066–2069), and
-            // the Plane-14 tag block (E0000–E007F).
+            // bidi formatting (202A–202E), bidi isolates (2066–2069),
+            // the Plane-14 tag block (E0000–E007F), and the Variation
+            // Selectors blocks VS1-16 (FE00–FE0F) and VS17-256
+            // (E0100–E01EF). Audit fix-#16 (2026-05-21): VS blocks were
+            // missing from this set even though the doc comment claims
+            // it 'mirrors `stripBidiOverrides`' — the inbound-paste
+            // sanitizer strips them. Now symmetric.
             let isInvisible = v == 0x00AD
                 || v == 0x061C
                 || v == 0x180E
@@ -253,8 +258,10 @@ struct DiagnosticsView: View {
                 || (v >= 0x2028 && v <= 0x202E)
                 || v == 0x2060
                 || (v >= 0x2066 && v <= 0x2069)
+                || (v >= 0xFE00 && v <= 0xFE0F)
                 || v == 0xFEFF
                 || (v >= 0xE0000 && v <= 0xE007F)
+                || (v >= 0xE0100 && v <= 0xE01EF)
             if isControl || isInvisible {
                 out.append(replacement)
             } else {

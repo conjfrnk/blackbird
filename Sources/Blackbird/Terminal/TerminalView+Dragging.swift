@@ -169,8 +169,10 @@ extension TerminalView {
                 || (v >= 0x2028 && v <= 0x202E)     // LS/PS + bidi formatting
                 || v == 0x2060                      // Word Joiner
                 || (v >= 0x2066 && v <= 0x2069)     // bidi isolates
+                || (v >= 0xFE00 && v <= 0xFE0F)     // VS1-16 (fix-#16)
                 || v == 0xFEFF                      // BOM / ZW no-break space
                 || (v >= 0xE0000 && v <= 0xE007F)   // Plane-14 tag block
+                || (v >= 0xE0100 && v <= 0xE01EF)   // VS17-256 (fix-#16)
             { return false }
             return true
         })
