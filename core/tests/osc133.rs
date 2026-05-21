@@ -164,6 +164,45 @@ fn osc_133_d_rejects_partial_digit_payload() {
 }
 
 #[test]
+fn osc_133_abc_rejects_payload_with_control_byte() {
+    // Audit fix-#07 (2026-05-21): A/B/C kinds reject payloads containing
+    // raw C0 / DEL bytes, symmetric with the D-kind digit-only gate and
+    // the OSC 7 cwd path. Pre-fix the bytes survived into
+    // TerminalSession.lastPromptMark.exitCode where any future chrome
+    // surface that bound to the field would render unscrubbed control
+    // chars. The de-facto OSC 133 protocol expects empty payload for
+    // A/B/C, so this tightening has no real-world false-positive
+    // surface.
+    //
+    // Pre-flight budget: 3 sub-tests × (10×3 BBTerm + 1ms drive) ≈
+    // negligible — well within standard test envelope.
+    for &kind in b"ABC" {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            let cap = install_capture(term);
+            // DEL (0x7F) inside the payload — vte's OSC parser passes
+            // it through as a parameter byte (not a terminator). The
+            // new gate rejects.
+            let mut seq: Vec<u8> = Vec::new();
+            seq.extend_from_slice(b"\x1b]133;");
+            seq.push(kind);
+            seq.extend_from_slice(b";");
+            seq.push(0x7F);
+            seq.extend_from_slice(b"evil\x1b\\");
+            bb_term_input(term, seq.as_ptr(), seq.len());
+            let events = cap.lock().unwrap().events.clone();
+            let marks = collect_marks(&events);
+            assert!(
+                marks.is_empty(),
+                "{} with DEL byte must be rejected: {marks:?}",
+                kind as char
+            );
+            bb_term_free(term);
+        }
+    }
+}
+
+#[test]
 fn osc_133_d_with_empty_payload_still_fires() {
     // The audit fix only rejects non-empty non-digit payloads.
     // `OSC 133 ; D ST` with no exit code is a valid emission for
