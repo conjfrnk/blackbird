@@ -507,4 +507,33 @@ final class DiagnosticReportStoreTests: XCTestCase {
                       "newline must be preserved for legibility")
         XCTAssertTrue(text.contains("\u{FFFD}"), "U+FFFD substitution must appear")
     }
+
+    /// Audit fix-#16 (2026-05-21): the doc comment on
+    /// DiagnosticsView.stripControlCharacters claims to mirror
+    /// `stripBidiOverrides`, but the variation-selector blocks VS1-16
+    /// (U+FE00..U+FE0F) and VS17-256 (U+E0100..U+E01EF) were missing
+    /// — the inbound-paste sanitiser strips them, the diag Copy/Email
+    /// path didn't. Tightening to parity so a planted .ips can't
+    /// smuggle VS-attached glyphs out via diagnostics.
+    func testLoadAndSanitizeStripsVariationSelectors() async throws {
+        // Memory: <1 KB on disk; <10 KB transient. Wall: <20 ms.
+        // Plant U+FE0F (VS-16 emoji presentation) and U+E0100 (VS-17 in
+        // the Plane-14 supplementary VS block) adjacent to printable
+        // ASCII. Real .ips reports never contain these scalars; only a
+        // planted file would.
+        let raw = "crash:\u{FE0F} at frame\u{E0100} 0"
+        try writeFile("hang-vs.txt", in: hangDir, contents: raw)
+        let url = hangDir.appendingPathComponent("hang-vs.txt")
+        let result = await DiagnosticsView.loadAndSanitize(
+            url: url, cap: 16 * 1024 * 1024
+        )
+        guard case .success(let text) = result else {
+            return XCTFail("expected sanitized success, got \(result)")
+        }
+        XCTAssertFalse(text.contains("\u{FE0F}"),
+                       "U+FE0F (VS-16) must be replaced")
+        XCTAssertFalse(text.contains("\u{E0100}"),
+                       "U+E0100 (VS-17) must be replaced")
+        XCTAssertTrue(text.contains("\u{FFFD}"), "U+FFFD substitution must appear")
+    }
 }
