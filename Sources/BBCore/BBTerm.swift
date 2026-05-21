@@ -155,6 +155,23 @@ public final class BBTerm {
     /// M6.
     public func terminate() {
         guard let h = handle else { return }
+        // Audit fix-#02 (2026-05-21): pair with Rust's ffi_reentry_blocked
+        // guard on bb_term_free (fix-#01). A handler that synchronously
+        // calls terminate() races alacritty's `processor.advance(&mut
+        // bb.term, …)` still on the outer bb_term_input stack — Rust now
+        // converts that to a defensive leak instead of UAF, but the Swift
+        // wrapper should surface the contract violation explicitly in dev
+        // so it can be fixed at the source. Release-mode assertionFailure
+        // is a no-op so the production behaviour is the (safer) leak path.
+        // The handle is left set so the caller can retry teardown after
+        // the handler returns.
+        assert(
+            !isInsideEventDispatch,
+            "BBTerm.terminate() called from inside event dispatch — Rust core will leak the BBTerm to avoid UAF (fix-#01/#02). Defer teardown until the handler returns."
+        )
+        if isInsideEventDispatch {
+            return
+        }
         // Clear the trampoline's back-reference BEFORE the FFI free
         // so any straggler trampoline call (which only happens off
         // the contract — same-queue discipline forbids it — but we
@@ -195,6 +212,23 @@ public final class BBTerm {
             ctxBox.pointee.owner = nil
             bb_term_set_event_cb(h, nil, nil)
             bb_term_free(h)
+            // Audit fix-#01/#02 (2026-05-21): if this deinit fires while
+            // an FFI callback is still in flight (e.g. the consumer
+            // released the last strong reference inside an event
+            // handler, and the trampoline's `let owner` is the
+            // releasing ref), the two FFI calls above are silently
+            // dropped by `ffi_reentry_blocked` on the Rust side —
+            // leaving the Rust callback slot still pointing at this
+            // ctxBox. Deallocating ctxBox here would dangling-
+            // reference the next trampoline fire (which proceeds
+            // after CallbackCell::fire returns, inside the same
+            // bb_term_input frame). Swift cannot tell whether the
+            // gate engaged, so be safe and leak the 16-byte ctxBox.
+            // The trampoline reads box.pointee.owner=nil (set above)
+            // and bails. The clean path — explicit terminate() called
+            // outside any handler — nils `handle` and falls through
+            // to the dealloc below.
+            return
         }
         ctxBox.deinitialize(count: 1)
         ctxBox.deallocate()
