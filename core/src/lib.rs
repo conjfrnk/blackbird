@@ -1082,12 +1082,18 @@ impl OscScanner<'_> {
         // amplification) and L-20 (allocation cap) remain enforced.
 
         // Accept only `file://` with an empty or `localhost` authority.
-        let Some(rest) = url.strip_prefix(b"file://") else {
+        // Audit fix-#08 (2026-05-21): RFC 3986 §3.1 / §3.2.2 define
+        // scheme and host as case-insensitive. Match the literal prefix
+        // case-insensitively so shell emitters that produce `FILE://`,
+        // `File://localhost/...`, `file://LocalHost/...` etc. are not
+        // silently dropped at ingest. The path portion stays
+        // case-sensitive (POSIX paths are).
+        let Some(rest) = strip_prefix_ascii_case_insensitive(url, b"file://") else {
             return;
         };
         let path_bytes: &[u8] = if rest.starts_with(b"/") {
             rest // "file:///path" → "/path"
-        } else if let Some(r) = rest.strip_prefix(b"localhost") {
+        } else if let Some(r) = strip_prefix_ascii_case_insensitive(rest, b"localhost") {
             if !r.starts_with(b"/") {
                 return;
             }
@@ -1354,6 +1360,23 @@ fn contains_bidi_or_invisible(bytes: &[u8]) -> bool {
         return true;
     };
     s.chars().any(is_bidi_or_invisible_scalar)
+}
+
+/// Strip `prefix` from `s` using ASCII case-insensitive comparison.
+/// Returns `Some(remainder)` on match, `None` otherwise. Used by the
+/// OSC 7 ingest gate to honour RFC 3986 §3.1 / §3.2.2 (scheme and host
+/// are case-insensitive) without normalising the path component (which
+/// is case-sensitive on POSIX). Audit fix-#08 (2026-05-21).
+fn strip_prefix_ascii_case_insensitive<'a>(s: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    if s.len() < prefix.len() {
+        return None;
+    }
+    let (head, rest) = s.split_at(prefix.len());
+    if head.eq_ignore_ascii_case(prefix) {
+        Some(rest)
+    } else {
+        None
+    }
 }
 
 /// RFC 3986 percent-decode. Returns `None` only on truncated escapes

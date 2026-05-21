@@ -252,3 +252,43 @@ fn osc7_path_with_emdash_still_accepted() {
         .expect("em-dash in path must NOT block OSC 7 — only bidi/invisible chars do");
     assert_eq!(cwd.1, b"/Users/foo\xE2\x80\x94bar");
 }
+
+/// Audit fix-#08 (2026-05-21): RFC 3986 §3.1 / §3.2.2 define scheme and
+/// host as case-insensitive. Prior to fix-#08 the OSC 7 ingest gate did
+/// byte-exact `strip_prefix(b"file://")` / `strip_prefix(b"localhost")`,
+/// silently dropping RFC-legal variants (`FILE://`, `File://Localhost/...`).
+/// Post-fix: scheme + host match case-insensitively while the path stays
+/// case-sensitive (POSIX paths are).
+#[test]
+fn osc7_scheme_uppercase_is_accepted() {
+    let seq = b"\x1b]7;FILE:///Users/foo\x1b\\";
+    let events = drive(seq);
+    let cwd = events
+        .iter()
+        .find(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+        .expect("FILE:// must be accepted per RFC 3986 §3.1");
+    assert_eq!(&cwd.1, b"/Users/foo");
+}
+
+#[test]
+fn osc7_scheme_mixedcase_with_uppercase_host_is_accepted() {
+    let seq = b"\x1b]7;File://LocalHost/Users/foo\x1b\\";
+    let events = drive(seq);
+    let cwd = events
+        .iter()
+        .find(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+        .expect("File://LocalHost/... must be accepted (scheme + host both case-insensitive)");
+    assert_eq!(&cwd.1, b"/Users/foo");
+}
+
+#[test]
+fn osc7_path_case_is_preserved_verbatim() {
+    // Path stays case-sensitive even when scheme/host are normalised.
+    let seq = b"\x1b]7;FILE://localhost/Users/Foo/Bar\x1b\\";
+    let events = drive(seq);
+    let cwd = events
+        .iter()
+        .find(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+        .expect("expected CwdChanged");
+    assert_eq!(&cwd.1, b"/Users/Foo/Bar");
+}
