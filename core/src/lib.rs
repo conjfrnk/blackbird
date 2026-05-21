@@ -1293,6 +1293,23 @@ impl OscScanner<'_> {
             return;
         }
 
+        // Audit fix-#07 (2026-05-21): A/B/C kinds also accept payload
+        // bytes (e.g. shell-supplied prompt metadata) and forward them
+        // to Swift as a String. The Swift consumer's `String(decoding:
+        // as:UTF8.self)` passes valid-UTF-8 control bytes through —
+        // C0 / DEL / C1 codepoints survive into TerminalSession's
+        // lastPromptMark.exitCode and could leak into any future
+        // chrome surface that renders the field. Reject A/B/C payloads
+        // that contain raw control bytes, symmetric with the D-path
+        // and the OSC 7 cwd path (which rejects b < 0x20 || b == 0x7F).
+        // The expected legitimate payload for A/B/C is empty in the
+        // de-facto prompt-marks protocol, so this is a tightening with
+        // no real-world false-positive surface.
+        if matches!(kind_byte, b'A' | b'B' | b'C') && payload.iter().any(|&b| b < 0x20 || b == 0x7F)
+        {
+            return;
+        }
+
         let ev = BBEvent {
             kind: BBEventKind::PromptMark,
             payload: payload.as_ptr(),
