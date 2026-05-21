@@ -1852,6 +1852,18 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
 /// `term` must have been returned by `bb_term_new` and not previously freed.
 /// Passing null is a no-op.
 ///
+/// Calling this from inside a user event callback (registered via
+/// `bb_term_set_event_cb`) violates the contract documented in BBCore.h
+/// ("must not call any bb_term_* function on the same term handle"). The
+/// header gates every other term-* entry point on `ffi_reentry_blocked`,
+/// turning the violation into a silent no-op; `bb_term_free` was the lone
+/// exception and would unconditionally `drop(Box::from_raw(term))` while
+/// alacritty's `processor.advance(&mut bb.term, …)` was still on the outer
+/// `bb_term_input` stack — a use-after-free. Audit fix-#01 (2026-05-21):
+/// engage the same gate here so a handler-driven free becomes a contained
+/// leak (the BBTerm box stays alive but the Swift wrapper nilled its
+/// handle, so it's unreachable) instead of UAF. Leak >> UAF.
+///
 /// Panics inside this function are caught by `catch_unwind` and swallowed
 /// silently (no safe `BBTerm` context is available during teardown to deliver
 /// a Fatal event). The function returns unit as the fallback value.
@@ -1859,6 +1871,9 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
 pub unsafe extern "C" fn bb_term_free(term: *mut BBTerm) {
     guard_no_term((), || {
         if term.is_null() {
+            return;
+        }
+        if ffi_reentry_blocked("bb_term_free") {
             return;
         }
         drop(Box::from_raw(term));
