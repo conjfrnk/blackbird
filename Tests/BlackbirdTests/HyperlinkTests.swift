@@ -725,6 +725,52 @@ final class HyperlinkTests: XCTestCase {
         }
     }
 
+    /// Audit fix-#09 (2026-05-21): the OSC 8 click-path control-byte
+    /// gate previously only matched %00-%1F / %7F. Foundation preserves
+    /// percent-encoded UTF-8 in URL.absoluteString, so a hostile OSC 8
+    /// href containing %E2%80%AE (U+202E RLO), %C2%85 (U+0085 NEL / C1),
+    /// or other percent-encoded bidi/C1 sequences passed the gate
+    /// verbatim, reached NSWorkspace.open + NSPasteboard.general via
+    /// Copy Link, and would render flipped in any URL-decoding
+    /// downstream surface (Mail compose / bidi-rendering issue tracker).
+    func testIsAllowed_rejectsPercentEncodedBidi() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE — %E2%80%AE.
+        let rlo = URL(string: "https://safe.com/%E2%80%AEevil.tld/redir")!
+        XCTAssertFalse(OSC8URLPolicy.isAllowed(rlo),
+                       "URL with percent-encoded U+202E must be rejected")
+        // U+202D LEFT-TO-RIGHT OVERRIDE — %E2%80%AD (same range).
+        let lro = URL(string: "https://safe.com/%E2%80%ADevil")!
+        XCTAssertFalse(OSC8URLPolicy.isAllowed(lro),
+                       "URL with percent-encoded U+202D must be rejected")
+        // U+200B ZERO-WIDTH SPACE — %E2%80%8B.
+        let zwsp = URL(string: "https://safe.com/path%E2%80%8B/login")!
+        XCTAssertFalse(OSC8URLPolicy.isAllowed(zwsp),
+                       "URL with percent-encoded U+200B must be rejected")
+    }
+
+    func testIsAllowed_rejectsPercentEncodedC1Controls() {
+        // U+0085 NEL (next-line) encoded as %C2%85.
+        let nel = URL(string: "https://safe.com/%C2%85evil")!
+        XCTAssertFalse(OSC8URLPolicy.isAllowed(nel),
+                       "URL with percent-encoded C1 NEL must be rejected")
+        // U+0090 DCS — %C2%90.
+        let dcs = URL(string: "https://safe.com/%C2%90evil")!
+        XCTAssertFalse(OSC8URLPolicy.isAllowed(dcs),
+                       "URL with percent-encoded C1 DCS must be rejected")
+    }
+
+    /// Sanity: percent-encoded non-control bytes must still pass.
+    /// %20 = space, %2F = '/', %3F = '?' — all legitimate in URLs and
+    /// must not be confused with control-byte percent encodings.
+    func testIsAllowed_acceptsBenignPercentEncodings() {
+        let space = URL(string: "https://apple.com/some%20path")!
+        XCTAssertTrue(OSC8URLPolicy.isAllowed(space),
+                      "URL with %20 (space) must remain allowed")
+        let slash = URL(string: "https://apple.com/a%2Fb")!
+        XCTAssertTrue(OSC8URLPolicy.isAllowed(slash),
+                      "URL with %2F (slash) must remain allowed")
+    }
+
     /// Pass-3 item 2 (HIGH). Default-port confusion: previously the
     /// host comparison ignored ports, so `https://example.com` looked
     /// identical to `https://example.com:8443` and a hostile remote
