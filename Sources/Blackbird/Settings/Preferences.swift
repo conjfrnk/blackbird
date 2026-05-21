@@ -357,9 +357,30 @@ public final class Preferences: ObservableObject {
         // same-version path; on downgrade, defer normalisation to the
         // first in-session edit (which fires didSet via the normal
         // Swift-assignment path).
+        //
+        // Audit fix-#04 (2026-05-21): only invoke the through-didSet
+        // write when the value actually lives in the APP's persistent
+        // domain. If the app domain is unset (first launch, or after
+        // `defaults delete <bundle> bb.fontSize`), `fontSize = fontSize`
+        // reads via @AppStorage which walks the search list (app →
+        // NSGlobalDomain → registration) and could absorb a hostile
+        // `defaults write -g bb.fontSize 999` into the app domain
+        // before the runtime observer is wired below. Checking the
+        // persistent-domain presence first means a missing app value
+        // falls through to the registered default cleanly, and only
+        // an actual tampered app-domain value triggers the clamp.
         if !isDowngrade {
-            fontSize = fontSize
-            translucency = translucency
+            let domain = Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+            if Preferences.doubleInPersistentDomain(
+                in: defaults, domain: domain, key: Preferences.k("fontSize")
+            ) != nil {
+                fontSize = fontSize
+            }
+            if Preferences.doubleInPersistentDomain(
+                in: defaults, domain: domain, key: Preferences.k("translucency")
+            ) != nil {
+                translucency = translucency
+            }
         }
 
         // Audit M-14 / DI-7, L-28 / MS-9 (2026-04-29): in-session
@@ -476,24 +497,40 @@ public final class Preferences: ObservableObject {
         // SHOULD bump the schema and add an explicit migration; the H-8
         // gate isn't the right place to express it.
         //
-        // `defaults.double(forKey:)` returns the disk value (or the
-        // registered-default 13 if absent). Reading `self.fontSize`
-        // would return the STALE @AppStorage cache — see method
-        // header.
-        let diskFontSize = defaults.double(forKey: Preferences.k("fontSize"))
-        let normalisedFont = diskFontSize.isFinite ? diskFontSize : 13
-        let clampedFont = max(9, min(32, normalisedFont))
-        if clampedFont != diskFontSize {
-            Preferences.logger.log("re-clamping fontSize after external defaults write: \(diskFontSize, privacy: .public) → \(clampedFont, privacy: .public)")
-            self.fontSize = clampedFont
+        // Audit fix-#04 (2026-05-21): read via persistentDomain so a
+        // hostile `defaults write -g bb.fontSize 999` on NSGlobalDomain
+        // can't surface here when the app domain is unset. The H-8 /
+        // S5-R-001 hardening for the schema-version key already uses
+        // this pattern; extending the same scope to the numeric
+        // envelope keys closes the symmetric gap. When the key is
+        // absent from the persistent domain, the registered default
+        // (13 / 1) applies — no re-clamp needed, so we skip the
+        // through-didSet write entirely. `defaults.double(forKey:)`
+        // would have walked NSGlobalDomain → registration → 13 in that
+        // case, then either matched (no write) or re-clamped to a
+        // global-poisoned value.
+        let domain = Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+
+        if let diskFontSize = Preferences.doubleInPersistentDomain(
+            in: defaults, domain: domain, key: Preferences.k("fontSize")
+        ) {
+            let normalisedFont = diskFontSize.isFinite ? diskFontSize : 13
+            let clampedFont = max(9, min(32, normalisedFont))
+            if clampedFont != diskFontSize {
+                Preferences.logger.log("re-clamping fontSize after external defaults write: \(diskFontSize, privacy: .public) → \(clampedFont, privacy: .public)")
+                self.fontSize = clampedFont
+            }
         }
 
-        let diskTrans = defaults.double(forKey: Preferences.k("translucency"))
-        let normalisedTrans = diskTrans.isFinite ? diskTrans : 1
-        let clampedTrans = max(1, min(10, normalisedTrans))
-        if clampedTrans != diskTrans {
-            Preferences.logger.log("re-clamping translucency after external defaults write: \(diskTrans, privacy: .public) → \(clampedTrans, privacy: .public)")
-            self.translucency = clampedTrans
+        if let diskTrans = Preferences.doubleInPersistentDomain(
+            in: defaults, domain: domain, key: Preferences.k("translucency")
+        ) {
+            let normalisedTrans = diskTrans.isFinite ? diskTrans : 1
+            let clampedTrans = max(1, min(10, normalisedTrans))
+            if clampedTrans != diskTrans {
+                Preferences.logger.log("re-clamping translucency after external defaults write: \(diskTrans, privacy: .public) → \(clampedTrans, privacy: .public)")
+                self.translucency = clampedTrans
+            }
         }
     }
 
@@ -721,6 +758,27 @@ public final class Preferences: ObservableObject {
         guard let persistent = defaults.persistentDomain(forName: domain) else { return 0 }
         if let n = persistent[Preferences.schemaVersionKey] as? NSNumber { return n.intValue }
         return 0
+    }
+
+    /// Audit fix-#04 (2026-05-21): persistentDomain-scoped double read,
+    /// returning nil when the key is absent. Used by the runtime
+    /// change-handler so `defaults.double(forKey:)`'s full search-list
+    /// walk can't surface an attacker-staged `defaults write -g
+    /// bb.fontSize` on the very first launch (before the through-didSet
+    /// init has populated the app domain) into the user's pref. Mirrors
+    /// the `storedSchemaVersion` hardening (audit S5-R-001).
+    ///
+    /// Returns nil rather than 0 so the caller can distinguish
+    /// "key absent on disk" (use the registered default) from "key set
+    /// to 0" (a legitimate but out-of-envelope value worth re-clamping).
+    static func doubleInPersistentDomain(
+        in defaults: UserDefaults,
+        domain: String,
+        key: String
+    ) -> Double? {
+        guard let persistent = defaults.persistentDomain(forName: domain) else { return nil }
+        if let n = persistent[key] as? NSNumber { return n.doubleValue }
+        return nil
     }
 
     /// One-shot promotion of the legacy unprefixed `prefsSchemaVersion`
