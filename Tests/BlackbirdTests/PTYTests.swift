@@ -279,14 +279,23 @@ final class PTYTests: XCTestCase {
             executable: "/bin/sh",
             arguments: [
                 "-c",
-                // Print size on spawn, then arm a WINCH trap that re-prints
-                // it and exits. `sleep 10 &` backgrounds the sleep so the
-                // parent shell blocks in `wait` instead of in `sleep`'s
-                // syscall — only `wait` is an interruptible shell builtin
-                // that lets traps fire immediately on signal receipt.
-                // Foregrounding `sleep` directly would queue SIGWINCH until
-                // `sleep` exited, which outlasts the test timeout.
-                "stty size; trap 'stty size; exit 0' WINCH; sleep 10 & wait",
+                // Arm the WINCH trap FIRST, then print initial size. The
+                // test fires resize as soon as it reads "24 80" — if
+                // `stty size` ran before `trap`, a SIGWINCH delivered in
+                // the gap between the two would hit the default
+                // disposition (POSIX: ignore) and be silently dropped,
+                // leaving the trap permanently un-fired. Installing
+                // `trap` first means the bytes the test waits for are
+                // produced AFTER the handler is registered, so any
+                // SIGWINCH the test triggers necessarily invokes it.
+                // `sleep 10 &` backgrounds the sleep so the parent
+                // shell blocks in `wait` instead of in `sleep`'s
+                // syscall — only `wait` is an interruptible shell
+                // builtin that lets traps fire immediately on signal
+                // receipt. Foregrounding `sleep` directly would queue
+                // SIGWINCH until `sleep` exited, which outlasts the
+                // test timeout.
+                "trap 'stty size; exit 0' WINCH; stty size; sleep 10 & wait",
             ],
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
@@ -294,10 +303,10 @@ final class PTYTests: XCTestCase {
         // Guarantee reap even if a wait() below times out.
         defer { pty.terminate() }
 
-        // Wait for the initial "24 80" line so we know the trap is armed
-        // before we fire the resize. If we resize too early the shell may
-        // not have registered the trap yet and the SIGWINCH is a no-op on
-        // subsequent output.
+        // Wait for the initial "24 80" line. Because `trap` ran before
+        // `stty size`, observing this output proves the handler is
+        // already armed; the subsequent `pty.resize()` SIGWINCH is
+        // guaranteed to invoke it.
         let initial = expectation(description: "initial size")
         var out = Data()
         var sawInitial = false
