@@ -2805,8 +2805,20 @@ extension TerminalView {
         // the newline. A 0x0D in the cleaned bytes follows the same
         // logic — pasteText's convertLoneCRToLF would just turn it
         // into LF anyway.
+        //
+        // Audit S3-009: TAB (0x09) joins LF/CR in the refusal set.
+        // A Replace All emitting DEL × matchLen + replacement-with-TAB
+        // at a bare shell prompt fires readline / zsh tab-completion
+        // mid-stream, splicing completion text into the byte stream
+        // unpredictably. The TUI guard already prevents this under
+        // alt-screen / mouse-reporting / bracketed-paste, but a
+        // command-line prompt is the failing case.
         if cleanedReplacement.contains(0x0A) || cleanedReplacement.contains(0x0D) {
             findBar?.showTransientMessage("Refusing: replacement contains a line break")
+            return
+        }
+        if cleanedReplacement.contains(0x09) {
+            findBar?.showTransientMessage("Refusing: replacement contains a tab")
             return
         }
         #if DEBUG

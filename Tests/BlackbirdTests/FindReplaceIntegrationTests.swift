@@ -143,6 +143,32 @@ final class FindReplaceIntegrationTests: XCTestCase {
         )
     }
 
+    /// Audit S3-009. `sanitizePasteControls` preserves TAB (0x09) for
+    /// paste — legitimate when the user actively pastes shell-safe content
+    /// — but a Replace All issuing `DEL × matchLen` followed by a TAB
+    /// fires readline / zsh tab-completion mid-stream at a bare prompt,
+    /// silently splicing completion text into the byte stream. Refuse
+    /// the replacement; LF / CR already refused for the same class of
+    /// reasons.
+    func test_replaceCurrent_replacementWithTAB_isRefused() throws {
+        let view = try makeView()
+        let snap = try liveSnapshot()
+
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
+
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+
+        view._invokeReplaceCurrentForTests(replacement: "foo\tbar")
+
+        XCTAssertTrue(
+            captured.isEmpty,
+            "replacement containing TAB must be refused — would trigger shell tab-completion; got \(Array(captured)) bytes"
+        )
+    }
+
     func test_replaceCurrent_offInputLine_emitsNothing() throws {
         let view = try makeView()
         let snap = try liveSnapshot()
