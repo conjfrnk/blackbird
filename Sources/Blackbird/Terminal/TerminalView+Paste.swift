@@ -243,15 +243,22 @@ extension TerminalView {
     ///   U+2029  PS    E2 80 A9            paragraph separator
     ///   U+2060  WJ    E2 81 A0            word joiner
     ///   U+2066-9 LRI/RLI/FSI/PDI E2 81 A6-A9
-    ///   U+FE00-F VS1-16        EF B8 80-8F
     ///   U+FEFF  BOM   EF BB BF            byte order mark (ZWNBSP)
     ///   U+E0000-E007F tag block F3 A0 80 80 - F3 A0 81 BF (4-byte)
-    ///   U+E0100-E01EF VS17-256  F3 A0 84 80 - F3 A0 87 AF (4-byte)
     ///
     /// These are rare in legitimate text — Unicode's bidi algorithm
     /// handles Arabic / Hebrew automatically and identifier rendering
     /// doesn't need ZWJ. Stripping is safer than rendering.
     /// Audit M3 / M4.
+    ///
+    /// Variation Selectors (VS1-16 U+FE00–FE0F, VS17-256 U+E0100–E01EF)
+    /// are deliberately NOT stripped: unlike the bidi / zero-width set
+    /// above, they only change how the immediately-preceding visible
+    /// glyph renders, so they cannot reorder or hide pasted text and
+    /// they are a legitimate part of pasted emoji ("❤️" = U+2764 U+FE0F,
+    /// keycaps like "1️⃣", …). Stripping them silently corrupted every
+    /// paste / drop carrying an emoji-presentation selector. See the
+    /// rationale block in `TerminalView+Dragging.sanitizeDropPath`.
     static func stripBidiOverrides(_ input: Data) -> Data {
         // Fast path: lead bytes for any tracked codepoint are
         // C2 / D8 / E1 / E2 / EF / F3. Absence of all six → no match.
@@ -289,7 +296,6 @@ extension TerminalView {
             //   U+202A-E embed/override  (E2 80 AA-AE)
             //   U+2060 WJ                (E2 81 A0)
             //   U+2066-9 isolates        (E2 81 A6-A9)
-            //   U+FE00-F VS1-16          (EF B8 80-8F)
             //   U+FEFF BOM               (EF BB BF)
             if remaining >= 3 {
                 let b1 = input[input.index(i, offsetBy: 1)]
@@ -317,12 +323,9 @@ extension TerminalView {
                     }
                 }
                 if b0 == 0xEF {
-                    // EF B8 80..8F  → variation selectors 1-16
-                    if b1 == 0xB8 && (0x80...0x8F).contains(b2) {
-                        i = input.index(i, offsetBy: 3)
-                        continue
-                    }
-                    // EF BB BF       → BOM / ZWNBSP
+                    // EF BB BF       → BOM / ZWNBSP. (VS1-16, EF B8
+                    // 80..8F, is deliberately preserved — see the doc
+                    // comment above.)
                     if b1 == 0xBB && b2 == 0xBF {
                         i = input.index(i, offsetBy: 3)
                         continue
@@ -332,28 +335,16 @@ extension TerminalView {
 
             // 4-byte sequences:
             //   U+E0000-E007F tag block   (F3 A0 80 80 - F3 A0 81 BF)
-            //   U+E0100-E01EF VS17-256    (F3 A0 84 80 - F3 A0 87 AF)
+            // (VS17-256, F3 A0 84 80 - F3 A0 87 AF, is deliberately
+            // preserved — see the doc comment above.)
             if remaining >= 4, b0 == 0xF3 {
                 let b1 = input[input.index(i, offsetBy: 1)]
                 let b2 = input[input.index(i, offsetBy: 2)]
-                let b3 = input[input.index(i, offsetBy: 3)]
                 if b1 == 0xA0 {
                     // Tag block: b2 ∈ {80, 81}, b3 any continuation.
                     if b2 == 0x80 || b2 == 0x81 {
                         i = input.index(i, offsetBy: 4)
                         continue
-                    }
-                    // VS17-256: b2 ∈ {84,85,86,87}, b3 covers VS17 (84 80)
-                    // through VS256 (87 AF).
-                    if (0x84...0x87).contains(b2) {
-                        // Tighten the b3 bound on the upper page so we
-                        // don't strip non-VS scalars sharing the same
-                        // 3-byte prefix. F3 A0 87 B0..BF is U+E01F0+,
-                        // outside the VS range — preserve those.
-                        if b2 < 0x87 || b3 <= 0xAF {
-                            i = input.index(i, offsetBy: 4)
-                            continue
-                        }
                     }
                 }
             }
@@ -388,7 +379,21 @@ extension TerminalView {
         // truncation and look like part of the URL host.
         bytes = bytes.filter { $0 != 0x09 && $0 != 0x0A && $0 != 0x0D }
         bytes = stripBidiOverrides(bytes)
-        return String(decoding: bytes, as: UTF8.self)
+        // `stripBidiOverrides` deliberately PRESERVES Variation Selectors
+        // (VS1-16 U+FE00–FE0F, VS17-256 U+E0100–E01EF) — they're
+        // legitimate in pasted/dropped *data* (see its doc comment). But
+        // this is a *display* scrubber for the "verify before clicking"
+        // affordance, where exact glyph fidelity is a non-goal and an
+        // invisible scalar riding a host character must not survive into
+        // the tooltip. So strip VS here, matching the display posture of
+        // `DiagnosticsView.stripControlCharacters`. VS only restyle the
+        // preceding glyph and can't reorder a host, so this is
+        // defense-in-depth, not the primary bidi guard above.
+        let scrubbed = String(decoding: bytes, as: UTF8.self)
+        return String(scrubbed.unicodeScalars.filter {
+            !((0xFE00...0xFE0F).contains($0.value)
+                || (0xE0100...0xE01EF).contains($0.value))
+        })
     }
 
     /// Strip any literal `ESC [ 2 0 1 ~` terminators from a bracketed-paste

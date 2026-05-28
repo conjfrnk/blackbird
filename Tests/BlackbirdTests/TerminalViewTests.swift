@@ -806,13 +806,18 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
     }
 
-    func test_stripBidiOverrides_removesAllVariationSelectors1to16() {
-        // U+FE00..U+FE0F — EF B8 80..8F
+    func test_stripBidiOverrides_preservesAllVariationSelectors1to16() {
+        // U+FE00..U+FE0F — EF B8 80..8F. Variation Selectors are NOT a
+        // Trojan-source vector (they only restyle the immediately-
+        // preceding visible glyph) and are a legitimate part of pasted
+        // emoji, so they must round-trip UNCHANGED. fix-#16 wrongly
+        // stripped them, silently corrupting pasted "❤️" / keycaps and
+        // dragged emoji filenames. See stripBidiOverrides' doc comment.
         for vs: UInt8 in 0x80...0x8F {
             let payload = Data([0x61, 0xEF, 0xB8, vs, 0x62])
             XCTAssertEqual(
-                TerminalView.stripBidiOverrides(payload), Data("ab".utf8),
-                "VS at byte \(String(vs, radix: 16, uppercase: true)) must strip"
+                TerminalView.stripBidiOverrides(payload), payload,
+                "VS at byte \(String(vs, radix: 16, uppercase: true)) must be preserved"
             )
         }
     }
@@ -826,20 +831,26 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(TerminalView.stripBidiOverrides(payload2), Data("ab".utf8))
     }
 
-    func test_stripBidiOverrides_removesVariationSelectors17to256() {
+    func test_stripBidiOverrides_preservesVariationSelectors17to256() {
+        // VS17-256 (U+E0100..U+E01EF) is preserved for the same reason
+        // as VS1-16 above — only the Plane-14 tag block (E0000-E007F)
+        // shares the F3 A0 lead and stays stripped.
         // U+E0100 (VS17) — F3 A0 84 80
         let payload = Data([0x61, 0xF3, 0xA0, 0x84, 0x80, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), payload,
+                       "VS17 (U+E0100) must be preserved")
         // U+E01EF (VS256) — F3 A0 87 AF
         let payload2 = Data([0x61, 0xF3, 0xA0, 0x87, 0xAF, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload2), Data("ab".utf8))
+        XCTAssertEqual(TerminalView.stripBidiOverrides(payload2), payload2,
+                       "VS256 (U+E01EF) must be preserved")
     }
 
     func test_stripBidiOverrides_preservesAdjacentNonVSPlaneE0() {
-        // U+E01F0 (just past VS256) — F3 A0 87 B0. Must NOT strip;
-        // it's outside the variation-selector range. Also U+E0200,
-        // F3 A0 88 80, which shares the F3 A0 lead but b2 is past
-        // the VS upper page.
+        // Only the Plane-14 tag block (b2 ∈ {80,81}) is stripped from
+        // the F3 A0 lead now. U+E01F0 — F3 A0 87 B0 — and U+E0200 —
+        // F3 A0 88 80 — both sit past the tag block and must round-trip
+        // unchanged (regression guard that the tag-block match didn't
+        // over-broaden into the rest of the F3 A0 space).
         let beyondVS = Data([0x61, 0xF3, 0xA0, 0x87, 0xB0, 0x62])
         XCTAssertEqual(TerminalView.stripBidiOverrides(beyondVS), beyondVS)
         let pastPage = Data([0x61, 0xF3, 0xA0, 0x88, 0x80, 0x62])
@@ -847,14 +858,16 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_stripBidiOverrides_attackComboPayload() {
-        // Realistic worst-case: bidi RLO + ZWJ + tag char + VS + soft
-        // hyphen all sandwiched into one payload. Must scrub to the
-        // bare ASCII "ab".
+        // Realistic worst-case: bidi RLO + ZWJ + tag char + soft hyphen
+        // all sandwiched into one payload. Must scrub to the bare ASCII
+        // "ab". (Variation Selectors are intentionally NOT scrubbed —
+        // see the VS-preservation tests above; the anti-false-positive
+        // "VS survives while invisibles are stripped" case lives in
+        // DragDropTests.)
         var payload = Data("a".utf8)
         payload.append(contentsOf: [0xE2, 0x80, 0xAE])      // U+202E RLO
         payload.append(contentsOf: [0xE2, 0x80, 0x8D])      // U+200D ZWJ
         payload.append(contentsOf: [0xF3, 0xA0, 0x81, 0xA1]) // U+E0061 tag 'a'
-        payload.append(contentsOf: [0xEF, 0xB8, 0x80])      // U+FE00 VS1
         payload.append(contentsOf: [0xC2, 0xAD])            // U+00AD SHY
         payload.append(0x62)
         XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
@@ -1324,5 +1337,25 @@ final class TerminalViewTests: XCTestCase {
         // prefix as bidi overrides; verify we don't over-match.
         let input = "https://例え.jp/—path/🌐"
         XCTAssertEqual(TerminalView.scrubURLForDisplay(input), input)
+    }
+
+    func test_scrubURLForDisplay_dropsVariationSelectors() {
+        // Display posture: the chrome scrubber strips Variation Selectors
+        // even though the *data* sanitizer `stripBidiOverrides` now
+        // PRESERVES them (VS are legitimate in dropped/pasted filenames &
+        // text). The OSC 8 "verify before clicking" tooltip is a display
+        // surface where exact glyph fidelity is a non-goal and an
+        // invisible scalar riding a host character must not survive —
+        // defense-in-depth, mirroring DiagnosticsView's display posture.
+        // (Regression guard for the VS-preservation change: removing VS
+        // from stripBidiOverrides must not silently weaken this surface.)
+        let vs16 = "https://example.com/a\u{FE0F}b"
+        XCTAssertEqual(TerminalView.scrubURLForDisplay(vs16),
+                       "https://example.com/ab",
+                       "VS16 (U+FE0F) must be stripped from the display scrubber")
+        let vs256 = "https://example.com/a\u{E0100}b"
+        XCTAssertEqual(TerminalView.scrubURLForDisplay(vs256),
+                       "https://example.com/ab",
+                       "VS17-256 (U+E0100) must be stripped from the display scrubber")
     }
 }
