@@ -132,6 +132,54 @@ fn split_chunk_delivery_still_sets_the_bit() {
     }
 }
 
+#[test]
+fn modify_other_keys_cleared_by_ris() {
+    // Cost: one 20x4 term + a handful of bytes — well under 1 MiB, <10 ms.
+    unsafe {
+        let term = blackbird_core::bb_term_new(20, 4, 100);
+        assert!(!term.is_null());
+        feed(term, b"\x1b[>4;2m");
+        assert_ne!(
+            current_mode(term) & MODIFY_OTHER_KEYS,
+            0,
+            "precondition: CSI > 4 ; 2 m must set MODIFY_OTHER_KEYS"
+        );
+        // RIS (ESC c) is a full terminal reset — it must clear modifyOtherKeys
+        // back to 0, exactly like every other mode (xterm semantics).
+        feed(term, b"\x1bc");
+        assert_eq!(
+            current_mode(term) & MODIFY_OTHER_KEYS,
+            0,
+            "RIS (ESC c) must clear MODIFY_OTHER_KEYS"
+        );
+        blackbird_core::bb_term_free(term);
+    }
+}
+
+#[test]
+fn modify_other_keys_level1_cleared_by_ris() {
+    // Cost: one 20x4 term + a handful of bytes — well under 1 MiB, <10 ms.
+    unsafe {
+        let term = blackbird_core::bb_term_new(20, 4, 100);
+        assert!(!term.is_null());
+        feed(term, b"\x1b[>4;1m");
+        assert_ne!(
+            current_mode(term) & MODIFY_OTHER_KEYS,
+            0,
+            "precondition: CSI > 4 ; 1 m must set MODIFY_OTHER_KEYS"
+        );
+        // RIS (ESC c) must clear modifyOtherKeys regardless of which level
+        // (1 or 2) was active — the mode bit collapses levels.
+        feed(term, b"\x1bc");
+        assert_eq!(
+            current_mode(term) & MODIFY_OTHER_KEYS,
+            0,
+            "RIS (ESC c) must clear MODIFY_OTHER_KEYS (level 1)"
+        );
+        blackbird_core::bb_term_free(term);
+    }
+}
+
 // Silence dead_code on the c_void import — the type isn't referenced
 // directly, but kept for parity with other test files that link
 // through the same FFI surface.

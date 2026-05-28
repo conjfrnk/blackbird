@@ -849,6 +849,33 @@ impl Perform for OscScanner<'_> {
         }
     }
 
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // RIS (`ESC c`): full terminal reset. The main alacritty
+        // `Processor` driving `bb.term` resets its `TermMode` to
+        // defaults on this same byte (via `Term::reset_state`),
+        // clearing the Kitty-keyboard / app-cursor / bracketed-paste
+        // bits. `modify_other_keys` is Blackbird-side sidecar state
+        // that alacritty never sees (we own the entire `CSI > 4 ; N m`
+        // parse — see `csi_dispatch` above), so without mirroring the
+        // reset here it stays latched across RIS:
+        // `extract_mode_with_extras` keeps OR-ing in MODIFY_OTHER_KEYS
+        // and Swift's KeyEncoder keeps emitting `CSI 27 ; <mod> ; <cp>
+        // ~` for modified keys to a shell that just reset itself and no
+        // longer understands the encoding. Clear it so the reported
+        // mode tracks the reset, matching xterm semantics (the bit doc
+        // at the top of this file states RIS clears modifyOtherKeys).
+        //
+        // RIS only — deliberately NOT DECSTR (`CSI ! p`): this
+        // alacritty/vte version has no DECSTR handler, so a soft reset
+        // leaves alacritty's own modes untouched. Clearing
+        // modify_other_keys on DECSTR while Kitty / app-cursor /
+        // bracketed-paste stay set would introduce the opposite
+        // desync. Mirror alacritty exactly.
+        if byte == b'c' && intermediates.is_empty() {
+            *self.modify_other_keys = 0;
+        }
+    }
+
     fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         // XTGETTCAP opens as `ESC P + q` — intermediates == [b'+'],
         // final byte == 'q'. Any other DCS (sixel, sync output, iTerm2
