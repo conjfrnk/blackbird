@@ -444,6 +444,33 @@ final class DiagnosticReportStoreTests: XCTestCase {
             "4 MB read+sanitize must not stall — the work must be dispatched off main")
     }
 
+    /// Audit S5-003: `loadAndSanitize` MUST refuse symlinks at read
+    /// time. `reload()` filters them at enumerate, but a same-uid
+    /// attacker can swap a regular `hang-XXX.txt` for a symlink to
+    /// `~/.ssh/id_rsa` between scan and click. `Data(contentsOf:)`
+    /// follows symlinks, so without an `O_NOFOLLOW` gate the worker
+    /// would route the target's contents through the sanitiser to
+    /// the pasteboard / Email compose. The fix opens with
+    /// `O_NOFOLLOW`; ELOOP surfaces as `.symlinkRejected`.
+    func testLoadAndSanitizeRefusesSymlinkAtReadTime() async throws {
+        // Plant target + symlink. The symlink simulates the TOCTOU
+        // swap an attacker would perform between reload() and the
+        // user's Copy/Email click.
+        let target = hangDir.appendingPathComponent("hang-real-target.txt")
+        try "sensitive content here\n".write(to: target, atomically: true, encoding: .utf8)
+        let symlink = hangDir.appendingPathComponent("hang-symlink-target.txt")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
+
+        let result = await DiagnosticsView.loadAndSanitize(
+            url: symlink, cap: 16 * 1024 * 1024
+        )
+        if case .failure(.symlinkRejected) = result {
+            // ok
+        } else {
+            XCTFail("expected .symlinkRejected for symlink path, got \(result)")
+        }
+    }
+
     /// Files larger than the inline cap must surface as a typed error.
     /// The cap bound is enforced inside the detached task as a TOCTOU
     /// guard (post-read size check); this pins that contract.

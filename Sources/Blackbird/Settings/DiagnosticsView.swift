@@ -160,6 +160,14 @@ struct DiagnosticsView: View {
             lastError = "\(report.url.lastPathComponent) contains non-text bytes. Use Reveal in Finder to attach the file directly."
             Self.log.error("copy decode failed: \(report.url.lastPathComponent, privacy: .public) is not UTF-8")
             return false
+        case .failure(.symlinkRejected):
+            // Audit S5-003: enumerate filters symlinks, but a same-uid
+            // attacker can swap the inode between scan and click. The
+            // read-time O_NOFOLLOW gate refused; surface a clear
+            // diagnostic so the operator notices something changed.
+            lastError = "\(report.url.lastPathComponent) is a symlink — refused for safety."
+            Self.log.error("copy refused symlink: \(report.url.lastPathComponent, privacy: .public)")
+            return false
         }
     }
 
@@ -178,9 +186,33 @@ struct DiagnosticsView: View {
     static func loadAndSanitizeForTesting(url: URL, cap: Int) async -> (Result<String, LoadError>, ranOffMain: Bool) {
         await Task.detached {
             let ranOffMain = !Thread.isMainThread
+            // Audit S5-003: open with O_NOFOLLOW so a TOCTOU swap of the
+            // file inode between `reload()` (which filters symlinks at
+            // enumerate time) and this read cannot redirect us to an
+            // attacker-chosen target like ~/.ssh/id_rsa. ELOOP at open
+            // time surfaces the symlink as a typed failure rather than
+            // routing the symlink's target through the sanitiser to the
+            // pasteboard / Email-Diagnostics compose. `Data(contentsOf:)`
+            // (the prior call) silently follows symlinks.
+            let fd = url.withUnsafeFileSystemRepresentation { cPath -> Int32 in
+                guard let cPath = cPath else { return -1 }
+                return Darwin.open(cPath, O_RDONLY | O_NOFOLLOW)
+            }
+            if fd < 0 {
+                let err = errno
+                if err == ELOOP {
+                    return (.failure(.symlinkRejected), ranOffMain)
+                }
+                let msg = String(cString: strerror(err))
+                return (.failure(.read("open: \(msg)")), ranOffMain)
+            }
+            defer { Darwin.close(fd) }
+            let fh = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
             let data: Data
             do {
-                data = try Data(contentsOf: url)
+                // readToEnd() returns Data? — nil only on empty (legitimate);
+                // we treat that as an empty success below.
+                data = try fh.readToEnd() ?? Data()
             } catch {
                 return (.failure(.read(error.localizedDescription)), ranOffMain)
             }
@@ -205,6 +237,12 @@ struct DiagnosticsView: View {
         case read(String)
         case grewDuringRead(Int)
         case notUTF8
+        /// Audit S5-003: `open(O_NOFOLLOW)` returned ELOOP — the path
+        /// resolved to a symlink. `reload()` filters symlinks at scan,
+        /// but a same-uid attacker can swap a regular file for a
+        /// symlink between scan and read; the read-time gate refuses
+        /// to follow.
+        case symlinkRejected
     }
 
     /// Replace C0 / C1 control characters AND bidi / zero-width /
