@@ -90,6 +90,57 @@ final class HyperlinkTests: XCTestCase {
         }
     }
 
+    /// Audit S4-002: extend the Rust core's `is_bidi_or_invisible_scalar`
+    /// coverage to the Swift click-time URL scrub. Without this gate,
+    /// hostile remotes could embed U+2060 / VS chars / BOM / tag block
+    /// scalars (all invisible) in OSC 8 URLs, defeating the documented
+    /// "no hidden chars in URL handed to NSWorkspace" invariant.
+    func testOsc8UrlAllowlistRejectsExtendedInvisibleCodepoints() {
+        // Each tuple: (URL, codepoint name) — for descriptive failure messages.
+        let cases: [(String, String)] = [
+            ("https://example.com/%C2%AD",       "U+00AD soft hyphen"),
+            ("https://example.com/%D8%9C",       "U+061C Arabic letter mark"),
+            ("https://example.com/%E1%A0%8E",    "U+180E Mongolian vowel separator"),
+            ("https://example.com/%E2%81%A0",    "U+2060 Word Joiner"),
+            ("https://example.com/%EF%B8%80",    "U+FE00 Variation Selector-1"),
+            ("https://example.com/%EF%B8%8F",    "U+FE0F Variation Selector-16"),
+            ("https://example.com/%EF%BB%BF",    "U+FEFF BOM / ZWNBSP"),
+            ("https://example.com/%F3%A0%80%80", "U+E0000 tag block start"),
+            ("https://example.com/%F3%A0%81%BF", "U+E007F tag block end"),
+            ("https://example.com/%F3%A0%84%80", "U+E0100 Variation Selector-17"),
+            ("https://example.com/%F3%A0%87%AF", "U+E01EF Variation Selector-256"),
+        ]
+        for (raw, name) in cases {
+            guard let u = URL(string: raw) else {
+                XCTFail("URL init failed for \(name): \(raw)")
+                continue
+            }
+            XCTAssertFalse(
+                OSC8URLPolicy.isAllowed(u),
+                "percent-encoded \(name) must be rejected: \(raw)"
+            )
+        }
+    }
+
+    /// Sanity: the extended invisible-char filter must NOT block
+    /// legitimate percent-encoded characters (printable, whitespace,
+    /// non-ASCII visible glyphs).
+    func testOsc8UrlAllowlistAcceptsLegitimatePercentEncoded() {
+        for raw in [
+            "https://example.com/path%20with%20spaces",   // %20 = space
+            "https://example.com/?q=hello%20world",        // %20 in query
+            "https://example.com/%2F",                     // %2F literal slash
+            "https://example.com/%E2%9C%93",               // U+2713 ✓ visible
+            "https://example.com/%C3%A9",                  // U+00E9 é visible
+        ] {
+            guard let u = URL(string: raw) else { continue }
+            XCTAssertTrue(
+                OSC8URLPolicy.isAllowed(u),
+                "legitimate percent-encoded chars must pass: \(raw)"
+            )
+        }
+    }
+
     /// Audit S4-022: `ftp://` is no longer on the allowlist. Modern macOS
     /// (Big Sur+) does not ship a default FTP client, and FTP credentials
     /// are routinely embedded in URLs (plaintext exfil) — both reasons to
