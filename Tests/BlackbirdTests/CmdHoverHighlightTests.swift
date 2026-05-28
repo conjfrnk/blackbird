@@ -311,10 +311,12 @@ final class CmdHoverHighlightTests: XCTestCase {
         // individually so a drift in any single scheme is visible in the
         // failure message — a single XCTAssertTrue over a loop would
         // collapse all scheme errors into one line.
+        // Audit S4-022: `ftp` was removed from the allowlist (vintage
+        // scheme without a default macOS handler). The remaining safe
+        // schemes are http/https/mailto.
         let safe: [(label: String, raw: String)] = [
             ("http",            "http://example.com/"),
             ("https",           "https://example.com/"),
-            ("ftp",             "ftp://example.com/"),
             ("mailto (plain)",  "mailto:alice@example.com"),
             ("mailto (subject only)", "mailto:alice@example.com?subject=hi"),
         ]
