@@ -287,6 +287,113 @@ final class DragDropTests: XCTestCase {
                        "non-control / non-bidi scalars must pass through untouched, in order")
     }
 
+    // MARK: - Variation selectors are NOT Trojan-source (must be preserved)
+    //
+    // Unicode Variation Selectors (VS1-16 = U+FE00–U+FE0F, VS17-256 =
+    // U+E0100–U+E01EF) only alter the rendering of the immediately-
+    // preceding visible glyph. They cannot reorder text, escape quotes,
+    // or inject control bytes, so they are NOT part of the Trojan-source
+    // / invisible-control attack class that `sanitizeDropPath` and
+    // `stripBidiOverrides` defend against. They ARE legitimate, common
+    // user-chosen content (emoji filenames, pasted emoji, keycaps), so
+    // both sanitizers MUST preserve them verbatim. An earlier revision
+    // over-broadly stripped VS, mangling emoji paths and pastes — these
+    // tests pin the corrected, narrower scrub policy.
+    //
+    // Memory/time cost: each test allocates one short String or a handful
+    // of 5–6-byte Data buffers; sub-millisecond, no meaningful allocation.
+
+    /// Regression: `sanitizeDropPath` must preserve VS16 (U+FE0F), the
+    /// emoji-presentation selector that turns a base glyph into its
+    /// colour emoji form. Dropping a file literally named "❤️.png"
+    /// (U+2764 HEAVY BLACK HEART + U+FE0F) must reach the shell with the
+    /// selector intact; stripping it changes the byte sequence the shell
+    /// receives and the file no longer exists under the scrubbed name.
+    /// A keycap sequence ("1️⃣" = '1' + U+FE0F + U+20E3) is the same case.
+    func test_sanitizeDropPath_preservesVariationSelector16() {
+        let heart = "/tmp/dir/❤\u{FE0F}.png"
+        let scrubbedHeart = TerminalView.sanitizeDropPath(heart)
+        XCTAssertTrue(scrubbedHeart.unicodeScalars.contains("\u{FE0F}"),
+                      "VS16 (U+FE0F) must survive sanitizeDropPath — it is not a Trojan-source scalar")
+        XCTAssertEqual(scrubbedHeart, heart,
+                       "an emoji-presentation path must round-trip through sanitizeDropPath unchanged")
+
+        let keycap = "/tmp/1\u{FE0F}\u{20E3}.txt"
+        let scrubbedKeycap = TerminalView.sanitizeDropPath(keycap)
+        XCTAssertTrue(scrubbedKeycap.unicodeScalars.contains("\u{FE0F}"),
+                      "VS16 inside a keycap sequence must survive sanitizeDropPath")
+        XCTAssertEqual(scrubbedKeycap, keycap,
+                       "a keycap-sequence path must round-trip through sanitizeDropPath unchanged")
+    }
+
+    /// Regression: `sanitizeDropPath` must preserve the high
+    /// variation-selector block VS17-256 (U+E0100–U+E01EF), used for
+    /// CJK ideographic variation. A path containing U+E0100 must
+    /// round-trip unchanged — the scalar is rendering-only and carries
+    /// no reordering or control-byte capability.
+    func test_sanitizeDropPath_preservesVariationSelector17_256() {
+        let raw = "/tmp/x\u{E0100}.log"
+        let scrubbed = TerminalView.sanitizeDropPath(raw)
+        XCTAssertTrue(scrubbed.unicodeScalars.contains("\u{E0100}"),
+                      "VS17 (U+E0100) must survive sanitizeDropPath — it is not a Trojan-source scalar")
+        XCTAssertEqual(scrubbed, raw,
+                       "a path with a high variation selector must round-trip unchanged")
+    }
+
+    /// Regression: `stripBidiOverrides` must preserve every VS1-16
+    /// scalar (U+FE00–U+FE0F, UTF-8 `EF B8 80..8F`). Wrapping "a<VS>b"
+    /// must come back as the identical 5 bytes — NOT collapsed to "ab".
+    /// This is the paste-pipeline twin of the sanitizeDropPath case:
+    /// Cmd-V of emoji text must not lose its presentation selector.
+    func test_stripBidiOverrides_preservesVariationSelectors1to16() {
+        for vs: UInt8 in 0x80...0x8F {
+            let input = Data([0x61, 0xEF, 0xB8, vs, 0x62])
+            XCTAssertEqual(
+                TerminalView.stripBidiOverrides(input), input,
+                "VS at byte EF B8 \(String(vs, radix: 16, uppercase: true)) must be PRESERVED, not stripped"
+            )
+        }
+    }
+
+    /// Regression: `stripBidiOverrides` must preserve the high
+    /// variation-selector block VS17-256. U+E0100 (`F3 A0 84 80`) and
+    /// U+E01EF (`F3 A0 87 AF`) — the range endpoints — must each come
+    /// back byte-for-byte. These four-byte scalars share the `F3 A0`
+    /// lead with the Plane-14 tag block (which IS stripped), so this
+    /// guards the boundary between the two sub-ranges.
+    func test_stripBidiOverrides_preservesVariationSelectors17to256() {
+        let vs17 = Data([0x61, 0xF3, 0xA0, 0x84, 0x80, 0x62]) // U+E0100
+        XCTAssertEqual(TerminalView.stripBidiOverrides(vs17), vs17,
+                       "VS17 (U+E0100) must be PRESERVED, not stripped")
+        let vs256 = Data([0x61, 0xF3, 0xA0, 0x87, 0xAF, 0x62]) // U+E01EF
+        XCTAssertEqual(TerminalView.stripBidiOverrides(vs256), vs256,
+                       "VS256 (U+E01EF) must be PRESERVED, not stripped")
+    }
+
+    /// Anti-false-positive guard: preserving variation selectors must NOT
+    /// have come at the cost of disabling the genuine Trojan-source scrub.
+    /// Feed a payload that interleaves a preserved VS with two genuine
+    /// invisibles — `a` + U+202E (RLO, `E2 80 AE`) + U+FE0F (VS, `EF B8
+    /// 8F`) + U+200B (ZWSP, `E2 80 8B`) + `b` — and assert the result is
+    /// exactly `a` + U+FE0F + `b`. If this passed merely because all
+    /// stripping was turned off, the RLO and ZWSP would survive and the
+    /// assertion would fail; if VS stripping regressed, the VS would be
+    /// gone. Only the correct, selective policy yields these 5 bytes.
+    func test_stripBidiOverrides_stillStripsGenuineInvisibles_alongsideVS() {
+        let payload = Data([
+            0x61,             // 'a'
+            0xE2, 0x80, 0xAE, // U+202E RIGHT-TO-LEFT OVERRIDE  (must strip)
+            0xEF, 0xB8, 0x8F, // U+FE0F VARIATION SELECTOR-16   (must keep)
+            0xE2, 0x80, 0x8B, // U+200B ZERO WIDTH SPACE        (must strip)
+            0x62,             // 'b'
+        ])
+        let expected = Data([0x61, 0xEF, 0xB8, 0x8F, 0x62]) // "a" + U+FE0F + "b"
+        XCTAssertEqual(
+            TerminalView.stripBidiOverrides(payload), expected,
+            "RLO + ZWSP must be stripped while the interleaved VS16 is preserved"
+        )
+    }
+
     /// Helper: take the same code path as `performDragOperation` —
     /// `url.path` -> `sanitizeDropPath` — so the integration tests
     /// above exercise the production scrubber rather than re-implementing

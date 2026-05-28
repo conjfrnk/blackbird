@@ -158,10 +158,28 @@ extension TerminalView {
             // the pasted line displays as `'/tmp/jpg.bad.jpg'` while
             // the shell actually opens the byte-order-flipped real
             // path. Same Trojan-source-class smuggling as the
-            // DiagnosticsView Copy path. Mirror the set used by
-            // `TerminalView+Paste.stripBidiOverrides` and
-            // `DiagnosticsView.stripControlCharacters` so all three
-            // sanitizer surfaces stay in lockstep. Audit S4-014.
+            // DiagnosticsView Copy path. This set mirrors
+            // `TerminalView+Paste.stripBidiOverrides`. Audit S4-014.
+            //
+            // Variation Selectors (VS1-16 U+FE00–FE0F, VS17-256
+            // U+E0100–E01EF) are deliberately NOT in this set. They only
+            // alter how the immediately-preceding visible glyph renders
+            // — they cannot reorder text, escape the single quotes that
+            // `shellQuote` wraps the path in, or inject a control byte —
+            // so they carry none of the Trojan-source risk above. They
+            // ARE a legitimate, common part of real filenames: APFS
+            // stores names as raw UTF-8 (no normalization) and macOS
+            // users routinely name files with emoji that decompose to
+            // base + U+FE0F (❤️, ⭐️, 1️⃣, …). Stripping them turned a
+            // dragged `❤️.png` into a non-existent `❤.png`, pasting a
+            // command the shell can't resolve. fix-#16 added them on the
+            // wrong assumption that "legitimate writers emit only
+            // printable ASCII" — false for filenames. The diagnostics
+            // display-scrubber (`DiagnosticsView.stripControlCharacters`)
+            // intentionally still strips VS: it scrubs an untrusted
+            // crash-log file purely for safe display, where exact glyph
+            // fidelity is not a goal — the opposite trade-off from this
+            // user-chosen path. Do not re-add VS here for "lockstep".
             if v == 0x00AD                          // soft hyphen
                 || v == 0x061C                      // Arabic Letter Mark
                 || v == 0x180E                      // Mongolian Vowel Sep
@@ -169,10 +187,8 @@ extension TerminalView {
                 || (v >= 0x2028 && v <= 0x202E)     // LS/PS + bidi formatting
                 || v == 0x2060                      // Word Joiner
                 || (v >= 0x2066 && v <= 0x2069)     // bidi isolates
-                || (v >= 0xFE00 && v <= 0xFE0F)     // VS1-16 (fix-#16)
                 || v == 0xFEFF                      // BOM / ZW no-break space
                 || (v >= 0xE0000 && v <= 0xE007F)   // Plane-14 tag block
-                || (v >= 0xE0100 && v <= 0xE01EF)   // VS17-256 (fix-#16)
             { return false }
             return true
         })
