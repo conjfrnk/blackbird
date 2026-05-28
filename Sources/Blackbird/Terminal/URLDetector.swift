@@ -226,12 +226,24 @@ public enum URLDetector {
                         //     default port silently re-targets an internal
                         //     console (`:8443`, `:9200`, `:6379`, etc.).
                         // (5) Continuation's first character must NOT be one
-                        //     of `?`, `#`, `&`, `@`, `;`. These introduce
-                        //     query / fragment / userinfo / path-parameter
+                        //     of `?`, `#`, `&`, `@`, `;`, `:`. These
+                        //     introduce query / fragment / userinfo /
+                        //     path-parameter / port-or-path-coercion
                         //     structure that doesn't exist in the visible
                         //     substring. The legitimate long-URL-path-wrap
                         //     case (continuation starting with alnum / `/` /
                         //     `.` / `-` / `_` / `~`) is unaffected.
+                        //
+                        // The `:` case (audit S4-007): when the substring
+                        // ends with `/`, Foundation parses a continuation
+                        // `:8080/...` as part of the PATH rather than the
+                        // port delimiter — host/port equality guards 3 and
+                        // 4 both pass (both ports default to scheme
+                        // default). Forbidding `:` as a leader closes that
+                        // gap without affecting any legitimate wrap shape
+                        // (a real `:port/...` only appears when the
+                        // substring also lacks the trailing `/`, in which
+                        // case guard 4 catches it).
                         //
                         // Acknowledged residual: a continuation that begins
                         // with a benign char but contains `?`/`#` later
@@ -243,7 +255,7 @@ public enum URLDetector {
                         // across rows so the dispatched URL matches the
                         // visible span; F9 notes that as a future
                         // improvement.
-                        let urlStructureLeaders: Set<Character> = ["?", "#", "&", "@", ";"]
+                        let urlStructureLeaders: Set<Character> = ["?", "#", "&", "@", ";", ":"]
                         if let joined = URL(string: candidate),
                            let sub = URL(string: substring),
                            let subHost = sub.host,

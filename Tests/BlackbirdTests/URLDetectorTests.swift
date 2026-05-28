@@ -486,6 +486,40 @@ final class URLDetectorTests: XCTestCase {
                      "no port should appear on the dispatched URL")
     }
 
+    /// S4-007: companion to the port-injection test. When the visible
+    /// substring ends with `/`, a continuation starting with `:` is
+    /// parsed by Foundation as part of the PATH rather than as the port
+    /// delimiter — joined.host == sub.host AND joined.port == sub.port
+    /// (both nil → default 443), so guards 3 and 4 both pass. The fix
+    /// adds `:` to the forbidden continuation-leader set so the join is
+    /// rejected at guard 5. Without the fix, an attacker emitting
+    /// `https://apple.com/` at the row edge with `:8080/admin?token=...`
+    /// on the next row gets the full malicious URL dispatched while the
+    /// user sees only the apex.
+    func test_scan_wrapJoin_rejectsColonPathInjectionWhenSubstringEndsWithSlash() throws {
+        let cols: UInt16 = 40
+        let url = "https://example.com/"        // 20 chars, ends in `/`
+        let pad = String(repeating: " ", count: Int(cols) - url.count)
+        XCTAssertEqual(pad.count + url.count, Int(cols))
+        let nextRow = ":8080/admin?token=stolen"
+        let snap = try snapshot(
+            from: "\(pad)\(url)\r\n\(nextRow)",
+            cols: cols,
+            rows: 5
+        )
+        let matches = URLDetector.scan(snapshot: snap)
+        let m = try XCTUnwrap(
+            matches.first(where: { $0.url.absoluteString.contains("example.com") }),
+            "expected a URLMatch covering example.com"
+        )
+        XCTAssertEqual(
+            m.url.absoluteString, url,
+            "wrap-join must not splice a `:` continuation onto a slash-terminated URL"
+        )
+        XCTAssertNil(m.url.query,
+                     "continuation's query must not leak onto the dispatched URL")
+    }
+
     /// Legitimate long-URL same-host path wrap (patch-reviewer's
     /// suggested case): a long GitHub URL whose path wraps at the row
     /// edge must still join cleanly. This is the F9 feature the host-
