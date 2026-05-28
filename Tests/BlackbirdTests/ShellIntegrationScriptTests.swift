@@ -494,6 +494,83 @@ final class ShellIntegrationScriptTests: XCTestCase {
         )
     }
 
+    /// Static-content check for fish's double-source guard — runs without
+    /// requiring a fish installation, so CI machines without fish still
+    /// catch the regression. The fish `exit` builtin terminates the
+    /// interactive shell process; a sourced file using `exit 0` as its
+    /// guard kills the user's session on re-source. The bash and zsh
+    /// siblings correctly use `return 0`. Audit S4-001.
+    func test_osc133_fish_doubleSourceGuard_scriptSourceUsesReturnNotExit() throws {
+        let scriptURL = try locateScript(named: "osc133.fish")
+        let content = try String(contentsOf: scriptURL, encoding: .utf8)
+        // The guard block has the shape:
+        //   if set -q __bb_osc133_loaded
+        //       <bail>
+        //   end
+        // Locate the guard line and assert the next non-blank, non-comment
+        // line bails via `return`, not `exit`.
+        let lines = content.components(separatedBy: "\n")
+        guard let guardIdx = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == "if set -q __bb_osc133_loaded"
+        }) else {
+            XCTFail("osc133.fish: expected guard `if set -q __bb_osc133_loaded` not found — script shape changed; re-check the audit assumption.")
+            return
+        }
+        // Next non-blank, non-comment line is the bail.
+        var bailLine: String?
+        for i in (guardIdx + 1)..<lines.count {
+            let t = lines[i].trimmingCharacters(in: .whitespaces)
+            if t.isEmpty || t.hasPrefix("#") { continue }
+            bailLine = t
+            break
+        }
+        guard let bail = bailLine else {
+            XCTFail("osc133.fish: guard `if set -q __bb_osc133_loaded` found but no body.")
+            return
+        }
+        XCTAssertFalse(
+            bail.hasPrefix("exit"),
+            "osc133.fish: double-source guard bails via `\(bail)` — fish's `exit` " +
+            "terminates the calling shell, killing user sessions on re-source. Use " +
+            "`return` instead (matches bash/zsh siblings). Audit S4-001."
+        )
+        XCTAssertTrue(
+            bail == "return" || bail.hasPrefix("return "),
+            "osc133.fish: expected `return` as the guard bail, got `\(bail)`."
+        )
+    }
+
+    /// fish's double-source guard. The bash sibling uses `return 0`, but
+    /// fish's `exit` builtin terminates the entire interactive shell
+    /// process — including a `source`-calling parent. A guard that uses
+    /// `exit 0` therefore kills the user's shell on re-source (e.g.
+    /// reloading `config.fish`). The guard must use `return` instead.
+    ///
+    /// Test shape: source the fish snippet twice, then emit a marker.
+    /// If the second source `exit`s the shell, the marker never appears
+    /// in captured stdout. If the second source `return`s, the marker
+    /// appears. We use a non-noisy marker so any future debug-print
+    /// regression in the snippet itself doesn't accidentally satisfy the
+    /// assertion. Audit S4-001.
+    func test_osc133_fish_doubleSourceGuard_doesNotKillCallingShell() throws {
+        let scriptURL = try locateScript(named: "osc133.fish")
+        guard let fish = locateShell("fish") else {
+            throw XCTSkip("fish not installed (not a regression — fish is optional on macOS)")
+        }
+        let body = """
+        source '\(scriptURL.path)'
+        source '\(scriptURL.path)'
+        printf 'BB_FISH_SURVIVED_RE_SOURCE\\n'
+        """
+        let out = try runShell(at: fish, scriptBody: body)
+        XCTAssertTrue(
+            out.contains("BB_FISH_SURVIVED_RE_SOURCE"),
+            "fish: double-sourcing the snippet terminated the calling shell — the " +
+            "double-source guard must use `return`, not `exit`. The bash and zsh " +
+            "siblings already use the correct primitive. Captured: \(debugHex(out))"
+        )
+    }
+
     /// Pin the fish wiring. fish doesn't use PS1; the snippet documents
     /// that users append `__bb_osc133_b` to their `fish_prompt` function
     /// manually. The function `__bb_osc133_b` MUST be defined post-
