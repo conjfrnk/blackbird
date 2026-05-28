@@ -176,6 +176,32 @@ fn osc7_path_containing_tab_or_newline_dropped() {
     }
 }
 
+// ─── Audit S3-001: UTF-8-encoded C1 controls (U+0080..U+009F) ─────────
+
+#[test]
+fn osc7_path_containing_utf8_c1_control_dropped() {
+    // C1 controls U+0080..U+009F encode in UTF-8 as 0xC2 0x80..0xC2 0x9F.
+    // The pre-fix gate did a byte-wise `b < 0x20 || b == 0x7F` sweep
+    // which misses both bytes of the UTF-8 form: 0xC2 = 194 and 0x85 =
+    // 133 are both >= 0x20. A hostile shell could emit
+    // `\x1b]7;file:///%C2%85tmp/\x1b\\` and the C1 byte would reach the
+    // CwdChanged payload. Audit S3-001 (companion to title-path C1
+    // codepoint filter at scrub_title_controls).
+    for hex in &[b"%C2%85", b"%C2%80", b"%C2%9F", b"%C2%9B"] {
+        let mut seq = b"\x1b]7;file:///foo".to_vec();
+        seq.extend_from_slice(*hex);
+        seq.extend_from_slice(b"bar\x1b\\");
+        let events = drive(&seq);
+        assert!(
+            events
+                .iter()
+                .all(|(k, _)| *k != BBEventKind::CwdChanged as u32),
+            "C1 control {:?} in OSC 7 path must reject event",
+            std::str::from_utf8(*hex).unwrap()
+        );
+    }
+}
+
 // ─── Audit M2: bidi / zero-width / invisible-payload codepoints ────────
 
 #[test]
