@@ -77,7 +77,6 @@ final class HyperlinkTests: XCTestCase {
         let fixtures: [(scheme: String, raw: String)] = [
             ("http",    "http://example.com/"),
             ("https",   "https://example.com/"),
-            ("ftp",     "ftp://example.com/"),
             ("mailto",  "mailto:alice@example.com"),
             ("HTTPS",   "HTTPS://example.com/"),
             ("Mailto",  "Mailto:alice@example.com"),
@@ -87,6 +86,25 @@ final class HyperlinkTests: XCTestCase {
             XCTAssertTrue(
                 OSC8URLPolicy.isAllowed(u),
                 "allowlist must accept the canonical safe scheme \(scheme)"
+            )
+        }
+    }
+
+    /// Audit S4-022: `ftp://` is no longer on the allowlist. Modern macOS
+    /// (Big Sur+) does not ship a default FTP client, and FTP credentials
+    /// are routinely embedded in URLs (plaintext exfil) — both reasons to
+    /// drop the scheme. Users wanting an FTP click-through can still copy
+    /// the URL and `open` from their shell.
+    func testOsc8UrlSchemeAllowlistRejectsFTPScheme() {
+        for raw in [
+            "ftp://ftp.example.com/file.tgz",
+            "ftp://anon@ftp.evil.tld/payload.tar",
+            "FTP://example.com/",
+        ] {
+            guard let u = URL(string: raw) else { continue }
+            XCTAssertFalse(
+                OSC8URLPolicy.isAllowed(u),
+                "ftp:// must be rejected — vintage scheme without a default macOS handler: \(raw)"
             )
         }
     }
@@ -129,13 +147,12 @@ final class HyperlinkTests: XCTestCase {
         // URL(string:) accepts plenty of shapes — ports, query strings,
         // auth components, IPv6 literals. All should pass the scheme
         // gate; none should surface unsafe behaviour because NSWorkspace
-        // still dispatches via the registered http/https/ftp/mailto
+        // still dispatches via the registered http/https/mailto
         // handler which is the user's browser / Mail.app.
         let ok = [
             "https://example.com:8443/path?q=1&x=2#frag",
             "http://[2001:db8::1]/",
             "mailto:root@example.com?subject=hi",
-            "ftp://ftp.example.com/pub/file.tgz",
         ]
         for raw in ok {
             guard let u = URL(string: raw) else {
@@ -225,7 +242,7 @@ final class HyperlinkTests: XCTestCase {
     func testOsc8UrlAllowlistAcceptsPureASCIIHost() {
         // Sanity: the all-ASCII path still passes. Verifies the IDN gate
         // didn't accidentally snag legitimate hosts.
-        for raw in ["https://apple.com/", "http://example.com/path", "ftp://mirror.example.org/"] {
+        for raw in ["https://apple.com/", "http://example.com/path"] {
             guard let u = URL(string: raw) else { continue }
             XCTAssertTrue(
                 OSC8URLPolicy.isAllowed(u),

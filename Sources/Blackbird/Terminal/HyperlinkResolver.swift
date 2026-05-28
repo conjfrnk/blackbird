@@ -30,13 +30,18 @@ public struct DefaultURLOpener: URLOpener {
 ///
 /// Allowlist rationale — schemes safe to open from an inline hyperlink:
 ///  - `http`, `https`: open in default browser
-///  - `ftp`: open in default FTP client / browser
 ///  - `mailto`: compose mail — side-effect limited to mail app
-///  - `file`: open in Finder
 /// Everything else is rejected. Users clicking a `ssh://host` in text can
 /// still get there via the regex fallback — it won't, because the regex
 /// itself excludes ssh — but we err on the side of the smaller blast
 /// radius. iTerm2's `SemanticHistoryController` uses a similar approach.
+///
+/// `ftp` was removed in audit S4-022. macOS 14+ no longer ships a default
+/// FTP client; clicks fall to whatever the user installed (or Safari,
+/// which errors). FTP URLs commonly embed plaintext credentials in the
+/// authority component, expanding the surface for credential exfil and
+/// for FTP-client parsing CVEs. Users with a legitimate `ftp://` need
+/// can copy the URL and `open` it manually.
 enum OSC8URLPolicy {
     /// Schemes we accept for OSC 8 hyperlinks. Matched case-insensitively
     /// against `URL.scheme` after construction.
@@ -52,11 +57,11 @@ enum OSC8URLPolicy {
     /// the tooltip. Strict-allowlist side of the tradeoff: drop `file`.
     /// Users with a legitimate `file://` need, copy the path and `open`
     /// from the shell.
-    static let allowedSchemes: Set<String> = ["http", "https", "ftp", "mailto"]
+    static let allowedSchemes: Set<String> = ["http", "https", "mailto"]
 
     /// Schemes that require a host component. `mailto:` is excluded —
     /// its "host" part is the local address, handled by `isMailtoSafe`.
-    private static let hostRequiredSchemes: Set<String> = ["http", "https", "ftp"]
+    private static let hostRequiredSchemes: Set<String> = ["http", "https"]
 
     /// Decide whether an OSC 8 URL is safe to hand to `NSWorkspace`.
     /// Rejects URLs with no scheme (malformed / relative), a scheme
@@ -298,7 +303,7 @@ enum OSC8URLPolicy {
             if normAnchor.hasSuffix("." + normHref) { return false }
             return true
         }
-        // Host-required schemes (http/https/ftp). Foundation's URL
+        // Host-required schemes (http/https). Foundation's URL
         // parser handles IPv6 bracket-form and IDN automatically.
         guard let hrefHost = url.host?.lowercased(), !hrefHost.isEmpty else {
             // No href host to compare against. The click path already
