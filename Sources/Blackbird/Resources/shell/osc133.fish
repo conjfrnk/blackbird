@@ -9,9 +9,12 @@
 # Invisible to the renderer; Blackbird tracks them as metadata for future
 # "jump to previous prompt" UX. Opt-in, shell-side only.
 
-# Guard against double-sourcing.
+# Guard against double-sourcing. `return` exits the sourced file and
+# yields control back to the caller; `exit` would terminate the entire
+# interactive shell, killing the user's session on re-source (the bash
+# and zsh siblings use the equivalent `return 0`). Audit S4-001.
 if set -q __bb_osc133_loaded
-    exit 0
+    return
 end
 set -g __bb_osc133_loaded 1
 
