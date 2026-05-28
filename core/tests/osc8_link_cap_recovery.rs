@@ -290,6 +290,87 @@ fn osc8_link_cap_resets_on_clear_all() {
     }
 }
 
+/// TEST 2b — `bb_term_clear_all` MUST reset the cap even when a
+/// snapshot is still held across the clear. Audit S5-002.
+///
+/// Production Swift code (`TerminalSession.clearAll`) calls
+/// `bbterm.clearAll()` while `TerminalView.currentSnapshot` still
+/// references the pre-clear snapshot — the publish-immediate flow
+/// runs the FFI side first, then publishes the fresh snapshot, so
+/// the prior snapshot is still alive at the moment of the FFI call.
+/// With the old `retain(strong_count > 1)` predicate, every cache
+/// entry's Arc count is >1 (the held snapshot pins each URI), so
+/// retain keeps every entry and `uri_cache_bytes` remains saturated.
+/// Post-clear OSC 8 hyperlinks silently lose attribution.
+///
+/// The realistic-Swift sequence here keeps `snap_pre` alive across
+/// `bb_term_clear_all` and asserts:
+///   (a) a fresh post-clear URI interns successfully (cap reset)
+///   (b) `snap_pre`'s pre-clear URI is still resolvable (no UAF —
+///       the snapshot's own Arc<CStr> clones independently keep the
+///       CStrs alive even though the cache dropped its references).
+#[test]
+fn osc8_link_cap_resets_on_clear_all_even_with_live_snapshot() {
+    unsafe {
+        let term = term_with_n_links(256);
+        let snap_pre = bc::bb_term_take_snapshot(term);
+        assert!(!snap_pre.is_null(), "pre-clear snapshot must succeed");
+
+        // Confirm the cap is tripped before testing recovery.
+        let seq_257 = make_osc8(256);
+        bc::bb_term_input(term, seq_257.as_ptr(), seq_257.len());
+        let snap_full = bc::bb_term_take_snapshot(term);
+        assert!(!snap_full.is_null());
+        let (r257, c257) = cell_at(256);
+        assert_eq!(
+            bc::bb_snap_link_id_at(snap_full, r257, c257),
+            0,
+            "pre-clear: 257th URI must be dropped — confirms cap tripped"
+        );
+        bc::bb_snap_release(snap_full);
+
+        // CRITICAL DIFFERENCE from `osc8_link_cap_resets_on_clear_all`:
+        // snap_pre stays ALIVE here, mirroring how Swift's
+        // currentSnapshot pins the prior snapshot across clearAll().
+        bc::bb_term_clear_all(term);
+
+        // Post-clear: a fresh URI must now intern despite the
+        // held-snapshot pinning. Pre-fix this fails because
+        // `retain(strong_count > 1)` keeps every entry.
+        let fresh_seq = make_osc8(900);
+        bc::bb_term_input(term, fresh_seq.as_ptr(), fresh_seq.len());
+        let snap_post = bc::bb_term_take_snapshot(term);
+        assert!(!snap_post.is_null());
+
+        let post_id = bc::bb_snap_link_id_at(snap_post, 0, 0);
+        assert_ne!(
+            post_id, 0,
+            "post-clear: a fresh OSC 8 must intern successfully even \
+             when a pre-clear snapshot is still live. Audit S5-002: \
+             the prior retain(strong_count > 1) predicate kept every \
+             cache entry when Swift held a snapshot across clearAll, \
+             leaving uri_cache_bytes saturated and post-clear links \
+             silently dropping to link_id=0."
+        );
+
+        // Memory safety: snap_pre's own Arc clones must independently
+        // keep its URIs alive even though the cache dropped its refs.
+        // Resolve link_id=1 on snap_pre (the first interned URI) and
+        // verify it still points to a non-null CStr.
+        let pre_url_ptr = bc::bb_snap_link_url(snap_pre, 1);
+        assert!(
+            !pre_url_ptr.is_null(),
+            "pre-clear snapshot's URI must still resolve after \
+             bb_term_clear_all dropped the cache — the snapshot's own \
+             Arc<CStr> clone keeps the byte buffer alive."
+        );
+
+        bc::bb_snap_release(snap_post);
+        bc::bb_snap_release(snap_pre);
+        bc::bb_term_free(term);
+    }
+}
+
 /// TEST 3 — `bb_term_free` + `bb_term_new` recovers the cap.
 ///
 /// A fresh `BBTerm` starts with `uri_cstr_cache: HashMap::new()` and

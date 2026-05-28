@@ -3410,18 +3410,40 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         bb.modify_other_keys = 0;
         bb.callback.pty_write_rate.reset();
 
-        // OSC 8 URI intern cache: drop entries that no live snapshot
-        // still references. `bb_term_take_snapshot` cloned each Arc into
-        // the snapshot's `links` vec, so any URI with `Arc::strong_count
-        // > 1` is still pointed-to by a snapshot whose `*const c_char`
-        // would dangle if we evicted. Retain those; drop the rest.
-        // `uri_cache_bytes` rebuilds from the surviving entries (sum of
-        // `key.len()`) — this also fixes the latent invariant break
-        // from the old `mem::take` shape (audit RC-01) where a panic
-        // could leave bytes_count stale.
-        bb.uri_cstr_cache
-            .retain(|_uri, arc| Arc::strong_count(arc) > 1);
-        bb.uri_cache_bytes = bb.uri_cstr_cache.keys().map(|k| k.len()).sum();
+        // OSC 8 URI intern cache: drain unconditionally. Audit S5-002.
+        //
+        // The previous shape used
+        // `retain(|_uri, arc| Arc::strong_count(arc) > 1)` to keep
+        // entries still referenced by a live snapshot. That semantics
+        // sounds safe but breaks the documented H-3 invariant in
+        // production: Swift's `TerminalSession.clearAll` runs the FFI
+        // call while `TerminalView.currentSnapshot` still pins the
+        // pre-clear snapshot. Every cache entry's Arc has
+        // strong_count > 1, retain keeps everything, and a pre-clear
+        // adversarial flood permanently disables OSC 8 attribution for
+        // the rest of the BBTerm lifetime (or until a SECOND clearAll
+        // happens after the snapshot was released — but Swift always
+        // re-pins on publish).
+        //
+        // Memory safety of the unconditional clear: each snapshot's
+        // `links: Vec<Arc<std::ffi::CStr>>` holds its own Arc clones
+        // (cf. `bb_term_take_snapshot` at the cache-resolve path).
+        // Dropping the cache's Arc only decrements; the snapshot's
+        // clone keeps the CStr alive for the lifetime of the snapshot.
+        // The `*const c_char` pointers returned by `bb_snap_link_url`
+        // come from the snapshot's own Arc, not the cache's, so they
+        // do not dangle. (The "would dangle" caveat in the prior
+        // comment was incorrect — the snapshot's links table owns its
+        // Arc independently.)
+        //
+        // The reachability test `osc8_link_cap_resets_on_clear_all_even_with_live_snapshot`
+        // pins this invariant; the original
+        // `osc8_link_cap_resets_on_clear_all` (which released
+        // snap_pre BEFORE clearAll) continues to pass for the same
+        // reason — clear() always drops references, regardless of
+        // whether external owners exist.
+        bb.uri_cstr_cache.clear();
+        bb.uri_cache_bytes = 0;
     })
 }
 
@@ -5713,14 +5735,24 @@ mod tests {
         }
     }
 
-    /// Audit H-3: the URI intern cache must drop entries that no live
-    /// snapshot still references — but live snapshot Arcs MUST stay
-    /// valid (their `*const c_char` is held by the snapshot's `links`
-    /// vec). The test takes a snapshot pre-clear (so its Arc strong-
-    /// count is 2), then clears, then asserts the cache retained that
-    /// entry. Releasing the snapshot then clearing again must drop it.
+    /// Audit S5-002 (supersedes H-3 retain semantics): the URI intern
+    /// cache must drain UNCONDITIONALLY on clear_all, even when live
+    /// snapshots still reference its entries. The prior `retain` shape
+    /// (keep entries with Arc::strong_count > 1) sounded safe but broke
+    /// the documented H-3 contract in production: Swift's
+    /// `TerminalSession.clearAll` always runs the FFI call while
+    /// `TerminalView.currentSnapshot` pins the pre-clear snapshot, so
+    /// retain kept every entry and a pre-clear flood permanently
+    /// disabled OSC 8 attribution.
+    ///
+    /// Memory safety: each snapshot's `links: Vec<Arc<CStr>>` holds its
+    /// own Arc clones. Dropping the cache's Arc only decrements; the
+    /// snapshot's clone keeps the CStr alive for the snapshot lifetime.
+    /// This test pins both halves of the contract — the cache empties
+    /// regardless of held snapshots AND the held snapshot's URI stays
+    /// resolvable across the clear.
     #[test]
-    fn clear_all_retains_uri_arcs_held_by_live_snapshots() {
+    fn clear_all_drains_uri_cache_even_with_live_snapshots() {
         unsafe {
             let term = bb_term_new(20, 4, 100);
 
@@ -5729,44 +5761,44 @@ mod tests {
             bb_term_input(term, osc8.as_ptr(), osc8.len());
 
             // Take a snapshot — this clones the URI's Arc into the
-            // snapshot's `links` vec.
+            // snapshot's `links` vec. Arc strong_count is now 2
+            // (cache + snapshot).
             let snap = bb_term_take_snapshot(term);
             assert!(!snap.is_null());
             assert!(
                 !(*term).uri_cstr_cache.is_empty(),
                 "precondition: cache populated by OSC 8 input"
             );
-            let bytes_before = (*term).uri_cache_bytes;
-            assert!(bytes_before > 0);
+            let link_id = bb_snap_link_id_at(snap, 0, 0);
+            assert_ne!(link_id, 0, "OSC 8 cell must carry a link_id");
 
-            // Clear-all WHILE the snapshot is live: the cache must
-            // RETAIN the entry because Arc::strong_count > 1.
+            // Clear-all WHILE the snapshot is live. Post-fix the cache
+            // must DRAIN regardless of held snapshots.
             bb_term_clear_all(term);
 
-            assert!(
-                !(*term).uri_cstr_cache.is_empty(),
-                "clear_all must retain URI arcs that live snapshots still hold"
-            );
-            assert_eq!(
-                (*term).uri_cache_bytes,
-                bytes_before,
-                "uri_cache_bytes must rebuild from surviving entries"
-            );
-
-            // Release the snapshot — now strong_count drops to 1 (only
-            // the cache holds it). A second clear_all should evict.
-            bb_snap_release(snap);
-            bb_term_clear_all(term);
             assert!(
                 (*term).uri_cstr_cache.is_empty(),
-                "clear_all must drop URI arcs no live snapshot holds"
+                "clear_all must drain the URI cache unconditionally — \
+                 audit S5-002 — so a pre-clear flood doesn't permanently \
+                 saturate the cap when Swift holds the prior snapshot"
             );
             assert_eq!(
                 (*term).uri_cache_bytes,
                 0,
-                "uri_cache_bytes must zero out when cache is empty"
+                "uri_cache_bytes must zero when the cache is drained"
             );
 
+            // Memory safety: the snapshot's own Arc clone keeps its
+            // URI alive across the drain. Resolve link_id and verify
+            // the CStr is still readable.
+            let url_ptr = bb_snap_link_url(snap, link_id);
+            assert!(
+                !url_ptr.is_null(),
+                "post-drain: held snapshot's URI must still resolve — \
+                 the snapshot's Arc<CStr> clone outlives the cache's drop"
+            );
+
+            bb_snap_release(snap);
             bb_term_free(term);
         }
     }
