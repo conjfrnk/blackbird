@@ -299,8 +299,20 @@ extension TerminalView: NSTextInputClient {
         // then map to a UTF-16 index by accumulating cellWidth per
         // grapheme from the composition string.
         let dx = local.x - cellRect.minX
-        guard dx >= 0 else { return 0 }
-        let cellOffset = Int((dx / cw).rounded(.down))
+        guard dx >= 0 else { return 0 }   // rejects negatives and NaN
+        // Clamp a finite-but-absurd (or +Infinity) dx before the
+        // `Int(Double)` cast. `point` arrives straight from an external
+        // NSTextInputClient caller (an input method, an assistive tool
+        // synthesising read-at-point, or fault injection); a magnitude
+        // like 1e300 — or +Inf, which slips past the `dx >= 0` guard —
+        // would otherwise trap ("Double value cannot be converted to
+        // Int because it is outside the representable range") and crash
+        // the app. Mirrors the `sanePx` clamp already applied in
+        // Selection.swift and TerminalView+Mouse.swift before their
+        // point-derived Int() casts.
+        let sanePx: CGFloat = 1_000_000
+        let safeDx = dx.isFinite ? min(dx, sanePx) : 0
+        let cellOffset = Int((safeDx / cw).rounded(.down))
         // Walk graphemes summing width until we reach cellOffset.
         // Per-grapheme width is the MAX scalar width within the cluster
         // (mirrors `terminalCellWidth(of:)` after commit 89f6e41) so a
