@@ -263,10 +263,53 @@ case_dmg_selection_semver_prerelease() {
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# CASE 6 — APPCAST_BASE_URL with XML-metacharacter must be rejected.
+# Audit S4-013: an operator running with a hostile env value
+# `APPCAST_BASE_URL='https://x" garbage="'` previously got an
+# unescaped attribute injection into the emitted <enclosure>. The fix
+# is to validate every URL input against a safe-charset regex at
+# intake and abort with a clear error.
+# ---------------------------------------------------------------------------
+case_rejects_xml_metachar_in_base_url() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-6)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+    printf 'fake\n' > "$tmp/dist/Blackbird-0.2.0.dmg"
+
+    local log; log="$(mktemp)"
+    local rc=0
+    (
+        cd "$tmp"
+        export PATH="$tmp/stub-bin:$PATH"
+        # Hostile value: closing-quote that would terminate the
+        # <enclosure url="..."> attribute mid-stream.
+        export APPCAST_BASE_URL='https://x" garbage="'
+        export SIGN_UPDATE="$tmp/stub-bin/sign_update"
+        bash "$tmp/scripts/make-appcast.sh"
+    ) >"$log" 2>&1 || rc=$?
+
+    if [[ "$rc" != "0" ]]; then
+        pass "S4-013: make-appcast.sh refuses XML-unsafe APPCAST_BASE_URL (rc=$rc)"
+    else
+        fail "S4-013: hostile APPCAST_BASE_URL accepted — XML injection surface"
+        head -20 "$log" | sed 's/^/      | /' >&2
+    fi
+    if grep -q "unsafe for XML" "$log"; then
+        pass "S4-013: operator gets a clear diagnostic"
+    else
+        fail "S4-013: missing diagnostic message"
+        head -20 "$log" | sed 's/^/      | /' >&2
+    fi
+    rm -f "$log"
+}
+
 case_dmg_selection_deterministic
 case_missing_base_url
 case_no_dmgs
 case_full_xml_wellformed
 case_dmg_selection_semver_prerelease
+case_rejects_xml_metachar_in_base_url
 
 test_end

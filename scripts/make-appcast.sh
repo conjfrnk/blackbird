@@ -37,6 +37,33 @@ cd "$REPO_ROOT"
 FEED_URL="${APPCAST_FEED_URL:-${APPCAST_BASE_URL%/}/appcast.xml}"
 SITE_URL="${APPCAST_SITE_URL:-https://blackbird-terminal.com/}"
 
+# Audit S4-013: validate the three URL inputs against a safe-charset
+# regex BEFORE interpolating into the appcast XML. Without this gate,
+# an operator running `APPCAST_BASE_URL='https://x" garbage="' ...`
+# would emit malformed XML: the `"` terminates the `<enclosure url=`
+# attribute mid-stream and the rest of the value parses as bogus
+# attributes. publish-update.sh hard-codes the URL from the validated
+# semver tag, so the production pipeline never reaches this gate,
+# but a hand-run invocation could. Fail loudly rather than emit a
+# broken appcast.
+#
+# Pattern: scheme http(s) + RFC 3986 unreserved/reserved characters,
+# excluding `"`, `<`, `>`, backtick, space. Permissive enough for any
+# legitimate appcast hosting URL (incl. ports, paths, query); strict
+# enough to refuse XML-attribute-breaking metacharacters.
+validate_url_for_xml() {
+    local name="$1" value="$2"
+    if [[ ! "$value" =~ ^https?://[A-Za-z0-9._~:/?#@!\$\&\'\(\)\*\+,\;=%\-]+$ ]]; then
+        echo "!! $name='$value' contains characters unsafe for XML attribute interpolation." >&2
+        echo "   Allowed: https?:// followed by RFC 3986 reserved/unreserved chars." >&2
+        echo "   Rejected chars include: \" < > backtick space, and others outside the set." >&2
+        exit 1
+    fi
+}
+validate_url_for_xml APPCAST_BASE_URL "$APPCAST_BASE_URL"
+validate_url_for_xml APPCAST_FEED_URL "$FEED_URL"
+validate_url_for_xml APPCAST_SITE_URL "$SITE_URL"
+
 FULL=0
 if [[ "${1:-}" == "--full" ]]; then
     FULL=1
