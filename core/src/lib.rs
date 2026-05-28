@@ -1143,12 +1143,22 @@ impl OscScanner<'_> {
             osc7_reject(self.osc7_reject_logged, OSC7_REJECT_NUL, "nul");
             return;
         }
-        // Reject every other ASCII control byte (0x01..=0x1F, 0x7F) too.
-        // Same shape as OSC title control-char scrub (c9304c2): control
-        // bytes in a chrome-displayed string can fool screen readers,
-        // log shippers, or any downstream parser that doesn't pre-scrub.
-        // Symmetric defense with the title path. Audit M13.
-        if decoded.iter().any(|&b| b < 0x20 || b == 0x7F) {
+        // Reject every other ASCII control byte (0x01..=0x1F, 0x7F) AND
+        // C1 controls (U+0080..=U+009F). Same shape as OSC title scrub
+        // (scrub_title_controls): control codepoints in a chrome-
+        // displayed string can fool screen readers, log shippers, or
+        // any downstream parser that doesn't pre-scrub.
+        //
+        // Audit S3-001: this used to be a byte-wise sweep that missed
+        // C1 controls — U+0080..U+009F encodes as `0xC2 0x80..0xC2 0x9F`
+        // in UTF-8, and neither byte is `< 0x20`. The title path was
+        // already codepoint-level (see scrub_title_controls comment at
+        // L525-527: "byte sweep would corrupt multi-byte UTF-8"). This
+        // gate now walks `chars()` so the two paths agree.
+        if decoded_str.chars().any(|c| {
+            let cp = c as u32;
+            cp <= 0x1F || cp == 0x7F || (0x80..=0x9F).contains(&cp)
+        }) {
             osc7_reject(self.osc7_reject_logged, OSC7_REJECT_CONTROL, "control");
             return;
         }
