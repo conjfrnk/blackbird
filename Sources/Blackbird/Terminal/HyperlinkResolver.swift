@@ -207,16 +207,50 @@ enum OSC8URLPolicy {
         // spoof is bounded, but mailing the URL to Mail compose / a
         // bidi-rendering surface re-introduces the spoof.
         let c0DelPattern = #"%(?i)(0[0-9A-F]|1[0-9A-F]|7F)"#
-        // C1 controls: %C2 followed by %8X or %9X.
+        // C1 controls (UTF-8 two-byte form): %C2 followed by %8X or %9X.
         let c1Pattern = #"%(?i)C2%(8[0-9A-F]|9[0-9A-F])"#
-        // U+2028..U+202F (LS, PS, LRE, RLE, PDF, LRO, RLO, WJ):
+        // Audit S4-005 (lone single-byte %80-%9F not preceded by %C2):
+        // deferred. A simple lookbehind regex over-blocks legitimate
+        // UTF-8 continuation bytes — e.g. `%E2%9C%93` (U+2713 ✓) would
+        // match the lone-%9C path. The correct mitigation needs a real
+        // percent-decode + UTF-8 validation pass; tracked separately.
+        // U+2028..U+202F (LS, PS, LRE, RLE, PDF, LRO, RLO, WJ, NBSP):
         // %E2%80 followed by %A8..%AF.
-        // U+2066..U+2069 (bidi isolates): %E2%81 followed by %A6..%A9.
         // U+200B..U+200F (ZW joiners / LRM / RLM): %E2%80 followed by
         // %8B..%8F.
         let bidi80Pattern = #"%(?i)E2%80%(A[8-9A-F]|8[B-F])"#
-        let bidi81Pattern = #"%(?i)E2%81%A[6-9]"#
-        for pattern in [c0DelPattern, c1Pattern, bidi80Pattern, bidi81Pattern] {
+        // U+2060 (Word Joiner) + U+2066..U+2069 (bidi isolates):
+        // %E2%81%A0 and %E2%81%A[6-9]. Audit S4-002.
+        let bidi81Pattern = #"%(?i)E2%81%A[06-9]"#
+        // Audit S4-002: extend coverage to the rest of
+        // `is_bidi_or_invisible_scalar` (core/src/lib.rs:492). The Rust
+        // core catches raw UTF-8 byte sequences in the OSC 8 URI body;
+        // these patterns catch the percent-encoded form that Foundation
+        // preserves through to absoluteString.
+        // U+00AD (soft hyphen): %C2%AD
+        let shyPattern = #"%(?i)C2%AD"#
+        // U+061C (Arabic letter mark): %D8%9C
+        let almPattern = #"%(?i)D8%9C"#
+        // U+180E (Mongolian vowel separator): %E1%A0%8E
+        let mvsPattern = #"%(?i)E1%A0%8E"#
+        // U+FE00..U+FE0F (Variation Selectors 1-16): %EF%B8%8X
+        let vsPattern = #"%(?i)EF%B8%8[0-9A-F]"#
+        // U+FEFF (BOM / ZWNBSP): %EF%BB%BF
+        let bomPattern = #"%(?i)EF%BB%BF"#
+        // U+E0000..U+E007F (tag block): %F3%A0%(80|81)%XX. Slightly
+        // over-matches U+E0080..U+E00FF (reserved, still invisible).
+        let tagBlockPattern = #"%(?i)F3%A0%(80|81)%[0-9A-F]{2}"#
+        // U+E0100..U+E01EF (Variation Selectors 17-256):
+        // %F3%A0%(84|85|86|87)%XX. Slightly over-matches U+E01F0..U+E01FF
+        // (reserved, still invisible).
+        let vs17Pattern = #"%(?i)F3%A0%(84|85|86|87)%[0-9A-F]{2}"#
+        for pattern in [
+            c0DelPattern, c1Pattern,
+            bidi80Pattern, bidi81Pattern,
+            shyPattern, almPattern, mvsPattern,
+            vsPattern, bomPattern,
+            tagBlockPattern, vs17Pattern,
+        ] {
             if s.range(of: pattern, options: .regularExpression) != nil {
                 return true
             }
