@@ -291,6 +291,75 @@ final class IMETests: XCTestCase {
         XCTAssertEqual(TerminalView.terminalCellWidth(of: "中"), 2)
     }
 
+    /// Regression: `characterIndex(for:)` maps a screen point to a UTF-16
+    /// index inside the active composition. The previous implementation fed
+    /// a finite-but-absurd or non-finite pixel coordinate straight into an
+    /// unclamped `Int(Double)` cast, which traps (`SIGTRAP`) on values
+    /// outside `Int`'s range or on `.infinity`/`.nan` — crashing the whole
+    /// app. The sibling hit-test sites (Selection.swift,
+    /// TerminalView+Mouse.swift) already clamp to a 1_000_000 pixel ceiling
+    /// before any `Int(Double)`; this pins the same robustness here.
+    ///
+    /// The core assertion is simply that the call *returns* (does not trap)
+    /// for each pathological point, and that whatever it returns is a valid
+    /// index: `NSNotFound`, or `0...markedUTF16Count` (the end offset is a
+    /// valid insertion point, hence the inclusive upper bound).
+    ///
+    /// Cost: trivially cheap — one 3-char marked string, no allocation
+    /// beyond it, no real PTY session, <1 ms wall.
+    func test_characterIndex_absurdOrNonFinitePoint_doesNotTrap() throws {
+        let (view, _) = try makeViewAndFakePty()
+        // `characterIndex(for:)` early-returns NSNotFound when the view
+        // has no window (it maps the screen point via
+        // `window?.convertPoint(fromScreen:)`). `makeHeadlessForTests`
+        // produces a windowless view, so host it in a transient offscreen
+        // window — otherwise the pathological points short-circuit at the
+        // window guard and never reach the screen→cell index computation,
+        // and the test would pass without exercising the cast at all.
+        // No run-loop pumping and no PTY session: this is a synchronous
+        // coordinate-math call. Mirrors the windowing pattern in
+        // TerminalViewTests. Cost: ~50 KB transient window, <1 ms.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+        view.installCursorForTests(row: 5, col: 10)
+        view.setMarkedText("あいう",
+                           selectedRange: NSRange(location: 3, length: 0),
+                           replacementRange: NSRange(location: NSNotFound, length: 0))
+        XCTAssertTrue(view.hasMarkedText())
+
+        let markedUTF16Count = "あいう".utf16.count
+
+        // Each of these once trapped via an unclamped `Int(Double)` cast.
+        // Reaching the assertion at all proves the call returned instead of
+        // crashing the process — that is the regression being guarded.
+        // `x` is typed CGFloat so the NSPoint init is unambiguous (CGPoint
+        // has Double / CGFloat / Int initializers).
+        let pathological: [(String, CGFloat)] = [
+            ("finite-but-absurd +x", 1e300),
+            ("+infinity x",          .infinity),
+            ("finite-but-absurd -x", -1e300),
+            ("nan x",                .nan),
+        ]
+
+        for (label, x) in pathological {
+            let result = view.characterIndex(for: NSPoint(x: x, y: 0))
+            XCTAssertTrue(
+                result == NSNotFound
+                    || (result >= 0 && result <= markedUTF16Count),
+                "\(label): characterIndex must return a valid index "
+                    + "(NSNotFound or 0...\(markedUTF16Count)), got \(result)"
+            )
+        }
+    }
+
     private func makeViewAndFakePty(optionIsMeta: Bool = true) throws
         -> (TerminalView, RecordingPTY)
     {
