@@ -78,3 +78,6 @@ libnull.rmeta
 
 # Logs and misc
 *.log
+
+# Local workflow scratch (Claude Code orchestration scripts)
+.claude-workflows/
