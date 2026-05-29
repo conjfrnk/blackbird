@@ -163,6 +163,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Normal (non-test) launch: open the main window with a shell session.
+
+        // Kick the kitty-terminfo resolution onto a background thread NOW,
+        // before we build the menu / window / renderer. That work runs two
+        // synchronous child-process round-trips (`tic` + `infocmp`) the
+        // first time it's touched; left on the main thread it lands on the
+        // first `PTY.spawn` and delays the first window's paint. Starting it
+        // here lets it complete concurrently with the ~20 ms of renderer +
+        // window construction below, so `PTY.spawn`'s read is (almost
+        // always) a memoized no-op. Strictly safe — see
+        // `PTY.prewarmKittyTerminfo()`'s `swift_once` rationale.
+        PTY.prewarmKittyTerminfo()
+
         // Replace Sparkle's verbose "up to date" alert before any updater
         // session can spin up (scheduled check, menu action, etc.).
         SparkleAlertOverride.install()

@@ -250,6 +250,41 @@ public final class PTY {
         )
     }
 
+    /// Kick the one-shot `kittyTerminfoAvailable` resolution onto a
+    /// background thread so the two synchronous child-process round-trips
+    /// it performs (`/usr/bin/tic` then `/usr/bin/infocmp`,
+    /// `installKittyTerminfoIfNeeded` above) don't block the FIRST
+    /// `PTY.spawn` on the main thread — which sits squarely on the
+    /// cold-launch critical path (`applicationDidFinishLaunching` →
+    /// `MainWindowController.init` → `startSession` → `TerminalSession.start`
+    /// → `PTY.spawn`), delaying the first window's appearance by however
+    /// long `tic`+`infocmp` take (tens to >100 ms on a cold filesystem).
+    ///
+    /// Mechanism — and why this is strictly safe: `kittyTerminfoAvailable`
+    /// is a Swift `static let`, so its initializer runs **exactly once**
+    /// under `swift_once` (dispatch_once semantics), on whichever thread
+    /// touches it first. Forcing that touch here on a background queue
+    /// means:
+    ///   - race won  (warm-up finishes before the first spawn): `spawn`'s
+    ///     read of `kittyTerminfoAvailable` returns the memoized value with
+    ///     zero blocking.
+    ///   - race lost (first spawn arrives mid-warm-up): `swift_once` blocks
+    ///     the reader only for the REMAINING work — never re-runs `tic`,
+    ///     never hands the child a downgraded `TERM`. Worst case is exactly
+    ///     today's synchronous behaviour; there is no regression and no new
+    ///     `tic` concurrency. The L1 security gate
+    ///     (`decideKittyTerminfoAvailability`) is on the unchanged init
+    ///     path, so it still governs the result.
+    ///
+    /// Idempotent and cheap to call more than once (subsequent calls just
+    /// re-read an already-resolved static). Call once, early, from
+    /// `applicationDidFinishLaunching` on the normal (non-test) launch.
+    static func prewarmKittyTerminfo() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = kittyTerminfoAvailable
+        }
+    }
+
     /// Decision helper for L1: given a `tic` exit status and a callable
     /// `infocmp` probe, determine whether the child should be told
     /// `TERM=xterm-kitty`. Surfaced as a static so the audit's mock-the-
