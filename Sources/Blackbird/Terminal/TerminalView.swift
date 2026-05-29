@@ -330,6 +330,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
     var isDragging = false                        // internal for TerminalView+Mouse.swift
+    /// The fully-resolved word (start, end) selected by the initiating
+    /// double-click, captured ONCE in `mouseDown` for `.word` mode while
+    /// the anchor is guaranteed on-screen. Word-drag extension unions THIS
+    /// fixed range with the word under the live cursor. Capturing the
+    /// resolved range (rather than re-running `wordRange` on a stored point
+    /// every tick) is deliberate: an autoscroll drag can push the anchor
+    /// off the viewport, where `wordRange` returns nil — re-resolving there
+    /// would collapse the original word to a single cell. Storing the
+    /// resolved range makes that failure mode unrepresentable. Cleared /
+    /// re-captured on every fresh mouseDown. Internal for
+    /// TerminalView+Mouse.swift. Audit double-click-drag word-extend.
+    var wordDragAnchorWord: (BufferPoint, BufferPoint)?  // internal for TerminalView+Mouse.swift
 
     /// Repeating timer that drives edge-autoscroll while the user is
     /// dragging a selection past the top/bottom of the viewport. AppKit

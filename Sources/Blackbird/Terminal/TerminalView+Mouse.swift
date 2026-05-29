@@ -104,6 +104,16 @@ extension TerminalView {
            event.modifierFlags.contains(.shift),
            let existing = selection {
             selection = Selection(anchor: existing.anchor, cursor: point, mode: existing.mode)
+            // Re-capture the word-drag anchor so a subsequent drag extends
+            // by word from the existing selection's anchor. Resolve the
+            // word now (anchor is on-screen); fall back to the bare anchor
+            // if it lands on a non-word cell.
+            if existing.mode == .word, let snap = currentSnapshot {
+                wordDragAnchorWord = wordRange(around: existing.anchor, in: snap, displayOffset: snap.displayOffset)
+                    ?? (existing.anchor, existing.anchor)
+            } else {
+                wordDragAnchorWord = nil
+            }
             isDragging = true
             return
         }
@@ -121,6 +131,17 @@ extension TerminalView {
         isDragging = true
         if mode == .word || mode == .line {
             expandSelectionUnderAnchor()
+        }
+        // Capture the resolved anchor word ONCE, now, while the anchor is
+        // on-screen — `expandSelectionUnderAnchor` just set the selection's
+        // endpoints to the word edges for `.word`. A subsequent drag unions
+        // this fixed range with the word under the cursor; storing the
+        // resolved range (not the point) means an autoscroll that pushes the
+        // anchor off-viewport can't lose it. nil for non-word modes.
+        if mode == .word, let s = selection {
+            wordDragAnchorWord = (s.anchor, s.cursor)
+        } else {
+            wordDragAnchorWord = nil
         }
     }
 
@@ -195,7 +216,7 @@ extension TerminalView {
                 sel.cursor = fakePoint
                 self.selection = sel
                 if sel.mode == .word || sel.mode == .line {
-                    self.expandSelectionUnderAnchor()
+                    self.extendSelectionToCursor()
                 }
             }
         }
@@ -520,16 +541,16 @@ extension TerminalView {
             updateSelectionAutoscroll(direction: direction)
             sel.cursor = bufferPointFromEvent(event)
             selection = sel
-            // F15 (findbar-selection): .word and .line modes set their
-            // endpoints during the mouseDown via `expandSelectionUnderAnchor`.
-            // Without a matching call on every drag, the visual highlight
-            // (renderer uses `selection.normalized`) disagrees with the
-            // copy range (which extends to full-row/full-word boundaries
-            // via `copyRange(for:cols:)`) — a triple-click-and-drag
+            // F15 (findbar-selection): .word and .line modes must re-snap
+            // their endpoints on every drag so the visual highlight
+            // (renderer uses `selection.normalized`) agrees with the copy
+            // range (which extends to full-row/full-word boundaries via
+            // `copyRange(for:cols:)`) — otherwise a triple-click-and-drag
             // highlights a ragged prose rectangle while ⌘C grabs clean
-            // whole rows. Re-expand here so the paint and the copy match.
+            // whole rows. Unlike the initiating click, the drag must EXTEND
+            // to the word/line under the cursor, not re-select the anchor.
             if sel.mode == .word || sel.mode == .line {
-                expandSelectionUnderAnchor()
+                extendSelectionToCursor()
             }
             return
         }
@@ -584,11 +605,12 @@ extension TerminalView {
 
     // MARK: - Selection + reporting helpers
 
-    /// Grow the current `.word` or `.line` selection outward from
-    /// `anchor`. `.word` uses the shared `wordRange` helper; `.line`
-    /// selects the entire grid line. Called from double/triple-click
-    /// in `mouseDown` and from the autoscroll tick. `private` because
-    /// no extension outside this file reaches it.
+    /// Select the `.word` or `.line` UNDER THE ANCHOR — the initiating
+    /// double/triple-click gesture. `.word` uses the shared `wordRange`
+    /// helper; `.line` selects the entire grid line. Drag/autoscroll use
+    /// `extendSelectionToCursor` instead, so this is now only the
+    /// mouseDown entry point. `private` because no extension outside this
+    /// file reaches it.
     private func expandSelectionUnderAnchor() {
         guard var sel = selection, let snap = currentSnapshot else { return }
         switch sel.mode {
@@ -604,6 +626,82 @@ extension TerminalView {
             selection = sel
         default:
             break
+        }
+    }
+
+    /// Extend a `.word` or `.line` selection to the live drag cursor.
+    /// Used by `mouseDragged` and the autoscroll tick — distinct from
+    /// `expandSelectionUnderAnchor`, which only ever selects the
+    /// word/line at the anchor (the initiating click). A drag must span
+    /// from the anchor's word/line to whatever the cursor is now over,
+    /// the way Terminal.app / iTerm2 extend a double-click-drag word by
+    /// word. Audit double-click-drag word-extend.
+    private func extendSelectionToCursor() {
+        guard var sel = selection, let snap = currentSnapshot else { return }
+        let off = snap.displayOffset
+        switch sel.mode {
+        case .word:
+            // Union the FIXED anchor word (resolved once at mouseDown) with
+            // the word under the live cursor. Using the stored resolved
+            // range — not `sel.anchor`, and not a re-resolved point — keeps
+            // the anchor word both stable across a backward drag (where
+            // `sel.anchor` moves to the cursor side) AND intact when an
+            // autoscroll drag pushes the anchor off-viewport (where a
+            // re-resolve would return nil and collapse it).
+            let anchorWord = wordDragAnchorWord ?? (sel.anchor, sel.cursor)
+            let ends = TerminalView.wordDragSelectionEndpoints(
+                anchorWord: anchorWord,
+                cursorPoint: sel.cursor,
+                in: snap,
+                displayOffset: off
+            )
+            sel.anchor = ends.anchor
+            sel.cursor = ends.cursor
+            selection = sel
+        case .line:
+            sel.anchor = BufferPoint(line: sel.anchor.line, col: 0)
+            sel.cursor = BufferPoint(line: sel.cursor.line, col: snap.cols - 1)
+            selection = sel
+        default:
+            break
+        }
+    }
+
+    /// Word-mode drag endpoints: union the already-resolved `anchorWord`
+    /// (start, end — the double-click word, captured on-screen at
+    /// mouseDown) with the word under the live `cursorPoint`, returning
+    /// the `(anchor, cursor)` endpoints for the resulting selection. The
+    /// stable end is placed at `anchor` and the moving end at `cursor`
+    /// following the drag direction; `Selection.normalized` re-sorts, so
+    /// the union is covered either way. When the cursor falls on a
+    /// non-word cell (blank), `wordRange` returns nil and that endpoint
+    /// degrades to the bare cursor cell — the selection extends to the
+    /// exact cell, matching character-grained drag over whitespace.
+    /// `anchorWord` is taken pre-resolved (not a point re-resolved here)
+    /// so it survives an autoscroll that scrolls the anchor off-viewport.
+    /// Pure + `static` so it is unit-testable without a live view or
+    /// synthesized `NSEvent`. Audit double-click-drag word-extend.
+    static func wordDragSelectionEndpoints(
+        anchorWord: (BufferPoint, BufferPoint),
+        cursorPoint: BufferPoint,
+        in snapshot: BBSnapshot,
+        displayOffset: Int
+    ) -> (anchor: BufferPoint, cursor: BufferPoint) {
+        // Defensive: tolerate an unnormalized anchorWord (the mouseDown
+        // capture is already start<=end, but a fallback span may not be).
+        let aLo = min(anchorWord.0, anchorWord.1)
+        let aHi = max(anchorWord.0, anchorWord.1)
+        let cWord = wordRange(around: cursorPoint, in: snapshot, displayOffset: displayOffset)
+            ?? (cursorPoint, cursorPoint)
+        if cursorPoint < aLo {
+            // Backward drag: stable end is the anchor word's trailing
+            // edge, moving end is the cursor word's leading edge.
+            return (anchor: aHi, cursor: cWord.0)
+        } else {
+            // Forward drag (cursor at/after the anchor word's start,
+            // including inside it): stable end is the anchor word's
+            // leading edge, moving end is the cursor word's trailing edge.
+            return (anchor: aLo, cursor: cWord.1)
         }
     }
 
