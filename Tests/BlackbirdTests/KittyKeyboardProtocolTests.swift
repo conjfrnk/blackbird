@@ -380,17 +380,20 @@ final class KittyKeyboardProtocolTests: XCTestCase {
     }
 
     func test_flag4_reportAlternateKeys_shiftLetterEmitsShifted() {
-        // Flag 4 + Flag 8 + Shift+A: `ESC[97:0:65;2u`.
+        // Flag 4 + Flag 8 + Shift+A: `ESC[97:65;2u`.
+        // Kitty key-code field = `unicode-key : shifted-key : base-layout-key`
+        // (https://sw.kovidgoyal.net/kitty/keyboard-protocol/). So:
         //   - base codepoint 97 (lowercase 'a')
-        //   - alternate 0 (macOS doesn't expose a true alt-layout slot)
-        //   - shifted 65 (uppercase 'A')
+        //   - shifted 65 (uppercase 'A') in the SECOND sub-field
+        //   - base-layout omitted (macOS exposes no alt-layout slot); the
+        //     spec drops an absent trailing field rather than padding it.
         //   - modifier 2 (shift)
         // Flag 4 without flag 8 wouldn't emit CSI-u for plain letters at
         // all, so the natural test exercises the combined mode.
         let enc = KeyEncoder()
         let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
         XCTAssertEqual(enc.encode(chars: "A", modifiers: [.shift], mode: mode),
-                       Data("\u{1B}[97:0:65;2u".utf8))
+                       Data("\u{1B}[97:65;2u".utf8))
     }
 
     func test_flag4_reportAlternateKeys_plainLetterNoShiftedPayload() {
@@ -407,11 +410,11 @@ final class KittyKeyboardProtocolTests: XCTestCase {
     func test_flag4_shiftDigit2_emitsUnshiftedBaseWithShiftedAlt() {
         // Canonical shifted-symbol case: Shift+2 on US layout produces "@".
         // Flag 4 reverse-lookup must resolve the unshifted base ('2' = 50)
-        // and report the typed symbol ('@' = 64) in the alternate slot.
+        // and report the typed symbol ('@' = 64) in the shifted sub-field.
         let enc = KeyEncoder()
         let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
         XCTAssertEqual(enc.encode(chars: "@", modifiers: [.shift], mode: mode),
-                       Data("\u{1B}[50:0:64;2u".utf8))
+                       Data("\u{1B}[50:64;2u".utf8))
     }
 
     func test_flag4_shiftHyphenToUnderscore() {
@@ -419,7 +422,7 @@ final class KittyKeyboardProtocolTests: XCTestCase {
         let enc = KeyEncoder()
         let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
         XCTAssertEqual(enc.encode(chars: "_", modifiers: [.shift], mode: mode),
-                       Data("\u{1B}[45:0:95;2u".utf8))
+                       Data("\u{1B}[45:95;2u".utf8))
     }
 
     func test_flag4_shiftSlashToQuestion() {
@@ -427,7 +430,7 @@ final class KittyKeyboardProtocolTests: XCTestCase {
         let enc = KeyEncoder()
         let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
         XCTAssertEqual(enc.encode(chars: "?", modifiers: [.shift], mode: mode),
-                       Data("\u{1B}[47:0:63;2u".utf8))
+                       Data("\u{1B}[47:63;2u".utf8))
     }
 
     func test_flag4_unshiftedSymbol_noShiftPayload() {
@@ -442,9 +445,9 @@ final class KittyKeyboardProtocolTests: XCTestCase {
 
     func test_flag4_nonAsciiSymbol_noShiftedPayload() {
         // Shift+É isn't a US-layout letter or a known shifted ASCII symbol,
-        // so the reverse-lookup must fail gracefully — no `:0:` section, no
-        // invented base codepoint. Falls back to flag-8 single-codepoint
-        // output with the shift modifier bit set.
+        // so the reverse-lookup must fail gracefully — no `:<shifted>`
+        // section, no invented base codepoint. Falls back to flag-8
+        // single-codepoint output with the shift modifier bit set.
         let enc = KeyEncoder()
         let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
         XCTAssertEqual(enc.encode(chars: "É", modifiers: [.shift], mode: mode),
@@ -544,13 +547,14 @@ final class KittyKeyboardProtocolTests: XCTestCase {
 
     func test_flag4_plus_flag16_combined() {
         // Flag 8+4+16 + Shift+A: all three sections.
-        //   base=97 : alt=0 : shifted=65 ; mod=2 ; text=65
+        //   base=97 : shifted=65 ; mod=2 ; text=65
+        // (base-layout sub-field omitted — see flag-4 tests above.)
         let enc = KeyEncoder()
         let mode: BBTermMode = [
             .reportAllKeysAsEsc, .reportAlternateKeys, .reportAssociatedText,
         ]
         XCTAssertEqual(enc.encode(chars: "A", modifiers: [.shift], mode: mode),
-                       Data("\u{1B}[97:0:65;2;65u".utf8))
+                       Data("\u{1B}[97:65;2;65u".utf8))
     }
 
     func test_allFlagsTogether_doNotAlterEncoding() {

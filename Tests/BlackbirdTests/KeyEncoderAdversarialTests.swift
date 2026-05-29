@@ -96,7 +96,11 @@ final class KeyEncoderAdversarialTests: XCTestCase {
     ///
     /// Format: `(typed_glyph, base_codepoint_unshifted)` for each
     /// US-layout shifted-symbol pair. The encoder under flag 8+4
-    /// must emit `ESC [ <base> : 0 : <typed> ; 2 u`.
+    /// must emit `ESC [ <base> : <typed> ; 2 u` — the Kitty key-code
+    /// field is `unicode-key : shifted-key : base-layout-key`
+    /// (https://sw.kovidgoyal.net/kitty/keyboard-protocol/), so the typed
+    /// (shifted) glyph goes in the second sub-field and the base-layout
+    /// field is omitted (macOS exposes no alt-layout slot).
     func test_flag4_allUSLayoutShiftedSymbols() {
         let enc = KeyEncoder()
         let mode: BBTermMode = [.reportAllKeysAsEsc, .reportAlternateKeys]
@@ -132,10 +136,10 @@ final class KeyEncoderAdversarialTests: XCTestCase {
 
         for (typed, base, name) in pairs {
             let typedScalar = Int(typed.unicodeScalars.first!.value)
-            let expected = Data("\u{1B}[\(base):0:\(typedScalar);2u".utf8)
+            let expected = Data("\u{1B}[\(base):\(typedScalar);2u".utf8)
             let actual = enc.encode(chars: typed, modifiers: [.shift], mode: mode)
             XCTAssertEqual(actual, expected,
-                           "\(name): expected ESC[\(base):0:\(typedScalar);2u, got \(Array(actual))")
+                           "\(name): expected ESC[\(base):\(typedScalar);2u, got \(Array(actual))")
         }
     }
 
@@ -146,7 +150,7 @@ final class KeyEncoderAdversarialTests: XCTestCase {
     /// produce *some* shifted symbol from Cocoa, but we can't infer
     /// the unshifted base without a system-keyboard query (which we
     /// don't issue). Pin today's behaviour: a shifted non-ASCII glyph
-    /// falls through with no `:0:<shifted>` payload — just the single-
+    /// falls through with no `:<shifted>` payload — just the single-
     /// codepoint CSI u with the shift bit in the mod field.
     func test_flag4_nonUSLayout_isExplicitlyNotCovered() {
         let enc = KeyEncoder()
@@ -158,8 +162,8 @@ final class KeyEncoderAdversarialTests: XCTestCase {
         // `Ä` = U+00C4 = 196.
         XCTAssertEqual(out, csiU(196, mod: 2),
                        "Non-US shifted glyph falls through to single-cp CSI u")
-        // Specifically: must NOT contain `:0:` (which would imply a
-        // reverse-lookup happened).
+        // Specifically: must NOT contain a `:` sub-field separator (which
+        // would imply a reverse-lookup produced a shifted-key payload).
         XCTAssertFalse(out.contains(0x3A),  // ':' = 0x3A
                        "Non-US fallback must not include the alternate ':' separator")
     }

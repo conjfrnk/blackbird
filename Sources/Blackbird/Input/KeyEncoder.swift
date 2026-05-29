@@ -410,15 +410,16 @@ public final class KeyEncoder {
     /// emitted so later sub-parameters parse correctly.
     ///
     /// `shiftedCodepoint` lights the Kitty flag 4 (`reportAlternateKeys`)
-    /// output — we emit `base:0:shifted` where 0 indicates "no alternate
-    /// layout code", since macOS's `NSEvent` doesn't expose a
-    /// keyboard-layout alternate. That's the smallest useful quantum of
-    /// the spec: TUIs that care about shifted-vs-base disambiguation
-    /// (most commonly tmux, kakoune) get it; TUIs that wanted a true
-    /// alt-layout see the 0 and fall back to base. Only set by callers
-    /// that have actually derived a distinct shifted form (e.g. Shift+A
-    /// → base=97 shifted=65); control chars have no shifted form and
-    /// pass `nil`.
+    /// output — we emit `base:shifted` (the spec's key-code field is
+    /// `unicode-key : shifted-key : base-layout-key`, so the shifted key
+    /// is the second sub-field). The third base-layout field is omitted
+    /// because macOS's `NSEvent` doesn't expose a keyboard-layout
+    /// alternate, and the spec drops an absent trailing field. That's the
+    /// smallest useful quantum of the spec: TUIs that care about
+    /// shifted-vs-base disambiguation (most commonly tmux, kakoune) get
+    /// it. Only set by callers that have actually derived a distinct
+    /// shifted form (e.g. Shift+A → base=97 shifted=65); control chars
+    /// have no shifted form and pass `nil`.
     ///
     /// `associatedText` lights Kitty flag 16 (`reportAssociatedText`).
     /// Carries the UTF-32 codepoints the key would actually produce —
@@ -434,14 +435,22 @@ public final class KeyEncoder {
         let mod = modifierParam(modifiers)
         var bytes: [UInt8] = [0x1B, 0x5B]                 // ESC [
         bytes.append(contentsOf: Array(String(codepoint).utf8))
-        // Flag 4 alternate-keys payload: `:0:<shifted>` appended to the
-        // base codepoint. `0` (not omitted) for the alternate slot —
-        // parsers that split on `:` see three fields and know the
-        // middle is empty. Kitty spec allows `:<shifted>` with no
-        // alternate, but `0` is more conservative cross-parser.
+        // Flag 4 alternate-keys payload. The Kitty key-code field is
+        // `unicode-key-code : shifted-key : base-layout-key`
+        // (https://sw.kovidgoyal.net/kitty/keyboard-protocol/, "Report
+        // alternate keys"): the SHIFTED key is the *second* sub-field and
+        // the base-layout (alternate-layout) key is the *third*. macOS
+        // doesn't expose a per-key base-layout codepoint, so we emit only
+        // `:<shifted>` and omit the third field — the spec says an absent
+        // trailing sub-field is simply left out (and an absent middle
+        // field is empty, never a literal `0`).
+        //
+        // Pre-fix this emitted `:0:<shifted>`, which a spec-compliant TUI
+        // reads as shifted-key = U+0000 (NUL) with the real shifted value
+        // misplaced into the base-layout slot — i.e. the wrong fields. The
+        // earlier code comment misread the spec ("0 for the alternate
+        // slot"); the order is shifted-then-base-layout, not the reverse.
         if let shifted = shiftedCodepoint {
-            bytes.append(0x3A)                            // :
-            bytes.append(0x30)                            // 0 (alternate absent)
             bytes.append(0x3A)                            // :
             bytes.append(contentsOf: Array(String(shifted).utf8))
         }
