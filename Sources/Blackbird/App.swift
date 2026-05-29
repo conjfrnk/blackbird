@@ -200,7 +200,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Called regardless of installWatchdog because the orphan is
         // from a PRIOR session that may have armed the watchdog even
         // if this session doesn't.
-        MainThreadWatchdog.pruneOrphanPartials()
+        //
+        // Off the main thread: this enumerates ~/Library/Logs/Blackbird,
+        // stats each entry, and creates the directory on first launch —
+        // synchronous disk I/O that has no business on the cold-launch
+        // critical path before the first window paints. It's pure
+        // FileManager + os.Logger work (thread-safe) reaping files from a
+        // PRIOR session, so it has no ordering dependency on this launch.
+        // Backgrounding does NOT widen the (already-present) race with a
+        // concurrent watchdog capture: the synchronous version ran right
+        // after install() too. A capture-in-progress partial is always
+        // younger than the prune's 60 s age gate, so it's skipped — that
+        // freshness, not the thread it runs on, is what protects a live
+        // partial.
+        DispatchQueue.global(qos: .utility).async {
+            MainThreadWatchdog.pruneOrphanPartials()
+        }
         // `installMainMenu` builds the full menu tree (including the
         // conditional Sparkle "Check for Updates…" item via
         // `insertSparkleMenuItem(into:)`) BEFORE publishing it as the
