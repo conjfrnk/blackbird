@@ -31,7 +31,7 @@ Not supported: ZWJ sequences like 👨‍👩‍👧 (family) still render as th
 
 ## Kitty flag 4 / 16 — US-layout only
 
-**Flag 4 (`reportAlternateKeys`)** emits `base:0:shifted` for every ASCII letter and for the 21 US-layout shifted symbols (`!`→`1`, `@`→`2`, …, `|`→`\`). Non-US layouts (German QWERTZ, Dvorak, BÉPO, …) still see only the shifted char with no alt-layout slot — the reverse lookup would need Carbon's `UCKeyTranslate` + current-layout plumbing, deferred to a dedicated session.
+**Flag 4 (`reportAlternateKeys`)** emits `base:shifted` for every ASCII letter and for the 21 US-layout shifted symbols (`!`→`1`, `@`→`2`, …, `|`→`\`). The Kitty key-code field is `unicode-key : shifted-key : base-layout-key`, so the shifted codepoint occupies the second sub-field; the third (base-layout / alt-layout) field is omitted because macOS exposes no per-key alternate-layout codepoint. (Through v0.2.9 this emitted `base:0:shifted`, which misread the spec — a literal `0` in the shifted slot and the real shifted value pushed into the base-layout slot — so a spec-compliant TUI read shifted-key = U+0000. Fixed to the spec-correct `base:shifted` shape.) Non-US layouts (German QWERTZ, Dvorak, BÉPO, …) still see only the shifted char with no alt-layout slot — the reverse lookup would need Carbon's `UCKeyTranslate` + current-layout plumbing, deferred to a dedicated session.
 
 **Flag 16 (`reportAssociatedText`)** emits the produced text as a trailing `;<utf32>` section for the single-key press case, elided when the text equals the base codepoint (saves bytes; spec says parsers treat "absent" as "text=base"). IME-committed multi-scalar text (e.g. Chinese pinyin commits, ZWJ emoji composed via input methods) goes through `insertText` directly and doesn't synthesize a flag-16-style key event — Kitty's spec doesn't define IME commit as a keystroke, so no reasonable TUI expects it.
 
@@ -130,3 +130,79 @@ they don't fall off the radar.
   calling thread); enforcement lives in `TerminalSession`'s
   dispatchPrecondition tripwires (M-12) for now. Resolution path:
   thread `owningQueue: DispatchQueue` through BBTerm's init.
+
+## Bug-hunt deferrals (2026-05-28, v0.2.10 cycle)
+
+A multi-agent bug-hunt + adversarial-verification sweep confirmed 10
+findings. The high-value, cleanly-testable ones shipped in v0.2.10
+(Kitty flag-4 wire order, double-click-drag word-extend, FrameKey
+atlas-generation skip-cache). The items below are confirmed-real but
+deferred — either the safe fix is larger than a patch warrants, or no
+non-vacuous test seam exists yet.
+
+- **Unbounded OSC payload growth — memory DoS (deferred, needs
+  dedicated work).** A single OSC sequence opened with `ESC ]` and
+  never terminated (no BEL / ST / CAN / SUB) accumulates its payload
+  without bound. Root cause is upstream: `vte 0.15.0` under the default
+  `std` feature stores the OSC payload in `osc_raw: Vec<u8>`, and the
+  `MAX_OSC_RAW` (1024) / `is_full()` cap in `action_osc_put` is gated
+  behind `#[cfg(not(feature = "std"))]` — so under `std` (which
+  `alacritty_terminal 0.26` enables) there is NO cap. `bb_term_input`
+  drives *two* parsers over the same bytes — alacritty's `bb.processor`
+  and Blackbird's parallel `bb.osc_parser` — so the retained memory is
+  ~2× the streamed payload until a terminator / RIS / `bb_term_clear_all`
+  arrives. The handlers' own caps (`OSC7_URL_MAX`, `OSC8_URI_MAX`) only
+  fire at dispatch time, which never happens for an unterminated
+  sequence. The `osc_possibly_pending` comment ("pathological but
+  harmless") reasoned about the latch's correctness, not the `Vec`
+  growth. Reachable by ordinary hostile terminal output: a malicious
+  program or compromised remote over SSH writes `\x1b]2;` then an endless
+  stream of printable bytes. **Why deferred:** a correct fix must bound
+  BOTH parsers. Blackbird's own `osc_parser` is trivially recreatable,
+  but alacritty's `Processor` exposes no parser-reset / cap, so bounding
+  it means either (a) injecting an abort byte (`CAN`) into the stream —
+  which risks corrupting a multi-byte UTF-8 scalar if the injection
+  lands mid-character, since OSC payloads (and plain text) carry UTF-8 —
+  or (b) a precise byte-level OSC-state tracker duplicating vte's
+  entry/exit logic, which is fragile against the throughput/fuzz gates.
+  The clean fix is upstream: a `std`-mode `osc_raw` cap in vte, or an
+  alacritty `Processor` parser-reset hook. A generous cap (≥ several MiB)
+  would not affect legitimate large OSCs (OSC 52 clipboard, OSC 8
+  hyperlinks ≤ 4 KiB) and would bound the DoS. Tracked for a dedicated
+  hardening pass with upstream coordination + a `long_session_memory`
+  regression gate variant that feeds an unterminated OSC.
+
+- **IME caret / candidate-window width model divergence (low).**
+  `TerminalView+IME.swift` `characterIndex(for:)` measures per-grapheme
+  cell width inline (`cluster.unicodeScalars.map { cellWidth(for:) }.max()`)
+  while `firstRect(forCharacterRange:)` and `refreshPreeditOverlay()` use
+  `terminalCellWidth(of:)`, which applies the VS-16 / keycap
+  presentation promotion. For emoji-presentation / keycap graphemes the
+  two disagree, so the IME candidate window can anchor a cell off from
+  the caret. Fix: route `characterIndex` through `terminalCellWidth(of:)`
+  (or a shared `graphemeCellWidth` helper). Niche; deferred to a polish
+  batch.
+
+- **VoiceOver tab-title value-changed notification can't fire (low).**
+  `TabStripView.update` captures `oldTitles` from `self.tabs` *before*
+  reassigning, but the pill titles are read live from the same window
+  references, so by the time `update` runs the title already changed and
+  `oldTitles[i] == tabs[i].title` — the `.valueChanged` post never
+  fires. Fix: cache the last-applied titles in a stored property and diff
+  against the previous call's snapshot. Low impact (AppKit's
+  container-children invalidation still re-reads pills on list-shape
+  changes); deferred.
+
+- **Instance-buffer grow-failure presents a blank drawable (low).**
+  In `MetalRenderer.buildInstances`, if `device.makeBuffer` returns nil
+  on a grow, the frame proceeds and presents a cleared drawable instead
+  of skipping (mirroring the drawable-acquisition early-return). A
+  one-frame black flash on an allocation failure that effectively never
+  occurs in practice. Fix: signal the inflight semaphore and bail before
+  present/commit. Deferred (vanishingly rare trigger).
+
+- **URL wrap-join follows only one continuation row (low).**
+  `URLDetector` joins a soft-wrapped URL across `row → row + 1` only, so
+  a URL wrapping across 3+ rows is truncated at the second row. Most
+  real URLs fit two rows on an 80+ col grid; deferred as a documented
+  2-row cap rather than a multi-row walk.
