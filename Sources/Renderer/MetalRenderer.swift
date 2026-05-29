@@ -253,6 +253,17 @@ public final class MetalRenderer {
         /// null `lastFrameKey` by hand. Mirrors `CacheKey.atlasGeneration`.
         /// Audit M-20.
         let metricsGeneration: UInt64
+        /// `GlyphAtlas.generation` snapshot. A saturation flush bumps the
+        /// atlas generation mid-encode (the `flushBarrier` only drains the
+        /// GPU; it does NOT touch `lastFrameKey`). `CacheKey` already keys
+        /// on `atlasGeneration` so per-row instance data rebuilds, but
+        /// without it here the FRAME-SKIP cache could short-circuit the
+        /// next identical frame and leave a glyph that was rasterised
+        /// against the pre-flush atlas on screen indefinitely. Folding it
+        /// in forces a single re-encode after any flush, converting a
+        /// persistent stale-glyph artifact into a self-correcting one.
+        /// Mirrors `metricsGeneration` / `CacheKey.atlasGeneration`.
+        let atlasGeneration: UInt64
     }
     private var lastFrameKey: FrameKey?
     /// Observable frame-skip signal. `true` when the most recent
@@ -1271,7 +1282,8 @@ public final class MetalRenderer {
             cmdHoverBufferLine: cmdHoverBufferLine,
             cmdHoverStartCol: cmdHoverStartCol,
             cmdHoverEndCol: cmdHoverEndCol,
-            metricsGeneration: metricsGeneration
+            metricsGeneration: metricsGeneration,
+            atlasGeneration: atlas.generation
         )
         if !frameSkipDisabled, frameKey == lastFrameKey {
             // Nothing that affects pixels has changed since the last
