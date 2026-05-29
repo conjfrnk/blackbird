@@ -52,18 +52,53 @@ public final class GlyphAtlas {
         public let isColor: Bool
     }
 
+    /// Device the atlas allocates textures against. Held so the color
+    /// atlas can be allocated lazily (see `colorTexture`) on first color-
+    /// glyph insertion rather than eagerly at init.
+    private let device: MTLDevice
     /// Mono coverage atlas (`r8Unorm`) — every ASCII / CJK / box-drawing
     /// glyph lands here. Shader reads `coverage = atlas.sample(uv).r` and
     /// mixes the cell's fg / bg colors by it.
     public let texture: MTLTexture
     /// Color atlas (`bgra8Unorm`, premultiplied alpha) — emoji and any
     /// other glyphs from fonts that CoreText reports as color-bearing
-    /// (`CTFontSymbolicTraits.colorGlyphs`). Empty until the first
-    /// color glyph insertion; callers always bind it to fragment
-    /// texture index 1 so the shader branch at `BB_ATTR_IS_COLOR_GLYPH`
-    /// is addressable. Never grows or shrinks — same slot layout as
-    /// `texture`, just wider byte depth per pixel.
-    public let colorTexture: MTLTexture
+    /// (`CTFontSymbolicTraits.colorGlyphs`). Callers always bind it to
+    /// fragment texture index 1 so the shader branch at
+    /// `BB_ATTR_IS_COLOR_GLYPH` is addressable.
+    ///
+    /// LAZY: full-size allocation (a `bgra8Unorm` texture spanning the
+    /// whole `slotCols × slotRows` grid — ~4× the mono atlas's bytes) plus
+    /// its zero-fill is the single most expensive part of `init` (measured
+    /// ~8 ms of a ~21 ms `MetalRenderer.init` at 13pt@2x), yet the vast
+    /// majority of terminal sessions never display a color glyph. So at
+    /// init this points at a tiny 1×1 placeholder and the real texture is
+    /// allocated + zeroed on the FIRST color-glyph insertion via
+    /// `ensureRealColorTexture()`. The shader only ever samples this
+    /// texture for cells whose `BB_ATTR_IS_COLOR_GLYPH` bit is set — and
+    /// no such cell can exist until a color glyph has been inserted (which
+    /// is exactly what triggers the real allocation) — so the placeholder
+    /// is bound-but-never-sampled. Once allocated the real texture matches
+    /// the mono `texture`'s dimensions and never grows or shrinks. The
+    /// zero-fill is preserved (done when the real texture is created), so
+    /// there is no uninitialised-edge sampling risk. `private(set) var`
+    /// (not `let`) so the lazy swap is internal-only.
+    public private(set) var colorTexture: MTLTexture
+    /// True once `ensureRealColorTexture()` has swapped the 1×1 placeholder
+    /// for the full-size color atlas. DERIVED from the texture's own
+    /// dimensions rather than tracked in a separate stored flag, so the
+    /// "placeholder vs real" state can never desync from the actual
+    /// `colorTexture`: the real atlas spans the whole slot grid (matching
+    /// the mono `texture`), the placeholder is 1×1. (Read only inside
+    /// `ensureRealColorTexture`, a once-per-session path — not the render
+    /// hot path — so the recompute is free.)
+    private var colorTextureIsReal: Bool {
+        colorTexture.width == slotCols * cellPxWidth
+            && colorTexture.height == slotRows * cellPxHeight
+    }
+    /// One-shot guard so a sustained color-atlas allocation failure (GPU
+    /// memory pressure) logs once instead of on every subsequent color
+    /// glyph (we no longer cache a failed color insert, so each retries).
+    private var colorTextureAllocFailureLogged = false
     public let metrics: CellMetrics
     public let capacityGlyphs: Int
     public let slotCols: Int
@@ -137,6 +172,7 @@ public final class GlyphAtlas {
         // compute cols = 0 and then divide by zero when picking rows, and
         // zero-scale would produce a zero-pixel cell (invalid texture).
         guard capacityGlyphs > 0, scale > 0 else { return nil }
+        self.device = device
         self.metrics = metrics
         self.capacityGlyphs = capacityGlyphs
         self.scale = scale
@@ -168,26 +204,31 @@ public final class GlyphAtlas {
         guard let tex = device.makeTexture(descriptor: desc) else { return nil }
         self.texture = tex
 
-        // Parallel color atlas. Same grid (slotCols × slotRows) so a
-        // color glyph at slot N lands at the same pixel rectangle as a
-        // mono glyph at the same slot — UVs are interchangeable. Bytes
-        // per pixel differ (4 vs 1); memory cost is 5× the mono atlas
-        // but lazy — only non-empty rows get written on first color
-        // insertion.
-        let colorDesc = MTLTextureDescriptor.texture2DDescriptor(
+        // Color atlas: allocated LAZILY (see `colorTexture` doc). At init
+        // we bind a tiny 1×1 `bgra8Unorm` placeholder so the renderer's
+        // unconditional fragment-texture-1 binding is always addressable;
+        // the full-size color atlas (~4× the mono bytes) and its zero-fill
+        // are deferred to the first color-glyph insertion via
+        // `ensureRealColorTexture()`. The shader only samples the color
+        // texture for `BB_ATTR_IS_COLOR_GLYPH` cells, which cannot exist
+        // before a color glyph is inserted, so the placeholder is never
+        // sampled.
+        let placeholderDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
-            width: texW,
-            height: texH,
+            width: 1,
+            height: 1,
             mipmapped: false
         )
-        colorDesc.usage = [.shaderRead]
-        colorDesc.storageMode = .shared
-        guard let colorTex = device.makeTexture(descriptor: colorDesc) else { return nil }
-        self.colorTexture = colorTex
+        placeholderDesc.usage = [.shaderRead]
+        placeholderDesc.storageMode = .shared
+        guard let placeholder = device.makeTexture(descriptor: placeholderDesc) else { return nil }
+        self.colorTexture = placeholder
 
-        // Zero both textures initially. baseAddress can't be nil because
+        // Zero the mono texture initially. baseAddress can't be nil because
         // `count: texW * texH` is positive for any valid atlas (init bails
-        // earlier on zero-dim textures via MTLTextureDescriptor).
+        // earlier on zero-dim textures via MTLTextureDescriptor). The color
+        // texture's zero-fill happens when its real allocation lands in
+        // `ensureRealColorTexture()`.
         let zero = [UInt8](repeating: 0, count: texW * texH)
         zero.withUnsafeBytes { ptr in
             guard let base = ptr.baseAddress else { return }
@@ -198,6 +239,50 @@ public final class GlyphAtlas {
                 bytesPerRow: texW
             )
         }
+    }
+
+    /// Allocate and zero the full-size color atlas on first use, swapping it
+    /// in for the 1×1 placeholder installed at init. Idempotent — a no-op
+    /// once the real texture exists. Returns `false` (and leaves the
+    /// placeholder in place) if the GPU can't allocate the texture, so the
+    /// caller can skip the color write rather than draw against a 1×1
+    /// surface; the glyph renders blank, matching atlas-saturation behaviour.
+    ///
+    /// Called from `rasterizeColor` on the same thread as `lookupOrInsert`
+    /// (main, in production — the renderer's `dispatchPrecondition` enforces
+    /// it). The swap publishes a new `MTLTexture`; the renderer re-reads
+    /// `atlas.colorTexture` on every frame's fragment binding, so the next
+    /// frame picks up the real texture. Any in-flight command buffer that
+    /// still references the placeholder is safe: the placeholder was never
+    /// sampled (no color cell existed yet), and Metal keeps it alive until
+    /// that buffer completes.
+    @discardableResult
+    private func ensureRealColorTexture() -> Bool {
+        if colorTextureIsReal { return true }
+        let texW = slotCols * cellPxWidth
+        let texH = slotRows * cellPxHeight
+        let colorDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: texW,
+            height: texH,
+            mipmapped: false
+        )
+        colorDesc.usage = [.shaderRead]
+        // Shared storage avoids explicit didModifyRange synchronization and
+        // works identically on Apple Silicon unified memory and Intel Macs.
+        colorDesc.storageMode = .shared
+        guard let colorTex = device.makeTexture(descriptor: colorDesc) else {
+            if !colorTextureAllocFailureLogged {
+                colorTextureAllocFailureLogged = true
+                Self.logger.error(
+                    "GlyphAtlas.ensureRealColorTexture: makeTexture(\(texW, privacy: .public)×\(texH, privacy: .public) bgra8) returned nil under GPU memory pressure — color glyphs render blank until allocation succeeds (logged once per atlas)"
+                )
+            }
+            return false
+        }
+        // Zero so unwritten slots (and the inter-slot padding linear
+        // filtering can fractionally sample at glyph edges) are transparent
+        // — same correctness contract as the mono texture's init zero-fill.
         let zeroColor = [UInt8](repeating: 0, count: texW * texH * 4)
         zeroColor.withUnsafeBytes { ptr in
             guard let base = ptr.baseAddress else { return }
@@ -208,6 +293,8 @@ public final class GlyphAtlas {
                 bytesPerRow: texW * 4
             )
         }
+        self.colorTexture = colorTex
+        return true
     }
 
     /// Return the atlas entry for `scalar`, rasterizing it into the next free
@@ -251,7 +338,14 @@ public final class GlyphAtlas {
             let row = reclaimed / slotCols
             let pxX = col * cellPxWidth
             let pxY = row * cellPxHeight
-            rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: false, style: style, color: colorPath)
+            // If rasterisation failed, give the reclaimed slot back and
+            // return nil WITHOUT caching — the cell renders blank and the
+            // glyph re-rasterises on its next appearance (matches the
+            // atlas-full contract; see `rasterize`).
+            guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: false, style: style, color: colorPath) else {
+                freeNarrowSlots.append(reclaimed)
+                return nil
+            }
             let entry = Self.makeEntry(
                 pxX: pxX, pxY: pxY,
                 pxW: cellPxWidth, pxH: cellPxHeight,
@@ -360,7 +454,14 @@ public final class GlyphAtlas {
         let pxX = col * cellPxWidth
         let pxY = row * cellPxHeight
 
-        rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style, color: colorPath)
+        // If rasterisation failed, return nil WITHOUT caching the entry or
+        // advancing nextSlot, so this slot is retried (and the glyph
+        // re-rasterises) on the scalar's next appearance rather than being
+        // cached as a permanently-blank entry pointing at unwritten / 1×1-
+        // placeholder bytes. Same contract as the atlas-full path above.
+        guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style, color: colorPath) else {
+            return nil
+        }
 
         let entry = Self.makeEntry(
             pxX: pxX, pxY: pxY,
@@ -466,16 +567,26 @@ public final class GlyphAtlas {
         return resolved
     }
 
+    /// Rasterise `scalar` into the slot at `origin`. Returns `true` when
+    /// glyph pixels actually landed in a texture, `false` when the glyph
+    /// could not be rasterised (CGContext creation failed, or — for color
+    /// glyphs — the lazy color atlas couldn't be allocated). Callers must
+    /// NOT cache an `Entry` on a `false` return: a cached entry whose
+    /// pixels were never written renders blank forever (the byKey cache
+    /// short-circuits future lookups) and, for the color path, would make a
+    /// cell sample the 1×1 placeholder. Returning `false` lets the caller
+    /// drop the insert so the glyph re-rasterises (and self-heals) on its
+    /// next appearance — same contract as the atlas-full path returning nil.
+    @discardableResult
     private func rasterize(
         scalar: UnicodeScalar,
         intoSlotAt origin: (x: Int, y: Int),
         wide: Bool = false,
         style: Style = .regular,
         color: Bool = false
-    ) {
+    ) -> Bool {
         if color {
-            rasterizeColor(scalar: scalar, intoSlotAt: origin, wide: wide, style: style)
-            return
+            return rasterizeColor(scalar: scalar, intoSlotAt: origin, wide: wide, style: style)
         }
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
@@ -489,7 +600,7 @@ public final class GlyphAtlas {
             bytesPerRow: w,
             space: cs,
             bitmapInfo: bitmapInfo
-        ) else { return }
+        ) else { return false }
 
         ctx.setFillColor(gray: 0, alpha: 1)
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
@@ -547,13 +658,14 @@ public final class GlyphAtlas {
         ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
         CTLineDraw(line, ctx)
 
-        guard let bytes = ctx.data else { return }
+        guard let bytes = ctx.data else { return false }
         texture.replace(
             region: MTLRegionMake2D(origin.x, origin.y, w, h),
             mipmapLevel: 0,
             withBytes: bytes,
             bytesPerRow: w
         )
+        return true
     }
 
     /// Color-glyph rasterization path. Writes a premultiplied-BGRA bitmap
@@ -578,12 +690,16 @@ public final class GlyphAtlas {
     /// base scalar (e.g. the first 👨 of the sequence). This is the same
     /// behaviour current mono rendering produces; proper grapheme-cluster
     /// keying is documented as future work in KNOWN_ISSUES.md.
+    /// Returns `true` when color pixels were written, `false` on any bail
+    /// (CGContext failure, or the lazy color atlas couldn't be allocated).
+    /// The caller must not cache an entry on `false` — see `rasterize`.
+    @discardableResult
     private func rasterizeColor(
         scalar: UnicodeScalar,
         intoSlotAt origin: (x: Int, y: Int),
         wide: Bool,
         style: Style
-    ) {
+    ) -> Bool {
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
         // Audit L16. We rasterize emoji into an sRGB context even on
@@ -616,7 +732,7 @@ public final class GlyphAtlas {
             bytesPerRow: w * 4,
             space: cs,
             bitmapInfo: bitmapInfo
-        ) else { return }
+        ) else { return false }
 
         // Transparent background. The emoji's own colors come from
         // CTFontDrawGlyphs; we must NOT pre-fill with an opaque color
@@ -644,13 +760,20 @@ public final class GlyphAtlas {
         ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
         CTLineDraw(line, ctx)
 
-        guard let bytes = ctx.data else { return }
+        guard let bytes = ctx.data else { return false }
+        // Promote the 1×1 placeholder to the full-size color atlas on this
+        // first color-glyph write. If the allocation fails, return false so
+        // the caller drops the insert (no cached entry) rather than us
+        // replacing into the 1×1 placeholder; the glyph re-rasterises on its
+        // next appearance and self-heals once allocation succeeds.
+        guard ensureRealColorTexture() else { return false }
         colorTexture.replace(
             region: MTLRegionMake2D(origin.x, origin.y, w, h),
             mipmapLevel: 0,
             withBytes: bytes,
             bytesPerRow: w * 4
         )
+        return true
     }
 
     /// Pre-populate the atlas with glyphs the first real frame is almost

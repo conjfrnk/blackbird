@@ -465,8 +465,10 @@ final class GlyphAtlasTests: XCTestCase {
     //
     // Regression coverage for the second-texture color-emoji path:
     //   1) GlyphAtlas.colorTexture is a .bgra8Unorm companion to the
-    //      .r8Unorm mono texture, sized identically so UV coords drawn
-    //      from Entry.uvOrigin/uvSize can address either texture.
+    //      .r8Unorm mono texture. It is allocated lazily (a 1×1 placeholder
+    //      until the first color glyph is inserted), then sized identically
+    //      to the mono texture so UV coords drawn from Entry.uvOrigin/uvSize
+    //      can address either texture.
     //   2) Entry.isColor flips iff the font reports .colorGlyphs for
     //      the scalar; the renderer reads that flag to mirror it onto
     //      CellAttributeMask.isColorGlyph (bit 7) in the cell attrs
@@ -642,23 +644,153 @@ final class GlyphAtlasTests: XCTestCase {
     }
 
     /// UV coordinates are normalised to [0,1] and are the same for the
-    /// mono and color textures; a dimension mismatch would make the
-    /// shader sample a different slot depending on which texture it
-    /// reads. Pin the invariant.
+    /// mono and color textures; once the real color atlas exists a
+    /// dimension mismatch would make the shader sample a different slot
+    /// depending on which texture it reads. Pin the invariant — through
+    /// the lazy transition.
+    ///
+    /// The color atlas is now allocated LAZILY: before any color glyph is
+    /// inserted, `colorTexture` is a tiny placeholder STRICTLY SMALLER
+    /// than the full-size mono `texture` (the placeholder is bound but
+    /// never sampled, since no cell can carry the color bit until a color
+    /// glyph has been inserted). The FIRST color-glyph insertion swaps it
+    /// for the real atlas, which must match the mono atlas's dimensions
+    /// EXACTLY — that equality is what lets the shader reuse a single set
+    /// of normalised UVs to address the same slot in either texture. If
+    /// the real color atlas were a different size, the shared UVs would
+    /// land on a different slot in the color path and the emoji would draw
+    /// garbage.
     func test_colorAtlasSizeMatchesMonoAtlas() throws {
         let device = try requireMetalDevice()
-        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        let metrics = CellMetrics(font: font)
+        // Build from AppleColorEmoji (mirrors test_colorEntryLandsInColorTexture)
+        // so the U+1F389 insert reliably reports `isColor` and drives the
+        // lazy real-atlas allocation. CoreText doesn't substitute a color
+        // font per-scalar when rasterising on a non-color base, so a
+        // color-bearing font is required to fire the color path.
+        guard let emojiFont = NSFont(name: "AppleColorEmoji", size: 13) else {
+            throw XCTSkip(
+                "AppleColorEmoji font unavailable in test host — can't exercise color-glyph path"
+            )
+        }
+        let metrics = CellMetrics(font: emojiFont)
         let atlas = try XCTUnwrap(
             GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
         )
+
+        // BEFORE any color glyph: colorTexture is the lazy placeholder,
+        // strictly smaller than the full-size mono atlas in BOTH
+        // dimensions. (Don't pin the exact placeholder size — only that
+        // it's smaller, so the placeholder can shrink/grow without
+        // breaking this test.)
+        XCTAssertLessThan(
+            atlas.colorTexture.width, atlas.texture.width,
+            "before the first color glyph, colorTexture must be a placeholder "
+                + "strictly narrower than the mono atlas (lazy allocation)"
+        )
+        XCTAssertLessThan(
+            atlas.colorTexture.height, atlas.texture.height,
+            "before the first color glyph, colorTexture must be a placeholder "
+                + "strictly shorter than the mono atlas (lazy allocation)"
+        )
+
+        // Insert a color emoji to trigger the lazy real-atlas swap.
+        let party = try XCTUnwrap(UnicodeScalar(0x1F389))  // 🎉
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: party, wide: true))
+        XCTAssertTrue(
+            entry.isColor,
+            "precondition: 🎉 from AppleColorEmoji must route to the color "
+                + "atlas, otherwise the lazy allocation is never triggered"
+        )
+
+        // AFTER the first color glyph: the real color atlas must match the
+        // mono atlas dimensions exactly so the shared normalised UVs
+        // address the same slot in either texture.
         XCTAssertEqual(
             atlas.colorTexture.width, atlas.texture.width,
-            "color atlas width must equal mono atlas width — UVs are shared"
+            "real color atlas width must equal mono atlas width — UVs are shared"
         )
         XCTAssertEqual(
             atlas.colorTexture.height, atlas.texture.height,
-            "color atlas height must equal mono atlas height — UVs are shared"
+            "real color atlas height must equal mono atlas height — UVs are shared"
+        )
+    }
+
+    /// Pins the lazy-allocation contract directly: the color atlas is a
+    /// tiny placeholder until the first color glyph, and the mono atlas's
+    /// dimensions never move across that transition.
+    ///
+    /// The full-size `bgra8Unorm` color atlas costs ~4× the mono atlas's
+    /// bytes plus a zero-fill, and most terminal sessions never show an
+    /// emoji — so `init` parks `colorTexture` on a tiny placeholder and
+    /// allocates the real texture only on the first color-glyph insertion.
+    /// Two things must hold across the swap: (1) the placeholder is
+    /// strictly smaller than the mono atlas (so the eager-allocation cost
+    /// really is deferred), and (4) the mono `texture` is untouched (the
+    /// lazy color swap must not perturb the mono atlas the shader is
+    /// actively sampling). The `pixelFormat` stays `.bgra8Unorm` even for
+    /// the placeholder, so binding it to fragment texture index 1 is
+    /// always type-correct.
+    func test_colorTexture_isLazyPlaceholderUntilFirstColorGlyph() throws {
+        let device = try requireMetalDevice()
+        guard let emojiFont = NSFont(name: "AppleColorEmoji", size: 13) else {
+            throw XCTSkip(
+                "AppleColorEmoji font unavailable in test host — can't exercise color-glyph path"
+            )
+        }
+        let metrics = CellMetrics(font: emojiFont)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+
+        // Capture the mono dimensions before doing anything — they must be
+        // identical after the lazy color swap (point 4).
+        let monoWidthBefore = atlas.texture.width
+        let monoHeightBefore = atlas.texture.height
+
+        // PLACEHOLDER (point 1): colorTexture strictly smaller than mono in
+        // both dimensions, but still .bgra8Unorm (point 2) so the bind is
+        // type-correct.
+        XCTAssertLessThan(
+            atlas.colorTexture.width, monoWidthBefore,
+            "placeholder colorTexture must be strictly narrower than the mono atlas"
+        )
+        XCTAssertLessThan(
+            atlas.colorTexture.height, monoHeightBefore,
+            "placeholder colorTexture must be strictly shorter than the mono atlas"
+        )
+        XCTAssertEqual(
+            atlas.colorTexture.pixelFormat, .bgra8Unorm,
+            "placeholder colorTexture must still be .bgra8Unorm so binding it "
+                + "to fragment texture index 1 is type-correct before the swap"
+        )
+
+        // Insert a color emoji — triggers the lazy real-atlas allocation.
+        let party = try XCTUnwrap(UnicodeScalar(0x1F389))  // 🎉
+        let entry = try XCTUnwrap(atlas.lookupOrInsert(scalar: party, wide: true))
+        XCTAssertTrue(
+            entry.isColor,
+            "precondition: 🎉 from AppleColorEmoji must route to the color atlas"
+        )
+
+        // REAL atlas (point 3): now matches the mono dimensions exactly.
+        XCTAssertEqual(
+            atlas.colorTexture.width, monoWidthBefore,
+            "after the first color glyph, real colorTexture width must match the mono atlas"
+        )
+        XCTAssertEqual(
+            atlas.colorTexture.height, monoHeightBefore,
+            "after the first color glyph, real colorTexture height must match the mono atlas"
+        )
+
+        // MONO UNCHANGED (point 4): the lazy color swap must not resize the
+        // mono atlas the shader is actively sampling.
+        XCTAssertEqual(
+            atlas.texture.width, monoWidthBefore,
+            "mono atlas width must not change across the lazy color-atlas swap"
+        )
+        XCTAssertEqual(
+            atlas.texture.height, monoHeightBefore,
+            "mono atlas height must not change across the lazy color-atlas swap"
         )
     }
 
