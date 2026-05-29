@@ -567,6 +567,26 @@ public final class GlyphAtlas {
         return resolved
     }
 
+    /// Build the process-wide bitmap-cache key for this rasterisation.
+    /// Keyed on the BASE font name + style (not the resolved bold/italic
+    /// variant): `styledFont(for:)` is a deterministic function of
+    /// (base, style), as is the color path's CoreText substitution, so the
+    /// rasterised pixels are fully determined by these fields.
+    private func bitmapCacheKey(
+        scalar: UnicodeScalar, wide: Bool, style: Style, isColor: Bool
+    ) -> GlyphBitmapCache.Key {
+        GlyphBitmapCache.Key(
+            fontName: metrics.font.fontName,
+            sizeQ: GlyphBitmapCache.quantize(metrics.font.pointSize),
+            scaleQ: GlyphBitmapCache.quantize(scale),
+            scalar: scalar.value,
+            bold: style.bold,
+            italic: style.italic,
+            wide: wide,
+            isColor: isColor
+        )
+    }
+
     /// Rasterise `scalar` into the slot at `origin`. Returns `true` when
     /// glyph pixels actually landed in a texture, `false` when the glyph
     /// could not be rasterised (CGContext creation failed, or — for color
@@ -590,6 +610,27 @@ public final class GlyphAtlas {
         }
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
+        // Cache hit: blit the previously-rasterised bytes straight into the
+        // texture and skip CoreText entirely (the win for every tab after
+        // the first warms the shared cache).
+        let cacheKey = bitmapCacheKey(scalar: scalar, wide: wide, style: style, isColor: false)
+        if let cached = GlyphBitmapCache.get(cacheKey) {
+            // The key makes this hold (same font+size+scale ⇒ same cell px),
+            // but pin it: a wrong-sized cached bitmap would `texture.replace`
+            // off the slot. Trap loudly in DEBUG rather than risk an OOB.
+            assert(cached.width == w && cached.height == h,
+                   "cached mono glyph \(cached.width)×\(cached.height) != slot \(w)×\(h)")
+            cached.bytes.withUnsafeBytes { ptr in
+                guard let base = ptr.baseAddress else { return }
+                texture.replace(
+                    region: MTLRegionMake2D(origin.x, origin.y, cached.width, cached.height),
+                    mipmapLevel: 0,
+                    withBytes: base,
+                    bytesPerRow: cached.bytesPerRow
+                )
+            }
+            return true
+        }
         let cs = CGColorSpaceCreateDeviceGray()
         let bitmapInfo = CGImageAlphaInfo.none.rawValue
         guard let ctx = CGContext(
@@ -659,6 +700,11 @@ public final class GlyphAtlas {
         CTLineDraw(line, ctx)
 
         guard let bytes = ctx.data else { return false }
+        // Cache the rasterised bytes so sibling atlases skip CoreText.
+        let copy = Array(UnsafeBufferPointer(
+            start: bytes.assumingMemoryBound(to: UInt8.self), count: h * w
+        ))
+        GlyphBitmapCache.put(cacheKey, .init(bytes: copy, width: w, height: h, bytesPerRow: w))
         texture.replace(
             region: MTLRegionMake2D(origin.x, origin.y, w, h),
             mipmapLevel: 0,
@@ -702,6 +748,25 @@ public final class GlyphAtlas {
     ) -> Bool {
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
+        // Cache hit: promote the lazy color atlas (if needed) and blit the
+        // cached premultiplied-BGRA bytes, skipping CoreText. ensureReal must
+        // run before the replace — see the lazy-allocation note on `colorTexture`.
+        let cacheKey = bitmapCacheKey(scalar: scalar, wide: wide, style: style, isColor: true)
+        if let cached = GlyphBitmapCache.get(cacheKey) {
+            guard ensureRealColorTexture() else { return false }
+            assert(cached.width == w && cached.height == h,
+                   "cached color glyph \(cached.width)×\(cached.height) != slot \(w)×\(h)")
+            cached.bytes.withUnsafeBytes { ptr in
+                guard let base = ptr.baseAddress else { return }
+                colorTexture.replace(
+                    region: MTLRegionMake2D(origin.x, origin.y, cached.width, cached.height),
+                    mipmapLevel: 0,
+                    withBytes: base,
+                    bytesPerRow: cached.bytesPerRow
+                )
+            }
+            return true
+        }
         // Audit L16. We rasterize emoji into an sRGB context even on
         // wide-gamut Display P3 panels (every MacBook Pro since 2016,
         // every Retina iMac since 2019). Apple Color Emoji ships with
@@ -761,6 +826,14 @@ public final class GlyphAtlas {
         CTLineDraw(line, ctx)
 
         guard let bytes = ctx.data else { return false }
+        // Cache the rasterised bytes (bgra8, bytesPerRow = w*4) so sibling
+        // atlases skip CoreText. Cached BEFORE the allocation guard so that
+        // even if ensureRealColorTexture fails here, a later attempt is a
+        // cache hit (no re-rasterisation) once the texture can be allocated.
+        let copy = Array(UnsafeBufferPointer(
+            start: bytes.assumingMemoryBound(to: UInt8.self), count: h * w * 4
+        ))
+        GlyphBitmapCache.put(cacheKey, .init(bytes: copy, width: w, height: h, bytesPerRow: w * 4))
         // Promote the 1×1 placeholder to the full-size color atlas on this
         // first color-glyph write. If the allocation fails, return false so
         // the caller drops the insert (no cached entry) rather than us

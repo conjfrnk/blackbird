@@ -949,4 +949,164 @@ final class GlyphAtlasTests: XCTestCase {
             "alpha byte should be near opaque for the densest ink pixel"
         )
     }
+
+    // MARK: - Process-wide rasterised-glyph bitmap cache
+    //
+    // A process-wide `GlyphBitmapCache` caches each glyph's rasterised
+    // bytes, keyed by (font, size, scale, scalar, bold, italic, wide,
+    // mono-vs-color). The first GlyphAtlas to rasterise a glyph populates
+    // the cache; a second atlas with the SAME font/size/scale that asks
+    // for the SAME glyph gets a cache HIT — it blits the cached bytes into
+    // its own texture instead of re-running CoreText. A hit must reproduce
+    // byte-identical texture content (the cache stores the exact pixels).
+    //
+    // These tests are written purely from that contract (not the cache or
+    // rasterise implementation) so a wrong-but-self-consistent impl can't
+    // pass them. The observability seams (`_resetForTests` / `_countForTests`)
+    // are DEBUG-only, so each body is gated on `#if DEBUG` and skips under
+    // a release toolchain rather than failing to compile.
+    //
+    // Memory pre-flight (MEMORY rule): capacity 128 at 13pt/2× scale gives
+    // tiny ~16×36 px cells; each atlas's mono texture is well under 1 MB,
+    // and we build at most two atlases per test — far inside the suite's
+    // 320 MB budget.
+
+    /// A second atlas built with the SAME font/size/scale that rasterises a
+    /// glyph already cached by the first atlas must take a CACHE HIT — it
+    /// must NOT re-run CoreText, so the process-wide cache's entry count
+    /// stays flat across the second insertion.
+    func test_glyphBitmapCache_secondAtlasHitsCacheForSameGlyph() throws {
+        #if DEBUG
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+
+        // Start from a known-cold cache so the entry count is unambiguous.
+        GlyphBitmapCache._resetForTests()
+        XCTAssertEqual(
+            GlyphBitmapCache._countForTests, 0,
+            "_resetForTests must empty the process-wide glyph bitmap cache"
+        )
+
+        // First atlas rasterises "A" — that rasterisation must populate the
+        // cache, so the entry count strictly increases.
+        let atlas1 = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128, scale: 2.0)
+        )
+        _ = try XCTUnwrap(
+            atlas1.lookupOrInsert(scalar: UnicodeScalar("A")),
+            "first atlas must insert 'A'"
+        )
+        let countAfterFirst = GlyphBitmapCache._countForTests
+        XCTAssertGreaterThan(
+            countAfterFirst, 0,
+            "first rasterisation of 'A' must populate the process-wide cache"
+        )
+
+        // Second atlas, SAME font/size/scale, asks for the SAME "A". The
+        // cache key matches, so this is a hit: the cached bytes are blitted
+        // in and CoreText is skipped — the entry count must NOT change. A
+        // re-rasterisation would either add a new entry (different impl) or,
+        // at minimum, prove the second atlas didn't reuse the cached glyph.
+        let atlas2 = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128, scale: 2.0)
+        )
+        _ = try XCTUnwrap(
+            atlas2.lookupOrInsert(scalar: UnicodeScalar("A")),
+            "second atlas must still return an entry for 'A' (served from cache)"
+        )
+        XCTAssertEqual(
+            GlyphBitmapCache._countForTests, countAfterFirst,
+            "second atlas with identical font/size/scale must hit the cache for "
+                + "'A' (no new entry) — proving it blitted the cached bytes and "
+                + "skipped CoreText rather than re-rasterising"
+        )
+        #else
+        throw XCTSkip("DEBUG-only cache seam")
+        #endif
+    }
+
+    /// A cache hit must reproduce byte-identical texture content: the cache
+    /// stores the exact rasterised pixels, so a second atlas serving "W"
+    /// from cache must end up with the same mono-texture bytes at its slot
+    /// as the first atlas got from its live rasterisation.
+    func test_glyphBitmapCache_hitProducesIdenticalBytes() throws {
+        #if DEBUG
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+
+        GlyphBitmapCache._resetForTests()
+
+        // Read the mono-texture (.r8Unorm, 1 byte/pixel) bytes covering an
+        // entry's slot. Mirrors the UV→pixel-rect math in
+        // test_colorEntryLandsInColorTexture, clamped to texture bounds so
+        // getBytes can't walk off the edge if the UV inset nudges the rect.
+        func slotBytes(of entry: GlyphAtlas.Entry, in texture: MTLTexture) -> [UInt8] {
+            let texW = texture.width
+            let texH = texture.height
+            let originX = Int((entry.uvOrigin.x * Float(texW)).rounded(.down))
+            let originY = Int((entry.uvOrigin.y * Float(texH)).rounded(.down))
+            let sizeW = max(1, Int((entry.uvSize.x * Float(texW)).rounded(.up)))
+            let sizeH = max(1, Int((entry.uvSize.y * Float(texH)).rounded(.up)))
+            let clampedW = min(sizeW, texW - originX)
+            let clampedH = min(sizeH, texH - originY)
+            XCTAssertGreaterThan(clampedW, 0, "entry UVs produced an empty width")
+            XCTAssertGreaterThan(clampedH, 0, "entry UVs produced an empty height")
+            let region = MTLRegionMake2D(originX, originY, clampedW, clampedH)
+            // .r8Unorm = 1 byte/pixel, so bytesPerRow == clampedW.
+            let bytesPerRow = clampedW
+            var buf = [UInt8](repeating: 0, count: clampedW * clampedH)
+            buf.withUnsafeMutableBytes { ptr in
+                texture.getBytes(
+                    ptr.baseAddress!,
+                    bytesPerRow: bytesPerRow,
+                    from: region,
+                    mipmapLevel: 0
+                )
+            }
+            return buf
+        }
+
+        // First atlas: live rasterisation of "W" (lots of ink) populates
+        // both its texture slot and the process-wide cache.
+        let atlas1 = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128, scale: 2.0)
+        )
+        let entry1 = try XCTUnwrap(
+            atlas1.lookupOrInsert(scalar: UnicodeScalar("W")),
+            "first atlas must insert 'W'"
+        )
+        let bytes1 = slotBytes(of: entry1, in: atlas1.texture)
+
+        // Second atlas, same params: "W" is served from the cache (a hit).
+        // Its slot must hold the exact same bytes the first atlas rasterised.
+        let atlas2 = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128, scale: 2.0)
+        )
+        let entry2 = try XCTUnwrap(
+            atlas2.lookupOrInsert(scalar: UnicodeScalar("W")),
+            "second atlas must still return an entry for 'W' (served from cache)"
+        )
+        let bytes2 = slotBytes(of: entry2, in: atlas2.texture)
+
+        // Guard against a degenerate pass on two all-zero buffers: 'W' has
+        // ample ink, so the rasterised slot must contain non-zero coverage.
+        XCTAssertTrue(
+            bytes1.contains(where: { $0 > 0 }),
+            "first atlas's 'W' slot had no ink — rasterisation failed, so a "
+                + "byte-equality assertion would pass vacuously on empty buffers"
+        )
+
+        // The cache-hit blit must reproduce the exact rasterised glyph.
+        XCTAssertEqual(
+            bytes1, bytes2,
+            "cache hit must reproduce byte-identical texture content — the "
+                + "second atlas's 'W' slot must equal the first atlas's "
+                + "live-rasterised bytes"
+        )
+        #else
+        throw XCTSkip("DEBUG-only cache seam")
+        #endif
+    }
 }
