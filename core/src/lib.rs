@@ -685,6 +685,11 @@ struct OscScanner<'a> {
     /// (audit L1 + reviewer follow-up). Mirrors the per-instance
     /// stance L3 established for OSC 7.
     osc133_d_nondigit_logged: &'a mut bool,
+    /// One-shot latch for the OSC 133 A/B/C tainted-payload reject path
+    /// (audit S3R-001/S3R-002 + silent-failure review). Same per-instance,
+    /// one-shot rule as the D-path latch so a hostile flood can't drown the
+    /// log while still leaving one breadcrumb when prompt marks are dropped.
+    osc133_abc_tainted_logged: &'a mut bool,
 }
 
 /// Per-terminal sliding-window rate limiter for OSC 133 prompt marks.
@@ -1365,6 +1370,18 @@ impl OscScanner<'_> {
                 Err(_) => false,
             };
             if !payload_clean {
+                // One-shot breadcrumb (silent-failure review): mirror the
+                // D-path and OSC 7 reject latches so a dropped prompt mark
+                // isn't invisible to an operator debugging why command
+                // navigation / exit-code chrome stopped working. Subsequent
+                // rejects on this instance stay silent so a flood can't drown
+                // the log.
+                if !*self.osc133_abc_tainted_logged {
+                    *self.osc133_abc_tainted_logged = true;
+                    eprintln!(
+                        "[blackbird_core] OSC 133 A/B/C rejected (control/bidi/non-UTF-8 payload)"
+                    );
+                }
                 return;
             }
         }
@@ -1568,6 +1585,10 @@ pub struct BBTerm {
     /// as `osc7_reject_logged` but only one class so a single bool
     /// suffices.
     osc133_d_nondigit_logged: bool,
+    /// One-shot latch for the OSC 133 A/B/C tainted-payload reject path
+    /// (audit S3R-001/S3R-002). Same per-instance / one-shot rule as
+    /// `osc133_d_nondigit_logged`.
+    osc133_abc_tainted_logged: bool,
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
     /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
     /// 256+ allocations, but a hostile stream can fan replies across many
@@ -1938,6 +1959,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc7_rate: Osc7RateState::new(),
             osc7_reject_logged: [false; 8],
             osc133_d_nondigit_logged: false,
+            osc133_abc_tainted_logged: false,
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
         });
@@ -2090,6 +2112,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     osc7_rate: &mut bb.osc7_rate,
                     osc7_reject_logged: &mut bb.osc7_reject_logged,
                     osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
+                    osc133_abc_tainted_logged: &mut bb.osc133_abc_tainted_logged,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
@@ -2115,6 +2138,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             osc7_rate: &mut bb.osc7_rate,
             osc7_reject_logged: &mut bb.osc7_reject_logged,
             osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
+            osc133_abc_tainted_logged: &mut bb.osc133_abc_tainted_logged,
         };
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);
