@@ -1330,21 +1330,39 @@ impl OscScanner<'_> {
             return;
         }
 
-        // Audit fix-#07 (2026-05-21): A/B/C kinds also accept payload
-        // bytes (e.g. shell-supplied prompt metadata) and forward them
-        // to Swift as a String. The Swift consumer's `String(decoding:
-        // as:UTF8.self)` passes valid-UTF-8 control bytes through —
-        // C0 / DEL / C1 codepoints survive into TerminalSession's
-        // lastPromptMark.exitCode and could leak into any future
-        // chrome surface that renders the field. Reject A/B/C payloads
-        // that contain raw control bytes, symmetric with the D-path
-        // and the OSC 7 cwd path (which rejects b < 0x20 || b == 0x7F).
-        // The expected legitimate payload for A/B/C is empty in the
-        // de-facto prompt-marks protocol, so this is a tightening with
-        // no real-world false-positive surface.
-        if matches!(kind_byte, b'A' | b'B' | b'C') && payload.iter().any(|&b| b < 0x20 || b == 0x7F)
-        {
-            return;
+        // Audit fix-#07 (2026-05-21) + S3R-001/S3R-002 (2026-05-30): A/B/C
+        // kinds also accept payload bytes (e.g. shell-supplied prompt
+        // metadata) and forward them to Swift as a String. The Swift
+        // consumer's `String(decoding:as:UTF8.self)` passes valid-UTF-8
+        // control codepoints through — so they could leak into any future
+        // chrome surface that renders TerminalSession's lastPromptMark.
+        // Screen the payload at the CODEPOINT level, NOT byte level: a byte
+        // sweep (b < 0x20 || b == 0x7F) misses C1 controls (U+0080..=U+009F
+        // encode as 0xC2 0x80..=0xC2 0x9F — neither byte is < 0x20) and bidi
+        // / invisible scalars (U+202E RIGHT-TO-LEFT OVERRIDE, zero-width
+        // joiners, variation selectors, …), which a hostile shell can use to
+        // visually spoof or confuse downstream consumers. This is the exact
+        // gap the OSC 7 cwd path (the `decoded_str.chars()` gate above) and
+        // the title scrubber (`scrub_title_controls`) already close; the
+        // A/B/C path was the lone byte-level holdout. Reject the whole mark
+        // when the payload is not well-formed UTF-8, or contains any C0 / DEL
+        // / C1 control or bidi/invisible scalar. The de-facto A/B/C payload
+        // is empty, so this tightening has no real-world false-positive
+        // surface.
+        if matches!(kind_byte, b'A' | b'B' | b'C') {
+            let payload_clean = match std::str::from_utf8(payload) {
+                Ok(s) => !s.chars().any(|c| {
+                    let cp = c as u32;
+                    cp <= 0x1F
+                        || cp == 0x7F
+                        || (0x80..=0x9F).contains(&cp)
+                        || is_bidi_or_invisible_scalar(c)
+                }),
+                Err(_) => false,
+            };
+            if !payload_clean {
+                return;
+            }
         }
 
         let ev = BBEvent {

@@ -203,6 +203,79 @@ fn osc_133_abc_rejects_payload_with_control_byte() {
 }
 
 #[test]
+fn osc_133_abc_rejects_c1_control_in_payload() {
+    // Audit S3R-001: a byte-level control sweep misses C1 controls
+    // (U+0080..=U+009F). Their UTF-8 encoding is 0xC2 0x80..0xC2 0x9F —
+    // neither byte is < 0x20 or == 0x7F, so a byte scan passes them
+    // through into the A/B/C prompt-mark payload. The OSC 7 cwd path and
+    // the window-title scrubber already reject these at the codepoint
+    // level; the prompt-mark gate must match. U+0080 is [0xC2, 0x80].
+    //
+    // Pre-flight budget: 3 sub-tests × (10×3 BBTerm + 1ms drive) ≈
+    // negligible — well within standard test envelope.
+    for &kind in b"ABC" {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            let cap = install_capture(term);
+            // Payload is the single C1 control U+0080 (0xC2 0x80). vte's
+            // OSC parser passes the bytes through as parameter bytes; the
+            // codepoint-level gate must reject.
+            let mut seq: Vec<u8> = Vec::new();
+            seq.extend_from_slice(b"\x1b]133;");
+            seq.push(kind);
+            seq.extend_from_slice(b";");
+            seq.extend_from_slice(&[0xC2, 0x80]);
+            seq.extend_from_slice(b"\x1b\\");
+            bb_term_input(term, seq.as_ptr(), seq.len());
+            let events = cap.lock().unwrap().events.clone();
+            let marks = collect_marks(&events);
+            assert!(
+                marks.is_empty(),
+                "{} with C1 control U+0080 must be rejected: {marks:?}",
+                kind as char
+            );
+            bb_term_free(term);
+        }
+    }
+}
+
+#[test]
+fn osc_133_abc_rejects_bidi_override_in_payload() {
+    // Audit S3R-002: bidi / invisible scalars (e.g. U+202E RIGHT-TO-LEFT
+    // OVERRIDE, UTF-8 0xE2 0x80 0xAE) slip past a byte-level control sweep
+    // — none of the three bytes is a C0 / DEL byte — and reach the A/B/C
+    // prompt-mark payload, where they can spoof the displayed direction of
+    // adjacent UI text. The sibling OSC 7 / title paths strip these at the
+    // codepoint level; the prompt-mark gate must reject them too.
+    //
+    // Pre-flight budget: 3 sub-tests × (10×3 BBTerm + 1ms drive) ≈
+    // negligible — well within standard test envelope.
+    for &kind in b"ABC" {
+        unsafe {
+            let term = bb_term_new(10, 3, 100);
+            let cap = install_capture(term);
+            // Payload is U+202E (0xE2 0x80 0xAE) followed by ASCII "x".
+            let mut seq: Vec<u8> = Vec::new();
+            seq.extend_from_slice(b"\x1b]133;");
+            seq.push(kind);
+            seq.extend_from_slice(b";");
+            seq.extend_from_slice(&[0xE2, 0x80, 0xAE]);
+            seq.extend_from_slice(b"x");
+            seq.extend_from_slice(b"\x1b\\");
+            bb_term_input(term, seq.as_ptr(), seq.len());
+            let events = cap.lock().unwrap().events.clone();
+            let marks = collect_marks(&events);
+            assert!(
+                marks.is_empty(),
+                "{} with bidi override U+202E must be rejected: {marks:?}",
+                kind as char
+            );
+            bb_term_free(term);
+        }
+    }
+}
+
+#[test]
 fn osc_133_d_with_empty_payload_still_fires() {
     // The audit fix only rejects non-empty non-digit payloads.
     // `OSC 133 ; D ST` with no exit code is a valid emission for
