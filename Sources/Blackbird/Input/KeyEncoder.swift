@@ -487,7 +487,8 @@ public final class KeyEncoder {
         _ key: SpecialKey,
         modifiers: Modifiers,
         applicationCursorKeys: Bool = false,
-        applicationKeypad: Bool = false
+        applicationKeypad: Bool = false,
+        mode: BBTermMode = []
     ) -> Data {
         // Modifier-encoded keys use CSI with a trailing modifier parameter.
         // Modern xterm convention: CSI 1;M <final> where M = 1 + bitmask.
@@ -629,28 +630,34 @@ public final class KeyEncoder {
                 // SS3 <final> — ESC O <final>
                 return Data([0x1B, 0x4F, final])
             }
-            // Fall back to the plain character. Callers should avoid
-            // routing here when DECPAM is off; this branch exists so a
-            // future dispatch refactor can't regress to emitting nothing.
-            let legacy: UInt8 = {
+            // DECPAM off: a keypad key is just its plain character, so route
+            // it through `encode(chars:)` — the same path a normal printable
+            // key takes — instead of emitting a bare byte that silently drops
+            // modifiers. This makes Option-as-Meta (ESC prefix), Kitty
+            // disambiguation / flag-8, and xterm modifyOtherKeys framing all
+            // apply to keypad keys exactly as they do to the top-row digits.
+            // Audit S3S-002. With no modifiers and no protocol mode the result
+            // is the same bare legacy byte as before (e.g. kp5 -> 0x35,
+            // kpEnter -> CR 0x0D), so the unmodified fast path is unchanged.
+            let legacyChar: String = {
                 switch key {
-                case .kp0: return 0x30;  case .kp1: return 0x31
-                case .kp2: return 0x32;  case .kp3: return 0x33
-                case .kp4: return 0x34;  case .kp5: return 0x35
-                case .kp6: return 0x36;  case .kp7: return 0x37
-                case .kp8: return 0x38;  case .kp9: return 0x39
-                case .kpEnter:    return 0x0D  // CR
-                case .kpPlus:     return 0x2B
-                case .kpMinus:    return 0x2D
-                case .kpMultiply: return 0x2A
-                case .kpDivide:   return 0x2F
-                case .kpDecimal:  return 0x2E
-                case .kpEquals:   return 0x3D
-                default: return 0x00
+                case .kp0: return "0";  case .kp1: return "1"
+                case .kp2: return "2";  case .kp3: return "3"
+                case .kp4: return "4";  case .kp5: return "5"
+                case .kp6: return "6";  case .kp7: return "7"
+                case .kp8: return "8";  case .kp9: return "9"
+                case .kpEnter:    return "\r"  // CR (0x0D)
+                case .kpPlus:     return "+"
+                case .kpMinus:    return "-"
+                case .kpMultiply: return "*"
+                case .kpDivide:   return "/"
+                case .kpDecimal:  return "."
+                case .kpEquals:   return "="
+                default: return ""
                 }
             }()
-            _ = hasMods // keypad modifier encoding is TUI-specific; omit.
-            return Data([legacy])
+            guard !legacyChar.isEmpty else { return Data() }
+            return encode(chars: legacyChar, modifiers: modifiers, mode: mode)
         }
     }
 
