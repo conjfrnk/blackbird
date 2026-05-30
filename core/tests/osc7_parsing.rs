@@ -318,3 +318,114 @@ fn osc7_path_case_is_preserved_verbatim() {
         .expect("expected CwdChanged");
     assert_eq!(&cwd.1, b"/Users/Foo/Bar");
 }
+
+// ─── Audit S4-001: validation-failing floods must not starve legit cwd ──
+//
+// OSC 7 ingest has a per-terminal sliding-window rate gate
+// (`OSC7_INGEST_PER_SECOND = 32` events / 1 s). The audit-S4-001 bug:
+// the gate runs BEFORE the deep validation chain (bidi/invisible
+// codepoints, `..` path traversal), so a payload that passes the
+// `file://` scheme + authority check but then FAILS deeper validation
+// still CONSUMES a rate-limit slot. A hostile remote can flood ~32 such
+// well-formed-but-rejected OSC 7s in under a second to exhaust the
+// window, after which a subsequent LEGITIMATE `cd`-driven OSC 7 from the
+// user's own shell is silently dropped — breaking prompt-cwd, "Open in
+// Finder", and new-tab cwd inheritance.
+//
+// Post-fix contract: only OSC 7s that will actually emit a CwdChanged
+// consume budget. These tests encode that contract and so FAIL on the
+// pre-fix code (the legit cwd is starved → 0 events). All bytes for a
+// single `drive()` call are fed in one synchronous `bb_term_input`, so
+// they land in the same 1-second window.
+
+#[test]
+fn osc7_bidi_tainted_flood_does_not_starve_legit_cwd() {
+    // 32 copies of a bidi-tainted payload: U+202E RIGHT-TO-LEFT OVERRIDE
+    // percent-encoded as %E2%80%AE. It passes the file:// scheme +
+    // authority check but is rejected by the bidi gate (see
+    // osc7_path_containing_rlo_dropped). Pre-fix each copy still burns a
+    // rate slot, exhausting the 32-event window before the legit cwd.
+    let mut seq = Vec::new();
+    for _ in 0..32 {
+        seq.extend_from_slice(b"\x1b]7;file:///%E2%80%AE\x07");
+    }
+    // One legitimate OSC 7 from the user's own `cd`.
+    seq.extend_from_slice(b"\x1b]7;file:///tmp/proj\x07");
+
+    let events = drive(&seq);
+    let cwds: Vec<_> = events
+        .iter()
+        .filter(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+        .collect();
+    assert!(
+        !cwds.is_empty(),
+        "legitimate OSC 7 must fire CwdChanged — a bidi-tainted flood that \
+         fails validation must NOT consume rate budget (audit S4-001)"
+    );
+    assert_eq!(
+        &cwds.last().unwrap().1,
+        b"/tmp/proj",
+        "last CwdChanged must be the legitimate /tmp/proj cwd"
+    );
+}
+
+#[test]
+fn osc7_traversal_flood_does_not_starve_legit_cwd() {
+    // 32 copies of a path-traversal payload: percent-encoded `..` →
+    // file:///%2e%2e/x decodes to "/../x". Passes file:// scheme +
+    // authority but is rejected by the `..` traversal gate (audit
+    // synthesis #13). Pre-fix each burns a rate slot.
+    let mut seq = Vec::new();
+    for _ in 0..32 {
+        seq.extend_from_slice(b"\x1b]7;file:///%2e%2e/x\x07");
+    }
+    // One legitimate OSC 7 from the user's own `cd`.
+    seq.extend_from_slice(b"\x1b]7;file:///tmp/proj\x07");
+
+    let events = drive(&seq);
+    let cwds: Vec<_> = events
+        .iter()
+        .filter(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+        .collect();
+    assert!(
+        !cwds.is_empty(),
+        "legitimate OSC 7 must fire CwdChanged — a percent-encoded `..` \
+         traversal flood that fails validation must NOT consume rate \
+         budget (audit S4-001)"
+    );
+    assert_eq!(
+        &cwds.last().unwrap().1,
+        b"/tmp/proj",
+        "last CwdChanged must be the legitimate /tmp/proj cwd"
+    );
+}
+
+#[test]
+fn osc7_valid_flood_is_still_rate_limited() {
+    // Guard against over-correction: moving the rate gate after
+    // validation must NOT disable rate-limiting (audit M-7 stays
+    // enforced). Feed 40 DISTINCT *valid* cwd updates in one window —
+    // each passes the full validation chain and so consumes one slot.
+    // The number of CwdChanged events must be capped at
+    // OSC7_INGEST_PER_SECOND (32), not 40. This passes on both pre-fix
+    // and post-fix code so the cap can't be silently removed.
+    const OSC7_INGEST_PER_SECOND: usize = 32;
+    const VALID_FLOOD: usize = 40;
+
+    let mut seq = Vec::new();
+    for n in 0..VALID_FLOOD {
+        seq.extend_from_slice(format!("\x1b]7;file:///tmp/d{n}\x07").as_bytes());
+    }
+
+    let events = drive(&seq);
+    let cwd_count = events
+        .iter()
+        .filter(|(k, _)| *k == BBEventKind::CwdChanged as u32)
+        .count();
+    assert!(
+        cwd_count <= OSC7_INGEST_PER_SECOND,
+        "OSC 7 ingest must stay rate-limited: {VALID_FLOOD} distinct valid \
+         cwd updates in one window fired {cwd_count} CwdChanged events, \
+         expected at most {OSC7_INGEST_PER_SECOND} (audit M-7)"
+    );
+}
