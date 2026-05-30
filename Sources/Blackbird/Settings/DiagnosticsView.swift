@@ -234,7 +234,10 @@ struct DiagnosticsView: View {
                 let msg = String(cString: strerror(errno))
                 return (.failure(.read("fstat: \(msg)")), ranOffMain)
             }
-            guard (Int32(st.st_mode) & S_IFMT) == S_IFREG else {
+            // Work in `mode_t` (the type of `st_mode`); `S_IFMT`/`S_IFREG`
+            // are bridged as `mode_t` on this SDK, and the values fit, so this
+            // is homogeneous regardless of how the constants are imported.
+            guard (st.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
                 return (.failure(.notRegularFile), ranOffMain)
             }
             let fh = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
