@@ -493,6 +493,131 @@ final class PreferencesAdversarialTests: XCTestCase {
         )
     }
 
+    // MARK: - Enum-repair persistent-domain scoping (audit S5-001)
+    //
+    // `Preferences.repairEnumRawValues(in:defaults:domain:)` repairs an
+    // invalid enum rawValue (theme/themeMode/bell/cursorShape/optionKey)
+    // back to its registered default. The S5-001 fix narrows the READ
+    // side to the APP PERSISTENT DOMAIN only — `defaults.persistentDomain(
+    // forName: domain)` — mirroring its sibling hardening
+    // (`storedSchemaVersion`, `doubleInPersistentDomain`, S5-009's
+    // `sanitizeStoredTypes`). The OLD code read each rawValue via
+    // `defaults.string(forKey:)`, which walks the FULL UserDefaults
+    // search list (app persistent → NSGlobalDomain → registration). That
+    // meant a value living ONLY in the registration domain (or planted
+    // via `defaults write -g`) could be seen as "invalid" and clobber a
+    // perfectly valid stored rawValue.
+    //
+    // IMPORTANT WRITE/READ ASYMMETRY: repairEnumRawValues READS from the
+    // passed `defaults` suite's persistent domain, but WRITES the repaired
+    // value through the `prefs` instance's `@AppStorage` setter
+    // (`prefs.themeRaw = …`), which targets `UserDefaults.standard`. So we
+    // observe repair effects via `Preferences.shared.themeRaw` (standard),
+    // NOT via the throwaway suite. Both tests below therefore snapshot and
+    // restore `Preferences.shared.themeRaw` so they can't pollute the
+    // developer's prefs domain or a sibling test (same discipline as the
+    // sister scalar-clamp tests in this file, just spelled out per the
+    // singleton-mutation hazard).
+    //
+    // Pre-flight memory/time budget: one throwaway suite per test, a
+    // handful of string writes, one shared-singleton string write +
+    // restore. No RunLoop pumping, no GUI, no observer fire. Sub-ms.
+
+    /// Sentinel rawValue used by both S5-001 tests: a VALID Theme case
+    /// that is NOT the repair fallback (`Theme.gruvbox`). "Solarized"
+    /// in the current `Theme` enum. If the repair fires it would clobber
+    /// this to `Theme.gruvbox.rawValue`, so the sentinel doubles as the
+    /// "was the repair (in)correctly triggered" oracle.
+    private static var s5001Sentinel: String {
+        // Pick any valid, non-gruvbox case so a clobber is observable.
+        let v = Theme.allCases.first { $0 != .gruvbox }?.rawValue
+        return v ?? Theme.solarized.rawValue
+    }
+
+    /// FAIL-FIRST (the S5-001 fix). Garbage enum rawValue present ONLY in
+    /// the suite's REGISTRATION domain — `register(defaults:)` seeds the
+    /// VOLATILE registration domain, which `string(forKey:)` reads through
+    /// the search list but `persistentDomain(forName:)` does NOT see.
+    ///
+    /// With a valid sentinel pinned in the standard domain
+    /// (`Preferences.shared.themeRaw`), the FIXED code reads the suite's
+    /// EMPTY persistent domain, finds no garbage, fires no repair, and the
+    /// sentinel survives. The OLD code read the registration garbage via
+    /// the search list, judged it invalid, and clobbered `themeRaw` to
+    /// `Theme.gruvbox.rawValue` — so the OLD code FAILS this assertion.
+    func test_repairEnumRawValues_registrationDomainGarbage_doesNotClobberValidStandardValue() throws {
+        // Snapshot/restore the shared singleton state this test mutates.
+        let p = Preferences.shared
+        let savedThemeRaw = p.themeRaw
+        defer { p.themeRaw = savedThemeRaw }
+
+        let suiteName = "test.s5001.\(UUID().uuidString)"
+        guard let d = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        // Belt-and-braces: ensure NOTHING leaks into the persistent domain.
+        d.removePersistentDomain(forName: suiteName)
+        defer {
+            d.removePersistentDomain(forName: suiteName)
+            UserDefaults.standard.removeSuite(named: suiteName)
+        }
+
+        // `register` => VOLATILE registration domain only. `string(forKey:)`
+        // sees this; `persistentDomain(forName:)` does NOT.
+        d.register(defaults: ["bb.theme": "ZZZ_NOT_A_THEME"])
+
+        // Pin a valid, non-gruvbox sentinel in the standard domain (where
+        // the repair WRITES).
+        let sentinel = Self.s5001Sentinel
+        p.themeRaw = sentinel
+
+        Preferences.repairEnumRawValues(in: .shared, defaults: d, domain: suiteName)
+
+        XCTAssertEqual(
+            Preferences.shared.themeRaw, sentinel,
+            "S5-001: repairEnumRawValues read registration-domain garbage via the full search list and clobbered a valid standard-domain themeRaw to gruvbox. The fix must read ONLY the suite's persistent domain (empty here), fire no repair, and leave the sentinel \"\(sentinel)\" intact."
+        )
+    }
+
+    /// POSITIVE CONTROL — guards that the S5-001 fix did NOT over-correct
+    /// into disabling repair entirely. A genuinely-invalid value in the
+    /// suite's PERSISTENT domain (`set(_:forKey:)` writes there) MUST still
+    /// trigger the repair, clobbering the standard-domain value to the
+    /// registered fallback `Theme.gruvbox.rawValue`. Passes on both old and
+    /// new code; its job is to fail loudly if a future change narrows the
+    /// read past the point of seeing real persistent-domain corruption.
+    func test_repairEnumRawValues_persistentDomainGarbage_stillRepairsToDefault() throws {
+        let p = Preferences.shared
+        let savedThemeRaw = p.themeRaw
+        defer { p.themeRaw = savedThemeRaw }
+
+        let suiteName = "test.s5001.\(UUID().uuidString)"
+        guard let d = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        d.removePersistentDomain(forName: suiteName)
+        defer {
+            d.removePersistentDomain(forName: suiteName)
+            UserDefaults.standard.removeSuite(named: suiteName)
+        }
+
+        // `set(_:forKey:)` on a suite writes the PERSISTENT domain, which
+        // `persistentDomain(forName:)` reads — so the repair CAN see it.
+        d.set("ZZZ_NOT_A_THEME", forKey: "bb.theme")
+
+        let sentinel = Self.s5001Sentinel
+        p.themeRaw = sentinel
+
+        Preferences.repairEnumRawValues(in: .shared, defaults: d, domain: suiteName)
+
+        XCTAssertEqual(
+            Preferences.shared.themeRaw, Theme.gruvbox.rawValue,
+            "Positive control: a genuinely-invalid rawValue in the suite's PERSISTENT domain must still trigger repair to the registered default \(Theme.gruvbox.rawValue). If this fails, the S5-001 narrowing over-corrected and disabled repair for real on-disk corruption."
+        )
+    }
+
     // MARK: - Singleton identity under multi-thread first-touch
     //
     // PreferencesTests pins `Preferences.shared === Preferences.shared`

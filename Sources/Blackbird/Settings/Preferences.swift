@@ -339,7 +339,11 @@ public final class Preferences: ObservableObject {
         )
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
-            Preferences.repairEnumRawValues(in: self, defaults: defaults)
+            Preferences.repairEnumRawValues(
+                in: self,
+                defaults: defaults,
+                domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+            )
         }
 
         // Force a through-didSet write on each numeric pref so values
@@ -476,7 +480,11 @@ public final class Preferences: ObservableObject {
         )
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
-            Preferences.repairEnumRawValues(in: self, defaults: defaults)
+            Preferences.repairEnumRawValues(
+                in: self,
+                defaults: defaults,
+                domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+            )
         }
 
         // Numeric clamps — same envelope as the `didSet` blocks. The
@@ -553,35 +561,50 @@ public final class Preferences: ObservableObject {
     /// observer can fire this on a path that loops back through the
     /// SwiftUI bridge.
     ///
-    /// Reads each rawValue from `defaults` directly rather than via the
-    /// `@AppStorage` property. The init caller passes the same
-    /// `UserDefaults.standard` instance the wrapper writes against; the
-    /// observer caller MUST read disk because @AppStorage's
-    /// non-`View`-host cache lags behind external `defaults.set(…)`
-    /// writes (see `handleDefaultsChange` header). Reading from
-    /// `defaults` is correct on both paths.
-    private static func repairEnumRawValues(in prefs: Preferences, defaults: UserDefaults) {
-        let themeRaw = defaults.string(forKey: k("theme")) ?? Theme.gruvbox.rawValue
+    /// Reads each rawValue from the persistent domain on disk rather than via
+    /// the `@AppStorage` property. The observer caller MUST read disk because
+    /// @AppStorage's non-`View`-host cache lags behind external
+    /// `defaults.set(…)` writes (see `handleDefaultsChange` header); reading
+    /// `persistentDomain(forName:)` is correct on both the init and observer
+    /// paths.
+    ///
+    /// Audit S5-001: each rawValue is read from the APP's persistent domain
+    /// (`persistentDomain(forName:)`), NOT via `defaults.string(forKey:)` which
+    /// walks the full search list (app persistent → NSGlobalDomain →
+    /// registration). This matches the sibling hardening already applied to the
+    /// numeric clamps (`doubleInPersistentDomain`) and the schema-version gate
+    /// (`storedSchemaVersion`): a `defaults write -g bb.theme <x>` to
+    /// NSGlobalDomain can no longer be surfaced as a "valid" foreign value that
+    /// suppresses repair, nor (when it is garbage) trigger a clobber of the
+    /// app domain. A key absent from the persistent domain reads as nil and
+    /// falls back to the canonical default, which is exactly the registered
+    /// default the @AppStorage getter already returns for an unset key — so
+    /// legitimate first-run / never-customised state is unchanged.
+    static func repairEnumRawValues(in prefs: Preferences, defaults: UserDefaults, domain: String) {
+        let persistent = defaults.persistentDomain(forName: domain) ?? [:]
+        func storedRaw(_ name: String) -> String? { persistent[k(name)] as? String }
+
+        let themeRaw = storedRaw("theme") ?? Theme.gruvbox.rawValue
         if Theme(rawValue: themeRaw) == nil {
             let target = Theme.gruvbox.rawValue
             if themeRaw != target { prefs.themeRaw = target }
         }
-        let themeModeRaw = defaults.string(forKey: k("themeMode")) ?? ThemeMode.dark.rawValue
+        let themeModeRaw = storedRaw("themeMode") ?? ThemeMode.dark.rawValue
         if ThemeMode(rawValue: themeModeRaw) == nil {
             let target = ThemeMode.dark.rawValue
             if themeModeRaw != target { prefs.themeModeRaw = target }
         }
-        let bellRaw = defaults.string(forKey: k("bell")) ?? BellStyle.visual.rawValue
+        let bellRaw = storedRaw("bell") ?? BellStyle.visual.rawValue
         if BellStyle(rawValue: bellRaw) == nil {
             let target = BellStyle.visual.rawValue
             if bellRaw != target { prefs.bellRaw = target }
         }
-        let cursorShapeRaw = defaults.string(forKey: k("cursorShape")) ?? CursorShape.followShell.rawValue
+        let cursorShapeRaw = storedRaw("cursorShape") ?? CursorShape.followShell.rawValue
         if CursorShape(rawValue: cursorShapeRaw) == nil {
             let target = CursorShape.followShell.rawValue
             if cursorShapeRaw != target { prefs.cursorShapeRaw = target }
         }
-        let optionKeyRaw = defaults.string(forKey: k("optionKey")) ?? OptionKey.meta.rawValue
+        let optionKeyRaw = storedRaw("optionKey") ?? OptionKey.meta.rawValue
         if OptionKey(rawValue: optionKeyRaw) == nil {
             let target = OptionKey.meta.rawValue
             if optionKeyRaw != target { prefs.optionKeyRaw = target }
