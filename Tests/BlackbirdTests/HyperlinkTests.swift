@@ -901,6 +901,58 @@ final class HyperlinkTests: XCTestCase {
         )
     }
 
+    /// Audit S4-003 (MEDIUM). The mailto trust contract is "an address,
+    /// optionally with a SINGLE `subject=` query item, and nothing else."
+    /// The buggy gate used `items.allSatisfy { $0.name == "subject" }`,
+    /// which admitted REPEATED subject items
+    /// (`mailto:a@b.com?subject=x&subject=y`). A hostile OSC 8 href can
+    /// present a benign first subject token to the eye while a mail client
+    /// that concatenates or honours the last value composes a Subject the
+    /// user never saw in any single visible token — the exact
+    /// visible-vs-actual mismatch this per-header allowlist exists to
+    /// prevent. The fix requires EXACTLY one subject query item.
+    ///
+    /// Each row is an independent oracle asserting the documented contract,
+    /// not the implementation: the duplicate-subject case is the fix
+    /// (true on buggy code, false on fixed); the single-subject and bare
+    /// cases are regression guards that legitimate mailtos still open; the
+    /// exfil-header case pins unchanged blocking of cc/bcc-style headers.
+    func testMailto_rejectsDuplicateSubjectItems() {
+        // Each tuple: (raw mailto URL, expected isAllowed result, why).
+        let cases: [(raw: String, allowed: Bool, why: String)] = [
+            (
+                "mailto:a@b.com?subject=x&subject=y",
+                false,
+                "duplicate subject items must be rejected (S4-003 fix)"
+            ),
+            (
+                "mailto:a@b.com?subject=Hello%20there",
+                true,
+                "a single legitimate subject must still be allowed"
+            ),
+            (
+                "mailto:a@b.com",
+                true,
+                "a bare mailto with no query must still be allowed"
+            ),
+            (
+                "mailto:a@b.com?subject=x&bcc=evil@example.com",
+                false,
+                "an exfil header (bcc) alongside subject must stay blocked"
+            ),
+        ]
+        for c in cases {
+            guard let u = URL(string: c.raw) else {
+                XCTFail("URL(string:) should accept \(c.raw)")
+                continue
+            }
+            XCTAssertEqual(
+                OSC8URLPolicy.isAllowed(u), c.allowed,
+                "\(c.raw): \(c.why)"
+            )
+        }
+    }
+
     /// Pass-3 item 8 (MEDIUM). KNOWN LIMITATION: Foundation's
     /// `URL.host` doesn't normalise IPv6 long-form vs short-form, so
     /// the divergence detector sees them as different hosts and
