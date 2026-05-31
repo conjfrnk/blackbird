@@ -1101,17 +1101,20 @@ impl OscScanner<'_> {
             return;
         }
 
-        // Reviewer feedback (2026-04-29): reorder the cheap structural
-        // validation (scheme, authority) BEFORE the rate gate. Pre-fix,
-        // a hostile remote firing 32 well-formed-but-malicious OSC 7s
-        // (wrong scheme `http://x`, path traversal `/../../`) consumed
-        // the entire 1-second budget; subsequent legitimate
-        // `OSC 7;file:///Users/foo/proj` from the user's shell got
-        // dropped silently, breaking prompt-cwd, "Open in Finder",
-        // new-tab cwd inheritance. The gate now consumes a budget slot
-        // ONLY on requests that pass scheme + authority — so floods of
-        // structural garbage cost zero budget. M-7 (proc_listpids
-        // amplification) and L-20 (allocation cap) remain enforced.
+        // Audit S4-001 (2026-05-30): EVERY reject path — structural (scheme,
+        // authority, below) AND semantic (percent-decode, UTF-8, NUL,
+        // control, bidi, absolute-path, traversal) — runs BEFORE the rate
+        // gate, which now sits immediately before the CwdChanged emission at
+        // the end of this function. So a hostile remote firing OSC 7s that
+        // will be rejected — wrong scheme `http://x`, or `file://`-valid-but-
+        // tainted like `file:///%E2%80%AE` (bidi) / `file:///%2e%2e/x`
+        // (traversal) — consumes ZERO budget, and a legitimate
+        // `OSC 7;file:///Users/foo/proj` from the user's own shell can't be
+        // starved out of the 1-second window by a flood that was never going
+        // to emit an event. (The earlier 2026-04-29 reorder moved the gate
+        // past scheme+authority only; this moves it past every reject path.)
+        // L-20's length cap (above) and the M-7 proc_listpids gate (below)
+        // both remain enforced.
 
         // Accept only `file://` with an empty or `localhost` authority.
         // Audit fix-#08 (2026-05-21): RFC 3986 §3.1 / §3.2.2 define
@@ -1133,20 +1136,6 @@ impl OscScanner<'_> {
         } else {
             return; // non-local host
         };
-
-        // Audit M-7 (2026-04-29) + reviewer reorder: rate-limit ingest.
-        // Legitimate shells emit one OSC 7 per `cd`. A hostile remote
-        // streaming OSC 7s in a tight loop forces Swift's
-        // `classifyForegroundNamespace()` to run a `proc_listpids` BFS
-        // on every event — main-thread work that beachballs the UI.
-        // Drop excess silently within the sliding window. Sits AFTER
-        // structural validation (so malformed traffic doesn't starve
-        // legitimate cwd updates) but BEFORE `percent_decode` (so the
-        // allocation work still benefits from rate-limiting).
-        if !self.osc7_rate.allow() {
-            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_RATE, "rate");
-            return;
-        }
 
         let Some(decoded) = percent_decode(path_bytes) else {
             osc7_reject(
@@ -1246,6 +1235,21 @@ impl OscScanner<'_> {
         // from the fg pgroup and drops `.cwdChanged` events at ingest
         // when the tree contains an `ssh`/`mosh-client`/`docker`/etc
         // binary. Shipped 2026-04-28; this site stays validation-only.
+
+        // Audit M-7 (2026-04-29) + S4-001 (2026-05-30): rate-limit ingest,
+        // positioned AFTER every validation/reject path so that ONLY OSC 7s
+        // which will actually emit a CwdChanged consume a budget slot — a
+        // flood of rejected payloads (wrong scheme, bidi, traversal, …) can
+        // no longer starve a legitimate cwd update out of the window
+        // (S4-001). Legitimate shells emit one OSC 7 per `cd`; a hostile
+        // remote streaming VALID `file://` cwds in a tight loop still forces
+        // Swift's `classifyForegroundNamespace()` to run a `proc_listpids`
+        // BFS per event (main-thread work that beachballs the UI), so excess
+        // valid events are still dropped within the sliding window (M-7).
+        if !self.osc7_rate.allow() {
+            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_RATE, "rate");
+            return;
+        }
 
         let ev = BBEvent {
             kind: BBEventKind::CwdChanged,
