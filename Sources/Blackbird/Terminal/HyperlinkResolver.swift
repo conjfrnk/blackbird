@@ -608,9 +608,16 @@ enum OSC8URLPolicy {
         guard let items = comps.queryItems, !items.isEmpty else {
             return true
         }
-        return items.allSatisfy { item in
-            item.name.lowercased() == "subject"
-        }
+        // Audit S4-003: accept at MOST ONE `subject` item. The old
+        // `allSatisfy { name == "subject" }` admitted repeated subject items
+        // (`?subject=Invoice&subject=Wire%20transfer`); RFC 6068 expects a
+        // single Subject, and a mail client that concatenates or honours the
+        // last value would compose a subject the user never saw in any single
+        // visible token — the visible-vs-actual mismatch this per-header
+        // allowlist exists to prevent. With the empty-items case already
+        // handled above, a safe non-empty query is exactly one subject item.
+        // (cc/bcc/reply-to/body/X-* remain rejected: they fail this check.)
+        return items.count == 1 && items[0].name.lowercased() == "subject"
     }
 
     /// Return the substring between `mailto:` and the first `?`
