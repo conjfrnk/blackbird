@@ -313,17 +313,18 @@ extension TerminalView: NSTextInputClient {
         let sanePx: CGFloat = 1_000_000
         let safeDx = dx.isFinite ? min(dx, sanePx) : 0
         let cellOffset = Int((safeDx / cw).rounded(.down))
-        // Walk graphemes summing width until we reach cellOffset.
-        // Per-grapheme width is the MAX scalar width within the cluster
-        // (mirrors `terminalCellWidth(of:)` after commit 89f6e41) so a
-        // ZWJ family emoji counts as one wide cell rather than the sum
-        // of its component scalars' widths.
+        // Walk graphemes summing width until we reach cellOffset. Per-grapheme
+        // width comes from `terminalCellWidth(of:)` — the SAME grapheme-aware
+        // model the grid and `firstRect(forCharacterRange:)` use — so a ZWJ
+        // family counts as one wide cell AND an emoji-presentation sequence
+        // (base + VS16 / keycap, e.g. ⚠️) counts as 2 cells, matching where the
+        // grid actually draws it. (A previous per-scalar `.max()` here counted
+        // ⚠️ as 1 cell, anchoring the caret a cell off — KNOWN_ISSUES "IME caret
+        // width model divergence".)
         var consumed = 0
         var utf16Index = 0
         for cluster in composition.attributedText.string {
-            let clusterCells = cluster.unicodeScalars
-                .map { Self.cellWidth(for: $0) }
-                .max() ?? 0
+            let clusterCells = Self.terminalCellWidth(of: String(cluster))
             if consumed + clusterCells > cellOffset {
                 return utf16Index
             }

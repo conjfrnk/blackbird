@@ -172,17 +172,6 @@ non-vacuous test seam exists yet.
   hardening pass with upstream coordination + a `long_session_memory`
   regression gate variant that feeds an unterminated OSC.
 
-- **IME caret / candidate-window width model divergence (low).**
-  `TerminalView+IME.swift` `characterIndex(for:)` measures per-grapheme
-  cell width inline (`cluster.unicodeScalars.map { cellWidth(for:) }.max()`)
-  while `firstRect(forCharacterRange:)` and `refreshPreeditOverlay()` use
-  `terminalCellWidth(of:)`, which applies the VS-16 / keycap
-  presentation promotion. For emoji-presentation / keycap graphemes the
-  two disagree, so the IME candidate window can anchor a cell off from
-  the caret. Fix: route `characterIndex` through `terminalCellWidth(of:)`
-  (or a shared `graphemeCellWidth` helper). Niche; deferred to a polish
-  batch.
-
 - **VoiceOver tab-title value-changed notification can't fire (low).**
   `TabStripView.update` captures `oldTitles` from `self.tabs` *before*
   reassigning, but the pill titles are read live from the same window

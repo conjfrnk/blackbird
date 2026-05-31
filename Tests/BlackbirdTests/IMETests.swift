@@ -360,6 +360,54 @@ final class IMETests: XCTestCase {
         }
     }
 
+    /// `characterIndex(for:)` maps a click inside a composition to a UTF-16
+    /// offset by walking graphemes and summing each one's CELL width. That
+    /// width must use the same grapheme-aware model as the grid and
+    /// `firstRect(forCharacterRange:)` — i.e. `terminalCellWidth`, which
+    /// promotes an emoji-presentation sequence (base + VS16) to 2 cells.
+    /// The old per-scalar `.max()` counted ⚠️ as 1 cell, so a click past the
+    /// (actually 2-cell-wide) emoji walked one cell too far and landed at the
+    /// composition end instead of the following character. Resolves the
+    /// KNOWN_ISSUES "IME caret width model divergence" now that the grid
+    /// itself renders these graphemes at width 2.
+    func test_characterIndex_emojiPresentationGraphemeCountsTwoCells() throws {
+        let (view, _) = try makeViewAndFakePty()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        defer {
+            window.contentView = nil
+            window.close()
+        }
+        view.installCursorForTests(row: 0, col: 0)
+        // "⚠️X": ⚠️ = U+26A0 U+FE0F (emoji presentation → 2 cells, UTF-16 0..<2),
+        // then 'X' at UTF-16 index 2.
+        view.setMarkedText(
+            "\u{26A0}\u{FE0F}X",
+            selectedRange: NSRange(location: 3, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        XCTAssertTrue(view.hasMarkedText())
+
+        // A point ~2.5 cells right of the composition's leading edge — past the
+        // 2-cell ⚠️, on 'X'. Round-trip through the same transforms
+        // characterIndex uses (view → window → screen) so the mapping is exact.
+        let cellRect = view.cursorCellRectInView()
+        let cw = max(view.metrics.cellWidth, 1)
+        let localPoint = NSPoint(x: cellRect.minX + 2.5 * cw, y: cellRect.midY)
+        let screenPoint = window.convertPoint(toScreen: view.convert(localPoint, to: nil))
+
+        XCTAssertEqual(
+            view.characterIndex(for: screenPoint), 2,
+            "a click past the 2-cell-wide ⚠️ must map to 'X' (UTF-16 index 2), "
+                + "not the composition end — characterIndex must count emoji-"
+                + "presentation graphemes as 2 cells (terminalCellWidth)"
+        )
+    }
+
     private func makeViewAndFakePty(optionIsMeta: Bool = true) throws
         -> (TerminalView, RecordingPTY)
     {
