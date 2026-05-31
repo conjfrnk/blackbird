@@ -1099,15 +1099,24 @@ final class PreferencesMigrationTests: XCTestCase {
             we're on a downgrade and must skip the enum repair.
             """
         )
-        XCTAssertTrue(
-            src.contains("if !isDowngrade {") && src.contains("Preferences.repairEnumRawValues(in: self, defaults: defaults)"),
+        // Regex (not an exact substring) so the pin survives the
+        // audit-S5-001 reformat: the repair call gained a `domain:` argument
+        // and is now multi-line. `\s*` spans the newline + indentation
+        // between the gate's `{` and the call, so this asserts the STRONGER
+        // property that `if !isDowngrade {` IMMEDIATELY wraps a
+        // `Preferences.repairEnumRawValues(` call (adjacency), rather than
+        // merely that both strings appear somewhere in the file.
+        XCTAssertNotNil(
+            src.range(
+                of: #"if !isDowngrade \{\s*Preferences\.repairEnumRawValues\("#,
+                options: .regularExpression
+            ),
             """
             H-8 init-time gate must wrap the init-time repair call.
-            Expected `if !isDowngrade {` guarding
-            `Preferences.repairEnumRawValues(in: self, defaults: defaults)`
-            in source. The observer-path runtime tests cannot reach the
-            init gate — this source pin is the only check protecting
-            that branch.
+            Expected `if !isDowngrade {` immediately followed by a
+            `Preferences.repairEnumRawValues(` call in source. The
+            observer-path runtime tests cannot reach the init gate — this
+            source pin is the only check protecting that branch.
             """
         )
     }
