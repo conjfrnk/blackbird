@@ -1080,6 +1080,59 @@ impl<T: EventListener> Handler for Term<T> {
                 column.0 = column.saturating_sub(1);
             }
 
+            // BLACKBIRD PATCH (emoji-presentation / keycap width parity).
+            // A text-default symbol (per-scalar width 1) followed by VS16
+            // (U+FE0F) or the keycap combiner (U+20E3) is an emoji-presentation
+            // sequence that `string-width` — and therefore Ink / Claude Code's
+            // inline-redraw row arithmetic — measures as 2 columns. alacritty's
+            // per-scalar `c.width()` left the base at 1, so without this the
+            // grid is one column narrower than the program believes and the
+            // prompt redraw drifts a row (eats a line / leaves a blank). Promote
+            // the base in place to a NATIVE wide glyph (WIDE_CHAR + trailing
+            // spacer) so cursor, selection, reflow and text extraction all use
+            // alacritty's existing wide-cell machinery and stay consistent.
+            //
+            // Only when the base sits before the right margin (`!input_needs_wrap`
+            // guarantees the cursor advanced to base+1, so there is room for the
+            // spacer), the base actually carries a glyph, and it isn't already
+            // wide. The rare exact-last-column case is intentionally left at
+            // width 1 rather than retroactively moving the glyph across a line
+            // wrap. Re-apply this patch on any alacritty_terminal bump.
+            if matches!(c, '\u{FE0F}' | '\u{20E3}')
+                && !self.grid.cursor.input_needs_wrap
+                // INSERT mode (IRM) shifts cells right by the glyph width when
+                // the base is written; a retroactive promotion can't re-shift
+                // for the extra column without clobbering an already-shifted
+                // cell, so leave the base at width 1 in insert mode (a rare
+                // combination — TUIs position directly rather than insert).
+                && !self.mode.contains(TermMode::INSERT)
+                && self.grid[line][column].c != ' '
+                && !self.grid[line][column].flags.intersects(
+                    Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
+                )
+            {
+                let columns = self.columns();
+                // OR WIDE_CHAR directly onto the already-written base instead of
+                // rewriting it through write_at_cursor: this preserves the
+                // base's fg/bg and — crucially — its `extra` Arc, which the
+                // push_zerowidth below needs to attach the VS16. Safe because
+                // SGR state cannot change between a base scalar and the VS16 /
+                // keycap mark that immediately follows it in the same input
+                // stream, so the base already carries the template the native
+                // width-2 path would have applied.
+                self.grid[line][column].flags.insert(Flags::WIDE_CHAR);
+                // Spacer in the cell the cursor currently occupies (base + 1),
+                // mirroring the native width-2 path, then advance past it.
+                self.grid.cursor.template.flags.insert(Flags::WIDE_CHAR_SPACER);
+                self.write_at_cursor(' ');
+                self.grid.cursor.template.flags.remove(Flags::WIDE_CHAR_SPACER);
+                if self.grid.cursor.point.column.0 + 1 < columns {
+                    self.grid.cursor.point.column += 1;
+                } else {
+                    self.grid.cursor.input_needs_wrap = true;
+                }
+            }
+
             self.grid[line][column].push_zerowidth(c);
             return;
         }

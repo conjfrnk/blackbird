@@ -178,26 +178,260 @@ fn combining_acute_attaches_to_previous_glyph() {
 }
 
 // ---------------------------------------------------------------------------
-// Emoji with variation selectors
+// Emoji-presentation sequences (text-default symbol + VS16 / keycap)
 // ---------------------------------------------------------------------------
+//
+// A symbol whose per-scalar Unicode display width is 1 (text-presentation
+// default — e.g. ⚠, ❤, the digit 1) becomes a 2-column emoji when followed by
+// the emoji variation selector VS16 (U+FE0F) or, for keycaps, the combining
+// enclosing keycap (U+20E3). This is exactly how `string-width` (and therefore
+// Ink and Claude Code) measure these sequences, and it matches what iTerm2 and
+// Terminal.app draw: the emoji takes two cells. The vendored alacritty patch
+// PROMOTES the base in place to a native wide glyph, identical in
+// representation to a wide CJK glyph:
+//   * the base scalar stays in cell N, and cell N now carries WIDE_CHAR,
+//   * cell N+1 is a spacer carrying WIDE_CHAR_SPACER (its `ch` reads as space),
+//   * the cursor advances by 2,
+//   * the VS16 / keycap scalar is a zero-width mark on the base cell and is NOT
+//     surfaced through `BBCell.ch` (same as ordinary combining marks).
+// These replace the obsolete `heart_with_vs16_stays_in_one_cell` test, whose
+// "stays one cell" premise drove Claude Code's inline-redraw row math to drift.
 
 #[test]
-fn heart_with_vs16_stays_in_one_cell() {
-    // U+2764 HEAVY BLACK HEART + VS16 (U+FE0F) selects the emoji/colour
-    // presentation. VS selectors are zero-width; grid advance is still one.
+fn warning_sign_with_vs16_occupies_two_cells() {
+    // ⚠ (U+26A0 WARNING SIGN) is text-presentation by default (width 1). With
+    // VS16 (U+FE0F) it is the emoji ⚠️, which string-width measures as 2 cols.
+    with_term(10, 2, |term| {
+        feed(term, "\u{26A0}\u{FE0F}".as_bytes());
+        let s = snap(term);
+
+        let c0 = cell_at(s, 0, 0);
+        assert_eq!(c0.ch, 0x26A0, "⚠ base scalar must stay in cell 0");
+        assert!(
+            c0.flags & bc::cell_flags::WIDE_CHAR != 0,
+            "emoji-presentation base must gain WIDE_CHAR; got flags 0x{:x}",
+            c0.flags
+        );
+
+        let c1 = cell_at(s, 1, 0);
+        assert!(
+            c1.flags & bc::cell_flags::WIDE_CHAR_SPACER != 0,
+            "cell right of promoted emoji must have WIDE_CHAR_SPACER; got 0x{:x}",
+            c1.flags
+        );
+        assert_eq!(
+            c1.ch, b' ' as u32,
+            "spacer cell ch must read as space, got 0x{:x}",
+            c1.ch
+        );
+
+        assert_eq!(
+            unsafe { (*s).cursor_col },
+            2,
+            "emoji-presentation sequence must advance cursor by 2"
+        );
+
+        release(s);
+    });
+}
+
+#[test]
+fn heart_with_vs16_occupies_two_cells() {
+    // Replaces the old `heart_with_vs16_stays_in_one_cell`. U+2764 HEAVY BLACK
+    // HEART is text-presentation by default (width 1); U+2764 U+FE0F is the
+    // emoji ❤️, width 2 per string-width / iTerm2 / Terminal.app.
     with_term(10, 2, |term| {
         feed(term, "\u{2764}\u{FE0F}".as_bytes());
         let s = snap(term);
 
         let c0 = cell_at(s, 0, 0);
-        assert_eq!(c0.ch, 0x2764);
-        // VS-16 must not consume a second cell (empty cells read as space).
+        assert_eq!(c0.ch, 0x2764, "❤ base scalar must stay in cell 0");
+        assert!(
+            c0.flags & bc::cell_flags::WIDE_CHAR != 0,
+            "emoji-presentation base must gain WIDE_CHAR; got flags 0x{:x}",
+            c0.flags
+        );
+
         let c1 = cell_at(s, 1, 0);
+        assert!(
+            c1.flags & bc::cell_flags::WIDE_CHAR_SPACER != 0,
+            "cell right of promoted emoji must have WIDE_CHAR_SPACER; got 0x{:x}",
+            c1.flags
+        );
         assert_eq!(
             c1.ch, b' ' as u32,
-            "VS-16 must not write cell 1; expected empty space, got 0x{:x}",
+            "spacer cell ch must read as space, got 0x{:x}",
             c1.ch
         );
+
+        assert_eq!(unsafe { (*s).cursor_col }, 2, "❤️ must advance cursor by 2");
+
+        release(s);
+    });
+}
+
+#[test]
+fn keycap_digit_occupies_two_cells() {
+    // 1️⃣ is '1' (U+0031) + VS16 (U+FE0F) + COMBINING ENCLOSING KEYCAP
+    // (U+20E3). string-width measures it as 2 cols. Both selectors are
+    // zero-width marks that ride the base '1' cell.
+    with_term(10, 2, |term| {
+        feed(term, "\u{0031}\u{FE0F}\u{20E3}".as_bytes());
+        let s = snap(term);
+
+        let c0 = cell_at(s, 0, 0);
+        assert_eq!(c0.ch, 0x31, "keycap base scalar '1' must stay in cell 0");
+        assert!(
+            c0.flags & bc::cell_flags::WIDE_CHAR != 0,
+            "keycap base must gain WIDE_CHAR; got flags 0x{:x}",
+            c0.flags
+        );
+
+        let c1 = cell_at(s, 1, 0);
+        assert!(
+            c1.flags & bc::cell_flags::WIDE_CHAR_SPACER != 0,
+            "cell right of keycap must have WIDE_CHAR_SPACER; got 0x{:x}",
+            c1.flags
+        );
+        assert_eq!(
+            c1.ch, b' ' as u32,
+            "spacer cell ch must read as space, got 0x{:x}",
+            c1.ch
+        );
+
+        assert_eq!(
+            unsafe { (*s).cursor_col },
+            2,
+            "keycap sequence must advance cursor by 2 (both marks zero-width)"
+        );
+
+        release(s);
+    });
+}
+
+#[test]
+fn combining_acute_does_not_promote_to_wide() {
+    // Guard: ONLY emoji-presentation selectors (VS16 / keycap) promote a base
+    // to wide. A general zero-width combining mark must NOT. `e` + U+0301
+    // (combining acute) stays width 1 — string-width measures "é" as 1 col.
+    with_term(10, 2, |term| {
+        feed(term, "e\u{0301}".as_bytes());
+        let s = snap(term);
+
+        let c0 = cell_at(s, 0, 0);
+        assert_eq!(c0.ch, b'e' as u32, "base glyph stays in cell 0");
+        assert_eq!(
+            c0.flags & bc::cell_flags::WIDE_CHAR,
+            0,
+            "a plain combining mark must NOT promote the base to WIDE_CHAR; \
+             got flags 0x{:x}",
+            c0.flags
+        );
+
+        let c1 = cell_at(s, 1, 0);
+        assert_eq!(
+            c1.flags & bc::cell_flags::WIDE_CHAR_SPACER,
+            0,
+            "no spacer must be written for a narrow combining sequence; \
+             got flags 0x{:x}",
+            c1.flags
+        );
+
+        assert_eq!(
+            unsafe { (*s).cursor_col },
+            1,
+            "combining acute must keep width 1 (cursor advances by 1)"
+        );
+
+        release(s);
+    });
+}
+
+#[test]
+fn emoji_presentation_at_last_column_is_not_promoted() {
+    // Exact-last-column case. In a 2-column terminal, write "A" then ⚠️
+    // (U+26A0 U+FE0F). 'A' takes col 0, so the ⚠ base lands at col 1 — the
+    // last column. There is no room for the trailing spacer a wide glyph needs,
+    // so the base must NOT be promoted: it stays a width-1 glyph with no
+    // WIDE_CHAR flag (rather than retroactively moving it across a line wrap).
+    with_term(2, 2, |term| {
+        feed(term, b"A");
+        feed(term, "\u{26A0}\u{FE0F}".as_bytes());
+        let s = snap(term);
+
+        assert_eq!(cell_at(s, 0, 0).ch, b'A' as u32, "A in col 0");
+
+        let last = cell_at(s, 1, 0);
+        assert_eq!(
+            last.ch, 0x26A0,
+            "⚠ base scalar should occupy the last column"
+        );
+        assert_eq!(
+            last.flags & bc::cell_flags::WIDE_CHAR,
+            0,
+            "emoji at the last column has no room for a spacer and must NOT be \
+             promoted to WIDE_CHAR; got flags 0x{:x}",
+            last.flags
+        );
+
+        release(s);
+    });
+}
+
+#[test]
+fn native_wide_emoji_unaffected_by_promotion() {
+    // Regression guard that the promotion patch did not disturb emoji that are
+    // ALREADY width 2 (Emoji_Presentation=Yes, no selector needed). 😀
+    // (U+1F600 GRINNING FACE) must still be a wide glyph + spacer.
+    with_term(10, 2, |term| {
+        feed(term, "\u{1F600}".as_bytes());
+        let s = snap(term);
+
+        let c0 = cell_at(s, 0, 0);
+        assert_eq!(c0.ch, 0x1F600, "😀 base scalar in cell 0");
+        assert!(
+            c0.flags & bc::cell_flags::WIDE_CHAR != 0,
+            "native wide emoji must keep WIDE_CHAR; got flags 0x{:x}",
+            c0.flags
+        );
+
+        let c1 = cell_at(s, 1, 0);
+        assert!(
+            c1.flags & bc::cell_flags::WIDE_CHAR_SPACER != 0,
+            "native wide emoji must keep its WIDE_CHAR_SPACER; got 0x{:x}",
+            c1.flags
+        );
+
+        assert_eq!(
+            unsafe { (*s).cursor_col },
+            2,
+            "native wide emoji must advance cursor by 2"
+        );
+
+        release(s);
+    });
+}
+
+#[test]
+fn emoji_presentation_promotes_across_feed_boundary() {
+    // A PTY delivers bytes in arbitrary chunks: the base symbol and its
+    // trailing VS16 routinely arrive in separate `bb_term_input` calls. The
+    // promotion keys off persisted grid/cursor state (not the current input
+    // buffer), so it must still fire across the boundary.
+    with_term(10, 2, |term| {
+        feed(term, "\u{26A0}".as_bytes()); // base ⚠ alone — width 1 so far
+        feed(term, "\u{FE0F}".as_bytes()); // VS16 arrives in a later read
+        let s = snap(term);
+
+        let c0 = cell_at(s, 0, 0);
+        assert_eq!(c0.ch, 0x26A0);
+        assert!(
+            c0.flags & bc::cell_flags::WIDE_CHAR != 0,
+            "promotion must fire across a feed boundary; got flags 0x{:x}",
+            c0.flags
+        );
+        assert!(cell_at(s, 1, 0).flags & bc::cell_flags::WIDE_CHAR_SPACER != 0);
+        assert_eq!(unsafe { (*s).cursor_col }, 2);
 
         release(s);
     });
