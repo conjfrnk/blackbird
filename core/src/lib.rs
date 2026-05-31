@@ -685,6 +685,11 @@ struct OscScanner<'a> {
     /// (audit L1 + reviewer follow-up). Mirrors the per-instance
     /// stance L3 established for OSC 7.
     osc133_d_nondigit_logged: &'a mut bool,
+    /// One-shot latch for the OSC 133 A/B/C tainted-payload reject path
+    /// (audit S3R-001/S3R-002 + silent-failure review). Same per-instance,
+    /// one-shot rule as the D-path latch so a hostile flood can't drown the
+    /// log while still leaving one breadcrumb when prompt marks are dropped.
+    osc133_abc_tainted_logged: &'a mut bool,
 }
 
 /// Per-terminal sliding-window rate limiter for OSC 133 prompt marks.
@@ -1330,21 +1335,51 @@ impl OscScanner<'_> {
             return;
         }
 
-        // Audit fix-#07 (2026-05-21): A/B/C kinds also accept payload
-        // bytes (e.g. shell-supplied prompt metadata) and forward them
-        // to Swift as a String. The Swift consumer's `String(decoding:
-        // as:UTF8.self)` passes valid-UTF-8 control bytes through —
-        // C0 / DEL / C1 codepoints survive into TerminalSession's
-        // lastPromptMark.exitCode and could leak into any future
-        // chrome surface that renders the field. Reject A/B/C payloads
-        // that contain raw control bytes, symmetric with the D-path
-        // and the OSC 7 cwd path (which rejects b < 0x20 || b == 0x7F).
-        // The expected legitimate payload for A/B/C is empty in the
-        // de-facto prompt-marks protocol, so this is a tightening with
-        // no real-world false-positive surface.
-        if matches!(kind_byte, b'A' | b'B' | b'C') && payload.iter().any(|&b| b < 0x20 || b == 0x7F)
-        {
-            return;
+        // Audit fix-#07 (2026-05-21) + S3R-001/S3R-002 (2026-05-30): A/B/C
+        // kinds also accept payload bytes (e.g. shell-supplied prompt
+        // metadata) and forward them to Swift as a String. The Swift
+        // consumer's `String(decoding:as:UTF8.self)` passes valid-UTF-8
+        // control codepoints through — so they could leak into any future
+        // chrome surface that renders TerminalSession's lastPromptMark.
+        // Screen the payload at the CODEPOINT level, NOT byte level: a byte
+        // sweep (b < 0x20 || b == 0x7F) misses C1 controls (U+0080..=U+009F
+        // encode as 0xC2 0x80..=0xC2 0x9F — neither byte is < 0x20) and bidi
+        // / invisible scalars (U+202E RIGHT-TO-LEFT OVERRIDE, zero-width
+        // joiners, variation selectors, …), which a hostile shell can use to
+        // visually spoof or confuse downstream consumers. This is the exact
+        // gap the OSC 7 cwd path (the `decoded_str.chars()` gate above) and
+        // the title scrubber (`scrub_title_controls`) already close; the
+        // A/B/C path was the lone byte-level holdout. Reject the whole mark
+        // when the payload is not well-formed UTF-8, or contains any C0 / DEL
+        // / C1 control or bidi/invisible scalar. The de-facto A/B/C payload
+        // is empty, so this tightening has no real-world false-positive
+        // surface.
+        if matches!(kind_byte, b'A' | b'B' | b'C') {
+            let payload_clean = match std::str::from_utf8(payload) {
+                Ok(s) => !s.chars().any(|c| {
+                    let cp = c as u32;
+                    cp <= 0x1F
+                        || cp == 0x7F
+                        || (0x80..=0x9F).contains(&cp)
+                        || is_bidi_or_invisible_scalar(c)
+                }),
+                Err(_) => false,
+            };
+            if !payload_clean {
+                // One-shot breadcrumb (silent-failure review): mirror the
+                // D-path and OSC 7 reject latches so a dropped prompt mark
+                // isn't invisible to an operator debugging why command
+                // navigation / exit-code chrome stopped working. Subsequent
+                // rejects on this instance stay silent so a flood can't drown
+                // the log.
+                if !*self.osc133_abc_tainted_logged {
+                    *self.osc133_abc_tainted_logged = true;
+                    eprintln!(
+                        "[blackbird_core] OSC 133 A/B/C rejected (control/bidi/non-UTF-8 payload)"
+                    );
+                }
+                return;
+            }
         }
 
         let ev = BBEvent {
@@ -1546,6 +1581,10 @@ pub struct BBTerm {
     /// as `osc7_reject_logged` but only one class so a single bool
     /// suffices.
     osc133_d_nondigit_logged: bool,
+    /// One-shot latch for the OSC 133 A/B/C tainted-payload reject path
+    /// (audit S3R-001/S3R-002). Same per-instance / one-shot rule as
+    /// `osc133_d_nondigit_logged`.
+    osc133_abc_tainted_logged: bool,
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
     /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
     /// 256+ allocations, but a hostile stream can fan replies across many
@@ -1916,6 +1955,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc7_rate: Osc7RateState::new(),
             osc7_reject_logged: [false; 8],
             osc133_d_nondigit_logged: false,
+            osc133_abc_tainted_logged: false,
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
         });
@@ -2068,6 +2108,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     osc7_rate: &mut bb.osc7_rate,
                     osc7_reject_logged: &mut bb.osc7_reject_logged,
                     osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
+                    osc133_abc_tainted_logged: &mut bb.osc133_abc_tainted_logged,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
@@ -2093,6 +2134,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             osc7_rate: &mut bb.osc7_rate,
             osc7_reject_logged: &mut bb.osc7_reject_logged,
             osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
+            osc133_abc_tainted_logged: &mut bb.osc133_abc_tainted_logged,
         };
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);
