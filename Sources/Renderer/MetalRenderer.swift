@@ -970,6 +970,10 @@ public final class MetalRenderer {
             // slot and reports a doubled uvSize.x; we draw a 2x-wide quad
             // so the full glyph lands on screen.
             let isWide = (cell.flags & UInt16(WIDE_CHAR)) != 0
+            // EMOJI_PRESENTATION: a text-default base + VS16 (⚠️ ‼️ ❤️) — the
+            // atlas must rasterise the colour emoji from the base + VS16
+            // grapheme rather than the monochrome base scalar.
+            let isEmojiPresentation = (cell.flags & UInt16(EMOJI_PRESENTATION)) != 0
             let quadW = isWide ? cellW * 2.0 : cellW
             let quadSize = SIMD2<Float>(quadW, cellH)
 
@@ -981,7 +985,8 @@ public final class MetalRenderer {
                 )
                 if let us = Unicode.Scalar(scalar),
                    let entry = atlas.lookupOrInsert(
-                       scalar: us, wide: isWide, style: glyphStyle) {
+                       scalar: us, wide: isWide, style: glyphStyle,
+                       emojiPresentation: isEmojiPresentation) {
                     // Tell the fragment shader to sample the color
                     // atlas (texture 1) instead of the mono coverage
                     // atlas (texture 0) for this cell. Emoji + other

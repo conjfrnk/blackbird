@@ -437,6 +437,41 @@ fn emoji_presentation_promotes_across_feed_boundary() {
     });
 }
 
+#[test]
+fn vs16_cell_is_flagged_emoji_presentation() {
+    // A text-default base carrying VS16 (⚠️ = U+26A0 U+FE0F) must carry the
+    // EMOJI_PRESENTATION flag so the renderer rasterises the COLOUR emoji
+    // (base + VS16 grapheme) rather than the monochrome text glyph. Width
+    // parity is WIDE_CHAR's job; this flag only drives colour/glyph selection.
+    with_term(10, 2, |term| {
+        feed(term, "\u{26A0}\u{FE0F}".as_bytes());
+        let s = snap(term);
+        assert!(
+            cell_at(s, 0, 0).flags & bc::cell_flags::EMOJI_PRESENTATION != 0,
+            "VS16 base must carry EMOJI_PRESENTATION; got flags 0x{:x}",
+            cell_at(s, 0, 0).flags
+        );
+        release(s);
+    });
+}
+
+#[test]
+fn bare_symbol_is_not_flagged_emoji_presentation() {
+    // A bare ⚠ (no VS16) stays text presentation — no EMOJI_PRESENTATION, so
+    // the renderer keeps drawing the monochrome glyph.
+    with_term(10, 2, |term| {
+        feed(term, "\u{26A0}".as_bytes());
+        let s = snap(term);
+        assert_eq!(
+            cell_at(s, 0, 0).flags & bc::cell_flags::EMOJI_PRESENTATION,
+            0,
+            "bare symbol must NOT carry EMOJI_PRESENTATION; got flags 0x{:x}",
+            cell_at(s, 0, 0).flags
+        );
+        release(s);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Control characters
 // ---------------------------------------------------------------------------

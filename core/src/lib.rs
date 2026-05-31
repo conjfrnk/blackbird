@@ -2302,6 +2302,14 @@ pub mod cell_flags {
     pub const UNDERLINE_DOTTED: u16 = 1 << 11;
     /// CSI 4:5 m — dashed underline.
     pub const UNDERLINE_DASHED: u16 = 1 << 12;
+    /// The cell's base glyph starts an emoji-presentation sequence — a
+    /// text-default symbol carrying a VS16 (U+FE0F) zero-width mark (⚠️ ‼️ ❤️,
+    /// keycaps) — so the renderer must rasterise the COLOUR emoji from the
+    /// base + VS16 grapheme, not the bare base scalar (which CoreText resolves
+    /// to the monochrome text glyph). Width is carried separately by
+    /// WIDE_CHAR; this bit only governs colour / glyph selection. Set by the
+    /// snapshot FFI when a cell's zerowidth list contains U+FE0F.
+    pub const EMOJI_PRESENTATION: u16 = 1 << 13;
 }
 
 /// Terminal mode bitflags mirrored from `alacritty_terminal::term::TermMode`.
@@ -2987,11 +2995,22 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
                 Some(c) => color_to_rgb(&c, palette),
                 None => UNDERLINE_COLOR_UNSET,
             };
+            // Emoji-presentation: a text-default base carrying a VS16 (U+FE0F)
+            // renders as the colour emoji (base + VS16 grapheme), not the
+            // monochrome base scalar. Width parity is already handled by the
+            // alacritty Term::input promotion (WIDE_CHAR); this flag only
+            // drives the renderer's colour / glyph selection.
+            let mut flags = extract_cell_flags(indexed.flags);
+            if let Some(zw) = indexed.cell.zerowidth() {
+                if zw.contains(&'\u{FE0F}') {
+                    flags |= cell_flags::EMOJI_PRESENTATION;
+                }
+            }
             cells.push(BBCell {
                 ch: indexed.c as u32,
                 fg: color_to_rgb(&indexed.fg, palette),
                 bg: color_to_rgb(&indexed.bg, palette),
-                flags: extract_cell_flags(indexed.flags),
+                flags,
                 link_id,
                 underline_color,
             });

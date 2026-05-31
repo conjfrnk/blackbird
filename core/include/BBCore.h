@@ -81,6 +81,17 @@
  */
 #define UNDERLINE_DASHED (1 << 12)
 
+/**
+ * The cell's base glyph starts an emoji-presentation sequence — a
+ * text-default symbol carrying a VS16 (U+FE0F) zero-width mark (⚠️ ‼️ ❤️,
+ * keycaps) — so the renderer must rasterise the COLOUR emoji from the
+ * base + VS16 grapheme, not the bare base scalar (which CoreText resolves
+ * to the monochrome text glyph). Width is carried separately by
+ * WIDE_CHAR; this bit only governs colour / glyph selection. Set by the
+ * snapshot FFI when a cell's zerowidth list contains U+FE0F.
+ */
+#define EMOJI_PRESENTATION (1 << 13)
+
 #define ALT_SCREEN (1 << 0)
 
 #define APP_CURSOR (1 << 1)

@@ -568,6 +568,47 @@ final class GlyphAtlasTests: XCTestCase {
         )
     }
 
+    /// A text-default symbol (⚠ U+26A0) is monochrome on its own, but the
+    /// promoted emoji-presentation sequence ⚠️ (base + VS16, flagged
+    /// EMOJI_PRESENTATION by the core) must rasterise the COLOUR emoji. The
+    /// atlas must feed CoreText the base + VS16 grapheme, not the bare base
+    /// scalar — otherwise the now-2-cell-wide ⚠️ renders as a gray silhouette.
+    func test_vs16Symbol_withEmojiPresentation_routesToColorAndDistinctEntry() throws {
+        let device = try requireMetalDevice()
+        let mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: mono)
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 128)
+        )
+        let warning = try XCTUnwrap(UnicodeScalar(0x26A0))  // ⚠ (text-default)
+
+        // ⚠️ (base + VS16) must rasterise the COLOUR emoji. On hosts where
+        // bare ⚠ is monochrome this REQUIRES the appended VS16 to reach
+        // AppleColorEmoji; we deliberately do NOT assert the bare symbol's
+        // presentation because newer macOS renders even the bare ⚠ in colour
+        // (host-dependent). The emoji-presentation grapheme is colour on every
+        // host, which is the guarantee that matters.
+        let colorEntry = try XCTUnwrap(
+            atlas.lookupOrInsert(scalar: warning, wide: true, emojiPresentation: true)
+        )
+        XCTAssertTrue(
+            colorEntry.isColor,
+            "⚠️ (base + VS16) must rasterise as a colour emoji"
+        )
+
+        // It must be keyed/rasterised SEPARATELY from the bare base (same
+        // scalar + width, differing only in emoji presentation) — otherwise
+        // ⚠ and ⚠️ would alias one atlas slot and one would render as the
+        // other's glyph.
+        let bareEntry = try XCTUnwrap(
+            atlas.lookupOrInsert(scalar: warning, wide: true, emojiPresentation: false)
+        )
+        XCTAssertNotEqual(
+            colorEntry.uvOrigin, bareEntry.uvOrigin,
+            "⚠️ and bare ⚠ must occupy distinct atlas slots (emojiPresentation keying)"
+        )
+    }
+
     /// Color emoji rasterises into `colorTexture`; the same slot in the
     /// mono `texture` stays zeroed. If either half of the split is
     /// wrong — mono bytes written for a color glyph, or color texture

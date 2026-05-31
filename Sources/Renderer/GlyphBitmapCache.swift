@@ -47,6 +47,13 @@ enum GlyphBitmapCache {
         let italic: Bool
         let wide: Bool
         let isColor: Bool
+        /// Which grapheme was rasterised: the bare base scalar vs. the
+        /// emoji-presentation sequence (base + VS16). These can share the same
+        /// `(scalar, wide, isColor)` yet rasterise to different pixels (⚠ vs
+        /// ⚠️), so this field keeps them in separate cache entries instead of
+        /// relying on `wide` differing — which would silently alias if a
+        /// width-table change ever set WIDE_CHAR on a base without a VS16.
+        let emojiPresentation: Bool
     }
 
     /// A rasterised glyph bitmap, ready to hand to `MTLTexture.replace`.

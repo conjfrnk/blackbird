@@ -36,6 +36,10 @@ public final class GlyphAtlas {
         let scalarValue: UInt32
         let bold: Bool
         let italic: Bool
+        /// Distinguishes the emoji-presentation grapheme (base + VS16, e.g.
+        /// ⚠️) from the bare text-presentation base (⚠) so they occupy
+        /// separate atlas entries instead of aliasing.
+        let emojiPresentation: Bool
     }
 
     public struct Entry {
@@ -309,12 +313,14 @@ public final class GlyphAtlas {
     public func lookupOrInsert(
         scalar: UnicodeScalar,
         wide: Bool = false,
-        style: Style = .regular
+        style: Style = .regular,
+        emojiPresentation: Bool = false
     ) -> Entry? {
         let key = GlyphKey(
             scalarValue: scalar.value,
             bold: style.bold,
-            italic: style.italic
+            italic: style.italic,
+            emojiPresentation: emojiPresentation
         )
         if let existing = byKey[key] { return existing }
         let slotsNeeded = wide ? 2 : 1
@@ -326,7 +332,9 @@ public final class GlyphAtlas {
         // Emoji (or another color font) for emoji scalars at draw
         // time. We mirror that substitution to decide the path.
         let font = styledFont(for: style)
-        let colorPath = Self.shouldRasterizeAsColor(base: font, scalar: scalar)
+        let colorPath = Self.shouldRasterizeAsColor(
+            base: font, scalar: scalar, emojiPresentation: emojiPresentation
+        )
 
         // Narrow glyph + a parked orphan slot? Reclaim it before carving
         // a fresh one off `nextSlot`. This is the other half of the
@@ -342,7 +350,7 @@ public final class GlyphAtlas {
             // return nil WITHOUT caching — the cell renders blank and the
             // glyph re-rasterises on its next appearance (matches the
             // atlas-full contract; see `rasterize`).
-            guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: false, style: style, color: colorPath) else {
+            guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: false, style: style, color: colorPath, emojiPresentation: emojiPresentation) else {
                 freeNarrowSlots.append(reclaimed)
                 return nil
             }
@@ -459,7 +467,7 @@ public final class GlyphAtlas {
         // re-rasterises) on the scalar's next appearance rather than being
         // cached as a permanently-blank entry pointing at unwritten / 1×1-
         // placeholder bytes. Same contract as the atlas-full path above.
-        guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style, color: colorPath) else {
+        guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style, color: colorPath, emojiPresentation: emojiPresentation) else {
             return nil
         }
 
@@ -497,11 +505,30 @@ public final class GlyphAtlas {
     /// emoji-variant Symbols fonts) route per-glyph correctly:
     /// CoreText picks the right substitute, we ask that substitute
     /// for its traits, and the bit reflects reality.
+    /// The grapheme CoreText should resolve / rasterise for a cell: the bare
+    /// scalar, or the emoji-presentation sequence (base + VS16) when the cell
+    /// was flagged EMOJI_PRESENTATION by the core. Appending U+FE0F forces
+    /// CoreText to the colour-emoji substitute for text-default symbols like
+    /// ⚠ / ‼ / ❤ that would otherwise resolve to a monochrome text glyph.
+    ///
+    /// Limitation: only U+FE0F is appended, so a keycap sequence
+    /// (base + U+FE0F + U+20E3, e.g. `1️⃣`) rasterises as the coloured base
+    /// digit, not the enclosing-keycap box — the snapshot's single
+    /// EMOJI_PRESENTATION bit doesn't carry the trailing combiner. Width is
+    /// still correct (2 cells) and keycaps are rare in terminal output;
+    /// surface U+20E3 too if keycap fidelity ever matters.
+    fileprivate static func glyphString(
+        _ scalar: UnicodeScalar, emojiPresentation: Bool
+    ) -> String {
+        emojiPresentation ? String(scalar) + "\u{FE0F}" : String(scalar)
+    }
+
     fileprivate static func shouldRasterizeAsColor(
         base: NSFont,
-        scalar: UnicodeScalar
+        scalar: UnicodeScalar,
+        emojiPresentation: Bool
     ) -> Bool {
-        let str = String(scalar) as NSString
+        let str = glyphString(scalar, emojiPresentation: emojiPresentation) as NSString
         let range = CFRange(location: 0, length: str.length)
         let resolved = CTFontCreateForString(base as CTFont, str as CFString, range)
         return CTFontGetSymbolicTraits(resolved).contains(.traitColorGlyphs)
@@ -573,7 +600,8 @@ public final class GlyphAtlas {
     /// (base, style), as is the color path's CoreText substitution, so the
     /// rasterised pixels are fully determined by these fields.
     private func bitmapCacheKey(
-        scalar: UnicodeScalar, wide: Bool, style: Style, isColor: Bool
+        scalar: UnicodeScalar, wide: Bool, style: Style, isColor: Bool,
+        emojiPresentation: Bool = false
     ) -> GlyphBitmapCache.Key {
         GlyphBitmapCache.Key(
             fontName: metrics.font.fontName,
@@ -583,7 +611,8 @@ public final class GlyphAtlas {
             bold: style.bold,
             italic: style.italic,
             wide: wide,
-            isColor: isColor
+            isColor: isColor,
+            emojiPresentation: emojiPresentation
         )
     }
 
@@ -603,17 +632,24 @@ public final class GlyphAtlas {
         intoSlotAt origin: (x: Int, y: Int),
         wide: Bool = false,
         style: Style = .regular,
-        color: Bool = false
+        color: Bool = false,
+        emojiPresentation: Bool = false
     ) -> Bool {
         if color {
-            return rasterizeColor(scalar: scalar, intoSlotAt: origin, wide: wide, style: style)
+            return rasterizeColor(
+                scalar: scalar, intoSlotAt: origin, wide: wide, style: style,
+                emojiPresentation: emojiPresentation
+            )
         }
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
         // Cache hit: blit the previously-rasterised bytes straight into the
         // texture and skip CoreText entirely (the win for every tab after
         // the first warms the shared cache).
-        let cacheKey = bitmapCacheKey(scalar: scalar, wide: wide, style: style, isColor: false)
+        let cacheKey = bitmapCacheKey(
+            scalar: scalar, wide: wide, style: style, isColor: false,
+            emojiPresentation: emojiPresentation
+        )
         if let cached = GlyphBitmapCache.get(cacheKey) {
             // The key makes this hold (same font+size+scale ⇒ same cell px),
             // but pin it: a wrong-sized cached bitmap would `texture.replace`
@@ -653,7 +689,7 @@ public final class GlyphAtlas {
         ctx.scaleBy(x: scale, y: scale)
         ctx.textMatrix = .identity
 
-        let str = String(scalar)
+        let str = Self.glyphString(scalar, emojiPresentation: emojiPresentation)
         let font = styledFont(for: style)
         let attr = NSAttributedString(
             string: str,
@@ -744,14 +780,18 @@ public final class GlyphAtlas {
         scalar: UnicodeScalar,
         intoSlotAt origin: (x: Int, y: Int),
         wide: Bool,
-        style: Style
+        style: Style,
+        emojiPresentation: Bool = false
     ) -> Bool {
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
         // Cache hit: promote the lazy color atlas (if needed) and blit the
         // cached premultiplied-BGRA bytes, skipping CoreText. ensureReal must
         // run before the replace — see the lazy-allocation note on `colorTexture`.
-        let cacheKey = bitmapCacheKey(scalar: scalar, wide: wide, style: style, isColor: true)
+        let cacheKey = bitmapCacheKey(
+            scalar: scalar, wide: wide, style: style, isColor: true,
+            emojiPresentation: emojiPresentation
+        )
         if let cached = GlyphBitmapCache.get(cacheKey) {
             guard ensureRealColorTexture() else { return false }
             assert(cached.width == w && cached.height == h,
@@ -809,7 +849,7 @@ public final class GlyphAtlas {
         ctx.scaleBy(x: scale, y: scale)
         ctx.textMatrix = .identity
 
-        let str = String(scalar)
+        let str = Self.glyphString(scalar, emojiPresentation: emojiPresentation)
         let font = styledFont(for: style)
         // Use the line/attributed-string path so CoreText does font
         // substitution + fallback. `CTFontDrawGlyphs` directly works
