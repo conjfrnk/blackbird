@@ -1768,7 +1768,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 special,
                 modifiers: mods,
                 applicationCursorKeys: appCursor,
-                applicationKeypad: appKeypad
+                applicationKeypad: appKeypad,
+                // S3S-002: pass the full mode so a keypad key with DECPAM off
+                // can route its plain character through encode(chars:) and pick
+                // up Meta / Kitty / modifyOtherKeys framing instead of dropping
+                // the modifiers in the legacy fallback.
+                mode: termMode
             )
             if !bytes.isEmpty { sendToSession(bytes) }
             return
