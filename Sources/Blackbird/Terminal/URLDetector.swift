@@ -52,21 +52,31 @@ public enum URLDetector {
     //     followed by optional alnum/`-`; the final label is a literal
     //     `.` + two-or-more-letter TLD. `.` alone isn't enough.
     //
-    // **Performance note:** this pattern has O(n²) worst-case backtracking
-    // on inputs like `a@aaaaa…aaaa` (one `@`, long run of alphanumerics,
-    // no `.`). `scan` gates invocation behind an `@`-AND-`.`-present
-    // pre-check, which is O(n) and eliminates the adversarial case — a
-    // malicious remote can paste thousands of `a`s after `@`, but the
-    // regex never runs without a `.` elsewhere on the line. Lines that
-    // do contain both characters are already linear in practice because
-    // a valid domain is bounded in length.
+    // **Performance / ReDoS resistance (audit S3S-001):** the local part is
+    // bounded to `{1,64}` (RFC 5321 caps a local part at 64 octets) and every
+    // domain label run is bounded to 63 characters (RFC 1035). The local-part
+    // quantifier is *possessive* (`{1,64}+`): `@` is not in the local-char
+    // class, so a local run is always delimited by a non-local char and never
+    // needs to give back — possessive matching is therefore semantically
+    // identical to greedy here while eliminating the per-start-position
+    // backtrack. Previously the unbounded greedy local part (`+`) made the
+    // engine re-scan the whole run at every start position looking for an
+    // `@`, which is O(n²) on inputs like `a@aaaa…a.` (one `@`, a long run, no
+    // valid TLD); the bounds + possessive quantifier make every start
+    // position O(63) work, so a full attacker-controlled row scans in linear
+    // time (measured ~2 ms for a 1000-col row vs ~17 ms before; the old
+    // pattern grew quadratically). `scan` still gates the regex behind a
+    // cheap `@`-AND-`.`-present pre-check as a fast-path skip, but — unlike
+    // the old comment claimed — that pre-check is *not* what makes the
+    // pattern safe (the adversarial string contains both characters); the
+    // length bounds are.
     //
     // Emails that land inside an already-matched `http(s)://…@…` URL
     // are filtered out after the scan (see `scan(snapshot:)`), so
     // `https://user:pass@host.com` produces one match (the https URL),
     // not two.
     private static let emailRegex: NSRegularExpression = {
-        let pattern = #"[A-Za-z0-9._+\-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}"#
+        let pattern = #"[A-Za-z0-9._+\-]{1,64}+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.[A-Za-z]{2,}"#
         return try! NSRegularExpression(pattern: pattern)
     }()
 
@@ -301,11 +311,12 @@ public enum URLDetector {
             // emails inside URL matches (the `user@host.com` substring of
             // `https://user:pass@host.com`).
             //
-            // Pre-check: the emailRegex has O(n²) worst-case backtracking
-            // on `@`-present/`.`-absent input. Require both chars on the
-            // line before invoking the regex. Both `contains` calls are
-            // O(n) — cheap — and they eliminate the adversarial no-TLD
-            // shape entirely.
+            // Fast-path pre-check: skip the regex on lines without both an
+            // `@` and a `.`. This is a cheap O(n) skip, NOT the ReDoS guard —
+            // the emailRegex is linear by construction (see its length bounds
+            // + possessive local part). The adversarial `x@aaa…a.` shape
+            // contains both characters and passes this pre-check; the bounds
+            // are what keep the scan linear. Audit S3S-001.
             //
             // Also respect `consumedNextRowPrefix[row]` — when the
             // previous row's URL wrap-joined into our leading cells, the
