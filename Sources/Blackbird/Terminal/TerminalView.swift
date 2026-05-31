@@ -1087,7 +1087,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // state. Without this, the "first" focus event the app sees is the
         // next NSWindow.didResignKey, which misregisters the initial state.
         if !wasFocusMode, nowFocusMode, window?.isKeyWindow == true {
-            sendFocusEventIfNeeded(gained: true)
+            // Route through the session's single focus emitter (live-core
+            // gate + same-state dedup) so this 1004-enable catch-up can't
+            // double-fire against the MainWindowController key-transition
+            // path. See TerminalSession.focusEmissionBytes.
+            session?.focusChanged(true)
         }
     }
 
@@ -1166,7 +1170,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             object: window,
             queue: .main
         ) { [weak self] _ in
-            self?.sendFocusEventIfNeeded(gained: true)
+            // Focus-event emission (CSI I) is owned by MainWindowController's
+            // windowDidBecomeKey → session.focusChanged, which gates on the
+            // live core mode. Don't also emit here — the old snapshot-gated
+            // path double-fired and could disagree with the core. The SKE +
+            // ⌘-modifier sync below ARE this view's responsibility.
             self?.enableSecureEventInputIfNeeded()
             // If the user switched INTO this tab while already holding
             // ⌘ (Cmd-Tab, or Cmd-` within the group), `flagsChanged`
@@ -1183,7 +1191,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             object: window,
             queue: .main
         ) { [weak self] _ in
-            self?.sendFocusEventIfNeeded(gained: false)
+            // Focus-event emission (CSI O) is owned by MainWindowController's
+            // windowDidResignKey → session.focusChanged. Keep the SKE /
+            // IME-composition / hover teardown below, which ARE this view's
+            // responsibility.
             self?.disableSecureEventInputIfHeld()
             // Tear down any in-flight IME composition so a stale preedit
             // can't commit into the next-focused terminal on Cmd-Tab. See
@@ -1387,19 +1398,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         guard ownsSecureInput else { return }
         DisableSecureEventInput()
         ownsSecureInput = false
-    }
-
-    /// xterm focus-in/out reports. Enabled by the running program via
-    /// DECSET 1004; tmux, neovim's `FocusGained/FocusLost` autocmds, and
-    /// some shells (zsh vi-mode helpers) lean on this to refresh state
-    /// exactly when the user's attention moves.
-    private func sendFocusEventIfNeeded(gained: Bool) {
-        guard let session,
-              currentSnapshot?.termMode.contains(.focusInOut) == true
-        else { return }
-        // CSI I on focus gain, CSI O on focus loss. Two bytes after ESC [.
-        let final: UInt8 = gained ? 0x49 : 0x4F    // 'I' / 'O'
-        session.send(Data([0x1B, 0x5B, final]))
     }
 
     // MARK: - MTKViewDelegate

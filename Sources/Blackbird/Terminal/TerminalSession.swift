@@ -279,6 +279,13 @@ public final class TerminalSession: ObservableObject {
     private var snapshotDispatchScheduled: Bool = false
     private var isTerminated: Bool = false
 
+    /// Last focus state actually emitted to the TUI (`CSI I`/`CSI O`),
+    /// guarded by `coreQueue`. Dedups consecutive same-state focus
+    /// transitions so the single-owner emitter sends exactly one byte pair
+    /// per real focus change. `nil` = nothing emitted yet; left untouched
+    /// when mode 1004 is off so a later enable still reports current focus.
+    private var lastFocusEmitted: Bool?
+
     public static func start(
         shell: String,
         arguments: [String],
@@ -388,6 +395,13 @@ public final class TerminalSession: ObservableObject {
     func takeSnapshotForTests() -> BBSnapshot? {
         return coreQueue.sync { self.bbterm.snapshot() }
     }
+
+    /// Test hook: drive `focusEmissionBytes` on the core queue so unit tests
+    /// can pin the DECSET 1004 gate + same-state dedup without an NSWindow.
+    /// Mirrors `feedBytesForTests`.
+    func focusEmissionBytesForTests(focused: Bool) -> Data? {
+        return coreQueue.sync { self.focusEmissionBytes(focused: focused) }
+    }
     #endif
 
     deinit {
@@ -491,9 +505,7 @@ public final class TerminalSession: ObservableObject {
     /// made.
     public func focusChanged(_ focused: Bool) {
         coreQueue.async { [weak self] in
-            guard let self, let bytes = self.bbterm.focusChangeBytes(focused: focused) else {
-                return
-            }
+            guard let self else { return }
             // S2-010: gate on isTerminated so a focus-change dispatched
             // before terminate() but processed after doesn't hand bytes
             // to PTY.writeImmediate on a stopped session. PTY's own
@@ -505,8 +517,40 @@ public final class TerminalSession: ObservableObject {
             let terminated = self.isTerminated
             self.publishLock.unlock()
             if terminated { return }
+            guard let bytes = self.focusEmissionBytes(focused: focused) else { return }
             self.pty?.writeImmediate(bytes)
         }
+    }
+
+    /// Single source of truth for window-focus escape emission: applies the
+    /// DECSET 1004 gate (via the **live** core mode, not the async-published
+    /// snapshot) and dedups consecutive same-state transitions. Returns the
+    /// `CSI I` / `CSI O` bytes to write, or nil when nothing should be sent.
+    ///
+    /// MUST run on `coreQueue` — it reads the live core mode and mutates
+    /// `lastFocusEmitted`. This consolidation removed the former second
+    /// emitter in `TerminalView` (which gated on the stale snapshot mode and
+    /// could double-fire per transition, or — across the async window of a
+    /// 1004 toggle — send a stray `CSI I`/`CSI O` to a program that had just
+    /// disabled focus reporting).
+    private func focusEmissionBytes(focused: Bool) -> Data? {
+        dispatchPrecondition(condition: .onQueue(coreQueue))
+        guard let bytes = bbterm.focusChangeBytes(focused: focused) else {
+            // Mode 1004 off: emit nothing and CLEAR the dedup latch, so a
+            // later 1004 re-enable (vim `:e`, tmux re-attach, an alt-screen
+            // app re-initialising its terminal state) is treated as a fresh
+            // first emit. The TerminalView 1004-enable catch-up depends on
+            // this — if the latch stayed set it would swallow the focus-in
+            // the catch-up fires when the window never lost key across the
+            // off→on toggle. (Clearing to nil also keeps the never-enabled
+            // case correct: nil ≠ any focus state, so the first real emit
+            // still fires.)
+            lastFocusEmitted = nil
+            return nil
+        }
+        if lastFocusEmitted == focused { return nil }
+        lastFocusEmitted = focused
+        return bytes
     }
 
     // MARK: - Prompt navigation
