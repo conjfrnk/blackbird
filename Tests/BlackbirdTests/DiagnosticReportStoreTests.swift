@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Blackbird
 
@@ -562,5 +563,70 @@ final class DiagnosticReportStoreTests: XCTestCase {
         XCTAssertFalse(text.contains("\u{E0100}"),
                        "U+E0100 (VS-17) must be replaced")
         XCTAssertTrue(text.contains("\u{FFFD}"), "U+FFFD substitution must appear")
+    }
+
+    /// Audit S2-001: `loadAndSanitize` MUST refuse non-regular files at
+    /// read time. `reload()` enumerates only regular reports, but a
+    /// same-uid attacker can TOCTOU-swap a legitimate `hang-XXX.txt` for
+    /// a FIFO between the directory scan and the user's Copy/Email click.
+    /// `O_NOFOLLOW` rejects a symlink but NOT a FIFO: opening a writer-less
+    /// FIFO (and the subsequent read) blocks FOREVER, hanging and leaking
+    /// the detached worker. The fix adds `O_NONBLOCK` to the open plus an
+    /// `fstat` file-type check that rejects anything non-regular as
+    /// `.notRegularFile`.
+    ///
+    /// Memory pre-flight: one FIFO node (a single inode, zero data bytes)
+    /// + one temp directory. < 1 KB allocations. Wall: milliseconds on the
+    /// fixed code; the 5 s timeout is the fail-first ceiling for the buggy
+    /// open()-blocks-forever path.
+    ///
+    /// This is a SYNCHRONOUS test on purpose: the blocked `open()`/`read()`
+    /// syscall on buggy code is un-cancellable, so a `withTaskGroup` /
+    /// async-timeout race would deadlock at scope exit awaiting the leaked
+    /// child. The classic expectation + `wait(for:timeout:)` pattern lets
+    /// the XCTest runner record a timeout failure and PROCEED without
+    /// joining the leaked Task.
+    func test_loadAndSanitize_fifo_returnsNotRegularFile_andDoesNotHang() {
+        // Memory: <1 KB. Wall: <50 ms on fixed code; 5 s ceiling on buggy.
+        let fifoURL = hangDir.appendingPathComponent("hang-fifo.txt")
+        let rc = fifoURL.withUnsafeFileSystemRepresentation { cPath -> Int32 in
+            guard let cPath else { return -1 }
+            return mkfifo(cPath, 0o600)
+        }
+        XCTAssertEqual(rc, 0, "mkfifo must create the FIFO node (errno \(errno))")
+        defer { try? FileManager.default.removeItem(at: fifoURL) }
+        // No process opens the FIFO for writing — this is exactly the
+        // writer-less FIFO that blocks open()+read() forever on buggy code.
+
+        let exp = expectation(description: "loadAndSanitize returns for a FIFO")
+        var outcome: Result<String, DiagnosticsView.LoadError>?
+        Task {
+            outcome = await DiagnosticsView.loadAndSanitize(
+                url: fifoURL, cap: 16 * 1024 * 1024
+            )
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 5.0)
+        XCTAssertEqual(outcome, .failure(.notRegularFile),
+                       "a FIFO must be refused promptly as .notRegularFile, not block the worker")
+    }
+
+    /// Audit S2-001 (deterministic second oracle): a directory is also a
+    /// non-regular file. Opening a directory does NOT block, so no timeout
+    /// machinery is needed — call `loadAndSanitize` directly and assert the
+    /// typed refusal. On the buggy code (no `fstat` type check) this
+    /// returned a `.read(...)` EISDIR error; asserting `.notRegularFile`
+    /// genuinely distinguishes fixed from buggy.
+    func test_loadAndSanitize_directory_returnsNotRegularFile() async throws {
+        // Memory: <1 KB (one empty directory). Wall: <20 ms.
+        let dirURL = hangDir.appendingPathComponent("hang-as-a-directory")
+        try FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dirURL) }
+
+        let result = await DiagnosticsView.loadAndSanitize(
+            url: dirURL, cap: 16 * 1024 * 1024
+        )
+        XCTAssertEqual(result, .failure(.notRegularFile),
+                       "a directory must be refused as .notRegularFile, not surfaced as a read error")
     }
 }

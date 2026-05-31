@@ -168,6 +168,15 @@ struct DiagnosticsView: View {
             lastError = "\(report.url.lastPathComponent) is a symlink — refused for safety."
             Self.log.error("copy refused symlink: \(report.url.lastPathComponent, privacy: .public)")
             return false
+        case .failure(.notRegularFile):
+            // Audit S2-001: enumerate admits only regular files, but a
+            // same-uid attacker can swap the inode for a FIFO/device node
+            // between scan and click. The read-time fstat gate refused
+            // (and O_NONBLOCK kept the open from hanging); surface a clear
+            // diagnostic so the operator notices something changed.
+            lastError = "\(report.url.lastPathComponent) is not a regular file — refused for safety."
+            Self.log.error("copy refused non-regular file: \(report.url.lastPathComponent, privacy: .public)")
+            return false
         }
     }
 
@@ -194,9 +203,20 @@ struct DiagnosticsView: View {
             // routing the symlink's target through the sanitiser to the
             // pasteboard / Email-Diagnostics compose. `Data(contentsOf:)`
             // (the prior call) silently follows symlinks.
+            // Audit S2-001: also pass O_NONBLOCK. O_NOFOLLOW rejects a
+            // symlink final component but NOT a FIFO / socket / device node.
+            // `reload()` admits only regular files at enumerate time, but a
+            // same-uid process can swap the regular report for a FIFO between
+            // scan and this read; `open(O_RDONLY)` on a writer-less FIFO
+            // blocks indefinitely (and so would the subsequent read), hanging
+            // and leaking this detached worker on every Copy/Email click.
+            // O_NONBLOCK makes the open return immediately for a FIFO/device
+            // so the fstat gate below can reject it. It is harmless for the
+            // regular-file fast path — regular files never report EAGAIN on
+            // read, so readToEnd() behaves identically.
             let fd = url.withUnsafeFileSystemRepresentation { cPath -> Int32 in
                 guard let cPath = cPath else { return -1 }
-                return Darwin.open(cPath, O_RDONLY | O_NOFOLLOW)
+                return Darwin.open(cPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
             }
             if fd < 0 {
                 let err = errno
@@ -207,6 +227,19 @@ struct DiagnosticsView: View {
                 return (.failure(.read("open: \(msg)")), ranOffMain)
             }
             defer { Darwin.close(fd) }
+            // Audit S2-001: reject anything that is not a regular file. Closes
+            // the FIFO/device-node TOCTOU gap that O_NOFOLLOW does not cover.
+            var st = stat()
+            guard fstat(fd, &st) == 0 else {
+                let msg = String(cString: strerror(errno))
+                return (.failure(.read("fstat: \(msg)")), ranOffMain)
+            }
+            // Work in `mode_t` (the type of `st_mode`); `S_IFMT`/`S_IFREG`
+            // are bridged as `mode_t` on this SDK, and the values fit, so this
+            // is homogeneous regardless of how the constants are imported.
+            guard (st.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+                return (.failure(.notRegularFile), ranOffMain)
+            }
             let fh = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
             let data: Data
             do {
@@ -243,6 +276,12 @@ struct DiagnosticsView: View {
         /// symlink between scan and read; the read-time gate refuses
         /// to follow.
         case symlinkRejected
+        /// Audit S2-001: `fstat` after open showed the path is not a
+        /// regular file (e.g. a FIFO / device node swapped in via a
+        /// same-uid TOCTOU). O_NOFOLLOW does not cover these, and
+        /// reading one could block the worker forever; the read-time
+        /// gate refuses anything that is not `S_IFREG`.
+        case notRegularFile
     }
 
     /// Replace C0 / C1 control characters AND bidi / zero-width /
