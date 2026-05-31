@@ -21,3 +21,13 @@ rust-version = "1.85"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# In-tree fork of the pinned alacritty_terminal 0.26.0 (same version, so the
+# `=0.26.0` requirement in core/Cargo.toml still resolves). Step 1 vendors it
+# UNCHANGED under vendor/; the emoji-presentation (VS16 / keycap) cell-width
+# patch — which gives `string-width` parity so Claude Code's inline redraw
+# math stops drifting — lands on top of this fork. A path patch keeps the
+# crate's source local (no new registry/git source for `cargo deny check
+# sources`). Re-vendor from the registry + re-apply the patch on any bump.
+[patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
