@@ -13,7 +13,28 @@ public struct ThemePalette: Equatable, Sendable {
     private static let themeLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "theme")
 
     public init(background: UInt32, foreground: UInt32, cursor: UInt32, ansi: [UInt32]) {
-        precondition(ansi.count == 16, "ansi must have 16 entries")
+        // fix-#14 philosophy: don't abort the process on a malformed theme.
+        // A non-16-entry `ansi` array previously hit a `precondition` that
+        // aborts in BOTH debug AND release (reachable the moment a non-literal
+        // theme source — e.g. a user-theme importer — hands in the wrong
+        // length). Normalise to exactly 16 entries instead — truncate extras,
+        // pad missing slots with `foreground` so text stays visible — and log
+        // a warning, mirroring the cursor snap-to-foreground recovery below.
+        // Downstream (renderer, color_to_rgb) indexes ansi[0..<16] and relies
+        // on this invariant. Audit S6-003.
+        let normalizedAnsi: [UInt32]
+        if ansi.count == 16 {
+            normalizedAnsi = ansi
+        } else {
+            Self.themeLogger.warning(
+                "Theme palette ANSI array has \(ansi.count, privacy: .public) entries, expected 16 — normalising to 16 (was a process-aborting precondition before audit S6-003)"
+            )
+            if ansi.count > 16 {
+                normalizedAnsi = Array(ansi.prefix(16))
+            } else {
+                normalizedAnsi = ansi + Array(repeating: foreground, count: 16 - ansi.count)
+            }
+        }
         self.background = background
         self.foreground = foreground
         // Audit fix-#14 (2026-05-11): the original DEBUG-only asserts ship
@@ -35,7 +56,7 @@ public struct ThemePalette: Equatable, Sendable {
         } else {
             self.cursor = cursor
         }
-        self.ansi = ansi
+        self.ansi = normalizedAnsi
         #if DEBUG
         // Check the three "first-class" colors for glaring misconfiguration
         // so a future palette edit can't ship a theme with an invisible
