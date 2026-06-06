@@ -3020,7 +3020,13 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // cursor_point.line.0 is a 0-based screen row (Line wraps i32; visible rows are 0..rows-1).
         // cursor_point.column.0 is a 0-based column (Column wraps usize).
         let cursor_row = cursor_point.line.0.max(0) as u16;
-        let cursor_col = cursor_point.column.0 as u16;
+        // column.0 is a usize; saturate at u16::MAX rather than truncating, so
+        // the cast can never silently wrap to a small column. Symmetric with
+        // the row's `.max(0)` clamp above and the display_offset/history_size
+        // `.min(u32::MAX as usize)` clamps below. Bounded by MAX_DIM today, but
+        // a defensive clamp keeps the snapshot's cursor honest unconditionally.
+        // Audit S6-002.
+        let cursor_col = cursor_point.column.0.min(u16::MAX as usize) as u16;
         // display_offset: lines scrolled above the live grid. When > 0 the
         // `cells` above are from scrollback; the live cursor at `cursor_row`
         // is actually `cursor_row + display_offset` from the top of the
