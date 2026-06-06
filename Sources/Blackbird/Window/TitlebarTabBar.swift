@@ -122,6 +122,16 @@ final class TabStripView: NSView {
     /// teardown).
     var onCommitRename: ((NSWindow, String) -> Void)?
 
+    /// Hand-off for "drag a pill in a non-horizontal direction to move the
+    /// window" (the empty gutter already moves the window for free via
+    /// pass-through `hitTest`). Default performs a native AppKit window
+    /// drag; injectable so a headless test can spy on the hand-off without
+    /// a live `NSWindow`/`performDrag(with:)`. Lazy because the default
+    /// captures `self`.
+    lazy var requestWindowDrag: (NSEvent) -> Void = { [weak self] event in
+        self?.window?.performDrag(with: event)
+    }
+
     private var tabs: [NSWindow] = []
     private weak var selectedTab: NSWindow?
     private var totalWidth: CGFloat = 0
@@ -177,6 +187,29 @@ final class TabStripView: NSView {
     /// controls and is high enough to absorb hand-tremor without making
     /// the gesture feel laggy.
     private static let dragThreshold: CGFloat = 5
+
+    /// The intent of a pill drag once it has moved far enough to commit.
+    enum DragIntent: Equatable {
+        /// Hasn't moved past `threshold` yet — keep waiting.
+        case pending
+        /// Horizontal-dominant — reorder the tabs (existing gesture).
+        case reorder
+        /// Vertical-dominant — move the window instead.
+        case windowMove
+    }
+
+    /// Classify a pill drag by dominant axis. Pure + static so the whole
+    /// reorder-vs-window-move decision is testable without AppKit.
+    ///
+    /// `m = max(|dx|, |dy|)`; `m < threshold` → `.pending`; otherwise
+    /// horizontal-dominant (`|dx| > |dy|`) → `.reorder`, else → `.windowMove`
+    /// (exact 45° ties resolve to `.windowMove`, matching the user's
+    /// "left/right reorders, anything else moves the window" model).
+    static func classifyDrag(dx: CGFloat, dy: CGFloat,
+                             threshold: CGFloat) -> DragIntent {
+        if max(abs(dx), abs(dy)) < threshold { return .pending }
+        return abs(dx) > abs(dy) ? .reorder : .windowMove
+    }
 
     // MARK: - Inline-edit state
 
@@ -933,22 +966,44 @@ final class TabStripView: NSView {
         case .idle:
             return
         case .armed(let pending):
-            // Below threshold — gesture is still potentially a click.
-            if abs(p.x - pending.startPoint.x) < Self.dragThreshold { return }
-            // Promote to an active drag. Snap the hover state off —
-            // we're not painting close hotspots or hover backgrounds
-            // while a drag is in flight, and stale hover indices would
-            // visibly linger under the moving pill.
-            hoveredPill = nil
-            hoveredClose = false
-            hoveredAdd = false
-            dragPhase = .dragging(DragState(
-                originalIndex: pending.pillIndex,
-                downOffsetX: pending.downOffsetX,
-                cursorX: p.x,
-                currentIndex: pending.pillIndex
-            ))
-            needsDisplay = true
+            let dx = p.x - pending.startPoint.x
+            let dy = p.y - pending.startPoint.y
+            switch Self.classifyDrag(dx: dx, dy: dy,
+                                     threshold: Self.dragThreshold) {
+            case .pending:
+                // Hasn't moved far enough — still potentially a click.
+                return
+            case .reorder:
+                // Horizontal-dominant — promote to an active reorder
+                // drag. Snap the hover state off: we're not painting
+                // close hotspots or hover backgrounds while a drag is in
+                // flight, and stale hover indices would visibly linger
+                // under the moving pill.
+                hoveredPill = nil
+                hoveredClose = false
+                hoveredAdd = false
+                dragPhase = .dragging(DragState(
+                    originalIndex: pending.pillIndex,
+                    downOffsetX: pending.downOffsetX,
+                    cursorX: p.x,
+                    currentIndex: pending.pillIndex
+                ))
+                needsDisplay = true
+            case .windowMove:
+                // Vertical-dominant — the user is moving the window, not
+                // reordering. Drop the armed reorder, clear hover paint,
+                // and hand off to a native AppKit window drag. The
+                // hand-off consumes the rest of the gesture (the default
+                // `performDrag(with:)` blocks until mouse-up), so reset
+                // to `.idle` *before* the hand-off — no `mouseUp` will
+                // arrive to clear it for us.
+                hoveredPill = nil
+                hoveredClose = false
+                hoveredAdd = false
+                dragPhase = .idle
+                needsDisplay = true
+                requestWindowDrag(event)
+            }
         case .dragging(var state):
             // Bail out cleanly if the underlying tab list changed
             // shape mid-gesture (a sibling closed, a new tab opened) —
