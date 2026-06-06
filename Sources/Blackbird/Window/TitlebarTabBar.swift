@@ -990,8 +990,21 @@ final class TabStripView: NSView {
         case .armed(let pending):
             let dx = p.x - pending.startPoint.x
             let dy = p.y - pending.startPoint.y
-            switch Self.classifyDrag(dx: dx, dy: dy,
-                                     threshold: Self.dragThreshold) {
+            let intent: DragIntent
+            let dragMask = Preferences.shared.windowDragModifier.modifierMask
+            if !dragMask.isEmpty, event.modifierFlags.contains(dragMask) {
+                // The configured window-drag modifier (default ⌘) on a pill
+                // moves the window instead of reordering, regardless of drag
+                // direction — once the gesture has moved past the threshold
+                // (audit titlebar-tabs F10). Unifies the move affordance with
+                // the body modifier-drag.
+                guard max(abs(dx), abs(dy)) >= Self.dragThreshold else { return }
+                intent = .windowMove
+            } else {
+                intent = Self.classifyDrag(dx: dx, dy: dy,
+                                           threshold: Self.dragThreshold)
+            }
+            switch intent {
             case .pending:
                 // Hasn't moved far enough — still potentially a click.
                 return

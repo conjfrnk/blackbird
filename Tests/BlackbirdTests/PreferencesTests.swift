@@ -1,5 +1,6 @@
 import XCTest
 import Combine
+import AppKit
 @testable import Blackbird
 
 final class PreferencesTests: XCTestCase {
@@ -24,6 +25,8 @@ final class PreferencesTests: XCTestCase {
     private var savedColorQueryEnabled: Bool = false
     private var savedConfirmMultiLinePaste: Bool = false
     private var savedTranslucency: Double = 0
+    private var savedWindowDragModifierRaw: String = ""
+    private var savedWindowResizeModifierRaw: String = ""
 
     override class func setUp() {
         super.setUp()
@@ -67,6 +70,8 @@ final class PreferencesTests: XCTestCase {
         savedColorQueryEnabled = p.colorQueryEnabled
         savedConfirmMultiLinePaste = p.confirmMultiLinePaste
         savedTranslucency      = p.translucency
+        savedWindowDragModifierRaw   = p.windowDragModifierRaw
+        savedWindowResizeModifierRaw = p.windowResizeModifierRaw
     }
 
     override func tearDown() {
@@ -85,6 +90,8 @@ final class PreferencesTests: XCTestCase {
         p.colorQueryEnabled = savedColorQueryEnabled
         p.confirmMultiLinePaste = savedConfirmMultiLinePaste
         p.translucency      = savedTranslucency
+        p.windowDragModifierRaw   = savedWindowDragModifierRaw
+        p.windowResizeModifierRaw = savedWindowResizeModifierRaw
         super.tearDown()
     }
 
@@ -139,6 +146,7 @@ final class PreferencesTests: XCTestCase {
             "bb.autoUpdateChecks", "bb.osc52Enabled", "bb.colorQueryEnabled",
             "bb.confirmMultiLinePaste",
             "bb.translucency",
+            "bb.windowDragModifier", "bb.windowResizeModifier",
         ]
         let missing = Set(declared).subtracting(tracked)
         XCTAssertTrue(
@@ -302,6 +310,263 @@ final class PreferencesTests: XCTestCase {
         }
     }
 
+    // MARK: - WindowGestureModifier enum
+    //
+    // Drag/resize gesture modifier preference. Mirrors the BellStyle /
+    // OptionKey enum-pref pattern. There are intentionally exactly TWO
+    // cases (Command, Option-Command). Control was REMOVED: macOS routes
+    // Control+left-click to a secondary (right) click, so it can never
+    // drive a left-drag window move. ⌥⌘ is the collision-free alternative
+    // to ⌘ — it has no Control (no re-routing) and requires BOTH keys, so
+    // it never collides with ⌥-alone rectangular selection.
+
+    func test_windowGestureModifier_allCases_exactlyCommandOptionCommand() {
+        XCTAssertEqual(
+            Preferences.WindowGestureModifier.allCases,
+            [.command, .optionCommand],
+            "WindowGestureModifier must expose exactly [.command, .optionCommand] in that order — Control was removed (macOS re-routes Control+click to a right-click), and ⌥⌘ is the collision-free alternative to ⌘"
+        )
+    }
+
+    func test_windowGestureModifier_idMatchesRawValue() {
+        for modifier in Preferences.WindowGestureModifier.allCases {
+            XCTAssertEqual(modifier.id, modifier.rawValue,
+                           "WindowGestureModifier.\(modifier).id should match rawValue")
+        }
+    }
+
+    func test_windowGestureModifier_rawValues() {
+        XCTAssertEqual(Preferences.WindowGestureModifier.command.rawValue, "Command")
+        XCTAssertEqual(Preferences.WindowGestureModifier.optionCommand.rawValue, "Option-Command")
+    }
+
+    func test_windowGestureModifier_validRaw_roundTrips() {
+        for modifier in Preferences.WindowGestureModifier.allCases {
+            XCTAssertEqual(
+                Preferences.WindowGestureModifier(rawValue: modifier.rawValue), modifier,
+                "WindowGestureModifier(rawValue: \(modifier.rawValue)) must round-trip to .\(modifier)"
+            )
+        }
+    }
+
+    func test_windowGestureModifier_unknownRaw_initsToNil() {
+        // Unknown raw values must produce nil so the computed-property
+        // `?? .command` fallback can fire. Cover several shapes of garbage,
+        // including the deliberately-omitted "Option" case AND the now-removed
+        // "Control" case — Control is no longer a declared rawValue, so the
+        // prior on-disk "Control" preference must read back as unknown → nil.
+        for bad in ["Option", "Control", "", "garbage", "command", "CONTROL"] {
+            XCTAssertNil(
+                Preferences.WindowGestureModifier(rawValue: bad),
+                "WindowGestureModifier(rawValue: \"\(bad)\") must be nil — it is not a declared case"
+            )
+        }
+    }
+
+    // MARK: - WindowGestureModifier.modifierMask mapping
+    //
+    // The renderer/window code keys window drag + resize off this mask;
+    // a wrong mapping would silently move the gesture to the wrong key.
+
+    func test_windowGestureModifier_modifierMask_mapping() {
+        XCTAssertEqual(
+            Preferences.WindowGestureModifier.command.modifierMask,
+            NSEvent.ModifierFlags.command,
+            "Command must map to NSEvent.ModifierFlags.command"
+        )
+        XCTAssertEqual(
+            Preferences.WindowGestureModifier.optionCommand.modifierMask,
+            [.option, .command],
+            "Option-Command must map to an NSEvent.ModifierFlags containing BOTH .option and .command"
+        )
+    }
+
+    // MARK: - windowDragModifier / windowResizeModifier defaults + fallback
+
+    func test_windowDragModifier_default_isCommand() {
+        // On a clean defaults state the registered default is "Command".
+        // setUp/tearDown snapshot-restore the raw values, and the
+        // registered default fills the gap if the user-domain key is
+        // absent, so the computed property must resolve to .command.
+        XCTAssertEqual(
+            Preferences.shared.windowDragModifier, .command,
+            "windowDragModifier must default to .command"
+        )
+    }
+
+    func test_windowResizeModifier_default_isCommand() {
+        XCTAssertEqual(
+            Preferences.shared.windowResizeModifier, .command,
+            "windowResizeModifier must default to .command"
+        )
+    }
+
+    func test_windowDragModifier_validRaw_roundTrips() {
+        let p = Preferences.shared
+        p.windowDragModifierRaw = "Option-Command"
+        XCTAssertEqual(
+            p.windowDragModifier, .optionCommand,
+            "windowDragModifierRaw=Option-Command must resolve to .optionCommand"
+        )
+        p.windowDragModifierRaw = "Command"
+        XCTAssertEqual(p.windowDragModifier, .command)
+    }
+
+    func test_windowResizeModifier_validRaw_roundTrips() {
+        let p = Preferences.shared
+        p.windowResizeModifierRaw = "Option-Command"
+        XCTAssertEqual(
+            p.windowResizeModifier, .optionCommand,
+            "windowResizeModifierRaw=Option-Command must resolve to .optionCommand"
+        )
+        p.windowResizeModifierRaw = "Command"
+        XCTAssertEqual(p.windowResizeModifier, .command)
+    }
+
+    /// Control is now an INVALID rawValue (removed because macOS re-routes
+    /// Control+click to a right-click). A user upgrading from a build that
+    /// stored "Control" on disk must fall back to .command — the
+    /// computed-property `?? .command` path catches the now-unknown raw.
+    func test_windowDragModifier_legacyControlRaw_fallsBackToCommand() {
+        Preferences.shared.windowDragModifierRaw = "Control"
+        XCTAssertEqual(
+            Preferences.shared.windowDragModifier, .command,
+            "Legacy windowDragModifierRaw=Control is now unknown → must fall back to .command"
+        )
+    }
+
+    func test_windowResizeModifier_legacyControlRaw_fallsBackToCommand() {
+        Preferences.shared.windowResizeModifierRaw = "Control"
+        XCTAssertEqual(
+            Preferences.shared.windowResizeModifier, .command,
+            "Legacy windowResizeModifierRaw=Control is now unknown → must fall back to .command"
+        )
+    }
+
+    func test_windowDragModifier_unknownRaw_fallsBackToCommand() {
+        Preferences.shared.windowDragModifierRaw = "Bogus"
+        XCTAssertEqual(
+            Preferences.shared.windowDragModifier, .command,
+            "Unknown windowDragModifierRaw must yield .command via the ?? .command path"
+        )
+    }
+
+    func test_windowDragModifier_emptyRaw_fallsBackToCommand() {
+        Preferences.shared.windowDragModifierRaw = ""
+        XCTAssertEqual(Preferences.shared.windowDragModifier, .command)
+    }
+
+    func test_windowResizeModifier_unknownRaw_fallsBackToCommand() {
+        Preferences.shared.windowResizeModifierRaw = "Bogus"
+        XCTAssertEqual(
+            Preferences.shared.windowResizeModifier, .command,
+            "Unknown windowResizeModifierRaw must yield .command via the ?? .command path"
+        )
+    }
+
+    func test_windowResizeModifier_emptyRaw_fallsBackToCommand() {
+        Preferences.shared.windowResizeModifierRaw = ""
+        XCTAssertEqual(Preferences.shared.windowResizeModifier, .command)
+    }
+
+    // MARK: - WindowGestureModifier repair
+    //
+    // Mirrors the M4 theme/themeMode repair tests: the init-time enum
+    // repair (`repairEnumRawValues`) isn't re-invokable from the test
+    // body — `Preferences.shared` initialises once per process. So the
+    // repair is pinned two ways: (1) a source-level presence pin that
+    // both keys exist and surface a `.command` fallback, and (2) a
+    // schema-gated, observer-path runtime test (BB_RUN_STRESS_TESTS)
+    // that mirrors `test_m4_themeRepair_landsOnGruvbox` — writing a
+    // garbage raw and asserting the repair resets it to "Command".
+
+    /// Source-level pin: both modifier keys must exist and fall back to
+    /// `.command`. The runtime `?? .command` path is covered by the
+    /// *_unknownRaw_fallsBackToCommand tests above; this catches a
+    /// rename/divergence on the corrupted-rawValue branch that runtime
+    /// coverage alone is too rare to catch reliably.
+    func test_windowGestureModifier_repairTarget_isCommand_inSource() throws {
+        let prefsURL = try Self.locatePreferencesSwift()
+        let src = try String(contentsOf: prefsURL, encoding: .utf8)
+        XCTAssertTrue(
+            src.contains("bb.windowDragModifier"),
+            "windowDragModifier key must be present in Preferences.swift"
+        )
+        XCTAssertTrue(
+            src.contains("bb.windowResizeModifier"),
+            "windowResizeModifier key must be present in Preferences.swift"
+        )
+        XCTAssertTrue(
+            src.contains("?? .command"),
+            "windowDragModifier/windowResizeModifier must fall back to .command on an unknown raw"
+        )
+    }
+
+    /// Runtime repair — write a garbage windowDragModifier rawValue and
+    /// verify the observer-driven repair resets it to "Command" (the
+    /// registered default). Mirrors `test_m4_themeRepair_landsOnGruvbox`
+    /// exactly: same schema-version gate so the downgrade guard doesn't
+    /// skip the repair, same BB_RUN_STRESS_TESTS gate for the cumulative-
+    /// ASan CATransaction-pop SEGV during RunLoop pumping.
+    func test_windowDragModifierRepair_landsOnCommand() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "RunLoop-pumping repair test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1")
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+        let schemaKey = "bb.prefsSchemaVersion"
+        let originalSchema = d.object(forKey: schemaKey)
+        let originalRaw = p.windowDragModifierRaw
+        defer {
+            if let originalSchema {
+                d.set(originalSchema, forKey: schemaKey)
+            } else {
+                d.removeObject(forKey: schemaKey)
+            }
+            p.windowDragModifierRaw = originalRaw
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        d.set(Preferences.currentSchemaVersion, forKey: schemaKey)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        d.set("garbage_dragmod_\(UUID().uuidString)", forKey: "bb.windowDragModifier")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+
+        XCTAssertEqual(
+            p.windowDragModifierRaw, Preferences.WindowGestureModifier.command.rawValue,
+            "corrupted bb.windowDragModifier must repair to \"Command\" (registered default), got \(p.windowDragModifierRaw)"
+        )
+    }
+
+    /// Runtime repair — same shape as the drag test, for resize.
+    func test_windowResizeModifierRepair_landsOnCommand() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "RunLoop-pumping repair test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1")
+        let p = Preferences.shared
+        let d = UserDefaults.standard
+        let schemaKey = "bb.prefsSchemaVersion"
+        let originalSchema = d.object(forKey: schemaKey)
+        let originalRaw = p.windowResizeModifierRaw
+        defer {
+            if let originalSchema {
+                d.set(originalSchema, forKey: schemaKey)
+            } else {
+                d.removeObject(forKey: schemaKey)
+            }
+            p.windowResizeModifierRaw = originalRaw
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        d.set(Preferences.currentSchemaVersion, forKey: schemaKey)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        d.set("garbage_resizemod_\(UUID().uuidString)", forKey: "bb.windowResizeModifier")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+
+        XCTAssertEqual(
+            p.windowResizeModifierRaw, Preferences.WindowGestureModifier.command.rawValue,
+            "corrupted bb.windowResizeModifier must repair to \"Command\" (registered default), got \(p.windowResizeModifierRaw)"
+        )
+    }
+
     // MARK: - Simple setter round-trip for scalar properties
 
     func test_scalarProperties_roundTrip() {
@@ -446,6 +711,7 @@ final class PreferencesTests: XCTestCase {
             "bb.cursorBlink", "bb.bell", "bb.cursorShape", "bb.optionKey",
             "bb.confirmClose", "bb.autoUpdateChecks", "bb.osc52Enabled",
             "bb.colorQueryEnabled", "bb.translucency",
+            "bb.windowDragModifier", "bb.windowResizeModifier",
         ] {
             XCTAssertNotNil(
                 d.object(forKey: key),

@@ -157,7 +157,7 @@ public struct SettingsView: View {
 
     private var behaviorTab: some View {
         Form {
-            Section("Terminal") {
+            Section {
                 Picker("Bell", selection: $prefs.bellRaw) {
                     ForEach(Preferences.BellStyle.allCases) { s in
                         Text(s.rawValue).tag(s.rawValue)
@@ -168,7 +168,21 @@ public struct SettingsView: View {
                         Text(o.rawValue).tag(o.rawValue)
                     }
                 }
+                Picker("Move window with", selection: $prefs.windowDragModifierRaw) {
+                    ForEach(Preferences.WindowGestureModifier.allCases) { m in
+                        Text(m.rawValue).tag(m.rawValue)
+                    }
+                }
+                Picker("Resize window with", selection: $prefs.windowResizeModifierRaw) {
+                    ForEach(Preferences.WindowGestureModifier.allCases) { m in
+                        Text(m.rawValue).tag(m.rawValue)
+                    }
+                }
                 Toggle("Confirm quit while processes are running", isOn: $prefs.confirmClose)
+            } header: {
+                Text("Terminal")
+            } footer: {
+                Self.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. The empty title-bar area and a vertical tab drag always move the window without a modifier.")
             }
 
             Section {

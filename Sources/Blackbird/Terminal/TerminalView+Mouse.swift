@@ -13,8 +13,9 @@ import BBCore
 ///     handling, wheel reporting (buttons 64/65), middle-mouse, and
 ///     the option-modifier escape hatch that lets users bypass
 ///     reporting when a TUI captures the wheel.
-///   - **⌘-drag window move / resize** — with the app's `.command`
-///     modifier held, left-drag moves the window and right-drag
+///   - **Modifier-drag window move / resize** — with the configured
+///     `Preferences.windowDragModifier` / `windowResizeModifier` held
+///     (default `.command`), left-drag moves the window and right-drag
 ///     resizes from the nearest corner. Matches Amethyst-style tiling
 ///     workflows and Blackbird's own keybinding table.
 ///
@@ -59,6 +60,9 @@ extension TerminalView {
         // can initiate window drag by calling `performDrag(with:)`; the
         // call blocks until the mouse is released, so this returns cleanly
         // without triggering the selection path below.
+        // ⌘-click on a URL → open it. URL-open stays bound to ⌘ (the
+        // universal link-open convention) regardless of the configurable
+        // window-drag modifier handled just below.
         if event.modifierFlags.contains(.command) {
             let underlyingOption = event.modifierFlags.contains(.option)
             // Suppress URL resolution when the click landed in the
@@ -85,7 +89,13 @@ extension TerminalView {
                     return
                 }
             }
-            // No URL under the click — treat as window drag.
+        }
+        // Configured window-drag modifier (default ⌘) → move the window like a
+        // titlebar drag. Any view can initiate a window drag by calling
+        // `performDrag(with:)`; the call blocks until the mouse is released,
+        // so this returns cleanly without triggering the selection path below.
+        let windowDragMask = Preferences.shared.windowDragModifier.modifierMask
+        if !windowDragMask.isEmpty, event.modifierFlags.contains(windowDragMask) {
             window?.performDrag(with: event)
             return
         }
@@ -123,8 +133,11 @@ extension TerminalView {
         case 2: mode = .word
         default:
             // ⌥-drag for rectangular (column-block) selection — iTerm2 /
-            // Terminal.app default. ⌘ is reserved for URL-open / window-drag
-            // and never reaches here (the .command branch above returns).
+            // Terminal.app default. ⌘-click is reserved for URL-open and, when
+            // ⌘ is the configured window-drag modifier (the default), window
+            // drag — both of which return above before reaching here. If the
+            // drag modifier is remapped (e.g. ⌥⌘), a bare ⌘-drag with no URL
+            // intentionally falls through to character selection here.
             mode = event.modifierFlags.contains(.option) ? .rectangular : .character
         }
         selection = Selection(anchor: point, cursor: point, mode: mode)
@@ -271,12 +284,14 @@ extension TerminalView {
     }
 
     public override func rightMouseDown(with event: NSEvent) {
-        // ⌘ + right-drag → resize the window from the corner nearest the
-        // click. Matches the borderless-window idiom from apps like iTerm2
-        // and VS Code: ⌘-drag moves, ⌘-right-drag resizes. Anchor the
-        // OPPOSITE corner so dragging from (say) the top-right pulls the
-        // top-right while bottom-left stays pinned.
-        if event.modifierFlags.contains(.command), let win = window {
+        // Configured resize modifier (default ⌘) + right-drag → resize the
+        // window from the corner nearest the click. Matches the borderless-
+        // window idiom from apps like iTerm2 and VS Code: modifier-drag moves,
+        // modifier-right-drag resizes. Anchor the OPPOSITE corner so dragging
+        // from (say) the top-right pulls the top-right while bottom-left stays
+        // pinned.
+        let windowResizeMask = Preferences.shared.windowResizeModifier.modifierMask
+        if !windowResizeMask.isEmpty, event.modifierFlags.contains(windowResizeMask), let win = window {
             let local = convert(event.locationInWindow, from: nil)
             let left = local.x < bounds.width / 2
             // AppKit's Y-axis points up, so "below the midline" = smaller y.

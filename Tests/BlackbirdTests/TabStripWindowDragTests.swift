@@ -111,10 +111,23 @@ final class TabStripWindowDragTests: XCTestCase {
     /// modifier key").
     private func mouseEvent(_ type: NSEvent.EventType, at p: NSPoint,
                             clickCount: Int = 1) -> NSEvent {
+        mouseEvent(type, at: p, modifierFlags: [], clickCount: clickCount)
+    }
+
+    /// Modifier-bearing variant of the factory above. Mirrors the no-modifier
+    /// version exactly except that `modifierFlags` is caller-supplied so a
+    /// gesture can carry the configured window-drag modifier (default ⌘).
+    /// The window-drag-modifier contract (audit titlebar-tabs F10) says a
+    /// ⌘-drag moves the window regardless of axis, so the modifier MUST ride
+    /// on the synthesized event — `[]` would route through the axis
+    /// classifier instead.
+    private func mouseEvent(_ type: NSEvent.EventType, at p: NSPoint,
+                            modifierFlags: NSEvent.ModifierFlags,
+                            clickCount: Int = 1) -> NSEvent {
         NSEvent.mouseEvent(
             with: type,
             location: p,
-            modifierFlags: [],
+            modifierFlags: modifierFlags,
             timestamp: 0,
             windowNumber: 0,
             context: nil,
@@ -418,6 +431,154 @@ final class TabStripWindowDragTests: XCTestCase {
             "horizontal drag past threshold must promote to the reorder .dragging state")
         XCTAssertEqual(state?.originalIndex, grabbed,
             "reorder originalIndex must equal the grabbed pill index")
+    }
+
+    // MARK: - C2. ⌘-drag moves the window regardless of axis
+
+    /// Audit titlebar-tabs F10: holding the configured window-drag modifier
+    /// (default ⌘, `Preferences.shared.windowDragModifier`) while dragging a
+    /// pill moves the WINDOW instead of reordering — and it does so by
+    /// *bypassing* the vertical/horizontal axis classifier entirely. The
+    /// adversarial shape here is a HORIZONTAL drag well past the 5pt
+    /// threshold: without the modifier this is the canonical reorder gesture
+    /// (proven by `test_horizontalPillDrag_pastThreshold_stillReorders…`).
+    /// With ⌘ held it must instead fire the window-move seam once and leave
+    /// no reorder-committable state. A buggy impl that only consults
+    /// `classifyDrag` (ignoring the modifier) would reorder and fail every
+    /// assertion below; one that fires the seam AND arms a reorder would fail
+    /// the state-clearing assertions.
+    func test_commandDrag_onPill_movesWindow_notReorder() {
+        // Pin the modifier hermetically so this test doesn't ride on the
+        // global default. The raw value for Command is the string "Command".
+        let saved = Preferences.shared.windowDragModifierRaw
+        Preferences.shared.windowDragModifierRaw = "Command"
+        defer { Preferences.shared.windowDragModifierRaw = saved }
+
+        let (strip, _) = makeStrip(tabCount: 3)
+        let frames = strip.pillFramesForTesting
+        XCTAssertGreaterThanOrEqual(frames.count, 2,
+            "test precondition: at least 2 pill frames")
+
+        var fired = 0
+        strip.requestWindowDrag = { _ in fired += 1 }
+
+        var observed = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: TabOrderCoordinator.orderDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in observed += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        let down = pillCenter(frames[1])
+        strip.mouseDown(with: mouseEvent(.leftMouseDown, at: down))
+        // ⌘ held + a HORIZONTAL delta past threshold (dx=10, dy=0). Without
+        // the modifier this is unambiguously a reorder; the modifier must
+        // override the classifier and move the window instead.
+        strip.mouseDragged(with: mouseEvent(.leftMouseDragged,
+                                            at: NSPoint(x: down.x + 10, y: down.y),
+                                            modifierFlags: [.command]))
+
+        XCTAssertEqual(fired, 1,
+            "⌘-drag past threshold must call requestWindowDrag exactly once")
+        XCTAssertNil(strip.dragStateForTesting,
+            "⌘-drag must NOT enter the reorder .dragging state")
+        XCTAssertNil(strip.pendingDragPillIndexForTesting,
+            "⌘-drag must reset the strip's drag state to idle")
+
+        drainMainQueue()
+        XCTAssertEqual(observed, 0,
+            "⌘-drag must NOT post orderDidChange (no reorder commit)")
+    }
+
+    // MARK: - C3. the configured window-drag modifier is actually READ
+    //
+    // `test_commandDrag_onPill_movesWindow_notReorder` pins the modifier to
+    // "Command" and sends ⌘ — a hardcoded-⌘ implementation that ignores the
+    // preference entirely would still pass it. These two tests prove the pill
+    // path READS `Preferences.shared.windowDragModifier` rather than baking in
+    // ⌘: with the pref set to "Option-Command", a ⌘-only drag must NOT move the
+    // window (it falls through to the normal axis classifier → reorder), and an
+    // ⌥⌘ drag MUST move it.
+
+    /// Case A — WRONG modifier does NOT move the window. With the configured
+    /// modifier set to ⌥⌘, a ⌘-ONLY horizontal drag past threshold must behave
+    /// like an ordinary reorder gesture: no window move, and a reorder armed.
+    /// This is the assertion that fails for a hardcoded-⌘ impl — it would fire
+    /// the window-move seam on the ⌘-only drag.
+    func test_configuredOptionCommandModifier_isHonored_onPill_wrongModifierDoesNotMove() {
+        let saved = Preferences.shared.windowDragModifierRaw
+        Preferences.shared.windowDragModifierRaw = "Option-Command"
+        defer { Preferences.shared.windowDragModifierRaw = saved }
+
+        let (strip, _) = makeStrip(tabCount: 3)
+        let frames = strip.pillFramesForTesting
+        XCTAssertGreaterThanOrEqual(frames.count, 2,
+            "test precondition: at least 2 pill frames")
+
+        var fired = 0
+        strip.requestWindowDrag = { _ in fired += 1 }
+
+        let grabbed = 1
+        let down = pillCenter(frames[grabbed])
+        strip.mouseDown(with: mouseEvent(.leftMouseDown, at: down))
+        // ⌘ ONLY (not the configured ⌥⌘) + a HORIZONTAL delta past threshold
+        // (dx=10, dy=0). Because the configured modifier is ⌥⌘, the bare ⌘ no
+        // longer triggers the window-move bypass; this routes through the axis
+        // classifier → reorder. If ⌘ were still hardcoded, the window would move.
+        strip.mouseDragged(with: mouseEvent(.leftMouseDragged,
+                                            at: NSPoint(x: down.x + 10, y: down.y),
+                                            modifierFlags: [.command]))
+
+        XCTAssertEqual(fired, 0,
+            "with the configured modifier set to ⌥⌘, a ⌘-only drag must NOT move the window — proves ⌘ is no longer hardcoded")
+        XCTAssertNotNil(strip.dragStateForTesting,
+            "a ⌘-only drag (wrong modifier) is now just a normal reorder, so it must arm the .dragging state")
+    }
+
+    /// Case B — RIGHT modifier DOES move the window. With the configured
+    /// modifier set to ⌥⌘, an ⌥⌘ horizontal drag past threshold must fire the
+    /// window-move seam exactly once and leave no reorder-committable state.
+    func test_configuredOptionCommandModifier_isHonored_onPill_rightModifierMoves() {
+        let saved = Preferences.shared.windowDragModifierRaw
+        Preferences.shared.windowDragModifierRaw = "Option-Command"
+        defer { Preferences.shared.windowDragModifierRaw = saved }
+
+        let (strip, _) = makeStrip(tabCount: 3)
+        let frames = strip.pillFramesForTesting
+        XCTAssertGreaterThanOrEqual(frames.count, 2,
+            "test precondition: at least 2 pill frames")
+
+        var fired = 0
+        strip.requestWindowDrag = { _ in fired += 1 }
+
+        var observed = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: TabOrderCoordinator.orderDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in observed += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        let down = pillCenter(frames[1])
+        strip.mouseDown(with: mouseEvent(.leftMouseDown, at: down))
+        // ⌥⌘ (the configured modifier) + a HORIZONTAL delta past threshold
+        // (dx=10, dy=0). The modifier must override the axis classifier and
+        // move the window.
+        strip.mouseDragged(with: mouseEvent(.leftMouseDragged,
+                                            at: NSPoint(x: down.x + 10, y: down.y),
+                                            modifierFlags: [.option, .command]))
+
+        XCTAssertEqual(fired, 1,
+            "⌥⌘-drag (the configured modifier) past threshold must call requestWindowDrag exactly once")
+        XCTAssertNil(strip.dragStateForTesting,
+            "⌥⌘-drag must NOT enter the reorder .dragging state")
+        XCTAssertNil(strip.pendingDragPillIndexForTesting,
+            "⌥⌘-drag must reset the strip's drag state to idle")
+
+        drainMainQueue()
+        XCTAssertEqual(observed, 0,
+            "⌥⌘-drag must NOT post orderDidChange (no reorder commit)")
     }
 
     // MARK: - D. below-threshold drag stays armed, no window move
