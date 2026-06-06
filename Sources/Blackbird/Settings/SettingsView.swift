@@ -172,17 +172,20 @@ public struct SettingsView: View {
             }
 
             Section {
-                Toggle("Allow remote clipboard writes (OSC 52)", isOn: $prefs.osc52Enabled)
+                // The "Allow remote clipboard writes (OSC 52)" toggle was
+                // removed (audit S4-001): the Rust core hardcodes
+                // `Osc52::Disabled` with no FFI to change it, so OSC 52 writes
+                // never reach the Swift side — the toggle advertised a
+                // capability that could never take effect. The `osc52Enabled`
+                // preference and the Swift-side scrub / size-cap handler are
+                // retained as dormant defence-in-depth (and stay unit-tested)
+                // for if the core ever opts back in, but they are no longer
+                // user-exposed.
                 Toggle("Reply to color queries (OSC 10/11/12)", isOn: $prefs.colorQueryEnabled)
             } header: {
                 Text("Security")
             } footer: {
-                // The two toggles in this section are related (both gate what
-                // a remote / in-terminal program can ask the emulator to do),
-                // so one combined footer keeps the UI dense without losing the
-                // explanatory nuance each toggle needs. Blank line separates
-                // the two paragraphs.
-                Self.footer("OSC 52 lets remote shells write text to your Mac clipboard. Disable it on untrusted servers.\n\nOSC 10/11/12 lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors. Off by default — the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
+                Self.footer("OSC 10/11/12 lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors. Off by default — the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
             }
         }
         .formStyle(.grouped)
