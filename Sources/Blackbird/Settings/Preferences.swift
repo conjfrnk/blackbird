@@ -137,9 +137,14 @@ public final class Preferences: ObservableObject {
     /// clipboard up to 1 MiB without user consent when on. The scrub
     /// pipeline blocks raw C0/C1/bidi bytes, but cross-app paste into a
     /// password field or bank-transfer IBAN is still trivial once a
-    /// hostile remote can emit OSC 52. Users who want auto-clipboard
-    /// integration (helix, some nvim clipboard providers) can opt in
-    /// explicitly via Settings. See `SEC-001` in the v0.1.9 sweep triage.
+    /// hostile remote can emit OSC 52. The user-facing Settings toggle was
+    /// removed in audit S4-001 because the Rust core hardcodes
+    /// `Osc52::Disabled` (no FFI to flip it), so OSC 52 writes never reach the
+    /// Swift handler — the toggle promised a capability it could not deliver.
+    /// This preference (registered default `false`) and the Swift scrub / size-
+    /// cap handler are retained as dormant defence-in-depth — and stay
+    /// unit-tested — for if the core ever re-enables OSC 52.
+    /// See `SEC-001` in the v0.1.9 sweep triage.
     @AppStorage("bb.osc52Enabled")   public var osc52Enabled: Bool = false
     /// Audit L19. When true, pasting text containing a newline (LF)
     /// while the foreground process has NOT requested bracketed paste
