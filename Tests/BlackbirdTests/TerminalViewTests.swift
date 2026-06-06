@@ -880,6 +880,34 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(TerminalView.stripBidiOverrides(input), input)
     }
 
+    func test_stripBidiOverrides_malformedTagBlockLeadDoesNotOverConsume() {
+        // A valid Plane-14 tag-block scalar is 4 bytes: F3 A0 {80|81} XX
+        // where XX is a UTF-8 continuation byte (0x80–0xBF). When the lead
+        // F3 A0 80 is followed by a NON-continuation byte (0x41 = ASCII 'A',
+        // which is < 0x80) the 4 bytes do NOT form a tag-block scalar, so the
+        // 4th byte must NOT be consumed/dropped. Consistent with how the
+        // function treats every other near-miss lead (e.g. `C2 <not AD>`,
+        // `E2 80 <out of range>` — the lead byte is preserved and scanning
+        // resumes one byte later), the unrecognised `F3 A0 80` prefix passes
+        // through verbatim and NOTHING is dropped. The current (buggy) code
+        // over-consumes 4 bytes, emitting only `[0x42]` — this assertion fails
+        // on it. Audit S3-005.
+        let malformed = Data([0xF3, 0xA0, 0x80, 0x41, 0x42])
+        XCTAssertEqual(
+            TerminalView.stripBidiOverrides(malformed),
+            Data([0xF3, 0xA0, 0x80, 0x41, 0x42]),
+            "Malformed F3 A0 80 lead followed by a non-continuation byte must "
+                + "not over-consume: no byte may be dropped — the prefix and "
+                + "trailing 'A'/'B' all survive verbatim")
+
+        // Pin the valid path: a well-formed tag-block scalar (F3 A0 80 80 =
+        // U+E0000) is still stripped, leaving the trailing 'B' (0x42).
+        let wellFormed = Data([0xF3, 0xA0, 0x80, 0x80, 0x42])
+        XCTAssertEqual(
+            TerminalView.stripBidiOverrides(wellFormed), Data([0x42]),
+            "Well-formed tag-block scalar F3 A0 80 80 must still be stripped")
+    }
+
     // MARK: - Paste line-ending normalisation
 
     func test_normalizePaste_collapsesCRLF() {
