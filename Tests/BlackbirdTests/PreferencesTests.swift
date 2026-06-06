@@ -314,14 +314,17 @@ final class PreferencesTests: XCTestCase {
     //
     // Drag/resize gesture modifier preference. Mirrors the BellStyle /
     // OptionKey enum-pref pattern. There are intentionally exactly TWO
-    // cases (Command, Control): Option is reserved for rectangular
-    // selection and "none" would collide with text selection.
+    // cases (Command, Option-Command). Control was REMOVED: macOS routes
+    // Control+left-click to a secondary (right) click, so it can never
+    // drive a left-drag window move. ⌥⌘ is the collision-free alternative
+    // to ⌘ — it has no Control (no re-routing) and requires BOTH keys, so
+    // it never collides with ⌥-alone rectangular selection.
 
-    func test_windowGestureModifier_allCases_exactlyCommandControl() {
+    func test_windowGestureModifier_allCases_exactlyCommandOptionCommand() {
         XCTAssertEqual(
             Preferences.WindowGestureModifier.allCases,
-            [.command, .control],
-            "WindowGestureModifier must expose exactly [.command, .control] in that order — no .option (reserved for rect-select), no .none (collides with text-select)"
+            [.command, .optionCommand],
+            "WindowGestureModifier must expose exactly [.command, .optionCommand] in that order — Control was removed (macOS re-routes Control+click to a right-click), and ⌥⌘ is the collision-free alternative to ⌘"
         )
     }
 
@@ -334,7 +337,7 @@ final class PreferencesTests: XCTestCase {
 
     func test_windowGestureModifier_rawValues() {
         XCTAssertEqual(Preferences.WindowGestureModifier.command.rawValue, "Command")
-        XCTAssertEqual(Preferences.WindowGestureModifier.control.rawValue, "Control")
+        XCTAssertEqual(Preferences.WindowGestureModifier.optionCommand.rawValue, "Option-Command")
     }
 
     func test_windowGestureModifier_validRaw_roundTrips() {
@@ -349,8 +352,10 @@ final class PreferencesTests: XCTestCase {
     func test_windowGestureModifier_unknownRaw_initsToNil() {
         // Unknown raw values must produce nil so the computed-property
         // `?? .command` fallback can fire. Cover several shapes of garbage,
-        // including the deliberately-omitted "Option" case.
-        for bad in ["Option", "", "garbage", "command", "CONTROL"] {
+        // including the deliberately-omitted "Option" case AND the now-removed
+        // "Control" case — Control is no longer a declared rawValue, so the
+        // prior on-disk "Control" preference must read back as unknown → nil.
+        for bad in ["Option", "Control", "", "garbage", "command", "CONTROL"] {
             XCTAssertNil(
                 Preferences.WindowGestureModifier(rawValue: bad),
                 "WindowGestureModifier(rawValue: \"\(bad)\") must be nil — it is not a declared case"
@@ -370,9 +375,9 @@ final class PreferencesTests: XCTestCase {
             "Command must map to NSEvent.ModifierFlags.command"
         )
         XCTAssertEqual(
-            Preferences.WindowGestureModifier.control.modifierMask,
-            NSEvent.ModifierFlags.control,
-            "Control must map to NSEvent.ModifierFlags.control"
+            Preferences.WindowGestureModifier.optionCommand.modifierMask,
+            [.option, .command],
+            "Option-Command must map to an NSEvent.ModifierFlags containing BOTH .option and .command"
         )
     }
 
@@ -398,10 +403,10 @@ final class PreferencesTests: XCTestCase {
 
     func test_windowDragModifier_validRaw_roundTrips() {
         let p = Preferences.shared
-        p.windowDragModifierRaw = "Control"
+        p.windowDragModifierRaw = "Option-Command"
         XCTAssertEqual(
-            p.windowDragModifier, .control,
-            "windowDragModifierRaw=Control must resolve to .control"
+            p.windowDragModifier, .optionCommand,
+            "windowDragModifierRaw=Option-Command must resolve to .optionCommand"
         )
         p.windowDragModifierRaw = "Command"
         XCTAssertEqual(p.windowDragModifier, .command)
@@ -409,13 +414,33 @@ final class PreferencesTests: XCTestCase {
 
     func test_windowResizeModifier_validRaw_roundTrips() {
         let p = Preferences.shared
-        p.windowResizeModifierRaw = "Control"
+        p.windowResizeModifierRaw = "Option-Command"
         XCTAssertEqual(
-            p.windowResizeModifier, .control,
-            "windowResizeModifierRaw=Control must resolve to .control"
+            p.windowResizeModifier, .optionCommand,
+            "windowResizeModifierRaw=Option-Command must resolve to .optionCommand"
         )
         p.windowResizeModifierRaw = "Command"
         XCTAssertEqual(p.windowResizeModifier, .command)
+    }
+
+    /// Control is now an INVALID rawValue (removed because macOS re-routes
+    /// Control+click to a right-click). A user upgrading from a build that
+    /// stored "Control" on disk must fall back to .command — the
+    /// computed-property `?? .command` path catches the now-unknown raw.
+    func test_windowDragModifier_legacyControlRaw_fallsBackToCommand() {
+        Preferences.shared.windowDragModifierRaw = "Control"
+        XCTAssertEqual(
+            Preferences.shared.windowDragModifier, .command,
+            "Legacy windowDragModifierRaw=Control is now unknown → must fall back to .command"
+        )
+    }
+
+    func test_windowResizeModifier_legacyControlRaw_fallsBackToCommand() {
+        Preferences.shared.windowResizeModifierRaw = "Control"
+        XCTAssertEqual(
+            Preferences.shared.windowResizeModifier, .command,
+            "Legacy windowResizeModifierRaw=Control is now unknown → must fall back to .command"
+        )
     }
 
     func test_windowDragModifier_unknownRaw_fallsBackToCommand() {

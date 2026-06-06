@@ -13,8 +13,9 @@ import BBCore
 ///     handling, wheel reporting (buttons 64/65), middle-mouse, and
 ///     the option-modifier escape hatch that lets users bypass
 ///     reporting when a TUI captures the wheel.
-///   - **⌘-drag window move / resize** — with the app's `.command`
-///     modifier held, left-drag moves the window and right-drag
+///   - **Modifier-drag window move / resize** — with the configured
+///     `Preferences.windowDragModifier` / `windowResizeModifier` held
+///     (default `.command`), left-drag moves the window and right-drag
 ///     resizes from the nearest corner. Matches Amethyst-style tiling
 ///     workflows and Blackbird's own keybinding table.
 ///
@@ -132,8 +133,11 @@ extension TerminalView {
         case 2: mode = .word
         default:
             // ⌥-drag for rectangular (column-block) selection — iTerm2 /
-            // Terminal.app default. ⌘ is reserved for URL-open / window-drag
-            // and never reaches here (the .command branch above returns).
+            // Terminal.app default. ⌘-click is reserved for URL-open and, when
+            // ⌘ is the configured window-drag modifier (the default), window
+            // drag — both of which return above before reaching here. If the
+            // drag modifier is remapped (e.g. ⌥⌘), a bare ⌘-drag with no URL
+            // intentionally falls through to character selection here.
             mode = event.modifierFlags.contains(.option) ? .rectangular : .character
         }
         selection = Selection(anchor: point, cursor: point, mode: mode)

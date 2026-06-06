@@ -75,18 +75,24 @@ public final class Preferences: ObservableObject {
 
     /// Modifier held while dragging the terminal body or a tab pill to MOVE
     /// the window (the empty title-bar gutter and a vertical tab drag move it
-    /// with no modifier). Also reused for the right-drag resize gesture.
-    /// Option is intentionally NOT offered: it is reserved for rectangular
-    /// selection and for escaping a TUI's mouse capture, so binding it to
-    /// window drag would break both.
+    /// with no modifier); also reused for the right-drag resize gesture.
+    ///
+    /// Only ⌘ and ⌥⌘ are offered, because in a terminal every other modifier
+    /// is already taken:
+    /// - Plain ⌥ is rectangular selection + the TUI mouse-capture escape; but
+    ///   ⌥⌘ is safe because the drag gate requires BOTH keys, so it never
+    ///   matches an ⌥-alone gesture.
+    /// - ⌃ is excluded entirely: macOS routes ⌃+left-click to a secondary
+    ///   (right) click, so a ⌃ left-drag is delivered to `rightMouseDown` and
+    ///   would never reach the move path.
     public enum WindowGestureModifier: String, CaseIterable, Identifiable {
-        case command = "Command", control = "Control"
+        case command = "Command", optionCommand = "Option-Command"
         public var id: String { rawValue }
-        /// AppKit flag this maps to.
+        /// AppKit flag(s) this maps to.
         public var modifierMask: NSEvent.ModifierFlags {
             switch self {
-            case .command: return .command
-            case .control: return .control
+            case .command:       return .command
+            case .optionCommand: return [.option, .command]
             }
         }
     }
