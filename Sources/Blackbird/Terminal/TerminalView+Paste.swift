@@ -340,12 +340,18 @@ extension TerminalView {
             if remaining >= 4, b0 == 0xF3 {
                 let b1 = input[input.index(i, offsetBy: 1)]
                 let b2 = input[input.index(i, offsetBy: 2)]
-                if b1 == 0xA0 {
-                    // Tag block: b2 ∈ {80, 81}, b3 any continuation.
-                    if b2 == 0x80 || b2 == 0x81 {
-                        i = input.index(i, offsetBy: 4)
-                        continue
-                    }
+                let b3 = input[input.index(i, offsetBy: 3)]
+                // Tag block U+E0000–E007F: F3 A0 {80|81} XX, where XX must be a
+                // UTF-8 continuation byte (0x80–0xBF) for the four bytes to form
+                // a valid scalar. Validate b3 so a *malformed* lead
+                // `F3 A0 80 <non-continuation>` is NOT mistaken for a tag-block
+                // scalar and over-consumed — over-consuming would silently drop
+                // the byte after the prefix. Like every other near-miss above
+                // (e.g. `C2 <not AD>`, `E2 80 <out of range>`), an unrecognised
+                // lead falls through and is preserved verbatim. Audit S3-005.
+                if b1 == 0xA0, b2 == 0x80 || b2 == 0x81, (0x80...0xBF).contains(b3) {
+                    i = input.index(i, offsetBy: 4)
+                    continue
                 }
             }
 
