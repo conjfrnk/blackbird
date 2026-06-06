@@ -127,9 +127,16 @@ final class TabStripView: NSView {
     /// pass-through `hitTest`). Default performs a native AppKit window
     /// drag; injectable so a headless test can spy on the hand-off without
     /// a live `NSWindow`/`performDrag(with:)`. Lazy because the default
-    /// captures `self`.
+    /// captures `self`. The no-window branch logs rather than dropping the
+    /// gesture silently — the strip is a permanently-attached titlebar
+    /// accessory, so a nil window here means a future refactor broke that
+    /// invariant (review S-2; matches the `dragLogger` discipline below).
     lazy var requestWindowDrag: (NSEvent) -> Void = { [weak self] event in
-        self?.window?.performDrag(with: event)
+        guard let window = self?.window else {
+            Self.dragLogger.notice("windowMove hand-off skipped: tab strip has no window — gesture dropped")
+            return
+        }
+        window.performDrag(with: event)
     }
 
     private var tabs: [NSWindow] = []
@@ -198,17 +205,32 @@ final class TabStripView: NSView {
         case windowMove
     }
 
+    /// Vertical-dominance bias for promoting a pill drag to a window move.
+    /// A drag is a window move only when `|dy| > |dx| * this` (steeper than
+    /// ~56° from horizontal). Ties and shallow diagonals stay `.reorder`:
+    /// reorder is reversible (the pill stays in the strip and can be dragged
+    /// back), whereas a window move is committed the instant `performDrag`
+    /// takes over, so the ambiguous cone resolves to the recoverable
+    /// outcome (review S-1).
+    static let windowMoveVerticalBias: CGFloat = 1.5
+
     /// Classify a pill drag by dominant axis. Pure + static so the whole
     /// reorder-vs-window-move decision is testable without AppKit.
     ///
-    /// `m = max(|dx|, |dy|)`; `m < threshold` → `.pending`; otherwise
-    /// horizontal-dominant (`|dx| > |dy|`) → `.reorder`, else → `.windowMove`
-    /// (exact 45° ties resolve to `.windowMove`, matching the user's
-    /// "left/right reorders, anything else moves the window" model).
+    /// - non-finite `dx`/`dy` → `.pending` (ignore a degenerate sample)
+    /// - `max(|dx|,|dy|) < threshold` → `.pending` (hasn't committed yet)
+    /// - `|dy| > |dx| * windowMoveVerticalBias` → `.windowMove` (clearly vertical)
+    /// - otherwise → `.reorder` (horizontal, ties, and shallow diagonals)
     static func classifyDrag(dx: CGFloat, dy: CGFloat,
                              threshold: CGFloat) -> DragIntent {
+        // Ignore a degenerate sample rather than silently moving the window
+        // (review S-3): AppKit can hand back a non-finite location in
+        // pathological cases, and NaN fails every comparison below — which
+        // would otherwise fall through to `.windowMove`.
+        guard dx.isFinite, dy.isFinite else { return .pending }
         if max(abs(dx), abs(dy)) < threshold { return .pending }
-        return abs(dx) > abs(dy) ? .reorder : .windowMove
+        return abs(dy) > abs(dx) * Self.windowMoveVerticalBias
+            ? .windowMove : .reorder
     }
 
     // MARK: - Inline-edit state

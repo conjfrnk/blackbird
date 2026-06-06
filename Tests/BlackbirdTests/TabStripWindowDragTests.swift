@@ -23,13 +23,24 @@ import AppKit
 ///      that hole. Symmetrically, the horizontal path must NOT fire the
 ///      window-move seam.
 ///
-/// The state machine under test (per the contract):
+/// The state machine under test (per the refined contract):
 ///
-///   classifyDrag(dx, dy, threshold):  let m = max(|dx|, |dy|)
-///     m < threshold            -> .pending      (not committed yet)
-///     |dx| > |dy|              -> .reorder      (horizontal-dominant)
-///     else                     -> .windowMove   (vertical-dominant;
-///                                                 exact 45° ties → windowMove)
+///   classifyDrag(dx, dy, threshold):
+///     dx or dy non-finite      -> .pending      (degenerate sample, ignore)
+///     max(|dx|, |dy|) < threshold
+///                              -> .pending      (not committed yet)
+///     |dy| > |dx| * 1.5        -> .windowMove   (CLEARLY vertical; needs a
+///                                                 steep, >~56° pull)
+///     else                     -> .reorder      (horizontal-dominant,
+///                                                 exact 45° ties, AND shallow
+///                                                 diagonals all reorder)
+///
+/// The 1.5 is a fixed vertical-dominance bias baked into the function (it
+/// can't be passed in; the tests pin it via concrete dx/dy values).
+/// Rationale: reorder is reversible, but a window move is committed the moment
+/// it starts — so the ambiguous diagonal cone and exact ties favour the
+/// recoverable choice (reorder), and a window move requires a steep vertical
+/// pull. Non-finite samples are treated as noise and stay pending.
 ///
 ///   ARMED (pendingDragPillIndex non-nil, dragState nil)
 ///    ── mouseDragged classified .pending     ──▶ ARMED (unchanged)
@@ -162,32 +173,37 @@ final class TabStripWindowDragTests: XCTestCase {
     }
 
     func test_classifyDrag_exactlyAtThreshold_vertical_isWindowMove() {
+        // |dx|=0 so any dy >= threshold is CLEARLY vertical: 5 > 0*1.5 (=0).
         XCTAssertEqual(
             TabStripView.classifyDrag(dx: 0, dy: 5, threshold: 5),
             .windowMove,
-            "(0,5) at threshold, vertical-dominant → windowMove")
+            "(0,5) at threshold, abs(dx)=0 → clearly vertical → windowMove")
     }
 
     func test_classifyDrag_horizontalDominant_pastThreshold_isReorder() {
+        // 1 > 6*1.5 (=9) is false → not clearly vertical → reorder.
         XCTAssertEqual(
             TabStripView.classifyDrag(dx: 6, dy: 1, threshold: 5),
             .reorder,
-            "(6,1) |dx|>|dy| → reorder")
+            "(6,1) horizontal-dominant → reorder")
     }
 
     func test_classifyDrag_verticalDominant_pastThreshold_isWindowMove() {
+        // 6 > 1*1.5 (=1.5) is true → clearly vertical → windowMove.
         XCTAssertEqual(
             TabStripView.classifyDrag(dx: 1, dy: 6, threshold: 5),
             .windowMove,
-            "(1,6) |dy|>|dx| → windowMove")
+            "(1,6) clearly vertical (6 > 1.5) → windowMove")
     }
 
-    func test_classifyDrag_exact45DegreeTie_isWindowMove() {
-        // |dx| == |dy|: the "else" branch wins → windowMove.
+    func test_classifyDrag_exact45DegreeTie_isReorder() {
+        // |dx| == |dy|: 5 > 5*1.5 (=7.5) is false, so the vertical-dominance
+        // test fails and we fall through to .reorder. Exact 45° ties favour
+        // the reversible choice — a window move needs a steeper pull.
         XCTAssertEqual(
             TabStripView.classifyDrag(dx: 5, dy: 5, threshold: 5),
-            .windowMove,
-            "(5,5) exact 45° tie → windowMove (ties go to windowMove)")
+            .reorder,
+            "(5,5) exact 45° tie → reorder (5 > 5*1.5 is false; ties favour reorder)")
     }
 
     func test_classifyDrag_largePureHorizontal_isReorder() {
@@ -213,11 +229,12 @@ final class TabStripWindowDragTests: XCTestCase {
     }
 
     func test_classifyDrag_negativeVertical_classifiesByMagnitude() {
-        // (0,-6) is magnitude-6 vertical → windowMove.
+        // (0,-6) is magnitude-6 vertical, abs(dx)=0 → clearly vertical →
+        // windowMove. Sign must not matter.
         XCTAssertEqual(
             TabStripView.classifyDrag(dx: 0, dy: -6, threshold: 5),
             .windowMove,
-            "(0,-6) classified by |dy| → windowMove")
+            "(0,-6) classified by |dy|, abs(dx)=0 → windowMove")
     }
 
     func test_classifyDrag_negativeDiagonal_belowThreshold_isPending() {
@@ -244,6 +261,98 @@ final class TabStripWindowDragTests: XCTestCase {
             TabStripView.classifyDrag(dx: 0, dy: 12, threshold: 10),
             .windowMove,
             "(0,12) with threshold 10: crosses 10, vertical → windowMove")
+    }
+
+    // MARK: - A2. non-finite guard (degenerate samples stay pending)
+
+    // A NaN/±infinity component is a degenerate sample (e.g. from a divide or
+    // an uninitialised delta) and must be ignored: classifyDrag returns
+    // .pending rather than letting the magnitude/ratio comparisons commit to a
+    // gesture on garbage input.
+
+    func test_classifyDrag_nanDx_isPending() {
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: CGFloat.nan, dy: 0, threshold: 5),
+            .pending,
+            "dx = NaN → degenerate sample → pending")
+    }
+
+    func test_classifyDrag_nanDy_isPending() {
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: 0, dy: CGFloat.nan, threshold: 5),
+            .pending,
+            "dy = NaN → degenerate sample → pending")
+    }
+
+    func test_classifyDrag_infiniteDx_isPending() {
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: CGFloat.infinity, dy: 0, threshold: 5),
+            .pending,
+            "dx = +infinity → degenerate sample → pending")
+    }
+
+    func test_classifyDrag_negativeInfiniteDy_isPending() {
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: 0, dy: -CGFloat.infinity, threshold: 5),
+            .pending,
+            "dy = -infinity → degenerate sample → pending")
+    }
+
+    func test_classifyDrag_bothInfinite_isPending() {
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: CGFloat.infinity, dy: CGFloat.infinity,
+                                      threshold: 5),
+            .pending,
+            "dx = dy = +infinity → degenerate sample → pending")
+    }
+
+    // MARK: - A3. vertical-dominance bias boundary (the baked-in 1.5 ratio)
+
+    // The function commits to .windowMove only when |dy| > |dx| * 1.5 (a
+    // strict >, so the exact boundary stays .reorder). The 1.5 can't be
+    // passed in, so these cases pin it via concrete deltas. All deltas here
+    // are past the 5pt threshold, so the only decision left is the ratio.
+
+    func test_classifyDrag_belowVerticalBias_isReorder() {
+        // 14 > 10*1.5 (=15) is false → not clearly vertical → reorder.
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: 10, dy: 14, threshold: 5),
+            .reorder,
+            "(10,14) 14 > 15 is false → reorder")
+    }
+
+    func test_classifyDrag_exactlyAtVerticalBias_isReorder() {
+        // 15 > 10*1.5 (=15) is false (strict >, boundary stays reorder).
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: 10, dy: 15, threshold: 5),
+            .reorder,
+            "(10,15) 15 > 15 is false (strict >) → reorder")
+    }
+
+    func test_classifyDrag_pastVerticalBias_isWindowMove() {
+        // 16 > 10*1.5 (=15) is true → clearly vertical → windowMove.
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: 10, dy: 16, threshold: 5),
+            .windowMove,
+            "(10,16) 16 > 15 is true → windowMove")
+    }
+
+    func test_classifyDrag_shallowDiagonal_firstEventMeantAsReorder_isReorder() {
+        // Adversarial "first event was meant as a reorder": a shallow diagonal
+        // just past threshold. 6 > 4*1.5 (=6) is false → reorder, so an
+        // intended reorder isn't hijacked into a committed window move.
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: 4, dy: 6, threshold: 5),
+            .reorder,
+            "(4,6) 6 > 6 is false → reorder (shallow diagonal favours reorder)")
+    }
+
+    func test_classifyDrag_steepDiagonal_pastVerticalBias_isWindowMove() {
+        // 8 > 4*1.5 (=6) is true → steep enough → windowMove.
+        XCTAssertEqual(
+            TabStripView.classifyDrag(dx: 4, dy: 8, threshold: 5),
+            .windowMove,
+            "(4,8) 8 > 6 is true → windowMove")
     }
 
     // MARK: - B. vertical pill drag past threshold moves the window
