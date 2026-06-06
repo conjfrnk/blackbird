@@ -189,9 +189,20 @@ public enum URLDetector {
                     // trailing-punct set so a wrapped URL followed by
                     // ", thanks" on the next row still yields a clean URL.
                     var continuation = ""
+                    // Track how many COLUMNS each appended grapheme consumes so
+                    // the dedup prefix recorded below is in column units (what
+                    // the next row's scan skips), not grapheme-count units. They
+                    // coincide today (isURLContinuationChar admits only single-
+                    // scalar ASCII, so one cell == one grapheme == one column),
+                    // but recording the grapheme count as a column index is a
+                    // latent unit confusion that would mis-skip the dedup prefix
+                    // if a wide / non-BMP continuation char ever lands here.
+                    // Audit S3-004.
+                    var graphemeEndColumn: [Int] = []
                     for c in 0..<contEnd {
                         if let ch = snapshot.character(at: c, row: row + 1) {
                             continuation.append(ch)
+                            graphemeEndColumn.append(c + 1)
                         }
                     }
                     var trimmedLen = continuation.count
@@ -275,10 +286,14 @@ public enum URLDetector {
                            let firstContChar = continuation.first,
                            !urlStructureLeaders.contains(firstContChar) {
                             finalURLString = candidate
-                            // Record how many leading columns of the next
-                            // row were consumed so that row's own scan
-                            // skips them and doesn't double-emit.
-                            consumedNextRowPrefix[row + 1] = trimmedLen
+                            // Record how many leading COLUMNS of the next row
+                            // were consumed — the column span of the first
+                            // `trimmedLen` graphemes — so that row's own scan
+                            // skips exactly those cells and doesn't double-emit.
+                            // (graphemeEndColumn[k] = columns consumed through
+                            // grapheme k; equals trimmedLen today, but stays
+                            // correct if a grapheme ever spans >1 column.)
+                            consumedNextRowPrefix[row + 1] = graphemeEndColumn[trimmedLen - 1]
                             // Extend the match's endCol virtually past the
                             // right edge — the caller uses (line, endCol)
                             // for the highlight. Keep endCol clamped to

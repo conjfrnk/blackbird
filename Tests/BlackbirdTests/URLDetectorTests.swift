@@ -540,6 +540,74 @@ final class URLDetectorTests: XCTestCase {
                        "joined URL should be the full long path")
     }
 
+    /// Guard for the wrap-join column-accounting (`consumedNextRowPrefix`):
+    /// when an http(s) URL fills row N to its right edge and continues on
+    /// row N+1, `scan()` joins the continuation into a single match AND
+    /// records how many leading columns of row N+1 it consumed, so the
+    /// per-row scan of row N+1 SKIPS them and does not emit a second,
+    /// duplicate match for the continuation fragment.
+    ///
+    /// This locks in the no-duplicate-emit invariant so a refactor of the
+    /// column-skipping logic can't silently start double-emitting.
+    ///
+    /// Setup: 40-col grid. `head` is exactly 40 chars (fills row 0, ends at
+    /// col 39). The continuation embeds a second `https://` so that, IF the
+    /// dedup were broken and row 1 were rescanned from column 0, the URL
+    /// regex WOULD find a standalone match on the continuation fragment —
+    /// making a regression observable as `count == 2`. With the dedup
+    /// intact, the leading consumed columns are skipped and only the single
+    /// joined match survives.
+    func test_scan_wrappedURL_continuationRowNotDoubleEmitted() throws {
+        let cols: UInt16 = 40
+        // 40-char head, same-host path that will wrap. Ends at col 39.
+        let head = "https://h.example/aaaaaaaaaaaaaaaaaaaaaa"  // 40 chars
+        XCTAssertEqual(head.count, Int(cols),
+                       "setup: head must exactly fill the first row")
+        // Continuation begins with a URL-safe alnum so all five join guards
+        // pass (same host, no port, benign leader). It embeds a literal
+        // `https://` substring: a broken dedup that rescanned row 1 from
+        // col 0 would emit a SECOND URLMatch for `https://evil.example/x`.
+        let tail = "bb/https://evil.example/x"
+        let full = head + tail
+        let snap = try snapshot(from: full, cols: cols, rows: 5)
+
+        let matches = URLDetector.scan(snapshot: snap)
+
+        // (a) The joined URL must be present exactly once.
+        let joinedCount = matches.filter { $0.url.absoluteString == full }.count
+        XCTAssertEqual(
+            joinedCount, 1,
+            "wrapped URL must produce exactly one match for the full joined href, got matches: \(matches.map { $0.url.absoluteString })"
+        )
+
+        // (b) No standalone match for the embedded continuation fragment —
+        // that's the duplicate the column-accounting exists to suppress.
+        let strayFragment = matches.contains {
+            $0.url.absoluteString == "https://evil.example/x"
+        }
+        XCTAssertFalse(
+            strayFragment,
+            "continuation row must be skipped, not rescanned into a duplicate fragment match: \(matches.map { $0.url.absoluteString })"
+        )
+
+        // (c) Total: exactly one match overall. (Belt-and-suspenders: if a
+        // future change emitted some OTHER stray match on row 1, this
+        // catches it even if it isn't the exact evil fragment above.)
+        XCTAssertEqual(
+            matches.count, 1,
+            "exactly one URLMatch expected for the wrapped URL, got: \(matches.map { $0.url.absoluteString })"
+        )
+        let m = try XCTUnwrap(matches.first)
+        XCTAssertEqual(
+            m.url.absoluteString, full,
+            "the single match must be the full joined URL"
+        )
+        // Visible highlight stays clamped to row 0's right edge.
+        XCTAssertEqual(m.line, 0)
+        XCTAssertEqual(m.endCol, Int(cols) - 1,
+                       "highlight extent stays on the last column of row 0")
+    }
+
     /// Wrapped URL with trailing prose punctuation on the continuation row
     /// should trim the punctuation before joining.
     func test_scan_wrappedURL_trimsTrailingPunctuation() throws {
