@@ -372,4 +372,83 @@ final class ThemeResolutionTests: XCTestCase {
             """
         )
     }
+
+    // MARK: - ThemePalette.init ansi-array normalisation (robustness)
+    //
+    // The `ansi` array is documented as "16 ANSI colors — 0..7 normal,
+    // 8..15 bright" and downstream code indexes `ansi[0..<16]`. The
+    // initializer must be ROBUST to a malformed `ansi` whose count != 16:
+    // it normalises to exactly 16 entries — truncating extras when the
+    // count is > 16 and padding missing slots when < 16 — so the
+    // constructed palette always has `.ansi.count == 16`, with the
+    // supplied entries that fit preserved in order.
+    //
+    // IMPORTANT: on the CURRENT (pre-fix) code these non-16 constructions
+    // hit a `precondition(ansi.count == 16, …)` that ABORTS the whole test
+    // process — a precondition failure is a process trap that XCTest
+    // CANNOT catch. Cases (a) and (b) therefore validate the INTENDED
+    // post-fix contract and will only run cleanly once the initializer is
+    // made graceful; we deliberately do NOT try to assert-on-crash.
+    //
+    // Memory pre-flight: each test builds a single ThemePalette (a handful
+    // of UInt32s + a ≤20-element [UInt32]). Well under 1 KB; < 1 ms wall.
+
+    /// (a) Too-few entries: a 3-element ansi array must be PADDED up to 16
+    /// while preserving the 3 supplied colours in the first 3 slots.
+    func test_themePaletteInit_underfilledAnsi_padsToSixteen_preservingPrefix() {
+        // Memory: <1 KB. Wall: ~1 ms.
+        let palette = ThemePalette(
+            background: 0x000000,
+            foreground: 0xFFFFFF,
+            cursor: 0xFFFFFF,
+            ansi: [0x111111, 0x222222, 0x333333]
+        )
+        XCTAssertEqual(palette.ansi.count, 16,
+                       "Underfilled ansi (3 entries) must normalise to exactly 16 slots")
+        XCTAssertEqual(palette.ansi[0], 0x111111,
+                       "First supplied colour must be preserved in slot 0")
+        XCTAssertEqual(palette.ansi[1], 0x222222,
+                       "Second supplied colour must be preserved in slot 1")
+        XCTAssertEqual(palette.ansi[2], 0x333333,
+                       "Third supplied colour must be preserved in slot 2")
+    }
+
+    /// (b) Too-many entries: a 20-element ansi array must be TRUNCATED to
+    /// 16 while preserving the first 16 supplied values in order.
+    func test_themePaletteInit_overfilledAnsi_truncatesToSixteen_preservingPrefix() {
+        // Memory: <1 KB. Wall: ~1 ms.
+        let input = (0..<20).map { UInt32($0) }
+        let palette = ThemePalette(
+            background: 0x000000,
+            foreground: 0xFFFFFF,
+            cursor: 0xFFFFFF,
+            ansi: input
+        )
+        XCTAssertEqual(palette.ansi.count, 16,
+                       "Overfilled ansi (20 entries) must normalise to exactly 16 slots")
+        XCTAssertEqual(Array(palette.ansi[0..<16]), Array(input[0..<16]),
+                       "First 16 supplied colours must be preserved in order after truncation")
+    }
+
+    /// (c) Exactly-16 entries: the well-formed case must round-trip
+    /// unchanged — `.ansi` equals the supplied array exactly.
+    func test_themePaletteInit_exactlySixteenAnsi_roundTripsUnchanged() {
+        // Memory: <1 KB. Wall: ~1 ms.
+        let input: [UInt32] = [
+            0x1E1E22, 0xFF5555, 0x50FA7B, 0xF1FA8C,
+            0xBD93F9, 0xFF79C6, 0x8BE9FD, 0xC7C7C7,
+            0x595959, 0xFF6E6E, 0x69FF94, 0xFFFFA5,
+            0xD6ACFF, 0xFF92DF, 0xA4FFFF, 0xFFFFFF
+        ]
+        let palette = ThemePalette(
+            background: 0x000000,
+            foreground: 0xFFFFFF,
+            cursor: 0xFFFFFF,
+            ansi: input
+        )
+        XCTAssertEqual(palette.ansi.count, 16,
+                       "A well-formed 16-entry ansi array must stay at 16 slots")
+        XCTAssertEqual(palette.ansi, input,
+                       "A well-formed 16-entry ansi array must round-trip unchanged")
+    }
 }
