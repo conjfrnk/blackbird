@@ -95,6 +95,7 @@
 		92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */; };
 		92F85478B5B065F702AD717B /* MetalDeviceSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14E5F5AA20D171CAD16112AD /* MetalDeviceSelection.swift */; };
 		9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */; };
+		93ADAE9FD6AA4E96D06A40A8 /* TabStripWindowDragTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 169183A826D6D1D5DD4471B9 /* TabStripWindowDragTests.swift */; };
 		93C6141EA8E0FBB96A023E2C /* DiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB953F6C152888DF02CD2AB3 /* DiagnosticsView.swift */; };
 		94BFD61D338BCA15E5AD538B /* TabStripStressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C7486776E182C56E2C61173 /* TabStripStressTests.swift */; };
 		95D6A4034F6872A29F1474AF /* PowerAwareRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28AC18E4DFA1B4F34FA78C71 /* PowerAwareRendering.swift */; };
@@ -191,6 +192,7 @@
 		14A26A1A1B1A4D9656B10D76 /* Blackbird.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Blackbird.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		14E5F5AA20D171CAD16112AD /* MetalDeviceSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDeviceSelection.swift; sourceTree = "<group>"; };
 		15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasTests.swift; sourceTree = "<group>"; };
+		169183A826D6D1D5DD4471B9 /* TabStripWindowDragTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStripWindowDragTests.swift; sourceTree = "<group>"; };
 		173C25905C5C1D2D008F3EEA /* TerminalSessionBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionBoundaryTests.swift; sourceTree = "<group>"; };
 		20D4A2742422F440F7C65BB5 /* IMEAstralRectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEAstralRectTests.swift; sourceTree = "<group>"; };
 		22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdResolver.swift; sourceTree = "<group>"; };
@@ -449,6 +451,7 @@
 				50B65F38ABE8935D2BAD3494 /* TabStripMouseFocusYieldIntegrationTests.swift */,
 				F28B81E7D43F3CC0B8F88998 /* TabStripMouseFocusYieldTests.swift */,
 				8C7486776E182C56E2C61173 /* TabStripStressTests.swift */,
+				169183A826D6D1D5DD4471B9 /* TabStripWindowDragTests.swift */,
 				9586BA1A204E2F0F10A05964 /* TerminalSessionAdversarialTests.swift */,
 				173C25905C5C1D2D008F3EEA /* TerminalSessionBoundaryTests.swift */,
 				5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */,
@@ -879,6 +882,7 @@
 				2C1D7AE3B4FC333817C1DD6F /* TabStripMouseFocusYieldIntegrationTests.swift in Sources */,
 				EBED2EDDFC82B8C03A0AB65A /* TabStripMouseFocusYieldTests.swift in Sources */,
 				94BFD61D338BCA15E5AD538B /* TabStripStressTests.swift in Sources */,
+				93ADAE9FD6AA4E96D06A40A8 /* TabStripWindowDragTests.swift in Sources */,
 				6E53CFFB550C8ABFD1B9EF83 /* TerminalSessionAdversarialTests.swift in Sources */,
 				85FF81EC8B3EDAE4FE6BD44A /* TerminalSessionBoundaryTests.swift in Sources */,
 				91497F92ABED24A383320845 /* TerminalSessionTests.swift in Sources */,
