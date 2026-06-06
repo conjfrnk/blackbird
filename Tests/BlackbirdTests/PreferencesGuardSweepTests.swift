@@ -36,6 +36,8 @@ final class PreferencesGuardSweepTests: XCTestCase {
     private var savedBellRaw: String = ""
     private var savedCursorShapeRaw: String = ""
     private var savedOptionKeyRaw: String = ""
+    private var savedWindowDragModifierRaw: String = ""
+    private var savedWindowResizeModifierRaw: String = ""
     private var savedCursorBlink: Bool = false
     private var savedConfirmClose: Bool = false
     private var savedAutoUpdateChecks: Bool = false
@@ -59,6 +61,8 @@ final class PreferencesGuardSweepTests: XCTestCase {
         savedBellRaw               = p.bellRaw
         savedCursorShapeRaw        = p.cursorShapeRaw
         savedOptionKeyRaw          = p.optionKeyRaw
+        savedWindowDragModifierRaw   = p.windowDragModifierRaw
+        savedWindowResizeModifierRaw = p.windowResizeModifierRaw
         savedCursorBlink           = p.cursorBlink
         savedConfirmClose          = p.confirmClose
         savedAutoUpdateChecks      = p.autoUpdateChecks
@@ -77,6 +81,8 @@ final class PreferencesGuardSweepTests: XCTestCase {
         p.bellRaw               = savedBellRaw
         p.cursorShapeRaw        = savedCursorShapeRaw
         p.optionKeyRaw          = savedOptionKeyRaw
+        p.windowDragModifierRaw   = savedWindowDragModifierRaw
+        p.windowResizeModifierRaw = savedWindowResizeModifierRaw
         p.cursorBlink           = savedCursorBlink
         p.confirmClose          = savedConfirmClose
         p.autoUpdateChecks      = savedAutoUpdateChecks
@@ -146,6 +152,18 @@ final class PreferencesGuardSweepTests: XCTestCase {
             current: p.optionKeyRaw,
             candidates: Preferences.OptionKey.allCases.map { $0.rawValue },
             write: { p.optionKeyRaw = $0 }
+        ))
+        probes.append(makeStringProbe(
+            name: "windowDragModifierRaw",
+            current: p.windowDragModifierRaw,
+            candidates: Preferences.WindowGestureModifier.allCases.map { $0.rawValue },
+            write: { p.windowDragModifierRaw = $0 }
+        ))
+        probes.append(makeStringProbe(
+            name: "windowResizeModifierRaw",
+            current: p.windowResizeModifierRaw,
+            candidates: Preferences.WindowGestureModifier.allCases.map { $0.rawValue },
+            write: { p.windowResizeModifierRaw = $0 }
         ))
 
         // Free-form String — fontName has no enum constraint, but we still
@@ -439,6 +457,8 @@ final class PreferencesGuardSweepTests: XCTestCase {
             "bb.bell":                  "bellRaw",
             "bb.cursorShape":           "cursorShapeRaw",
             "bb.optionKey":             "optionKeyRaw",
+            "bb.windowDragModifier":    "windowDragModifierRaw",
+            "bb.windowResizeModifier":  "windowResizeModifierRaw",
             "bb.confirmClose":          "confirmClose",
             "bb.autoUpdateChecks":      "autoUpdateChecks",
             "bb.osc52Enabled":          "osc52Enabled",

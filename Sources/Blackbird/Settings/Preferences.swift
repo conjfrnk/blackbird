@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Combine
 import os
 
@@ -72,6 +73,24 @@ public final class Preferences: ObservableObject {
         public var id: String { rawValue }
     }
 
+    /// Modifier held while dragging the terminal body or a tab pill to MOVE
+    /// the window (the empty title-bar gutter and a vertical tab drag move it
+    /// with no modifier). Also reused for the right-drag resize gesture.
+    /// Option is intentionally NOT offered: it is reserved for rectangular
+    /// selection and for escaping a TUI's mouse capture, so binding it to
+    /// window drag would break both.
+    public enum WindowGestureModifier: String, CaseIterable, Identifiable {
+        case command = "Command", control = "Control"
+        public var id: String { rawValue }
+        /// AppKit flag this maps to.
+        public var modifierMask: NSEvent.ModifierFlags {
+            switch self {
+            case .command: return .command
+            case .control: return .control
+            }
+        }
+    }
+
     public enum CursorShape: String, CaseIterable, Identifiable {
         case followShell = "Follow Shell"
         case block       = "Block"
@@ -131,6 +150,8 @@ public final class Preferences: ObservableObject {
     @AppStorage("bb.bell")           public var bellRaw: String = BellStyle.visual.rawValue
     @AppStorage("bb.cursorShape")    public var cursorShapeRaw: String = CursorShape.followShell.rawValue
     @AppStorage("bb.optionKey")      public var optionKeyRaw: String = OptionKey.meta.rawValue
+    @AppStorage("bb.windowDragModifier")   public var windowDragModifierRaw: String = WindowGestureModifier.command.rawValue
+    @AppStorage("bb.windowResizeModifier") public var windowResizeModifierRaw: String = WindowGestureModifier.command.rawValue
     @AppStorage("bb.confirmClose")   public var confirmClose: Bool = true
     @AppStorage("bb.autoUpdateChecks") public var autoUpdateChecks: Bool = false
     /// Default off (v0.1.10): arbitrary PTY output can overwrite the system
@@ -196,6 +217,12 @@ public final class Preferences: ObservableObject {
     public var bell: BellStyle      { BellStyle(rawValue: bellRaw) ?? .visual }
     public var cursorShape: CursorShape { CursorShape(rawValue: cursorShapeRaw) ?? .followShell }
     public var optionKey: OptionKey { OptionKey(rawValue: optionKeyRaw) ?? .meta }
+    public var windowDragModifier: WindowGestureModifier {
+        WindowGestureModifier(rawValue: windowDragModifierRaw) ?? .command
+    }
+    public var windowResizeModifier: WindowGestureModifier {
+        WindowGestureModifier(rawValue: windowResizeModifierRaw) ?? .command
+    }
 
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "preferences")
@@ -279,6 +306,8 @@ public final class Preferences: ObservableObject {
             Preferences.k("bell"):              BellStyle.visual.rawValue,
             Preferences.k("cursorShape"):       CursorShape.followShell.rawValue,
             Preferences.k("optionKey"):         OptionKey.meta.rawValue,
+            Preferences.k("windowDragModifier"):   WindowGestureModifier.command.rawValue,
+            Preferences.k("windowResizeModifier"): WindowGestureModifier.command.rawValue,
             Preferences.k("confirmClose"):      true,
             Preferences.k("autoUpdateChecks"):  false,
             Preferences.k("osc52Enabled"):      false,
@@ -613,6 +642,16 @@ public final class Preferences: ObservableObject {
         if OptionKey(rawValue: optionKeyRaw) == nil {
             let target = OptionKey.meta.rawValue
             if optionKeyRaw != target { prefs.optionKeyRaw = target }
+        }
+        let windowDragModifierRaw = storedRaw("windowDragModifier") ?? WindowGestureModifier.command.rawValue
+        if WindowGestureModifier(rawValue: windowDragModifierRaw) == nil {
+            let target = WindowGestureModifier.command.rawValue
+            if windowDragModifierRaw != target { prefs.windowDragModifierRaw = target }
+        }
+        let windowResizeModifierRaw = storedRaw("windowResizeModifier") ?? WindowGestureModifier.command.rawValue
+        if WindowGestureModifier(rawValue: windowResizeModifierRaw) == nil {
+            let target = WindowGestureModifier.command.rawValue
+            if windowResizeModifierRaw != target { prefs.windowResizeModifierRaw = target }
         }
     }
 

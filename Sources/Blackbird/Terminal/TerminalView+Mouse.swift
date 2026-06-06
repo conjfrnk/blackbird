@@ -59,6 +59,9 @@ extension TerminalView {
         // can initiate window drag by calling `performDrag(with:)`; the
         // call blocks until the mouse is released, so this returns cleanly
         // without triggering the selection path below.
+        // ⌘-click on a URL → open it. URL-open stays bound to ⌘ (the
+        // universal link-open convention) regardless of the configurable
+        // window-drag modifier handled just below.
         if event.modifierFlags.contains(.command) {
             let underlyingOption = event.modifierFlags.contains(.option)
             // Suppress URL resolution when the click landed in the
@@ -85,7 +88,13 @@ extension TerminalView {
                     return
                 }
             }
-            // No URL under the click — treat as window drag.
+        }
+        // Configured window-drag modifier (default ⌘) → move the window like a
+        // titlebar drag. Any view can initiate a window drag by calling
+        // `performDrag(with:)`; the call blocks until the mouse is released,
+        // so this returns cleanly without triggering the selection path below.
+        let windowDragMask = Preferences.shared.windowDragModifier.modifierMask
+        if !windowDragMask.isEmpty, event.modifierFlags.contains(windowDragMask) {
             window?.performDrag(with: event)
             return
         }
@@ -271,12 +280,14 @@ extension TerminalView {
     }
 
     public override func rightMouseDown(with event: NSEvent) {
-        // ⌘ + right-drag → resize the window from the corner nearest the
-        // click. Matches the borderless-window idiom from apps like iTerm2
-        // and VS Code: ⌘-drag moves, ⌘-right-drag resizes. Anchor the
-        // OPPOSITE corner so dragging from (say) the top-right pulls the
-        // top-right while bottom-left stays pinned.
-        if event.modifierFlags.contains(.command), let win = window {
+        // Configured resize modifier (default ⌘) + right-drag → resize the
+        // window from the corner nearest the click. Matches the borderless-
+        // window idiom from apps like iTerm2 and VS Code: modifier-drag moves,
+        // modifier-right-drag resizes. Anchor the OPPOSITE corner so dragging
+        // from (say) the top-right pulls the top-right while bottom-left stays
+        // pinned.
+        let windowResizeMask = Preferences.shared.windowResizeModifier.modifierMask
+        if !windowResizeMask.isEmpty, event.modifierFlags.contains(windowResizeMask), let win = window {
             let local = convert(event.locationInWindow, from: nil)
             let left = local.x < bounds.width / 2
             // AppKit's Y-axis points up, so "below the midline" = smaller y.
