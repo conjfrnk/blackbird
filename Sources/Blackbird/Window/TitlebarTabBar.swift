@@ -122,10 +122,10 @@ final class TabStripView: NSView {
     /// teardown).
     var onCommitRename: ((NSWindow, String) -> Void)?
 
-    /// Hand-off for "drag a pill in a non-horizontal direction to move the
-    /// window" (the empty gutter already moves the window for free via
-    /// pass-through `hitTest`). Default performs a native AppKit window
-    /// drag; injectable so a headless test can spy on the hand-off without
+    /// Hand-off for "drag a pill with the configured window-move modifier
+    /// (default ⌘) to move the window" (the empty trailing gutter already
+    /// moves the window for free via pass-through `hitTest`). Default performs
+    /// a native AppKit window drag; injectable so a headless test can spy on the hand-off without
     /// a live `NSWindow`/`performDrag(with:)`. Lazy because the default
     /// captures `self`. The no-window branch logs rather than dropping the
     /// gesture silently — the strip is a permanently-attached titlebar
@@ -196,41 +196,44 @@ final class TabStripView: NSView {
     private static let dragThreshold: CGFloat = 5
 
     /// The intent of a pill drag once it has moved far enough to commit.
+    /// Kept as a three-case enum (not a `Bool`) because `.pending` — the
+    /// below-threshold / non-finite "not yet" state — is a real third outcome
+    /// the move-vs-reorder distinction can't express; don't flatten it away
+    /// even though `.reorder`/`.windowMove` now track `hasMoveModifier` 1:1.
     enum DragIntent: Equatable {
         /// Hasn't moved past `threshold` yet — keep waiting.
         case pending
-        /// Horizontal-dominant — reorder the tabs (existing gesture).
+        /// Plain drag — reorder the tabs.
         case reorder
-        /// Vertical-dominant — move the window instead.
+        /// Modifier-bearing drag — move the window instead.
         case windowMove
     }
 
-    /// Vertical-dominance bias for promoting a pill drag to a window move.
-    /// A drag is a window move only when `|dy| > |dx| * this` (steeper than
-    /// ~56° from horizontal). Ties and shallow diagonals stay `.reorder`:
-    /// reorder is reversible (the pill stays in the strip and can be dragged
-    /// back), whereas a window move is committed the instant `performDrag`
-    /// takes over, so the ambiguous cone resolves to the recoverable
-    /// outcome (review S-1).
-    static let windowMoveVerticalBias: CGFloat = 1.5
-
-    /// Classify a pill drag by dominant axis. Pure + static so the whole
-    /// reorder-vs-window-move decision is testable without AppKit.
+    /// Classify a pill drag once it has moved past `threshold`. Direction no
+    /// longer selects the outcome: a plain drag reorders; a drag carrying the
+    /// configured window-move modifier moves the window, in EITHER axis (the
+    /// same gesture grammar as the terminal body — see `TerminalView.mouseDown`).
     ///
-    /// - non-finite `dx`/`dy` → `.pending` (ignore a degenerate sample)
+    /// This replaces the old direction heuristic (`classifyDrag`), which moved
+    /// the window on an un-modified steep-vertical pull. That overloaded the
+    /// pill with a sixth, unaffordanced meaning, made a horizontal window move
+    /// impossible without a modifier, let a brisk reorder escalate into an
+    /// irreversible window grab, and collided with the cross-app "drag a tab
+    /// down to tear it off" idiom (critique 2026-06-07, issues 1–7).
+    ///
+    /// - non-finite `dx`/`dy` → `.pending` (ignore a degenerate AppKit sample,
+    ///   regardless of the modifier — the guard precedes it)
     /// - `max(|dx|,|dy|) < threshold` → `.pending` (hasn't committed yet)
-    /// - `|dy| > |dx| * windowMoveVerticalBias` → `.windowMove` (clearly vertical)
-    /// - otherwise → `.reorder` (horizontal, ties, and shallow diagonals)
-    static func classifyDrag(dx: CGFloat, dy: CGFloat,
-                             threshold: CGFloat) -> DragIntent {
-        // Ignore a degenerate sample rather than silently moving the window
-        // (review S-3): AppKit can hand back a non-finite location in
-        // pathological cases, and NaN fails every comparison below — which
-        // would otherwise fall through to `.windowMove`.
+    /// - `hasMoveModifier` → `.windowMove`
+    /// - otherwise → `.reorder`
+    ///
+    /// Pure + static so the whole decision is unit-testable without AppKit.
+    static func classifyPillDrag(dx: CGFloat, dy: CGFloat,
+                                 threshold: CGFloat,
+                                 hasMoveModifier: Bool) -> DragIntent {
         guard dx.isFinite, dy.isFinite else { return .pending }
-        if max(abs(dx), abs(dy)) < threshold { return .pending }
-        return abs(dy) > abs(dx) * Self.windowMoveVerticalBias
-            ? .windowMove : .reorder
+        guard max(abs(dx), abs(dy)) >= threshold else { return .pending }
+        return hasMoveModifier ? .windowMove : .reorder
     }
 
     // MARK: - Inline-edit state
@@ -314,15 +317,20 @@ final class TabStripView: NSView {
         if editingPill != nil, listShapeChanged {
             commitEdit()
         }
-        // If a drag is in flight and the underlying tab list shape
-        // changed beneath it (sibling closed, new tab opened, post-
-        // commit reorder), the captured `originalIndex` no longer
-        // matches the strip — cancel cleanly rather than trying to
-        // reconcile. Skipped on the post-commit refresh because the
-        // commit path returned `dragPhase = .idle` in `mouseUp` before
-        // the notification fired.
-        if listShapeChanged, case .dragging = dragPhase {
-            cancelDragInProgress()
+        // If a gesture is in flight — an armed press OR an active reorder —
+        // and the underlying tab list shape changed beneath it (sibling
+        // closed, new tab opened, post-commit reorder), the captured index no
+        // longer matches the strip. Cancel cleanly rather than trying to
+        // reconcile: a stale `.dragging` would commit a reorder against the
+        // wrong slot, and a stale `.armed` would fire a wrong selection on the
+        // trailing mouseUp (selection is deferred to mouseUp now). Skipped on
+        // the post-commit refresh because the commit path returned
+        // `dragPhase = .idle` in `mouseUp` before the notification fired.
+        if listShapeChanged {
+            switch dragPhase {
+            case .armed, .dragging: cancelDragInProgress()
+            case .idle: break
+            }
         }
         self.tabs = tabs
         self.selectedTab = selected
@@ -424,6 +432,15 @@ final class TabStripView: NSView {
     private static let addButtonWidth: CGFloat = 22
     private static let pillSpacing: CGFloat = 2
     private static let trailingInset: CGFloat = 4
+    /// Minimum width of the empty, window-draggable gutter reserved at the
+    /// trailing edge of the strip (to the right of the `+`). Without it the
+    /// pills divide the entire titlebar and no bare chrome is left to grab once
+    /// the bar fills with tabs — losing the native "drag the titlebar to move
+    /// the window" affordance that the empty-region `hitTest` pass-through
+    /// relies on. Reserving it keeps a no-modifier window move reachable at any
+    /// tab count (critique 2026-06-07, issue 7). Internal (not private) so the
+    /// layout invariant is unit-testable.
+    static let minDragGutter: CGFloat = 44
     private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .regular)
 
     private func layoutPills() {
@@ -440,7 +457,11 @@ final class TabStripView: NSView {
         let gap = Self.pillSpacing
         let trail = Self.trailingInset
         let n = max(1, tabs.count)
-        let available = max(0, totalWidth - trail - addW - gap)
+        // Reserve a trailing window-draggable gutter (see `minDragGutter`): the
+        // pills + `+` button divide only the width LEFT of it, so a bare,
+        // hit-test-pass-through region always remains at the trailing edge for
+        // moving the window even when the bar is full of tabs.
+        let available = max(0, totalWidth - trail - addW - gap - Self.minDragGutter)
         let pillW = available / CGFloat(n)
         var x: CGFloat = 0
         for _ in 0..<n {
@@ -626,6 +647,10 @@ final class TabStripView: NSView {
     /// Lets a test pass realistic geometry into the static
     /// `computeIntermediateIndex` helper without re-deriving it.
     var pillFramesForTesting: [CGRect] { pillFrames }
+    /// Test hook — the trailing `+` button frame, so the reserved drag gutter
+    /// (the empty span between the `+` and the strip's trailing edge) is
+    /// assertable without exposing the private `addButtonFrame`.
+    var addButtonFrameForTesting: CGRect { addButtonFrame }
     #endif
 
     // MARK: - Drawing
@@ -681,7 +706,7 @@ final class TabStripView: NSView {
                     let base = pillFrames[d.originalIndex]
                     let maxX = max(
                         0,
-                        totalWidth - Self.trailingInset - Self.addButtonWidth - Self.pillSpacing - base.width
+                        totalWidth - Self.trailingInset - Self.addButtonWidth - Self.pillSpacing - Self.minDragGutter - base.width
                     )
                     let rawX = d.cursorX - d.downOffsetX
                     let x = max(0, min(maxX, rawX))
@@ -952,28 +977,36 @@ final class TabStripView: NSView {
             // the ×) and then click.
             if hoveredPill == i, hoveredClose, NSPointInRect(p, closeHotspot(in: rect)) {
                 onCloseWindow?(tabs[i])
+                return
+            }
+            // Selection is DEFERRED to mouseUp-as-click (see `mouseUp`'s
+            // `.armed` case) so a drag — reorder OR window move — never
+            // switches tabs. Grabbing a background pill to move the window
+            // used to eagerly select it here, yanking the foreground session
+            // onto that tab before the gesture was even classified (user
+            // report 2026-06-07; critique complaint C). Arm a potential drag
+            // and let `mouseDragged` promote it; the tab only switches if the
+            // press is released without a drag.
+            //
+            // Suppressed for: single-tab windows (no peer to reorder against),
+            // a click that also begins inline rename (clickCount ≥ 2), and any
+            // pill currently being renamed elsewhere — the field editor owns
+            // first responder and a drag would steal focus mid-edit.
+            let canReorder = tabs.count > 1
+                && event.clickCount == 1
+                && !isEditing
+            if canReorder {
+                dragPhase = .armed(PendingDrag(
+                    pillIndex: i,
+                    startPoint: p,
+                    downOffsetX: p.x - rect.minX
+                ))
             } else {
+                // No drag can start from this press (single-tab strip, an
+                // in-flight rename, or a multi-click), so there is no
+                // mouseUp-as-click to defer to — select now to preserve the
+                // click-to-switch contract.
                 onSelectWindow?(tabs[i])
-                // Arm a potential reorder drag. Selection has already
-                // fired (matches today's click semantics — you don't
-                // grab a tab without focusing it first); `mouseDragged`
-                // promotes this to a real drag once the cursor moves
-                // past `dragThreshold`. Suppressed for: single-tab
-                // windows (no peer to reorder against), a click that
-                // also begins inline rename (clickCount ≥ 2), and any
-                // pill currently being renamed elsewhere — the field
-                // editor owns first responder and a drag would steal
-                // focus mid-edit.
-                let canReorder = tabs.count > 1
-                    && event.clickCount == 1
-                    && !isEditing
-                if canReorder {
-                    dragPhase = .armed(PendingDrag(
-                        pillIndex: i,
-                        startPoint: p,
-                        downOffsetX: p.x - rect.minX
-                    ))
-                }
             }
             return
         }
@@ -990,30 +1023,27 @@ final class TabStripView: NSView {
         case .armed(let pending):
             let dx = p.x - pending.startPoint.x
             let dy = p.y - pending.startPoint.y
-            let intent: DragIntent
+            // A plain drag reorders; a drag carrying the configured
+            // window-move modifier (default ⌘) moves the window, in EITHER
+            // axis — the same gesture grammar as the terminal body
+            // (`TerminalView.mouseDown`). Direction no longer decides the
+            // outcome: the old steep-vertical-pull-moves-window heuristic was
+            // removed (critique 2026-06-07, audit titlebar-tabs F10 lives on
+            // as this modifier path).
             let dragMask = Preferences.shared.windowDragModifier.modifierMask
-            if !dragMask.isEmpty, event.modifierFlags.contains(dragMask) {
-                // The configured window-drag modifier (default ⌘) on a pill
-                // moves the window instead of reordering, regardless of drag
-                // direction — once the gesture has moved past the threshold
-                // (audit titlebar-tabs F10). Unifies the move affordance with
-                // the body modifier-drag.
-                guard max(abs(dx), abs(dy)) >= Self.dragThreshold else { return }
-                intent = .windowMove
-            } else {
-                intent = Self.classifyDrag(dx: dx, dy: dy,
-                                           threshold: Self.dragThreshold)
-            }
-            switch intent {
+            let hasMoveModifier = !dragMask.isEmpty
+                && event.modifierFlags.contains(dragMask)
+            switch Self.classifyPillDrag(dx: dx, dy: dy,
+                                         threshold: Self.dragThreshold,
+                                         hasMoveModifier: hasMoveModifier) {
             case .pending:
                 // Hasn't moved far enough — still potentially a click.
                 return
             case .reorder:
-                // Horizontal-dominant — promote to an active reorder
-                // drag. Snap the hover state off: we're not painting
-                // close hotspots or hover backgrounds while a drag is in
-                // flight, and stale hover indices would visibly linger
-                // under the moving pill.
+                // Plain drag — promote to an active reorder drag. Snap the
+                // hover state off: we're not painting close hotspots or hover
+                // backgrounds while a drag is in flight, and stale hover
+                // indices would visibly linger under the moving pill.
                 hoveredPill = nil
                 hoveredClose = false
                 hoveredAdd = false
@@ -1025,7 +1055,7 @@ final class TabStripView: NSView {
                 ))
                 needsDisplay = true
             case .windowMove:
-                // Vertical-dominant — the user is moving the window, not
+                // Modifier held — the user is moving the window, not
                 // reordering. Drop the armed reorder, clear hover paint,
                 // and hand off to a native AppKit window drag. The
                 // hand-off consumes the rest of the gesture (the default
@@ -1069,9 +1099,29 @@ final class TabStripView: NSView {
         defer {
             dragPhase = .idle
         }
-        // Click-only and pending-but-never-promoted gestures both clear
-        // out via the defer above — only the actively-dragging phase
-        // has a commit to consider.
+        // A press that armed a drag but never crossed the threshold is a
+        // click: NOW switch tabs (selection was deferred from `mouseDown` so a
+        // drag never selects — critique complaint C). Guard the index against
+        // a list-shape change between mouseDown and mouseUp.
+        if case .armed(let pending) = dragPhase {
+            // `.armed` is cancelled in `update(tabs:)` on any list-shape
+            // change, so a surviving armed index should always be valid here.
+            // If it isn't, the armed phase outlived a refresh that should have
+            // reconciled it — log (matching the `.dragging` canary below)
+            // rather than dropping the click silently.
+            guard pending.pillIndex < tabs.count else {
+                Self.dragLogger.notice("mouseUp: armed pillIndex \(pending.pillIndex, privacy: .public) >= tabs.count \(self.tabs.count, privacy: .public); armed phase outlived a list-shape change without being cancelled in update(tabs:) — click-to-select dropped, investigate.")
+                return
+            }
+            // Only an index guard is needed here (unlike the reorder-commit
+            // path below, which re-checks `tabGroup`): selecting a window whose
+            // group changed mid-press is benign, whereas committing a reorder
+            // against a detached window is not.
+            onSelectWindow?(tabs[pending.pillIndex])
+            return
+        }
+        // Only the actively-dragging phase has a reorder commit to consider;
+        // `.idle` (no pill grabbed) falls straight through the guard.
         guard case .dragging(let state) = dragPhase else { return }
         // No-op when the user lifted on the original slot.
         guard state.currentIndex != state.originalIndex else {
