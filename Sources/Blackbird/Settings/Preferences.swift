@@ -74,8 +74,9 @@ public final class Preferences: ObservableObject {
     }
 
     /// Modifier held while dragging the terminal body or a tab pill to MOVE
-    /// the window (the empty title-bar gutter and a vertical tab drag move it
-    /// with no modifier); also reused for the right-drag resize gesture.
+    /// the window (the empty title-bar gutter moves it with no modifier; a
+    /// plain tab drag reorders the tabs); also reused for the right-drag
+    /// resize gesture.
     ///
     /// Only ⌘ and ⌥⌘ are offered, because in a terminal every other modifier
     /// is already taken:

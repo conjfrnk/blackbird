@@ -182,7 +182,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Terminal")
             } footer: {
-                Self.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. The empty title-bar area and a vertical tab drag always move the window without a modifier.")
+                Self.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. Drag the empty title-bar area to move the window without a modifier; a plain tab drag reorders the tabs.")
             }
 
             Section {
