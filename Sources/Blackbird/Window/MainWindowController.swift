@@ -1113,30 +1113,58 @@ func nudgeFrameOntoVisibleScreen(
 ///   coordinates (origin bottom-left, AppKit convention).
 /// - Parameter visibleFrames: each screen's `visibleFrame`. Pass
 ///   `NSScreen.screens.map(\.visibleFrame)` in production. Order
-///   matters: the FIRST entry is treated as the "main" screen for
-///   recentering when the input is off-screen.
-/// - Returns: `frame` unchanged when its intersection with the union
-///   of `visibleFrames` is at least `minimumOnScreenOverlap` in BOTH
-///   dimensions. Otherwise a frame of the same size centered on the
-///   first screen's visibleFrame. Empty `visibleFrames` (truly
-///   headless / disconnected display) returns `frame` unchanged
+///   matters: the first entry large enough to host a window (≥
+///   `minimumOnScreenOverlap` in both dimensions) is the recenter
+///   target when the input is off-screen.
+/// - Returns: `frame` unchanged when it overlaps at least one of the
+///   `visibleFrames` by `minimumOnScreenOverlap` in BOTH dimensions —
+///   checked per-screen, NOT against the union bounding box, so a frame
+///   stranded in the gap between non-adjacent displays is correctly
+///   treated as off-screen. Otherwise a frame centered on the first
+///   usable screen's visibleFrame, its size clamped to that screen so the whole
+///   window (title bar included) is reachable even when the saved frame
+///   came from a larger, now-disconnected display. Empty `visibleFrames`
+///   (truly headless / disconnected display) returns `frame` unchanged
 ///   because there's no reasonable target to recenter onto.
 func nudgeFrameOntoVisibleScreen(
     _ frame: NSRect,
     visibleFrames: [NSRect]
 ) -> NSRect {
-    guard let primary = visibleFrames.first else { return frame }
-    // `NSRect.zero.union(other)` includes the origin (0,0), which on a
-    // single-screen Mac whose visibleFrame doesn't touch (0,0) would
-    // wrongly enlarge the union. Seed with the first visibleFrame.
-    let visibleUnion = visibleFrames.dropFirst().reduce(primary) { $0.union($1) }
-    let onScreen = frame.intersection(visibleUnion)
-    if onScreen.width >= minimumOnScreenOverlap,
-       onScreen.height >= minimumOnScreenOverlap {
-        return frame
+    // Recenter target: the first screen actually large enough to host a
+    // grabbable window. A degenerate / sub-`minimumOnScreenOverlap`
+    // visibleFrame (a placeholder, or a screen reported mid-reconfiguration at
+    // launch — exactly when this validator runs) can otherwise sort first and
+    // make the recenter below emit a zero-size, unreachable frame. With no
+    // usable screen, return `frame` unchanged and let AppKit place the window.
+    guard let primary = visibleFrames.first(where: {
+        $0.width >= minimumOnScreenOverlap && $0.height >= minimumOnScreenOverlap
+    }) else { return frame }
+    // Reachable iff the frame overlaps SOME ACTUAL screen by at least
+    // `minimumOnScreenOverlap` in BOTH dimensions. Test each screen
+    // individually — NOT the union of all visibleFrames. The union is a
+    // bounding box that spans the empty gaps between non-adjacent displays
+    // (and the dead corner of an L-shaped / diagonal arrangement); a window
+    // restored into such a gap overlaps the bounding box yet sits on no real
+    // screen, so a union test calls it "reachable" and leaves it invisible.
+    // (multi-display restore regression: the original code unioned first.)
+    let reachable = visibleFrames.contains { screen in
+        let overlap = frame.intersection(screen)
+        return overlap.width >= minimumOnScreenOverlap
+            && overlap.height >= minimumOnScreenOverlap
     }
-    let centeredX = primary.minX + (primary.width  - frame.width)  / 2
-    let centeredY = primary.minY + (primary.height - frame.height) / 2
-    return NSRect(x: centeredX, y: centeredY,
-                  width: frame.width, height: frame.height)
+    if reachable { return frame }
+    // Not reachable: recenter on the primary screen. Clamp the size to the
+    // primary's visibleFrame FIRST — a window saved at the size of a larger,
+    // now-unplugged display would otherwise be recentered at that oversized
+    // height with its title bar (and the traffic-light cluster) above the top
+    // edge, unreachable, leaving the user unable to drag it. Shrinking to fit
+    // guarantees the whole window lands on the primary. The saved frame in
+    // defaults is untouched (this runs before the window delegate is
+    // installed, so no save fires), so re-attaching the larger display
+    // restores the original size on the next launch.
+    let width  = min(frame.width,  primary.width)
+    let height = min(frame.height, primary.height)
+    let centeredX = primary.minX + (primary.width  - width)  / 2
+    let centeredY = primary.minY + (primary.height - height) / 2
+    return NSRect(x: centeredX, y: centeredY, width: width, height: height)
 }
