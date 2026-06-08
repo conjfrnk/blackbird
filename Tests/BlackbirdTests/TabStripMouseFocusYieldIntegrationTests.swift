@@ -135,9 +135,15 @@ final class TabStripMouseFocusYieldIntegrationTests: XCTestCase {
         let (host, cv, strip, _) = makeHost()
         XCTAssertTrue(host.makeFirstResponder(strip))
 
-        // Click far to the right where nothing matches a pill or the
-        // `+` button.
-        strip.mouseDown(with: clickEvent(at: NSPoint(x: 590, y: 14)))
+        // After the trailing-gutter removal the `+` button reaches almost the
+        // full strip width, so a hardcoded far-right x now lands ON the button.
+        // Target the tiny empty sliver just past the `+` button's right edge,
+        // computed from the test hook rather than hardcoded — still inside the
+        // strip's 600px width.
+        let emptyX = strip.addButtonFrameForTesting.maxX + 2
+        XCTAssertLessThan(emptyX, 600,
+            "precondition: the empty sliver past the `+` button must stay within the strip width")
+        strip.mouseDown(with: clickEvent(at: NSPoint(x: emptyX, y: 14)))
 
         XCTAssertTrue(host.firstResponder === cv,
             "empty-area click must still yield FR back to contentView")

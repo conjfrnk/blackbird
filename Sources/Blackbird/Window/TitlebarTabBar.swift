@@ -123,8 +123,10 @@ final class TabStripView: NSView {
     var onCommitRename: ((NSWindow, String) -> Void)?
 
     /// Hand-off for "drag a pill with the configured window-move modifier
-    /// (default ⌘) to move the window" (the empty trailing gutter already
-    /// moves the window for free via pass-through `hitTest`). Default performs
+    /// (default ⌘) to move the window". With the trailing drag gutter removed
+    /// (pills + `+` now fill the titlebar), this is the primary way to move a
+    /// multi-tab window; single-tab windows skip the strip and keep a bare,
+    /// draggable titlebar. Default performs
     /// a native AppKit window drag; injectable so a headless test can spy on the hand-off without
     /// a live `NSWindow`/`performDrag(with:)`. Lazy because the default
     /// captures `self`. The no-window branch logs rather than dropping the
@@ -285,12 +287,14 @@ final class TabStripView: NSView {
     override var isFlipped: Bool { true }
 
     /// Pass-through hit testing: only claim mouse events that fall on a pill,
-    /// the `+` button, or an active inline-rename field. Empty regions of the
-    /// strip belong to AppKit's titlebar so the user can still ⌘-drag the
-    /// window or invoke standard titlebar gestures from the gaps. Without this
-    /// the strip's full frame swallowed clicks that landed in the empty area
-    /// between pills and the right edge — `mouseDown` returned silently and
-    /// nothing else got a chance to handle the event.
+    /// the `+` button, or an active inline-rename field. Any remaining empty
+    /// region of the strip (the thin trailing inset, sub-pixel gaps between
+    /// pills) belongs to AppKit's titlebar so standard titlebar gestures still
+    /// pass through. The strip now fills the bar with pills + `+`, so little
+    /// bare region is left and a window move uses a modifier-drag on a pill;
+    /// the pass-through still matters because without it the strip's full frame
+    /// would swallow clicks landing in that empty area — `mouseDown` would
+    /// return silently and nothing else got a chance to handle the event.
     override func hitTest(_ point: NSPoint) -> NSView? {
         // Subviews (the inline-edit text field) get first crack — defer to the
         // default chain so the field editor still receives clicks routed at it.
@@ -432,15 +436,6 @@ final class TabStripView: NSView {
     private static let addButtonWidth: CGFloat = 22
     private static let pillSpacing: CGFloat = 2
     private static let trailingInset: CGFloat = 4
-    /// Minimum width of the empty, window-draggable gutter reserved at the
-    /// trailing edge of the strip (to the right of the `+`). Without it the
-    /// pills divide the entire titlebar and no bare chrome is left to grab once
-    /// the bar fills with tabs — losing the native "drag the titlebar to move
-    /// the window" affordance that the empty-region `hitTest` pass-through
-    /// relies on. Reserving it keeps a no-modifier window move reachable at any
-    /// tab count (critique 2026-06-07, issue 7). Internal (not private) so the
-    /// layout invariant is unit-testable.
-    static let minDragGutter: CGFloat = 44
     private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .regular)
 
     private func layoutPills() {
@@ -457,11 +452,14 @@ final class TabStripView: NSView {
         let gap = Self.pillSpacing
         let trail = Self.trailingInset
         let n = max(1, tabs.count)
-        // Reserve a trailing window-draggable gutter (see `minDragGutter`): the
-        // pills + `+` button divide only the width LEFT of it, so a bare,
-        // hit-test-pass-through region always remains at the trailing edge for
-        // moving the window even when the bar is full of tabs.
-        let available = max(0, totalWidth - trail - addW - gap - Self.minDragGutter)
+        // Pills + `+` button divide the full strip width (less the trailing
+        // inset). No window-draggable gutter is reserved: filling the bar to
+        // the trailing edge is a deliberate product choice, accepting the loss
+        // of the no-modifier "drag empty titlebar to move the window"
+        // affordance. The window still moves via a modifier-drag on a pill
+        // (see `classifyPillDrag` → `.windowMove`), and single-tab windows skip
+        // the strip entirely so their titlebar stays bare and draggable.
+        let available = max(0, totalWidth - trail - addW - gap)
         let pillW = available / CGFloat(n)
         var x: CGFloat = 0
         for _ in 0..<n {
@@ -647,9 +645,9 @@ final class TabStripView: NSView {
     /// Lets a test pass realistic geometry into the static
     /// `computeIntermediateIndex` helper without re-deriving it.
     var pillFramesForTesting: [CGRect] { pillFrames }
-    /// Test hook — the trailing `+` button frame, so the reserved drag gutter
-    /// (the empty span between the `+` and the strip's trailing edge) is
-    /// assertable without exposing the private `addButtonFrame`.
+    /// Test hook — the trailing `+` button frame, so the strip's trailing
+    /// layout (the `+` sits flush after the last pill, with no reserved drag
+    /// gutter) is assertable without exposing the private `addButtonFrame`.
     var addButtonFrameForTesting: CGRect { addButtonFrame }
     #endif
 
@@ -700,14 +698,12 @@ final class TabStripView: NSView {
                     // Anchor the dragged pill to the cursor — `downOffsetX`
                     // is the horizontal offset inside the pill where the
                     // user grabbed it, so the pill doesn't snap-left to
-                    // the cursor on grab. Clamped so the pill never
-                    // crosses into the `+` button gutter or the leading
-                    // edge of the strip.
+                    // the cursor on grab. Clamped against the laid-out `+`
+                    // button frame (the single source of truth for the
+                    // trailing boundary) so the dragged pill can never slide
+                    // under it and this can't drift from layoutPills()'s math.
                     let base = pillFrames[d.originalIndex]
-                    let maxX = max(
-                        0,
-                        totalWidth - Self.trailingInset - Self.addButtonWidth - Self.pillSpacing - Self.minDragGutter - base.width
-                    )
+                    let maxX = max(0, addButtonFrame.minX - Self.pillSpacing - base.width)
                     let rawX = d.cursorX - d.downOffsetX
                     let x = max(0, min(maxX, rawX))
                     rect = NSRect(x: x, y: base.minY, width: base.width, height: base.height)
@@ -1503,8 +1499,8 @@ final class TabStripView: NSView {
     override func menu(for event: NSEvent) -> NSMenu? {
         let p = convert(event.locationInWindow, from: nil)
         // Hit-test against pillFrames. Falling outside a pill (e.g. over the
-        // `+` button or the gutter) yields no contextual menu — there's no
-        // tab to target.
+        // `+` button or the empty trailing region) yields no contextual menu —
+        // there's no tab to target.
         guard
             let idx = pillFrames.firstIndex(where: { NSPointInRect(p, $0) }),
             idx < tabs.count

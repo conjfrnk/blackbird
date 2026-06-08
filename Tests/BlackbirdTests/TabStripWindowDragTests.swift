@@ -726,52 +726,82 @@ final class TabStripWindowDragTests: XCTestCase {
             "sub-threshold diagonal drag must NOT promote to .dragging")
     }
 
-    // MARK: - F. reserved trailing window-drag gutter
+    // MARK: - F. no reserved trailing gutter — pills + `+` fill the strip
     //
-    // Contract 6. After update(), the empty span at the trailing edge — past
-    // the rightmost of {last pill, + button} — must be at least
-    // TabStripView.minDragGutter wide, so the window stays draggable by empty
-    // titlebar even when tabs fill the bar. No pill may extend into the gutter.
+    // Contract 6 (REPLACED). The old contract reserved a large empty span
+    // (~44pt) at the trailing edge to the RIGHT of the `+` button so the
+    // window stayed draggable by empty titlebar. That gutter is
+    // GONE: the no-modifier titlebar drag affordance was deliberately given up
+    // as a product decision (modifier-drag on a pill still moves the window,
+    // and that path is unchanged — see sections C/C2 above). The NEW invariant
+    // is that the pills and the `+` button fill essentially the whole strip
+    // width, with no large empty span anywhere:
+    //
+    //   1. The `+` button's right edge is within a small tolerance of the
+    //      strip's full width (no large reserved gutter to its right).
+    //   2. The `+` button sits immediately after the last pill (no large gap
+    //      between the tabs and the `+`).
+    //   3. No pill's right edge exceeds the `+` button's left edge (pills never
+    //      overlap the button).
+    //
+    // The small tolerance absorbs the inter-element spacing + trailing
+    // breathing-room inset without coupling the test to their exact values.
 
-    private func assertGutter(_ strip: TabStripView, width: CGFloat,
-                              tabs: Int, file: StaticString = #filePath,
-                              line: UInt = #line) {
+    /// Largest acceptable empty span (in points) — must comfortably cover the
+    /// inter-element spacing plus trailing inset, but be far below the old
+    /// ~44pt reserved gutter so a regression to that design fails this test.
+    private static let gutterTolerance: CGFloat = 6
+
+    private func assertNoGutter(_ strip: TabStripView, width: CGFloat,
+                                tabs: Int, file: StaticString = #filePath,
+                                line: UInt = #line) {
         let pillFrames = strip.pillFramesForTesting
         XCTAssertFalse(pillFrames.isEmpty,
             "precondition: at least one pill frame for \(tabs) tabs @ \(width)",
             file: file, line: line)
         let rightmostPillMaxX = pillFrames.map { $0.maxX }.max()!
-        let addMaxX = strip.addButtonFrameForTesting.maxX
-        let occupied = max(rightmostPillMaxX, addMaxX)
-        let gutter = width - occupied
-        XCTAssertGreaterThanOrEqual(
-            gutter, TabStripView.minDragGutter,
-            "trailing gutter (\(gutter)) must be >= minDragGutter for \(tabs) tabs @ width \(width)",
-            file: file, line: line)
+        let addFrame = strip.addButtonFrameForTesting
+        let tol = Self.gutterTolerance
+
+        // 1. No large reserved span to the RIGHT of the `+` button.
+        let trailingSpan = width - addFrame.maxX
         XCTAssertLessThanOrEqual(
-            rightmostPillMaxX, width - TabStripView.minDragGutter,
-            "no pill may extend into the reserved gutter (\(tabs) tabs @ width \(width))",
+            trailingSpan, tol,
+            "the `+` button's right edge must reach (within \(tol)pt) the strip's full width — found a \(trailingSpan)pt trailing span for \(tabs) tabs @ width \(width); the reserved gutter must be gone",
+            file: file, line: line)
+
+        // 2. No large gap between the last pill and the `+` button.
+        let gapBeforeAdd = addFrame.minX - rightmostPillMaxX
+        XCTAssertLessThanOrEqual(
+            gapBeforeAdd, tol,
+            "the `+` button must sit immediately after the last pill (gap <= \(tol)pt) — found a \(gapBeforeAdd)pt gap for \(tabs) tabs @ width \(width)",
+            file: file, line: line)
+
+        // 3. Pills must never overlap the `+` button.
+        XCTAssertLessThanOrEqual(
+            rightmostPillMaxX, addFrame.minX,
+            "no pill's right edge may exceed the `+` button's left edge (\(tabs) tabs @ width \(width))",
             file: file, line: line)
     }
 
-    func test_gutter_2tabs_width600() {
+    func test_noGutter_2tabs_width600() {
         let (strip, _) = makeStrip(tabCount: 2, width: 600)
-        assertGutter(strip, width: 600, tabs: 2)
+        assertNoGutter(strip, width: 600, tabs: 2)
     }
 
-    func test_gutter_3tabs_width600() {
+    func test_noGutter_3tabs_width600() {
         let (strip, _) = makeStrip(tabCount: 3, width: 600)
-        assertGutter(strip, width: 600, tabs: 3)
+        assertNoGutter(strip, width: 600, tabs: 3)
     }
 
-    func test_gutter_5tabs_width600() {
+    func test_noGutter_5tabs_width600() {
         let (strip, _) = makeStrip(tabCount: 5, width: 600)
-        assertGutter(strip, width: 600, tabs: 5)
+        assertNoGutter(strip, width: 600, tabs: 5)
     }
 
-    func test_gutter_3tabs_narrowWidth420() {
+    func test_noGutter_3tabs_narrowWidth420() {
         let (strip, _) = makeStrip(tabCount: 3, width: 420)
-        assertGutter(strip, width: 420, tabs: 3)
+        assertNoGutter(strip, width: 420, tabs: 3)
     }
 
     // MARK: - G. armed gesture is cancelled when the tab list changes shape mid-press
