@@ -82,7 +82,8 @@ if [[ ! -s "$DMG_PATH" ]]; then
     echo "!! Downloaded DMG is empty." >&2
     exit 1
 fi
-echo "    $(shasum -a 256 "$DMG_PATH" | awk '{print $1}')  $(wc -c <"$DMG_PATH") bytes"
+DMG_SHA="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+echo "    ${DMG_SHA}  $(wc -c <"$DMG_PATH") bytes"
 
 # ---------------------------------------------------------------------------
 # Trust-root verification (audit SEC-003 / F-S8-004).
@@ -204,6 +205,20 @@ TAG_PUB_DATE="$(date -u -r "$TAG_COMMIT_TS" +"%a, %d %b %Y %H:%M:%S +0000")"
 # advertise an artifact that bypassed the trust-root gate, with an
 # enclosure URL that 404s under the older tag's release path. Audit
 # S2-009 / S4-001.
+# Verify-then-sign TOCTOU guard: verify_dmg checked the file at
+# $DMG_PATH, but make-appcast.sh re-reads (mounts, signs) whatever sits
+# at that PATH later — and dist/ is shared with release.sh local builds
+# under the same name. Re-hash immediately before handing the path over
+# so swapped bytes can't ride the verified path. Review follow-up to
+# audit S2-009/S4-001.
+RECHECK_SHA="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
+if [[ "$RECHECK_SHA" != "$DMG_SHA" ]]; then
+    echo "!! $DMG_PATH changed on disk between verification and signing:" >&2
+    echo "   verified sha256: $DMG_SHA" >&2
+    echo "   current  sha256: $RECHECK_SHA" >&2
+    echo "   (concurrent scripts/release.sh run?) Aborting." >&2
+    exit 1
+fi
 APPCAST_DMG="$DMG_PATH" \
   APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}" \
   APPCAST_FEED_URL="https://blackbird-terminal.com/appcast.xml" \
@@ -216,15 +231,47 @@ APPCAST_DMG="$DMG_PATH" \
 # version being published. Either mismatch means make-appcast.sh signed
 # something other than the verified artifact — abort with the staged
 # tempfile discarded (EXIT trap) and the tracked appcast untouched.
+# "Exactly the verified artifact" means exactly ONE enclosure and it is
+# ours — a feed that grew a second enclosure pointing elsewhere would
+# pass a substring check. (`url="` appears only on enclosures; the atom
+# self-link uses href=.)
+ENCLOSURE_COUNT="$(grep -c 'url="' "$TMP_APPCAST" || true)"
+if [[ "$ENCLOSURE_COUNT" -ne 1 ]]; then
+    echo "!! Generated appcast has ${ENCLOSURE_COUNT} enclosure url= attributes (expected exactly 1):" >&2
+    grep -o 'url="[^"]*"' "$TMP_APPCAST" | sed 's/^/   got: /' >&2 || true
+    exit 1
+fi
 if ! grep -qF "url=\"${DMG_URL}\"" "$TMP_APPCAST"; then
     echo "!! Generated appcast does not reference the verified DMG URL:" >&2
     echo "   expected enclosure url=\"${DMG_URL}\"" >&2
-    grep -o 'url="[^"]*"' "$TMP_APPCAST" | sed 's/^/   got: /' >&2
+    grep -o 'url="[^"]*"' "$TMP_APPCAST" | sed 's/^/   got: /' >&2 || true
     exit 1
 fi
 if ! grep -qF "<sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>" "$TMP_APPCAST"; then
     echo "!! Generated appcast advertises a different version than ${VERSION}:" >&2
-    grep -o '<sparkle:shortVersionString>[^<]*</sparkle:shortVersionString>' "$TMP_APPCAST" | sed 's/^/   got: /' >&2
+    grep -o '<sparkle:shortVersionString>[^<]*</sparkle:shortVersionString>' "$TMP_APPCAST" | sed 's/^/   got: /' >&2 || true
+    exit 1
+fi
+# Reconcile the value Sparkle ACTUALLY compares — <sparkle:version>
+# (CFBundleVersion, read from inside the mounted DMG) — against the
+# build number the tag's own project.yml declares. URL and
+# shortVersionString are filename-derived on both sides, so they can't
+# catch a wrong-content artifact; this can. cut-release.sh guarantees
+# the key exists and is a plain integer at every tag.
+EXPECTED_BUILD="$(git show "${TAG}:project.yml" 2>/dev/null \
+    | grep -E '^ *CFBundleVersion:' | head -1 \
+    | sed -E 's/^ *CFBundleVersion: *"?([^"]+)"? *$/\1/' || true)"
+if [[ -z "$EXPECTED_BUILD" ]]; then
+    echo "!! Could not read CFBundleVersion from ${TAG}:project.yml — cannot" >&2
+    echo "   reconcile the appcast's sparkle:version. Aborting." >&2
+    exit 1
+fi
+if ! grep -qF "<sparkle:version>${EXPECTED_BUILD}</sparkle:version>" "$TMP_APPCAST"; then
+    echo "!! Generated appcast's sparkle:version does not match ${TAG}'s project.yml" >&2
+    echo "   expected: <sparkle:version>${EXPECTED_BUILD}</sparkle:version>" >&2
+    grep -o '<sparkle:version>[^<]*</sparkle:version>' "$TMP_APPCAST" | sed 's/^/   got: /' >&2 || true
+    echo "   The DMG's embedded CFBundleVersion disagrees with the tagged source —" >&2
+    echo "   a wrong-content artifact would make this update invisible to Sparkle." >&2
     exit 1
 fi
 mv -f "$TMP_APPCAST" website/appcast.xml

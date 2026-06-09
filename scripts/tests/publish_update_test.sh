@@ -57,6 +57,17 @@ XML
     # A sentinel marker we'll grep for after the run.
     echo "<!-- SENTINEL_GOOD_APPCAST_DO_NOT_TRUNCATE -->" >> "$root/website/appcast.xml"
 
+    # Minimal project.yml committed at the tag: publish-update.sh
+    # reconciles the feed's <sparkle:version> against
+    # `git show <tag>:project.yml`'s CFBundleVersion. The stub
+    # make-appcast (below) and the stub hdiutil plist both use 42.
+    cat >"$root/project.yml" <<'YAML'
+name: Blackbird
+settings:
+  CFBundleShortVersionString: "0.2.0"
+  CFBundleVersion: "42"
+YAML
+
     # website/deploy.sh stub — no S3, no CloudFront.
     cat >"$root/website/deploy.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -182,6 +193,7 @@ cat <<XML
     <description>fixture full appcast</description>
     <item>
       <title>Version ${VERSION}</title>
+      <sparkle:version>42</sparkle:version>
       <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
       <enclosure url="${APPCAST_BASE_URL%/}/${DMG_NAME}"
                  type="application/x-apple-diskimage" />
@@ -197,9 +209,10 @@ STUB
     # Init git repo so the script's `git add` / `git commit` / `git push`
     # paths have a real repo to operate on.
     mk_git_fixture "$root"
-    # Track the pre-existing appcast so changes to it show up in `git
-    # status` / `git diff --cached`.
-    (cd "$root" && git add website/appcast.xml \
+    # Track the pre-existing appcast (and the fixture project.yml the
+    # sparkle:version reconciliation reads via `git show <tag>:…`) so
+    # the tag below carries both.
+    (cd "$root" && git add website/appcast.xml project.yml \
         && git -c commit.gpgsign=false commit -q -m "seed appcast")
     # Tag the seed commit as v0.2.0 — the version every test case in
     # this file passes to publish-update.sh. The script's deterministic
