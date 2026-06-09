@@ -392,6 +392,19 @@ struct BBSnap {
    * (same rule as `history_size`). Audit S5-004/S5-005.
    */
   uint64_t lines_scrolled;
+  /**
+   * 1 when the cursor is parked ON the last written cell with
+   * alacritty's `input_needs_wrap` set — the input line exactly
+   * filled the row, so the shell's LOGICAL cursor position is one
+   * character PAST `cursor_col` even though the grid cursor hasn't
+   * wrapped yet. Grid state alone cannot distinguish this from a
+   * cursor legitimately sitting on a character (e.g. after
+   * arrow-left); consumers doing character-position math (the
+   * find-replace splice) need this bit. Audit S5-003 review
+   * follow-up. Appended at the tail per the ABI-evolution rule.
+   */
+  uint8_t cursor_pending_wrap;
+  uint8_t _pad3[7];
 };
 
 /**

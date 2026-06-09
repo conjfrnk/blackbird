@@ -615,6 +615,14 @@ public final class BBSnapshot {
     public var linesScrolled: UInt64 { handle.pointee.lines_scrolled }
     /// DECSCUSR cursor shape: 0 = block, 1 = bar/beam, 2 = underline, 3 = hidden.
     public var cursorShape: Int { Int(handle.pointee.cursor_shape) }
+    /// True when the cursor is parked ON the last written cell with
+    /// alacritty's input_needs_wrap set: the input line exactly filled
+    /// the row, so the shell's LOGICAL cursor position is one character
+    /// past `cursorCol`. Character-position math (find-replace splice)
+    /// must add 1 when this is set — the grid alone can't distinguish
+    /// pending-wrap from a cursor legitimately sitting on a character.
+    /// Audit S5-003 review follow-up.
+    public var cursorPendingWrap: Bool { handle.pointee.cursor_pending_wrap != 0 }
     public var mode: UInt32 { handle.pointee.mode }
     public var termMode: BBTermMode { BBTermMode(rawValue: mode) }
 

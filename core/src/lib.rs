@@ -2725,6 +2725,17 @@ pub struct BBSnap {
     /// Appended at the struct tail to preserve existing field offsets
     /// (same rule as `history_size`). Audit S5-004/S5-005.
     pub lines_scrolled: u64,
+    /// 1 when the cursor is parked ON the last written cell with
+    /// alacritty's `input_needs_wrap` set — the input line exactly
+    /// filled the row, so the shell's LOGICAL cursor position is one
+    /// character PAST `cursor_col` even though the grid cursor hasn't
+    /// wrapped yet. Grid state alone cannot distinguish this from a
+    /// cursor legitimately sitting on a character (e.g. after
+    /// arrow-left); consumers doing character-position math (the
+    /// find-replace splice) need this bit. Audit S5-003 review
+    /// follow-up. Appended at the tail per the ABI-evolution rule.
+    pub cursor_pending_wrap: u8,
+    pub _pad3: [u8; 7],
 }
 
 unsafe impl Send for BBSnap {}
@@ -2775,6 +2786,7 @@ impl BBSnapOwned {
         cols: u16,
         rows: u16,
         cursor: (u16, u16, bool),
+        cursor_pending_wrap: bool,
         display_offset: u32,
         history_size: u32,
         lines_scrolled: u64,
@@ -2801,6 +2813,8 @@ impl BBSnapOwned {
                 cursor_shape,
                 _pad2b: [0; 3],
                 lines_scrolled,
+                cursor_pending_wrap: cursor_pending_wrap as u8,
+                _pad3: [0; 7],
             },
             rc: AtomicUsize::new(1),
             cells_owned: cells,
@@ -3341,6 +3355,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         }
 
         let cursor_point = grid.cursor.point;
+        let cursor_pending_wrap = grid.cursor.input_needs_wrap;
         // cursor_point.line.0 is a 0-based screen row (Line wraps i32; visible rows are 0..rows-1).
         // cursor_point.column.0 is a 0-based column (Column wraps usize).
         let cursor_row = cursor_point.line.0.max(0) as u16;
@@ -3467,6 +3482,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             cols,
             rows,
             (cursor_col, cursor_row, cursor_visible),
+            cursor_pending_wrap,
             display_offset,
             history_size,
             lines_scrolled,
@@ -4852,10 +4868,16 @@ mod tests {
              existing field offsets must not move"
         );
         assert_eq!(
-            std::mem::size_of::<BBSnap>(),
+            std::mem::offset_of!(BBSnap, cursor_pending_wrap),
             56,
-            "BBSnap total size 56 bytes (48 post-M5 + appended u64 \
-             lines_scrolled, audit S5-004/S5-005)"
+            "cursor_pending_wrap appended at offset 56 (audit S5-003 \
+             review follow-up) — existing field offsets must not move"
+        );
+        assert_eq!(
+            std::mem::size_of::<BBSnap>(),
+            64,
+            "BBSnap total size 64 bytes (56 + appended pending-wrap byte \
+             with explicit tail padding)"
         );
     }
 

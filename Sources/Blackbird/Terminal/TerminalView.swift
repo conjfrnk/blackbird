@@ -2865,9 +2865,12 @@ extension TerminalView {
     /// column-wise from the grid; OSC 133 B tracking would be the
     /// future fix.
     ///
-    /// All-or-nothing: validation failures (line break / tab in the
-    /// replacement, cursor inside a match) refuse BEFORE any byte is
-    /// emitted, so the line is never left half-spliced.
+    /// All-or-nothing: validation failures (line break / tab /
+    /// multi-scalar grapheme in the replacement) refuse BEFORE any byte
+    /// is emitted, so the line is never left half-spliced. A cursor
+    /// INSIDE a match is handled, not refused: the splice walks to the
+    /// match end and the final reposition maps the original position to
+    /// just after that match's replacement.
     private func spliceReplacements(
         matches: [(line: Int32, startCol: Int, endCol: Int)],
         replacement: String
@@ -2927,6 +2930,18 @@ extension TerminalView {
             findBar?.showTransientMessage("Refusing: replacement contains a tab")
             return
         }
+        // Review follow-up: readline/ZLE move and delete per CODEPOINT,
+        // while the walk/DEL counts here are grapheme/cell units. A
+        // replacement carrying a multi-scalar grapheme (decomposed
+        // accent, ZWJ emoji) would under-count the arrows the shell
+        // actually needs, landing the NEXT span's DELs off-target in a
+        // Replace All. Refuse rather than corrupt; precomposed input is
+        // unaffected.
+        let cleanedString = String(decoding: cleanedReplacement, as: UTF8.self)
+        if cleanedString.count != cleanedString.unicodeScalars.count {
+            findBar?.showTransientMessage("Refusing: replacement contains a multi-codepoint character")
+            return
+        }
 
         // Build the full splice against the tracked cursor position
         // (char index = count of shell characters left of a column).
@@ -2943,7 +2958,12 @@ extension TerminalView {
                 for _ in 0..<(-delta) { bytes.append(contentsOf: escLeft) }
             }
         }
-        let p0 = chars(0, snap.cursorCol - 1)
+        // Pending-wrap correction (review follow-up): when the input
+        // line exactly fills the row, the grid cursor parks ON the last
+        // cell but the shell's logical position is one past it — without
+        // the +1 every move and DEL landed one character left of target
+        // on width-exact lines.
+        let p0 = chars(0, snap.cursorCol - 1) + (snap.cursorPendingWrap ? 1 : 0)
         var p = p0
         var bytes = Data()
         // Original-space coordinates stay valid throughout because

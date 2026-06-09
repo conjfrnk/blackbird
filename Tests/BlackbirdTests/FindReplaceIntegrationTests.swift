@@ -748,16 +748,16 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         var captured = Data()
         view.replaceByteCapture = { captured.append($0) }
         view._invokeReplaceCurrentForTests(replacement: "x")
-        // Audit S5-003 positioned grammar: the fixture cursor sits at
-        // col 4 (pending wrap on 'c') = char position 3; the match
-        // spans chars [0, 4). Walk right 1 to the match end, erase 4
-        // (one per shell-char in 中abc — the wide glyph is ONE DEL),
-        // type "x"; the original position (inside the span) maps to
-        // just after the replacement, so no final walk.
-        let csiC = Data([0x1B, 0x5B, 0x43])
+        // Audit S5-003 positioned grammar with the pending-wrap
+        // correction: "中abc" exactly fills the 5-col row, so the
+        // cursor parks ON 'c' with input_needs_wrap set and the SHELL's
+        // logical position is 4 — already at the match end [0, 4). No
+        // walk, erase 4 (the wide glyph is ONE DEL), type "x"; the
+        // original position (inside the span) maps to just after the
+        // replacement — no final walk.
         XCTAssertEqual(
             captured,
-            csiC + Data([0x7F, 0x7F, 0x7F, 0x7F]) + Data("x".utf8)
+            Data([0x7F, 0x7F, 0x7F, 0x7F]) + Data("x".utf8)
         )
     }
 
@@ -776,15 +776,19 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         var captured = Data()
         view.replaceByteCapture = { captured.append($0) }
         view._invokeReplaceCurrentForTests(replacement: "Y")
-        // Audit S5-003 positioned grammar: cursor at char 3 (col 4,
-        // pending wrap), match = the single 中 char [0, 1). Walk left 2
-        // to the match end, ONE DEL (wide glyph = one shell char), type
-        // "Y", walk right 2 back to the (unshifted) original position.
+        // Audit S5-003 positioned grammar with the pending-wrap
+        // correction: shell logical position is 4 (cursor parked on 'c'
+        // with input_needs_wrap — one PAST the cell-derived 3). Match =
+        // the single 中 char [0, 1): walk left 3 to the match end, ONE
+        // DEL (wide glyph = one shell char), type "Y", walk right 3
+        // back to the (unshifted) original position. The first cut of
+        // this fix derived 2/2 from the raw cursor cell and would have
+        // erased 'a' on a real shell (review finding).
         let csiD = Data([0x1B, 0x5B, 0x44])
         let csiC2 = Data([0x1B, 0x5B, 0x43])
         XCTAssertEqual(
             captured,
-            csiD + csiD + Data([0x7F]) + Data("Y".utf8) + csiC2 + csiC2
+            csiD + csiD + csiD + Data([0x7F]) + Data("Y".utf8) + csiC2 + csiC2 + csiC2
         )
     }
 
@@ -814,13 +818,13 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         // homograph attack codepoint. Must be stripped before reaching
         // the PTY.
         view._invokeReplaceCurrentForTests(replacement: "x\u{202E}y")
-        // Audit S5-003 positioned grammar: cursor at char 1 (col 1,
-        // pending wrap), match [0, 2): walk right 1 to the end, 2 DELs,
-        // scrubbed "xy" (no RLO); original position inside the span
-        // maps to the replacement end — no final walk.
+        // Pending-wrap correction: "ab" exactly fills the 2-col row, so
+        // the shell's logical position is 2 — already at the match end
+        // [0, 2). 2 DELs + scrubbed "xy" (no RLO), no walks (final
+        // position == replacement end == original).
         XCTAssertEqual(
             captured,
-            Data([0x1B, 0x5B, 0x43]) + Data([0x7F, 0x7F]) + Data("xy".utf8)
+            Data([0x7F, 0x7F]) + Data("xy".utf8)
         )
         XCTAssertFalse(
             captured.contains(0xAE),
@@ -843,10 +847,10 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         // Replacement contains ESC + a Bell — both should be replaced
         // with space by sanitizePasteControls.
         view._invokeReplaceCurrentForTests(replacement: "x\u{1B}\u{07}y")
-        // Same positioned grammar as the RLO sibling above.
+        // Same pending-wrap-corrected grammar as the RLO sibling above.
         XCTAssertEqual(
             captured,
-            Data([0x1B, 0x5B, 0x43]) + Data([0x7F, 0x7F]) + Data("x  y".utf8)
+            Data([0x7F, 0x7F]) + Data("x  y".utf8)
         )
     }
 }
