@@ -212,6 +212,16 @@ jobs:
         # add new ones without explicit justification. Audit K5.
         run: scripts/lint-tests.sh
 
+      - name: Release-script regression tests
+        # Hermetic bash harness for the release pipeline scripts
+        # (make-appcast / publish-update / cut-release / release /
+        # smoke / shellcheck). Stubs all network/signing externals and
+        # runs in seconds. Previously these guards (incl. the audit
+        # S2-009 verified-DMG pin) only ran when an operator remembered
+        # to invoke them by hand — a regression merged green. Review
+        # follow-up to audit S2-009/S4-001.
+        run: bash scripts/tests/run.sh
+
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v7
