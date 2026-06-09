@@ -69,3 +69,41 @@ final class TestHostTermination: NSObject, XCTestObservation {
         }
     }
 }
+
+// MARK: - Audit S2-004: idle-heartbeat notification contract
+
+/// The test host's safety net (`TestHostActivityMonitor`, app side) only
+/// exits after 300 s WITHOUT a heartbeat; `TestHostTermination` (this
+/// file, test side) posts that heartbeat on every test start/finish.
+/// The two sides rendezvous solely on the notification NAME — a silent
+/// rename on either side would re-introduce the killed-mid-run host
+/// (or never-exiting zombie) failure mode with no compile error. Pin
+/// the literal both sides rely on.
+///
+/// The 300 s timeout itself is untestable here (a test cannot sit idle
+/// for 5 minutes without itself posting start/finish heartbeats), so
+/// this is deliberately limited to the name contract + a post smoke.
+///
+/// Memory: zero allocations beyond a Notification. Wall < 1 ms.
+final class TestHostActivityHeartbeatTests: XCTestCase {
+
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
+    func test_heartbeatNotificationName_isStableContract_andPostingDoesNotCrash() {
+        XCTAssertEqual(
+            TestHostActivityMonitor.activityNotification.rawValue,
+            "dev.conjfrnk.blackbird.testHostActivity",
+            "renaming the heartbeat notification silently decouples the "
+            + "test-side poster from the app-side idle monitor (audit S2-004)"
+        )
+        // Post smoke: the app-side observer (live in this very host
+        // process) must tolerate a heartbeat with no object/userInfo.
+        // Reaching the end of the test without a crash is the assertion.
+        NotificationCenter.default.post(
+            name: TestHostActivityMonitor.activityNotification, object: nil
+        )
+    }
+}

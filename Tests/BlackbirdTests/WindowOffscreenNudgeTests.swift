@@ -193,4 +193,86 @@ final class WindowOffscreenNudgeTests: XCTestCase {
         XCTAssertNotEqual(withoutExternal, savedOnExternal)
         XCTAssertTrue(mainScreen.contains(withoutExternal))
     }
+
+    // MARK: - Audit S5-007: small-window reachability
+
+    /// A window SHORTER than the 100pt overlap threshold that sits
+    /// ENTIRELY inside a screen is perfectly reachable — the user can
+    /// see and grab all of it. A naive "overlap ≥ 100pt in both
+    /// dimensions" rule can never be satisfied by a 90pt-tall frame, so
+    /// it would recenter the window on every launch even though nothing
+    /// is wrong. The frame must round-trip unchanged.
+    func test_smallWindowFullyOnScreen_shorterThan100pt_returnedUnchanged() {
+        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let frame = NSRect(x: 10, y: 10, width: 300, height: 90)
+        // Pin the construction: fully contained, but height < 100.
+        XCTAssertTrue(screen.contains(frame),
+                      "test setup: frame must be entirely inside the screen")
+        XCTAssertLessThan(frame.height, 100,
+                          "test setup: frame must be shorter than the overlap threshold")
+
+        let result = nudgeFrameOntoVisibleScreen(
+            frame,
+            visibleFrames: [screen]
+        )
+        XCTAssertEqual(result, frame,
+                       "a sub-100pt-tall frame fully on-screen must NOT be moved")
+    }
+
+    /// Counter-case: the small-window allowance must not make short
+    /// windows immune to the nudge. A 90pt-tall frame hanging mostly off
+    /// the bottom edge (only a 20pt strip visible) is NOT reachable and
+    /// must still be recentered at its original size.
+    func test_smallWindowMostlyOffScreen_isStillRecentered() {
+        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        // y ∈ [−70, 20]: only the top 20pt of the 90pt window is visible.
+        let frame = NSRect(x: 10, y: -70, width: 300, height: 90)
+        let overlap = frame.intersection(screen)
+        XCTAssertEqual(overlap.height, 20, accuracy: 0.001,
+                       "test setup: exactly a 20pt strip must remain visible")
+
+        let result = nudgeFrameOntoVisibleScreen(
+            frame,
+            visibleFrames: [screen]
+        )
+        XCTAssertNotEqual(result, frame,
+                          "a mostly-off-screen small window must be repositioned")
+        XCTAssertEqual(result.size, frame.size,
+                       "size must be preserved — 300×90 fits the screen")
+        // Recentered on the screen: x = (1440−300)/2 = 570,
+        // y = (900−90)/2 = 405.
+        XCTAssertEqual(result.origin.x, 570, accuracy: 0.5)
+        XCTAssertEqual(result.origin.y, 405, accuracy: 0.5)
+        XCTAssertTrue(screen.contains(result),
+                      "recentered small window must sit fully on the screen")
+    }
+
+    /// Frames LARGER than 100pt in both dimensions keep the original
+    /// 100pt-overlap rule: a 300×200 frame with only a 50pt-wide strip
+    /// visible at the left edge is unreachable and must be recentered.
+    /// (Guards against the small-window allowance accidentally relaxing
+    /// the threshold for normal-sized windows.)
+    func test_largeWindowWithSub100Overlap_keeps100ptRule_recentered() {
+        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        // x ∈ [−250, 50]: 50pt visible horizontally; fully visible
+        // vertically (200pt ≥ 100).
+        let frame = NSRect(x: -250, y: 100, width: 300, height: 200)
+        let overlap = frame.intersection(screen)
+        XCTAssertEqual(overlap.width, 50, accuracy: 0.001,
+                       "test setup: exactly 50pt must remain visible horizontally")
+        XCTAssertGreaterThanOrEqual(frame.width, 100)
+        XCTAssertGreaterThanOrEqual(frame.height, 100)
+
+        let result = nudgeFrameOntoVisibleScreen(
+            frame,
+            visibleFrames: [screen]
+        )
+        XCTAssertNotEqual(result, frame,
+                          "≥100pt frame with a sub-100pt overlap must still be moved")
+        XCTAssertEqual(result.size, frame.size,
+                       "size must be preserved — 300×200 fits the screen")
+        // Recentered: x = (1440−300)/2 = 570, y = (900−200)/2 = 350.
+        XCTAssertEqual(result.origin.x, 570, accuracy: 0.5)
+        XCTAssertEqual(result.origin.y, 350, accuracy: 0.5)
+    }
 }

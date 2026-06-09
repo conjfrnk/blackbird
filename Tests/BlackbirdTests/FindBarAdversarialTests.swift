@@ -556,19 +556,28 @@ final class FindBarAdversarialTests: XCTestCase {
 
         view._invokeReplaceAllForTests(replacement: "x")
 
-        // Right-to-left order: cols 12..16 first, then cols 0..4.
-        // Each match: 5 DELs + "x". Total: (5+1) × 2 = 12 bytes.
-        let delHelloX = Data(repeating: 0x7F, count: 5) + Data("x".utf8)
+        // Audit S5-003 positioned grammar, right-to-left from the
+        // cursor at char 17 (end of "hello world hello"):
+        //   cols 12..16 = chars [12, 17): cursor already at the end —
+        //     0 moves, 5 DELs, "x" (cursor at 13);
+        //   cols 0..4 = chars [0, 5): walk LEFT 8 (13 → 5) — these are
+        //     cursor moves, NOT destructive bytes, so the ' world '
+        //     interior is preserved — 5 DELs, "x" (cursor at 1);
+        //   final: original position 17 shifts by (1−5)×2 = −8 → walk
+        //     RIGHT 8 to char 9, the new end of line.
+        let csiD = Data([0x1B, 0x5B, 0x44])
+        let csiC = Data([0x1B, 0x5B, 0x43])
+        let del5x = Data(repeating: 0x7F, count: 5) + Data("x".utf8)
+        var expected = del5x
+        for _ in 0..<8 { expected += csiD }
+        expected += del5x
+        for _ in 0..<8 { expected += csiC }
         let combined = allCaptures.reduce(Data(), +)
         XCTAssertEqual(
-            combined, delHelloX + delHelloX,
-            "Replace All must emit exactly DEL₅+x twice (one per match) "
-            + "with no intervening bytes that would corrupt the ' world ' "
-            + "interior text"
-        )
-        XCTAssertEqual(
-            combined.count, 12,
-            "total byte count must be 12 (2 matches × (5 DELs + 1 char))"
+            combined, expected,
+            "Replace All must erase exactly the two match spans (5 DELs + "
+            + "replacement each) with only CURSOR MOVES in between — the "
+            + "' world ' interior is never erased"
         )
     }
 }

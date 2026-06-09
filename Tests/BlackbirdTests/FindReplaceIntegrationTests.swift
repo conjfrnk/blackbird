@@ -272,6 +272,158 @@ final class FindReplaceIntegrationTests: XCTestCase {
         XCTAssertEqual(captured, expected,
                        "Replace All must skip off-input-line matches and reposition for the rest")
     }
+
+    // MARK: - Audit S5-003: growing replacement (replacement longer than match)
+
+    /// The splice grammar must hold when the replacement GROWS the line:
+    /// match 3 chars at cols 2..4 (char span [2,5)), replacement
+    /// "longer" (6 chars). From the fixture cursor at char position 0:
+    /// walk right to the match end (5), erase 3, type the 6-char
+    /// replacement — the shell cursor now sits at 2 + 6 = 8 — then walk
+    /// back to the original position. 0 is LEFT of the replaced span, so
+    /// the final target stays 0 → left(8). A walk-back computed from the
+    /// MATCH length instead of the REPLACEMENT length would emit left(5)
+    /// and strand the shell cursor 3 chars right of home.
+    ///
+    /// Memory: one /bin/cat session (same fixture as the suite's other
+    /// tests) + one TerminalView. Wall < 3 s.
+    func test_replaceCurrent_longerReplacement_exactSpliceWithGrownWalkBack() throws {
+        let view = try makeView()
+        let snap = try liveSnapshot()
+
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 2, endCol: 4)]
+
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+
+        view._invokeReplaceCurrentForTests(replacement: "longer")
+
+        let expected = right(5) + dels(3) + Data("longer".utf8) + left(8)
+        XCTAssertEqual(captured, expected,
+                       "Growing replacement must walk back replacementLen + startChar "
+                       + "(8), not matchLen + startChar (5) — got \(Array(captured))")
+    }
+
+    // MARK: - Audit S5-003: shifted final position (cursor right of the matches)
+
+    /// Build a snapshot whose row 0 holds `text` with the cursor parked
+    /// immediately after it. `cols` must exceed the text's cell width so
+    /// the cursor does NOT enter the pending-wrap state at the right
+    /// edge (which would make its column — and thus its char position —
+    /// ambiguous to assert against blind).
+    ///
+    /// Memory: a cols×4 BBTerm grid is < 5 KB. Wall < 10 ms. No PTY.
+    private func typedSnapshot(_ text: String, cols: Int) throws -> BBSnapshot {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: UInt16(cols), rows: 4)))
+        term.input("\u{1B}[1;1H")
+        term.input(text)
+        return try XCTUnwrap(term.snapshot())
+    }
+
+    /// Two same-row matches with the user's cursor RIGHT of both: the
+    /// final walk-back target must shift by (replacementLen − matchLen)
+    /// PER replaced span. Row "foo bar", cursor at char 7 (right after
+    /// "r"); replacing both 3-char matches with the 2-char "xy" shifts
+    /// the original position 7 left by 1 per span → final target 5.
+    /// The trailing bytes are therefore a RIGHTWARD walk (from char 2,
+    /// where typing the second replacement left the shell cursor) — an
+    /// unshifted implementation would instead walk right 5 back to 7,
+    /// landing the cursor 2 chars past the (now shorter) line content.
+    func test_replaceAll_cursorRightOfMatches_finalPositionShiftsByLengthDelta() throws {
+        let view = try makeView()
+        let snap = try typedSnapshot("foo bar", cols: 10)
+        XCTAssertEqual(Int(snap.cursorRow), 0,
+                       "test fixture: cursor must sit on row 0 after typing")
+
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [
+            (line: cursorLine, startCol: 0, endCol: 2),   // "foo" → chars [0,3)
+            (line: cursorLine, startCol: 4, endCol: 6),   // "bar" → chars [4,7)
+        ]
+
+        var allCaptures: [Data] = []
+        view.replaceByteCapture = { allCaptures.append($0) }
+
+        view._invokeReplaceAllForTests(replacement: "xy")
+
+        // Right-to-left from cursor char 7:
+        //  - "bar" (chars [4,7)): match end == 7 == cursor → no walk;
+        //    erase 3, type "xy" → shell cursor at 6.
+        //  - "foo" (chars [0,3)): walk left 3 to char 3; erase 3, type
+        //    "xy" → shell cursor at 2.
+        //  - final: original 7 is right of both spans →
+        //    7 + (2−3) + (2−3) = 5; walk right 3 from char 2.
+        let xy = Data("xy".utf8)
+        let expected = dels(3) + xy + left(3) + dels(3) + xy + right(3)
+        let combined = allCaptures.reduce(Data(), +)
+        XCTAssertEqual(combined, expected,
+                       "Final reposition must map the original cursor through BOTH "
+                       + "length deltas (7 → 5) — got \(Array(combined))")
+    }
+
+    // MARK: - Audit S5-003: wide glyphs and shell-character walk units
+
+    /// A wide-glyph MATCH with cursor walks: 中 occupies cols 2..3 (TWO
+    /// cells) but is ONE shell character, so the walk to its end, the
+    /// DEL count, and the walk back must all count it once. Row
+    /// "ab中cd": cells a,b,中,中(spacer),c,d; cursor at cell 6 = char 5.
+    /// Match = 中 alone (cols 2..3 = chars [2,3)), replacement "Y".
+    func test_replaceCurrent_wideGlyphMatch_positionedSpliceCountsShellChars() throws {
+        let view = try makeView()
+        let snap = try typedSnapshot("ab中cd", cols: 8)
+        XCTAssertEqual(Int(snap.cursorRow), 0,
+                       "test fixture: cursor must sit on row 0 after typing")
+
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 2, endCol: 3)]
+
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+
+        view._invokeReplaceCurrentForTests(replacement: "Y")
+
+        // Cursor char 5 → match end char 3: left(2). Erase ONE shell
+        // char (the 中), type "Y" → shell cursor at 3. Final: original 5
+        // is right of the span → 5 + (1−1) = 5: right(2).
+        let expected = left(2) + dels(1) + Data("Y".utf8) + right(2)
+        XCTAssertEqual(captured, expected,
+                       "Wide-glyph match must count as ONE shell char in the walk, "
+                       + "the DELs, and the walk back — got \(Array(captured))")
+    }
+
+    /// Wide glyph BETWEEN the cursor and the match — the discriminating
+    /// case for walk units: a COLUMN-based walk from cell 6 to cell 2
+    /// would emit left(4); the contract's shell-character walk from
+    /// char 5 to char 2 emits left(3), because the intervening 中's
+    /// spacer cell contributes nothing. Match "ab" (cols 0..1 = chars
+    /// [0,2)), replacement "X" (1 char).
+    func test_replaceCurrent_wideGlyphBetweenCursorAndMatch_walksInShellChars() throws {
+        let view = try makeView()
+        let snap = try typedSnapshot("ab中cd", cols: 8)
+        XCTAssertEqual(Int(snap.cursorRow), 0,
+                       "test fixture: cursor must sit on row 0 after typing")
+
+        let cursorLine = Int32(snap.cursorRow)
+        view.replaceSnapshotForTests    = snap
+        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+
+        var captured = Data()
+        view.replaceByteCapture = { captured.append($0) }
+
+        view._invokeReplaceCurrentForTests(replacement: "X")
+
+        // Walk left 3 (char 5 → match end char 2), erase 2, type "X"
+        // (shell cursor at 1); final: original 5 right of span →
+        // 5 + (1−2) = 4: right(3).
+        let expected = left(3) + dels(2) + Data("X".utf8) + right(3)
+        XCTAssertEqual(captured, expected,
+                       "Walk counts crossing a wide glyph must be in shell chars "
+                       + "(left 3), not cells (left 4) — got \(Array(captured))")
+    }
 }
 
 // MARK: - Test-only TerminalView hooks
@@ -596,8 +748,17 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         var captured = Data()
         view.replaceByteCapture = { captured.append($0) }
         view._invokeReplaceCurrentForTests(replacement: "x")
-        // Expect: 4 × 0x7F (one per shell-char in 中abc) + "x".
-        XCTAssertEqual(captured, Data([0x7F, 0x7F, 0x7F, 0x7F]) + Data("x".utf8))
+        // Audit S5-003 positioned grammar: the fixture cursor sits at
+        // col 4 (pending wrap on 'c') = char position 3; the match
+        // spans chars [0, 4). Walk right 1 to the match end, erase 4
+        // (one per shell-char in 中abc — the wide glyph is ONE DEL),
+        // type "x"; the original position (inside the span) maps to
+        // just after the replacement, so no final walk.
+        let csiC = Data([0x1B, 0x5B, 0x43])
+        XCTAssertEqual(
+            captured,
+            csiC + Data([0x7F, 0x7F, 0x7F, 0x7F]) + Data("x".utf8)
+        )
     }
 
     func test_replaceCurrent_widCJKOnlyEmitsOneDel() throws {
@@ -615,7 +776,16 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         var captured = Data()
         view.replaceByteCapture = { captured.append($0) }
         view._invokeReplaceCurrentForTests(replacement: "Y")
-        XCTAssertEqual(captured, Data([0x7F]) + Data("Y".utf8))
+        // Audit S5-003 positioned grammar: cursor at char 3 (col 4,
+        // pending wrap), match = the single 中 char [0, 1). Walk left 2
+        // to the match end, ONE DEL (wide glyph = one shell char), type
+        // "Y", walk right 2 back to the (unshifted) original position.
+        let csiD = Data([0x1B, 0x5B, 0x44])
+        let csiC2 = Data([0x1B, 0x5B, 0x43])
+        XCTAssertEqual(
+            captured,
+            csiD + csiD + Data([0x7F]) + Data("Y".utf8) + csiC2 + csiC2
+        )
     }
 
     // MARK: - M10: Replace text routes through paste sanitizer
@@ -644,8 +814,14 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         // homograph attack codepoint. Must be stripped before reaching
         // the PTY.
         view._invokeReplaceCurrentForTests(replacement: "x\u{202E}y")
-        // Expect: 2 DELs (matched "ab") + scrubbed "xy" (no RLO).
-        XCTAssertEqual(captured, Data([0x7F, 0x7F]) + Data("xy".utf8))
+        // Audit S5-003 positioned grammar: cursor at char 1 (col 1,
+        // pending wrap), match [0, 2): walk right 1 to the end, 2 DELs,
+        // scrubbed "xy" (no RLO); original position inside the span
+        // maps to the replacement end — no final walk.
+        XCTAssertEqual(
+            captured,
+            Data([0x1B, 0x5B, 0x43]) + Data([0x7F, 0x7F]) + Data("xy".utf8)
+        )
         XCTAssertFalse(
             captured.contains(0xAE),
             "RLO byte (0xAE inside the E2 80 AE sequence) must not survive scrub"
@@ -667,6 +843,10 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         // Replacement contains ESC + a Bell — both should be replaced
         // with space by sanitizePasteControls.
         view._invokeReplaceCurrentForTests(replacement: "x\u{1B}\u{07}y")
-        XCTAssertEqual(captured, Data([0x7F, 0x7F]) + Data("x  y".utf8))
+        // Same positioned grammar as the RLO sibling above.
+        XCTAssertEqual(
+            captured,
+            Data([0x1B, 0x5B, 0x43]) + Data([0x7F, 0x7F]) + Data("x  y".utf8)
+        )
     }
 }
