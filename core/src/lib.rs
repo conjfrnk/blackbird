@@ -3737,8 +3737,10 @@ pub unsafe extern "C" fn bb_term_text_range(
             iter_end = iter_start.saturating_add((MAX_TEXT_RANGE_ROWS - 1) as i32);
         }
 
-        // Collect each line's emitted text, then join with '\n' at the end.
-        let mut lines: Vec<String> = Vec::new();
+        // Collect each line's emitted text plus whether the GRID row was
+        // soft-wrapped (its last cell carries WRAPLINE), then join at the
+        // end inserting '\n' only at hard line breaks.
+        let mut lines: Vec<(String, bool)> = Vec::new();
 
         let rectangular = rect != 0;
         // The per-row branches compare line_i against iter_start /
@@ -3820,16 +3822,42 @@ pub unsafe extern "C" fn bb_term_text_range(
                 c += 1;
             }
 
-            if trim {
+            // Audit S5-002: a row whose LAST cell carries WRAPLINE is a
+            // soft-wrapped continuation of the same logical line — the
+            // shell never emitted a newline there, the text merely ran out
+            // of columns. Upstream alacritty's `line_to_string` appends
+            // '\n' only when the row's last cell lacks WRAPLINE; joining
+            // unconditionally injected hard newlines into copied text, so
+            // pasting a wrapped command back executed its leading fragment.
+            // The flag lives on the row's actual last cell regardless of
+            // the selection's column span. Rectangular (box) selection is
+            // exempt by design: box copies are row-per-row.
+            let wrapped = !rectangular
+                && row[Column(last_col)]
+                    .flags
+                    .contains(CellFlags::WRAPLINE);
+
+            // S5-002 second half: a wrapped row is full-width content —
+            // its trailing spaces are real characters interior to the
+            // logical line (upstream treats WRAPLINE rows as full-width
+            // in `line_length`). Only unwrapped rows carry '\0'-padding
+            // that the trim is meant to drop.
+            if trim && !wrapped {
                 let trimmed_len = text.trim_end_matches(' ').len();
                 text.truncate(trimmed_len);
             }
 
-            lines.push(text);
+            lines.push((text, wrapped));
             line_i += 1;
         }
 
-        let joined = lines.join("\n");
+        let mut joined = String::new();
+        for (i, (text, wrapped)) in lines.iter().enumerate() {
+            joined.push_str(text);
+            if i + 1 < lines.len() && !wrapped {
+                joined.push('\n');
+            }
+        }
         bb_string_new(joined.into_bytes())
     })
 }
