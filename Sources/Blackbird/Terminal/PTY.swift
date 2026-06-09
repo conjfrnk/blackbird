@@ -24,48 +24,58 @@ public final class PTY {
         case forkFailed(errno: Int32)
     }
 
-    /// Invoked with raw output bytes from the child. Called on the read queue.
-    /// Mutate via `setOnBytes(_:)` so writes are serialised against the read
-    /// loop's reads — a bare property setter races the consumer's load and
-    /// can drop bytes emitted between assignment and the next loop iteration.
-    public private(set) var onBytes: ((Data) -> Void)?
+    /// Lock guarding `_onBytes` / `_onExit` (audit S2-001). The previous
+    /// shape "serialised" setter writes by enqueuing them on `readQueue`
+    /// — but `startReading()` occupies that same serial queue with ONE
+    /// infinite blocking-loop block, so any setter call made after the
+    /// loop started was queued BEHIND it and only executed at EOF
+    /// teardown: the swap silently never applied for the life of the
+    /// session (bytes kept flowing to the old closure, no error, no
+    /// log), even though the doc comments advertised mid-session
+    /// mutation. A plain unfair/NSLock makes assignment immediate and
+    /// the per-chunk load cost is noise against a 128 KiB read.
+    private let handlerLock = NSLock()
+    private var _onBytes: ((Data) -> Void)?
+    private var _onExit: ((Int32) -> Void)?
 
-    /// Serialise `onBytes` mutations through the read queue so the read
-    /// loop never observes a half-published closure pointer. Audit M2:
-    /// pairs with the deferred `startReading()` so a consumer can wire
-    /// up before the first byte flows.
+    /// Invoked with raw output bytes from the child. Called on the read
+    /// queue. Mutate via `setOnBytes(_:)`; the lock guarantees the read
+    /// loop observes a fully-published closure and that swaps take
+    /// effect from the next chunk — including mid-session (audit
+    /// S2-001).
+    public var onBytes: ((Data) -> Void)? {
+        handlerLock.lock()
+        defer { handlerLock.unlock() }
+        return _onBytes
+    }
+
+    /// Install/replace the byte handler. Takes effect from the next read
+    /// chunk — immediately, even while the read loop is running (audit
+    /// S2-001; the old readQueue-enqueued assignment could not land
+    /// mid-session). Audit M2's contract still applies: wire BEFORE
+    /// `startReading()` or the first bytes race the installation.
     public func setOnBytes(_ closure: ((Data) -> Void)?) {
-        readQueue.async { [weak self] in
-            self?.onBytes = closure
-        }
+        handlerLock.lock()
+        _onBytes = closure
+        handlerLock.unlock()
     }
 
     /// Invoked once after the child process has exited and been reaped.
     /// Fires whether the exit was natural (shell typed `exit`) or induced by
     /// `terminate()` (which sends SIGHUP). Called on the main queue exactly
     /// once. Nil by default; callers opt in via `setOnExit(_:)`.
-    ///
-    /// Audit fix-#17 (2026-05-11): promoted to `private(set)` and access
-    /// is now serialised through `readQueue` to mirror the `onBytes` /
-    /// `setOnBytes` shape. Previously a plain `var` mutated on whatever
-    /// thread the caller chose, while the read-loop teardown's
-    /// `DispatchQueue.main.async { self?.onExit?(...) }` block reads it
-    /// on main. Today's only writer (`TerminalSession.wire`) runs on
-    /// main, so happens-before holds via main's serial runloop; the
-    /// hardening is for a future off-main caller (Task-dispatched
-    /// `start(shell:)`) that would otherwise race the read-loop main hop.
-    public private(set) var onExit: ((Int32) -> Void)?
+    public var onExit: ((Int32) -> Void)? {
+        handlerLock.lock()
+        defer { handlerLock.unlock() }
+        return _onExit
+    }
 
-    /// Audit fix-#17: setter that mirrors `setOnBytes`. The closure
-    /// assignment is enqueued on `readQueue` so the read-loop teardown's
-    /// main-async block, which reads `onExit`, has the assignment
-    /// happens-before its read via the readQueue → main dispatch chain
-    /// established at startReading time. Callers must use this setter
-    /// rather than touching `onExit` directly.
+    /// Install/replace the exit handler. Same immediate-effect contract
+    /// as `setOnBytes` (audit S2-001 / fix-#17).
     public func setOnExit(_ closure: ((Int32) -> Void)?) {
-        readQueue.async { [weak self] in
-            self?.onExit = closure
-        }
+        handlerLock.lock()
+        _onExit = closure
+        handlerLock.unlock()
     }
 
     /// Environment variables the GUI app inherits from launchd / XPC that
