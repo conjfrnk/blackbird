@@ -122,6 +122,29 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// the 2026-05-14 code-reviewer pass on the cross-window save fix.
     private var isPerformingShowWindow = false
 
+    /// Deadline until which frame saves are suppressed because macOS is
+    /// reconfiguring displays (audit S5-006). When a display is
+    /// unplugged, AppKit relocates and clamps windows onto the remaining
+    /// screens and fires the SAME windowDidMove/windowDidResize delegate
+    /// callbacks as a user drag — saveCurrentFrame then silently
+    /// overwrote the user's multi-display frame with the laptop-
+    /// constrained one, so re-attaching the display did NOT restore the
+    /// original geometry (the v0.3.2 recovery comment held only at
+    /// launch). NSApplication.didChangeScreenParametersNotification
+    /// fires for every reconfiguration; suppressing saves for a short
+    /// settle window after each one keeps system-initiated geometry out
+    /// of the autosave while a user's deliberate post-reconfig move
+    /// (necessarily later) still persists.
+    private var suppressFrameSavesUntil: Date = .distantPast
+
+    /// Settle window after a screen-parameters change during which
+    /// delegate-reported moves/resizes are treated as system-initiated.
+    /// AppKit performs its relocation synchronously with (or within a
+    /// few runloop ticks of) the notification; 2 s is generous for the
+    /// cascade of constraint passes without meaningfully delaying
+    /// persistence of a real user drag that follows a display change.
+    private static let screenReconfigurationSettleInterval: TimeInterval = 2.0
+
     /// User-defaults key every Blackbird main window persists its frame
     /// under. Hoisted to one place so the explicit save / restore drivers
     /// below and the `setFrameAutosaveName` call in `init` can never drift
@@ -236,6 +259,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         window.titleVisibility = .visible
         super.init(window: window)
         window.delegate = self
+        // Audit S5-006: observe display reconfigurations so the frame
+        // autosave can distinguish AppKit's relocation moves from user
+        // drags (see screenParametersDidChange / saveCurrentFrame).
+        // NotificationCenter holds the observer weakly via selector
+        // dispatch; removal in deinit is automatic on macOS 11+ but
+        // explicit removal stays in deinit-adjacent teardown via
+        // windowWillClose being unnecessary — selector observers on a
+        // deallocated object are auto-unregistered.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersDidChange(_:)),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
         installTitlebarTabBar()
 
         // `preferredMetalDevice` falls back to the system default when
@@ -506,9 +543,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     ///      windowed-mode frame.
     private func saveCurrentFrame() {
         guard !isPerformingShowWindow else { return }
+        // Audit S5-006 (gate 3): a display reconfiguration is in
+        // progress or just happened — the move/resize that triggered us
+        // is AppKit relocating the window, not the user. Persisting it
+        // would clobber the user's saved multi-display frame.
+        guard Date() >= suppressFrameSavesUntil else { return }
         guard let win = window else { return }
         guard !win.styleMask.contains(.fullScreen) else { return }
         win.saveFrame(usingName: Self.frameAutosaveName)
+    }
+
+    /// Installed in init; arms the S5-006 suppression window. Selector
+    /// target for NSApplication.didChangeScreenParametersNotification.
+    @objc private func screenParametersDidChange(_ note: Notification) {
+        suppressFrameSavesUntil = Date().addingTimeInterval(
+            Self.screenReconfigurationSettleInterval
+        )
     }
 
     /// Forward window-focus gains to the TUI as a `CSI I` escape when it
