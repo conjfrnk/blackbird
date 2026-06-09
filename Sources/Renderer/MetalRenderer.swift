@@ -1313,8 +1313,21 @@ public final class MetalRenderer {
         // reverted 2026-04-22.
         inflightSemaphore.wait()
         currentSlot = frameIndex
-        frameIndex = (frameIndex + 1) % 3
         let slot = currentSlot
+        // The rotation advance is deliberately NOT here. It moves below
+        // the guard (audit S2-006): the triple-buffer invariant — any ≤3
+        // concurrent in-flight frames occupy distinct slots — requires
+        // every consumed rotation turn to hold its semaphore token until
+        // GPU completion. The abort path below returns the token; if it
+        // kept the rotation advance, each aborted frame made the wait
+        // guard one frame too few: A encodes slot 0 (in flight), B
+        // aborts slot 1 (token back, rotation advanced), C encodes
+        // slot 2, D waits — succeeds because of B's returned token — and
+        // claims slot 0 while A's GPU work may still be reading it; D's
+        // buildInstances then CPU-writes the same .storageModeShared
+        // buffer mid-read (torn frame). Advancing only on commitment
+        // means an aborted frame returns its token AND its turn, and the
+        // next attempt reuses the same untouched slot.
 
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
@@ -1350,7 +1363,9 @@ public final class MetalRenderer {
         // we are committed to encoding this frame. Advance the skip-
         // cache atomically with that commitment so an early-return
         // above leaves `lastFrameKey` pinned to the previous successful
-        // frame. Audit H7.
+        // frame (audit H7), and consume the rotation turn only now
+        // (audit S2-006 — see the comment at the semaphore wait).
+        frameIndex = (frameIndex + 1) % 3
         didFrameSkipLastRender = false
         lastFrameKey = frameKey
 
