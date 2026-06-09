@@ -98,7 +98,13 @@ pub struct BBEvent {
     /// non-null per this contract never sees a dangling pointer.
     pub payload: *const u8,
     pub len: usize,
-    /// Cursor-shape variant: 0 = block, 1 = bar, 2 = underline; 0 otherwise.
+    /// Event-specific integer argument (audit S6-002):
+    /// - `PromptMark`: the mark kind, 1 = A (prompt start), 2 = B
+    ///   (command start), 3 = C (command output), 4 = D (command end) —
+    ///   see `BBPromptMarkKind`.
+    /// - `CursorShape` (reserved; not currently emitted): 0 = block,
+    ///   1 = bar, 2 = underline.
+    /// - 0 for every other event kind.
     pub i32_arg: i32,
 }
 
