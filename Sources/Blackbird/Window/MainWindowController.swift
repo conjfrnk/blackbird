@@ -1147,10 +1147,22 @@ func nudgeFrameOntoVisibleScreen(
     // restored into such a gap overlaps the bounding box yet sits on no real
     // screen, so a union test calls it "reachable" and leaves it invisible.
     // (multi-display restore regression: the original code unioned first.)
+    // Audit S5-007: the overlap requirement is capped by the frame's OWN
+    // dimensions. The intersection can never exceed the frame, so a
+    // legitimately small window — a 4-row terminal at font size 9 is
+    // ~82-90pt tall, under the 100pt requirement — could NEVER qualify
+    // as reachable no matter how fully on-screen it sat, and its saved
+    // position was discarded and recentered on every launch, violating
+    // the return-unchanged contract above. Requiring min(100, frame dim)
+    // keeps the Bug #22 intent (the traffic-light cluster must be
+    // grabbable) for normal windows while letting a window smaller than
+    // the threshold qualify by being entirely visible in that dimension.
+    let requiredW = min(minimumOnScreenOverlap, frame.width)
+    let requiredH = min(minimumOnScreenOverlap, frame.height)
     let reachable = visibleFrames.contains { screen in
         let overlap = frame.intersection(screen)
-        return overlap.width >= minimumOnScreenOverlap
-            && overlap.height >= minimumOnScreenOverlap
+        return overlap.width >= requiredW
+            && overlap.height >= requiredH
     }
     if reachable { return frame }
     // Not reachable: recenter on the primary screen. Clamp the size to the
