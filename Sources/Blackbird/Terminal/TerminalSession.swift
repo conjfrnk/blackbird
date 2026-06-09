@@ -122,6 +122,22 @@ public final class TerminalSession: ObservableObject {
     /// anchored to deleted scrollback (a phantom ⌘[ entry).
     private var promptMarkGeneration: UInt64 = 0
 
+    /// Clear-epoch pair (audit S5-008, second half — found by the blind
+    /// regression test for the first half). The generation token guards
+    /// the recordPromptStart→append window, but the race ALSO spans the
+    /// event hop: the OSC 133 A event fires on coreQueue during feed
+    /// BEFORE ⌘K's clear, while the main-side event switch (and its
+    /// recordPromptStart call) drains AFTER clearAll completed on main —
+    /// so the generation captured at recordPromptStart entry was already
+    /// post-bump and the phantom mark still landed. The epoch is
+    /// captured AT EVENT-FIRE TIME on coreQueue (`clearEpochCore`,
+    /// coreQueue-confined, bumped inside clearAll's coreQueue.sync) and
+    /// compared on main against `clearEpochMain` (main-owned, bumped in
+    /// resetPromptState): an event that predates the clear carries a
+    /// stale epoch and its append self-discards.
+    private var clearEpochCore: UInt64 = 0
+    private var clearEpochMain: UInt64 = 0
+
     /// Position of a recorded prompt, anchored to the core's monotonic
     /// lines-scrolled counter (audit S5-004). The previous
     /// (historySize, gridRow) anchor broke the moment scrollback
@@ -570,7 +586,7 @@ public final class TerminalSession: ObservableObject {
     /// block main while we wait for `bbterm.snapshot()` to drain.
     /// A new prompt resets `promptCursor` to nil so the next jump
     /// starts from the newest mark.
-    private func recordPromptStart() {
+    private func recordPromptStart(eventClearEpoch: UInt64) {
         // M-12: tripwire the same way scroll / scrollToBottom / clearAll do.
         // `coreQueue.sync` self-deadlocks if invoked from coreQueue, and the
         // bbterm event handler's pre-main fast-path for ptyWrite already
@@ -581,7 +597,12 @@ public final class TerminalSession: ObservableObject {
         // ahead of the coreQueue hop). If ⌘K's resetPromptState runs
         // while our snapshot block is in flight, the generation moves
         // and the append below self-discards instead of re-inserting a
-        // mark anchored to wiped scrollback.
+        // mark anchored to wiped scrollback. The eventClearEpoch guard
+        // covers the OTHER half of the window: an event that fired on
+        // coreQueue before the clear but drained on main after it
+        // arrives here with a stale epoch (blind-test finding on the
+        // first cut of this fix).
+        guard eventClearEpoch == clearEpochMain else { return }
         let generation = promptMarkGeneration
         // Audit L7. Was `coreQueue.sync(execute: bbterm.snapshot)` —
         // under heavy streaming output the sync would block main
@@ -969,6 +990,10 @@ public final class TerminalSession: ObservableObject {
         var s: BBSnapshot?
         coreQueue.sync {
             bbterm.clearAll()
+            // Audit S5-008: events fired on coreQueue BEFORE this point
+            // carry the pre-bump epoch and their prompt-mark appends
+            // self-discard on the main side.
+            clearEpochCore &+= 1
             s = bbterm.snapshot()
         }
         // H-6: drop prompt-state tied to the now-deleted scrollback. The
@@ -991,8 +1016,11 @@ public final class TerminalSession: ObservableObject {
             // Audit S5-008: bump the ring generation so an in-flight
             // recordPromptStart whose snapshot predates the clear drops
             // its append instead of re-inserting a mark anchored to the
-            // scrollback we just deleted.
+            // scrollback we just deleted — and the main-side clear epoch
+            // so events that FIRED before the clear (but drain after)
+            // self-discard too.
             self.promptMarkGeneration &+= 1
+            self.clearEpochMain &+= 1
             self.promptMarks = []
             self.promptCursor = nil
             self.lastPromptMark = nil
@@ -1324,6 +1352,13 @@ public final class TerminalSession: ObservableObject {
             // capture into `let` here, not read `Preferences.shared`
             // again on main. That avoids the TOCTOU class entirely.
             let osc52EnabledAtDispatch = Preferences.shared.osc52Enabled
+            // Audit S5-008: epoch snapshot at event-FIRE time — we are on
+            // coreQueue here (events dispatch synchronously inside
+            // bb_term_input on coreQueue), so this read is ordered
+            // against clearAll's coreQueue.sync bump. Rides the hop so
+            // the prompt-mark append can tell "event predates the
+            // clear" from "genuine post-clear prompt".
+            let clearEpochAtDispatch = self.clearEpochCore
             // SFH-005 sibling: fire the OSC 52 oversize breadcrumb on
             // coreQueue, BEFORE the main hop, so a terminating session
             // can't suppress the security log. The post-hop `guard let
@@ -1482,7 +1517,7 @@ public final class TerminalSession: ObservableObject {
                     // or two of drift is negligible next to a multi-screen
                     // scrollback jump.
                     if kind == .promptStart {
-                        self.recordPromptStart()
+                        self.recordPromptStart(eventClearEpoch: clearEpochAtDispatch)
                     }
                 case .fatal(let msg):
                     // Surface as a title prefix for visibility — the unified
