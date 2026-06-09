@@ -214,9 +214,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     ///
     /// `cachedURLMatchesSeq` is `Optional<UInt64>` rather than a `0`
     /// sentinel: "never scanned" and "scanned at seq 0" would otherwise
-    /// compare equal and skip a legitimate scan. BBSnapshot's allocator
-    /// today starts at 1 (see BBTerm.allocateSequence) but we don't want
-    /// correctness to depend on that.
+    /// compare equal and skip a legitimate scan. Sequence ids are
+    /// PER-SESSION since audit S6-003 (each BBTerm numbers its own
+    /// snapshots from 1), so this cache must be reset when the view is
+    /// bound to a session — two sessions' ids can legitimately collide.
     var cachedURLMatches: [URLMatch] = []         // internal for TerminalView+Hover.swift
     var cachedURLMatchesSeq: UInt64?              // internal for TerminalView+Hover.swift
     /// Trackpad pinch gesture accumulator. Magnification events deliver
@@ -1560,6 +1561,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             currentSnapshot = nil
             findMatches.removeAll()
             findMatchesSeq = nil
+            // Per-session sequence ids (audit S6-003) can collide across
+            // sessions, so the URL-hover cache key must be cleared on any
+            // rebind — global uniqueness no longer invalidates it for
+            // free (F-S5-018 follow-up). `!=`-gated, so over-clearing is
+            // harmless.
+            cachedURLMatches = []
+            cachedURLMatchesSeq = nil
             findCurrentIndex = 0
             findQuery = ""
             setNeedsDisplay(bounds)
@@ -1576,6 +1584,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // snapshot path (which feeds the renderer's keystroke→pixel
         // cadence) and makes the thread contract explicit at the
         // subscription point rather than implicit at every call site.
+        // Rebinding to a session (fresh view today; defensive for any
+        // future rebind path): per-session sequence ids (audit S6-003)
+        // mean the previous session's cached seq can collide with the
+        // new session's numbering — clear the seq-keyed caches so a
+        // stale URL-match set can't survive the swap (F-S5-018
+        // follow-up). `!=`-gated consumers make over-clearing harmless.
+        cachedURLMatches = []
+        cachedURLMatchesSeq = nil
+        findMatchesSeq = nil
+
         session.$snapshot
             .receive(on: DispatchQueue.main)
             .sink { [weak self] snap in

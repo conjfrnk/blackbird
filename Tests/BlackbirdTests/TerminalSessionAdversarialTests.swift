@@ -222,36 +222,36 @@ final class TerminalSessionAdversarialTests: XCTestCase {
     /// total < 100 KB; runs serial (not concurrent), so memory peak is
     /// one session at a time.
     ///
-    /// When a TerminalView is rebound to a new session, the URL match
-    /// cache (`cachedURLMatchesSeq: UInt64?`) must be invalidated.
-    /// Because `BBSnapshot.allocateSequence` is a process-global
-    /// monotonic counter (NOT per-term), a fresh session's first
-    /// snapshot has a *different* sequence ID than the prior session's
-    /// last snapshot — so the cache key naturally invalidates.
-    ///
-    /// Pin that contract: the global monotonic invariant. If a future
-    /// refactor moves sequence to per-BBTerm, the cache key collision
-    /// described in F-S5-018 becomes possible and this test fires.
-    func test_bbsnapshotSequenceIDs_areGloballyMonotonic_acrossTerms() throws {
+    /// Audit S6-003 scoped BBSnapshot.sequenceID PER session (the old
+    /// process-global counter defeated MetalRenderer's partial-row fast
+    /// path in multi-tab use). That removes the global-monotonicity
+    /// property the F-S5-018 analysis leaned on for natural cache
+    /// invalidation across a session swap — so `subscribeToSession`
+    /// must now reset `cachedURLMatchesSeq` explicitly (it does, next
+    /// to the same reset for `findMatchesSeq`). Pin the new contract:
+    /// per-session numbering restarts at 1, and two sessions' raw ids
+    /// are comparable only within their own session.
+    func test_bbsnapshotSequenceIDs_arePerSession_and_restartAtOne() throws {
         let term1 = try XCTUnwrap(BBTerm(size: .init(cols: 4, rows: 2)))
         term1.input("a")
         let snap1 = try XCTUnwrap(term1.snapshot())
-        let seq1 = snap1.sequenceID
+        XCTAssertEqual(snap1.sequenceID, 1, "fresh session numbers from 1")
 
-        // Drop term1 and create term2 — fresh allocation, but the
-        // process-global counter must keep advancing.
         let term2 = try XCTUnwrap(BBTerm(size: .init(cols: 4, rows: 2)))
         term2.input("b")
         let snap2 = try XCTUnwrap(term2.snapshot())
-        let seq2 = snap2.sequenceID
+        XCTAssertEqual(
+            snap2.sequenceID, 1,
+            "another fresh session also numbers from 1 — raw ids COLLIDE "
+            + "across sessions by design (per-session scoping, audit S6-003); "
+            + "any cross-session cache key must be reset on rebind instead of "
+            + "relying on global uniqueness (F-S5-018 follow-up)"
+        )
 
-        XCTAssertGreaterThan(
-            seq2, seq1,
-            "BBSnapshot.sequenceID must be GLOBALLY monotonic across BBTerm "
-            + "instances; F-S5-018 / cache-key invalidation depends on this. "
-            + "If a refactor scoped the counter per-BBTerm, two fresh terms "
-            + "would both produce seq=1 and the URL cache would serve stale "
-            + "matches across session swaps."
+        let snap1b = try XCTUnwrap(term1.snapshot())
+        XCTAssertEqual(
+            snap1b.sequenceID, 2,
+            "term2's snapshot must not perturb term1's numbering"
         )
     }
 

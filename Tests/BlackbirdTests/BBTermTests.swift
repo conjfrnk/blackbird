@@ -111,19 +111,27 @@ final class BBTermTests: XCTestCase {
         XCTAssertLessThan(b.sequenceID, c.sequenceID)
     }
 
-    func test_snapshot_sequenceIDsUniqueAcrossTerms() throws {
-        // The counter is process-global, not per-BBTerm. Two independent
-        // terminals share the monotonic sequence. Confirm the ids still
-        // interleave strictly — two terminals each taking a snapshot must
-        // not collide on id.
+    func test_snapshot_sequenceIDsArePerSession() throws {
+        // Audit S6-003: the counter is per-BBTerm, NOT process-global.
+        // (The old global counter made any background tab's snapshots
+        // create gaps in the focused session's numbering, which
+        // MetalRenderer misread as coalesced-snapshot damage loss and
+        // disabled the partial-row fast path on every multi-tab frame.)
+        // Contract: each session numbers its own snapshots from 1,
+        // consecutively, regardless of the other session's activity —
+        // and two fresh sessions DO collide on raw id, by design
+        // (sequence comparisons are only meaningful within a session).
         let t1 = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
         let t2 = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
         let s1 = try XCTUnwrap(t1.snapshot())
         let s2 = try XCTUnwrap(t2.snapshot())
         let s1Again = try XCTUnwrap(t1.snapshot())
-        XCTAssertNotEqual(s1.sequenceID, s2.sequenceID)
-        XCTAssertNotEqual(s2.sequenceID, s1Again.sequenceID)
-        XCTAssertNotEqual(s1.sequenceID, s1Again.sequenceID)
+        XCTAssertEqual(s1.sequenceID, 1, "first snapshot of a session is 1")
+        XCTAssertEqual(s2.sequenceID, 1, "independent session also starts at 1")
+        XCTAssertEqual(
+            s1Again.sequenceID, s1.sequenceID + 1,
+            "a session's numbering is consecutive — the other session's snapshot must not create a gap"
+        )
     }
 
     func test_bellEventFires() throws {
