@@ -153,11 +153,26 @@ struct CallbackCell {
     /// shares ownership and `bb_term_clear_all` can `reset()` it via
     /// `BBTerm`'s clone (audit H-3).
     pty_write_rate: Arc<PtyWriteRateCell>,
-    /// Title/Bell sliding windows (audit S1-002). Same UnsafeCell
+    /// Title/Bell tumbling windows (audit S1-002). Same UnsafeCell
     /// discipline as `slot`; accessed only inside the fire()/reset
     /// busy-guard scopes.
     title_rate: UnsafeCell<EventRateState>,
     bell_rate: UnsafeCell<EventRateState>,
+    /// Coalesce-to-latest latch for rate-suppressed titles (review
+    /// follow-up to audit S1-002). Title is last-writer-wins state: a
+    /// plain drop of the NEWEST title in a burst left the window title
+    /// pinned to the 32nd-of-window value — and nothing re-emits in the
+    /// default configuration (the bundled shell integration sends no
+    /// OSC 0/2), so the stale title persisted indefinitely. Suppressed
+    /// titles overwrite this latch; `flush_suppressed_title` (called
+    /// from `bb_term_input` after each chunk) re-attempts delivery, so
+    /// the latest title lands on the first chunk after the window
+    /// rolls — bounding the flood to its cap while preserving
+    /// last-writer-wins correctness.
+    suppressed_title: UnsafeCell<Option<String>>,
+    /// One-shot breadcrumb latch for the first suppressed title
+    /// (mirrors `osc133_rate_limited_logged`'s stance).
+    title_suppressed_logged: UnsafeCell<bool>,
     #[cfg(debug_assertions)]
     busy: std::sync::atomic::AtomicBool,
 }
@@ -226,6 +241,8 @@ impl CallbackCell {
                 BELL_EVENT_PER_SECOND,
                 EVENT_RATE_WINDOW,
             )),
+            suppressed_title: UnsafeCell::new(None),
+            title_suppressed_logged: UnsafeCell::new(false),
             #[cfg(debug_assertions)]
             busy: std::sync::atomic::AtomicBool::new(false),
         }
@@ -253,6 +270,30 @@ impl CallbackCell {
         let _busy = self.debug_enter();
         *self.title_rate.get() = EventRateState::new(TITLE_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
         *self.bell_rate.get() = EventRateState::new(BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
+    }
+
+    /// Re-attempt delivery of a rate-suppressed title (see
+    /// `suppressed_title`). Called from `bb_term_input` after each
+    /// chunk's parser drains — outside any alacritty borrow and outside
+    /// handler dispatch. If the window is still saturated, `fire`
+    /// re-latches the same title; once it rolls, the latest title is
+    /// delivered exactly once.
+    ///
+    /// # Safety
+    /// Caller must ensure no concurrent access.
+    unsafe fn flush_suppressed_title(&self) {
+        let pending = {
+            let _busy = self.debug_enter();
+            (*self.suppressed_title.get()).take()
+        };
+        let Some(title) = pending else { return };
+        let bytes = title.as_bytes();
+        self.fire(BBEvent {
+            kind: BBEventKind::Title,
+            payload: bytes.as_ptr(),
+            len: bytes.len(),
+            i32_arg: 0,
+        });
     }
 
     /// Update the stored callback and context.
@@ -325,8 +366,29 @@ impl CallbackCell {
         // hostile byte stream can fan out per-event to the Swift main
         // queue. Same silent-drop policy as PtyWrite (per-drop logging
         // would itself amplify the flood).
-        if matches!(event.kind, BBEventKind::Title) && !(*self.title_rate.get()).allow() {
-            return;
+        if matches!(event.kind, BBEventKind::Title) {
+            if (*self.title_rate.get()).allow() {
+                // An admitted title supersedes anything latched.
+                *self.suppressed_title.get() = None;
+            } else {
+                // Coalesce-to-latest instead of dropping: keep the
+                // NEWEST suppressed title for redelivery once the
+                // window rolls (see `suppressed_title`).
+                let bytes = if event.payload.is_null() || event.len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(event.payload, event.len)
+                };
+                *self.suppressed_title.get() = Some(String::from_utf8_lossy(bytes).into_owned());
+                if !*self.title_suppressed_logged.get() {
+                    *self.title_suppressed_logged.get() = true;
+                    eprintln!(
+                        "[blackbird_core] Title event rate cap ({TITLE_EVENT_PER_SECOND}/s) \
+                         engaged — coalescing to latest. One-shot per session."
+                    );
+                }
+                return;
+            }
         }
         if matches!(event.kind, BBEventKind::Bell) && !(*self.bell_rate.get()).allow() {
             return;
@@ -604,9 +666,12 @@ impl EventRateState {
 /// same flood class the F1 snapshot coalescer and M1 PtyWrite cap
 /// already closed on their paths. 32/sec matches the PtyWrite budget:
 /// legitimate shells emit a couple of titles per prompt and animated
-/// build tools stay well under. Excess drops keep the FIRST events in
-/// each window, so a flood shows a stale title until the next admitted
-/// event — self-healing, since shells re-emit per prompt.
+/// build tools stay well under. Suppressed titles are NOT plain-dropped
+/// — title is last-writer-wins state and nothing re-emits in the
+/// default configuration (the bundled shell integration sends no
+/// OSC 0/2), so dropping the newest would pin a stale title
+/// indefinitely. They coalesce to the latest via `suppressed_title`
+/// and deliver on the first input chunk after the window rolls.
 const TITLE_EVENT_PER_SECOND: u32 = 32;
 /// Bell-event cap (audit S1-002, same rationale as the title cap).
 /// 16/sec is far above perception — the Swift bell flash visually
@@ -2348,6 +2413,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                 }
             }
             drain_color_requests(bb);
+            bb.callback.flush_suppressed_title();
             return;
         }
         // Chunk contains ESC — may open a new OSC that terminates in a
@@ -2372,6 +2438,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);
         drain_color_requests(bb);
+        bb.callback.flush_suppressed_title();
     })
 }
 
@@ -4419,6 +4486,81 @@ mod tests {
         drop(held);
         // After release, a fresh accessor proceeds normally.
         let _third = DebugBusyGuard::enter(&flag, "test-cell");
+    }
+
+    /// Review follow-up to audit S1-002: a title flood must coalesce to
+    /// the LATEST title, not pin the 32nd-of-window value. Feed a
+    /// 40-title burst (over the 32/s cap) in one chunk, sleep past the
+    /// window, feed a plain-text chunk (no titles) — the latched newest
+    /// title must be delivered on that chunk's flush.
+    #[test]
+    fn title_flood_coalesces_to_latest() {
+        use std::os::raw::c_void;
+        use std::sync::Mutex;
+
+        struct Sink {
+            titles: Mutex<Vec<String>>,
+        }
+        unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+            if matches!(ev.kind, BBEventKind::Title) {
+                let sink = &*(ctx as *const Sink);
+                let bytes = if ev.payload.is_null() || ev.len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(ev.payload, ev.len)
+                };
+                sink.titles
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(bytes).into_owned());
+            }
+        }
+
+        let sink = Sink {
+            titles: Mutex::new(Vec::new()),
+        };
+        unsafe {
+            let term = bb_term_new(40, 5, 100);
+            bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+
+            // 40 distinct titles in one chunk — 8 over the cap.
+            let mut buf = Vec::new();
+            for i in 0..40 {
+                buf.extend_from_slice(format!("\x1b]2;t{i}\x07").as_bytes());
+            }
+            bb_term_input(term, buf.as_ptr(), buf.len());
+            {
+                let titles = sink.titles.lock().unwrap();
+                assert!(
+                    titles.len() <= 32,
+                    "cap must hold within the window; got {}",
+                    titles.len()
+                );
+                assert_ne!(
+                    titles.last().map(String::as_str),
+                    Some("t39"),
+                    "t39 must still be latched, not yet delivered"
+                );
+            }
+
+            // Roll the window, then feed a titles-free chunk; the flush
+            // must deliver the latched newest title exactly once.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let plain = b"hello";
+            bb_term_input(term, plain.as_ptr(), plain.len());
+            {
+                let titles = sink.titles.lock().unwrap();
+                assert_eq!(
+                    titles.last().map(String::as_str),
+                    Some("t39"),
+                    "latest suppressed title must deliver after the window rolls"
+                );
+                let t39_count = titles.iter().filter(|t| t.as_str() == "t39").count();
+                assert_eq!(t39_count, 1, "latched title must deliver exactly once");
+            }
+
+            bb_term_free(term);
+        }
     }
 
     /// Verify that scrollback is wired up: after feeding enough newlines to
