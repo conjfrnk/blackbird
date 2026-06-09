@@ -189,10 +189,37 @@ if [[ -z "$TAG_COMMIT_TS" ]]; then
     exit 1
 fi
 TAG_PUB_DATE="$(date -u -r "$TAG_COMMIT_TS" +"%a, %d %b %Y %H:%M:%S +0000")"
-APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}" \
+# Pin the DMG make-appcast.sh signs to the exact file verify_dmg just
+# checked. Without APPCAST_DMG, make-appcast.sh auto-picks the version-
+# highest DMG in dist/ — and dist/ is gitignored, never cleaned, and
+# shared with release.sh local builds, so publishing an older tag while
+# a newer (or merely unverified) DMG sat there used to sign and
+# advertise an artifact that bypassed the trust-root gate, with an
+# enclosure URL that 404s under the older tag's release path. Audit
+# S2-009 / S4-001.
+APPCAST_DMG="$DMG_PATH" \
+  APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}" \
   APPCAST_FEED_URL="https://blackbird-terminal.com/appcast.xml" \
   APPCAST_PUB_DATE="$TAG_PUB_DATE" \
   bash scripts/make-appcast.sh --full > "$TMP_APPCAST"
+
+# Belt-and-braces cross-check before the generated appcast can replace
+# the live one: the enclosure must reference exactly the URL we
+# downloaded and verified, and the advertised short version must be the
+# version being published. Either mismatch means make-appcast.sh signed
+# something other than the verified artifact — abort with the staged
+# tempfile discarded (EXIT trap) and the tracked appcast untouched.
+if ! grep -qF "url=\"${DMG_URL}\"" "$TMP_APPCAST"; then
+    echo "!! Generated appcast does not reference the verified DMG URL:" >&2
+    echo "   expected enclosure url=\"${DMG_URL}\"" >&2
+    grep -o 'url="[^"]*"' "$TMP_APPCAST" | sed 's/^/   got: /' >&2
+    exit 1
+fi
+if ! grep -qF "<sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>" "$TMP_APPCAST"; then
+    echo "!! Generated appcast advertises a different version than ${VERSION}:" >&2
+    grep -o '<sparkle:shortVersionString>[^<]*</sparkle:shortVersionString>' "$TMP_APPCAST" | sed 's/^/   got: /' >&2
+    exit 1
+fi
 mv -f "$TMP_APPCAST" website/appcast.xml
 
 # Bump the three version-bearing strings in website/index.html so the

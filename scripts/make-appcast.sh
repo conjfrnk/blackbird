@@ -25,6 +25,18 @@ set -euo pipefail
 #   SIGN_UPDATE        — path to Sparkle's sign_update binary. If unset,
 #                        the script looks in PATH first, then in the
 #                        Xcode DerivedData SPM artifact tree.
+#   APPCAST_DMG        — explicit path to the DMG to sign and reference.
+#                        When set, the dist/ auto-pick below is skipped
+#                        entirely. publish-update.sh ALWAYS sets this to
+#                        the exact DMG it just trust-root-verified, so
+#                        the signed/advertised artifact can never diverge
+#                        from the verified one (audit S2-009/S4-001: a
+#                        stale newer DMG left in dist/ used to win the
+#                        auto-pick and get signed unverified). Prerelease
+#                        names (Blackbird-X.Y.Z-rc.N.dmg) are accepted on
+#                        this path — the GA-only restriction below exists
+#                        to protect the *auto-pick* ordering, which an
+#                        explicit selection doesn't need.
 #
 # The script PRINTS the snippet on stdout — it does not modify any file.
 # Redirect to append to a hosted appcast.xml, or paste into one by hand.
@@ -69,51 +81,79 @@ if [[ "${1:-}" == "--full" ]]; then
     FULL=1
 fi
 
-# Pick the version-newest DMG, NOT the mtime-newest. A stale-dated
-# rebuild of an OLDER version sitting next to the freshly-cut newer
-# one would otherwise shadow the real release. Sort lexicographically
-# on the version segment using `sort -V` (GNU/BSD versionsort), which
-# correctly orders "0.10.0" after "0.9.0" — plain `sort` would not.
-# Audit F-S8-008 / SFH-027.
-#
-# `sort -V` inverts semver for prereleases: it places "0.2.0" BEFORE
-# "0.2.0-rc.1" because the hyphen sorts after end-of-string in version
-# bytes, but semver §11 says "0.2.0-rc.1 < 0.2.0". Restrict the regex
-# to GA versions (no hyphen suffix) so a leftover prerelease DMG can't
-# shadow the real release. Operators publishing a prerelease drive
-# make-appcast.sh against a dist/ that contains only that prerelease
-# DMG, so this restriction is safe.
 DMG=""
-# Audit L18: enumerate via shell glob into an array rather than
-# `for x in $(ls ...)`. The previous shape was vulnerable to word-
-# splitting on filenames with spaces / globs and could pick up
-# unintended paths if dist/ was a shared workspace; glob expansion
-# is whitespace-safe by construction, and the regex below still
-# rejects any candidate whose name doesn't match the strict
-# `Blackbird-N.N.N.dmg` GA-only shape.
-shopt -s nullglob
-DMG_CANDIDATES=( dist/Blackbird-*.dmg )
-shopt -u nullglob
-DMG_VERSIONS=()
-# Empty-array guard: under `set -u` (set at the top of this script),
-# `"${DMG_CANDIDATES[@]}"` traps as unbound-variable when the glob
-# matched nothing. The `+` alt-expansion form returns nothing if the
-# array is unset/empty so the for-loop iterates zero times instead.
-for candidate in ${DMG_CANDIDATES[@]+"${DMG_CANDIDATES[@]}"}; do
-    base="$(basename "$candidate")"
-    if [[ "$base" =~ ^Blackbird-([0-9]+\.[0-9]+\.[0-9]+)\.dmg$ ]]; then
-        DMG_VERSIONS+=( "${BASH_REMATCH[1]}" )
+if [[ -n "${APPCAST_DMG:-}" ]]; then
+    # Explicit selection (publish-update.sh path). The name must still
+    # carry a semver so the VERSION extraction below stays well-formed;
+    # prerelease suffixes are allowed here — only the auto-pick needs
+    # the GA-only restriction (see below).
+    APPCAST_DMG_BASE="$(basename "$APPCAST_DMG")"
+    if [[ ! "$APPCAST_DMG_BASE" =~ ^Blackbird-([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)\.dmg$ ]]; then
+        echo "!! APPCAST_DMG='$APPCAST_DMG' doesn't match Blackbird-<semver>.dmg" >&2
+        exit 1
     fi
-done
-if [[ ${#DMG_VERSIONS[@]} -gt 0 ]]; then
-    # Sort the versions numerically and take the highest; mirrors
-    # the prior `sort -V | tail -n1` behavior without going through
-    # a subshell pipeline that would lose DMG on assignment.
-    PICKED="$(printf '%s\n' "${DMG_VERSIONS[@]}" | sort -V | tail -n1)"
-    DMG="dist/Blackbird-${PICKED}.dmg"
+    if [[ ! -f "$APPCAST_DMG" ]]; then
+        echo "!! APPCAST_DMG='$APPCAST_DMG' does not exist." >&2
+        exit 1
+    fi
+    DMG="$APPCAST_DMG"
+else
+    # Auto-pick: the version-newest DMG, NOT the mtime-newest. A
+    # stale-dated rebuild of an OLDER version sitting next to the
+    # freshly-cut newer one would otherwise shadow the real release.
+    # Sort on the version segment using `sort -V` (GNU/BSD versionsort),
+    # which correctly orders "0.10.0" after "0.9.0" — plain `sort`
+    # would not. Audit F-S8-008 / SFH-027.
+    #
+    # NOTE (audit S2-009/S4-001): this auto-pick is inherently unsafe
+    # for publishing because dist/ accumulates DMGs across releases —
+    # it can select a DMG the caller never verified. It remains only
+    # as a convenience for hand-run snippet generation; the production
+    # pipeline (publish-update.sh) always pins APPCAST_DMG above.
+    #
+    # `sort -V` inverts semver for prereleases: it places "0.2.0" BEFORE
+    # "0.2.0-rc.1" because the hyphen sorts after end-of-string in
+    # version bytes, but semver §11 says "0.2.0-rc.1 < 0.2.0". Restrict
+    # the regex to GA versions (no hyphen suffix) so a leftover
+    # prerelease DMG can't shadow the real release. Prereleases are
+    # published via APPCAST_DMG, which bypasses this ordering problem
+    # entirely (audit S4-003: the old "use a dist/ containing only the
+    # prerelease DMG" advice never worked — this regex excluded the
+    # prerelease from enumeration altogether, not just from sorting).
+    #
+    # Audit L18: enumerate via shell glob into an array rather than
+    # `for x in $(ls ...)`. The previous shape was vulnerable to word-
+    # splitting on filenames with spaces / globs and could pick up
+    # unintended paths if dist/ was a shared workspace; glob expansion
+    # is whitespace-safe by construction, and the regex below still
+    # rejects any candidate whose name doesn't match the strict
+    # `Blackbird-N.N.N.dmg` GA-only shape.
+    shopt -s nullglob
+    DMG_CANDIDATES=( dist/Blackbird-*.dmg )
+    shopt -u nullglob
+    DMG_VERSIONS=()
+    # Empty-array guard: under `set -u` (set at the top of this script),
+    # `"${DMG_CANDIDATES[@]}"` traps as unbound-variable when the glob
+    # matched nothing. The `+` alt-expansion form returns nothing if the
+    # array is unset/empty so the for-loop iterates zero times instead.
+    for candidate in ${DMG_CANDIDATES[@]+"${DMG_CANDIDATES[@]}"}; do
+        base="$(basename "$candidate")"
+        if [[ "$base" =~ ^Blackbird-([0-9]+\.[0-9]+\.[0-9]+)\.dmg$ ]]; then
+            DMG_VERSIONS+=( "${BASH_REMATCH[1]}" )
+        fi
+    done
+    if [[ ${#DMG_VERSIONS[@]} -gt 0 ]]; then
+        # Sort the versions numerically and take the highest; mirrors
+        # the prior `sort -V | tail -n1` behavior without going through
+        # a subshell pipeline that would lose DMG on assignment.
+        PICKED="$(printf '%s\n' "${DMG_VERSIONS[@]}" | sort -V | tail -n1)"
+        DMG="dist/Blackbird-${PICKED}.dmg"
+    fi
 fi
 if [[ -z "$DMG" || ! -f "$DMG" ]]; then
-    echo "!! No DMG found in dist/. Run scripts/release.sh first." >&2
+    echo "!! No DMG found in dist/. Run scripts/release.sh first, or pass" >&2
+    echo "   APPCAST_DMG=/path/to/Blackbird-X.Y.Z[-pre].dmg explicitly" >&2
+    echo "   (required for prerelease versions — the auto-pick is GA-only)." >&2
     exit 1
 fi
 

@@ -159,14 +159,33 @@ echo "make-appcast.sh: simulated sign_update failure" >&2
 exit 1
 STUB
     else
+        # The "ok" stub mimics the real make-appcast.sh contract closely
+        # enough for publish-update.sh's post-generation cross-check
+        # (audit S2-009/S4-001): the enclosure URL and shortVersionString
+        # must come from the DMG publish-update.sh verified. Requiring
+        # APPCAST_DMG here doubles as a regression guard — if a future
+        # edit drops the APPCAST_DMG pin from publish-update.sh, every
+        # happy-path case in this file fails loudly.
         cat >"$root/scripts/make-appcast.sh" <<'STUB'
 #!/usr/bin/env bash
-cat <<'XML'
+if [[ -z "${APPCAST_DMG:-}" ]]; then
+    echo "stub make-appcast.sh: APPCAST_DMG not set — publish-update.sh must pin the verified DMG (audit S2-009)" >&2
+    exit 1
+fi
+DMG_NAME="$(basename "$APPCAST_DMG")"
+VERSION="$(echo "$DMG_NAME" | sed -E 's/^Blackbird-(.*)\.dmg$/\1/')"
+cat <<XML
 <?xml version="1.0" standalone="yes"?>
-<rss version="2.0">
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
     <title>Blackbird</title>
     <description>fixture full appcast</description>
+    <item>
+      <title>Version ${VERSION}</title>
+      <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
+      <enclosure url="${APPCAST_BASE_URL%/}/${DMG_NAME}"
+                 type="application/x-apple-diskimage" />
+    </item>
   </channel>
 </rss>
 XML
