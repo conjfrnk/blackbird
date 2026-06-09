@@ -1853,9 +1853,20 @@ unsafe fn guard_with_term<T>(term: *mut BBTerm, fallback: T, f: impl FnOnce() ->
                 let (cb, ctx) = *bb.callback.slot.get();
                 if let Some(cb) = cb {
                     let bytes = msg.as_bytes();
+                    // Same payload normalization CallbackCell::fire applies
+                    // (audit S6-001): this Fatal dispatch deliberately
+                    // bypasses fire() (the cell may be mid-panic), so it
+                    // must uphold the `payload == NULL ⇔ len == 0` header
+                    // contract itself — an empty panic message's
+                    // `as_bytes().as_ptr()` is NonNull::dangling(), the
+                    // exact shape S6-001 eliminated. Review follow-up.
                     let ev = BBEvent {
                         kind: BBEventKind::Fatal,
-                        payload: bytes.as_ptr(),
+                        payload: if bytes.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            bytes.as_ptr()
+                        },
                         len: bytes.len(),
                         i32_arg: 0,
                     };
@@ -4842,7 +4853,14 @@ mod tests {
         unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
             if matches!(ev.kind, BBEventKind::Title) {
                 let received = &*(ctx as *const std::sync::Mutex<Vec<String>>);
-                let bytes = std::slice::from_raw_parts(ev.payload, ev.len);
+                // Post-S6-001 an empty title arrives with payload == NULL;
+                // from_raw_parts(null, 0) is UB — guard like every
+                // integration harness does. Review follow-up (latent UB).
+                let bytes = if ev.payload.is_null() || ev.len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(ev.payload, ev.len)
+                };
                 received
                     .lock()
                     .unwrap()
