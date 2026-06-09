@@ -102,7 +102,7 @@ case_smoke_crash_detection
 if [[ "${BB_TEST_RELEASE_FAILURE:-0}" != "1" ]]; then
     echo "    skip: release.sh failure-path tests are opt-in via BB_TEST_RELEASE_FAILURE=1"
     echo "          (F-S8-001 codesign-log swallow + M-11 Team ID pin regression-guards;"
-    echo "           F-S8-001 will FAIL until the CODESIGN_LOG=\$(...) capture is fixed)"
+    echo "           F-S8-001 capture fix landed 2026-06-09; the gated case now passes)"
     test_end
     exit 0
 fi

@@ -101,7 +101,19 @@ if [[ -z "$EXPECTED_TEAM_ID" ]]; then
     echo "!! release.sh: cannot read DEVELOPMENT_TEAM from project.yml" >&2
     exit 1
 fi
-ACTUAL_TEAM_ID="$(codesign --display --verbose=2 "$APP_DST" 2>&1 | awk -F'=' '/^TeamIdentifier=/ {print $2; exit}')"
+# Capture-with-status, same shape as the --verify block above: a
+# failing `codesign --display` piped into awk would otherwise abort the
+# script at this assignment under pipefail with its error text consumed
+# by the pipe — zero output, dead diagnostics. Review follow-up to
+# audit S2-008 / F-S8-001 (same class, sibling occurrence).
+CODESIGN_DISPLAY_STATUS=0
+CODESIGN_DISPLAY_LOG="$(codesign --display --verbose=2 "$APP_DST" 2>&1)" || CODESIGN_DISPLAY_STATUS=$?
+if [[ $CODESIGN_DISPLAY_STATUS -ne 0 ]]; then
+    echo "!! release.sh: codesign --display failed (exit $CODESIGN_DISPLAY_STATUS) for $APP_DST" >&2
+    echo "$CODESIGN_DISPLAY_LOG" >&2
+    exit 1
+fi
+ACTUAL_TEAM_ID="$(awk -F'=' '/^TeamIdentifier=/ {print $2; exit}' <<<"$CODESIGN_DISPLAY_LOG")"
 if [[ -z "$ACTUAL_TEAM_ID" ]]; then
     echo "!! release.sh: codesign --display did not emit TeamIdentifier= for $APP_DST" >&2
     echo "   the bundle may be unsigned or the signature unreadable; aborting." >&2
