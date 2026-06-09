@@ -6,8 +6,15 @@ import Combine
 import BBCore
 
 /// Integration-level tests for the replace path: verifies that
-/// `replaceCurrentMatch` / `replaceAllMatches` emit the expected byte sequences
-/// (DEL×N + replacement UTF-8) through the view's send path.
+/// `replaceCurrentMatch` / `replaceAllMatches` emit the expected byte
+/// sequences through the view's send path. Audit S5-003 made the splice
+/// position-aware: cursor moves (CSI C right / CSI D left) walk the
+/// shell cursor to each match end before the DELs, and walk back to the
+/// (shift-adjusted) original position afterward — DEL erases left of
+/// the SHELL CURSOR, so the old position-less DEL×N + replacement shape
+/// corrupted any line where the match wasn't immediately left of the
+/// cursor. The fixture snapshot's cursor sits at col 0, so expected
+/// sequences here include the rightward walk to the match.
 ///
 /// These tests use `#if DEBUG` hooks injected into `TerminalView`:
 ///   - `replaceSnapshotForTests`  — supplies cursor position without a PTY.
@@ -54,7 +61,23 @@ final class FindReplaceIntegrationTests: XCTestCase {
         return try XCTUnwrap(snap)
     }
 
-    // MARK: - Replace-current: DEL×N + replacement
+    // MARK: - Byte helpers (audit S5-003 splice grammar)
+
+    private func right(_ n: Int) -> Data {
+        var d = Data()
+        for _ in 0..<n { d.append(contentsOf: [0x1B, 0x5B, 0x43]) }  // CSI C
+        return d
+    }
+
+    private func left(_ n: Int) -> Data {
+        var d = Data()
+        for _ in 0..<n { d.append(contentsOf: [0x1B, 0x5B, 0x44]) }  // CSI D
+        return d
+    }
+
+    private func dels(_ n: Int) -> Data { Data(repeating: 0x7F, count: n) }
+
+    // MARK: - Replace-current: cursor walk + DEL×N + replacement + walk back
 
     func test_replaceCurrent_emitsDelNPlusReplacement() throws {
         let view = try makeView()
@@ -72,10 +95,13 @@ final class FindReplaceIntegrationTests: XCTestCase {
         // findCurrentIndex is 0 by default which matches our single entry.
         view._invokeReplaceCurrentForTests(replacement: "baz")
 
-        // Expect: DEL DEL DEL (3 × 0x7F) + "baz"
-        let expected = Data([0x7F, 0x7F, 0x7F]) + Data("baz".utf8)
+        // Audit S5-003: fixture cursor is at char position 0; the match
+        // spans chars [4, 7). Splice = walk right to the match end (7),
+        // erase 3, type "baz", walk back to the original position
+        // (unshifted — the cursor was left of the match).
+        let expected = right(7) + dels(3) + Data("baz".utf8) + left(7)
         XCTAssertEqual(captured, expected,
-                       "Replace must emit DEL×matchLen then the replacement bytes")
+                       "Replace must walk to the match end, erase it, type the replacement, and restore the cursor")
     }
 
     func test_replaceCurrent_emptyReplacement_emitsOnlyDels() throws {
@@ -91,7 +117,9 @@ final class FindReplaceIntegrationTests: XCTestCase {
 
         view._invokeReplaceCurrentForTests(replacement: "")
 
-        XCTAssertEqual(captured, Data([0x7F, 0x7F]),
+        // Cursor at 0, match chars [0, 2), empty replacement: walk right
+        // to 2, erase 2; final position == original (0) needs no walk.
+        XCTAssertEqual(captured, right(2) + dels(2),
                        "Empty replacement still emits DEL bytes for the match span")
     }
 
@@ -206,13 +234,16 @@ final class FindReplaceIntegrationTests: XCTestCase {
 
         view._invokeReplaceAllForTests(replacement: "bar")
 
-        // Right-to-left: cols 10..12 processed first, then 0..2.
-        // Each replacement emits: DEL DEL DEL + "bar"
-        let delBar = Data([0x7F, 0x7F, 0x7F]) + Data("bar".utf8)
-        let expected = delBar + delBar   // twice, right-to-left
+        // Audit S5-003, right-to-left as ONE positioned splice from
+        // cursor char 0: walk right to 13 (end of the 10..12 match),
+        // erase 3 + "bar" (cursor now at 13), walk left 10 to char 3
+        // (end of the 0..2 match), erase 3 + "bar" (cursor at 3), walk
+        // left 3 back to the original position 0.
+        let bar = Data("bar".utf8)
+        let expected = right(13) + dels(3) + bar + left(10) + dels(3) + bar + left(3)
         let combined = allCaptures.reduce(Data(), +)
         XCTAssertEqual(combined, expected,
-                       "Replace All must process matches right-to-left on the input line")
+                       "Replace All must splice right-to-left with cursor repositioning")
     }
 
     func test_replaceAll_mixedLines_onlyInputLineReplaced() throws {
@@ -234,10 +265,12 @@ final class FindReplaceIntegrationTests: XCTestCase {
 
         view._invokeReplaceAllForTests(replacement: "qux")
 
-        // Only the input-line match should produce bytes.
-        let expected = Data([0x7F, 0x7F, 0x7F]) + Data("qux".utf8)
+        // Only the input-line match should produce bytes: walk right to
+        // char 8 (end of the 5..7 match), erase 3 + "qux", walk back to
+        // the original cursor position 0.
+        let expected = right(8) + dels(3) + Data("qux".utf8) + left(8)
         XCTAssertEqual(captured, expected,
-                       "Replace All must skip off-input-line matches")
+                       "Replace All must skip off-input-line matches and reposition for the rest")
     }
 }
 

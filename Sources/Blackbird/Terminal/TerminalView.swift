@@ -2700,7 +2700,7 @@ extension TerminalView {
             findBar?.showTransientMessage("Only input-line matches can be replaced")
             return
         }
-        sendReplacement(match: m, replacement: replacement)
+        spliceReplacements(matches: [m], replacement: replacement)
         // The replacement edits the shell line; every recorded match on that
         // line has now shifted or vanished. Drop the cache so find-next
         // doesn't scroll to a stale coordinate.
@@ -2798,10 +2798,15 @@ extension TerminalView {
             findBar?.showTransientMessage("Refusing: matches span a possible wrapped input line")
             return
         }
-        // Process right-to-left so earlier col indices remain valid.
-        for m in inputLineMatches.sorted(by: { $0.startCol > $1.startCol }) {
-            sendReplacement(match: m, replacement: replacement)
-        }
+        // Process right-to-left as ONE splice: the cursor walks left
+        // match by match, so each match's gap is computed against the
+        // post-replacement position of the matches to its right
+        // (audit S5-003 — the old per-match sends assumed DELs landed
+        // at the match columns, which they never did).
+        spliceReplacements(
+            matches: inputLineMatches.sorted(by: { $0.startCol > $1.startCol }),
+            replacement: replacement
+        )
         // All input-line matches have been spliced; invalidate the cache.
         findMatches.removeAll()
         findMatchesSeq = nil
@@ -2820,29 +2825,57 @@ extension TerminalView {
         }
     }
 
-    /// Emits DEL×N bytes to erase the matched span, then the UTF-8 replacement.
-    /// `N` is the number of *shell-input characters* in the match — equal to
-    /// the number of non-spacer cells in `[startCol, endCol]` on the match
-    /// row. A wide CJK glyph counts as one DEL even though it occupies two
-    /// columns; without this distinction the column-span DEL count would
-    /// overshoot by one per wide grapheme and erase characters to the left
-    /// of the actual match. Audit H6.
-    private func sendReplacement(
-        match m: (line: Int32, startCol: Int, endCol: Int),
+    /// Splice replacements into the live input line (audit S5-003).
+    ///
+    /// DEL (0x7F) erases the character LEFT OF THE SHELL CURSOR — not at
+    /// the match's columns. The previous implementation emitted
+    /// DEL×matchLen + replacement with no cursor movement, so any match
+    /// not immediately left of the cursor erased the wrong characters:
+    /// replacing 'aaa' in `echo aaa bbb` (cursor at end) yielded
+    /// `echo aaa ZZZ` — the match untouched, the unrelated tail
+    /// destroyed. The right-to-left Replace All ordering comment ('so
+    /// earlier col indices stay valid') encoded exactly that false
+    /// assumption; the extensive audits on this path (H6, F4, fix-#08,
+    /// fix-#18) all tuned the DEL *count*, never the DEL *position*.
+    ///
+    /// This version repositions in character space: for each match
+    /// (right-to-left, all on the cursor row), emit left-arrows
+    /// (CSI D) from the tracked cursor position to the match end, then
+    /// DEL×len, then the replacement; finish with right-arrows (CSI C)
+    /// back to the (shifted) end of line. All counts are derived from
+    /// ONE snapshot in shell-character units via nonSpacerCellCount
+    /// (a wide CJK glyph is one character / one DEL / one arrow even
+    /// though it spans two columns — audit H6). Arrows are bound to
+    /// char movement in readline/ZLE emacs AND vi-insert modes, and the
+    /// replace path is already gated off TUI modes.
+    ///
+    /// Known residual (unchanged from before): a match inside the
+    /// PROMPT region — not the typed input — cannot be edited;
+    /// readline stops cursor movement at the input start, so such a
+    /// splice still misfires. The prompt boundary is not knowable
+    /// column-wise from the grid; OSC 133 B tracking would be the
+    /// future fix.
+    ///
+    /// All-or-nothing: validation failures (line break / tab in the
+    /// replacement, cursor inside a match) refuse BEFORE any byte is
+    /// emitted, so the line is never left half-spliced.
+    private func spliceReplacements(
+        matches: [(line: Int32, startCol: Int, endCol: Int)],
         replacement: String
     ) {
-        let snap = effectiveSnapshot()
-        let screenRow = Int(m.line) + (snap?.displayOffset ?? 0)
-        // Use the cell-walked count when we have a snapshot row to walk;
-        // fall back to the col span for scrollback / no-snapshot test
-        // paths (those don't match wide chars in practice — replace
-        // requires the match be on the cursor line, which is always
-        // in viewport).
-        let matchLen = snap?.nonSpacerCellCount(
-            row: screenRow, startCol: m.startCol, endCol: m.endCol
-        ) ?? (m.endCol - m.startCol + 1)
-        guard matchLen > 0 else { return }
-        let delBytes = Data(repeating: 0x7F, count: matchLen)
+        guard !matches.isEmpty, let snap = effectiveSnapshot() else { return }
+        let line = matches[0].line
+        let screenRow = Int(line) + snap.displayOffset
+        // Character count helper over the ORIGINAL snapshot; the whole
+        // splice is computed against one consistent line state and sent
+        // as a single byte sequence (the shell echoes asynchronously,
+        // so re-reading the snapshot mid-splice would see stale cells).
+        func chars(_ startCol: Int, _ endCol: Int) -> Int {
+            guard startCol <= endCol else { return 0 }
+            return snap.nonSpacerCellCount(
+                row: screenRow, startCol: startCol, endCol: endCol
+            ) ?? (endCol - startCol + 1)
+        }
         // Scrub the replacement bytes through the same pipeline paste
         // uses. The find-bar Replace field accepts arbitrary user input
         // — typed or pasted via NSTextField's own paste handler, which
@@ -2853,6 +2886,8 @@ extension TerminalView {
         let cleanedReplacement = Self.stripBidiOverrides(
             Self.sanitizePasteControls(Data(replacement.utf8))
         )
+        // Shell-character length of the replacement, for cursor math.
+        let replacementChars = String(decoding: cleanedReplacement, as: UTF8.self).count
         // Audit L20. sanitizePasteControls intentionally preserves LF
         // (the paste path treats it as "user pressed Enter, run the
         // line"). For find-replace at a non-bracketed-paste prompt
@@ -2883,18 +2918,68 @@ extension TerminalView {
             findBar?.showTransientMessage("Refusing: replacement contains a tab")
             return
         }
+
+        // Build the full splice against the tracked cursor position
+        // (char index = count of shell characters left of a column).
+        // Moves are BIDIRECTIONAL: the cursor may legitimately sit left
+        // of (or inside) a match — the user can arrow back through
+        // typed input before invoking Replace — so each hop emits
+        // CSI C (right) or CSI D (left) as needed.
+        let escLeft: [UInt8] = [0x1B, 0x5B, 0x44]   // CSI D
+        let escRight: [UInt8] = [0x1B, 0x5B, 0x43]  // CSI C
+        func appendMoves(_ delta: Int, to bytes: inout Data) {
+            if delta > 0 {
+                for _ in 0..<delta { bytes.append(contentsOf: escRight) }
+            } else if delta < 0 {
+                for _ in 0..<(-delta) { bytes.append(contentsOf: escLeft) }
+            }
+        }
+        let p0 = chars(0, snap.cursorCol - 1)
+        var p = p0
+        var bytes = Data()
+        // Original-space coordinates stay valid throughout because
+        // matches are processed right-to-left: edits never move content
+        // to the LEFT of the region being edited next.
+        var spliced: [(sChar: Int, eChar: Int, len: Int)] = []
+        for m in matches {
+            let sChar = chars(0, m.startCol - 1)
+            let len = chars(m.startCol, m.endCol)
+            guard len > 0 else { continue }
+            let eChar = sChar + len
+            appendMoves(eChar - p, to: &bytes)
+            bytes.append(Data(repeating: 0x7F, count: len))
+            bytes.append(cleanedReplacement)
+            p = sChar + replacementChars
+            spliced.append((sChar, eChar, len))
+        }
+        guard !bytes.isEmpty else { return }
+        // Land the cursor back where the user had it, mapped through
+        // the edits: positions right of a replaced span shift by
+        // (replacement − match) per span; a position INSIDE a span maps
+        // to just after its replacement.
+        var finalTarget = p0
+        var insideAdjusted = false
+        for r in spliced {
+            if r.eChar <= p0 {
+                finalTarget += replacementChars - r.len
+            } else if r.sChar < p0, p0 < r.eChar, !insideAdjusted {
+                // p0 inside this span: anchor to the replacement's end
+                // (shifts from spans further left still apply via the
+                // eChar <= p0 branch — spans are disjoint).
+                finalTarget += (r.sChar + replacementChars) - p0
+                insideAdjusted = true
+            }
+        }
+        appendMoves(finalTarget - p, to: &bytes)
+
         #if DEBUG
         if let capture = replaceByteCapture {
-            capture(delBytes)
-            if !cleanedReplacement.isEmpty { capture(cleanedReplacement) }
+            capture(bytes)
             return
         }
         #endif
         guard let session else { return }
-        session.send(delBytes)
-        if !cleanedReplacement.isEmpty {
-            session.send(cleanedReplacement)
-        }
+        session.send(bytes)
     }
 
     /// Returns true when the match's buffer line equals the cursor's buffer line,
