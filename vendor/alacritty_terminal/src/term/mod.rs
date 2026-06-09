@@ -642,6 +642,20 @@ impl<T> Term<T> {
     }
 
     /// Access to the raw grid data structure.
+    /// Blackbird fork addition (audit S5-004/S5-005): the PRIMARY
+    /// screen's monotonic scrolled-lines counter, regardless of which
+    /// screen is active — prompt marks and selections anchor to primary
+    /// content only, and the alt grid (history 0) recycles lines without
+    /// meaningful anchoring.
+    #[inline]
+    pub fn primary_lines_scrolled(&self) -> u64 {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            self.inactive_grid.lines_scrolled()
+        } else {
+            self.grid.lines_scrolled()
+        }
+    }
+
     pub fn grid(&self) -> &Grid<Cell> {
         &self.grid
     }

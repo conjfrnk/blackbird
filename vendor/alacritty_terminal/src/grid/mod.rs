@@ -135,6 +135,17 @@ pub struct Grid<T> {
 
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
+
+    /// Blackbird fork addition (audit S5-004/S5-005): monotonic count of
+    /// lines this grid has rotated toward history via full-width
+    /// `scroll_up` — including lines immediately recycled once the ring
+    /// is saturated. `history_size()` saturates at `max_scroll_limit`
+    /// and therefore cannot anchor buffer positions across eviction;
+    /// this counter can: content recorded at grid row R when the counter
+    /// read P sits `(counter_now - P)` rows further up at any later
+    /// time, until a column reflow or clear invalidates the anchor.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    lines_scrolled: u64,
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -147,6 +158,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             cursor: Cursor::default(),
             lines,
             columns,
+            lines_scrolled: 0,
         }
     }
 
@@ -270,6 +282,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
+            // Blackbird fork addition (audit S5-004/S5-005): this is the
+            // only path that rotates lines toward history — count every
+            // rotated line, including ones a saturated ring recycles.
+            self.lines_scrolled += positions as u64;
+
             // Create scrollback for the new lines.
             self.increase_scroll_limit(positions);
 
@@ -431,6 +448,13 @@ impl<T> Grid<T> {
     #[inline]
     pub fn display_offset(&self) -> usize {
         self.display_offset
+    }
+
+    /// Blackbird fork addition (audit S5-004/S5-005): see the
+    /// `lines_scrolled` field.
+    #[inline]
+    pub fn lines_scrolled(&self) -> u64 {
+        self.lines_scrolled
     }
 
     #[inline]

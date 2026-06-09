@@ -2590,6 +2590,17 @@ pub struct BBSnap {
     /// drawing the cursor entirely.
     pub cursor_shape: u8,
     pub _pad2b: [u8; 3],
+    /// Monotonic count of lines the PRIMARY screen has pushed toward
+    /// scrollback history — including lines recycled once the ring
+    /// saturated. Unlike `history_size`, which plateaus at the
+    /// scrollback cap, this never saturates, so callers can anchor
+    /// content positions across eviction: content at grid row R in a
+    /// snapshot whose counter read P sits `(counter_now − P)` rows
+    /// further up in any later snapshot. Column reflow (resize) and
+    /// clears invalidate the anchor. Appended at the struct tail to
+    /// preserve existing field offsets (same rule as `history_size`).
+    /// Audit S5-004/S5-005.
+    pub lines_scrolled: u64,
 }
 
 unsafe impl Send for BBSnap {}
@@ -2642,6 +2653,7 @@ impl BBSnapOwned {
         cursor: (u16, u16, bool),
         display_offset: u32,
         history_size: u32,
+        lines_scrolled: u64,
         mode: u32,
         cursor_shape: u8,
         cells: Vec<BBCell>,
@@ -2664,6 +2676,7 @@ impl BBSnapOwned {
                 history_size,
                 cursor_shape,
                 _pad2b: [0; 3],
+                lines_scrolled,
             },
             rc: AtomicUsize::new(1),
             cells_owned: cells,
@@ -3220,6 +3233,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         // visible viewport — and may be below it entirely.
         let display_offset = grid.display_offset().min(u32::MAX as usize) as u32;
         let history_size = grid.history_size().min(u32::MAX as usize) as u32;
+        let lines_scrolled = bb.term.primary_lines_scrolled();
         // Drop the `grid`/`palette` borrows (and by extension the `&bb.term`
         // borrow) before we touch `bb.uri_cstr_cache` mutably below.
         let _ = grid;
@@ -3331,6 +3345,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             (cursor_col, cursor_row, cursor_visible),
             display_offset,
             history_size,
+            lines_scrolled,
             mode,
             cursor_shape,
             cells,
@@ -4612,9 +4627,16 @@ mod tests {
             "cursor_shape follows history_size (post-M5 layout)"
         );
         assert_eq!(
-            std::mem::size_of::<BBSnap>(),
+            std::mem::offset_of!(BBSnap, lines_scrolled),
             48,
-            "BBSnap total size 48 bytes (post-M5 layout, includes tail padding)"
+            "lines_scrolled appended at offset 48 (audit S5-004/S5-005) — \
+             existing field offsets must not move"
+        );
+        assert_eq!(
+            std::mem::size_of::<BBSnap>(),
+            56,
+            "BBSnap total size 56 bytes (48 post-M5 + appended u64 \
+             lines_scrolled, audit S5-004/S5-005)"
         );
     }
 

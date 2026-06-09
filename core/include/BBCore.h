@@ -364,6 +364,19 @@ struct BBSnap {
    */
   uint8_t cursor_shape;
   uint8_t _pad2b[3];
+  /**
+   * Monotonic count of lines the PRIMARY screen has pushed toward
+   * scrollback history — including lines recycled once the ring
+   * saturated. Unlike `history_size`, which plateaus at the
+   * scrollback cap, this never saturates, so callers can anchor
+   * content positions across eviction: content at grid row R in a
+   * snapshot whose counter read P sits `(counter_now − P)` rows
+   * further up in any later snapshot. Column reflow (resize) and
+   * clears invalidate the anchor. Appended at the struct tail to
+   * preserve existing field offsets (same rule as `history_size`).
+   * Audit S5-004/S5-005.
+   */
+  uint64_t lines_scrolled;
 };
 
 /**

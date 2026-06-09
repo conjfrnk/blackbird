@@ -592,6 +592,16 @@ public final class BBSnapshot {
     public var displayOffset: Int { Int(handle.pointee.display_offset) }
     /// Total scrollback lines retained (up to the scrollback limit).
     public var historySize: Int { Int(handle.pointee.history_size) }
+    /// Monotonic count of lines the PRIMARY screen has pushed toward
+    /// scrollback — keeps counting past the point `historySize`
+    /// saturates at the scrollback cap, so positions can be anchored
+    /// across eviction: content at grid row R in a snapshot whose
+    /// counter read P sits `(now − P)` rows further up in any later
+    /// snapshot. Column reflow (resize) and clears invalidate the
+    /// anchor; a value that moves BACKWARD means the underlying grid
+    /// was recreated (RIS) and any anchors must be dropped.
+    /// Audit S5-004/S5-005.
+    public var linesScrolled: UInt64 { handle.pointee.lines_scrolled }
     /// DECSCUSR cursor shape: 0 = block, 1 = bar/beam, 2 = underline, 3 = hidden.
     public var cursorShape: Int { Int(handle.pointee.cursor_shape) }
     public var mode: UInt32 { handle.pointee.mode }
