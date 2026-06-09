@@ -9,7 +9,7 @@
 //!     necessarily show up in RSS within the 128-iteration window of
 //!     `long_session_memory.rs`, but every cycle would burn an FD until the
 //!     process hits `ulimit -n` mid-session.
-//!   * The `OnceLock<ThreadId>` owner latch on `CallbackCell`
+//!   * The debug-only busy flag on `CallbackCell` (audit S1-004)
 //!     (core/src/lib.rs:137) encodes a single-thread-per-handle contract.
 //!     A future regression that spawns a worker thread per `BBTerm`
 //!     (e.g. an internal background task on the listener) would compile,
@@ -217,7 +217,7 @@ mod macos {
 
         // Churn: 1024 cycles. A per-iteration FD leak burns 1024 FDs (well
         // beyond the +8 slop). A per-iteration worker-thread spawn burns
-        // 1024 threads (well beyond the +4 slop). A `OnceLock<ThreadId>`
+        // 1024 threads (well beyond the +4 slop). A busy-flag/guard
         // bug that leaks the first-thread latch's containing Arc would
         // manifest as RSS in the sibling test, not here — this gate's job
         // is the OS-resource handles specifically.
@@ -260,7 +260,7 @@ mod macos {
              delta={thread_delta} limit=+{THREAD_SLOP} iterations={ITERATIONS} — \
              a per-iteration thread spawn would push delta to ITERATIONS-scale; \
              {thread_delta} threads above baseline suggests a regression in the \
-             single-thread-per-handle contract (core/src/lib.rs:137 owner latch)"
+             mutual-exclusion contract (CallbackCell busy flag, audit S1-004)"
         );
         assert!(
             final_fds as i64 <= baseline_fds as i64 + FD_SLOP,

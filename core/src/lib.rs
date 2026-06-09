@@ -120,18 +120,26 @@ pub type BBEventCb = unsafe extern "C" fn(BBEvent, *mut c_void);
 /// `BBTerm` owns it via `Arc`.
 ///
 /// # Thread-safety contract
-/// All access to `CallbackCell` is restricted to the single thread that owns
-/// the `BBTerm`.  `Term<RoutingListener>` and `Processor` are not `Sync`; the
-/// FFI contract already forbids concurrent calls on the same `term` handle
-/// (documented on `bb_term_input`).  Under this single-thread discipline no
-/// data race can occur, making the `UnsafeCell` sound.
+/// All access to `CallbackCell` is mutually exclusive: the FFI contract
+/// forbids concurrent calls on the same `term` handle (documented on
+/// `bb_term_input` / `bb_term_new` — one thread at a time, e.g. confinement
+/// to a dedicated serial queue). `Term<RoutingListener>` and `Processor`
+/// are not `Sync`. Under this mutual-exclusion discipline no data race can
+/// occur, making the `UnsafeCell` sound.
 ///
-/// In debug builds, the first thread to touch the cell is latched into
-/// `owner`; subsequent cross-thread access trips a `debug_assert_eq` — a
-/// runtime diagnostic for the otherwise-silent UB if the Swift side
-/// accidentally ships a handle across threads, or if a future
-/// `alacritty_terminal` point release spawns a background thread that calls
-/// `send_event`. Zero cost in release (rust-core-1 F2/F10).
+/// In debug builds, a `busy` flag detects OVERLAPPING access — two threads
+/// inside the cell simultaneously, the actual data-race UB — and panics
+/// with a diagnostic. Audit S1-004: the previous design latched the FIRST
+/// accessor's `ThreadId` and asserted every later access matched, which
+/// contradicted `bb_term_new`'s own documented allowance ("confine it to a
+/// single dedicated serial queue"): GCD gives a serial queue no stable
+/// thread identity, so the legitimate Swift architecture (handle created
+/// on main, driven from `coreQueue`) tripped the latch on the first event
+/// of every debug-assertions core build — making the diagnostic worthless
+/// for catching real misuse. Overlap detection has no false positive for
+/// serialized cross-thread use and still catches genuinely concurrent
+/// access (best-effort: only overlaps colliding inside the flag's window
+/// are observable). Zero cost in release (rust-core-1 F2/F10).
 struct CallbackCell {
     slot: UnsafeCell<(Option<BBEventCb>, *mut c_void)>,
     /// Sliding-window cap on `Event::PtyWrite` dispatches. Audit M1 (the
@@ -146,7 +154,35 @@ struct CallbackCell {
     /// `BBTerm`'s clone (audit H-3).
     pty_write_rate: Arc<PtyWriteRateCell>,
     #[cfg(debug_assertions)]
-    owner: std::sync::OnceLock<std::thread::ThreadId>,
+    busy: std::sync::atomic::AtomicBool,
+}
+
+/// Debug-only RAII overlap detector for the `UnsafeCell`-backed FFI cells.
+/// `enter` panics when the flag is already held — i.e. another thread is
+/// INSIDE the cell right now (serialized access from different threads
+/// never trips it). Audit S1-004.
+#[cfg(debug_assertions)]
+struct DebugBusyGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+#[cfg(debug_assertions)]
+impl<'a> DebugBusyGuard<'a> {
+    fn enter(flag: &'a std::sync::atomic::AtomicBool, what: &str) -> Self {
+        let was_busy = flag.swap(true, std::sync::atomic::Ordering::Acquire);
+        assert!(
+            !was_busy,
+            "blackbird_core: overlapping access to {what} — two threads are \
+             using the same BBTerm handle concurrently (mutual-exclusion \
+             contract violated)",
+        );
+        DebugBusyGuard(flag)
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for DebugBusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 // SAFETY: the owning BBTerm is never shared across threads; see contract above.
@@ -160,31 +196,25 @@ impl CallbackCell {
             slot: UnsafeCell::new((None, std::ptr::null_mut())),
             pty_write_rate,
             #[cfg(debug_assertions)]
-            owner: std::sync::OnceLock::new(),
+            busy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     #[cfg(debug_assertions)]
-    fn debug_check_thread(&self) {
-        let current = std::thread::current().id();
-        let owner = *self.owner.get_or_init(|| current);
-        debug_assert_eq!(
-            owner, current,
-            "blackbird_core: BBTerm handle used from multiple threads \
-             (CallbackCell) — single-thread-per-handle contract violated",
-        );
+    fn debug_enter(&self) -> DebugBusyGuard<'_> {
+        DebugBusyGuard::enter(&self.busy, "CallbackCell")
     }
 
     #[cfg(not(debug_assertions))]
     #[inline(always)]
-    fn debug_check_thread(&self) {}
+    fn debug_enter(&self) {}
 
     /// Update the stored callback and context.
     ///
     /// # Safety
     /// Caller must ensure no concurrent access.
     unsafe fn set(&self, cb: Option<BBEventCb>, ctx: *mut c_void) {
-        self.debug_check_thread();
+        let _busy = self.debug_enter();
         *self.slot.get() = (cb, ctx);
     }
 
@@ -221,7 +251,10 @@ impl CallbackCell {
         if event.len == 0 {
             event.payload = std::ptr::null();
         }
-        self.debug_check_thread();
+        // Overlap-detection scope covers the slot read and the rate-state
+        // mutation below, and ends BEFORE the user callback runs — a
+        // nested dispatch from inside `f` must not false-trip the guard.
+        let _busy = self.debug_enter();
         // Reviewer feedback (2026-04-29): read the callback slot FIRST.
         // If no callback is registered (e.g. `set()` never called or
         // explicitly cleared), every PtyWrite previously consumed a
@@ -252,6 +285,8 @@ impl CallbackCell {
         // even if `f` panics (the outer `catch_unwind` machinery in
         // `guard_with_term` still owns the panic; this guard exists
         // only to expose the in-flight bit).
+        #[cfg(debug_assertions)]
+        drop(_busy);
         let _handler_guard = HandlerInFlightGuard::enter();
         f(event, ctx);
     }
@@ -279,9 +314,10 @@ impl CallbackCell {
 /// becomes user-visible.
 ///
 /// # Thread-safety contract
-/// Same as `CallbackCell` — single-threaded access on the BBTerm owner's
-/// thread. Debug builds latch `owner` on first access and debug_assert on
-/// mismatch (rust-core-1 F2/F10).
+/// Same as `CallbackCell` — mutually-exclusive access under the BBTerm
+/// handle's one-thread-at-a-time discipline. Debug builds detect
+/// overlapping access via a `busy` flag and panic (rust-core-1 F2/F10,
+/// reworked per audit S1-004 — see `CallbackCell`).
 struct ColorRequestQueue {
     entries: UnsafeCell<Vec<ColorRequestEntry>>,
     /// True once `push` has refused at least one entry since the latest
@@ -290,7 +326,7 @@ struct ColorRequestQueue {
     /// against.
     cap_hit_logged: UnsafeCell<bool>,
     #[cfg(debug_assertions)]
-    owner: std::sync::OnceLock<std::thread::ThreadId>,
+    busy: std::sync::atomic::AtomicBool,
 }
 
 /// Upper bound on queued `ColorRequestEntry`s between two drains. See
@@ -313,24 +349,18 @@ impl ColorRequestQueue {
             entries: UnsafeCell::new(Vec::new()),
             cap_hit_logged: UnsafeCell::new(false),
             #[cfg(debug_assertions)]
-            owner: std::sync::OnceLock::new(),
+            busy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     #[cfg(debug_assertions)]
-    fn debug_check_thread(&self) {
-        let current = std::thread::current().id();
-        let owner = *self.owner.get_or_init(|| current);
-        debug_assert_eq!(
-            owner, current,
-            "blackbird_core: BBTerm handle used from multiple threads \
-             (ColorRequestQueue) — single-thread-per-handle contract violated",
-        );
+    fn debug_enter(&self) -> DebugBusyGuard<'_> {
+        DebugBusyGuard::enter(&self.busy, "ColorRequestQueue")
     }
 
     #[cfg(not(debug_assertions))]
     #[inline(always)]
-    fn debug_check_thread(&self) {}
+    fn debug_enter(&self) {}
 
     /// Append an entry, dropping silently when the queue is already at
     /// `COLOR_REQUEST_QUEUE_CAP`. Returns `true` when the entry was
@@ -339,7 +369,7 @@ impl ColorRequestQueue {
     /// # Safety
     /// Caller must ensure no concurrent access.
     unsafe fn push(&self, entry: ColorRequestEntry) -> bool {
-        self.debug_check_thread();
+        let _busy = self.debug_enter();
         let vec = &mut *self.entries.get();
         if vec.len() >= COLOR_REQUEST_QUEUE_CAP {
             let logged = &mut *self.cap_hit_logged.get();
@@ -362,7 +392,7 @@ impl ColorRequestQueue {
     /// # Safety
     /// Caller must ensure no concurrent access.
     unsafe fn drain(&self) -> Vec<ColorRequestEntry> {
-        self.debug_check_thread();
+        let _busy = self.debug_enter();
         *self.cap_hit_logged.get() = false;
         std::mem::take(&mut *self.entries.get())
     }
@@ -1924,11 +1954,14 @@ const MAX_TEXT_RANGE_ROWS: u32 = 262_144;
 /// # Thread safety
 /// The returned handle is NOT Sync / Sendable. Once created, every subsequent
 /// `bb_term_*` call on this handle MUST happen on the same thread; the handle
-/// may never be accessed concurrently from two threads, even with external
-/// locking. Crossing threads is undefined behavior. In Swift, restrict the
-/// handle to the @MainActor or confine it to a single dedicated serial queue.
-/// Debug builds latch the first accessor's ThreadId and debug_assert on
-/// mismatch (rust-core-1 F2/F10).
+/// may never be accessed concurrently from two threads. In Swift, restrict
+/// the handle to the @MainActor or confine it to a single dedicated serial
+/// queue — serial-queue confinement means calls may arrive on DIFFERENT
+/// threads over time (GCD provides no stable thread identity), which is
+/// fine: the contract is mutual exclusion plus the queue's memory ordering,
+/// not thread identity. Debug builds panic on OVERLAPPING access (two
+/// threads inside the handle simultaneously) — rust-core-1 F2/F10, reworked
+/// per audit S1-004.
 ///
 /// # Safety
 /// The returned pointer must be freed exactly once via `bb_term_free`.
@@ -3900,10 +3933,7 @@ pub unsafe extern "C" fn bb_term_text_range(
             // The flag lives on the row's actual last cell regardless of
             // the selection's column span. Rectangular (box) selection is
             // exempt by design: box copies are row-per-row.
-            let wrapped = !rectangular
-                && row[Column(last_col)]
-                    .flags
-                    .contains(CellFlags::WRAPLINE);
+            let wrapped = !rectangular && row[Column(last_col)].flags.contains(CellFlags::WRAPLINE);
 
             // S5-002 second half: a wrapped row is full-width content —
             // its trailing spaces are real characters interior to the
@@ -4193,17 +4223,16 @@ mod tests {
         }
     }
 
-    /// Regression for rust-core-1 F2/F10: CallbackCell must debug_assert on
-    /// cross-thread access so accidental Swift-side @Sendable leakage (or a
-    /// future alacritty release that calls send_event on a background
-    /// thread) surfaces as a diagnosable panic instead of silent UB.
-    /// Only meaningful in debug builds where the latch is live.
+    /// Audit S1-004 (reworking rust-core-1 F2/F10): SERIALIZED access from
+    /// different threads is the legitimate GCD serial-queue confinement
+    /// pattern `bb_term_new` explicitly allows — the debug diagnostic must
+    /// NOT fire on it. (The previous ThreadId latch did, which made every
+    /// debug-assertions core build panic on the first event of a normal
+    /// session and rendered the diagnostic useless for real misuse.)
     #[test]
     #[cfg(debug_assertions)]
-    fn callback_cell_catches_cross_thread_access() {
-        use std::panic::{catch_unwind, AssertUnwindSafe};
+    fn callback_cell_allows_serialized_cross_thread_access() {
         let cell = Arc::new(CallbackCell::new(Arc::new(PtyWriteRateCell::new())));
-        // Latch the owner on this thread by touching the cell once.
         unsafe {
             cell.fire(BBEvent {
                 kind: BBEventKind::Bell,
@@ -4213,22 +4242,37 @@ mod tests {
             });
         }
         let cell_clone = Arc::clone(&cell);
-        let result = std::thread::spawn(move || {
-            catch_unwind(AssertUnwindSafe(|| unsafe {
-                cell_clone.fire(BBEvent {
-                    kind: BBEventKind::Bell,
-                    payload: std::ptr::null(),
-                    len: 0,
-                    i32_arg: 0,
-                });
-            }))
+        std::thread::spawn(move || unsafe {
+            cell_clone.fire(BBEvent {
+                kind: BBEventKind::Bell,
+                payload: std::ptr::null(),
+                len: 0,
+                i32_arg: 0,
+            });
         })
         .join()
-        .expect("spawned thread panicked before catch_unwind caught anything");
+        .expect("serialized cross-thread fire must not panic (S1-004)");
+    }
+
+    /// Audit S1-004: the replacement diagnostic — overlap detection — must
+    /// panic when a second accessor enters while the first is still inside,
+    /// and recover cleanly once the holder releases.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn debug_busy_guard_panics_on_overlapping_access() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let held = DebugBusyGuard::enter(&flag, "test-cell");
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _second = DebugBusyGuard::enter(&flag, "test-cell");
+        }));
         assert!(
             result.is_err(),
-            "cross-thread CallbackCell::fire should trip the debug_assert_eq",
+            "overlapping enter must panic while the first guard is held"
         );
+        drop(held);
+        // After release, a fresh accessor proceeds normally.
+        let _third = DebugBusyGuard::enter(&flag, "test-cell");
     }
 
     /// Verify that scrollback is wired up: after feeding enough newlines to
