@@ -141,18 +141,12 @@ fn combining_acute_attaches_to_previous_glyph() {
         // Cursor advanced by one glyph only.
         assert_eq!(unsafe { (*s).cursor_col }, 1);
 
-        // Document the current behaviour of `bb_term_text_range` for cells
-        // that carry combining marks: the extractor walks cells by `ch`
-        // only, so the base glyph round-trips but the combining mark is
-        // DROPPED. F11 flagged this as a latent gap — if a caller of
-        // `textRange` ever copy/pastes "café" the accent silently
-        // disappears.
-        //
-        // This assertion PINS that gap so a fix (or a subtle regression
-        // that happens to add a second mark somewhere) trips here. If a
-        // future patch adds combining-mark retention to `bb_term_text_range`
-        // (e.g. via alacritty's zerowidth list on the grid), flip this to
-        // `assert_eq!(text, "e\u{0301}")` and the gap is closed.
+        // rust-tests F11, CLOSED by audit S5-001 (2026-06-09):
+        // `bb_term_text_range` now re-emits the cell's zerowidth list
+        // (combining marks, VS16, ZWJ) after the base scalar, matching
+        // upstream's `line_to_string`. Copy of "café" retains the accent.
+        // This assertion pins the retention so a regression back to
+        // base-scalar-only extraction trips here.
         unsafe {
             let raw = bc::bb_term_text_range(term, 0, 0, 0, 0, 0);
             assert!(
@@ -165,11 +159,9 @@ fn combining_acute_attaches_to_previous_glyph() {
                 .unwrap_or_default();
             bc::bb_string_release(raw);
             assert_eq!(
-                text, "e",
-                "current behaviour: combining mark is dropped by text_range. \
-                 If this test ever starts returning \"e\\u{{0301}}\", the FFI \
-                 gained combining-mark retention — update the assertion to \
-                 match and close rust-tests F11. Got {text:?}"
+                text, "e\u{0301}",
+                "audit S5-001: text_range must retain the combining mark \
+                 from the cell's zerowidth list. Got {text:?}"
             );
         }
 
