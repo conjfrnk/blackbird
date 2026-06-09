@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+@testable import Blackbird
 
 /// Ensures the test host (`Blackbird.app`) terminates cleanly after the test
 /// bundle finishes. Without this, `xcodebuild test` leaves zombie app
@@ -20,6 +21,22 @@ final class TestHostTermination: NSObject, XCTestObservation {
         guard !registered else { return }
         XCTestObservationCenter.shared.addTestObserver(self)
         registered = true
+    }
+
+    /// Audit S2-004: heartbeat for the host's idle-based safety net
+    /// (TestHostActivityMonitor). Posting on every test start/finish
+    /// means a healthy run — however long — never trips the host's
+    /// exit fuse; only a genuinely hung/abandoned host goes idle.
+    func testCaseWillStart(_ testCase: XCTestCase) {
+        NotificationCenter.default.post(
+            name: TestHostActivityMonitor.activityNotification, object: nil
+        )
+    }
+
+    func testCaseDidFinish(_ testCase: XCTestCase) {
+        NotificationCenter.default.post(
+            name: TestHostActivityMonitor.activityNotification, object: nil
+        )
     }
 
     func testCase(_ testCase: XCTestCase, didRecord issue: XCTIssue) {
