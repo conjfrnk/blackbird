@@ -148,8 +148,10 @@ final class ScrollIndicator: NSView {
     }
 
     /// Render prompt-mark ticks along the track. Each mark's position is
-    /// derived from its (historySize, gridRow) snapshot so marks slide
-    /// upward as new content scrolls them into history.
+    /// derived from its (linesScrolled, gridRow) anchor (audit S5-004) so
+    /// marks slide upward as new content scrolls them into history — and
+    /// keep sliding correctly after scrollback saturates, where the old
+    /// history_size anchor froze.
     ///
     /// Call from the main thread whenever `TerminalSession.promptMarks`
     /// changes OR the displayOffset changes (so marks stay visually anchored
@@ -157,6 +159,7 @@ final class ScrollIndicator: NSView {
     /// against).
     func updatePromptMarks(
         _ marks: [TerminalSession.PromptMark],
+        linesScrolled: UInt64,
         historySize: Int,
         rows: Int,
         accentColor: NSColor
@@ -189,13 +192,15 @@ final class ScrollIndicator: NSView {
                 continue
             }
             let m = marks[i]
-            // Distance in lines from the bottom-most (live) row. Marks
-            // whose `historySize + gridRow` exceeds the current live
-            // bottom are "stale" (buffer content scrolled past the
-            // scrollback cap and the line is gone); clamp them off the
-            // track by setting alpha to zero.
-            let mLine = m.historySize + m.gridRow
-            let dist = historySize + rows - 1 - mLine
+            // Distance in lines from the bottom-most (live) row: the
+            // marked row started at gridRow (so rows-1-gridRow above
+            // the bottom) and every line scrolled since pushes it one
+            // further up (audit S5-004 anchor algebra). Marks pushed
+            // past retention land outside [0, total) and hide.
+            let scrolledSince = linesScrolled >= m.linesScrolled
+                ? Int(clamping: linesScrolled - m.linesScrolled)
+                : 0
+            let dist = (rows - 1 - m.gridRow) + scrolledSince
             if dist < 0 || dist >= total {
                 l.isHidden = true
                 continue

@@ -60,7 +60,7 @@ final class TerminalSessionAdversarialTests: XCTestCase {
 
         // Seed prompt-marks so jumpToPrevious has something to walk.
         for i in 0..<25 {
-            session._testAppendMark(.init(historySize: i, gridRow: 0))
+            session._testAppendMark(.init(linesScrolled: UInt64(i), gridRow: 0))
         }
 
         // Big-but-not-pathological feed. 32 chunks × 256 bytes = 8 KB
@@ -144,9 +144,9 @@ final class TerminalSessionAdversarialTests: XCTestCase {
 
         // Seed enough marks so the cursor walk has a target. The
         // session.snapshot.displayOffset starts at 0 (live grid).
-        session._testAppendMark(.init(historySize: 1, gridRow: 0))
-        session._testAppendMark(.init(historySize: 5, gridRow: 0))
-        session._testAppendMark(.init(historySize: 12, gridRow: 0))
+        session._testAppendMark(.init(linesScrolled: 1, gridRow: 0))
+        session._testAppendMark(.init(linesScrolled: 5, gridRow: 0))
+        session._testAppendMark(.init(linesScrolled: 12, gridRow: 0))
 
         let beforeOffset = session.snapshot?.displayOffset ?? 0
         let beforeCursor = session._testPromptCursor

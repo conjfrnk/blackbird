@@ -112,23 +112,32 @@ public final class TerminalSession: ObservableObject {
 
     private static let promptMarkCap = 200
 
-    /// Audit fix-#22: drop a prompt mark when its absolute buffer line has
-    /// been evicted from scrollback (i.e. more than this many lines have
-    /// been written past the mark). Matches BBTerm's default scrollback
-    /// floor; users with smaller configs may see marks dropped slightly
-    /// earlier than strictly necessary, which is safe (loss of a UI
-    /// affordance, no correctness defect). Sessions with larger scrollback
-    /// keep their marks for the full retention.
-    private static let scrollbackEvictionThreshold: Int = 100_000
+    /// Generation token for the prompt-mark ring (audit S5-008).
+    /// Main-owned, like the ring itself. Every path that wipes the ring
+    /// (⌘K clearAll, reflow invalidation) bumps it; recordPromptStart
+    /// captures the value at entry (on main, before its coreQueue hop)
+    /// and the main-hop append drops the mark when the generation moved
+    /// — closing the race where a pre-clear snapshot's append drained
+    /// AFTER resetPromptState wiped the ring and re-inserted a mark
+    /// anchored to deleted scrollback (a phantom ⌘[ entry).
+    private var promptMarkGeneration: UInt64 = 0
 
-    /// Position of a recorded prompt in buffer coordinates.
+    /// Position of a recorded prompt, anchored to the core's monotonic
+    /// lines-scrolled counter (audit S5-004). The previous
+    /// (historySize, gridRow) anchor broke the moment scrollback
+    /// saturated: history_size plateaus at the cap while content keeps
+    /// rotating out, so post-saturation marks all compared equal and
+    /// ⌘[ silently jumped to the live bottom; the fix-#22 eviction
+    /// guard ('elapsed > 100_000') was unsatisfiable dead code because
+    /// elapsed ≤ cap by construction. linesScrolled never plateaus, so
+    /// the anchor algebra — the marked row sits (now − linesScrolled)
+    /// rows above its recorded gridRow — survives eviction, and
+    /// eviction itself becomes exactly detectable (offset > history).
     public struct PromptMark: Equatable, Hashable {
-        /// History size (scrollback line count) at the moment the prompt
-        /// was emitted. Monotonically grows in most sessions, up to the
-        /// scrollback cap; paired with `gridRow` this fixes the prompt's
-        /// absolute line.
-        public let historySize: Int
-        /// Grid row (0 = top of visible viewport) at the moment the prompt
+        /// `BBSnapshot.linesScrolled` at the moment the prompt was
+        /// emitted (primary-screen monotonic counter).
+        public let linesScrolled: UInt64
+        /// Grid row (0 = top of the live grid) at the moment the prompt
         /// was emitted.
         public let gridRow: Int
     }
@@ -568,6 +577,12 @@ public final class TerminalSession: ObservableObject {
         // demonstrates a precedent for handlers calling back into us off
         // their queue. Fail loud if a future caller lands here on coreQueue.
         dispatchPrecondition(condition: .notOnQueue(coreQueue))
+        // Audit S5-008: capture the ring generation NOW (we're on main,
+        // ahead of the coreQueue hop). If ⌘K's resetPromptState runs
+        // while our snapshot block is in flight, the generation moves
+        // and the append below self-discards instead of re-inserting a
+        // mark anchored to wiped scrollback.
+        let generation = promptMarkGeneration
         // Audit L7. Was `coreQueue.sync(execute: bbterm.snapshot)` —
         // under heavy streaming output the sync would block main
         // until every queued feed ahead of us drained. The audit
@@ -588,7 +603,7 @@ public final class TerminalSession: ObservableObject {
             self.publishLock.unlock()
             if terminated { return }
             guard let snap = self.bbterm.snapshot() else { return }
-            let mark = PromptMark(historySize: snap.historySize, gridRow: snap.cursorRow)
+            let mark = PromptMark(linesScrolled: snap.linesScrolled, gridRow: snap.cursorRow)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 // Re-check on the main hop: terminate() could have run
@@ -597,6 +612,10 @@ public final class TerminalSession: ObservableObject {
                 let terminatedNow = self.isTerminated
                 self.publishLock.unlock()
                 if terminatedNow { return }
+                // Audit S5-008: a clear/reflow between capture and this
+                // drain invalidated the anchor — drop instead of
+                // re-inserting a phantom mark.
+                guard generation == self.promptMarkGeneration else { return }
                 self.promptMarks.append(mark)
                 if self.promptMarks.count > Self.promptMarkCap {
                     self.promptMarks.removeFirst(self.promptMarks.count - Self.promptMarkCap)
@@ -676,14 +695,18 @@ public final class TerminalSession: ObservableObject {
     /// Compute and apply the scroll delta that places a given mark near
     /// the top of the current viewport.
     ///
-    /// Math: display_offset D means the viewport's top row shows buffer
-    /// line (history_size - D). The mark's absolute line is
-    /// mark.historySize + mark.gridRow, so the target D that puts it at
-    /// the top is (current_history - mark.historySize - mark.gridRow).
-    /// Clamped to [0, current_history] because display_offset can't go
-    /// past the top of scrollback, and a negative target means the mark
-    /// is already below the current live bottom (odd — only possible if
-    /// scrollback was cleared between record and jump; fall back to live).
+    /// Math (audit S5-004): the mark was recorded at live-grid row
+    /// `gridRow` when the primary screen's monotonic counter read
+    /// `linesScrolled`. Every line scrolled since moves the marked row
+    /// one row further up, so the display offset that puts it at the
+    /// viewport top is `(counterNow − linesScrolled) − gridRow`. Unlike
+    /// the previous history_size anchor, the counter never plateaus at
+    /// the scrollback cap, so this stays exact after saturation — and
+    /// eviction is exactly `target > history` (the row scrolled past
+    /// retention), replacing the unsatisfiable fix-#22 threshold guard.
+    /// A negative target means the marked row is still at/below the
+    /// viewport top in the live grid (or a clear collapsed history);
+    /// clamp to 0 = live bottom.
     private func scrollToMark(_ mark: PromptMark) {
         // M-12: same tripwire rationale as recordPromptStart above. The
         // public callers (jumpToPreviousPrompt / jumpToNextPrompt) run on
@@ -693,26 +716,24 @@ public final class TerminalSession: ObservableObject {
         guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
             return
         }
-        // Audit fix-#22 (2026-05-11): drop marks whose absolute buffer
-        // line has been evicted from scrollback. Once
-        // (snap.historySize - mark.historySize) exceeds the scrollback
-        // cap, the original prompt's line has been discarded; the
-        // existing target-arithmetic + min-clamp still produces a
-        // valid offset but it lands on whatever line happens to be at
-        // that position (mid-output, not the prompt). Walking back
-        // through the cycle then jumps to arbitrary interior lines
-        // rather than progressive prompts. Drop the now-orphaned mark
-        // and let the cycle promotion re-enter on the next press.
-        let elapsed = snap.historySize - mark.historySize
-        if elapsed > Self.scrollbackEvictionThreshold {
+        // Monotonic by contract; the defensive branch guards a future
+        // regression rather than a reachable state.
+        let scrolledSince = snap.linesScrolled >= mark.linesScrolled
+            ? Int(clamping: snap.linesScrolled - mark.linesScrolled)
+            : 0
+        let target = scrolledSince - mark.gridRow
+        if target > snap.historySize {
+            // Evicted: the anchored row scrolled past retention. Drop
+            // the orphaned mark and let the cycle promotion re-enter on
+            // the next press (audit S5-004 — this check is exact, and
+            // unlike its dead predecessor it actually fires).
             promptMarks.removeAll { $0 == mark }
             if let cursor = promptCursor, cursor >= promptMarks.count {
                 promptCursor = promptMarks.isEmpty ? nil : promptMarks.count - 1
             }
             return
         }
-        let target = max(0, snap.historySize - mark.historySize - mark.gridRow)
-        let clampedTarget = min(target, snap.historySize)
+        let clampedTarget = max(0, min(target, snap.historySize))
         let delta = clampedTarget - snap.displayOffset
         if delta != 0 {
             scroll(delta: Int32(clamping: delta))
@@ -763,20 +784,36 @@ public final class TerminalSession: ObservableObject {
         // would cause text past the clamp ceiling to wrap into oblivion.
         let clamped = Self.clampResize(size)
         var newSnap: BBSnapshot?
+        var appliedDims: Size?
         coreQueue.sync {
+            // Audit S1-007: gate on termination INSIDE the coreQueue
+            // block — terminate() sets the flag before nil'ing the
+            // handle via this same serial queue, so the read here is
+            // exact. Without it, a resize racing a tab close reached
+            // BBTerm.resize after the handle was nil'd, got nil back,
+            // and logged the 'Rust panic fallback' warning with no
+            // panic anywhere — a false alarm that would misdirect
+            // triage of REAL core panics (the only consumer of that
+            // message).
+            self.publishLock.lock()
+            let terminated = self.isTerminated
+            self.publishLock.unlock()
+            if terminated { return }
             // Audit M3: when bb_term_resize2 panics, BBTerm.resize returns
             // nil. Skip TIOCSWINSZ so the kernel winsize stays in lockstep
             // with the grid (which kept its prior dims). Snapshot still
             // publishes so the renderer doesn't stall.
             if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
                 self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
+                appliedDims = Size(cols: applied.cols, rows: applied.rows)
             } else {
                 Self.sessionLogger.warning(
-                    "BBTerm.resize returned nil (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
+                    "BBTerm.resize returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
                 )
             }
             newSnap = self.bbterm.snapshot()
         }
+        if let appliedDims { noteAppliedGridSize(appliedDims) }
         guard let newSnap else { return }
         // Audit fix-#07 (2026-05-11): route through publishImmediate so the
         // post-resize snapshot honours the H8 user-action-wins invariant.
@@ -804,19 +841,66 @@ public final class TerminalSession: ObservableObject {
         let clamped = Self.clampResize(size)
         coreQueue.async { [weak self] in
             guard let self else { return }
+            // Audit S1-007: same in-block termination gate as the sync
+            // path — a font-change resizeAsync queued behind terminate()
+            // used to reach a nil'd handle and emit the false
+            // 'Rust panic fallback' warning.
+            self.publishLock.lock()
+            let terminated = self.isTerminated
+            self.publishLock.unlock()
+            if terminated { return }
             // Same Bug #3/#9 ordering as the sync `resize(to:)`: bbterm
             // first, then pty with the actually-applied (post-clamp) dims.
             // Audit M3 sibling of the sync path: nil => Rust panic
             // fallback, skip TIOCSWINSZ.
             if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
                 self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
+                self.noteAppliedGridSize(Size(cols: applied.cols, rows: applied.rows))
             } else {
                 Self.sessionLogger.warning(
-                    "BBTerm.resize (async) returned nil (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
+                    "BBTerm.resize (async) returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
                 )
             }
             guard let snap = self.bbterm.snapshot() else { return }
             self.publishPendingSnapshot(snap)
+        }
+    }
+
+    /// Last grid size BBTerm actually applied. Used to detect real
+    /// reflow (audit S5-004/S5-005 contract: ANY resize invalidates
+    /// lines-scrolled anchors — column reflow rewraps history and
+    /// row-count changes move content through uncounted paths). Reads
+    /// and writes ordered by `coreQueue` on the resize paths plus the
+    /// main hop below; a plain var with no lock is safe because every
+    /// mutation site is either inside a coreQueue block or behind one.
+    private var lastAppliedGridSize: Size?
+
+    /// Invalidate prompt-mark anchors when the applied grid size
+    /// actually changed. First application just records the baseline —
+    /// the window-setup resize precedes any shell prompt, so the ring
+    /// is empty then anyway.
+    private func noteAppliedGridSize(_ applied: Size) {
+        let changed: Bool
+        if let last = lastAppliedGridSize {
+            changed = last != applied
+        } else {
+            changed = false
+        }
+        lastAppliedGridSize = applied
+        guard changed else { return }
+        let work: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            // Bump the generation FIRST so any in-flight
+            // recordPromptStart append from the pre-reflow grid
+            // self-discards (audit S5-008's token doubles here).
+            self.promptMarkGeneration &+= 1
+            self.promptMarks = []
+            self.promptCursor = nil
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(work)
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated(work) }
         }
     }
 
@@ -899,6 +983,11 @@ public final class TerminalSession: ObservableObject {
         // instead of trapping at runtime via `MainActor.assumeIsolated`.
         let resetPromptState: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
+            // Audit S5-008: bump the ring generation so an in-flight
+            // recordPromptStart whose snapshot predates the clear drops
+            // its append instead of re-inserting a mark anchored to the
+            // scrollback we just deleted.
+            self.promptMarkGeneration &+= 1
             self.promptMarks = []
             self.promptCursor = nil
             self.lastPromptMark = nil

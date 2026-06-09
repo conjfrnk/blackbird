@@ -534,9 +534,9 @@ final class TerminalSessionTests: XCTestCase {
         // slots have non-default values. _testAppendMark sets cursor=nil
         // each call so we re-establish the cursor by walking back via
         // jumpToPreviousPrompt.
-        session._testAppendMark(.init(historySize: 3, gridRow: 1))
-        session._testAppendMark(.init(historySize: 7, gridRow: 2))
-        session._testAppendMark(.init(historySize: 12, gridRow: 0))
+        session._testAppendMark(.init(linesScrolled: 3, gridRow: 1))
+        session._testAppendMark(.init(linesScrolled: 7, gridRow: 2))
+        session._testAppendMark(.init(linesScrolled: 12, gridRow: 0))
         session.lastPromptMark = (kind: .promptStart, exitCode: "")
         session.jumpToPreviousPrompt()  // cursor → 2
 

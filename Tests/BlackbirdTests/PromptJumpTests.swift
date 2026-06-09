@@ -42,9 +42,9 @@ final class PromptJumpTests: XCTestCase {
         let s = makeHeadless()
         // Seed a few marks directly (simulates shell emitting OSC 133 A
         // at distinct history-size / grid-row combinations).
-        s._testAppendMark(.init(historySize: 0, gridRow: 0))
-        s._testAppendMark(.init(historySize: 5, gridRow: 2))
-        s._testAppendMark(.init(historySize: 10, gridRow: 3))
+        s._testAppendMark(.init(linesScrolled: 0, gridRow: 0))
+        s._testAppendMark(.init(linesScrolled: 5, gridRow: 2))
+        s._testAppendMark(.init(linesScrolled: 10, gridRow: 3))
         XCTAssertEqual(s.promptMarks.count, 3)
 
         // First jumpPrev picks the newest mark (index 2).
@@ -66,7 +66,7 @@ final class PromptJumpTests: XCTestCase {
 
     func test_jumpNext_isNoOp_outsideCycle() throws {
         let s = makeHeadless()
-        s._testAppendMark(.init(historySize: 5, gridRow: 1))
+        s._testAppendMark(.init(linesScrolled: 5, gridRow: 1))
         // No jumpPrev yet, so cursor is nil. Next should be a no-op.
         s.jumpToNextPrompt()
         XCTAssertNil(s._testPromptCursor)
@@ -74,9 +74,9 @@ final class PromptJumpTests: XCTestCase {
 
     func test_jumpNext_walksForwardWithinCycle() throws {
         let s = makeHeadless()
-        s._testAppendMark(.init(historySize: 0, gridRow: 0))
-        s._testAppendMark(.init(historySize: 5, gridRow: 2))
-        s._testAppendMark(.init(historySize: 10, gridRow: 3))
+        s._testAppendMark(.init(linesScrolled: 0, gridRow: 0))
+        s._testAppendMark(.init(linesScrolled: 5, gridRow: 2))
+        s._testAppendMark(.init(linesScrolled: 10, gridRow: 3))
 
         // Walk back to 0.
         s.jumpToPreviousPrompt()
@@ -98,12 +98,12 @@ final class PromptJumpTests: XCTestCase {
         let s = makeHeadless()
         // Append 250 synthetic marks; FIFO cap is 200.
         for i in 0..<250 {
-            s._testAppendMark(.init(historySize: i, gridRow: 0))
+            s._testAppendMark(.init(linesScrolled: UInt64(i), gridRow: 0))
         }
         XCTAssertEqual(s.promptMarks.count, 200)
         // The ring kept the 200 newest — first stored mark's history
         // should be 50 (the oldest 50 were dropped).
-        XCTAssertEqual(s.promptMarks.first?.historySize, 50)
-        XCTAssertEqual(s.promptMarks.last?.historySize, 249)
+        XCTAssertEqual(s.promptMarks.first?.linesScrolled, 50)
+        XCTAssertEqual(s.promptMarks.last?.linesScrolled, 249)
     }
 }

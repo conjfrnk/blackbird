@@ -1077,6 +1077,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if let s = session {
             scrollIndicator.updatePromptMarks(
                 s.promptMarks,
+                linesScrolled: snapshot.linesScrolled,
                 historySize: snapshot.historySize,
                 rows: snapshot.rows,
                 accentColor: NSColor.controlAccentColor
