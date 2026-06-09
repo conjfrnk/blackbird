@@ -130,13 +130,18 @@ final class BBTermLifetimeTests: XCTestCase {
             // term deinit at end of loop
         }
         XCTAssertEqual(lastIDs.count, 50)
-        // Sequence IDs are process-global and monotonic; the 50 IDs
-        // here are a strict ascending sequence (interleaved with
-        // anything else the test runner did between iterations, but
-        // never duplicated).
-        let sorted = lastIDs.sorted()
-        XCTAssertEqual(sorted, lastIDs, "sequence IDs are stream-monotonic")
-        XCTAssertEqual(Set(lastIDs).count, lastIDs.count, "no duplicate sequence IDs")
+        // Audit S6-003 re-pin: sequence IDs are PER-SESSION (numbered
+        // by each BBTerm), no longer process-global. Every term here
+        // takes exactly one snapshot, so every recorded ID must be 1 —
+        // which is also the strongest form of pin #1 above: no shared
+        // mutable counter state leaks across instances (a leak would
+        // surface as IDs drifting upward across the 50 iterations).
+        XCTAssertEqual(
+            lastIDs, Array(repeating: 1, count: 50),
+            "each fresh BBTerm numbers its own snapshots from 1 (audit "
+            + "S6-003); a drifting ID means counter state leaked across "
+            + "instances"
+        )
     }
 
     /// pre-flight: < 1 KB; ~5 ms.

@@ -1179,4 +1179,304 @@ final class MetalRendererTests: XCTestCase {
         // with the rest of the device-loss tests — `xcrun xctest
         // --list-tests` will surface it next to the others.
     }
+
+    // MARK: - S2-006: aborted frames return their triple-buffer rotation turn
+    //
+    // The triple-buffer ring pairs a 3-slot semaphore with a rotating
+    // frame index. The invariant: any ≤3 concurrent in-flight frames
+    // occupy DISTINCT slots, which requires every consumed rotation
+    // turn to hold its semaphore token until GPU completion. An aborted
+    // frame (nil drawable / descriptor / command buffer) must give back
+    // BOTH the token AND its rotation turn — returning the token while
+    // keeping the rotation advance (or vice versa) eventually either
+    // deadlocks the ring or lets two in-flight frames share a slot and
+    // CPU-write a .storageModeShared instance buffer the GPU is still
+    // reading (torn frames exactly under drawable-failure load).
+    //
+    // Memory pre-flight per `feedback_test_memory_safety`: one 20×8
+    // BBTerm (~3 KB), one renderer (~4 MB instance buffers + atlas),
+    // one 320×192 MTKView with a ≤3-drawable pool (~1 MB). Total well
+    // under 10 MB; wall-clock dominated by 5 tiny GPU encodes (< 50 ms).
+
+    /// MTKView that can be flipped per-call between vending a real
+    /// drawable (stock CAMetalLayer behaviour — works offscreen in the
+    /// xctest host, see the NoDrawableMTKView doc above) and failing
+    /// the frame (nil drawable + nil descriptor → the aborted-frame
+    /// path inside `render(in:)`).
+    private final class TogglingDrawableMTKView: MTKView {
+        var failFrame = false
+        override var currentDrawable: CAMetalDrawable? {
+            failFrame ? nil : super.currentDrawable
+        }
+        override var currentRenderPassDescriptor: MTLRenderPassDescriptor? {
+            failFrame ? nil : super.currentRenderPassDescriptor
+        }
+    }
+
+    private func makeTogglingView(device: MTLDevice) -> TogglingDrawableMTKView {
+        let view = TogglingDrawableMTKView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 192),
+            device: device
+        )
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
+        // Must match the renderer pipeline's colorAttachments[0] format
+        // (same as TerminalView's init).
+        view.colorPixelFormat = .bgra8Unorm
+        return view
+    }
+
+    /// Blind regression pin for audit S2-006. Drives 8 render calls —
+    /// strictly more than the 3-slot ring — alternating aborted frames
+    /// (nil drawable) with successful encodes, each on a FRESH snapshot
+    /// so the frame-skip cache can never short-circuit a call. Three
+    /// observable contracts:
+    ///   1. The sequence completes (no deadlock — a bookkeeping bug in
+    ///      either direction starves the ring within 4 calls; a hang
+    ///      here is the deliberate tripwire, same convention as
+    ///      test_render_tripleBufferRing_noStarvationAcrossMixedPaths).
+    ///   2. `didFrameSkipLastRender == true` after every aborted call.
+    ///   3. `didFrameSkipLastRender == false` after every successful
+    ///      encode — proving aborted frames didn't poison the rotation
+    ///      or skip-cache state that subsequent encodes depend on.
+    ///
+    /// Hosts whose CAMetalLayer can't vend offscreen drawables (rare;
+    /// some headless CI window servers) XCTSkip after the probe render,
+    /// mirroring RealLatencyProbeWindowedTests' documented limitation.
+    func test_render_abortedFramesReturnRotationTurn_acrossEightAlternatingCalls() throws {
+        let device = try requireMetalDevice()
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(MetalRenderer(device: device, metrics: metrics))
+        let view = makeTogglingView(device: device)
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 8)))
+
+        // Probe: can this host vend an offscreen drawable at all? If
+        // not, the success-path half of the contract is unobservable
+        // here — skip rather than assert vacuously against abort-only
+        // calls (NoDrawable-path coverage already exists above).
+        term.input("seed")
+        let seedSnap = try XCTUnwrap(term.snapshot())
+        view.failFrame = false
+        renderer.render(in: view, snapshot: seedSnap, focused: true)
+        if renderer.didFrameSkipLastRender {
+            throw XCTSkip(
+                "xctest host cannot acquire an offscreen CAMetalLayer drawable "
+                + "(view.currentDrawable == nil on the probe render); the "
+                + "successful-encode half of the S2-006 contract is unobservable "
+                + "here. Abort-path-only coverage lives in "
+                + "test_render_noDrawablePath_doesNotLeakSemaphore."
+            )
+        }
+        // Release the cached drawable so the next successful call gets a
+        // fresh one instead of re-presenting the same CAMetalDrawable
+        // (which logs `[API] Each CAMetalLayerDrawable can only be
+        // presented once!` — see the NoDrawableMTKView rationale above).
+        view.releaseDrawables()
+
+        // 8 alternating calls: even indices abort, odd indices encode.
+        // Every call feeds a byte first so each snapshot's sequenceID —
+        // and therefore the FrameKey — differs, keeping the frame-skip
+        // cache out of the picture for the whole sweep.
+        for i in 0..<8 {
+            let abort = (i % 2 == 0)
+            view.failFrame = abort
+            term.input("\(i)")
+            let snap = try XCTUnwrap(term.snapshot())
+            renderer.render(in: view, snapshot: snap, focused: true)
+            if abort {
+                XCTAssertTrue(
+                    renderer.didFrameSkipLastRender,
+                    "call \(i): an aborted (nil-drawable) frame must report "
+                    + "didFrameSkipLastRender == true — nothing reached the screen"
+                )
+            } else {
+                XCTAssertFalse(
+                    renderer.didFrameSkipLastRender,
+                    "call \(i): a successful encode after an aborted frame must "
+                    + "report didFrameSkipLastRender == false. If this is true, "
+                    + "the prior abort corrupted ring/rotation or skip-cache "
+                    + "state and the renderer is no longer presenting (audit "
+                    + "S2-006 regression)."
+                )
+                view.releaseDrawables()
+            }
+        }
+    }
+
+    // MARK: - S2-007: instance-buffer grow failure abandons the frame
+    //
+    // When a snapshot needs more per-cell instances than the current
+    // instance buffers hold, the renderer grows them via
+    // `device.makeBuffer`. Under memory pressure that allocation can
+    // fail (returns nil). The frame MUST be abandoned — not presented
+    // with a truncated/blank instance buffer — and the failure must
+    // not be sticky: once allocation succeeds again, rendering resumes.
+    //
+    // Memory pre-flight per `feedback_test_memory_safety`: the startup
+    // instance buffers are exactly 200×80 = 16 000 slots × 80 B =
+    // 1 280 000 B × 3 ring slots ≈ 3.8 MB (observed through the device
+    // seam), so a 200×80 snapshot fits exactly and can never trigger a
+    // grow — the test grid must exceed 16 000 cells. 210×80 = 16 800
+    // cells is the smallest comfortable overshoot: BBTerm grid ≈
+    // 16 800 × ~16 B ≈ 270 KB; grown buffers ≤ 3 × (~33 600 instances
+    // × 80 B) ≈ 8 MB on the success path. Total < 13 MB, well inside
+    // the 256 MB budget — the 200×80 guidance exists for this budget
+    // computation, which the 5% overshoot does not meaningfully move.
+
+    /// MTLDevice is a huge @objc protocol, so a hand-written conforming
+    /// mock is impractical. Instead: an NSObject that fast-forwards
+    /// every message to a real system device, intercepting only the two
+    /// buffer-allocation selectors so a settable threshold can make
+    /// allocations larger than `failBuffersLargerThan` bytes fail
+    /// (return nil) exactly like a device under memory pressure.
+    /// `conforms(to:)` is overridden so the `as? MTLDevice` cast
+    /// succeeds; all other selectors hit the real device via
+    /// `forwardingTarget(for:)` with full fidelity.
+    private final class AllocationCappedDevice: NSObject {
+        let wrapped: MTLDevice
+        /// Buffer requests STRICTLY larger than this many bytes fail.
+        var failBuffersLargerThan: Int = .max
+        /// Byte sizes of every refused request (diagnostic + proof the
+        /// grow path was actually exercised, not silently skipped).
+        private(set) var refusedAllocations: [Int] = []
+        /// Largest granted request so far — after init + a small render
+        /// this is the startup instance-buffer size, which makes a
+        /// perfect cap: any grow must be strictly larger.
+        private(set) var grantedMaxLength: Int = 0
+
+        init(wrapping: MTLDevice) {
+            self.wrapped = wrapping
+            super.init()
+        }
+
+        override func forwardingTarget(for aSelector: Selector!) -> Any? { wrapped }
+        override func responds(to aSelector: Selector!) -> Bool {
+            super.responds(to: aSelector) || wrapped.responds(to: aSelector)
+        }
+        override func conforms(to aProtocol: Protocol) -> Bool {
+            super.conforms(to: aProtocol) || wrapped.conforms(to: aProtocol)
+        }
+
+        @objc(newBufferWithLength:options:)
+        func makeBuffer(length: Int, options: MTLResourceOptions) -> MTLBuffer? {
+            if length > failBuffersLargerThan {
+                refusedAllocations.append(length)
+                return nil
+            }
+            grantedMaxLength = max(grantedMaxLength, length)
+            return wrapped.makeBuffer(length: length, options: options)
+        }
+
+        @objc(newBufferWithBytes:length:options:)
+        func makeBuffer(bytes: UnsafeRawPointer, length: Int, options: MTLResourceOptions) -> MTLBuffer? {
+            if length > failBuffersLargerThan {
+                refusedAllocations.append(length)
+                return nil
+            }
+            grantedMaxLength = max(grantedMaxLength, length)
+            return wrapped.makeBuffer(bytes: bytes, length: length, options: options)
+        }
+    }
+
+    /// Blind regression pin for audit S2-007.
+    ///
+    /// 1. Build the renderer over the forwarding device (no cap) and
+    ///    prove a small frame encodes on this host (else XCTSkip — no
+    ///    offscreen drawables means the present/abandon distinction is
+    ///    unobservable).
+    /// 2. Cap allocations at the largest granted so far (the startup
+    ///    instance-buffer size), then render a 210×80 fully bg-styled
+    ///    snapshot that needs more instances than startup capacity.
+    ///    The grow's makeBuffer returns nil → the render must return
+    ///    without crashing and `didFrameSkipLastRender == true` (frame
+    ///    abandoned, NOT presented).
+    /// 3. Lift the cap and render the SAME snapshot again → the grow
+    ///    succeeds and `didFrameSkipLastRender == false`, proving the
+    ///    failure wasn't pinned (no poisoned skip-cache, no zombie
+    ///    half-grown buffer state).
+    func test_render_instanceBufferGrowFailure_abandonsFrame_andIsNotSticky() throws {
+        let realDevice = try requireMetalDevice()
+        let capped = AllocationCappedDevice(wrapping: realDevice)
+        guard let proxyDevice = capped as? MTLDevice else {
+            XCTFail(
+                "AllocationCappedDevice failed the `as? MTLDevice` cast — the "
+                + "conforms(to:) forwarding override is not being honoured by "
+                + "the Swift runtime on this host; the S2-007 grow-failure "
+                + "contract cannot be exercised without a device seam."
+            )
+            return
+        }
+
+        let metrics = CellMetrics(font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let renderer = try XCTUnwrap(
+            MetalRenderer(device: proxyDevice, metrics: metrics),
+            "renderer must initialize over the forwarding device while no cap is set"
+        )
+        // The view talks to the SAME physical GPU via the real device,
+        // so drawable textures and the renderer's (forwarded) resources
+        // are device-compatible.
+        let view = makeTogglingView(device: realDevice)
+
+        // Step 1: baseline small frame — proves the host vends offscreen
+        // drawables and records the startup buffer sizes in `granted`.
+        let smallTerm = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 8)))
+        smallTerm.input("baseline")
+        let smallSnap = try XCTUnwrap(smallTerm.snapshot())
+        renderer.render(in: view, snapshot: smallSnap, focused: true)
+        if renderer.didFrameSkipLastRender {
+            throw XCTSkip(
+                "xctest host cannot acquire an offscreen CAMetalLayer drawable; "
+                + "presented-vs-abandoned frames are indistinguishable here, so "
+                + "the S2-007 contract is unobservable (same limitation as "
+                + "RealLatencyProbeWindowedTests)."
+            )
+        }
+        view.releaseDrawables()
+        XCTAssertGreaterThan(capped.grantedMaxLength, 0,
+                             "renderer init + first frame must have allocated at least one buffer "
+                             + "through the forwarding device — if 0, the seam isn't intercepting")
+
+        // Step 2: cap at the largest granted allocation. A grow request
+        // (strictly larger than any startup buffer) now fails.
+        capped.failBuffersLargerThan = capped.grantedMaxLength
+
+        // Build the oversized snapshot: 210×80 grid (16 800 cells — the
+        // startup buffers hold exactly 200×80 = 16 000 instance slots,
+        // so this grid cannot fit without a grow), every cell carrying
+        // an explicit red background + a glyph so every cell emits an
+        // instance.
+        let bigTerm = try XCTUnwrap(BBTerm(size: .init(cols: 210, rows: 80)))
+        bigTerm.input("\u{1B}[41m" + String(repeating: "x", count: 210 * 80))
+        let bigSnap = try XCTUnwrap(bigTerm.snapshot())
+
+        renderer.render(in: view, snapshot: bigSnap, focused: true)
+        XCTAssertFalse(
+            capped.refusedAllocations.isEmpty,
+            "the 210×80 fully-styled snapshot must force an instance-buffer "
+            + "grow while the cap is active — zero refused allocations means "
+            + "the harness never exercised the S2-007 failure path (snapshot "
+            + "not large enough to exceed the startup instance capacity, or "
+            + "the grow bypassed makeBuffer)"
+        )
+        XCTAssertTrue(
+            renderer.didFrameSkipLastRender,
+            "a frame whose instance-buffer grow failed must be ABANDONED "
+            + "(didFrameSkipLastRender == true), not presented with a "
+            + "truncated or blank instance buffer (audit S2-007)"
+        )
+        view.releaseDrawables()
+
+        // Step 3: lift the cap; the same snapshot must now render. A
+        // sticky failure (poisoned skip-cache from the abandoned frame,
+        // or half-grown buffer state pinned at the old capacity) shows
+        // up as didFrameSkipLastRender staying true.
+        capped.failBuffersLargerThan = .max
+        renderer.render(in: view, snapshot: bigSnap, focused: true)
+        XCTAssertFalse(
+            renderer.didFrameSkipLastRender,
+            "once allocation succeeds again the SAME snapshot must encode "
+            + "and present (didFrameSkipLastRender == false) — the grow "
+            + "failure must not be sticky (audit S2-007)"
+        )
+    }
 }

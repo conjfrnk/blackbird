@@ -134,6 +134,61 @@ final class BBTermTests: XCTestCase {
         )
     }
 
+    /// Blind regression pin for audit S6-003, exercising the contract
+    /// under *fed* interleaving (the multi-tab shape that defeated the
+    /// partial-row fast path): every PTY chunk takes a snapshot, so a
+    /// background tab's feed+snapshot cycles ran the old process-global
+    /// counter forward and left gaps in the focused tab's numbering.
+    /// Contract: each session's snapshot sequenceIDs are CONSECUTIVE
+    /// for that session — A's second snapshot ID == A's first + 1 — no
+    /// matter how much the other session feeds and snapshots in
+    /// between, and each session's first snapshot has ID 1.
+    ///
+    /// Memory pre-flight per `feedback_test_memory_safety`: two 20×5
+    /// grids ≈ 2 × 100 cells × ~16 B = ~3 KB plus a few dozen input
+    /// bytes. Trivial. BBTerm directly — no TerminalSession/PTY, per
+    /// the no-real-shells rule.
+    func test_snapshot_sequenceIDs_perSessionConsecutive_underFedInterleaving() throws {
+        let a = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 5)))
+        let b = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 5)))
+
+        // feed A, snapshot A.
+        a.input("a-one")
+        let a1 = try XCTUnwrap(a.snapshot())
+        XCTAssertEqual(a1.sequenceID, 1, "A's first snapshot must have ID 1")
+
+        // feed B, snapshot B — twice, to widen any would-be gap a
+        // regressed shared counter would leave in A's numbering.
+        b.input("b-one")
+        let b1 = try XCTUnwrap(b.snapshot())
+        b.input("b-two")
+        let b2 = try XCTUnwrap(b.snapshot())
+        XCTAssertEqual(b1.sequenceID, 1,
+                       "B's first snapshot must have ID 1 — A's prior activity "
+                       + "must not advance B's counter (audit S6-003)")
+        XCTAssertEqual(b2.sequenceID, b1.sequenceID + 1,
+                       "B's own numbering is consecutive")
+
+        // feed A, snapshot A again: exactly +1 despite B's two
+        // interleaved snapshots. Under the old process-global counter
+        // this came back as a1 + 3 and the renderer misread the gap as
+        // "A's intermediate damage was coalesced away", forcing a full
+        // per-cell rebuild on every multi-tab frame.
+        a.input("a-two")
+        let a2 = try XCTUnwrap(a.snapshot())
+        XCTAssertEqual(
+            a2.sequenceID, a1.sequenceID + 1,
+            "A's second snapshot must be exactly A's first + 1 regardless of "
+            + "B's interleaved feed+snapshot activity (audit S6-003)"
+        )
+
+        // Symmetric check: A's latest snapshot must not have perturbed B.
+        b.input("b-three")
+        let b3 = try XCTUnwrap(b.snapshot())
+        XCTAssertEqual(b3.sequenceID, b2.sequenceID + 1,
+                       "B's numbering stays consecutive despite A's interleaved snapshot")
+    }
+
     func test_bellEventFires() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 5)))
         let exp = expectation(description: "bell")

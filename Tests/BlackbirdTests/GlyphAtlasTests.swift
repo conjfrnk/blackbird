@@ -267,6 +267,131 @@ final class GlyphAtlasTests: XCTestCase {
         )
     }
 
+    /// Success-path pin for audit S2-005 (wide-alignment orphan
+    /// staging).
+    ///
+    /// Drive `nextSlot` to the LAST column of an atlas row with narrow
+    /// inserts, force the wide row-skip with a CJK glyph (中 U+4E2D),
+    /// then insert two more distinct narrow glyphs. Whatever the atlas
+    /// does internally with the orphaned trailing slot (park-and-
+    /// reclaim per F4, staged until rasterization succeeds per
+    /// S2-005), two externally observable invariants must hold:
+    ///
+    ///   1. **Non-aliasing**: no two cached entries cover overlapping
+    ///      pixel regions of the atlas — the wide entry's rect spans
+    ///      two slot widths, every narrow entry one. Aliasing means
+    ///      one glyph's rasterization overwrote another's slot and one
+    ///      cell on screen silently draws the wrong glyph.
+    ///   2. **Lookup stability**: re-looking-up every inserted glyph
+    ///      returns the exact UVs it got the first time. An entry that
+    ///      moves between lookups desynchronizes the renderer's cached
+    ///      row instances from the texture content.
+    ///
+    /// Slot geometry is derived from public API (texture dims ÷
+    /// cellPx) rather than hard-coded so a capacity/layout change
+    /// reflows the test instead of falsifying it.
+    ///
+    /// Memory pre-flight per MEMORY: capacity-16 atlas at 13pt/default
+    /// scale → mono+color textures well under 1 MB. Trivial.
+    func test_wideAlignmentAtRowEnd_entriesNeverAlias_andLookupsAreStable() throws {
+        let device = try requireMetalDevice()
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let metrics = CellMetrics(font: font)
+        // Capacity 16 → room for the row-end skip, the two-slot wide
+        // glyph, and two trailing narrow inserts with zero saturation
+        // risk (saturation flush would reset slots and invalidate the
+        // stability half of the contract by design).
+        let atlas = try XCTUnwrap(
+            GlyphAtlas(device: device, metrics: metrics, capacityGlyphs: 16)
+        )
+        let slotCols = atlas.texture.width / atlas.cellPxWidth
+        XCTAssertGreaterThanOrEqual(slotCols, 2,
+                                    "row-end alignment needs at least two slot columns")
+        XCTAssertLessThanOrEqual(slotCols - 1, 20,
+                                 "test seeds at most 20 distinct narrow glyphs")
+
+        // Pixel-space rect for an entry's slot region. uvOrigin carries
+        // a half-texel inset (audit shaders F4), so flooring uv × texDim
+        // recovers the slot's integer pixel origin. Wide entries cover
+        // two slot widths.
+        func slotRect(_ e: GlyphAtlas.Entry) -> (x: Int, y: Int, w: Int, h: Int) {
+            let x = Int((e.uvOrigin.x * Float(atlas.texture.width)).rounded(.down))
+            let y = Int((e.uvOrigin.y * Float(atlas.texture.height)).rounded(.down))
+            let w = e.isWide ? atlas.cellPxWidth * 2 : atlas.cellPxWidth
+            return (x, y, w, atlas.cellPxHeight)
+        }
+        func overlaps(_ a: (x: Int, y: Int, w: Int, h: Int),
+                      _ b: (x: Int, y: Int, w: Int, h: Int)) -> Bool {
+            a.x < b.x + b.w && b.x < a.x + a.w &&
+            a.y < b.y + b.h && b.y < a.y + a.h
+        }
+
+        var entries: [(label: String, scalar: UnicodeScalar, wide: Bool, entry: GlyphAtlas.Entry)] = []
+
+        // Exactly enough distinct narrow glyphs ("A", "B", …) to land
+        // nextSlot on the LAST column of row 0.
+        for i in 0..<(slotCols - 1) {
+            let scalar = try XCTUnwrap(UnicodeScalar(UInt32(0x41 + i)))  // A, B, C, …
+            let entry = try XCTUnwrap(
+                atlas.lookupOrInsert(scalar: scalar),
+                "narrow seed glyph \(i) must insert"
+            )
+            entries.append((String(scalar), scalar, false, entry))
+        }
+
+        // Wide CJK glyph at the last column → row-end alignment skip.
+        let zhong = try XCTUnwrap(UnicodeScalar(0x4E2D))  // 中
+        let wideEntry = try XCTUnwrap(
+            atlas.lookupOrInsert(scalar: zhong, wide: true),
+            "wide glyph at the row-end boundary must insert"
+        )
+        XCTAssertTrue(wideEntry.isWide, "中 must report isWide")
+        entries.append(("中", zhong, true, wideEntry))
+
+        // Two more distinct narrow glyphs — one may land on the
+        // orphaned trailing slot, the other continues after the wide
+        // glyph. Either layout is fine; aliasing is not.
+        for scalar: UnicodeScalar in ["p", "q"] {
+            let entry = try XCTUnwrap(
+                atlas.lookupOrInsert(scalar: scalar),
+                "post-wide narrow glyph '\(scalar)' must insert"
+            )
+            entries.append((String(scalar), scalar, false, entry))
+        }
+
+        // Contract 1: pairwise-disjoint pixel regions.
+        for i in 0..<entries.count {
+            for j in (i + 1)..<entries.count {
+                let a = entries[i], b = entries[j]
+                XCTAssertFalse(
+                    overlaps(slotRect(a.entry), slotRect(b.entry)),
+                    "atlas entries '\(a.label)' \(slotRect(a.entry)) and "
+                    + "'\(b.label)' \(slotRect(b.entry)) alias overlapping "
+                    + "pixel regions — one glyph's rasterization overwrote "
+                    + "the other's slot (audit S2-005)"
+                )
+            }
+        }
+
+        // Contract 2: every earlier insert is still cached at the same
+        // UVs — re-lookup returns identical origin AND size.
+        for (label, scalar, wide, first) in entries {
+            let again = try XCTUnwrap(
+                atlas.lookupOrInsert(scalar: scalar, wide: wide),
+                "re-lookup of '\(label)' must hit the cache"
+            )
+            XCTAssertEqual(
+                again.uvOrigin, first.uvOrigin,
+                "re-lookup of '\(label)' moved its UV origin — cached entries "
+                + "must be stable across subsequent inserts (audit S2-005)"
+            )
+            XCTAssertEqual(
+                again.uvSize, first.uvSize,
+                "re-lookup of '\(label)' changed its UV size"
+            )
+        }
+    }
+
     /// Regression for glyph-atlas F5.
     ///
     /// Pins the current (deliberately limited) behaviour for
