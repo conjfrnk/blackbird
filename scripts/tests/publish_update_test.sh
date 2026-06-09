@@ -862,6 +862,137 @@ HTML
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# CASE 11 — appcast cross-check: before replacing website/appcast.xml the
+# script must verify the freshly generated feed actually advertises the
+# release being published — enclosure URL exactly
+# https://github.com/conjfrnk/blackbird/releases/download/v<version>/Blackbird-<version>.dmg
+# and <sparkle:shortVersionString> == <version>. Simulate a buggy
+# make-appcast.sh that IGNORES its inputs and emits a feed for a
+# different DMG (0.9.9). publish-update.sh must abort: non-zero exit,
+# pre-existing website/appcast.xml byte-identical, nothing committed,
+# and website/deploy.sh never run.
+# ---------------------------------------------------------------------------
+
+case_appcast_crosscheck_wrong_feed() {
+    local tmp; tmp="$(mk_tmp bb-pub-11)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+
+    # codesign --display stub with the pinned Team ID so verify_dmg
+    # passes and the run reaches the appcast-regeneration stage.
+    cat >"$tmp/stub-bin/codesign" <<'STUB'
+#!/usr/bin/env bash
+mode=""
+for arg in "$@"; do
+    case "$arg" in
+        --display) mode="display" ;;
+    esac
+done
+case "$mode" in
+    display)
+        cat <<'EOF'
+Executable=/path/to/Blackbird.dmg
+TeamIdentifier=F2B95Q4CT8
+EOF
+        ;;
+esac
+exit 0
+STUB
+    chmod +x "$tmp/stub-bin/codesign"
+
+    # Seed a rewritable index.html (all three stale anchors) so the
+    # website-rewrite step — wherever it sits relative to the appcast
+    # regeneration — can't be the thing that aborts the run.
+    cat >"$tmp/website/index.html" <<'HTML'
+<!doctype html>
+<html><head>
+<script type="application/ld+json">
+{"softwareVersion": "0.1.15"}
+</script>
+</head>
+<body>
+<div class="reqs">Apple Silicon and Intel · v0.1.15</div>
+<div class="row dim">Compiling blackbird_core v0.1.15</div>
+</body></html>
+HTML
+    (cd "$tmp" && git add website/index.html \
+        && git -c commit.gpgsign=false commit -q -m "seed index.html")
+
+    # The buggy make-appcast.sh: exits 0 but advertises Blackbird-0.9.9.dmg
+    # with shortVersionString 0.9.9, regardless of APPCAST_DMG/version.
+    cat >"$tmp/scripts/make-appcast.sh" <<'STUB'
+#!/usr/bin/env bash
+BASE="${APPCAST_BASE_URL:-https://github.com/conjfrnk/blackbird/releases/download/v0.9.9}"
+cat <<XML
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>Blackbird</title>
+    <description>buggy feed advertising the wrong release</description>
+    <item>
+      <title>Version 0.9.9</title>
+      <sparkle:shortVersionString>0.9.9</sparkle:shortVersionString>
+      <enclosure url="${BASE%/}/Blackbird-0.9.9.dmg"
+                 type="application/x-apple-diskimage" />
+    </item>
+  </channel>
+</rss>
+XML
+exit 0
+STUB
+    chmod +x "$tmp/scripts/make-appcast.sh"
+
+    # Tripwire deploy.sh — must never run on an aborted publish.
+    cat >"$tmp/website/deploy.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "TRIPWIRE: deploy.sh ran despite wrong-feed cross-check" >&2
+exit 0
+STUB
+    chmod +x "$tmp/website/deploy.sh"
+
+    local before_sha before_head
+    before_sha="$(shasum -a 256 "$tmp/website/appcast.xml" | awk '{print $1}')"
+    before_head="$(cd "$tmp" && git rev-parse HEAD)"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "cross-check: publish-update.sh aborts on wrong-release feed (rc=$rc)"
+    else
+        fail "cross-check: publish-update.sh exited 0 despite feed advertising 0.9.9"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    local after_sha
+    after_sha="$(shasum -a 256 "$tmp/website/appcast.xml" | awk '{print $1}')"
+    if [[ "$after_sha" == "$before_sha" ]]; then
+        pass "cross-check: pre-existing website/appcast.xml is byte-identical after abort"
+    else
+        fail "cross-check: website/appcast.xml was modified despite the abort"
+        head -10 "$tmp/website/appcast.xml" | sed 's/^/      | /' >&2
+    fi
+
+    local after_head
+    after_head="$(cd "$tmp" && git rev-parse HEAD)"
+    if [[ "$after_head" == "$before_head" ]]; then
+        pass "cross-check: nothing committed to git on abort"
+    else
+        fail "cross-check: a commit landed despite the abort ($before_head -> $after_head)"
+        (cd "$tmp" && git log --oneline -3) | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "TRIPWIRE: deploy.sh ran" "$log"; then
+        fail "cross-check: deploy.sh ran despite the abort"
+    else
+        pass "cross-check: deploy.sh did NOT run on abort"
+    fi
+
+    rm -f "$log"
+}
+
 case_atomic_appcast
 case_arg_validation
 case_push_then_deploy
@@ -872,5 +1003,6 @@ case_verify_format_change
 case_jsonld_softwareversion_rewritten
 case_jsonld_softwareversion_stray_guard
 case_stray_check_prerelease_substring
+case_appcast_crosscheck_wrong_feed
 
 test_end

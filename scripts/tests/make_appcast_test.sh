@@ -305,11 +305,201 @@ case_rejects_xml_metachar_in_base_url() {
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# Helper for the APPCAST_DMG cases — run make-appcast.sh with an explicit
+# APPCAST_DMG env value (plus --full when asked) and echo the exit code.
+# ---------------------------------------------------------------------------
+run_make_appcast_dmg() {
+    local fixture="$1" dmg="$2" log="$3"; shift 3
+    local rc=0
+    (
+        cd "$fixture"
+        export PATH="$fixture/stub-bin:$PATH"
+        export APPCAST_BASE_URL="https://example.test/blackbird"
+        export APPCAST_FEED_URL="https://example.test/appcast.xml"
+        export SIGN_UPDATE="$fixture/stub-bin/sign_update"
+        export APPCAST_DMG="$dmg"
+        bash "$fixture/scripts/make-appcast.sh" "$@"
+    ) >"$log" 2>&1 || rc=$?
+    echo "$rc"
+}
+
+# Extract the basename of the DMG referenced by the first .dmg-bearing
+# url="..." attribute (the <enclosure url="...">) in the given log.
+enclosure_dmg_basename() {
+    local log="$1"
+    local url
+    url="$(grep -oE 'url="[^"]*\.dmg"' "$log" | head -1 \
+        | sed -E 's/^url="//; s/"$//')"
+    [[ -n "$url" ]] && basename "$url"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 7 — A1: APPCAST_DMG pins the EXACT DMG to publish. Even with a
+# higher-GA-version DMG sitting in dist/, the enclosure must reference
+# the pinned DMG's basename. Exit 0.
+# ---------------------------------------------------------------------------
+case_appcast_dmg_pins_exact_dmg() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-7)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+    printf 'fake dmg 0.4.0-rc.1\n' > "$tmp/dist/Blackbird-0.4.0-rc.1.dmg"
+    printf 'fake dmg 0.5.0\n' > "$tmp/dist/Blackbird-0.5.0.dmg"
+
+    local log; log="$(mktemp)"
+    local rc
+    rc="$(run_make_appcast_dmg "$tmp" \
+        "$tmp/dist/Blackbird-0.4.0-rc.1.dmg" "$log" --full)"
+    assert_eq "$rc" "0" "A1: make-appcast.sh exits 0 with APPCAST_DMG set"
+
+    local picked
+    picked="$(enclosure_dmg_basename "$log" || true)"
+    if [[ -z "$picked" ]]; then
+        fail "A1: no .dmg-bearing enclosure url found in output"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    else
+        assert_eq "$picked" "Blackbird-0.4.0-rc.1.dmg" \
+            "A1: enclosure basename equals APPCAST_DMG basename despite higher-GA DMG in dist/"
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 8 — A2: a prerelease-named APPCAST_DMG generates successfully and
+# the feed carries the prerelease as the shortVersionString.
+# ---------------------------------------------------------------------------
+case_appcast_dmg_prerelease_short_version() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-8)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+    printf 'fake dmg 0.4.0-rc.1\n' > "$tmp/dist/Blackbird-0.4.0-rc.1.dmg"
+
+    local log; log="$(mktemp)"
+    local rc
+    rc="$(run_make_appcast_dmg "$tmp" \
+        "$tmp/dist/Blackbird-0.4.0-rc.1.dmg" "$log" --full)"
+    assert_eq "$rc" "0" "A2: prerelease APPCAST_DMG generates (exit 0)"
+
+    if grep -q "<sparkle:shortVersionString>0.4.0-rc.1</sparkle:shortVersionString>" "$log"; then
+        pass "A2: feed carries shortVersionString 0.4.0-rc.1"
+    else
+        fail "A2: <sparkle:shortVersionString>0.4.0-rc.1</sparkle:shortVersionString> missing from output"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 9 — A3: APPCAST_DMG pointing at a nonexistent path must abort
+# with a diagnostic that mentions APPCAST_DMG.
+# ---------------------------------------------------------------------------
+case_appcast_dmg_nonexistent_path() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-9)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+    # dist/ has a perfectly good DMG — the script must NOT fall back to
+    # it when the operator explicitly pinned a (bad) path.
+    printf 'fake dmg 0.3.0\n' > "$tmp/dist/Blackbird-0.3.0.dmg"
+
+    local log; log="$(mktemp)"
+    local rc
+    rc="$(run_make_appcast_dmg "$tmp" \
+        "$tmp/dist/Blackbird-9.9.9.dmg" "$log")"
+    if [[ "$rc" != "0" ]]; then
+        pass "A3: nonexistent APPCAST_DMG aborts (rc=$rc)"
+    else
+        fail "A3: make-appcast.sh exited 0 with nonexistent APPCAST_DMG"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "APPCAST_DMG" "$log"; then
+        pass "A3: diagnostic mentions APPCAST_DMG"
+    else
+        fail "A3: diagnostic does not mention APPCAST_DMG"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 10 — A4: APPCAST_DMG whose basename is not Blackbird-<semver>.dmg
+# must abort even though the file exists.
+# ---------------------------------------------------------------------------
+case_appcast_dmg_bad_basename() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-10)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+    printf 'fake dmg nightly\n' > "$tmp/dist/Blackbird-nightly.dmg"
+
+    local log; log="$(mktemp)"
+    local rc
+    rc="$(run_make_appcast_dmg "$tmp" \
+        "$tmp/dist/Blackbird-nightly.dmg" "$log")"
+    if [[ "$rc" != "0" ]]; then
+        pass "A4: non-semver APPCAST_DMG basename rejected (rc=$rc)"
+    else
+        fail "A4: make-appcast.sh accepted APPCAST_DMG with non-semver basename"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 11 — A5: without APPCAST_DMG the auto-pick behavior is unchanged:
+# highest GA version wins and prerelease-named DMGs are NOT auto-picked,
+# even when the prerelease carries a higher base version.
+# ---------------------------------------------------------------------------
+case_autopick_skips_prerelease() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-11)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+    printf 'fake dmg 0.3.0\n' > "$tmp/dist/Blackbird-0.3.0.dmg"
+    printf 'fake dmg 0.4.0-rc.1\n' > "$tmp/dist/Blackbird-0.4.0-rc.1.dmg"
+
+    local log; log="$(mktemp)"
+    local rc=0
+    (
+        cd "$tmp"
+        export PATH="$tmp/stub-bin:$PATH"
+        export APPCAST_BASE_URL="https://example.test/blackbird"
+        export APPCAST_FEED_URL="https://example.test/appcast.xml"
+        export SIGN_UPDATE="$tmp/stub-bin/sign_update"
+        unset APPCAST_DMG
+        bash "$tmp/scripts/make-appcast.sh" --full
+    ) >"$log" 2>&1 || rc=$?
+    assert_eq "$rc" "0" "A5: auto-pick exits 0 with GA + higher prerelease in dist/"
+
+    local picked
+    picked="$(enclosure_dmg_basename "$log" || true)"
+    if [[ "$picked" == "Blackbird-0.3.0.dmg" ]]; then
+        pass "A5: auto-pick selects highest GA DMG, not the higher-versioned prerelease"
+    else
+        fail "A5: auto-pick selected '$picked' — expected GA Blackbird-0.3.0.dmg"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
 case_dmg_selection_deterministic
 case_missing_base_url
 case_no_dmgs
 case_full_xml_wellformed
 case_dmg_selection_semver_prerelease
 case_rejects_xml_metachar_in_base_url
+case_appcast_dmg_pins_exact_dmg
+case_appcast_dmg_prerelease_short_version
+case_appcast_dmg_nonexistent_path
+case_appcast_dmg_bad_basename
+case_autopick_skips_prerelease
 
 test_end
