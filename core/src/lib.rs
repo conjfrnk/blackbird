@@ -3803,6 +3803,20 @@ pub unsafe extern "C" fn bb_term_text_range(
                 // embedded NULs in their UTF-8.
                 let out = if ch == '\0' { ' ' } else { ch };
                 text.push(out);
+                // Audit S5-001: width-0 scalars do NOT live in `cell.c` —
+                // alacritty stores combining accents (U+0301 …), variation
+                // selectors (VS16 U+FE0F), ZWJ, and every other zero-width
+                // scalar in the cell's `zerowidth()` extra list (see
+                // `Term::input`'s width==0 branch → `push_zerowidth`).
+                // Upstream's own `line_to_string` re-emits them; dropping
+                // them here meant ⌘C of an NFD filename pasted "cafe" for
+                // "café" and ⚠️ (U+26A0 U+FE0F) pasted as bare U+26A0 —
+                // silent copy-fidelity loss on a core terminal operation.
+                if let Some(zw) = cell.zerowidth() {
+                    for &z in zw {
+                        text.push(z);
+                    }
+                }
                 c += 1;
             }
 
