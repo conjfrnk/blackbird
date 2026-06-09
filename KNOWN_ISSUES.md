@@ -182,13 +182,16 @@ non-vacuous test seam exists yet.
   container-children invalidation still re-reads pills on list-shape
   changes); deferred.
 
-- **Instance-buffer grow-failure presents a blank drawable (low).**
-  In `MetalRenderer.buildInstances`, if `device.makeBuffer` returns nil
-  on a grow, the frame proceeds and presents a cleared drawable instead
-  of skipping (mirroring the drawable-acquisition early-return). A
-  one-frame black flash on an allocation failure that effectively never
-  occurs in practice. Fix: signal the inflight semaphore and bail before
-  present/commit. Deferred (vanishingly rare trigger).
+- **Instance-buffer grow-failure presents a blank drawable — FIXED
+  2026-06-09 (audit S2-007).** The 2026-06 audit escalated this from
+  the "one-frame black flash" assumed here: `lastFrameKey` had already
+  advanced at encoder creation, so the frame-skip cache PINNED the
+  blank frame until some unrelated FrameKey field changed (with cursor
+  blink off, until the user typed). Fixed as originally sketched plus
+  the pinning half: `buildInstances` now returns nil (distinct from a
+  legitimate 0-instance frame) on grow failure; the render path ends
+  the encoder, signals the slot token back, rolls back the rotation
+  turn (S2-006 invariant), clears `lastFrameKey`, and never presents.
 
 - **URL wrap-join follows only one continuation row (low).**
   `URLDetector` joins a soft-wrapped URL across `row → row + 1` only, so

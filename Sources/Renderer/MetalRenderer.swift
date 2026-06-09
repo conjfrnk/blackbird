@@ -1055,12 +1055,18 @@ public final class MetalRenderer {
     /// the rows alacritty's damage iterator flagged as changed (partial
     /// path). Returns the total instance count the encoder should draw.
     @discardableResult
+    /// Returns the flattened instance count, or nil when the per-slot
+    /// GPU buffer could not grow to hold it (audit S2-007). nil is
+    /// distinct from 0 on purpose: 0 means "nothing styled to draw —
+    /// encode and present an empty frame", nil means "this frame cannot
+    /// be drawn — the caller must abandon the encode entirely instead of
+    /// presenting a cleared drawable over valid content".
     private func buildInstances(
         snapshot: BBSnapshot,
         isSelected: (Int32, Int) -> Bool = { _, _ in false },
         blockCursorCell: (row: Int, col: Int)? = nil,
         partialRowsOnly: Set<Int>? = nil
-    ) -> Int {
+    ) -> Int? {
         let rows = snapshot.rows
         let cols = snapshot.cols
         let needed = cols * rows
@@ -1155,13 +1161,19 @@ public final class MetalRenderer {
                 instanceBuffers[slot] = newBuf
                 instanceCapacities[slot] = newCap
             } else {
-                // Out-of-GPU-memory while growing — skip frame. Next
-                // repaint will retry. Log so a silently-stale frame
-                // surfaces in the unified log instead of just looking
-                // like the renderer skipped a tick. Audit L-21
-                // follow-up (2026-04-29).
-                Self.logger.error("instance buffer grow failed: requested \(newCap, privacy: .public) instances (\(bufBytes, privacy: .public) bytes); skipping frame")
-                return 0
+                // Out-of-GPU-memory while growing — the frame cannot
+                // be drawn. Return nil (NOT 0): the audit S2-007 trace
+                // showed the old `return 0` let the render path continue
+                // to endEncoding/present/commit with zero cell
+                // instances, presenting a fully blank frame over valid
+                // content — and because `lastFrameKey` had already been
+                // advanced at encoder creation, the frame-skip cache
+                // then pinned the blank frame until some unrelated
+                // FrameKey field changed (with cursor blink off, until
+                // the user typed). Log so the abandoned frame surfaces
+                // in the unified log. Audit L-21 follow-up + S2-007.
+                Self.logger.error("instance buffer grow failed: requested \(newCap, privacy: .public) instances (\(bufBytes, privacy: .public) bytes); abandoning frame")
+                return nil
             }
         }
 
@@ -1590,12 +1602,39 @@ public final class MetalRenderer {
                 return rows
             }()
 
-            let instanceCount = buildInstances(
+            guard let instanceCount = buildInstances(
                 snapshot: snap,
                 isSelected: isSelected,
                 blockCursorCell: blockCursorCell,
                 partialRowsOnly: partialRows
-            )
+            ) else {
+                // Instance-buffer grow failure (audit S2-007): abandon
+                // the frame. End the encoder (required before the
+                // uncommitted command buffer can be dropped), do NOT
+                // present — presenting here would flash a cleared
+                // drawable over valid content — and return the slot
+                // token manually: the addCompletedHandler above only
+                // fires for COMMITTED buffers, so without this signal
+                // the ring leaks a slot and the 4th render call blocks
+                // forever. Clear `lastFrameKey` so the next tick cannot
+                // frame-skip against a key that was never presented
+                // (the pinned-blank-frame half of the finding), and
+                // leave lastCacheKey/lastRenderedSnapshotSeq stale so
+                // the retry re-walks every row.
+                encoder.endEncoding()
+                inflightSemaphore.signal()
+                // Return the rotation turn together with the token —
+                // the audit S2-006 invariant: a frame that won't reach
+                // GPU completion must not consume a slot rotation, or
+                // each abort makes the triple-buffer wait guard one
+                // frame too few. render() is only entered from the
+                // MTKView draw callback, so no interleaving caller can
+                // observe the rollback.
+                frameIndex = currentSlot
+                lastFrameKey = nil
+                didFrameSkipLastRender = true
+                return
+            }
             lastCacheKey = newCacheKey
             // Record the snapshot seq we just rendered. `lastRenderedSnapshot
             // Seq` drives the coalesced-snapshot detection on the next
