@@ -784,7 +784,6 @@ public final class TerminalSession: ObservableObject {
         // would cause text past the clamp ceiling to wrap into oblivion.
         let clamped = Self.clampResize(size)
         var newSnap: BBSnapshot?
-        var appliedDims: Size?
         coreQueue.sync {
             // Audit S1-007: gate on termination INSIDE the coreQueue
             // block — terminate() sets the flag before nil'ing the
@@ -805,7 +804,14 @@ public final class TerminalSession: ObservableObject {
             // publishes so the renderer doesn't stall.
             if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
                 self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
-                appliedDims = Size(cols: applied.cols, rows: applied.rows)
+                // INSIDE the coreQueue block, matching resizeAsync —
+                // lastAppliedGridSize is coreQueue-confined, and calling
+                // from the caller's thread here raced a concurrent
+                // font-change resizeAsync (review finding on this
+                // batch). noteAppliedGridSize never re-enters coreQueue
+                // (its @Published mutations hop to main), so this is
+                // deadlock-free.
+                self.noteAppliedGridSize(Size(cols: applied.cols, rows: applied.rows))
             } else {
                 Self.sessionLogger.warning(
                     "BBTerm.resize returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
@@ -813,7 +819,6 @@ public final class TerminalSession: ObservableObject {
             }
             newSnap = self.bbterm.snapshot()
         }
-        if let appliedDims { noteAppliedGridSize(appliedDims) }
         guard let newSnap else { return }
         // Audit fix-#07 (2026-05-11): route through publishImmediate so the
         // post-resize snapshot honours the H8 user-action-wins invariant.
