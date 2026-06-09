@@ -143,7 +143,9 @@ pub struct Grid<T> {
     /// and therefore cannot anchor buffer positions across eviction;
     /// this counter can: content recorded at grid row R when the counter
     /// read P sits `(counter_now - P)` rows further up at any later
-    /// time, until a column reflow or clear invalidates the anchor.
+    /// time, until a resize (column reflow or row-count change — vertical
+    /// resizes route grow/shrink through this same scroll path) or a
+    /// clear invalidates the anchor.
     #[cfg_attr(feature = "serde", serde(skip))]
     lines_scrolled: u64,
 }
@@ -282,9 +284,12 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
-            // Blackbird fork addition (audit S5-004/S5-005): this is the
-            // only path that rotates lines toward history — count every
-            // rotated line, including ones a saturated ring recycles.
+            // Blackbird fork addition (audit S5-004/S5-005): count every
+            // line this full-width rotation moves toward history,
+            // including ones a saturated ring recycles. NOTE: vertical
+            // resize (grow_lines/shrink_lines in resize.rs) also routes
+            // through here, which is why any resize invalidates anchors
+            // consumer-side.
             self.lines_scrolled += positions as u64;
 
             // Create scrollback for the new lines.

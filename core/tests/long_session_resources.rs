@@ -10,7 +10,7 @@
 //!     `long_session_memory.rs`, but every cycle would burn an FD until the
 //!     process hits `ulimit -n` mid-session.
 //!   * The debug-only busy flag on `CallbackCell` (audit S1-004)
-//!     (core/src/lib.rs:137) encodes a single-thread-per-handle contract.
+//!     encodes a mutual-exclusion (one-thread-at-a-time) contract.
 //!     A future regression that spawns a worker thread per `BBTerm`
 //!     (e.g. an internal background task on the listener) would compile,
 //!     pass debug-thread-check (each new BBTerm owns its own latch), and
@@ -260,7 +260,7 @@ mod macos {
              delta={thread_delta} limit=+{THREAD_SLOP} iterations={ITERATIONS} — \
              a per-iteration thread spawn would push delta to ITERATIONS-scale; \
              {thread_delta} threads above baseline suggests a regression in the \
-             mutual-exclusion contract (CallbackCell busy flag, audit S1-004)"
+             mutual-exclusion contract (CallbackCell.busy debug flag, audit S1-004)"
         );
         assert!(
             final_fds as i64 <= baseline_fds as i64 + FD_SLOP,

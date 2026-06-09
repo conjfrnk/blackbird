@@ -371,8 +371,10 @@ struct BBSnap {
    * scrollback cap, this never saturates, so callers can anchor
    * content positions across eviction: content at grid row R in a
    * snapshot whose counter read P sits `(counter_now − P)` rows
-   * further up in any later snapshot. Column reflow (resize) and
-   * clears invalidate the anchor. Appended at the struct tail to
+   * further up in any later snapshot. Any resize — column reflow OR
+   * row-count change (vertical resizes route through the same
+   * scroll path) — and clears invalidate the anchor. Appended at
+   * the struct tail to
    * preserve existing field offsets (same rule as `history_size`).
    * Audit S5-004/S5-005.
    */

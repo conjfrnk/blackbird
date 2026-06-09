@@ -597,9 +597,11 @@ public final class BBSnapshot {
     /// saturates at the scrollback cap, so positions can be anchored
     /// across eviction: content at grid row R in a snapshot whose
     /// counter read P sits `(now − P)` rows further up in any later
-    /// snapshot. Column reflow (resize) and clears invalidate the
-    /// anchor; a value that moves BACKWARD means the underlying grid
-    /// was recreated (RIS) and any anchors must be dropped.
+    /// snapshot. The counter NEVER moves backward (RIS and clears leave
+    /// it untouched while resetting history — anchors then resolve to
+    /// clamped live positions, not stale history). Any resize — column
+    /// reflow OR row-count change — perturbs the anchor algebra and
+    /// must invalidate anchors consumer-side.
     /// Audit S5-004/S5-005.
     public var linesScrolled: UInt64 { handle.pointee.lines_scrolled }
     /// DECSCUSR cursor shape: 0 = block, 1 = bar/beam, 2 = underline, 3 = hidden.
