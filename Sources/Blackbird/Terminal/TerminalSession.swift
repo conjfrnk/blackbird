@@ -914,7 +914,15 @@ public final class TerminalSession: ObservableObject {
         }
         lastAppliedGridSize = applied
         guard changed else { return }
-        let work: @MainActor () -> Void = { [weak self] in
+        // Unconditionally async (review follow-up): this runs INSIDE a
+        // coreQueue block — for a main-thread caller of the sync
+        // resize, dispatch_sync executes here ON main while the current
+        // dispatch context is coreQueue, and a synchronous @Published
+        // reaction touching scroll/resize would trip their
+        // .notOnQueue(coreQueue) tripwires from inside the held queue.
+        // Async delivery is safe: the S5-008 generation token already
+        // makes a late ring wipe race-free against in-flight appends.
+        DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             // Bump the generation FIRST so any in-flight
             // recordPromptStart append from the pre-reflow grid
@@ -922,11 +930,6 @@ public final class TerminalSession: ObservableObject {
             self.promptMarkGeneration &+= 1
             self.promptMarks = []
             self.promptCursor = nil
-        }
-        if Thread.isMainThread {
-            MainActor.assumeIsolated(work)
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated(work) }
         }
     }
 
