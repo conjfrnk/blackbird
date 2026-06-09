@@ -101,51 +101,38 @@ fn text_range_out_of_range_lines_return_empty() {
     );
 }
 
-/// Audit M-1 (2026-05-03): a single FFI call must not allocate
-/// O(rows × cols) on the request range. This test fills a deep
-/// scrollback (200 000 rows of "Q\n"), then asks for the entire range
-/// at once. With the cap engaged the returned text contains at most
-/// `MAX_TEXT_RANGE_ROWS` lines (preserving the head, dropping the tail) —
-/// truncation is the safer behaviour vs. erroring out, since every
-/// realistic interactive selection fits well under the cap.
+/// Audit S5-010 (2026-06-09, overturning the sizing of audit M-1's cap):
+/// Select All + Copy on a buffer deeper than 65 536 rows used to return
+/// only the OLDEST 65 536 rows — silent data loss on a first-class menu
+/// action, with no signal anywhere on the path. The M-1 row cap remains
+/// as a backstop against absurd-range callers (the i32::MIN/MAX shape
+/// below) but is now sized above the largest possible real buffer
+/// (SCROLLBACK_MAX + MAX_DIM rows), so a whole-buffer request must come
+/// back COMPLETE.
 ///
-/// We can't directly probe RSS in a Rust unit test without bringing in
-/// platform-specific syscalls, but we CAN assert the row-count bound on
-/// the result, which is the proxy that catches a regression where the
-/// cap is removed or set too high. The same regression would also
-/// reintroduce the worst-case heap amplification.
-///
-/// Pre-flight: 200 000 rows × 1 col × ~32 B alacritty cell ≈ 6.4 MB grid;
-/// the post-cap result is ≤ 65 536 single-char lines plus newline joins
-/// ≈ 130 KB. Total < 10 MB transient on this test.
+/// Pre-flight: 70 000 rows × 4 cols × ~32 B alacritty cell ≈ 9 MB grid;
+/// result is ~70 000 single-char lines ≈ 140 KB. Total < 15 MB transient.
 #[test]
-fn text_range_caps_huge_request_at_max_rows() {
+fn text_range_select_all_returns_entire_buffer() {
     use blackbird_core as bc;
     unsafe {
-        // 4-col × 4-row visible grid + 200 000 scrollback. Feed enough
-        // newline-terminated rows that the scrollback fills near-cap;
-        // alacritty's grid clamps `history_size` to the configured
-        // scrollback so this is the upper bound on iterable rows.
+        // 4-col × 4-row visible grid + 200 000 scrollback.
         let term = bc::bb_term_new(4, 4, 200_000);
         assert!(!term.is_null());
 
-        // Push 70 000 rows of "Q\r\n" — comfortably above the
-        // MAX_TEXT_RANGE_ROWS = 65 536 cap so the cap is the binding
-        // constraint, not history size.
+        // Push 70 000 rows of "Q\r\n" — above the OLD 65 536 cap that
+        // audit S5-010 found truncating Select All copies.
         let mut buf = Vec::with_capacity(70_000 * 3);
         for _ in 0..70_000 {
             buf.extend_from_slice(b"Q\r\n");
         }
         bc::bb_term_input(term, buf.as_ptr(), buf.len());
 
-        // Ask for the entire universe of rows in a single call. The
-        // i32::MIN/MAX/u16::MAX endpoints are exactly the worst-case
-        // shape an out-of-bounds caller would produce.
+        // Ask for the entire universe of rows in a single call — the
+        // worst-case absurd-range shape (i32::MIN/MAX, u16::MAX) AND a
+        // superset of what Swift's selectAll issues.
         let raw = bc::bb_term_text_range(term, i32::MIN, 0, i32::MAX, u16::MAX, 0);
-        assert!(
-            !raw.is_null(),
-            "huge text_range must succeed via truncation"
-        );
+        assert!(!raw.is_null(), "huge text_range must succeed");
 
         let bytes = if (*raw).len == 0 || (*raw).bytes.is_null() {
             &[][..]
@@ -153,23 +140,19 @@ fn text_range_caps_huge_request_at_max_rows() {
             std::slice::from_raw_parts((*raw).bytes, (*raw).len)
         };
         let text = std::str::from_utf8(bytes).expect("utf-8");
-        // Count emitted rows. The cap is on iteration rows
-        // (MAX_TEXT_RANGE_ROWS = 65 536), so the joined output contains
-        // exactly `<= MAX` lines separated by '\n'.
         let line_count = text.bytes().filter(|&b| b == b'\n').count() + 1;
+        // Every fed row must come back: 70 000 in history/screen plus
+        // the handful of trailing visible rows (small cushion for the
+        // cursor's blank bottom row).
         assert!(
-            line_count <= 65_536,
-            "text_range must cap output at MAX_TEXT_RANGE_ROWS rows; \
-             got {line_count} lines (cap = 65 536)"
+            (70_000..=70_010).contains(&line_count),
+            "S5-010: whole-buffer copy must not truncate; fed 70 000 rows, \
+             got {line_count} lines"
         );
-        // Lower-bound: the cap should still produce a NEAR-cap result
-        // when asked for far more — otherwise a regression that capped
-        // far too aggressively (e.g. at 1) would silently reduce
-        // copy/paste fidelity for legitimate large selections.
+        // Head intact too (grid-clamp sanity, not cap behaviour).
         assert!(
-            line_count > 1_000,
-            "text_range cap must not be set so low that legitimate huge \
-             selections truncate to nothing; got {line_count} lines"
+            text.starts_with('Q'),
+            "first retained row should survive the extraction"
         );
 
         bc::bb_string_release(raw);
@@ -300,42 +283,34 @@ fn text_range_over_bottom_collapse_preserves_trim() {
     }
 }
 
-/// S4-001: when MAX_TEXT_RANGE_ROWS engages and `iter_end` is moved to
-/// `iter_start + MAX - 1` (the cap row), the per-row branch's comparison
-/// must NOT treat the cap row as the end-row. At TAG the comparison
-/// used the caller's raw `e_line` — the cap row didn't match
-/// `line_i == e_line`, so it fell into the middle-row branch
-/// `(0, last_col, trim=true)` and the row was emitted in full. At HEAD
-/// the comparison uses `line_i == iter_end`, which DOES match the cap
-/// row, treating it as the end-row `(0, e_col, false)` and cropping to
-/// `e_col` — a column the user intended for the original (uncapped)
-/// final row, not for this arbitrary cap row.
+/// Audit S5-010: the backstop row cap must sit ABOVE the largest buffer
+/// the terminal can actually retain, so no real Select All can ever hit
+/// it. This drives a maximal buffer — SCROLLBACK_MAX (200 000) history
+/// rows, the configured ceiling — through a whole-range request and
+/// asserts nothing is dropped. (The historical S4-001 cap-row
+/// column-crop scenario this test used to pin is unreachable now that
+/// the cap exceeds any real span; the protective `!cap_truncated`
+/// branch in lib.rs is retained defensively for absurd-range callers.)
 ///
-/// Repro: 10-col × 4-row grid + 200 000 scrollback, 70 000 rows of
-/// `"AAAAAAAAAA"`. Select (i32::MIN, 0)..(i32::MAX, 2). The post-cap
-/// final row should still be a full "AAAAAAAAAA", not the 3-char "AAA"
-/// crop.
+/// Pre-flight: 200 010 rows × 4 cols × ~32 B cell ≈ 26 MB grid; feed is
+/// 200 010 × 3 B ≈ 600 KB; result ≈ 400 KB. Total well under 30 MB
+/// transient — acceptable for a single gate on this contract.
 #[test]
-fn text_range_row_cap_does_not_crop_capped_row_to_end_col() {
+fn text_range_cap_never_truncates_max_scrollback() {
     unsafe {
-        let term = bc::bb_term_new(10, 4, 200_000);
+        let term = bc::bb_term_new(4, 4, 200_000);
         assert!(!term.is_null());
 
-        // 70 000 rows × 12 bytes = ~840 KB feed, comfortably above the
-        // MAX_TEXT_RANGE_ROWS = 65 536 cap so the cap is the binding
-        // constraint.
-        let mut buf = Vec::with_capacity(70_000 * 12);
-        for _ in 0..70_000 {
-            buf.extend_from_slice(b"AAAAAAAAAA\r\n");
+        // Overfill: 200 010 rows so history saturates at exactly the
+        // 200 000-line ceiling.
+        let mut buf = Vec::with_capacity(200_010 * 3);
+        for _ in 0..200_010 {
+            buf.extend_from_slice(b"Q\r\n");
         }
         bc::bb_term_input(term, buf.as_ptr(), buf.len());
 
-        // Worst-case caller shape: full i32 span with a small e_col.
-        let raw = bc::bb_term_text_range(term, i32::MIN, 0, i32::MAX, 2, 0);
-        assert!(
-            !raw.is_null(),
-            "huge text_range must succeed via truncation"
-        );
+        let raw = bc::bb_term_text_range(term, i32::MIN, 0, i32::MAX, u16::MAX, 0);
+        assert!(!raw.is_null(), "whole-buffer text_range must succeed");
         let bytes: &[u8] = if (*raw).len == 0 || (*raw).bytes.is_null() {
             &[]
         } else {
@@ -345,14 +320,12 @@ fn text_range_row_cap_does_not_crop_capped_row_to_end_col() {
         bc::bb_string_release(raw);
         bc::bb_term_free(term);
 
-        // The cap row is the LAST emitted line. It should be a full
-        // 10-character row of A's, not cropped to e_col=2.
-        let last_line = text.rsplit('\n').next().unwrap_or("");
-        assert_eq!(
-            last_line, "AAAAAAAAAA",
-            "S4-001: when the MAX_TEXT_RANGE_ROWS cap fires, the cap row \
-             must keep middle-row (full-row) treatment instead of being \
-             cropped to the caller's end_col; got last line {last_line:?}"
+        let line_count = text.bytes().filter(|&b| b == b'\n').count() + 1;
+        assert!(
+            line_count >= 200_000,
+            "S5-010: a saturated 200 000-line scrollback must extract in \
+             full — the backstop cap may never bind on a real buffer; \
+             got {line_count} lines"
         );
     }
 }

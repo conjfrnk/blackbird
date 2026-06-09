@@ -1842,17 +1842,26 @@ const MAX_DIM: u16 = 1000;
 /// materialises in practice — but the cap is real defence against a runaway
 /// caller. 200k lines covers dense Claude Code / build-log workloads.
 const SCROLLBACK_MAX: u32 = 200_000;
-/// Per-call row cap on `bb_term_text_range`. Without the cap a single FFI
-/// call against a `SCROLLBACK_MAX × MAX_DIM = 200 000 × 1000` grid would
-/// allocate `MAX_DIM` bytes per row × that many rows ≈ 200 MB transient on
-/// one call — easy DoS amplification because every row gets its own
-/// `String` plus the final join. 65 536 covers any realistic copy
-/// selection (the tallest sane scrollback selection is the visible
-/// viewport, ~1 000 rows; whole-history copies are typically capped by
-/// the grid's `SCROLLBACK_MAX = 200 000`, so 65 536 leaves a generous
-/// 32× margin over plausible interactive selections while bounding
-/// worst-case heap to ~64 MB before the join). Audit M-1 (2026-05-03).
-const MAX_TEXT_RANGE_ROWS: u32 = 65_536;
+/// Per-call row cap on `bb_term_text_range`. Retained purely as a backstop
+/// against absurd-range callers (the fuzzer passing i32::MIN..i32::MAX) —
+/// sized so it can NEVER truncate a real buffer: the largest possible
+/// span is `SCROLLBACK_MAX + MAX_DIM = 201 000` rows, comfortably under
+/// the cap.
+///
+/// History (audit M-1, 2026-05-03 → audit S5-010, 2026-06-09): M-1 set
+/// this to 65 536 reasoning that "whole-history copies are typically
+/// capped by SCROLLBACK_MAX so 65 536 leaves a generous margin over
+/// plausible interactive selections" — but Select All is a first-class
+/// menu action and sessions default to 100 000 lines of scrollback, so
+/// ⌘A+⌘C on a full buffer silently returned only the OLDEST 65 536 rows
+/// and dropped the newest ~34 000 (usually the part the user wanted),
+/// with no log, error, or UI signal anywhere on the path. The transient
+/// allocation the cap bounds is proportional to content the terminal
+/// already retains in cell form (~32 B/cell vs ≤4 B/char extracted), so
+/// a content-sized extraction is strictly smaller than the grid backing
+/// it and the M-1 DoS-amplification concern doesn't apply to in-range
+/// requests; only the absurd-range case needs the bound.
+const MAX_TEXT_RANGE_ROWS: u32 = 262_144;
 
 /// Create a new terminal. Returns null on invalid input or internal error.
 ///
