@@ -2721,6 +2721,7 @@ pub struct BBSnap {
     ///   RIS reset history while this counter holds still) and drop
     ///   anchors then.
     /// - The counter never moves backward for a live handle.
+    ///
     /// Appended at the struct tail to preserve existing field offsets
     /// (same rule as `history_size`). Audit S5-004/S5-005.
     pub lines_scrolled: u64,
