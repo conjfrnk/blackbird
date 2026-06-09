@@ -1047,6 +1047,34 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             let historyCollapsed = prev.historySize > 0 && snapshot.historySize == 0
             if colsChanged || altScreenChanged || historyCollapsed {
                 selection = nil
+            } else if snapshot.linesScrolled > prev.linesScrolled, var sel = selection {
+                // Audit S5-005: keep the selection GLUED TO ITS CONTENT
+                // when output scrolls. Selection endpoints are
+                // grid-relative (line 0 = top of the live grid); every
+                // scrolled line moves the selected text one row up, and
+                // the vendored core rotates only its own internal
+                // selection — never this one. Without compensation the
+                // highlight visibly slid onto different text and ⌘C
+                // copied whatever now occupied the stale coordinates
+                // instead of what the user selected. Rotate both
+                // endpoints by the snapshot-to-snapshot lines-scrolled
+                // delta (the S5-004 counter — exact even after
+                // scrollback saturates); drop the selection once any
+                // endpoint scrolls past retention (its content is gone).
+                // Mid-drag this is still correct: the anchor tracks its
+                // content and the next mouseDragged recomputes the
+                // cursor endpoint from the pointer anyway.
+                let delta = Int64(snapshot.linesScrolled - prev.linesScrolled)
+                let anchorLine = Int64(sel.anchor.line) - delta
+                let cursorLine = Int64(sel.cursor.line) - delta
+                let retentionFloor = -Int64(snapshot.historySize)
+                if min(anchorLine, cursorLine) < retentionFloor {
+                    selection = nil
+                } else {
+                    sel.anchor.line = Int32(clamping: anchorLine)
+                    sel.cursor.line = Int32(clamping: cursorLine)
+                    selection = sel
+                }
             }
         }
         self.currentSnapshot = snapshot
