@@ -171,6 +171,23 @@ public final class PTY {
     private let readQueue = DispatchQueue(label: "blackbird.pty.read", qos: .userInitiated)
     private let writeQueue = DispatchQueue(label: "blackbird.pty.write", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "blackbird.pty.state")
+
+    /// Child-reap lifecycle, guarded by `stateQueue` (audit S1-003).
+    /// POSIX reserves a dead child's PID until its PARENT reaps it —
+    /// and this process is the parent, with the read-loop teardown the
+    /// sole reaper. So as long as the state is `.running`, `childPID`
+    /// still names OUR process (live or zombie) and signalling it is
+    /// safe; once the reaper begins, the escalation rungs in
+    /// `terminate()` must stand down — after `waitpid` returns, macOS
+    /// may recycle the PID for an unrelated process within
+    /// milliseconds, and the +100 ms SIGTERM / +200 ms SIGKILL timers
+    /// previously fired into exactly that window.
+    private enum ReapState {
+        case running
+        case reaping
+        case reaped
+    }
+    private var reapState: ReapState = .running
     private var _isRunning = true
     /// Per-`read(2)` buffer size. Darwin's PTY master delivers up to the
     /// kernel's pipe-buffer limit per syscall (typically 16 KiB), so a
@@ -875,6 +892,13 @@ public final class PTY {
             // (it shouldn't be — the read loop runs once per PTY — but
             // the flag keeps the invariant explicit rather than implicit).
             var reaped = false
+            // Announce reap intent BEFORE the first waitpid (audit
+            // S1-003): from the instant waitpid succeeds, the PID is
+            // free for kernel reuse, so the terminate() escalation
+            // rungs must observe `.reaping` and stand down before any
+            // recycling can occur. stateQueue orders this write against
+            // the rungs' reads.
+            self.stateQueue.sync { self.reapState = .reaping }
             let waited = waitpid(self.childPID, &status, WNOHANG)
             if waited == self.childPID {
                 reaped = true
@@ -918,6 +942,7 @@ public final class PTY {
             //     e.g. a SIGSEGV (11) surfaces as 139, SIGKILL (9) as 137,
             //     letting a future crash-reporter distinguish "shell
             //     exited cleanly" from "shell died of signal").
+            self.stateQueue.sync { self.reapState = .reaped }
             let exitCode = Self.decodeExitStatus(status, reaped: reaped)
             DispatchQueue.main.async { [weak self] in
                 self?.onExit?(exitCode)
@@ -1516,6 +1541,37 @@ public final class PTY {
     private(set) var _testTerminateBodyRanCount: Int = 0
     #endif
 
+    /// Audit S1-003: shared guard for the terminate() escalation rungs.
+    /// Returns true only when `childPID` still provably names our child:
+    /// the reap-state must be `.running` (POSIX reserves the pid until
+    /// the parent — us — reaps; once the read-loop reaper starts, the
+    /// pid may be recycled within milliseconds and the rungs must stand
+    /// down), and, when a spawn-time baseline exists, the BSD start
+    /// time must still match (defense-in-depth for the window between
+    /// this check and the signal).
+    private func escalationTargetIsStillOurChild(
+        pid: pid_t, originalStartTime: (sec: UInt64, usec: UInt64)?, rung: StaticString
+    ) -> Bool {
+        let stillOurs = stateQueue.sync { reapState == .running }
+        guard stillOurs else {
+            Self.logger.log(
+                "PTY.terminate \(rung, privacy: .public) rung stood down: child already reaped/reaping (pid \(pid, privacy: .public) may be recycled)"
+            )
+            return false
+        }
+        if let original = originalStartTime {
+            guard let current = Self.bsdProcessStartTime(pid: pid),
+                  current.sec == original.sec, current.usec == original.usec
+            else {
+                Self.logger.log(
+                    "PTY.terminate \(rung, privacy: .public) rung stood down: pid \(pid, privacy: .public) identity unverifiable or mismatched"
+                )
+                return false
+            }
+        }
+        return true
+    }
+
     public func terminate() {
         // Audit L6: atomic check-and-clear of `_isRunning`. The prior
         // `shouldKeepRunning() ... markStopped()` shape was two
@@ -1578,17 +1634,28 @@ public final class PTY {
         let originalStartTime = childStartTime
         // Audit L5. Insert SIGTERM between SIGHUP and SIGKILL so a
         // process that traps SIGTERM for cleanup but not SIGHUP gets
-        // a chance to flush before the kernel-forced kill. No
-        // start-time check on this rung: SIGTERM is survivable by
-        // any well-behaved process, so even on the rare PID-reuse
-        // edge the stranger just receives a polite request to exit
-        // (versus SIGKILL which is unrecoverable). 100ms is half the
-        // total grace window — well-behaved shells respond to SIGHUP
-        // immediately and never reach this branch (kill(pid, 0)
-        // returns ESRCH).
+        // a chance to flush before the kernel-forced kill. 100ms is
+        // half the total grace window — well-behaved shells respond to
+        // SIGHUP immediately and never reach this branch.
+        //
+        // Audit S1-003: this rung previously guarded only with
+        // `kill(pid, 0) == 0` — true for ANY process now owning the
+        // pid — on the premise that SIGTERM is "a polite request to
+        // exit". That premise was wrong: SIGTERM's DEFAULT disposition
+        // terminates the receiver, so a recycled pid meant killing an
+        // innocent same-user process. Two guards now apply, identical
+        // to the SIGKILL rung: (1) the reap-state gate — POSIX reserves
+        // the pid until WE reap it, and `reapState != .running` means
+        // the reaper has begun and recycling is possible, so stand
+        // down (the read-loop teardown owns any further forcing);
+        // (2) the BSD start-time identity check as defense-in-depth
+        // for the microseconds between the gate read and the kill.
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + .milliseconds(100)
-        ) {
+        ) { [weak self] in
+            guard let self, self.escalationTargetIsStillOurChild(
+                pid: pid, originalStartTime: originalStartTime, rung: "SIGTERM"
+            ) else { return }
             guard kill(pid, 0) == 0 else { return }
             let termRC = kill(pid, SIGTERM)
             if termRC != 0 {
@@ -1599,7 +1666,16 @@ public final class PTY {
         }
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + .milliseconds(200)
-        ) {
+        ) { [weak self] in
+            // Audit S1-003 reap-state gate — see the SIGTERM rung. In
+            // particular this makes the no-baseline "unverified
+            // SIGKILL" below safe: an un-reaped pid still names OUR
+            // child by POSIX (the parent hasn't collected the zombie),
+            // so even without a start-time baseline the target cannot
+            // be a recycled stranger.
+            guard let self, self.escalationTargetIsStillOurChild(
+                pid: pid, originalStartTime: nil, rung: "SIGKILL-gate"
+            ) else { return }
             // Poll for the child. `kill(pid, 0)` returns 0 iff the
             // process exists and we can signal it. A non-zero return
             // means ESRCH (already exited) or EPERM (impossible here
