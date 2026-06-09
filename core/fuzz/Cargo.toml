@@ -9,6 +9,16 @@ cargo-fuzz = true
 
 [workspace]
 
+# The fuzz crate is its OWN workspace (cargo-fuzz convention), so the
+# root workspace's [patch.crates-io] does NOT apply here — without this
+# mirror patch, `alacritty_terminal` resolved from crates.io and the
+# fuzz targets silently fuzzed the UNPATCHED upstream parser instead of
+# the vendored fork (masked until the fork grew API that
+# blackbird_core calls; then the fuzz build broke on CI). Keep in sync
+# with the root Cargo.toml's patch.
+[patch.crates-io]
+alacritty_terminal = { path = "../../vendor/alacritty_terminal" }
+
 [dependencies]
 libfuzzer-sys = "0.4"
 
