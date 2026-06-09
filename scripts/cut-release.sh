@@ -132,16 +132,31 @@ xcodegen generate >/dev/null
 
 # Sanity: Info.plist must now reflect both the new display version and
 # the bumped build number. If either is wrong, abort before tagging.
-# Same `|| true` rationale as extract_yaml_value above: a missing or
-# unreadable Info.plist makes PlistBuddy exit non-zero, and without it
-# `set -e` aborted at the assignment with the "Aborting." diagnostics
-# below unreachable AND PlistBuddy's own error discarded. Audit S2-010.
-PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Blackbird/Info.plist 2>/dev/null || true)"
+# Capture-with-status (audit S2-010 + review follow-up): a missing or
+# unreadable Info.plist makes PlistBuddy exit non-zero. The bare
+# assignment died under `set -e` with the "Aborting." diagnostics
+# unreachable; capturing with 2>/dev/null kept PlistBuddy's own error
+# invisible (missing-KEY errors go to stderr; missing-FILE notices go
+# to stdout and would garble the value). Capture stdout+stderr and
+# branch on status so the operator sees the tool's root cause.
+PB_STATUS=0
+PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Blackbird/Info.plist 2>&1)" || PB_STATUS=$?
+if [[ $PB_STATUS -ne 0 ]]; then
+    echo "!! PlistBuddy could not read CFBundleShortVersionString from Sources/Blackbird/Info.plist:" >&2
+    echo "   $PLIST_VERSION" >&2
+    exit 1
+fi
 if [[ "$PLIST_VERSION" != "$VERSION" ]]; then
     echo "!! Info.plist still reports '$PLIST_VERSION' after regen (expected '$VERSION'). Aborting." >&2
     exit 1
 fi
-PLIST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Sources/Blackbird/Info.plist 2>/dev/null || true)"
+PB_STATUS=0
+PLIST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Sources/Blackbird/Info.plist 2>&1)" || PB_STATUS=$?
+if [[ $PB_STATUS -ne 0 ]]; then
+    echo "!! PlistBuddy could not read CFBundleVersion from Sources/Blackbird/Info.plist:" >&2
+    echo "   $PLIST_BUILD" >&2
+    exit 1
+fi
 if [[ "$PLIST_BUILD" != "$NEW_BUILD" ]]; then
     echo "!! Info.plist CFBundleVersion is '$PLIST_BUILD', expected '$NEW_BUILD'. Aborting." >&2
     exit 1
