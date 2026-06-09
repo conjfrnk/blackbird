@@ -153,6 +153,11 @@ struct CallbackCell {
     /// shares ownership and `bb_term_clear_all` can `reset()` it via
     /// `BBTerm`'s clone (audit H-3).
     pty_write_rate: Arc<PtyWriteRateCell>,
+    /// Title/Bell sliding windows (audit S1-002). Same UnsafeCell
+    /// discipline as `slot`; accessed only inside the fire()/reset
+    /// busy-guard scopes.
+    title_rate: UnsafeCell<EventRateState>,
+    bell_rate: UnsafeCell<EventRateState>,
     #[cfg(debug_assertions)]
     busy: std::sync::atomic::AtomicBool,
 }
@@ -195,6 +200,8 @@ impl CallbackCell {
         CallbackCell {
             slot: UnsafeCell::new((None, std::ptr::null_mut())),
             pty_write_rate,
+            title_rate: UnsafeCell::new(EventRateState::new()),
+            bell_rate: UnsafeCell::new(EventRateState::new()),
             #[cfg(debug_assertions)]
             busy: std::sync::atomic::AtomicBool::new(false),
         }
@@ -209,6 +216,19 @@ impl CallbackCell {
     #[inline(always)]
     fn debug_enter(&self) {}
 
+    /// Reset the Title/Bell sliding windows so a pre-clear flood does
+    /// not strand the post-clear session's budget. Mirrors the PtyWrite
+    /// reset on `bb_term_clear_all` (audit H-3); added with the caps in
+    /// audit S1-002.
+    ///
+    /// # Safety
+    /// Caller must ensure no concurrent access.
+    unsafe fn reset_event_rates(&self) {
+        let _busy = self.debug_enter();
+        *self.title_rate.get() = EventRateState::new();
+        *self.bell_rate.get() = EventRateState::new();
+    }
+
     /// Update the stored callback and context.
     ///
     /// # Safety
@@ -221,11 +241,12 @@ impl CallbackCell {
     /// Invoke the stored callback if one is registered.
     ///
     /// `BBEventKind::PtyWrite` events go through the shared rate cap
-    /// (audit M1 + H-4); excess PtyWrites silently drop here. All other
-    /// kinds are dispatched unconditionally — the rate gate is specific
-    /// to PTY reply traffic that a hostile shell can fan out unboundedly
-    /// (DSR, DA1/DA2, DECXCPR replies, OSC 10/11/12 color responses,
-    /// XTGETTCAP responses).
+    /// (audit M1 + H-4); `Title` and `Bell` go through their own caps
+    /// (audit S1-002 — see `TITLE_EVENT_PER_SECOND`). Excess events
+    /// silently drop here. Remaining kinds dispatch unconditionally:
+    /// CwdChanged and PromptMark are rate-gated upstream in the
+    /// OscScanner, Osc52Clipboard is bounded by alacritty's own OSC 52
+    /// handling, and Fatal is one-shot by nature.
     ///
     /// Drop policy: dropped PtyWrites are silent BY DESIGN. Logging
     /// each drop would itself become a flood-amplifier (the very thing
@@ -272,6 +293,20 @@ impl CallbackCell {
         // here. This used to live in RoutingListener::send_event, where
         // it gated only the alacritty-driven path.
         if matches!(event.kind, BBEventKind::PtyWrite) && !self.pty_write_rate.allow() {
+            return;
+        }
+        // Audit S1-002: Title/Bell were the only uncapped event kinds a
+        // hostile byte stream can fan out per-event to the Swift main
+        // queue. Same silent-drop policy as PtyWrite (per-drop logging
+        // would itself amplify the flood).
+        if matches!(event.kind, BBEventKind::Title)
+            && !(*self.title_rate.get()).allow(TITLE_EVENT_PER_SECOND, EVENT_RATE_WINDOW)
+        {
+            return;
+        }
+        if matches!(event.kind, BBEventKind::Bell)
+            && !(*self.bell_rate.get()).allow(BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW)
+        {
             return;
         }
         // Audit M-9 follow-up (2026-04-29): set the
@@ -496,6 +531,57 @@ impl PtyWriteRateCell {
 
 const PTY_WRITE_REPLY_PER_SECOND: u32 = 32;
 const PTY_WRITE_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Sliding-window state for the Title/Bell event caps (audit S1-002).
+/// Same shape as `PtyWriteRateState`, parameterized so one type serves
+/// both kinds. Lives inside `CallbackCell` behind the same
+/// mutual-exclusion discipline as `slot`.
+struct EventRateState {
+    window_start: std::time::Instant,
+    window_count: u32,
+}
+
+impl EventRateState {
+    fn new() -> Self {
+        Self {
+            window_start: std::time::Instant::now(),
+            window_count: 0,
+        }
+    }
+
+    fn allow(&mut self, cap: u32, window: std::time::Duration) -> bool {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.window_start) >= window {
+            self.window_start = now;
+            self.window_count = 0;
+        }
+        if self.window_count >= cap {
+            return false;
+        }
+        self.window_count += 1;
+        true
+    }
+}
+
+/// Title-event cap (audit S1-002). Every `Event::Title`/`Event::Bell`
+/// used to dispatch uncapped — only PtyWrite had a budget — and the
+/// Swift side enqueues one main-queue hop per event (titles amplify
+/// further through @Published → window.title → KVO → tab-bar refresh
+/// broadcast). A stream of `ESC]0;x BEL` (`yes $'\e]0;x\a'`, a hostile
+/// remote, or catting a binary full of BEL bytes) therefore saturated
+/// the main queue with an unbounded backlog of retained Strings — the
+/// same flood class the F1 snapshot coalescer and M1 PtyWrite cap
+/// already closed on their paths. 32/sec matches the PtyWrite budget:
+/// legitimate shells emit a couple of titles per prompt and animated
+/// build tools stay well under. Excess drops keep the FIRST events in
+/// each window, so a flood shows a stale title until the next admitted
+/// event — self-healing, since shells re-emit per prompt.
+const TITLE_EVENT_PER_SECOND: u32 = 32;
+/// Bell-event cap (audit S1-002, same rationale as the title cap).
+/// 16/sec is far above perception — the Swift bell flash visually
+/// coalesces long before that.
+const BELL_EVENT_PER_SECOND: u32 = 16;
+const EVENT_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl PtyWriteRateState {
     fn new() -> Self {
@@ -3608,6 +3694,7 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         bb.osc7_rate = Osc7RateState::new();
         bb.modify_other_keys = 0;
         bb.callback.pty_write_rate.reset();
+        bb.callback.reset_event_rates();
 
         // OSC 8 URI intern cache: drain unconditionally. Audit S5-002.
         //
