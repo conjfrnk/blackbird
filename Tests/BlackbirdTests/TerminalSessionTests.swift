@@ -565,4 +565,118 @@ final class TerminalSessionTests: XCTestCase {
         XCTAssertNil(session._testPromptCursor,
                      "clearAll must drop the prompt-jump cursor (H-6)")
     }
+
+    /// Audit S5-008 (the ⌘K race): an OSC 133;A fed on the core queue
+    /// schedules its prompt-mark ring append onto main. If ⌘K
+    /// (`clearAll`) fires in the gap, the in-flight append used to land
+    /// AFTER the clear and deterministically re-insert a mark pointing
+    /// at scrollback that no longer exists. Post-fix, the clear
+    /// invalidates appends that were in flight when it ran, so pumping
+    /// main after `clearAll()` must leave the ring empty.
+    ///
+    /// Pre-flight cost (project rule): two ~10-byte feeds into one
+    /// headless session + ≤ 200 ms of runloop pumping. Trivial memory;
+    /// no PTY.
+    func test_clearAll_invalidatesInFlightPromptMarkAppend() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
+                      "RunLoop-pumping test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the S5-008 race invariant")
+        let session = TerminalSession.makeHeadlessForTests()
+        defer { session.terminate() }
+
+        // Feed the prompt-start mark. The BBTerm event fires
+        // synchronously on coreQueue inside this call; the session's
+        // ring append hops to main and is still queued when this
+        // returns.
+        session.feedBytesForTests(Data("\u{1B}]133;A\u{07}".utf8))
+
+        // IMMEDIATELY clear on main — deliberately WITHOUT draining the
+        // main queue first, so the append above is still in flight.
+        session.clearAll()
+
+        // Pump the main runloop so the in-flight append either lands
+        // (pre-fix behaviour) or gets discarded (post-fix).
+        for _ in 0..<5 {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        XCTAssertEqual(
+            session.promptMarks, [],
+            "an OSC 133 mark append in flight across clearAll() must be "
+            + "discarded, not re-inserted (S5-008)"
+        )
+
+        // Non-vacuity control: the identical feed → pump shape DOES
+        // append when no clear races it. Without this, a session that
+        // never routes OSC 133 into the ring at all would green-light
+        // the assertion above for the wrong reason.
+        session.feedBytesForTests(Data("\u{1B}]133;A\u{07}".utf8))
+        for _ in 0..<5 {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        XCTAssertEqual(
+            session.promptMarks.count, 1,
+            "control: an un-raced OSC 133;A must append exactly one mark — "
+            + "otherwise the empty-ring assertion above is vacuous"
+        )
+    }
+
+    /// Audit S1-007: `resize(to:)` / `resizeAsync(to:)` on an
+    /// already-terminated session must return cleanly instead of
+    /// tripping the false "core panicked" path.
+    ///
+    /// Limitation, stated per the contract: the fixed defect was a
+    /// spurious panic line in the unified log, and xctest has no clean
+    /// way to assert on os_log output. This test therefore pins only
+    /// the behavioural half: both calls return, nothing crashes, and
+    /// the dead session's published snapshot stays untouched. The
+    /// log-side half is verifiable manually via
+    /// `log stream --predicate 'subsystem == "dev.conjfrnk.blackbird"'`.
+    ///
+    /// Pre-flight cost: one headless session resized to 100×30 ≈ 3 000
+    /// cells ≈ ~48 KB + lazily-allocated scrollback; ~150 ms wall
+    /// (dominated by one deliberate sleep). No runloop pumping — plain
+    /// `Thread.sleep` — so this test stays un-gated.
+    func test_resizeAfterTerminate_returnsCleanly() throws {
+        let session = TerminalSession.makeHeadlessForTests()
+
+        // Control: resize demonstrably works while the session is
+        // live, so the post-terminate calls below exercise a path that
+        // does something when alive (guards against a vacuous pass via
+        // a resize that is a no-op in headless mode).
+        session.resize(to: .init(cols: 100, rows: 30))
+        let live = try XCTUnwrap(
+            session.takeSnapshotForTests(),
+            "live headless session must produce a snapshot"
+        )
+        XCTAssertEqual(live.cols, 100, "control resize must apply while live")
+        XCTAssertEqual(live.rows, 30, "control resize must apply while live")
+
+        session.terminate()
+        let publishedBefore = session.snapshot?.sequenceID
+
+        // The S1-007 surface: both resize entry points after
+        // terminate(). Pre-fix these logged a false core-panic; the
+        // pinned behaviour is that they return cleanly.
+        session.resizeAsync(to: .init(cols: 100, rows: 30))
+        session.resize(to: .init(cols: 90, rows: 28))
+
+        // Give the async variant wall-time to run whatever block it
+        // queued, so a crash inside it surfaces in THIS test rather
+        // than in a random later one. Thread.sleep, not a runloop
+        // pump: pumping tests SEGV under cumulative ASan and must hide
+        // behind BB_RUN_STRESS_TESTS, which would gut this guard's CI
+        // value.
+        Thread.sleep(forTimeInterval: 0.1)
+
+        // Reaching here means both calls returned. The published
+        // snapshot must be untouched (the terminate gate forbids
+        // post-terminate publishes; with no main pump having run, any
+        // violation would only surface later — this read is the
+        // nil-safe belt-and-braces half).
+        XCTAssertEqual(
+            session.snapshot?.sequenceID, publishedBefore,
+            "post-terminate resize must not publish a new snapshot (S1-007)"
+        )
+        // Teardown stays idempotent after the post-terminate resizes.
+        session.terminate()
+    }
 }

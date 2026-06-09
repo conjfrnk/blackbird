@@ -396,6 +396,159 @@ final class PTYTests: XCTestCase {
         XCTAssertFalse(result, "tic=0 + probe=false should return false (fallback)")
     }
 
+    /// Audit S1-001: writes against a child that NEVER reads its stdin
+    /// must not wedge the writer. `/bin/sh -c 'sleep 30'` is a
+    /// deterministic non-reader — the kernel tty input buffer fills
+    /// after ~1 KiB and stays full for the child's lifetime. Pre-fix,
+    /// a `writeImmediate` issued after the buffer filled parked inside
+    /// the kernel `write(2)` indefinitely — i.e. Ctrl+C against a
+    /// stuck child was exactly the keystroke that could never be
+    /// delivered.
+    ///
+    /// Contract pinned here:
+    ///  (a) `pty.write(64 KiB)` RETURNS without blocking on the full
+    ///      kernel buffer (the flush may proceed asynchronously);
+    ///  (b) a subsequent `writeImmediate(0x03)` — the Ctrl+C shape —
+    ///      returns in well under a second instead of wedging;
+    ///  (c) `pty.terminate()` (the deferred teardown) still completes.
+    ///
+    /// Pre-flight cost (project rule): one 64 KiB Data + one /bin/sh
+    /// child; < 1 s wall on the green path. One live shell, gated like
+    /// every other real-spawn test in this file.
+    func test_writeAgainstNonReadingChild_doesNotWedgeWriteImmediate() throws {
+        try Self.skipIfFlakyOnCI()
+        let pty = try PTY.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 30"],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        // Contract (c): teardown still completes — the defer runs
+        // before the test method returns; a terminate() hang would
+        // surface as a suite-level timeout, loudly.
+        defer { pty.terminate() }
+        // Drain the master side so tty ECHO of our 64 KiB can't add a
+        // second, unrelated blocking dimension on the read path.
+        pty.setOnBytes { _ in }
+        pty.startReading()
+
+        // (a) The 64 KiB write call must return promptly even though
+        // the child will never drain it.
+        let payload = Data(repeating: 0x61, count: 64 * 1024)
+        let writeStart = Date()
+        pty.write(payload)
+        let writeReturned = Date().timeIntervalSince(writeStart)
+        XCTAssertLessThan(
+            writeReturned, 1.0,
+            "pty.write(64 KiB) blocked \(writeReturned)s against a non-reading child (S1-001)"
+        )
+
+        // (b) writeImmediate must complete in bounded time. Issue it
+        // off the test thread so a regression fails this expectation's
+        // timeout instead of parking the whole xctest host in the
+        // kernel with no failure report.
+        var immediateElapsed: TimeInterval = -1
+        let returned = expectation(description: "writeImmediate returned")
+        DispatchQueue.global().async {
+            let t0 = Date()
+            pty.writeImmediate(Data([0x03]))  // the Ctrl+C shape
+            immediateElapsed = Date().timeIntervalSince(t0)
+            returned.fulfill()
+        }
+        wait(for: [returned], timeout: 5.0)
+        XCTAssertGreaterThanOrEqual(
+            immediateElapsed, 0,
+            "writeImmediate never returned — parked in the kernel (S1-001 pre-fix shape)"
+        )
+        XCTAssertLessThan(
+            immediateElapsed, 1.0,
+            "writeImmediate took \(immediateElapsed)s against a full kernel tty buffer — "
+            + "must stay well under 1 s (S1-001)"
+        )
+    }
+
+    /// Audit S2-001: `setOnBytes` called mid-session (after
+    /// `startReading()`) must swap the live read loop's consumer —
+    /// bytes produced after the swap go to the NEW closure and never
+    /// to the old one. A consumer that rebinds its handler (view
+    /// re-attach, session adoption) must not keep feeding a dead
+    /// closure.
+    ///
+    /// Pre-flight cost: one /bin/zsh -f child, a few hundred bytes of
+    /// prompt + echo traffic, < 6 s wall worst case. One live shell,
+    /// gated like the file's other real-spawn tests.
+    func test_setOnBytes_swapMidSession_routesPostSwapBytesToNewClosureOnly() throws {
+        try Self.skipIfFlakyOnCI()
+        let pty = try PTY.spawn(
+            executable: "/bin/zsh",
+            arguments: ["-f"],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        defer { pty.terminate() }
+
+        let lock = NSLock()
+        var bytesA = Data()
+        var bytesB = Data()
+
+        // Closure A: the initial consumer. Collects zsh's startup
+        // output (prompt etc.).
+        pty.setOnBytes { chunk in
+            lock.lock()
+            bytesA.append(chunk)
+            lock.unlock()
+        }
+        pty.startReading()
+
+        // Give zsh time to start and emit its initial prompt to A.
+        // After the prompt, zsh sits in read(2) and produces nothing
+        // until we send input — which we only do AFTER the swap, so
+        // the two closure regimes are separated in time.
+        Thread.sleep(forTimeInterval: 0.3)
+
+        lock.lock()
+        let aCountAtSwap = bytesA.count
+        lock.unlock()
+
+        // Swap to closure B mid-session, then produce fresh output
+        // carrying a nonce. The nonce bytes did not exist anywhere
+        // before the swap, so EITHER closure seeing them is an
+        // unambiguous post-swap delivery.
+        let nonce = "nonce-zz123"
+        let sawNonce = expectation(description: "closure B saw the nonce")
+        var fulfilled = false
+        pty.setOnBytes { chunk in
+            lock.lock()
+            bytesB.append(chunk)
+            let hit = bytesB.contains(Data(nonce.utf8))
+            lock.unlock()
+            if hit, !fulfilled {
+                fulfilled = true
+                sawNonce.fulfill()
+            }
+        }
+        pty.write(Data("echo \(nonce)\r".utf8))
+        wait(for: [sawNonce], timeout: 5.0)
+
+        lock.lock()
+        let aFinal = bytesA
+        let bFinal = bytesB
+        lock.unlock()
+        XCTAssertTrue(
+            bFinal.contains(Data(nonce.utf8)),
+            "post-swap output must reach closure B (S2-001)"
+        )
+        XCTAssertFalse(
+            aFinal.contains(Data(nonce.utf8)),
+            "closure A saw the post-swap nonce — setOnBytes swap did not apply mid-session (S2-001)"
+        )
+        XCTAssertEqual(
+            aFinal.count, aCountAtSwap,
+            "closure A must receive nothing after the swap point — got "
+            + "\(aFinal.count - aCountAtSwap) extra byte(s) (S2-001)"
+        )
+    }
+
     /// Audit M2: bytes the shell emits before the consumer wires `onBytes`
     /// must NOT be dropped on the floor. The contract changed: `PTY.spawn`
     /// no longer starts the read loop; `startReading()` is the explicit
