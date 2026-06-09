@@ -36,8 +36,19 @@ pass "plutil -lint accepts the plist"
 # Extract individual keys via plutil -extract. Using `raw` format gives
 # us the bare string value without quotes/escapes.
 extract_key() {
-    local key="$1"
-    plutil -extract "$key" raw "$PLIST" -o - 2>/dev/null || echo "<missing>"
+    # Branch on plutil's EXIT STATUS and discard its output on failure:
+    # some macOS releases print "Could not extract value, error: ..." to
+    # STDOUT (not stderr) for a missing key, so the old
+    # `plutil ... || echo "<missing>"` captured the error text AND the
+    # sentinel — the "if present" guards then misread a missing key as a
+    # present-but-wrong value. First surfaced when the harness started
+    # running on CI runners (GHA macos-14/15) whose plutil does this.
+    local key="$1" out
+    if out="$(plutil -extract "$key" raw "$PLIST" -o - 2>/dev/null)"; then
+        printf '%s' "$out"
+    else
+        echo "<missing>"
+    fi
 }
 
 METHOD="$(extract_key method)"
