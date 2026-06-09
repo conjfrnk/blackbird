@@ -371,30 +371,30 @@ public final class GlyphAtlas {
         // insert can reclaim them (audit glyph-atlas F4) — pre-fix they
         // were dead for the atlas's lifetime.
         var slot = nextSlot
+        // Orphans produced by wide row-alignment are STAGED here and
+        // committed to `freeNarrowSlots` only after rasterization
+        // succeeds (audit S2-005). The previous shape appended them
+        // before rasterizing; a rasterize failure (CGContext alloc, or
+        // the supported ensureRealColorTexture failure under GPU memory
+        // pressure) then returned nil WITHOUT advancing `nextSlot`,
+        // leaving the orphan simultaneously free-listed AND reachable
+        // via `nextSlot`: a narrow reclaim plus the next fresh insert
+        // cached two entries aliasing one atlas region (cells
+        // persistently rendered the wrong character until a flush), and
+        // a retry of the same wide glyph re-staged the same index and
+        // tripped the L15 double-append assert in DEBUG — the exact
+        // "nextSlot only ever moves forward" assumption the failure
+        // path violated.
+        var pendingOrphans: [Int] = []
         if wide {
             let col = slot % slotCols
             if col + slotsNeeded > slotCols {
                 // Record every single-slot gap we're skipping over. In
                 // the common `col == slotCols - 1` case that's exactly
                 // one slot; a theoretical multi-slot gap from a future
-                // >2-slot wide glyph is also handled.
-                //
-                // Audit L15. The append is conditional on the slot not
-                // already being in `freeNarrowSlots`. Currently
-                // unreachable — the saturation flush wipes the array
-                // on every overflow and `nextSlot` only ever moves
-                // forward — but a future change that moves the
-                // alignment skip above the flush check, or any other
-                // non-monotonic pointer math, could land the same
-                // index here twice. `popLast()` would then hand the
-                // same slot to two different glyphs (atlas region
-                // alias). The assertion fires loud in DEBUG to catch
-                // the regression at the introduction site.
-                for orphan in slot..<(slot / slotCols + 1) * slotCols {
-                    assert(!freeNarrowSlots.contains(orphan),
-                           "freeNarrowSlots double-append for slot=\(orphan); two glyphs would alias the same atlas region")
-                    freeNarrowSlots.append(orphan)
-                }
+                // >2-slot wide glyph is also handled. (Audit L15 /
+                // glyph-atlas F4.)
+                pendingOrphans = Array(slot..<(slot / slotCols + 1) * slotCols)
                 slot = (slot / slotCols + 1) * slotCols
             }
         }
@@ -438,8 +438,11 @@ public final class GlyphAtlas {
             slot = 0
             // Stale orphan records point into the pre-flush layout;
             // discard so the post-flush narrow-reclaim path doesn't
-            // hand out slots that overlap newly-allocated ones.
+            // hand out slots that overlap newly-allocated ones. The
+            // STAGED orphans from this very insert are pre-flush layout
+            // too — drop them with it (audit S2-005).
             freeNarrowSlots.removeAll(keepingCapacity: true)
+            pendingOrphans.removeAll()
             // Bump generation. Cached row UVs from MetalRenderer
             // anchored to the pre-flush slot layout will still be
             // valid byte-wise but point at whatever the post-flush
@@ -468,7 +471,24 @@ public final class GlyphAtlas {
         // cached as a permanently-blank entry pointing at unwritten / 1×1-
         // placeholder bytes. Same contract as the atlas-full path above.
         guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style, color: colorPath, emojiPresentation: emojiPresentation) else {
+            // No bookkeeping was mutated: staged orphans are discarded
+            // with this return and `nextSlot` is unadvanced, so the
+            // retry re-runs the alignment from a clean slate (audit
+            // S2-005).
             return nil
+        }
+
+        // Rasterization landed — NOW commit the staged alignment
+        // orphans so narrow inserts can reclaim them (glyph-atlas F4).
+        // The L15 double-append assert stays as a tripwire: with the
+        // commit deferred past every failure path it should be truly
+        // unreachable; if it ever fires, some new non-monotonic
+        // `nextSlot` math landed the same index twice and `popLast()`
+        // would alias one atlas region to two glyphs.
+        for orphan in pendingOrphans {
+            assert(!freeNarrowSlots.contains(orphan),
+                   "freeNarrowSlots double-append for slot=\(orphan); two glyphs would alias the same atlas region")
+            freeNarrowSlots.append(orphan)
         }
 
         let entry = Self.makeEntry(
