@@ -711,12 +711,31 @@ public final class PTY {
         // terminates the entire process — a single keystroke or IME
         // commit racing the shell exit can take Blackbird down. With
         // the flag set the same condition produces EPIPE on the
-        // syscall, which writeRawLocked logs and treats as fatal for
+        // syscall, which flushPendingLocked logs and treats as fatal for
         // that one write rather than the whole process. Audit H1.
         if Darwin.fcntl(masterFD, F_SETNOSIGPIPE, 1) < 0 {
             let savedErrno = errno
             Self.logger.error(
                 "PTY.init: F_SETNOSIGPIPE failed errno=\(savedErrno, privacy: .public) fd=\(masterFD, privacy: .public) — process is at risk of SIGPIPE-termination on master writes after slave close"
+            )
+        }
+        // O_NONBLOCK on the master (audit S1-001). With a BLOCKING fd, a
+        // raw-mode child that stops reading stdin (suspended, hung) lets
+        // the kernel tty input queue (~1 KB) fill, and the next write
+        // parks INSIDE Darwin.write holding the serial writeQueue
+        // indefinitely — writeImmediate's `.sync` callers (the main
+        // thread's Ctrl+letter fast path, coreQueue's focusChanged) then
+        // park behind it: app-wide beachball, unrecoverable via ⌘W
+        // because teardown also needs the main thread. Non-blocking
+        // writes return EAGAIN instead; the remainder lands in
+        // `pendingWrite` and drains on a bounded retry cadence. The read
+        // loop compensates by parking in poll(POLLIN) on EAGAIN rather
+        // than spinning.
+        let fdFlags = Darwin.fcntl(masterFD, F_GETFL, 0)
+        if fdFlags < 0 || Darwin.fcntl(masterFD, F_SETFL, fdFlags | O_NONBLOCK) < 0 {
+            let savedErrno = errno
+            Self.logger.error(
+                "PTY.init: O_NONBLOCK failed errno=\(savedErrno, privacy: .public) fd=\(masterFD, privacy: .public) — writes degrade to blocking; a non-reading child can wedge the write queue (audit S1-001 mitigation inactive)"
             )
         }
         // Capture the child's BSD start time at spawn so the SIGKILL
@@ -795,7 +814,27 @@ public final class PTY {
                 // is unrecoverable; log and tear down.
                 let savedErrno = errno
                 if savedErrno == EINTR { continue }
-                if savedErrno == EAGAIN || savedErrno == EWOULDBLOCK { continue }
+                if savedErrno == EAGAIN || savedErrno == EWOULDBLOCK {
+                    // The master is O_NONBLOCK (audit S1-001 — so WRITES
+                    // can't wedge the write queue). Reads get their
+                    // blocking behaviour back by parking in poll until
+                    // readable; a bare `continue` here would spin at
+                    // 100% CPU on an idle shell. Teardown still works
+                    // exactly like the blocking-read era: SIGHUP → child
+                    // exits → slave closes → POLLIN/POLLHUP wakes us →
+                    // read returns 0/EIO → loop exits.
+                    var pfd = pollfd(fd: self.masterFD, events: Int16(POLLIN), revents: 0)
+                    let rc = poll(&pfd, 1, -1)
+                    if rc < 0 && errno != EINTR {
+                        let pollErrno = errno
+                        Self.logger.log(
+                            "PTY.read poll error errno=\(pollErrno, privacy: .public) fd=\(self.masterFD, privacy: .public) — tearing down"
+                        )
+                        self.markStopped()
+                        break
+                    }
+                    continue
+                }
                 Self.logger.log(
                     "PTY.read error errno=\(savedErrno, privacy: .public) fd=\(self.masterFD, privacy: .public) — tearing down"
                 )
@@ -891,8 +930,7 @@ public final class PTY {
     public func write(_ data: Data) {
         writeQueue.async { [weak self] in
             guard let self, self.shouldKeepRunning() else { return }
-            // Retry loop on EINTR / EAGAIN is shared with writeImmediate.
-            _ = self.writeRawLocked(data)
+            self.sendLocked(data)
         }
     }
 
@@ -907,59 +945,124 @@ public final class PTY {
     /// has already marked us stopped. Lock order is `writeQueue →
     /// stateQueue` — same as `write()` — so no circular wait with
     /// teardown's `markStopped; writeQueue.sync {}; close(fd)` sequence.
+    ///
+    /// Boundedness (audit S1-001): the master is O_NONBLOCK and every
+    /// writeQueue task returns promptly (EAGAIN buffers the remainder
+    /// instead of parking in the kernel), so this `.sync` can no longer
+    /// wedge the caller — previously a raw-mode child that stopped
+    /// reading let a paste block writeQueue inside Darwin.write and the
+    /// main thread's Ctrl+letter fast path beachballed the app behind
+    /// it, with ⌘W recovery impossible (teardown needs main too).
     public func writeImmediate(_ data: Data) {
         writeQueue.sync {
             guard self.shouldKeepRunning() else { return }
-            _ = self.writeRawLocked(data)
+            self.sendLocked(data)
         }
     }
 
-    /// Private helper that performs the actual Darwin.write retry loop on
-    /// the caller's current queue. Caller MUST hold writeQueue (either via
-    /// `.async` in `write` or `.sync` in `writeImmediate`). Returns true
-    /// when the whole payload was delivered.
-    @discardableResult
-    private func writeRawLocked(_ data: Data) -> Bool {
-        let fd = self.masterFD
-        var delivered = true
-        data.withUnsafeBytes { rawBuf -> Void in
-            guard let base = rawBuf.baseAddress else { delivered = false; return }
-            var remaining = rawBuf.count
-            var offset = 0
-            while remaining > 0 {
-                let written = Darwin.write(fd, base.advanced(by: offset), remaining)
-                if written > 0 {
-                    remaining -= written
-                    offset += written
-                    continue
-                }
-                if errno == EINTR { continue }
-                if errno == EAGAIN || errno == EWOULDBLOCK {
-                    // EAGAIN doesn't normally fire on a blocking fd
-                    // (which we open by default), but a future
-                    // refactor could flip the master to O_NONBLOCK and
-                    // a tight `continue` loop here would burn 100% CPU
-                    // until the kernel buffer drains. Sleep briefly to
-                    // yield back the scheduler on each retry. Audit
-                    // pty F7.
-                    usleep(200)
-                    continue
-                }
-                // SFH-001: log in Release too. A PTY write that fails with
-                // EPIPE / EIO / ENOSPC silently vanishes a user keystroke or
-                // IME commit — the user sees no shell response and no
-                // diagnostic trail. `log stream --predicate 'subsystem ==
-                // "dev.conjfrnk.blackbird"'` now surfaces the errno in
-                // production.
-                let savedErrno = errno
+    // MARK: Pending-write buffering (audit S1-001)
+
+    /// Bytes the kernel wouldn't take yet (tty input queue full — child
+    /// not reading). Accessed ONLY on `writeQueue`. FIFO with respect to
+    /// new writes: `sendLocked` always appends before flushing, so byte
+    /// order is preserved even when a drain retry interleaves with new
+    /// keystrokes.
+    private var pendingWrite = Data()
+    /// True while a drain retry is scheduled on `writeQueue`; avoids
+    /// stacking redundant timers. Accessed only on `writeQueue`.
+    private var pendingDrainScheduled = false
+    /// One-shot latch for the overflow log. Accessed only on `writeQueue`.
+    private var pendingOverflowLogged = false
+    /// Cap on buffered-but-undelivered bytes. A stopped child means the
+    /// user pasted into a wedged program; 4 MiB absorbs any realistic
+    /// paste while bounding memory if a script floods writes at a
+    /// never-reading child. Excess NEW bytes are dropped with a log —
+    /// preserving the oldest bytes keeps the stream prefix coherent for
+    /// when the child resumes.
+    private static let pendingWriteCap = 4 * 1024 * 1024
+    /// Drain retry cadence. Only ticks while bytes are pending against a
+    /// full kernel queue — i.e. only in the pathological stopped-child
+    /// state — so the polling cost is irrelevant; latency on resume is
+    /// one tick at worst.
+    private static let pendingDrainInterval: DispatchTimeInterval = .milliseconds(10)
+
+    /// Queue/deliver bytes. Caller MUST hold writeQueue. Appends to the
+    /// pending buffer (capped) then flushes as much as the kernel will
+    /// take; any remainder stays buffered with a drain retry scheduled.
+    private func sendLocked(_ data: Data) {
+        let room = Self.pendingWriteCap - pendingWrite.count
+        if data.count <= room {
+            pendingWrite.append(data)
+        } else {
+            if room > 0 {
+                pendingWrite.append(data.prefix(room))
+            }
+            if !pendingOverflowLogged {
+                pendingOverflowLogged = true
                 Self.logger.error(
-                    "PTY.write FAILED after \(offset, privacy: .public)/\(rawBuf.count, privacy: .public) bytes errno=\(savedErrno, privacy: .public) fd=\(fd, privacy: .public)"
+                    "PTY.write pending buffer full (\(Self.pendingWriteCap, privacy: .public) bytes) — child not reading; dropping \(data.count - max(room, 0), privacy: .public) newest bytes (one-shot log)"
                 )
-                delivered = false
-                break
             }
         }
-        return delivered
+        flushPendingLocked()
+    }
+
+    /// Push pending bytes into the kernel until it pushes back. Caller
+    /// MUST hold writeQueue.
+    private func flushPendingLocked() {
+        let fd = self.masterFD
+        while !pendingWrite.isEmpty {
+            let written: Int = pendingWrite.withUnsafeBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return 0 }
+                return Darwin.write(fd, base, raw.count)
+            }
+            if written > 0 {
+                pendingWrite.removeFirst(written)
+                continue
+            }
+            if errno == EINTR { continue }
+            if errno == EAGAIN || errno == EWOULDBLOCK {
+                // Kernel tty queue full (child not reading). Keep the
+                // remainder and retry on a bounded cadence — the write
+                // queue task RETURNS here, which is the entire point of
+                // audit S1-001: no caller ever parks behind a full tty.
+                scheduleDrainLocked()
+                return
+            }
+            // SFH-001: log in Release too. A PTY write that fails with
+            // EPIPE / EIO / ENOSPC silently vanishes a user keystroke or
+            // IME commit — the user sees no shell response and no
+            // diagnostic trail. `log stream --predicate 'subsystem ==
+            // "dev.conjfrnk.blackbird"'` surfaces the errno in
+            // production. Hard errors drop the buffer: the fd is gone or
+            // the line is dead, and retrying would loop forever.
+            let savedErrno = errno
+            Self.logger.error(
+                "PTY.write FAILED with \(self.pendingWrite.count, privacy: .public) bytes undelivered errno=\(savedErrno, privacy: .public) fd=\(fd, privacy: .public)"
+            )
+            pendingWrite.removeAll()
+            return
+        }
+    }
+
+    /// Schedule one drain retry on writeQueue. Caller MUST hold
+    /// writeQueue. Teardown safety: the retry re-checks
+    /// `shouldKeepRunning()` before touching the fd, and the read-loop
+    /// teardown's `markStopped → writeQueue.sync {} → close(fd)`
+    /// sequence guarantees a retry firing after close observes the
+    /// stopped state and bails without writing.
+    private func scheduleDrainLocked() {
+        guard !pendingDrainScheduled else { return }
+        pendingDrainScheduled = true
+        writeQueue.asyncAfter(deadline: .now() + Self.pendingDrainInterval) { [weak self] in
+            guard let self else { return }
+            self.pendingDrainScheduled = false
+            guard self.shouldKeepRunning() else {
+                self.pendingWrite.removeAll()
+                return
+            }
+            self.flushPendingLocked()
+        }
     }
 
 
