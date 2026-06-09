@@ -72,8 +72,14 @@ echo "==> Verifying code signature"
 # ... missing" messages when signatures failed; on failure, dump the full
 # log so the operator can actually see what's wrong. Audit scripts-release
 # F6.
-CODESIGN_LOG="$(codesign --verify --strict --deep --verbose=2 "$APP_DST" 2>&1)"
-CODESIGN_STATUS=$?
+#
+# The `|| CODESIGN_STATUS=$?` is load-bearing: under `set -e`, a bare
+# `VAR="$(failing-cmd)"` assignment is itself a failing command and kills
+# the script at this line — with codesign's stderr captured into the
+# discarded substitution, a verify failure printed NOTHING, which was
+# exactly the silent failure F6 set out to fix. Audit S2-008 / F-S8-001.
+CODESIGN_STATUS=0
+CODESIGN_LOG="$(codesign --verify --strict --deep --verbose=2 "$APP_DST" 2>&1)" || CODESIGN_STATUS=$?
 if [[ $CODESIGN_STATUS -ne 0 ]]; then
     echo "!! Code signature verification failed (exit $CODESIGN_STATUS)."
     echo "$CODESIGN_LOG" >&2
