@@ -368,18 +368,20 @@ fn d_marks_are_rate_limited_like_a_b_c() {
     unsafe {
         let term = bb_term_new(20, 3, 100);
         let cap = install_capture(term);
-        // PROMPT_MARK_PER_SECOND = 16. Burst 50 D dispatches in one
-        // input; the rate limiter must drop the excess.
-        let mut burst = Vec::with_capacity(50 * 16);
-        for _ in 0..50 {
+        // PROMPT_MARK_PER_SECOND = 240 (audit S5-009 resized the budget
+        // so interactive key-repeat can't exhaust it; the cap itself —
+        // RC-03's point — still applies to all four kinds). Burst 300 D
+        // dispatches in one input; the limiter must drop the excess.
+        let mut burst = Vec::with_capacity(300 * 10);
+        for _ in 0..300 {
             burst.extend_from_slice(b"\x1b]133;D;0\x07");
         }
         bb_term_input(term, burst.as_ptr(), burst.len());
         let events = cap.lock().unwrap().events.clone();
         let marks = collect_marks(&events);
         assert!(
-            marks.len() <= 16,
-            "D-mark rate limit not enforced: {} marks fired",
+            marks.len() <= 240,
+            "D-mark rate limit not enforced: {} marks fired (cap 240)",
             marks.len()
         );
         // And we should still see at least one — the limiter is a cap,

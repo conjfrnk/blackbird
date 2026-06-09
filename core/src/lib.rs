@@ -690,6 +690,12 @@ struct OscScanner<'a> {
     /// one-shot rule as the D-path latch so a hostile flood can't drown the
     /// log while still leaving one breadcrumb when prompt marks are dropped.
     osc133_abc_tainted_logged: &'a mut bool,
+    /// One-shot latch for the OSC 133 rate-cap drop path (audit S5-009).
+    /// Dropped marks are user-visible (missing ⌘-navigation entries,
+    /// lost exit codes), so the first drop per session must leave a
+    /// breadcrumb; per-drop logging would amplify the flood the cap
+    /// defends against.
+    osc133_rate_limited_logged: &'a mut bool,
 }
 
 /// Per-terminal sliding-window rate limiter for OSC 133 prompt marks.
@@ -699,20 +705,33 @@ struct OscScanner<'a> {
 /// (cap 200) and rotates legitimate prompt marks out, so ⌘↑/⌘↓ navigation
 /// lands on attacker-authored "fake prompts" — a phishing primitive.
 ///
-/// Policy: at most `PROMPT_MARK_PER_SECOND` A/B/C dispatches per rolling
-/// 1-second window; D (command-end with exit code) is exempt because it
-/// is paired 1:1 with a real C dispatch the user already accepted.
+/// Policy: at most `PROMPT_MARK_PER_SECOND` dispatches per rolling
+/// 1-second window across ALL FOUR kinds (A/B/C/D — see the gate in
+/// `handle_osc133` for why D is included; RC-03).
 ///
 /// The window resets when `Instant::now()` is more than 1 second past
-/// `window_start`. Excess fires within an active window are dropped
-/// silently.
+/// `window_start`. Excess fires within an active window are dropped;
+/// the first drop per session leaves a one-shot breadcrumb (see
+/// `osc133_rate_limited_logged`).
+///
+/// Sizing (audit S5-009, 2026-06-09): the original 16/sec budget was
+/// sized for hostile floods but dropped LEGITIMATE marks at ordinary
+/// interactive rates — the bundled integration emits D+A (precmd) +
+/// B (PS1) per empty prompt cycle and +C per command, so holding
+/// Return at a shell prompt (macOS key-repeat up to ~33 Hz × 3 marks)
+/// produces ~100 marks/sec and cycle 6+'s A marks vanished from ⌘
+/// navigation while their paired Ds desynced. 240/sec is ~2× the
+/// fastest physically-typeable mark rate (33 Hz × 4 marks + margin)
+/// while still bounding a hostile flood to 240 small main-thread hops
+/// per second on the Swift side — the phishing/DoS mitigation #10
+/// cares about is preserved.
 #[derive(Clone, Copy)]
 struct PromptMarkRateState {
     window_start: std::time::Instant,
     window_count: u32,
 }
 
-const PROMPT_MARK_PER_SECOND: u32 = 16;
+const PROMPT_MARK_PER_SECOND: u32 = 240;
 const PROMPT_MARK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// OSC 10/11/12 color-query reply rate limit (audit synthesis bug #17).
@@ -1306,6 +1325,17 @@ impl OscScanner<'_> {
         // invariant the code didn't keep. Including D in the gate
         // restores the comment-vs-code contract.
         if matches!(kind_byte, b'A' | b'B' | b'C' | b'D') && !self.prompt_mark_rate.allow() {
+            // Audit S5-009: dropped marks silently degrade ⌘ prompt
+            // navigation and exit-code chrome — leave one breadcrumb
+            // per session (same one-shot stance as the sibling reject
+            // latches above/below).
+            if !*self.osc133_rate_limited_logged {
+                *self.osc133_rate_limited_logged = true;
+                eprintln!(
+                    "[blackbird_core] OSC 133 prompt-mark rate cap ({PROMPT_MARK_PER_SECOND}/s) \
+                     engaged — dropping excess marks. One-shot per session."
+                );
+            }
             return;
         }
 
@@ -1589,6 +1619,9 @@ pub struct BBTerm {
     /// (audit S3R-001/S3R-002). Same per-instance / one-shot rule as
     /// `osc133_d_nondigit_logged`.
     osc133_abc_tainted_logged: bool,
+    /// One-shot latch for the OSC 133 rate-cap drop breadcrumb (audit
+    /// S5-009). Same per-instance / one-shot rule as its siblings.
+    osc133_rate_limited_logged: bool,
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
     /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
     /// 256+ allocations, but a hostile stream can fan replies across many
@@ -1969,6 +2002,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc7_reject_logged: [false; 8],
             osc133_d_nondigit_logged: false,
             osc133_abc_tainted_logged: false,
+            osc133_rate_limited_logged: false,
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
         });
@@ -2122,6 +2156,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
                     osc7_reject_logged: &mut bb.osc7_reject_logged,
                     osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
                     osc133_abc_tainted_logged: &mut bb.osc133_abc_tainted_logged,
+                    osc133_rate_limited_logged: &mut bb.osc133_rate_limited_logged,
                 };
                 bb.osc_parser.advance(&mut osc, slice);
                 if has_bel {
@@ -2148,6 +2183,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
             osc7_reject_logged: &mut bb.osc7_reject_logged,
             osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
             osc133_abc_tainted_logged: &mut bb.osc133_abc_tainted_logged,
+            osc133_rate_limited_logged: &mut bb.osc133_rate_limited_logged,
         };
         bb.osc_parser.advance(&mut osc, slice);
         bb.processor.advance(&mut bb.term, slice);
