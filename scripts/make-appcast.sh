@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate a Sparkle appcast <item> snippet for the freshest DMG in ./dist.
+# Generate a Sparkle appcast <item> snippet (or with --full, a complete
+# feed) for one DMG: either the one pinned via APPCAST_DMG (the
+# production path — publish-update.sh always pins the artifact it just
+# verified) or, for hand-runs only, the freshest GA DMG in ./dist.
 #
 # Usage:
 #   scripts/make-appcast.sh [--full]
+#   APPCAST_DMG=/abs/path/Blackbird-X.Y.Z[-pre].dmg scripts/make-appcast.sh [--full]
 #
 # Required env:
 #   APPCAST_BASE_URL   — URL prefix where the DMG will be hosted, e.g.
@@ -43,6 +47,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Resolve a relative APPCAST_DMG against the CALLER's cwd BEFORE the cd
+# below switches to the repo root. Otherwise a hand-run from outside the
+# repo would silently re-anchor the path under the repo's dist/ — which
+# is gitignored, never cleaned, and shared with release.sh local builds,
+# so a same-named stale DMG there would be signed instead of the file
+# the operator pointed at, with no diagnostic (the -f and name checks
+# both pass). Review follow-up to audit S2-009/S4-001.
+if [[ -n "${APPCAST_DMG:-}" && "$APPCAST_DMG" != /* ]]; then
+    APPCAST_DMG="$PWD/$APPCAST_DMG"
+fi
 cd "$REPO_ROOT"
 
 : "${APPCAST_BASE_URL:?APPCAST_BASE_URL must be set (e.g. https://dl.example.com/blackbird/)}"
@@ -82,6 +96,16 @@ if [[ "${1:-}" == "--full" ]]; then
 fi
 
 DMG=""
+# Set-but-empty is rejected rather than treated as unset: the header
+# promises "when set, the auto-pick is skipped entirely", and a caller
+# whose path computation produced "" (or a stale `export APPCAST_DMG=`)
+# must not silently degrade to the unverified auto-pick mode this
+# variable exists to bypass. Review follow-up to audit S2-009/S4-001.
+if [[ -n "${APPCAST_DMG+x}" && -z "${APPCAST_DMG}" ]]; then
+    echo "!! APPCAST_DMG is set but empty — refusing to fall back to the dist/ auto-pick." >&2
+    echo "   Unset it for auto-pick, or point it at the DMG to publish." >&2
+    exit 1
+fi
 if [[ -n "${APPCAST_DMG:-}" ]]; then
     # Explicit selection (publish-update.sh path). The name must still
     # carry a semver so the VERSION extraction below stays well-formed;
@@ -159,6 +183,10 @@ fi
 
 DMG_NAME="$(basename "$DMG")"
 VERSION="$(echo "$DMG_NAME" | sed -E 's/^Blackbird-(.*)\.dmg$/\1/')"
+# Selection breadcrumb on stderr (stdout carries the XML): which file is
+# about to be signed and advertised. Makes a wrong-selection incident
+# diagnosable from the operator's scrollback.
+echo "==> Appcast DMG: $DMG (version $VERSION)" >&2
 
 # Extract CFBundleVersion from the built app's Info.plist. This is what
 # Sparkle compares against the installed CFBundleVersion to decide if an
@@ -177,10 +205,43 @@ trap 'hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true; rmdir "$MOUNT_PO
 # hides the volume from Finder so this doesn't spam the sidebar.
 hdiutil attach "$DMG" -nobrowse -noverify -noautoopen -readonly -owners off \
     -mountpoint "$MOUNT_POINT" >/dev/null
+# Both PlistBuddy reads capture-with-status so a missing key/file can't
+# kill the script at the assignment under set -e with the tool's error
+# swallowed by the substitution (the S2-008/S2-010 dead-diagnostic
+# class). The EXIT trap detaches the DMG on the abort paths.
+PB_STATUS=0
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
-    "$MOUNT_POINT/Blackbird.app/Contents/Info.plist")"
+    "$MOUNT_POINT/Blackbird.app/Contents/Info.plist" 2>&1)" || PB_STATUS=$?
+if [[ $PB_STATUS -ne 0 ]]; then
+    echo "!! PlistBuddy could not read CFBundleVersion from the mounted DMG:" >&2
+    echo "   $BUILD" >&2
+    exit 1
+fi
+# Content-level identity check: the app INSIDE the DMG must carry the
+# version the filename claims. The trust-root chain (notarization, Team
+# ID, staple) only proves the artifact is ours — a CI mishap that
+# archives the wrong commit under the right asset name passes all of it,
+# and the feed would then advertise this filename's version with the
+# wrong app's build number. If that build number is ≤ installed builds,
+# Sparkle silently shows "no update" to every client — the exact
+# comparator failure class that shipped broken in v0.1.1. Review
+# follow-up to audit S2-009/S4-001.
+PB_STATUS=0
+APP_SHORT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$MOUNT_POINT/Blackbird.app/Contents/Info.plist" 2>&1)" || PB_STATUS=$?
+if [[ $PB_STATUS -ne 0 ]]; then
+    echo "!! PlistBuddy could not read CFBundleShortVersionString from the mounted DMG:" >&2
+    echo "   $APP_SHORT" >&2
+    exit 1
+fi
 hdiutil detach "$MOUNT_POINT" -quiet
 rmdir "$MOUNT_POINT" 2>/dev/null || true
+
+if [[ "$APP_SHORT" != "$VERSION" ]]; then
+    echo "!! DMG filename says $VERSION but the app inside reports CFBundleShortVersionString=$APP_SHORT." >&2
+    echo "   Refusing to advertise a version the artifact does not carry." >&2
+    exit 1
+fi
 
 if ! [[ "$BUILD" =~ ^[0-9]+$ ]]; then
     echo "!! CFBundleVersion in the shipped app is '$BUILD', not a monotonic integer." >&2

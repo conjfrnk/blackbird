@@ -41,16 +41,22 @@ mk_appcast_fixture() {
     # "$MOUNT_POINT/Blackbird.app/Contents/Info.plist".
     cat >"$root/stub-bin/hdiutil" <<'STUB'
 #!/usr/bin/env bash
-# Parse args looking for `attach` and `-mountpoint <path>`.
-mode=""; mp=""; prev=""
+# Parse args looking for `attach`, the attached DMG path, and
+# `-mountpoint <path>`. The fabricated Info.plist mirrors the real
+# contract: CFBundleShortVersionString matches the version in the
+# attached DMG's filename (make-appcast.sh cross-checks it — a content
+# mismatch is a refusal path tested separately).
+mode=""; mp=""; dmg=""; prev=""
 for arg in "$@"; do
     case "$arg" in
         attach|detach) mode="$arg" ;;
+        *.dmg) dmg="$arg" ;;
     esac
     if [[ "$prev" == "-mountpoint" ]]; then mp="$arg"; fi
     prev="$arg"
 done
 if [[ "$mode" == "attach" && -n "$mp" ]]; then
+    short="$(basename "$dmg" | sed -E 's/^Blackbird-(.*)\.dmg$/\1/')"
     mkdir -p "$mp/Blackbird.app/Contents"
     cat >"$mp/Blackbird.app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -59,6 +65,8 @@ if [[ "$mode" == "attach" && -n "$mp" ]]; then
 <dict>
     <key>CFBundleVersion</key>
     <string>42</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${short}</string>
 </dict>
 </plist>
 PLIST
@@ -82,6 +90,10 @@ run_make_appcast() {
     local rc=0
     (
         cd "$fixture"
+        # Hermetic environment: an APPCAST_DMG leaked from the operator's
+        # shell would silently flip these auto-pick cases onto the
+        # explicit-pin branch (pass-for-wrong-reason hazard).
+        unset APPCAST_DMG
         export PATH="$fixture/stub-bin:$PATH"
         export APPCAST_BASE_URL="https://example.test/blackbird"
         export APPCAST_FEED_URL="https://example.test/appcast.xml"
@@ -156,6 +168,7 @@ case_missing_base_url() {
     local rc=0
     (
         cd "$tmp"
+        unset APPCAST_DMG
         export PATH="$tmp/stub-bin:$PATH"
         unset APPCAST_BASE_URL
         export SIGN_UPDATE="$tmp/stub-bin/sign_update"
@@ -208,26 +221,32 @@ case_full_xml_wellformed() {
     mk_appcast_fixture "$tmp"
     printf 'fake\n' > "$tmp/dist/Blackbird-0.2.0.dmg"
 
-    local log; log="$(mktemp)"
+    # Streams are separated deliberately: the script's contract is
+    # XML on stdout, operator diagnostics (the "==> Appcast DMG:"
+    # selection breadcrumb) on stderr. publish-update.sh relies on
+    # exactly this when it redirects stdout into the staged appcast.
+    local log errlog; log="$(mktemp)"; errlog="$(mktemp)"
     local rc=0
     (
         cd "$tmp"
+        unset APPCAST_DMG
         export PATH="$tmp/stub-bin:$PATH"
         export APPCAST_BASE_URL="https://example.test/blackbird"
         export APPCAST_FEED_URL="https://example.test/appcast.xml"
         export SIGN_UPDATE="$tmp/stub-bin/sign_update"
         bash "$tmp/scripts/make-appcast.sh" --full
-    ) >"$log" 2>&1 || rc=$?
+    ) >"$log" 2>"$errlog" || rc=$?
     assert_eq "$rc" "0" "make-appcast.sh --full exits 0"
 
     # Validate that stdout was a complete RSS document.
     if python3 -c "import xml.etree.ElementTree as E; E.parse('$log')" 2>/dev/null; then
-        pass "make-appcast.sh --full emits well-formed XML"
+        pass "make-appcast.sh --full emits well-formed XML on stdout"
     else
-        fail "make-appcast.sh --full emitted malformed XML"
+        fail "make-appcast.sh --full emitted malformed XML on stdout"
         head -30 "$log" | sed 's/^/      | /' >&2
+        head -5 "$errlog" | sed 's/^/      | stderr: /' >&2
     fi
-    rm -f "$log"
+    rm -f "$log" "$errlog"
 }
 
 # ---------------------------------------------------------------------------
@@ -282,6 +301,7 @@ case_rejects_xml_metachar_in_base_url() {
     local rc=0
     (
         cd "$tmp"
+        unset APPCAST_DMG
         export PATH="$tmp/stub-bin:$PATH"
         # Hostile value: closing-quote that would terminate the
         # <enclosure url="..."> attribute mid-stream.
@@ -469,6 +489,7 @@ case_autopick_skips_prerelease() {
     local rc=0
     (
         cd "$tmp"
+        unset APPCAST_DMG
         export PATH="$tmp/stub-bin:$PATH"
         export APPCAST_BASE_URL="https://example.test/blackbird"
         export APPCAST_FEED_URL="https://example.test/appcast.xml"
