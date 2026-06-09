@@ -262,11 +262,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // Audit S5-006: observe display reconfigurations so the frame
         // autosave can distinguish AppKit's relocation moves from user
         // drags (see screenParametersDidChange / saveCurrentFrame).
-        // NotificationCenter holds the observer weakly via selector
-        // dispatch; removal in deinit is automatic on macOS 11+ but
-        // explicit removal stays in deinit-adjacent teardown via
-        // windowWillClose being unnecessary — selector observers on a
-        // deallocated object are auto-unregistered.
+        // Selector-based observers auto-unregister on dealloc (macOS
+        // 10.11+); no explicit removeObserver needed.
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screenParametersDidChange(_:)),
@@ -543,12 +540,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     ///      windowed-mode frame.
     private func saveCurrentFrame() {
         guard !isPerformingShowWindow else { return }
+        guard let win = window else { return }
         // Audit S5-006 (gate 3): a display reconfiguration is in
         // progress or just happened — the move/resize that triggered us
         // is AppKit relocating the window, not the user. Persisting it
-        // would clobber the user's saved multi-display frame.
-        guard Date() >= suppressFrameSavesUntil else { return }
-        guard let win = window else { return }
+        // would clobber the user's saved multi-display frame. A
+        // USER-driven change bypasses the gate (review follow-up: a
+        // drag finished within the settle window was silently dropped):
+        // AppKit's reconfiguration relocations never occur during a
+        // live left-button drag or a live resize, so those signals
+        // positively identify the user.
+        let userDriven = (NSEvent.pressedMouseButtons & 1) != 0 || win.inLiveResize
+        guard userDriven || Date() >= suppressFrameSavesUntil else { return }
         guard !win.styleMask.contains(.fullScreen) else { return }
         win.saveFrame(usingName: Self.frameAutosaveName)
     }
@@ -1207,8 +1210,14 @@ func nudgeFrameOntoVisibleScreen(
     // keeps the Bug #22 intent (the traffic-light cluster must be
     // grabbable) for normal windows while letting a window smaller than
     // the threshold qualify by being entirely visible in that dimension.
-    let requiredW = min(minimumOnScreenOverlap, frame.width)
-    let requiredH = min(minimumOnScreenOverlap, frame.height)
+    // max(_, 1) guards the degenerate case (review follow-up): a
+    // zero-size frame would make the requirement 0, and the .null
+    // intersection of disjoint rects reads as 0×0 — so a 0×0 frame
+    // ANYWHERE, including far off every screen, would have passed as
+    // "reachable" and stayed invisible, the exact Bug #22 class this
+    // validator exists to prevent.
+    let requiredW = min(minimumOnScreenOverlap, max(frame.width, 1))
+    let requiredH = min(minimumOnScreenOverlap, max(frame.height, 1))
     let reachable = visibleFrames.contains { screen in
         let overlap = frame.intersection(screen)
         return overlap.width >= requiredW
