@@ -414,10 +414,25 @@ public final class BBTerm {
         return String(decoding: buf, as: UTF8.self)
     }
 
+    /// Per-instance snapshot sequence (audit S6-003). Previously
+    /// BBSnapshot drew its sequenceID from a process-global static
+    /// counter shared by EVERY session, so MetalRenderer's coalesced-
+    /// snapshot detection (`seq > lastRendered + 1` ⇒ "this terminal's
+    /// intermediate damage was lost, full rebuild") misfired on every
+    /// frame whenever any background tab produced output — silently
+    /// defeating the partial-row damage fast path in multi-tab use.
+    /// Per-instance numbering restores the heuristic's premise: a gap
+    /// now provably means THIS session took snapshots the renderer
+    /// never saw. Accessed only on the session's serial coreQueue (the
+    /// same discipline as every other bb_term_* call), so a plain var
+    /// suffices.
+    private var snapshotSequence: UInt64 = 0
+
     public func snapshot() -> BBSnapshot? {
         guard let h = handle else { return nil }
         guard let raw = bb_term_take_snapshot(h) else { return nil }
-        return BBSnapshot(retaining: raw)
+        snapshotSequence &+= 1
+        return BBSnapshot(retaining: raw, sequenceID: snapshotSequence)
     }
 
     // MARK: - Event trampoline
@@ -552,31 +567,22 @@ public struct BBTermMode: OptionSet {
 public final class BBSnapshot {
     private let handle: UnsafePointer<BBSnap>
 
-    /// Monotonic sequence id assigned once at init. Every new `BBSnapshot`
-    /// gets a strictly larger number than any previously-allocated one.
-    /// Used by `MetalRenderer.FrameKey` as a dedup token that — unlike the
-    /// raw handle pointer — survives allocator address reuse: an old
+    /// Monotonic PER-SESSION sequence id assigned by the owning
+    /// `BBTerm` (audit S6-003 — was a process-global static shared by
+    /// all sessions, which made cross-tab activity look like coalesced
+    /// snapshots to MetalRenderer and disabled its partial-row damage
+    /// fast path). Every snapshot of one session gets a strictly larger
+    /// number than that session's previous one. Used by
+    /// `MetalRenderer.FrameKey` as a dedup token that — unlike the raw
+    /// handle pointer — survives allocator address reuse: an old
     /// snapshot's handle can be freed and a new snapshot's handle can
     /// land at the same address, which would make a pointer-equality
     /// cache skip a legitimate repaint (see comments there).
     public let sequenceID: UInt64
-    /// Private atomic counter. Using a static OSAtomic-style increment
-    /// via `OSAtomicIncrement64` was considered, but a lock-guarded
-    /// UInt64 is plenty given BBSnapshot init happens a few hundred
-    /// times per second at most.
-    private static let sequenceLock = NSLock()
-    private static var nextSequenceID: UInt64 = 0
-    private static func allocateSequence() -> UInt64 {
-        sequenceLock.lock()
-        nextSequenceID &+= 1
-        let id = nextSequenceID
-        sequenceLock.unlock()
-        return id
-    }
 
-    init(retaining raw: UnsafePointer<BBSnap>) {
+    init(retaining raw: UnsafePointer<BBSnap>, sequenceID: UInt64) {
         self.handle = raw
-        self.sequenceID = Self.allocateSequence()
+        self.sequenceID = sequenceID
     }
 
     deinit {
