@@ -183,9 +183,16 @@ trap 'rm -f "$TMP_APPCAST"' EXIT
 # timestamp + `date -u` to get the same zero-padded UTC RFC 822 shape
 # Sparkle's parser expects ("EEE, dd MMM yyyy HH:mm:ss +0000") and that
 # the existing committed appcast already uses.
-TAG_COMMIT_TS="$(git log -1 --format=%ct "$TAG")"
+# `|| true` keeps the diagnostic below reachable: `git log <missing-tag>`
+# exits 128, and under `set -e` a bare command-substitution assignment
+# aborts the script at this line with only git's raw "fatal: ambiguous
+# argument" — the friendly message was dead code. Reachable when the
+# local clone hasn't fetched the tag (release cut elsewhere / stale
+# clone) even though the GH release exists. Same class as audit S2-010.
+TAG_COMMIT_TS="$(git log -1 --format=%ct "$TAG" 2>/dev/null || true)"
 if [[ -z "$TAG_COMMIT_TS" ]]; then
     echo "!! could not read commit timestamp for tag $TAG" >&2
+    echo "   (is the tag fetched locally? try: git fetch origin --tags)" >&2
     exit 1
 fi
 TAG_PUB_DATE="$(date -u -r "$TAG_COMMIT_TS" +"%a, %d %b %Y %H:%M:%S +0000")"
