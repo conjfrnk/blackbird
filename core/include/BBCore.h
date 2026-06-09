@@ -255,6 +255,12 @@ struct BBEvent {
   BBEventKind kind;
   /**
    * Borrowed pointer into Rust-owned memory; null when `len == 0`.
+   * `CallbackCell::fire` normalizes this invariant at dispatch
+   * (audit S6-001): producers may hand `fire` an empty slice's
+   * `as_ptr()` (non-null) or even a fresh `String`'s
+   * `NonNull::dangling()` — the callback always observes
+   * `payload == NULL ⇔ len == 0`, so a C consumer branching on
+   * non-null per this contract never sees a dangling pointer.
    */
   const uint8_t *payload;
   uintptr_t len;

@@ -90,6 +90,12 @@ pub enum BBEventKind {
 pub struct BBEvent {
     pub kind: BBEventKind,
     /// Borrowed pointer into Rust-owned memory; null when `len == 0`.
+    /// `CallbackCell::fire` normalizes this invariant at dispatch
+    /// (audit S6-001): producers may hand `fire` an empty slice's
+    /// `as_ptr()` (non-null) or even a fresh `String`'s
+    /// `NonNull::dangling()` — the callback always observes
+    /// `payload == NULL ⇔ len == 0`, so a C consumer branching on
+    /// non-null per this contract never sees a dangling pointer.
     pub payload: *const u8,
     pub len: usize,
     /// Cursor-shape variant: 0 = block, 1 = bar, 2 = underline; 0 otherwise.
@@ -198,6 +204,17 @@ impl CallbackCell {
     /// Caller must ensure no concurrent access and that the `BBEvent` fields
     /// are valid for the duration of the call.
     unsafe fn fire(&self, event: BBEvent) {
+        // Audit S6-001: enforce the header's documented nullability
+        // invariant (`payload == NULL ⇔ len == 0`) at the single choke
+        // point every event passes through. Rust producers naturally
+        // violate it: an empty slice's `as_ptr()` is non-null, and an
+        // empty `String`'s `as_ptr()` is `NonNull::dangling()` (0x1) —
+        // a conforming C consumer that branches on `payload != NULL`
+        // per the header would dereference it.
+        let mut event = event;
+        if event.len == 0 {
+            event.payload = std::ptr::null();
+        }
         self.debug_check_thread();
         // Reviewer feedback (2026-04-29): read the callback slot FIRST.
         // If no callback is registered (e.g. `set()` never called or
