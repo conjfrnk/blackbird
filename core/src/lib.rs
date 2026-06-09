@@ -162,12 +162,23 @@ struct CallbackCell {
     busy: std::sync::atomic::AtomicBool,
 }
 
-/// Debug-only RAII overlap detector for the `UnsafeCell`-backed FFI cells.
-/// `enter` panics when the flag is already held — i.e. another thread is
-/// INSIDE the cell right now (serialized access from different threads
-/// never trips it). Audit S1-004.
+/// RAII overlap detector for the `UnsafeCell`-backed FFI cells. In
+/// debug builds `enter` panics when the flag is already held — i.e.
+/// another thread is INSIDE the cell right now (serialized access from
+/// different threads never trips it); in release it is a zero-sized
+/// no-op. The type exists in BOTH configurations with the same
+/// signature (review follow-up to audit S1-004) so guard extents read
+/// identically in release control flow and `drop(guard)` works
+/// un-cfg'd; `#[must_use]` stops a bare `self.debug_enter();`
+/// statement from silently discarding the guard and disabling
+/// detection for the scope it meant to protect.
 #[cfg(debug_assertions)]
+#[must_use]
 struct DebugBusyGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+#[cfg(not(debug_assertions))]
+#[must_use]
+struct DebugBusyGuard<'a>(std::marker::PhantomData<&'a ()>);
 
 #[cfg(debug_assertions)]
 impl<'a> DebugBusyGuard<'a> {
@@ -190,6 +201,13 @@ impl Drop for DebugBusyGuard<'_> {
     }
 }
 
+// Empty Drop keeps release-mode `drop(guard)` clippy-clean
+// (drop_non_drop) and compiles to nothing.
+#[cfg(not(debug_assertions))]
+impl Drop for DebugBusyGuard<'_> {
+    fn drop(&mut self) {}
+}
+
 // SAFETY: the owning BBTerm is never shared across threads; see contract above.
 unsafe impl Send for CallbackCell {}
 // SAFETY: same — no concurrent access is ever made.
@@ -200,8 +218,14 @@ impl CallbackCell {
         CallbackCell {
             slot: UnsafeCell::new((None, std::ptr::null_mut())),
             pty_write_rate,
-            title_rate: UnsafeCell::new(EventRateState::new()),
-            bell_rate: UnsafeCell::new(EventRateState::new()),
+            title_rate: UnsafeCell::new(EventRateState::new(
+                TITLE_EVENT_PER_SECOND,
+                EVENT_RATE_WINDOW,
+            )),
+            bell_rate: UnsafeCell::new(EventRateState::new(
+                BELL_EVENT_PER_SECOND,
+                EVENT_RATE_WINDOW,
+            )),
             #[cfg(debug_assertions)]
             busy: std::sync::atomic::AtomicBool::new(false),
         }
@@ -214,7 +238,9 @@ impl CallbackCell {
 
     #[cfg(not(debug_assertions))]
     #[inline(always)]
-    fn debug_enter(&self) {}
+    fn debug_enter(&self) -> DebugBusyGuard<'_> {
+        DebugBusyGuard(std::marker::PhantomData)
+    }
 
     /// Reset the Title/Bell sliding windows so a pre-clear flood does
     /// not strand the post-clear session's budget. Mirrors the PtyWrite
@@ -225,8 +251,8 @@ impl CallbackCell {
     /// Caller must ensure no concurrent access.
     unsafe fn reset_event_rates(&self) {
         let _busy = self.debug_enter();
-        *self.title_rate.get() = EventRateState::new();
-        *self.bell_rate.get() = EventRateState::new();
+        *self.title_rate.get() = EventRateState::new(TITLE_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
+        *self.bell_rate.get() = EventRateState::new(BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
     }
 
     /// Update the stored callback and context.
@@ -299,14 +325,10 @@ impl CallbackCell {
         // hostile byte stream can fan out per-event to the Swift main
         // queue. Same silent-drop policy as PtyWrite (per-drop logging
         // would itself amplify the flood).
-        if matches!(event.kind, BBEventKind::Title)
-            && !(*self.title_rate.get()).allow(TITLE_EVENT_PER_SECOND, EVENT_RATE_WINDOW)
-        {
+        if matches!(event.kind, BBEventKind::Title) && !(*self.title_rate.get()).allow() {
             return;
         }
-        if matches!(event.kind, BBEventKind::Bell)
-            && !(*self.bell_rate.get()).allow(BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW)
-        {
+        if matches!(event.kind, BBEventKind::Bell) && !(*self.bell_rate.get()).allow() {
             return;
         }
         // Audit M-9 follow-up (2026-04-29): set the
@@ -320,7 +342,6 @@ impl CallbackCell {
         // even if `f` panics (the outer `catch_unwind` machinery in
         // `guard_with_term` still owns the panic; this guard exists
         // only to expose the in-flight bit).
-        #[cfg(debug_assertions)]
         drop(_busy);
         let _handler_guard = HandlerInFlightGuard::enter();
         f(event, ctx);
@@ -395,7 +416,9 @@ impl ColorRequestQueue {
 
     #[cfg(not(debug_assertions))]
     #[inline(always)]
-    fn debug_enter(&self) {}
+    fn debug_enter(&self) -> DebugBusyGuard<'_> {
+        DebugBusyGuard(std::marker::PhantomData)
+    }
 
     /// Append an entry, dropping silently when the queue is already at
     /// `COLOR_REQUEST_QUEUE_CAP`. Returns `true` when the entry was
@@ -532,30 +555,38 @@ impl PtyWriteRateCell {
 const PTY_WRITE_REPLY_PER_SECOND: u32 = 32;
 const PTY_WRITE_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Sliding-window state for the Title/Bell event caps (audit S1-002).
-/// Same shape as `PtyWriteRateState`, parameterized so one type serves
-/// both kinds. Lives inside `CallbackCell` behind the same
-/// mutual-exclusion discipline as `slot`.
+/// Tumbling-window state for the Title/Bell event caps (audit S1-002).
+/// ("Tumbling", not sliding: `window_start` resets on expiry, so up to
+/// 2×cap can cross a window boundary — same algorithm as the sibling
+/// limiters, named honestly.) The cap/window POLICY is bound at
+/// construction (review follow-up): an `allow(cap, window)` signature
+/// let the two call sites be cross-wired silently. Lives inside
+/// `CallbackCell` behind the same mutual-exclusion discipline as
+/// `slot`.
 struct EventRateState {
+    cap: u32,
+    window: std::time::Duration,
     window_start: std::time::Instant,
     window_count: u32,
 }
 
 impl EventRateState {
-    fn new() -> Self {
+    fn new(cap: u32, window: std::time::Duration) -> Self {
         Self {
+            cap,
+            window,
             window_start: std::time::Instant::now(),
             window_count: 0,
         }
     }
 
-    fn allow(&mut self, cap: u32, window: std::time::Duration) -> bool {
+    fn allow(&mut self) -> bool {
         let now = std::time::Instant::now();
-        if now.duration_since(self.window_start) >= window {
+        if now.duration_since(self.window_start) >= self.window {
             self.window_start = now;
             self.window_count = 0;
         }
-        if self.window_count >= cap {
+        if self.window_count >= self.cap {
             return false;
         }
         self.window_count += 1;
