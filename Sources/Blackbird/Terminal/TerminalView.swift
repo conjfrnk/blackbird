@@ -1047,7 +1047,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             let historyCollapsed = prev.historySize > 0 && snapshot.historySize == 0
             if colsChanged || altScreenChanged || historyCollapsed {
                 selection = nil
-            } else if snapshot.linesScrolled > prev.linesScrolled, var sel = selection {
+            } else if prev.rows == snapshot.rows,
+                      snapshot.linesScrolled > prev.linesScrolled, var sel = selection {
+                // rows-equal gate: vertical resize moves content through
+                // grow/shrink paths that ALSO bump linesScrolled (the
+                // counter's documented any-resize caveat) — rotating on
+                // that delta would shift a selection the row-only-resize
+                // contract (Bug #14) promises to preserve. Row-only
+                // resizes therefore keep the selection unrotated, same
+                // as before this fix; only genuine output flow (rows
+                // unchanged) rotates.
                 // Audit S5-005: keep the selection GLUED TO ITS CONTENT
                 // when output scrolls. Selection endpoints are
                 // grid-relative (line 0 = top of the live grid); every
