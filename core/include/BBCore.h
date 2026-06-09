@@ -371,12 +371,24 @@ struct BBSnap {
    * scrollback cap, this never saturates, so callers can anchor
    * content positions across eviction: content at grid row R in a
    * snapshot whose counter read P sits `(counter_now − P)` rows
-   * further up in any later snapshot. Any resize — column reflow OR
-   * row-count change (vertical resizes route through the same
-   * scroll path) — and clears invalidate the anchor. Appended at
-   * the struct tail to
-   * preserve existing field offsets (same rule as `history_size`).
-   * Audit S5-004/S5-005.
+   * further up in any later snapshot.
+   *
+   * Scope of the algebra (review-tightened): it is reliable for
+   * content that scrolls toward history via ordinary full-width
+   * output flow. Content still in the VIEWPORT can additionally be
+   * moved by operations this counter does not see — reverse index /
+   * CSI T at the top of the screen (`scroll_down`), IL/DL, and
+   * DECSTBM scroll-region rotations — so anchors to viewport rows
+   * drift under full-screen TUI redraws (shell prompt flows don't
+   * use these). Invalidation rules for consumers:
+   * - ANY resize (either axis) invalidates all anchors.
+   * - Clears are PTY-initiated and not separately signalled; detect
+   *   them by `history_size` shrinking between snapshots (ED 3 /
+   *   RIS reset history while this counter holds still) and drop
+   *   anchors then.
+   * - The counter never moves backward for a live handle.
+   * Appended at the struct tail to preserve existing field offsets
+   * (same rule as `history_size`). Audit S5-004/S5-005.
    */
   uint64_t lines_scrolled;
 };

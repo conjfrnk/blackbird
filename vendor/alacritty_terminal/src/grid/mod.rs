@@ -143,9 +143,11 @@ pub struct Grid<T> {
     /// and therefore cannot anchor buffer positions across eviction;
     /// this counter can: content recorded at grid row R when the counter
     /// read P sits `(counter_now - P)` rows further up at any later
-    /// time, until a resize (column reflow or row-count change — vertical
-    /// resizes route grow/shrink through this same scroll path) or a
-    /// clear invalidates the anchor.
+    /// time — reliable for content flowing into history via ordinary
+    /// full-width output; see the BBSnap field doc in blackbird_core
+    /// for the consumer-facing scope and invalidation rules (any
+    /// resize, clears detected via history_size shrink, uncounted
+    /// in-viewport ops).
     #[cfg_attr(feature = "serde", serde(skip))]
     lines_scrolled: u64,
 }
@@ -287,9 +289,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             // Blackbird fork addition (audit S5-004/S5-005): count every
             // line this full-width rotation moves toward history,
             // including ones a saturated ring recycles. NOTE: vertical
-            // resize (grow_lines/shrink_lines in resize.rs) also routes
-            // through here, which is why any resize invalidates anchors
-            // consumer-side.
+            // resize moves content WITHOUT fully routing through here
+            // (shrink_lines pushes rows into history via raw.rotate
+            // directly; grow_lines pulls rows back out via
+            // decrease_scroll_limit) — one reason any resize must
+            // invalidate anchors consumer-side. In-viewport ops
+            // (reverse index / IL / DL / region scrolls) also move
+            // content uncounted; see the BBSnap field doc for the
+            // consumer-facing scope rules.
             self.lines_scrolled += positions as u64;
 
             // Create scrollback for the new lines.

@@ -2705,12 +2705,24 @@ pub struct BBSnap {
     /// scrollback cap, this never saturates, so callers can anchor
     /// content positions across eviction: content at grid row R in a
     /// snapshot whose counter read P sits `(counter_now − P)` rows
-    /// further up in any later snapshot. Any resize — column reflow OR
-    /// row-count change (vertical resizes route through the same
-    /// scroll path) — and clears invalidate the anchor. Appended at
-    /// the struct tail to
-    /// preserve existing field offsets (same rule as `history_size`).
-    /// Audit S5-004/S5-005.
+    /// further up in any later snapshot.
+    ///
+    /// Scope of the algebra (review-tightened): it is reliable for
+    /// content that scrolls toward history via ordinary full-width
+    /// output flow. Content still in the VIEWPORT can additionally be
+    /// moved by operations this counter does not see — reverse index /
+    /// CSI T at the top of the screen (`scroll_down`), IL/DL, and
+    /// DECSTBM scroll-region rotations — so anchors to viewport rows
+    /// drift under full-screen TUI redraws (shell prompt flows don't
+    /// use these). Invalidation rules for consumers:
+    /// - ANY resize (either axis) invalidates all anchors.
+    /// - Clears are PTY-initiated and not separately signalled; detect
+    ///   them by `history_size` shrinking between snapshots (ED 3 /
+    ///   RIS reset history while this counter holds still) and drop
+    ///   anchors then.
+    /// - The counter never moves backward for a live handle.
+    /// Appended at the struct tail to preserve existing field offsets
+    /// (same rule as `history_size`). Audit S5-004/S5-005.
     pub lines_scrolled: u64,
 }
 
@@ -4792,6 +4804,26 @@ mod tests {
         // their offsets in the Swift bridge. Audit rust-core-3 F15 +
         // rust-build F7. (Offsets bumped 2026-04-28 for audit M5
         // u16→u32 widen of display_offset.)
+        // Head fields (review follow-up): a reorder in the first 12
+        // bytes previously passed this test while silently breaking the
+        // Swift bridge.
+        assert_eq!(std::mem::offset_of!(BBSnap, cols), 0, "cols at offset 0");
+        assert_eq!(std::mem::offset_of!(BBSnap, rows), 2, "rows at offset 2");
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, cursor_col),
+            4,
+            "cursor_col at offset 4"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, cursor_row),
+            6,
+            "cursor_row at offset 6"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BBSnap, cursor_visible),
+            8,
+            "cursor_visible at offset 8"
+        );
         assert_eq!(
             std::mem::offset_of!(BBSnap, display_offset),
             12,
