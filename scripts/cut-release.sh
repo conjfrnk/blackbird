@@ -86,7 +86,17 @@ extract_yaml_value() {
         | head -1 \
         | sed -E "s/^ *${key}: *\"?([^\"]+)\"? *$/\\1/"
 }
-CURRENT="$(extract_yaml_value CFBundleShortVersionString)"
+# `|| true` is load-bearing on these command-substitution assignments:
+# under `set -euo pipefail`, a missing key makes the grep (and so the
+# whole pipeline) exit non-zero, which kills the script AT the
+# assignment — the diagnostic branches below were dead code and the
+# abort printed nothing. Audit S2-010.
+CURRENT="$(extract_yaml_value CFBundleShortVersionString || true)"
+if [[ -z "$CURRENT" ]]; then
+    echo "!! Cannot find CFBundleShortVersionString in project.yml." >&2
+    echo "   Has the key been renamed or the file reorganised?" >&2
+    exit 1
+fi
 if [[ "$CURRENT" == "$VERSION" ]]; then
     echo "!! project.yml already declares version $VERSION — nothing to bump." >&2
     exit 1
@@ -97,7 +107,7 @@ fi
 # short-version bump so that every release is strictly "newer" than the
 # one before it, even when Sparkle is comparing a display version like
 # "0.1.2" against an installed CFBundleVersion of "3".
-CURRENT_BUILD="$(extract_yaml_value CFBundleVersion)"
+CURRENT_BUILD="$(extract_yaml_value CFBundleVersion || true)"
 if ! [[ "$CURRENT_BUILD" =~ ^[0-9]+$ ]]; then
     echo "!! CFBundleVersion in project.yml isn't a plain integer (got '$CURRENT_BUILD')." >&2
     echo "   cut-release.sh only knows how to increment monotonic integers." >&2
@@ -122,14 +132,18 @@ xcodegen generate >/dev/null
 
 # Sanity: Info.plist must now reflect both the new display version and
 # the bumped build number. If either is wrong, abort before tagging.
-PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Blackbird/Info.plist 2>/dev/null)"
+# Same `|| true` rationale as extract_yaml_value above: a missing or
+# unreadable Info.plist makes PlistBuddy exit non-zero, and without it
+# `set -e` aborted at the assignment with the "Aborting." diagnostics
+# below unreachable AND PlistBuddy's own error discarded. Audit S2-010.
+PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Blackbird/Info.plist 2>/dev/null || true)"
 if [[ "$PLIST_VERSION" != "$VERSION" ]]; then
-    echo "!! Info.plist still reports $PLIST_VERSION after regen. Aborting." >&2
+    echo "!! Info.plist still reports '$PLIST_VERSION' after regen (expected '$VERSION'). Aborting." >&2
     exit 1
 fi
-PLIST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Sources/Blackbird/Info.plist 2>/dev/null)"
+PLIST_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Sources/Blackbird/Info.plist 2>/dev/null || true)"
 if [[ "$PLIST_BUILD" != "$NEW_BUILD" ]]; then
-    echo "!! Info.plist CFBundleVersion is $PLIST_BUILD, expected $NEW_BUILD. Aborting." >&2
+    echo "!! Info.plist CFBundleVersion is '$PLIST_BUILD', expected '$NEW_BUILD'. Aborting." >&2
     exit 1
 fi
 
