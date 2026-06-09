@@ -379,6 +379,121 @@ case_4() {
 }
 
 # ---------------------------------------------------------------------------
+# CASE 5 — C1: project.yml with no CFBundleShortVersionString at all.
+# The pre-flight read must abort non-zero WITH a diagnostic naming
+# CFBundleShortVersionString — not exit silently, not plow ahead with an
+# empty current version.
+# ---------------------------------------------------------------------------
+
+case_5() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-5)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+
+    # Strip the CFBundleShortVersionString line from project.yml and
+    # commit + push so the clean-tree / up-to-date preconditions still hold.
+    sed -i '' '/CFBundleShortVersionString/d' "$tmp/project.yml"
+    (cd "$tmp" && git add project.yml \
+        && git -c commit.gpgsign=false commit -q -m "drop short version" \
+        && git push -q origin main)
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_cut_release "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "C1: cut-release.sh aborts when CFBundleShortVersionString is missing (rc=$rc)"
+    else
+        fail "C1: cut-release.sh exited 0 with no CFBundleShortVersionString in project.yml"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "CFBundleShortVersionString" "$log"; then
+        pass "C1: diagnostic names CFBundleShortVersionString"
+    else
+        fail "C1: no diagnostic naming CFBundleShortVersionString (silent abort)"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 6 — C2: project.yml whose CFBundleVersion is not a plain integer
+# ("abc"). Sparkle compares build numbers numerically, so the pre-flight
+# must abort non-zero with the "isn't a plain integer" diagnostic rather
+# than computing garbage arithmetic on it.
+# ---------------------------------------------------------------------------
+
+case_6() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-6)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+
+    sed -i '' 's/CFBundleVersion: "9"/CFBundleVersion: "abc"/' "$tmp/project.yml"
+    (cd "$tmp" && git add project.yml \
+        && git -c commit.gpgsign=false commit -q -m "corrupt build number" \
+        && git push -q origin main)
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_cut_release "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "C2: cut-release.sh aborts on non-integer CFBundleVersion (rc=$rc)"
+    else
+        fail "C2: cut-release.sh exited 0 with CFBundleVersion \"abc\""
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "plain integer" "$log" && [[ -s "$log" ]]; then
+        pass "C2: non-empty 'plain integer' diagnostic printed"
+    else
+        fail "C2: missing 'plain integer' diagnostic for CFBundleVersion=abc"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 7 — C2 (missing variant): project.yml with no CFBundleVersion line
+# at all. Same contract: abort non-zero with the plain-integer-style
+# diagnostic — an absent value is not a plain integer either.
+# ---------------------------------------------------------------------------
+
+case_7() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-7)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+
+    sed -i '' '/CFBundleVersion:/d' "$tmp/project.yml"
+    (cd "$tmp" && git add project.yml \
+        && git -c commit.gpgsign=false commit -q -m "drop build number" \
+        && git push -q origin main)
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_cut_release "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "C2-missing: cut-release.sh aborts when CFBundleVersion is absent (rc=$rc)"
+    else
+        fail "C2-missing: cut-release.sh exited 0 with no CFBundleVersion in project.yml"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if [[ -s "$log" ]] && grep -q "CFBundleVersion" "$log"; then
+        pass "C2-missing: non-empty diagnostic naming CFBundleVersion printed"
+    else
+        fail "C2-missing: silent abort — no diagnostic naming CFBundleVersion"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
 # Run all cases.
 # ---------------------------------------------------------------------------
 
@@ -386,5 +501,8 @@ case_1
 case_2
 case_3
 case_4
+case_5
+case_6
+case_7
 
 test_end
