@@ -83,6 +83,16 @@ def main() -> int:
                 print(f"{'-':>{col_w}}", end="")
         print()
 
+    # Subset detection: per-bench MB/s varies ~10× within one terminal,
+    # so a geomean over a SMALLER benchmark set (dropped 0-byte bench,
+    # partial .dat, mid-suite crash) is not comparable to a full-set
+    # geomean. Asterisk subset terminals and say what's missing.
+    subset_terms: dict[str, list[str]] = {}
+    for t in terms:
+        missing = [b for b in benches if not per_term[t].get(b)]
+        if missing:
+            subset_terms[t] = missing
+
     # Aggregate: geometric mean of MB/s across benchmarks per terminal.
     print()
     print(f"{'geomean MB/s':<28}", end="")
@@ -96,7 +106,8 @@ def main() -> int:
                     vals.append(v)
         if vals:
             gm = statistics.geometric_mean(vals)
-            print(f"{gm:>{col_w}.1f}", end="")
+            mark = "*" if t in subset_terms else ""
+            print(f"{f'{gm:.1f}{mark}':>{col_w}}", end="")
         else:
             print(f"{'-':>{col_w}}", end="")
     print()
@@ -113,7 +124,15 @@ def main() -> int:
     print()
     print("ranking (higher = faster):")
     for i, (t, gm) in enumerate(ranks, start=1):
-        print(f"  {i}. {t:<16} {gm:7.1f} MB/s")
+        mark = "*" if t in subset_terms else ""
+        print(f"  {i}. {t:<16} {gm:7.1f}{mark} MB/s")
+
+    if subset_terms:
+        print()
+        print("  * geomean over a PARTIAL benchmark set — not comparable to")
+        print("    full-set geomeans above; investigate before citing:")
+        for t, missing in sorted(subset_terms.items()):
+            print(f"    {t}: missing {', '.join(missing)}")
 
     return 0
 
