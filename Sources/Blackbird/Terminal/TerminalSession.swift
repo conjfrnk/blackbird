@@ -304,6 +304,19 @@ public final class TerminalSession: ObservableObject {
     private var snapshotDispatchScheduled: Bool = false
     private var isTerminated: Bool = false
 
+    /// True while a deferred feed-path snapshot work item is sitting in
+    /// `coreQueue` (see `scheduleSnapshotAfterBurst`). coreQueue-confined:
+    /// only touched from `feed(_:)` and the work item itself, both of
+    /// which run on `coreQueue` — no lock.
+    private var snapshotWorkQueued = false
+
+    /// Count of feed-path snapshot generations. coreQueue-confined like
+    /// `snapshotWorkQueued` (incremented only inside the deferred work
+    /// item); read via `snapshotsTakenForTests`, which syncs onto
+    /// `coreQueue`. Deliberately NOT in the `publishLock` set — that lock's
+    /// contract is the F1/F11 publish-coalescer state only.
+    private var snapshotsTakenCount: Int = 0
+
     /// Last focus state actually emitted to the TUI (`CSI I`/`CSI O`),
     /// guarded by `coreQueue`. Dedups consecutive same-state focus
     /// transitions so the single-owner emitter sends exactly one byte pair
@@ -406,6 +419,41 @@ public final class TerminalSession: ObservableObject {
         coreQueue.sync {
             self.feed(bytes)
         }
+    }
+
+    /// Test hook: production-shaped ASYNC feed. Mirrors the `setOnBytes`
+    /// closure in `wire()` exactly (`coreQueue.async` → `feed`), so tests
+    /// can enqueue a back-to-back burst the way a flooding PTY does —
+    /// something the synchronous `feedBytesForTests` cannot, because its
+    /// `coreQueue.sync` drains every internally deferred work item before
+    /// the next chunk is enqueued.
+    func enqueueBytesForTests(_ bytes: Data) {
+        coreQueue.async { [weak self] in
+            self?.feed(bytes)
+        }
+    }
+
+    /// Test hook: block until every enqueued feed AND any snapshot work
+    /// those feeds deferred to the tail of `coreQueue` has completed.
+    /// Drains by invariant, not structure: a sync block on the serial
+    /// queue can only observe `snapshotWorkQueued` between items, so
+    /// reading false means all feeds enqueued before this call AND the
+    /// snapshot work they deferred have finished — regardless of how many
+    /// levels deep a future change makes the deferral.
+    func waitForFeedsForTests() {
+        while coreQueue.sync(execute: { snapshotWorkQueued }) {
+            // Each pass queues behind whatever is currently in flight;
+            // no spin in practice (≤2 iterations for a single burst).
+        }
+    }
+
+    /// Test hook: running count of snapshot generations performed by the
+    /// feed path since session start. Pins the burst-coalescing contract
+    /// (a burst of N chunks must take O(bursts) snapshots, not N).
+    /// coreQueue-confined storage; the sync read also gives the caller
+    /// natural ordering behind any queued feeds.
+    var snapshotsTakenForTests: Int {
+        coreQueue.sync { snapshotsTakenCount }
     }
 
     /// Test-only synchronous snapshot accessor. Drives the same code path
@@ -1556,6 +1604,9 @@ public final class TerminalSession: ObservableObject {
         // assignment through PTY's readQueue, then startReading() launches
         // the loop. The bbterm event handler installed ABOVE means any
         // dispatch triggered by the first byte already has a target.
+        // NOTE: `enqueueBytesForTests` mirrors this closure exactly so the
+        // burst-coalescing tests exercise the production shape — keep both
+        // in lockstep if preprocessing is ever added here.
         pty?.setOnBytes { [weak self] data in
             guard let self else { return }
             self.coreQueue.async { [weak self] in
@@ -1617,8 +1668,40 @@ public final class TerminalSession: ObservableObject {
 
         let bytes = [UInt8](data)
         bbterm.input(bytes)
-        guard let snap = bbterm.snapshot() else { return }
-        publishPendingSnapshot(snap)
+        scheduleSnapshotAfterBurst()
+    }
+
+    /// Called on `coreQueue`. Defer snapshot generation to a single work
+    /// item at the TAIL of `coreQueue`: every chunk already enqueued
+    /// behind the current one is parsed before the item runs, so a burst
+    /// of N chunks costs one grid serialization instead of N.
+    ///
+    /// Why: `bbterm.snapshot()` is ~10 ms at a 200×50 grid while parsing
+    /// a 128 KiB chunk is ~2–4 ms. Taking a snapshot per chunk capped
+    /// sustained end-to-end throughput at ~8 MB/s (kitten __benchmark__,
+    /// 2026-06-09) even though the core parses at 25–90 MB/s — and the
+    /// publish coalescer (F1) was discarding almost all of those
+    /// snapshots anyway. Idle/interactive cadence is unchanged: with no
+    /// second chunk queued, the deferred item runs immediately after the
+    /// current one and publishes exactly as before.
+    private func scheduleSnapshotAfterBurst() {
+        dispatchPrecondition(condition: .onQueue(coreQueue))
+        if snapshotWorkQueued { return }
+        snapshotWorkQueued = true
+        coreQueue.async { [weak self] in
+            guard let self else { return }
+            self.snapshotWorkQueued = false
+            // F11/S1-007: skip generation entirely for a session that
+            // terminated while this item sat in the queue — same contract
+            // as the per-feed gate above.
+            self.publishLock.lock()
+            let terminated = self.isTerminated
+            self.publishLock.unlock()
+            if terminated { return }
+            guard let snap = self.bbterm.snapshot() else { return }
+            self.snapshotsTakenCount += 1
+            self.publishPendingSnapshot(snap)
+        }
     }
 
     /// Coalesce snapshot publishes to at most one in-flight main dispatch

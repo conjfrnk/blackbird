@@ -337,9 +337,12 @@ final class TerminalSessionTests: XCTestCase {
             }
 
         // 2000 tiny feeds back-to-back. Each one:
-        //   - `coreQueue.sync` → `feed(_:)` → `bbterm.input` + snapshot
-        //   - `publishPendingSnapshot` stores in the slot
-        //   - first feed schedules a main dispatch; subsequent feeds
+        //   - `coreQueue.sync` → `feed(_:)` → `bbterm.input`, deferring
+        //     snapshot generation to a tail-of-coreQueue work item
+        //   - the NEXT `coreQueue.sync` feed queues behind that item, so
+        //     between sync feeds the snapshot is generated and
+        //     `publishPendingSnapshot` stores it in the slot
+        //   - first generation schedules a main dispatch; later ones
         //     overwrite the slot because `snapshotDispatchScheduled==true`
         // The test runs on main, so main can't drain between feeds.
         let chunk = Data("data".utf8)

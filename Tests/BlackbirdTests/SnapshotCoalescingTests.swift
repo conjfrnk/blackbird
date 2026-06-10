@@ -114,9 +114,12 @@ final class SnapshotCoalescingTests: XCTestCase {
         wait(for: [seedExp], timeout: 1.0)
 
         // Now arm a counter and fire a feed, then immediately terminate
-        // BEFORE pumping main. The feed scheduled a main dispatch via
-        // `publishPendingSnapshot`; the dispatch hasn't fired yet because
-        // we're still synchronously on main.
+        // BEFORE pumping main. The feed deferred snapshot generation to a
+        // tail-of-coreQueue item; whether terminate() lands before or
+        // after that item runs, no publish may reach main: the item's
+        // F11 gate (isTerminated) drops generation, and an already-
+        // scheduled main dispatch drops the publish. Either way the
+        // counter must stay 0 — we're still synchronously on main.
         let counter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         counter.initialize(to: 0)
         defer { counter.deallocate() }
