@@ -46,10 +46,11 @@ final class TabOrderCoordinator {
     /// is a system class whose lifetime tracks the underlying group —
     /// once empty, AppKit deallocates it and the next read of `tabGroup`
     /// on any window in that group returns a fresh instance with a
-    /// different identifier. Stale keys for dead groups are harmless
-    /// (the dictionary never grows unbounded in practice; each tab
-    /// session is one group) and would be evicted by an explicit
-    /// `purge` if it ever became a leak. Not bothering for now.
+    /// different identifier. A dead group's key is therefore never read
+    /// again: its entry's weak windows all nil out, but the entry itself
+    /// would otherwise linger for the process lifetime. `purgeDeadGroups()`
+    /// (run on every reconcile commit) evicts those all-nil entries so the
+    /// map tracks only live groups.
     private var ordersByGroup: [ObjectIdentifier: [WeakWindow]] = [:]
 
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
@@ -87,6 +88,9 @@ final class TabOrderCoordinator {
         if clamped == oldIndex { return }
         current.remove(at: oldIndex)
         current.insert(window, at: clamped)
+        // No purgeDeadGroups() here: a successful move implies this group is
+        // live (we just located `window` in it), and any dead sibling entries
+        // are reclaimed at the next `orderedTabs` reconcile commit.
         ordersByGroup[ObjectIdentifier(group)] = current.map(WeakWindow.init)
         NotificationCenter.default.post(name: Self.orderDidChange, object: group)
     }
@@ -137,8 +141,28 @@ final class TabOrderCoordinator {
         }
         if let key {
             ordersByGroup[key] = result.map(WeakWindow.init)
+            // Opportunistic eviction: a reconcile commit is the natural
+            // choke point to drop entries for groups that have since gone
+            // fully dead (every weak window nil). Cheap — one entry per
+            // live tab session — and the dead group's own key is never
+            // read again, so nothing else would ever evict it.
+            purgeDeadGroups()
         }
         return result
+    }
+
+    /// A stored entry is dead when every window it tracked has deallocated.
+    /// Single source of truth for the "fully-closed group" predicate.
+    private static func isDeadGroup(_ weaks: [WeakWindow]) -> Bool {
+        !weaks.contains { $0.value != nil }
+    }
+
+    /// Evict storage entries whose windows have ALL deallocated — a tab
+    /// group fully closed/detached. Entries with ≥1 live window are kept.
+    /// Called on every reconcile commit (see `reconcile`). O(stored
+    /// groups), which is tiny (one entry per live tab session).
+    internal func purgeDeadGroups() {
+        ordersByGroup = ordersByGroup.filter { !Self.isDeadGroup($1) }
     }
 
     #if DEBUG
@@ -162,6 +186,32 @@ final class TabOrderCoordinator {
     /// `group.windows` alone.
     internal func resetForTesting() {
         ordersByGroup.removeAll()
+    }
+
+    // MARK: Dead-group purge seams
+
+    /// Test seam — inject a raw stored entry for `key`, reproducing the
+    /// all-nil "dead group" state a closed group decays into (production
+    /// never constructs dead entries directly). Lets a purge test set up
+    /// deterministic state without owning a real NSWindowTabGroup.
+    internal func seedRawForTesting(_ key: ObjectIdentifier, _ weaks: [WeakWindow]) {
+        ordersByGroup[key] = weaks
+    }
+
+    /// Test seam — the set of group keys currently retained in storage.
+    internal func storedGroupKeysForTesting() -> Set<ObjectIdentifier> {
+        Set(ordersByGroup.keys)
+    }
+
+    /// Test seam — drive the production `reconcile`+commit path (which runs
+    /// `purgeDeadGroups()` on commit) with a synthetic `key`, so a test can
+    /// assert commit-time purge without owning a real NSWindowTabGroup.
+    internal func reconcileCommittingForTesting(key: ObjectIdentifier,
+                                                stored: [NSWindow?],
+                                                live: [NSWindow]) -> [NSWindow] {
+        reconcile(stored: stored.map { WeakWindow(value: $0) },
+                  live: live,
+                  commitTo: key)
     }
     #endif
 }
