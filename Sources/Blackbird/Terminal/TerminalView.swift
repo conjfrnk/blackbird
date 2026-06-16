@@ -2232,6 +2232,29 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         Preferences.shared.fontSize = 13
     }
 
+    /// True when the audible bell should be swallowed: set by the test
+    /// harness via `BB_SUPPRESS_BELL=1` (which `scripts/test.sh` passes as
+    /// `TEST_RUNNER_BB_SUPPRESS_BELL`) so an automated full-suite run doesn't
+    /// emit a stream of system beeps. Read once; production and Xcode Cmd-U
+    /// runs (env unset) ring normally.
+    private static let bellSuppressed =
+        ProcessInfo.processInfo.environment["BB_SUPPRESS_BELL"] == "1"
+
+    /// Ring the system "no-op feedback" bell, unless suppressed under test.
+    private func ringBell() {
+        guard !Self.bellSuppressed else { return }
+        NSSound.beep()
+    }
+
+    /// AppKit rings NSBeep here for a key event that no responder handled.
+    /// Under the test harness, swallow it so key-input tests that drive
+    /// `keyDown(with:)` on an out-of-window view don't beep; real runs defer
+    /// to `super` for the normal feedback.
+    public override func noResponder(for eventSelector: Selector) {
+        guard !Self.bellSuppressed else { return }
+        super.noResponder(for: eventSelector)
+    }
+
     /// Scroll the viewport up to the previous OSC 133 prompt mark. Hooked
     /// to the "View → Previous Prompt" menu item (⌘⇧↑). No visible effect
     /// unless the user has sourced the bundled shell-integration snippet,
@@ -2241,8 +2264,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // Ring empty (no shell integration, or no commands yet) OR
             // already at the oldest prompt. NSBeep is the standard macOS
             // "no-op" feedback — quiet, doesn't steal focus. Audit
-            // terminal-view-2 F25.
-            NSSound.beep()
+            // terminal-view-2 F25. Via ringBell() so the test harness mutes it.
+            ringBell()
         }
     }
 
@@ -2251,7 +2274,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// newest prompt is always live.
     @objc public func jumpToNextPrompt(_ sender: Any?) {
         if session?.jumpToNextPrompt() != true {
-            NSSound.beep()
+            ringBell()
         }
     }
 
