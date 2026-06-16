@@ -430,11 +430,11 @@ final class BBTermAdversarialTests: XCTestCase {
         XCTAssertGreaterThan(snap2.sequenceID, id1, "snapshot ID still advances")
     }
 
-    // MARK: - Track C: opt-in soak (BB_SOAK=1)
+    // MARK: - Track C: opt-in soak (BB_RUN_SOAK=1)
 
     /// pre-flight: bounded by 10 s wall clock; up to ~50 MB peak
     /// resident depending on alacritty intern caches. Gate with
-    /// `BB_SOAK=1` to skip default runs — the soak is for hand
+    /// `BB_RUN_SOAK=1` to skip default runs — the soak is for hand
     /// validation, not CI.
     ///
     /// Feed-and-snapshot loop for 10 seconds. Memory must not climb
@@ -442,8 +442,8 @@ final class BBTermAdversarialTests: XCTestCase {
     /// mark. Any unbounded climb suggests a snapshot retain leak or
     /// an OSC 8 intern cache that grew past its cap.
     func test_soak_10s_feedAndSnapshot_underBoundedMemory() throws {
-        guard ProcessInfo.processInfo.environment["BB_SOAK"] == "1" else {
-            throw XCTSkip("BB_SOAK=1 not set; skipping 10s soak")
+        guard ProcessInfo.processInfo.environment["BB_RUN_SOAK"] == "1" else {
+            throw XCTSkip("BB_RUN_SOAK=1 not set; skipping 10s soak")
         }
         try requireTestFitsInBudget(
             estimatedBytes: estimatedGridBytes(cols: 80, rows: 24),

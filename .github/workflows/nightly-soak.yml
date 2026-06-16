@@ -16,7 +16,7 @@
 #     --ignored`): release-only, serial, ~5 min wall each. Inflating
 #     PR feedback by 20 min for a class of bug that a nightly will
 #     catch within 24 h is bad economics for the merge loop.
-#   - Swift soak gates (env-gated `BB_RUN_SOAK=1` / `BB_SOAK=1`): same
+#   - Swift soak gates (env-gated `BB_RUN_SOAK=1`): same
 #     reasoning — per-iter dispatch-queue teardown chatter doesn't
 #     earn its keep on a per-PR basis.
 # This workflow is the place those gates run. Once-a-day cadence keeps
@@ -42,7 +42,7 @@
 #      32 iterations of {create headless session, feed 1 MiB,
 #      terminate} with absolute + delta-of-deltas RSS checks.
 #   6. BBTermAdversarialTests::test_soak_10s_feedAndSnapshot
-#      (BB_SOAK=1) — the existing 10-second feed-and-snapshot soak
+#      (BB_RUN_SOAK=1) — the existing 10-second feed-and-snapshot soak
 #      with first-second / final peak ratio bound.
 #   7. RealLatencyProbeWindowedTests (BB_RUN_LATENCY_PROBE=1) — the
 #      P4.6 honesty fix. The PR-CI `latency-gate` job (ci.yml) only
@@ -277,9 +277,10 @@ jobs:
         # into the test runner's environment. Confirmed working
         # on Xcode 16.2.
         #
-        # We pass BOTH BB_RUN_SOAK (gate for SwiftSessionRSSReturnsToBaselineTests)
-        # AND BB_SOAK (gate for BBTermAdversarialTests::test_soak_10s_*)
-        # so the single test action covers both Swift soak gates.
+        # BB_RUN_SOAK gates BOTH Swift soak suites
+        # (SwiftSessionRSSReturnsToBaselineTests and
+        # BBTermAdversarialTests::test_soak_10s_*), so the single test
+        # action covers both Swift soak gates.
         #
         # `-only-testing` filters to the two soak test groups only;
         # without this filter we'd run the entire 900+ test PR-CI
@@ -325,7 +326,6 @@ jobs:
         run: |
           set +e
           TEST_RUNNER_BB_RUN_SOAK=1 \
-          TEST_RUNNER_BB_SOAK=1 \
           TEST_RUNNER_BB_RUN_LATENCY_PROBE=1 \
           xcodebuild test \
             -project Blackbird.xcodeproj \
@@ -433,7 +433,7 @@ jobs:
             for t in "${missing[@]}"; do
               echo "::error::  - $t"
             done
-            echo "::error::This usually means TEST_RUNNER_BB_RUN_SOAK / TEST_RUNNER_BB_SOAK / TEST_RUNNER_BB_RUN_LATENCY_PROBE did not reach the xctest host, and the tests skipped via XCTSkipIf - yielding a meaningless green. Investigate Xcode env-propagation regression or scheme drift before merging anything that touches CI."
+            echo "::error::This usually means TEST_RUNNER_BB_RUN_SOAK / TEST_RUNNER_BB_RUN_LATENCY_PROBE did not reach the xctest host, and the tests skipped via XCTSkipIf - yielding a meaningless green. Investigate Xcode env-propagation regression or scheme drift before merging anything that touches CI."
             echo "::error::Skip lines from log (if any):"
             grep -E "Test Case .*' skipped" /tmp/swift-soak.log >&2 || true
             exit 1
