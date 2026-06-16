@@ -322,11 +322,14 @@ final class TabOrderCoordinatorTests: XCTestCase {
 
         coord.move(window: target, to: 1, in: group)
 
-        // Give any (incorrect) async-posted notification a chance to land.
-        let tick = expectation(description: "tick")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick.fulfill() }
-        wait(for: [tick], timeout: 1.0)
-
+        // Assert synchronously: `move()` posts `orderDidChange` synchronously
+        // (its only post site; the observer above is `queue: nil`), so a no-op
+        // move has already posted nothing by the time it returns — there's no
+        // async post to wait for, and the old 50 ms `wait(for:)` spin tested
+        // nothing. (It was also a latent CATransaction-under-ASan SEGV risk
+        // while pumping the runloop; the full-suite ASan crash itself is fixed
+        // at the root by running the whole suite ASan-off, matching CI — see
+        // scripts/test.sh.)
         XCTAssertEqual(observed, 0,
             "no-op move (target == current index) must post no notification")
         let after = coord.orderedTabs(for: group)
@@ -338,8 +341,12 @@ final class TabOrderCoordinatorTests: XCTestCase {
         let (group, _) = try makeGroup(2)
         let coord = TabOrderCoordinator.shared
 
-        // A window that has no relationship to the group.
-        let stranger = makeWindow("stranger", tabId: "bb-other")
+        // A window with no relationship to the group: unique per-test tabbing
+        // id (makeWindow's default) + tabbing disallowed, so AppKit can never
+        // fold it into the live group. (The old shared "bb-other" id was a
+        // latent cross-test merge hazard.)
+        let stranger = makeWindow("stranger")
+        stranger.tabbingMode = .disallowed
 
         var observed = 0
         let token = NotificationCenter.default.addObserver(
@@ -349,12 +356,18 @@ final class TabOrderCoordinatorTests: XCTestCase {
         ) { _ in observed += 1 }
         defer { NotificationCenter.default.removeObserver(token) }
 
+        // Precondition: confirm the stranger really is a non-member, so a
+        // failure below is attributable to a spurious post, not an accidental
+        // group join.
+        XCTAssertFalse(coord.orderedTabs(for: group).contains { $0 === stranger },
+            "precondition: stranger must not be a member of the group")
+
         coord.move(window: stranger, to: 0, in: group)
 
-        let tick = expectation(description: "tick")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { tick.fulfill() }
-        wait(for: [tick], timeout: 1.0)
-
+        // Synchronous assertion, no runloop spin — same rationale as
+        // test_move_noOpWhenTargetEqualsCurrentIndex_postsNoNotification (the
+        // post path is synchronous, so nothing is posted by the time move()
+        // returns).
         XCTAssertEqual(observed, 0,
             "move of non-member window must be a no-op (no notification)")
     }
@@ -415,7 +428,11 @@ final class TabOrderCoordinatorTests: XCTestCase {
     func test_nextAndPrevious_nonMemberWindow_returnNil() throws {
         let (group, _) = try makeGroup(2)
         let coord = TabOrderCoordinator.shared
-        let stranger = makeWindow("stranger", tabId: "bb-other")
+        // Unique per-test id + tabbing disallowed (see
+        // test_move_nonMemberWindow_postsNoNotification) so the stranger can't
+        // be folded into the group.
+        let stranger = makeWindow("stranger")
+        stranger.tabbingMode = .disallowed
 
         XCTAssertNil(coord.nextWindow(after: stranger, in: group),
             "next of non-member must be nil")
