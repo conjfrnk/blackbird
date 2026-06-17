@@ -195,7 +195,7 @@ enum MainThreadWatchdog {
         // the hot frame on main while not stretching the capture window past
         // the hang itself.
         let proc = Process()
-        proc.launchPath = "/usr/bin/sample"
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
         proc.arguments = ["\(pid)", "2", "-file", partialFile]
         // Sample's own stdout/stderr is noise; redirect to /dev/null so the
         // unified log only sees the watchdog's own line.
