@@ -193,8 +193,14 @@ non-vacuous test seam exists yet.
   the encoder, signals the slot token back, rolls back the rotation
   turn (S2-006 invariant), clears `lastFrameKey`, and never presents.
 
-- **URL wrap-join follows only one continuation row (low).**
-  `URLDetector` joins a soft-wrapped URL across `row → row + 1` only, so
-  a URL wrapping across 3+ rows is truncated at the second row. Most
-  real URLs fit two rows on an 80+ col grid; deferred as a documented
-  2-row cap rather than a multi-row walk.
+- **URL wrap-join followed only one continuation row — FIXED 2026-06-16
+  (c3a64b3, v0.3.6).** `URLDetector` previously joined a soft-wrapped URL
+  across `row → row + 1` only, so a URL wrapping across 3+ rows was
+  truncated at the second row. The single-row join is now a walk that
+  continues while each consumed row fills edge-to-edge; all five security
+  guards (joined URL parses; first-row host non-empty; host and port
+  unchanged across the join; each continuation row's first char is not a
+  structure-leader) are re-evaluated at every row boundary against the
+  first-row portion the user sees underlined, and the highlight stays
+  clamped to the first row (only the dispatched URL carries the joined
+  string). Tests: `URLDetectorMultiRowWrapTests`.
