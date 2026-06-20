@@ -374,8 +374,10 @@ enum OSC8URLPolicy {
         // with href `https://attacker.github.io/steal` would pass this
         // check because `attacker.github.io.hasSuffix(".github.io")`,
         // letting any subdomain of a wildcard host claim the apex.
-        // Removed. Users who legitimately want to navigate to a
-        // divergent host can dwell to see the tooltip and ⌥⌘-click.
+        // Removed. Users who legitimately want to navigate to a divergent
+        // host can right-click and choose "Copy Link (host mismatch)" to copy
+        // the real href (TerminalView.blockedDivergentOSC8Href), then open it
+        // deliberately in their browser.
         return true
     }
 

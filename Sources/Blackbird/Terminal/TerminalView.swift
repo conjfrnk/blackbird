@@ -2395,9 +2395,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // (after the audit C1 scrub), but ⌘-click is single-action
         // and never gives the dwell tooltip a chance to surface. Block
         // the click when the rendered anchor claims a different host
-        // than the href; the user can ⌥⌘-click after dwelling on the
-        // tooltip to get the real destination if they really meant to
-        // open the divergent target. Regex-fallback URLs have no
+        // than the href. A legitimately-divergent link is NOT permanently
+        // unreachable: right-click offers a deliberate "Copy Link (host
+        // mismatch)" that copies the real href (see blockedDivergentOSC8Href
+        // + menu(for:)) — copy, not auto-open, so the user pastes into the
+        // browser and sees the real host. Regex-fallback URLs have no
         // separate anchor (the URL IS the visible text), so the gate
         // applies only to the OSC 8 path. Audit high-1.
         let acceptOSC8: (HyperlinkResolver, URL) -> URL? = { resolver, url in
@@ -2443,6 +2445,31 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return acceptOSC8(resolver, raw)
         }
         return allow(resolver.regexURL(row: screenRow, col: col))
+    }
+
+    /// The real OSC 8 href under a click ONLY when `resolveClickURL` is
+    /// blocking it because the visible anchor's host diverges from the href's
+    /// (the anti-phishing gate). Returns nil when there is no OSC 8 link, the
+    /// scheme isn't allowed, or the anchor does NOT diverge (in which case
+    /// `resolveClickURL` already returns the URL normally). Lets `menu(for:)`
+    /// offer a deliberate "Copy Link (host mismatch)" escape hatch so a
+    /// legitimately-divergent link that ⌘-click intentionally blocks isn't
+    /// permanently unreachable. Copy-only — never an auto-open path.
+    func blockedDivergentOSC8Href(screenRow: Int, col: Int) -> URL? {
+        let resolveDivergent: (HyperlinkResolver) -> URL? = { resolver in
+            guard let raw = resolver.osc8URL(row: screenRow, col: col),
+                  OSC8URLPolicy.isAllowed(raw) else { return nil }
+            let anchor = resolver.osc8AnchorText(row: screenRow, col: col)
+            return OSC8URLPolicy.anchorDivergesFromHost(anchorText: anchor, url: raw)
+                ? raw : nil
+        }
+        #if DEBUG
+        if let override = hyperlinkResolverOverride {
+            return resolveDivergent(override)
+        }
+        #endif
+        guard let snap = currentSnapshot else { return nil }
+        return resolveDivergent(SnapshotHyperlinkResolver(snapshot: snap))
     }
 
     // MARK: - NSAccessibility -------------------------------------------

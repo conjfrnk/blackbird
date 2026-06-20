@@ -681,6 +681,19 @@ extension TerminalView {
             m.addItem(openItem)
             m.addItem(copyLinkItem)
             m.addItem(NSMenuItem.separator())
+        } else if let blockedHref = blockedDivergentOSC8Href(screenRow: screenRow, col: p.col) {
+            // The ⌘-click anti-phishing gate blocks this OSC 8 link because the
+            // visible anchor's host differs from the href. Offer a deliberate,
+            // clearly-labelled COPY (not open) so a legitimate divergent link
+            // isn't permanently unreachable — the user pastes into the browser
+            // and sees the real destination host before committing.
+            let copyMismatch = NSMenuItem(title: "Copy Link (host mismatch)",
+                                          action: #selector(copyResolvedLink(_:)),
+                                          keyEquivalent: "")
+            copyMismatch.target = self
+            copyMismatch.representedObject = blockedHref
+            m.addItem(copyMismatch)
+            m.addItem(NSMenuItem.separator())
         }
         let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
         let pasteItem = NSMenuItem(title: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
