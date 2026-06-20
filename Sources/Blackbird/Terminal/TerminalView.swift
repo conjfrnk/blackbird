@@ -1681,6 +1681,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     // MARK: - Input
 
+    /// True when an Option+key event should bypass the IME and be encoded as a
+    /// Meta chord (ESC + base char) rather than composed as a dead-key / accent.
+    /// In "Use Option as Meta" mode, Option becomes the Meta modifier, so
+    /// Option+e must emit ESC 'e' rather than start a "´" dead-key composition
+    /// (and Option+a must emit ESC 'a' rather than insert "å"). Excludes
+    /// Ctrl/⌘ chords (Ctrl+Option is handled by the encoder's Meta-prefix path;
+    /// ⌘ is a menu/app shortcut). Native-Option mode (`optionIsMeta == false`)
+    /// always returns false so dead-key composition is preserved. Extracted as
+    /// a pure function so the decision is unit-testable without a live input
+    /// context (the `keyDown` IME path can't be driven headlessly).
+    static func isOptionMetaChord(
+        optionIsMeta: Bool,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        optionIsMeta
+            && modifierFlags.contains(.option)
+            && !modifierFlags.contains(.control)
+            && !modifierFlags.contains(.command)
+    }
+
     public override func keyDown(with event: NSEvent) {
         // Typing dismisses any dwell-tooltip the pointer might be about
         // to reveal — otherwise a hovered URL tooltip would obscure the
@@ -1748,7 +1768,23 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         //   - IME did nothing: the flag stays false and `hasMarkedText`
         //     stays false. Fall through to the existing encoder path.
         didInsertTextViaIME = false
-        inputContext?.handleEvent(event)
+        // "Use Option as Meta" means an Option+key chord is a Meta keystroke
+        // (ESC + base char), NOT dead-key / accent composition. Bypass the
+        // IME for that chord so Option+e sends ESC 'e' instead of starting a
+        // "´" dead-key preedit, and Option+a sends ESC 'a' instead of
+        // inserting "å". Without this, handleEvent's setMarkedText/insertText
+        // consumes the event and the encoder's Meta path is never reached —
+        // breaking M-e/M-i/M-u/M-n and every other Option+letter in Meta mode.
+        // Matches Terminal.app / iTerm2, which disable Option composition when
+        // Option-as-Meta is on. Ctrl/⌘ chords and non-Option input (CJK/Korean
+        // IME) keep the normal IME path.
+        let optionMetaChord = Self.isOptionMetaChord(
+            optionIsMeta: encoder.optionIsMeta,
+            modifierFlags: event.modifierFlags
+        )
+        if !optionMetaChord {
+            inputContext?.handleEvent(event)
+        }
         if hasMarkedText() || didInsertTextViaIME { return }
 
         // Fast path for control characters: macOS translates Ctrl+letter into
@@ -1776,9 +1812,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // request). Without this, the fast path would send a bare
             // 0x01 for Ctrl+A even though the TUI asked for the
             // protocol-framed form (F-S3-002).
-            if kittyActive || modifyOther {
+            if kittyActive || modifyOther
+                || (encoder.optionIsMeta && event.modifierFlags.contains(.option)) {
                 // Fall through — encoder picks the right protocol and
-                // handles Ctrl + C0-aliasing letters too.
+                // handles Ctrl + C0-aliasing letters too. The Option clause:
+                // Ctrl+Option+letter in Meta mode is an Emacs/readline M-C-*
+                // chord that must carry the ESC Meta prefix (the bare-C0 fast
+                // path below would drop it, degrading M-C-f to plain ^F).
             } else if let chars = event.characters,
                let scalar = chars.unicodeScalars.first,
                scalar.value >= 1, scalar.value <= 0x1F {
