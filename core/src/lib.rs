@@ -2015,11 +2015,17 @@ thread_local! {
     /// the second reborrow, catching the violation at the actual UB
     /// boundary. Audit follow-up to M-9 (2026-04-29).
     ///
-    /// Currently checked only by `bb_term_input` (the canonical re-entry
-    /// vector — every bytes-in path runs the VT parser, which fires
-    /// events). Coverage for the rest of the entry-point surface is
-    /// tracked in KNOWN_ISSUES.md as deferred follow-up; the Swift
-    /// precondition still backstops them.
+    /// Checked by `ffi_reentry_blocked` at the top of EVERY guarded entry
+    /// point — `bb_term_input` (the canonical re-entry vector), plus
+    /// `bb_term_{resize2,take_snapshot,current_mode,scroll,scroll_to_bottom,
+    /// clear_all,text_range,set_named_color,set_event_cb,free,…}` — BEFORE
+    /// each materialises its `&mut *term` / `&*term`, so a re-entrant call
+    /// bails (reading this thread-local, no `*term` deref) before taking a
+    /// second borrow. The Swift-side `isInsideEventDispatch` precondition
+    /// still backstops them. (Note: the remaining miri-validation of this
+    /// surface — confirming the borrow-stack is clean under Tree Borrows so
+    /// `core/tests/handler_reentry_guard.rs` can drop its `cfg_attr(miri,
+    /// ignore)` — is tracked in KNOWN_ISSUES.md; it needs a nightly miri run.)
     static FFI_HANDLER_IN_FLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
