@@ -474,7 +474,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // this specific window before showing. ⌘T stays on the sibling
         // newWindowForTab path, which uses `addTabbedWindow` explicitly and
         // isn't subject to the tabbingMode check.
-        controller.window?.tabbingMode = .disallowed
+        // Block creation-time auto-merge but revert to .preferred next tick so
+        // this window can still receive tabs later (drag-merge / Merge All
+        // Windows). Leaving it .disallowed permanently made ⌘N windows
+        // un-mergeable for life. (F-S6-003)
+        controller.disallowTabbingForCreationInstant()
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
     }
@@ -549,8 +553,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Suppress the per-tab "process is still running" confirm for this
         // sweep — the multi-tab alert above already covered consent. Without
         // this, closing two tabs with running commands would pop an extra
-        // alert per tab.
-        MainWindowController.bypassCloseConfirm = true
+        // alert per tab. ONLY for a multi-tab sweep: a single-tab ⌘⇧W must
+        // keep the per-tab confirm (matching plain ⌘W), else it kills a
+        // running process with no confirmation at all. (F-S6-002)
+        if MainWindowController.shouldBypassPerTabConfirm(tabCount: tabs.count) {
+            MainWindowController.bypassCloseConfirm = true
+        }
         defer { MainWindowController.bypassCloseConfirm = false }
         for tab in tabs {
             tab.performClose(nil)
