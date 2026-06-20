@@ -122,6 +122,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// the 2026-05-14 code-reviewer pass on the cross-window save fix.
     private var isPerformingShowWindow = false
 
+    /// One-shot guard for re-applying the theme (and thus the CGS background
+    /// blur) after the window has a live `windowNumber`. The first theme
+    /// apply happens in init, before the window is ordered in, when
+    /// `setBackgroundBlurRadius` is a no-op. `showWindow` re-applies for the
+    /// ⌘N / first-window path, but ⌘T tabs join via `addTabbedWindow` and
+    /// never call `showWindow`, so their translucent background stayed
+    /// un-frosted until an unrelated theme refresh. `windowDidBecomeKey`
+    /// re-applies once for those; the flag keeps it from re-theming on every
+    /// subsequent focus gain.
+    private var didReapplyThemeAfterOrderIn = false
+
     /// Deadline until which frame saves are suppressed because macOS is
     /// reconfiguring displays (audit S5-006). When a display is
     /// unplugged, AppKit relocates and clamps windows onto the remaining
@@ -330,6 +341,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // apply happens during init (before super), so the blur call then
         // was a no-op. Re-run the palette push now that the window is
         // visible so the blur actually lights up on first show.
+        didReapplyThemeAfterOrderIn = true
         DispatchQueue.main.async {
             ThemeManager.shared.refresh()
         }
@@ -484,7 +496,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guard let win = window, win.isVisible else { return }
         let appHasModal = NSApp.modalWindow != nil
         if appHasModal || win.attachedSheet != nil {
-            DispatchQueue.main.async { [weak self] in
+            // Poll with a small backoff rather than re-dispatching on every
+            // runloop drain. NSApp.modalWindow is app-global, so a modal owned
+            // by ANOTHER window (e.g. a sibling's close-confirm) blocks us;
+            // a bare main.async would then re-queue continuously and spin a
+            // core for that modal's entire (possibly user-held) lifetime.
+            // ~20 Hz keeps the same eventual-close semantics with negligible CPU.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                 self?.deferredAutoCloseIfNeeded()
             }
             return
@@ -550,10 +568,38 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // AppKit's reconfiguration relocations never occur during a
         // live left-button drag or a live resize, so those signals
         // positively identify the user.
-        let userDriven = (NSEvent.pressedMouseButtons & 1) != 0 || win.inLiveResize
+        // NSEvent.pressedMouseButtons is GLOBAL (app-wide), so a left button
+        // held for an unrelated reason — dragging a DIFFERENT window, a
+        // force-press elsewhere — would misclassify THIS window's
+        // reconfiguration relocation as user-driven and clobber the saved
+        // multi-display frame. Scope the button signal to this window: a real
+        // title-bar drag keeps the pointer over the window as it moves, so
+        // require the pointer within this window's frame. inLiveResize is
+        // already per-window.
+        let userDriven = Self.isUserDrivenFrameChange(
+            leftButtonDown: (NSEvent.pressedMouseButtons & 1) != 0,
+            pointerInWindowFrame: win.frame.contains(NSEvent.mouseLocation),
+            inLiveResize: win.inLiveResize
+        )
         guard userDriven || Date() >= suppressFrameSavesUntil else { return }
         guard !win.styleMask.contains(.fullScreen) else { return }
         win.saveFrame(usingName: Self.frameAutosaveName)
+    }
+
+    /// Decide whether a windowDidMove/Resize is genuinely user-driven (and so
+    /// may bypass the S5-006 screen-reconfig settle suppression). A live
+    /// resize is always user-driven. A left-button drag counts ONLY when the
+    /// pointer is over THIS window — a title-bar drag carries the pointer with
+    /// the window, whereas a left button held while a different window or app
+    /// is being manipulated must not green-light saving this window's
+    /// AppKit-relocated frame. Extracted as a pure function so the
+    /// window-scoping logic is unit-testable without synthesizing NSEvents.
+    static func isUserDrivenFrameChange(
+        leftButtonDown: Bool,
+        pointerInWindowFrame: Bool,
+        inLiveResize: Bool
+    ) -> Bool {
+        inLiveResize || (leftButtonDown && pointerInWindowFrame)
     }
 
     /// Installed in init; arms the S5-006 suppression window. Selector
@@ -589,6 +635,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // removes the new-tab flash without depending on the scheduled
         // async to fire first.
         hideNativeTabStrip()
+        // ⌘T tabs join via addTabbedWindow and never call showWindow, so the
+        // post-order-in blur re-apply that showWindow does never runs for
+        // them — their translucent background stays un-frosted. Re-apply once
+        // now that windowNumber is live (the window is key). One-shot so we
+        // don't re-theme every focus gain.
+        if !didReapplyThemeAfterOrderIn {
+            didReapplyThemeAfterOrderIn = true
+            ThemeManager.shared.refresh()
+        }
         // When AppKit promotes a sibling tab on close (⌘W or `exit`
         // typed in the shell), the survivor's first responder doesn't
         // always carry through the transition — the user sees

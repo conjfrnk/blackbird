@@ -354,6 +354,113 @@ final class WindowFrameAutosaveTests: XCTestCase {
             "renaming the autosave name silently invalidates every existing user's saved frame")
     }
 
+    // MARK: - User-driven frame-change classification
+
+    /// Full truth table for the pure classifier
+    /// `MainWindowController.isUserDrivenFrameChange(leftButtonDown:pointerInWindowFrame:inLiveResize:)`.
+    ///
+    /// CONTRACT: the function returns true iff the window frame change is
+    /// user-driven (and may bypass the screen-reconfig settle
+    /// suppression). A live resize is ALWAYS user-driven; a left-button
+    /// drag counts ONLY when the pointer is over THIS window — i.e.
+    /// `inLiveResize || (leftButtonDown && pointerInWindowFrame)`.
+    ///
+    /// WHY THIS MATTERS: `NSEvent.pressedMouseButtons` is app-GLOBAL, so
+    /// a button held while a DIFFERENT window or app is being dragged
+    /// could otherwise be mistaken for a genuine drag of this window —
+    /// and a display reconfigure happening at that moment would mis-save
+    /// the unrelated window's clamped frame. Scoping the button case by
+    /// `pointerInWindowFrame` is the fix this test pins.
+    ///
+    /// Pure-function test: no NSWindow allocation, no PTYs. Negligible
+    /// memory/time cost.
+    func test_isUserDrivenFrameChange_fullTruthTable() {
+        // (leftButtonDown, pointerInWindowFrame, inLiveResize) -> expected
+        let cases: [(Bool, Bool, Bool, Bool)] = [
+            // Quiescent: nothing held, pointer elsewhere, not resizing.
+            (false, false, false, false),
+            // Genuine title-bar drag of THIS window.
+            (true,  true,  false, true),
+            // KEY REGRESSION: button held while a DIFFERENT window/app is
+            // dragged (pointer NOT over this window) — must NOT be treated
+            // as user-driven.
+            (true,  false, false, false),
+            // Pointer over the window but no button held and not resizing
+            // (e.g. a hover during a reconfigure) — not user-driven.
+            (false, true,  false, false),
+            // Live resize with no button reported and pointer elsewhere —
+            // resize alone is user-driven.
+            (false, false, true,  true),
+            // Live resize wins even though the pointer is outside the frame.
+            (true,  false, true,  true),
+            // Live resize wins regardless of the button/pointer combo.
+            (false, true,  true,  true),
+        ]
+
+        for (leftButtonDown, pointerInWindowFrame, inLiveResize, expected) in cases {
+            let actual = MainWindowController.isUserDrivenFrameChange(
+                leftButtonDown: leftButtonDown,
+                pointerInWindowFrame: pointerInWindowFrame,
+                inLiveResize: inLiveResize
+            )
+            XCTAssertEqual(
+                actual, expected,
+                "isUserDrivenFrameChange(leftButtonDown: \(leftButtonDown), "
+                    + "pointerInWindowFrame: \(pointerInWindowFrame), "
+                    + "inLiveResize: \(inLiveResize)) should be \(expected)"
+            )
+        }
+    }
+
+    /// Isolated assertion of the KEY regression case: a held button while
+    /// the pointer is over a DIFFERENT window must NOT count as
+    /// user-driven. Called out separately from the truth table so a
+    /// failure here reads unambiguously as "the app-global pressed-button
+    /// leak is back".
+    func test_isUserDrivenFrameChange_heldButtonOverOtherWindow_isNotUserDriven() {
+        XCTAssertFalse(
+            MainWindowController.isUserDrivenFrameChange(
+                leftButtonDown: true,
+                pointerInWindowFrame: false,
+                inLiveResize: false
+            ),
+            "a button held while another window/app is dragged must not be "
+                + "classified as a user-driven change of this window"
+        )
+    }
+
+    /// A genuine title-bar drag of THIS window (button down AND pointer
+    /// over the window) is user-driven.
+    func test_isUserDrivenFrameChange_genuineDragOfThisWindow_isUserDriven() {
+        XCTAssertTrue(
+            MainWindowController.isUserDrivenFrameChange(
+                leftButtonDown: true,
+                pointerInWindowFrame: true,
+                inLiveResize: false
+            ),
+            "button down with the pointer over this window is a genuine drag"
+        )
+    }
+
+    /// A live resize is always user-driven, independent of the button and
+    /// pointer state.
+    func test_isUserDrivenFrameChange_liveResize_alwaysUserDriven() {
+        for leftButtonDown in [false, true] {
+            for pointerInWindowFrame in [false, true] {
+                XCTAssertTrue(
+                    MainWindowController.isUserDrivenFrameChange(
+                        leftButtonDown: leftButtonDown,
+                        pointerInWindowFrame: pointerInWindowFrame,
+                        inLiveResize: true
+                    ),
+                    "inLiveResize must force user-driven regardless of "
+                        + "leftButtonDown=\(leftButtonDown), "
+                        + "pointerInWindowFrame=\(pointerInWindowFrame)"
+                )
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     /// Formats `rect.origin.x rect.origin.y rect.width rect.height` the
