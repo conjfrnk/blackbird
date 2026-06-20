@@ -83,144 +83,182 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
 
     // MARK: - F-S6-002: closeWindow bypass on single-tab window
 
-    /// Pre-flight: spawns ONE real `MainWindowController` (login shell) so
-    /// the per-tab "process running" confirm path can be exercised end-to-
-    /// end. Memory: ~5 MB resident for the controller + shell + view.
-    /// Time: <500 ms (login shell cold-start dominates).
+    /// Pre-flight: NO controller, NO shell. Pure function under test.
+    /// Memory: negligible. Time: <1 ms.
     ///
-    /// Asserts the F-S6-002 contract: when `Preferences.confirmClose ==
-    /// true` and the user invokes ⌘⇧W on a single-tab window, the per-tab
-    /// confirm should NOT be silently bypassed by the multi-tab consent
-    /// alert path (which sets `MainWindowController.bypassCloseConfirm =
-    /// true`). Specifically: the static `bypassCloseConfirm` flag must
-    /// remain `false` when the close path traverses a single-tab window.
+    /// F-S6-002: `shouldBypassPerTabConfirm(tabCount:)` decides whether
+    /// ⌘⇧W's batch close suppresses the per-tab "process is still running"
+    /// confirmation. It must return `true` ONLY for a multi-tab sweep
+    /// (tabCount > 1) — the "Close N tabs?" alert already took consent. A
+    /// single-tab ⌘⇧W must return `false` so the per-tab confirm still
+    /// fires (matching plain ⌘W); setting the bypass there killed a running
+    /// process with no confirmation at all.
     ///
-    /// We can observe this without driving the real ⌘⇧W menu chain by
-    /// asserting the static flag's resting state and that no test setup
-    /// has flipped it. Then we exercise the close path through
-    /// `controller.window?.performClose(nil)` and ensure the static flag
-    /// is back to false on completion.
-    func test_closeWindow_singleTab_doesNotLeaveBypassFlagAsserted() throws {
-        // Per memory `feedback_test_real_shell_controllers`: even a single
-        // real MainWindowController created inside xctest leaks state
-        // that destabilises later PTY tests (causes ASan SEGV in the
-        // resize-propagates-SIGWINCH test downstream). F-S6-002 validated
-        // via manual eyeball plus the static-flag assertion would need a
-        // test seam that doesn't currently exist.
-        throw XCTSkip("spawning MainWindowController in xctest destabilises later PTY tests; F-S6-002 defer")
+    /// Also pins the static `bypassCloseConfirm` resting state to `false`
+    /// (it must never be left asserted between batch closes).
+    func test_shouldBypassPerTabConfirm_onlyForMultiTab() throws {
+        // Resting state: the bypass flag must be false at test start — it's
+        // only ever flipped transiently inside a multi-tab sweep and reset
+        // via defer.
+        XCTAssertFalse(MainWindowController.bypassCloseConfirm,
+                       "bypassCloseConfirm must rest at false")
+
+        // Single tab (and the degenerate empty case): do NOT bypass.
+        XCTAssertFalse(MainWindowController.shouldBypassPerTabConfirm(tabCount: 1),
+                       "single-tab ⌘⇧W must keep the per-tab confirm "
+                           + "(matches plain ⌘W) — F-S6-002")
+        XCTAssertFalse(MainWindowController.shouldBypassPerTabConfirm(tabCount: 0),
+                       "empty tab count must not bypass the per-tab confirm")
+
+        // Multi-tab sweep: bypass (consent already taken by the
+        // "Close N tabs?" alert).
+        XCTAssertTrue(MainWindowController.shouldBypassPerTabConfirm(tabCount: 2),
+                      "two-tab sweep must bypass the per-tab confirm")
+        XCTAssertTrue(MainWindowController.shouldBypassPerTabConfirm(tabCount: 5),
+                      "five-tab sweep must bypass the per-tab confirm")
     }
 
     // MARK: - F-S6-003: newWindow tabbingMode reverts to allow merge
 
-    /// Pre-flight: spawns ONE real `MainWindowController` to inspect the
-    /// `tabbingMode` after the post-creation runloop hop completes.
-    /// Memory: ~5 MB resident. Time: <500 ms (one runloop spin).
+    /// Pre-flight: builds ONE real headless `MainWindowController` via the
+    /// `makeForTesting(stubSession:)` seam (no PTY/shell). Memory: ~a few
+    /// MB resident; teardown closes it. Time: <250 ms (one 0.05 s tick).
     ///
-    /// F-S6-003: `newWindow(_:)` (⌘N) sets `tabbingMode = .disallowed`
-    /// during the creation moment to suppress AppKit auto-merge under
-    /// "Prefer Tabs: Always". Per the audit, the documented fix is to
-    /// flip back to `.preferred` on the next runloop tick so the new
-    /// window can RECEIVE drag-merged tabs / participate in "Merge All
-    /// Windows".
+    /// F-S6-003: `disallowTabbingForCreationInstant()` sets
+    /// `tabbingMode = .disallowed` synchronously during the creation moment
+    /// to suppress AppKit auto-merge under "Prefer Tabs: Always", then must
+    /// revert to `.preferred` on the next runloop tick so the new window can
+    /// RECEIVE drag-merged tabs / participate in "Merge All Windows".
+    /// Leaving it `.disallowed` permanently made ⌘N windows un-mergeable.
     ///
-    /// We assert the post-creation steady state: after one runloop
-    /// iteration, the tabbingMode must NOT be `.disallowed`. If the
-    /// fix landed it should be `.preferred` (or at minimum `.automatic`).
-    /// Allow either non-`.disallowed` value to avoid coupling to the
-    /// specific fix style.
+    /// We assert both halves of the contract: the creation-instant block
+    /// holds synchronously (`.disallowed`), then reverts to `.preferred`
+    /// after one runloop iteration.
     func test_newWindow_tabbingMode_revertsFromDisallowedAfterCreation() throws {
-        // Same hazard as the close-single-tab test: a real
-        // MainWindowController leaks state that crashes later PTY tests
-        // under ASan. F-S6-003 stays open for a separate fix that can
-        // observe tabbingMode without a full shell spawn.
-        throw XCTSkip("spawning MainWindowController in xctest destabilises later PTY tests; F-S6-003 defer")
+        // Real-window integration: building a MainWindowController window +
+        // Metal view repeatedly in one xctest process destabilises the host
+        // (silent unexpected exit) when several such tests run back-to-back —
+        // the documented real-controller hazard. The fix + this test are
+        // sound (passes in isolation); gate to opt-in so the cumulative suite
+        // stays green. Run with BB_RUN_WINDOW_LIFECYCLE_TESTS=1 in isolation.
+        try XCTSkipIf(
+            ProcessInfo.processInfo.environment["BB_RUN_WINDOW_LIFECYCLE_TESTS"] != "1",
+            "set BB_RUN_WINDOW_LIFECYCLE_TESTS=1 to run real-window lifecycle tests in isolation"
+        )
+        Self.acquireControllerSlot()
+        defer { Self.releaseControllerSlot() }
+
+        let controller = MainWindowController.makeForTesting(
+            stubSession: .makeHeadlessForTests()
+        )
+        guard let controller else {
+            throw XCTSkip("no Metal device (CI virtual display) — "
+                + "makeForTesting returned nil; skipping")
+        }
+        defer {
+            controller.terminateSessions()
+            controller.window?.close()
+        }
+
+        // Apply the creation-instant block.
+        controller.disallowTabbingForCreationInstant()
+
+        // Synchronously, the block must hold so AppKit can't auto-merge
+        // this fresh window into an existing tab group.
+        XCTAssertEqual(controller.window?.tabbingMode, .disallowed,
+                       "creation-instant block must set .disallowed "
+                           + "synchronously (F-S6-003)")
+
+        // Spin one runloop tick so the deferred revert fires.
+        let exp = expectation(description: "tick")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { exp.fulfill() }
+        wait(for: [exp], timeout: 1.0)
+
+        // After the tick, it must revert to .preferred so the window can
+        // still RECEIVE tabs later — leaving it .disallowed for life was
+        // the bug.
+        XCTAssertEqual(controller.window?.tabbingMode, .preferred,
+                       "tabbingMode must revert to .preferred on the next "
+                           + "runloop tick so the window can receive merged "
+                           + "tabs (F-S6-003)")
     }
 
     // MARK: - F-S6-001: dock zombie on miniaturized auto-close
 
-    /// Pre-flight: NO real MainWindowController. Drives the deferred
-    /// auto-close logic via the public `MainWindowController.deferred
-    /// AutoCloseIfNeeded()` entry point with a stub-built bare window.
+    /// Pre-flight: builds ONE real headless `MainWindowController` via the
+    /// `makeForTesting(stubSession:)` seam (real window + tab bar + Metal
+    /// view + exit-close sink, but NO PTY/shell). Memory: ~a few MB
+    /// resident for the one window; teardown closes it. Time: <250 ms
+    /// (one 0.1 s runloop tick).
     ///
-    /// Wait — that requires constructing a controller. We CAN'T construct
-    /// the public controller without spawning a shell, and we already use
-    /// the slot above. So this test exercises the SHAPE of the bug via
-    /// the only means available without a controller: a documentary
-    /// assertion that the public `deferredAutoCloseIfNeeded()` symbol
-    /// exists and is callable.
+    /// F-S6-001: when a shell exits while its window is MINIATURIZED, the
+    /// deferred auto-close must NOT leave a permanent Dock zombie. Pre-fix,
+    /// the close path early-returned on a non-visible (miniaturized) window
+    /// and the minimized tile stuck in the Dock forever. Post-fix, the
+    /// deferred close deminiaturizes + closes the window.
     ///
-    /// This is a "presence + signature" pin only. The end-to-end
-    /// validation requires a stub session, which the controller does NOT
-    /// expose at v0.1.9 (per memory: blind constraint, can't read the
-    /// source). Once a `MainWindowController.makeForTesting(stubSession:)`
-    /// seam exists, this test can be expanded.
-    ///
-    /// Until then, we verify the crash-free invariant: calling
-    /// `deferredAutoCloseIfNeeded()` on a controller whose window is
-    /// miniaturized does NOT crash and does NOT produce a UI side effect
-    /// observable from the bare-NSWindow surface.
-    func test_deferredAutoClose_miniaturizedWindow_doesNotCrash() throws {
+    /// Regression pin: after invoking `deferredAutoCloseIfNeeded`, the
+    /// window must NOT remain miniaturized.
+    func test_deferredAutoClose_miniaturizedWindow_closesZombie() throws {
+        // Real-window integration — gated to opt-in (see the sibling F-S6-003
+        // test) so repeated window+Metal creation doesn't destabilise the
+        // cumulative xctest host. Run with BB_RUN_WINDOW_LIFECYCLE_TESTS=1.
+        try XCTSkipIf(
+            ProcessInfo.processInfo.environment["BB_RUN_WINDOW_LIFECYCLE_TESTS"] != "1",
+            "set BB_RUN_WINDOW_LIFECYCLE_TESTS=1 to run real-window lifecycle tests in isolation"
+        )
         Self.acquireControllerSlot()
         defer { Self.releaseControllerSlot() }
 
-        let controller = MainWindowController(
-            initialWorkingDirectory: nil,
-            autosaveFrame: false
+        let controller = MainWindowController.makeForTesting(
+            stubSession: .makeHeadlessForTests()
         )
+        guard let controller else {
+            throw XCTSkip("no Metal device (CI virtual display) — "
+                + "makeForTesting returned nil; skipping")
+        }
         defer {
             controller.terminateSessions()
             controller.window?.close()
         }
 
         // Show, then miniaturize. The window is now `isMiniaturized==true`
-        // and `isVisible==false` (per AppKit: miniaturized windows are
-        // not visible). Invoking the auto-close path should not crash;
-        // pre-fix, F-S6-001 says it would early-return and leave the
-        // window as a dock zombie.
+        // and `isVisible==false` (AppKit: miniaturized windows are not
+        // visible). Pre-fix, F-S6-001 says the deferred auto-close would
+        // early-return on this non-visible window and leave a dock zombie.
         controller.showWindow(nil)
         controller.window?.miniaturize(nil)
 
         // In a headless / xctest environment (no Dock), `miniaturize`
         // sometimes no-ops silently — the Window Server's dock animation
-        // is what actually flips `isMiniaturized`. Skip the strong
-        // precondition when we can tell miniaturize didn't take, rather
-        // than fail; the test's real intent is the post-trigger no-crash
-        // assertion.
+        // is what actually flips `isMiniaturized`. Skip rather than fail
+        // when we can tell miniaturize didn't take; the test's intent is
+        // the post-trigger de-zombie assertion.
         try XCTSkipUnless(controller.window?.isMiniaturized == true,
                           "headless xctest host did not honor miniaturize; skipping")
 
-        // Trigger the deferred-auto-close logic. Pre-fix: early-returns
-        // silently. Post-fix: should still tolerate a miniaturized state
-        // and either un-miniaturize-then-close or queue a close. We
-        // assert the WEAKER invariant — no crash — because the strong
-        // observation requires reading MainWindowController.swift, which
-        // is forbidden.
-        //
-        // `deferredAutoCloseIfNeeded` may be `internal` (visible to
-        // @testable) OR `private` (only callable internally on session
-        // exit). We probe via the Obj-C runtime so the test compiles
-        // regardless of access modifier — if the selector exists, we
-        // call it; if not, the test still pins the miniaturize → no
-        // crash path (the controller deinit triggers any internal
-        // deferred close).
+        // Trigger the deferred-auto-close logic. `deferredAutoCloseIfNeeded`
+        // is `private`, so we probe via the Obj-C runtime (as the prior
+        // scaffolding did) so the test compiles regardless of access
+        // modifier.
         let sel = NSSelectorFromString("deferredAutoCloseIfNeeded")
+        XCTAssertTrue(controller.responds(to: sel),
+                      "deferredAutoCloseIfNeeded selector must exist")
         if controller.responds(to: sel) {
             _ = controller.perform(sel)
         }
 
-        // Spin one runloop tick so any async work settles.
+        // Spin one runloop tick so the deferred close settles.
         let exp = expectation(description: "tick")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { exp.fulfill() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { exp.fulfill() }
         wait(for: [exp], timeout: 1.0)
 
-        // Best-effort observation: if the fix landed AND the controller
-        // queues a close on miniaturized auto-close, the window is no
-        // longer in `controllers` (or its session is terminated). We
-        // can't directly observe the controller registry without reading
-        // App.swift, so we just pin "no crash, no exception."
-        XCTAssertNotNil(controller.window,
-                        "controller window pointer survives the call "
-                            + "(crash regression pin)")
+        // Regression pin (F-S6-001): the window must NOT remain a dock
+        // zombie. Post-fix it deminiaturizes (and closes); pre-fix it
+        // stayed miniaturized.
+        XCTAssertFalse(controller.window?.isMiniaturized == true,
+                       "miniaturized window must not remain a dock zombie "
+                           + "after auto-close")
     }
 
     // MARK: - contentMinSize / contentResizeIncrements (free-resize feature)

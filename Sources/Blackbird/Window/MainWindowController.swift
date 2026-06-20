@@ -18,6 +18,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// Always reset immediately after the batch via a `defer`.
     static var bypassCloseConfirm: Bool = false
 
+    /// Whether ⌘⇧W's batch close should suppress the per-tab "process is still
+    /// running" confirmation. True ONLY for a multi-tab sweep — the
+    /// "Close N tabs?" alert already took consent. A single-tab ⌘⇧W must keep
+    /// the per-tab confirm so it matches plain ⌘W; setting the bypass there
+    /// killed a running process with no confirmation at all. (F-S6-002)
+    static func shouldBypassPerTabConfirm(tabCount: Int) -> Bool {
+        tabCount > 1
+    }
+
     /// Fallback traffic-light reservation for environments where the live
     /// window-button geometry can't be queried (pre-install, nil window,
     /// non-standard style mask). The live path queries
@@ -132,6 +141,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// re-applies once for those; the flag keeps it from re-theming on every
     /// subsequent focus gain.
     private var didReapplyThemeAfterOrderIn = false
+
+    /// Set once `windowWillClose` begins genuine teardown. `deferredAutoClose`
+    /// keys on this (not `isVisible`) so a window that's merely miniaturized —
+    /// also `isVisible == false` — is still auto-closed when its shell exits,
+    /// instead of lingering as a permanent Dock zombie (F-S6-001).
+    private var isClosing = false
 
     /// Deadline until which frame saves are suppressed because macOS is
     /// reconfiguring displays (audit S5-006). When a display is
@@ -347,6 +362,42 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
     }
 
+    /// Block AppKit's creation-time auto-merge (system "Prefer Tabs: Always")
+    /// for a fresh ⌘N window by setting `.disallowed` synchronously, then
+    /// revert to `.preferred` on the next runloop tick — after the auto-merge
+    /// window has passed — so the window can still RECEIVE tabs later
+    /// (drag-merge / "Merge All Windows"). Leaving it `.disallowed` permanently
+    /// made ⌘N windows un-mergeable for life. (F-S6-003)
+    func disallowTabbingForCreationInstant() {
+        window?.tabbingMode = .disallowed
+        DispatchQueue.main.async { [weak self] in
+            self?.window?.tabbingMode = .preferred
+        }
+    }
+
+    #if DEBUG
+    /// Test seam: when non-nil, `startSession` uses this instead of spawning a
+    /// real shell (no PTY, no fork). Set + cleared by `makeForTesting`.
+    static var sessionFactoryForTests: (() -> TerminalSession)?
+
+    /// Build a real `MainWindowController` backed by a stub (headless, no-PTY)
+    /// session for window-lifecycle tests (F-S6). Exercises the production init
+    /// path — window, autosave, tab bar, Metal view, exit-close sink — but
+    /// never spawns a shell, so it doesn't destabilise the xctest host the way
+    /// real zsh sessions do. Returns nil when no Metal device is available
+    /// (e.g. a CI virtual display): the controller then has no `TerminalView`
+    /// and no session was wired, so the caller should `XCTSkip`.
+    static func makeForTesting(stubSession: TerminalSession) -> MainWindowController? {
+        sessionFactoryForTests = { stubSession }
+        defer { sessionFactoryForTests = nil }
+        let controller = MainWindowController(autosaveFrame: false)
+        guard controller.terminalView != nil, controller.session != nil else {
+            return nil
+        }
+        return controller
+    }
+    #endif
+
     // MARK: - Session lifecycle
 
     private func startSession(inView view: TerminalView) {
@@ -374,15 +425,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // CellMetrics.sanePx = 1M px, a degenerate 1×1 cell can push
             // grid.cols above UInt16.max. TerminalSession.resize clamps
             // again to ≤1000 so the downstream grid is always sensible.
-            let s = try TerminalSession.start(
-                shell: shell,
-                arguments: ["-il"],  // interactive login shell
-                size: .init(
-                    cols: UInt16(clamping: grid.cols),
-                    rows: UInt16(clamping: grid.rows)
-                ),
-                initialWorkingDirectory: initialWorkingDirectory
-            )
+            #if DEBUG
+            let testFactory = Self.sessionFactoryForTests
+            #else
+            let testFactory: (() -> TerminalSession)? = nil
+            #endif
+            let s: TerminalSession
+            if let testFactory {
+                // Window-lifecycle tests (F-S6) inject a headless, no-PTY
+                // session so a real MainWindowController can be exercised
+                // without the zsh/PTY spawn that destabilises the xctest host.
+                s = testFactory()
+            } else {
+                s = try TerminalSession.start(
+                    shell: shell,
+                    arguments: ["-il"],  // interactive login shell
+                    size: .init(
+                        cols: UInt16(clamping: grid.cols),
+                        rows: UInt16(clamping: grid.rows)
+                    ),
+                    initialWorkingDirectory: initialWorkingDirectory
+                )
+            }
             view.session = s
             self.session = s
             // Registration is keyed by `owner: self` inside ThemeManager and
@@ -493,7 +557,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// own ⌘W flow already tore the window down while we were deferring.
     /// (main-window F4)
     private func deferredAutoCloseIfNeeded() {
-        guard let win = window, win.isVisible else { return }
+        // `!isClosing` replaces the old `win.isVisible` guard. isVisible was
+        // meant to skip a window already torn down by ⌘W, but it is ALSO false
+        // for a MINIATURIZED window — so a shell that exited while its window
+        // sat in the Dock left a permanent zombie that never closed and blocked
+        // app auto-quit (F-S6-001). isClosing tracks the genuine teardown case
+        // precisely; exitCancellable is also cancelled in windowWillClose so
+        // the sink can't re-fire during teardown.
+        guard let win = window, !isClosing else { return }
         let appHasModal = NSApp.modalWindow != nil
         if appHasModal || win.attachedSheet != nil {
             // Poll with a small backoff rather than re-dispatching on every
@@ -506,6 +577,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 self?.deferredAutoCloseIfNeeded()
             }
             return
+        }
+        // A miniaturized window must be deminiaturized before performClose so
+        // the close runs through the normal on-screen path rather than leaving
+        // a dead Dock thumbnail (F-S6-001).
+        if win.isMiniaturized {
+            win.deminiaturize(nil)
         }
         win.performClose(nil)
     }
@@ -527,6 +604,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     func windowWillClose(_ notification: Notification) {
+        // Genuine teardown begins. Mark it so a queued deferredAutoClose can't
+        // act on a closing window, and cancel the shell-exit sink BEFORE
+        // terminateSessions (which publishes exitCode and would otherwise
+        // re-enter deferredAutoCloseIfNeeded mid-teardown). (F-S6-001 / F4)
+        isClosing = true
+        exitCancellable?.cancel()
+        exitCancellable = nil
         // No close-time `saveCurrentFrame` here: the resize / move delegate
         // hooks already capture the live frame on every user-driven
         // change, so close is purely redundant in the happy path — and
