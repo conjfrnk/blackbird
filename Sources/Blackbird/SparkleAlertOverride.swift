@@ -71,6 +71,45 @@ enum SparkleAlertOverride {
         return "\(name) \(version) is the latest version."
     }
 
+    /// Resolve which window an "up to date" sheet should attach to.
+    ///
+    /// Returns the currently-SELECTED tab of the frontmost terminal window —
+    /// never a non-selected tab — so `beginSheetModal(for:)` can't force a tab
+    /// switch. Background: `NSApp.windows` is registration/arrival order, and
+    /// every tab in an `NSWindowTabGroup` reports `isVisible == true` (AppKit
+    /// never `orderOut`s background tabs; front-ness lives in `occlusionState`
+    /// / `tabGroup.selectedWindow`, not `isVisible`). The previous
+    /// `.first { isVisible }` predicate therefore attached the sheet to the
+    /// earliest-created tab, and `beginSheetModal` surfaced it — yanking
+    /// selection to tab 1 on every "Check for Updates" with multiple tabs open.
+    ///
+    /// Preference order: the key window's group's selected tab, else the main
+    /// window's, else the first terminal window's, else the key/main window
+    /// as-is (so the alert still shows when no terminal window exists). Pure +
+    /// injectable so it is unit-testable without fabricating a real
+    /// `NSWindowTabGroup` (sibling of how `upToDateMessage` was extracted).
+    /// Settings/About/panels are excluded by construction: they aren't
+    /// `MainWindowController` windows, preserving the audit-L11
+    /// "don't anchor to Settings" guarantee.
+    internal static func resolveSheetParent(
+        windows: [SheetParentResolvable],
+        keyWindow: SheetParentResolvable?,
+        mainWindow: SheetParentResolvable?
+    ) -> SheetParentResolvable? {
+        if let key = keyWindow, key.bb_isTerminalWindow, !key.bb_hasAttachedSheet {
+            return key.bb_selectedTabWindow
+        }
+        if let main = mainWindow, main.bb_isTerminalWindow, !main.bb_hasAttachedSheet {
+            return main.bb_selectedTabWindow
+        }
+        if let term = windows.first(where: { $0.bb_isTerminalWindow && !$0.bb_hasAttachedSheet }) {
+            return term.bb_selectedTabWindow
+        }
+        // No terminal window at all (e.g. only Settings open) — fall back so
+        // the alert still appears rather than being silently dropped.
+        return keyWindow ?? mainWindow
+    }
+
     /// Invoked once during app launch. Idempotent — `method_setImplementation`
     /// is safe to call repeatedly. On re-install, the previous block IMP is
     /// freed via `imp_removeBlock` (F-S7-001); the very first install's prior
@@ -139,13 +178,15 @@ enum SparkleAlertOverride {
             // before falling back to keyWindow / mainWindow — that gives
             // the alert a stable visual home regardless of where the
             // check was triggered.
-            let preferredTerminalWindow = NSApp.windows.first { window in
-                guard window.windowController is MainWindowController else { return false }
-                return window.isVisible && window.attachedSheet == nil
-            }
-            let parentWindow = preferredTerminalWindow
-                ?? NSApp.keyWindow
-                ?? NSApp.mainWindow
+            // Target the ACTIVE/selected tab, not array position. See
+            // `resolveSheetParent` — attaching the sheet to a non-selected tab
+            // forces AppKit to surface (select) that tab, which is exactly the
+            // "Check for Updates kicks me back to tab 1" bug.
+            let parentWindow = Self.resolveSheetParent(
+                windows: NSApp.windows,
+                keyWindow: NSApp.keyWindow,
+                mainWindow: NSApp.mainWindow
+            ) as? NSWindow
             if let window = parentWindow,
                window.attachedSheet == nil,
                NSApp.modalWindow == nil,
@@ -241,4 +282,30 @@ enum SparkleAlertOverride {
         }
     }
     #endif
+}
+
+// MARK: - Sheet-parent resolution seam
+
+/// Minimal window facts `SparkleAlertOverride.resolveSheetParent` needs,
+/// abstracted so the resolution logic is unit-testable without fabricating a
+/// real `NSWindowTabGroup` (AppKit only creates one for genuinely-tabbed
+/// windows, and `selectedWindow` cannot be set directly). Production conformer
+/// is `NSWindow`; tests inject lightweight stubs.
+@MainActor
+protocol SheetParentResolvable: AnyObject {
+    /// Owned by a `MainWindowController` — a terminal window. Excludes
+    /// Settings/About/panels by construction (the audit-L11 guarantee).
+    var bb_isTerminalWindow: Bool { get }
+    /// A sheet is already attached (cannot stack another).
+    var bb_hasAttachedSheet: Bool { get }
+    /// The window AppKit would surface for a sheet: the tab group's selected
+    /// tab, or `self` when the window isn't tabbed. Array position in
+    /// `NSApp.windows` is NOT this; `tabGroup.selectedWindow` is the authority.
+    var bb_selectedTabWindow: SheetParentResolvable { get }
+}
+
+extension NSWindow: SheetParentResolvable {
+    var bb_isTerminalWindow: Bool { windowController is MainWindowController }
+    var bb_hasAttachedSheet: Bool { attachedSheet != nil }
+    var bb_selectedTabWindow: SheetParentResolvable { tabGroup?.selectedWindow ?? self }
 }
