@@ -202,4 +202,137 @@ final class WordDragExtendTests: XCTestCase {
             rows: 4
         )
     }
+
+    // MARK: - 6. wordDragAnchorWord rotates with the live selection on scroll
+    //
+    // Regression guard (Bug #7, word-drag-extend stale anchor):
+    // when output scrolls the grid in the MIDDLE of a double-click
+    // word-drag, `render(snapshot:)` rotates the live `selection`'s
+    // endpoints up by the scroll delta to keep the highlight glued to its
+    // content. Previously it left `wordDragAnchorWord` UN-rotated, so the
+    // stored anchor word snapped back to whatever content scrolled into the
+    // vacated line, and the next drag-extend frame jumped the selection.
+    //
+    // The fix: `render(snapshot:)` must rotate BOTH endpoints of
+    // `wordDragAnchorWord` by the SAME delta, in lockstep with the
+    // selection. This test pins that lockstep behaviour: it measures how
+    // far the selection's anchor.line rotated and asserts the word anchor's
+    // endpoints rotated by exactly the same amount (and crucially, were NOT
+    // left at their original line).
+    //
+    // Driving idiom mirrors the Bug #14/#15 render-invalidation tests in
+    // TerminalViewTests: drive a real BBTerm directly so the snapshot
+    // sequence (and its `linesScrolled` counter) is synthesised without a
+    // live session+shell. Feeding more lines than the grid is tall scrolls
+    // output, advancing `linesScrolled` by a delta we read back from the
+    // two snapshots (rather than hard-coding the core's internal count).
+    //
+    // Memory / time pre-flight: one headless 80×24 TerminalView + a real
+    // BBTerm fed a few hundred short lines. Snapshot ≈ 30 KB; scrollback a
+    // few hundred lines × ~16 B/cell. Single-digit MB, well under limits;
+    // no PTY, no GUI child process.
+
+    /// View + a paired BBTerm whose snapshots we drive into
+    /// `render(snapshot:)` synchronously. The view's `session` is left nil
+    /// (no Combine sink), exactly like the render-invalidation tests.
+    private func makeViewAndTerm(cols: UInt16 = 80,
+                                 rows: UInt16 = 24,
+                                 file: StaticString = #filePath,
+                                 line: UInt = #line) throws -> (TerminalView, BBTerm) {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests(),
+                                 "headless TerminalView init failed",
+                                 file: file, line: line)
+        let bb = try XCTUnwrap(BBTerm(size: .init(cols: cols, rows: rows)),
+                               "BBTerm init failed",
+                               file: file, line: line)
+        return (view, bb)
+    }
+
+    func test_scrollDuringWordDrag_rotatesWordAnchorWithSelection() throws {
+        let (view, bb) = try makeViewAndTerm()
+
+        // Establish the prior snapshot so the next render() has a `prev`
+        // with the same cols/rows and a baseline linesScrolled to diff
+        // against. Feed enough lines first that we already have scrollback,
+        // so a subsequent scroll is a plain output-scroll (no resize, no
+        // alt-screen, history not collapsing).
+        var warmup = ""
+        for i in 0..<200 { warmup += "warm \(i) padding text on the line\n" }
+        bb.input(warmup)
+        let s1 = try XCTUnwrap(bb.snapshot())
+        view.render(snapshot: s1)
+
+        // Mid-drag state: a live word-mode selection plus the stored anchor
+        // word that the drag captured. Put both at the same known line so
+        // we can compare how each rotates. Lines are negative (scrollback)
+        // so they stay well within the retention floor after a small scroll.
+        let anchorLine: Int32 = -5
+        let sel = Selection(
+            anchor: BufferPoint(line: anchorLine, col: 6),
+            cursor: BufferPoint(line: anchorLine, col: 10),
+            mode: .word
+        )
+        view.selection = sel
+        // The captured anchor word: (start, end) of the originally
+        // double-clicked word, on the same line as the selection anchor.
+        let wordStart = BufferPoint(line: anchorLine, col: 6)
+        let wordEnd = BufferPoint(line: anchorLine, col: 10)
+        view.wordDragAnchorWord = (wordStart, wordEnd)
+
+        // Scroll output: feed more lines than fit, advancing linesScrolled.
+        // cols/rows unchanged, no alt-screen, history already populated.
+        var more = ""
+        for i in 0..<8 { more += "scroll \(i) more output text here\n" }
+        bb.input(more)
+        let s2 = try XCTUnwrap(bb.snapshot())
+
+        // Gate sanity: this must be the live-selection rotation case.
+        XCTAssertEqual(s2.cols, s1.cols, "cols must be unchanged for the rotation gate")
+        XCTAssertEqual(s2.rows, s1.rows, "rows must be unchanged for the rotation gate")
+        XCTAssertFalse(s2.termMode.contains(.altScreen),
+                       "no alt-screen toggle for the rotation gate")
+        XCTAssertGreaterThan(s2.linesScrolled, s1.linesScrolled,
+                             "feeding more lines than the grid is tall must advance linesScrolled")
+
+        view.render(snapshot: s2)
+
+        // The selection must have survived and rotated up.
+        let rotatedSel = try XCTUnwrap(view.selection,
+                                       "selection must survive an output scroll")
+        let selectionDelta = rotatedSel.anchor.line - anchorLine
+        XCTAssertLessThan(selectionDelta, 0,
+                          "selection anchor.line must rotate UP (decrease) with the scroll; "
+                          + "this is the lockstep the word anchor must match")
+
+        // The fix under test: wordDragAnchorWord rotated by the SAME delta.
+        let rotatedWord = try XCTUnwrap(view.wordDragAnchorWord,
+                                        "wordDragAnchorWord must survive a small in-history scroll")
+        XCTAssertEqual(rotatedWord.0.line, wordStart.line + selectionDelta,
+                       "word anchor START line must rotate in lockstep with the selection "
+                       + "(expected \(wordStart.line + selectionDelta), got \(rotatedWord.0.line))")
+        XCTAssertEqual(rotatedWord.1.line, wordEnd.line + selectionDelta,
+                       "word anchor END line must rotate in lockstep with the selection "
+                       + "(expected \(wordEnd.line + selectionDelta), got \(rotatedWord.1.line))")
+        // Columns are untouched by a vertical scroll rotation.
+        XCTAssertEqual(rotatedWord.0.col, wordStart.col, "word anchor start col must be untouched")
+        XCTAssertEqual(rotatedWord.1.col, wordEnd.col, "word anchor end col must be untouched")
+        // The key regression assertion: the word anchor's line is NOT left
+        // at its original value (the old bug left it un-rotated).
+        XCTAssertNotEqual(rotatedWord.0.line, wordStart.line,
+                          "REGRESSION: word anchor start was left un-rotated on scroll")
+        XCTAssertNotEqual(rotatedWord.1.line, wordEnd.line,
+                          "REGRESSION: word anchor end was left un-rotated on scroll")
+    }
+
+    // NOTE on the optional retention-floor (`wordDragAnchorWord == nil`)
+    // case: it is NOT included here on purpose. A buffer line falls off the
+    // floor only when it scrolls past `-historySize`, but BBTerm's default
+    // scrollback is 100_000 lines and `historySize` GROWS in lockstep with
+    // every line scrolled. So an anchor near the floor never actually
+    // crosses it by feeding output — the floor moves down with it. Forcing
+    // a crossing would mean feeding 100_000+ lines, which is slow and
+    // violates the project's test memory/time discipline. Driving that
+    // branch wants a unit-level seam (e.g. injecting historySize), not an
+    // output-scroll integration test, so it is deliberately left to the
+    // implementation's own coverage rather than fabricated here.
 }

@@ -388,6 +388,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     var regexSearchIDCounter: UInt64 = 0
     var activeRegexSearchID: UInt64 = 0
     var regexSearchCompletedID: UInt64 = 0
+    /// Set when ⌘G / ⌘⇧G is pressed while a regex stale-rescan is in flight
+    /// (the rescan clears findMatches and repopulates asynchronously). The
+    /// scan's main-thread publish honours this instead of resetting to match
+    /// 1, so the cycle isn't swallowed and the user's position is preserved.
+    /// `anchor` is the (line, startCol) of the match the user was on before
+    /// the rescan, used to resume from the equivalent position. Audit
+    /// findbar-selection: regex ⌘G swallow + reset.
+    var pendingRegexAdvance: (direction: FindBar.Direction, anchor: (line: Int32, startCol: Int)?)?
 
     /// True while an active drag with file URLs is hovering the view. Drives
     /// the accent-coloured drop-target ring. Set by the NSDraggingDestination
@@ -1079,10 +1087,35 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 let retentionFloor = -Int64(snapshot.historySize)
                 if min(anchorLine, cursorLine) < retentionFloor {
                     selection = nil
+                    // The drag's content scrolled out with the selection; drop
+                    // the stored .word drag anchor too so a resumed drag can't
+                    // re-pin to vacated coordinates.
+                    wordDragAnchorWord = nil
                 } else {
                     sel.anchor.line = Int32(clamping: anchorLine)
                     sel.cursor.line = Int32(clamping: cursorLine)
                     selection = sel
+                    // Rotate the stored .word drag anchor by the SAME delta.
+                    // A double-click-drag selection unions this anchor word
+                    // (captured once at mouseDown, in buffer-line coordinates)
+                    // with the word under the live cursor. S5-005 rotated
+                    // sel.anchor/cursor but NOT this tuple, so after output
+                    // scrolled the next mouseDragged re-pinned sel.anchor to the
+                    // word's OLD line — detaching the highlight from the
+                    // double-clicked word and copying the wrong span. Keep them
+                    // in lockstep; drop if it scrolls past retention (the drag
+                    // path falls back to sel.anchor when this is nil).
+                    if var anchorWord = wordDragAnchorWord {
+                        let w0 = Int64(anchorWord.0.line) - delta
+                        let w1 = Int64(anchorWord.1.line) - delta
+                        if min(w0, w1) < retentionFloor {
+                            wordDragAnchorWord = nil
+                        } else {
+                            anchorWord.0.line = Int32(clamping: w0)
+                            anchorWord.1.line = Int32(clamping: w1)
+                            wordDragAnchorWord = anchorWord
+                        }
+                    }
                 }
             }
         }
@@ -2722,6 +2755,7 @@ extension TerminalView: FindBarDelegate {
         findMatchesSeq = nil
         findCurrentIndex = 0
         findQuery = ""
+        pendingRegexAdvance = nil
         // F30: deliberately preserve `selection` so Esc-then-⌘C on a found
         // match still copies. The selection is wiped by the next mouse click
         // or shell-bound keystroke (see keyDown handler).
@@ -2765,6 +2799,14 @@ extension TerminalView {
     /// match is on the live input line (cursor row). Otherwise a transient
     /// warning is shown in the find bar.
     func replaceCurrentMatch(with replacement: String) {
+        // Re-derive against the live snapshot before splicing — advanceFind and
+        // replaceAllMatches both do this (audit fix-#18); replaceCurrentMatch
+        // was missing it, so a buffer scroll since the last search could splice
+        // the stale (line, startCol) of a wide-char match against a different
+        // grid and corrupt the input line. Replace-safe variant: substring
+        // refreshes synchronously, regex keeps the already-scanned matches
+        // (its rescan is async and would empty the set).
+        refreshFindMatchesIfStaleForReplace()
         let matches = effectiveFindMatches()
         guard !matches.isEmpty, findCurrentIndex < matches.count else { return }
         let m = matches[findCurrentIndex]
@@ -2830,8 +2872,10 @@ extension TerminalView {
         // nonSpacerCellCount fallback then col-spans a wide-char match
         // and overcounts DELs by one per wide glyph. advanceFind already
         // calls refreshFindMatchesIfStale (TerminalView+Find.swift:162);
-        // replaceAllMatches needs the same discipline.
-        refreshFindMatchesIfStale()
+        // replaceAllMatches needs the same discipline. Use the replace-safe
+        // variant so a stale REGEX query doesn't async-clear findMatches and
+        // turn Replace All into a silent no-op.
+        refreshFindMatchesIfStaleForReplace()
         let matches = effectiveFindMatches()
         guard !matches.isEmpty else { return }
         guard let snap = effectiveSnapshot() else { return }
