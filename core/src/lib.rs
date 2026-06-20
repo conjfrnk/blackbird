@@ -3499,9 +3499,16 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
             damaged_rows,
             damage_full,
         );
-        // Expose the public `snap` field (first field at offset 0).
+        // Expose the public `snap` field (first field at offset 0). Cast the
+        // BBSnapOwned pointer rather than forming `&(*owned_ptr).snap`: snap is
+        // the first `#[repr(C)]` field (identical address), but a `&BBSnap`
+        // reference would narrow the Stacked/Tree Borrows tag to snap's extent
+        // [0x0..size_of::<BBSnap>()), making the later `rc` access in
+        // bb_snap_retain / bb_snap_release (a field PAST snap) an out-of-range
+        // retag → UB. The pointer cast preserves provenance over the whole
+        // allocation, so the rc field is legally reachable. (miri H-5 surface.)
         let owned_ptr = Box::into_raw(owned);
-        &(*owned_ptr).snap as *const BBSnap
+        owned_ptr as *const BBSnap
     })
 }
 
