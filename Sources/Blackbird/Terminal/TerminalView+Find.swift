@@ -152,14 +152,36 @@ extension TerminalView {
     }
 
     func advanceFind(direction: FindBar.Direction) {
+        // Capture where the user currently is BEFORE any stale-rescan wipes
+        // findMatches, so a regex re-scan can resume from the equivalent
+        // position instead of jumping back to match 1.
+        let priorAnchor: (line: Int32, startCol: Int)? = {
+            guard findCurrentIndex >= 0, findCurrentIndex < findMatches.count else { return nil }
+            let m = findMatches[findCurrentIndex]
+            return (m.line, m.startCol)
+        }()
+
         // Audit findbar-selection F11: the snapshot may have advanced
         // between performSearch and ⌘G — output arriving scrolls history
         // and overwrites rows, so the cached (line, col) tuples can now
-        // reference cells holding different text. Re-scan synchronously
-        // against the live snapshot before cycling. The async refresh in
-        // currentSnapshot.didSet is debounced via DispatchQueue.main.async
-        // and may not have fired yet when ⌘G runs in the same runloop turn.
+        // reference cells holding different text. Re-scan against the live
+        // snapshot before cycling. The async refresh in currentSnapshot.didSet
+        // is debounced via DispatchQueue.main.async and may not have fired yet
+        // when ⌘G runs in the same runloop turn.
+        let willRegexRescan = regexSearchWouldRescan()
         refreshFindMatchesIfStale()
+
+        // Regex rescan is asynchronous: refreshFindMatchesIfStale cleared
+        // findMatches and dispatched a background scan, so findMatches is empty
+        // RIGHT NOW. Don't swallow the ⌘G (the old `guard !isEmpty` returned
+        // here) and don't let the scan's publish reset to match 1 — defer the
+        // cycle to the publish, which resumes from priorAnchor. Audit
+        // findbar-selection: regex ⌘G swallow + reset-to-1.
+        if willRegexRescan, findMatches.isEmpty {
+            pendingRegexAdvance = (direction, priorAnchor)
+            return
+        }
+
         guard !findMatches.isEmpty else { return }
         switch direction {
         case .forward:  findCurrentIndex = (findCurrentIndex + 1) % findMatches.count
@@ -167,6 +189,48 @@ extension TerminalView {
         }
         findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
         highlightCurrentMatch()
+    }
+
+    /// True when the active query is a regex whose cached matches are stale
+    /// vs the live snapshot — i.e. `refreshFindMatchesIfStale()` is about to
+    /// trigger an ASYNC rescan that empties `findMatches` synchronously. The
+    /// substring path rescans synchronously, so it returns false there.
+    func regexSearchWouldRescan() -> Bool {
+        guard findBar?.options.regex ?? false else { return false }
+        guard !findQuery.isEmpty, let snap = currentSnapshot else { return false }
+        return findMatchesSeq != snap.sequenceID
+    }
+
+    /// Resolve the cycle index to land on after a deferred regex rescan
+    /// publishes a fresh match set. Resumes from `anchor` (the match the user
+    /// was on) plus one step in `direction`; if that exact match no longer
+    /// exists, lands on the nearest match in the travel direction. With no
+    /// anchor, behaves like a first cycle (first match forward, last backward).
+    func resolveResumeIndex(
+        anchor: (line: Int32, startCol: Int)?,
+        direction: FindBar.Direction,
+        in matches: [(line: Int32, startCol: Int, endCol: Int)]
+    ) -> Int {
+        guard !matches.isEmpty else { return 0 }
+        guard let anchor else {
+            switch direction {
+            case .forward:  return 0
+            case .backward: return matches.count - 1
+            }
+        }
+        let a = (anchor.line, anchor.startCol)
+        if let exact = matches.firstIndex(where: { ($0.line, $0.startCol) == a }) {
+            switch direction {
+            case .forward:  return (exact + 1) % matches.count
+            case .backward: return (exact - 1 + matches.count) % matches.count
+            }
+        }
+        // The anchored match is gone (text under it changed) — resume at the
+        // nearest surviving match in the travel direction, wrapping.
+        switch direction {
+        case .forward:  return matches.firstIndex(where: { ($0.line, $0.startCol) > a }) ?? 0
+        case .backward: return matches.lastIndex(where: { ($0.line, $0.startCol) < a }) ?? (matches.count - 1)
+        }
     }
 
     /// Rerun the active search if the cached `findMatches` were computed
@@ -192,8 +256,26 @@ extension TerminalView {
         }
     }
 
+    /// Stale-refresh variant safe to call before a Replace. The substring path
+    /// rescans synchronously (preserving the fix-#18 wide-char column
+    /// re-derivation), so we refresh there. The REGEX path rescans
+    /// asynchronously — calling `refreshFindMatchesIfStale` would clear
+    /// findMatches and leave the replace operating on an empty set (a silent
+    /// no-op, since the publish lands after the replace's guard). So in regex
+    /// mode we skip the refresh and operate on the already-scanned matches;
+    /// spliceReplacements still re-derives DEL counts against the live
+    /// snapshot. Audit findbar-selection: regex Replace All / Replace no-op.
+    func refreshFindMatchesIfStaleForReplace() {
+        guard !(findBar?.options.regex ?? false) else { return }
+        refreshFindMatchesIfStale()
+    }
+
     func performSearch(query: String) {
         findQuery = query
+        // A fresh search supersedes any ⌘G that was deferred behind an
+        // in-flight regex rescan (advanceFind re-sets this AFTER calling us,
+        // so its own deferral survives; a user-typed query correctly drops it).
+        pendingRegexAdvance = nil
         findMatches.removeAll()
         // Clear the seq stamp now; the substring path below stamps it
         // post-scan, and the regex async path stamps it on the main-queue
@@ -445,7 +527,20 @@ extension TerminalView {
                 // sees the cached seq trail the live one and re-runs the
                 // search before cycling.
                 self.findMatchesSeq = scanSeq
-                self.findCurrentIndex = 0
+                // If a ⌘G arrived while this scan was in flight, honour it
+                // here (resume from the user's position + one step) instead of
+                // resetting to match 1 — otherwise the press is lost and the
+                // cycle jumps back to the top during live output.
+                if let pending = self.pendingRegexAdvance {
+                    self.pendingRegexAdvance = nil
+                    self.findCurrentIndex = self.resolveResumeIndex(
+                        anchor: pending.anchor,
+                        direction: pending.direction,
+                        in: matches
+                    )
+                } else {
+                    self.findCurrentIndex = 0
+                }
                 self.findBar?.setMatchCount(self.findCurrentIndex, of: self.findMatches.count)
                 self.highlightCurrentMatch()
             }

@@ -1,6 +1,8 @@
 import XCTest
 import AppKit
+import Metal
 @testable import Blackbird
+import BBCore
 
 /// Unit tests for FindBar's replace row: layout, height, and delegate dispatch.
 /// These tests are purely structural — no PTY, no TerminalSession.
@@ -552,5 +554,276 @@ final class FindBarTransientTokenTests: XCTestCase {
         XCTAssertEqual(bar._matchLabelStringForTests(), "first")
         bar.showTransientMessage("second")
         XCTAssertEqual(bar._matchLabelStringForTests(), "second")
+    }
+}
+
+// MARK: - Bug 4: resolveResumeIndex (regex re-scan resume point)
+//
+// When a regex ⌘G fires during live output, the async re-scan publishes
+// a fresh match set and the cycle position must be restored to where the
+// user was — one step past their previous match in the travel direction.
+// A naïve "reset to match 1" swallows the press and loses the user's
+// place in the cycle. `resolveResumeIndex` is the pure function that
+// computes the landing index from the remembered anchor + direction
+// against the freshly-scanned (document-ordered) match list.
+//
+// These are pure-arithmetic assertions over a fixed 3-element match list
+// (each tuple < a few bytes; the whole suite is < 64 KB and allocates one
+// lightweight headless TerminalView for the instance receiver). Derived
+// entirely from the documented contract — no implementation body read.
+final class FindResolveResumeIndexTests: XCTestCase {
+
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
+    /// `resolveResumeIndex` is an instance method, so it needs a receiver.
+    /// `makeHeadlessForTests()` builds a TerminalView with no PTY / session
+    /// (< a few MB, no scrollback growth). The function is pure over its
+    /// arguments, so the receiver's other state is irrelevant.
+    private func makeView() throws -> TerminalView {
+        try XCTUnwrap(TerminalView.makeHeadlessForTests())
+    }
+
+    /// Document-ordered match list shared by most cases:
+    ///   index 0 → (line 0, col 0)
+    ///   index 1 → (line 0, col 5)
+    ///   index 2 → (line 2, col 1)
+    private let matches: [(line: Int32, startCol: Int, endCol: Int)] = [
+        (line: 0, startCol: 0, endCol: 0),
+        (line: 0, startCol: 5, endCol: 6),
+        (line: 2, startCol: 1, endCol: 2),
+    ]
+
+    // MARK: anchor == an exact existing match (forward/backward + wrap)
+
+    func test_resolveResumeIndex_anchorFirstMatch_forwardAdvances_backwardWrapsToLast() throws {
+        let view = try makeView()
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 0, startCol: 0),
+                                    direction: .forward, in: matches),
+            1, "Forward from the first match must advance to index 1")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 0, startCol: 0),
+                                    direction: .backward, in: matches),
+            2, "Backward from the first match must wrap to the last index")
+    }
+
+    func test_resolveResumeIndex_anchorMiddleMatch_forwardAndBackwardStepOne() throws {
+        let view = try makeView()
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 0, startCol: 5),
+                                    direction: .forward, in: matches),
+            2, "Forward from the middle match must advance to index 2")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 0, startCol: 5),
+                                    direction: .backward, in: matches),
+            0, "Backward from the middle match must step to index 0")
+    }
+
+    func test_resolveResumeIndex_anchorLastMatch_forwardWrapsToZero_backwardStepsOne() throws {
+        let view = try makeView()
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 2, startCol: 1),
+                                    direction: .forward, in: matches),
+            0, "Forward from the last match must wrap to index 0")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 2, startCol: 1),
+                                    direction: .backward, in: matches),
+            1, "Backward from the last match must step to index 1")
+    }
+
+    // MARK: anchor == nil (first-cycle semantics)
+
+    func test_resolveResumeIndex_nilAnchor_forwardReturnsFirst_backwardReturnsLast() throws {
+        let view = try makeView()
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: nil, direction: .forward, in: matches),
+            0, "No anchor + forward must behave like a first cycle → first match")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: nil, direction: .backward, in: matches),
+            2, "No anchor + backward must behave like a first cycle → last match")
+    }
+
+    // MARK: anchor does NOT equal any match (the cell under it changed)
+
+    func test_resolveResumeIndex_anchorBetweenMatches_forwardPicksNextGreater_backwardPicksPrevLess() throws {
+        // (0,3) sits strictly between (0,0) and (0,5).
+        let view = try makeView()
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 0, startCol: 3),
+                                    direction: .forward, in: matches),
+            1, "Forward must land on the FIRST match strictly greater than the anchor → (0,5) at index 1")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 0, startCol: 3),
+                                    direction: .backward, in: matches),
+            0, "Backward must land on the LAST match strictly less than the anchor → (0,0) at index 0")
+    }
+
+    func test_resolveResumeIndex_anchorAfterAllMatches_forwardWraps_backwardPicksLast() throws {
+        // (9,9) is lexicographically after every match.
+        let view = try makeView()
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 9, startCol: 9),
+                                    direction: .forward, in: matches),
+            0, "Forward with no greater match must wrap to index 0")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 9, startCol: 9),
+                                    direction: .backward, in: matches),
+            2, "Backward with the anchor past all matches must pick the last (index 2)")
+    }
+
+    func test_resolveResumeIndex_anchorBeforeAllMatches_forwardPicksFirst_backwardWraps() throws {
+        // (-1,0) is lexicographically before every match.
+        let view = try makeView()
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: -1, startCol: 0),
+                                    direction: .forward, in: matches),
+            0, "Forward with the anchor before all matches must pick the first (index 0)")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: -1, startCol: 0),
+                                    direction: .backward, in: matches),
+            2, "Backward with no lesser match must wrap to the last index (2)")
+    }
+
+    // MARK: degenerate — empty match list
+
+    func test_resolveResumeIndex_emptyMatches_returnsZero() throws {
+        let view = try makeView()
+        let empty: [(line: Int32, startCol: Int, endCol: Int)] = []
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 0, startCol: 0),
+                                    direction: .forward, in: empty),
+            0, "Empty match list must return 0 regardless of anchor/direction")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: (line: 0, startCol: 0),
+                                    direction: .backward, in: empty),
+            0, "Empty match list must return 0 in the backward direction too")
+        XCTAssertEqual(
+            view.resolveResumeIndex(anchor: nil, direction: .forward, in: empty),
+            0, "Empty match list must return 0 even with no anchor")
+    }
+}
+
+// MARK: - Bugs 5/6: refreshFindMatchesIfStaleForReplace — regex-skip guard
+//
+// Replace All / Replace Current call `refreshFindMatchesIfStaleForReplace()`
+// before splicing. For a SUBSTRING query whose cached matches are stale
+// (findMatchesSeq != currentSnapshot.sequenceID) it must synchronously
+// rescan (which, with no live session, clears findMatches). For a REGEX
+// query it must do NOTHING — the regex rescan is async, so clearing the
+// cache here would leave Replace operating on an empty set, turning
+// Replace All / Replace Current into a silent no-op (Bugs 5/6).
+//
+// Fixtures use one headless TerminalView (< a few MB) + a single BBTerm
+// snapshot (20×4 grid, < 5 KB). No PTY, no session.
+final class FindReplaceStaleRefreshGuardTests: XCTestCase {
+
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
+    private func makeView() throws -> TerminalView {
+        try XCTUnwrap(TerminalView.makeHeadlessForTests())
+    }
+
+    /// A fresh snapshot from a tiny BBTerm — only its `sequenceID` matters
+    /// here. The allocator bumps the ID on every `snapshot()` call so we
+    /// can force a stale condition by stamping `findMatchesSeq` to a
+    /// deliberately different value.
+    private func freshSnapshot() throws -> BBSnapshot {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 4)))
+        term.input("alpha")
+        return try XCTUnwrap(term.snapshot())
+    }
+
+    /// A FindBar with regex mode ON. `options.regex` defaults to false;
+    /// `toggleRegexMode(nil)` flips it to true (verified inline).
+    private func regexFindBar() -> FindBar {
+        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
+        bar.toggleRegexMode(nil)
+        XCTAssertTrue(bar.options.regex, "test setup: regex option must be ON")
+        return bar
+    }
+
+    /// A FindBar in plain substring mode (the default).
+    private func substringFindBar() -> FindBar {
+        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
+        XCTAssertFalse(bar.options.regex, "test setup: regex option must be OFF (substring)")
+        return bar
+    }
+
+    /// REGEX + stale cache → the guard must NOT touch findMatches. If it
+    /// cleared the cache, the subsequent (async) regex rescan would not
+    /// have repopulated it yet, and Replace would splice against an empty
+    /// list — the Bug 5 / Bug 6 silent no-op.
+    func test_refreshForReplace_regexStale_leavesMatchesUntouched() throws {
+        let view = try makeView()
+        let snap = try freshSnapshot()
+
+        view.findBar = regexFindBar()
+        view.findQuery = "al.ha"                       // non-empty regex query
+        view.currentSnapshot = snap
+        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        // Stamp the cache stale: a value that cannot equal the live
+        // snapshot's sequenceID.
+        view.findMatchesSeq = snap.sequenceID &+ 1
+
+        view.refreshFindMatchesIfStaleForReplace()
+
+        XCTAssertEqual(
+            view.findMatches.count, 1,
+            "Regex mode must skip the synchronous refresh and leave findMatches "
+            + "intact — clearing it here makes Replace All/Current a silent "
+            + "no-op (Bugs 5/6).")
+        XCTAssertEqual(
+            view.findMatches.first?.startCol, 0,
+            "The exact cached match must survive the regex-skip guard")
+    }
+
+    /// REGEX + NOT stale → still must not disturb the cache (the guard's
+    /// regex branch is unconditional; this pins that it doesn't rescan
+    /// even when seq happens to match).
+    func test_refreshForReplace_regexFresh_leavesMatchesUntouched() throws {
+        let view = try makeView()
+        let snap = try freshSnapshot()
+
+        view.findBar = regexFindBar()
+        view.findQuery = "al.ha"
+        view.currentSnapshot = snap
+        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findMatchesSeq = snap.sequenceID          // in sync → fresh
+
+        view.refreshFindMatchesIfStaleForReplace()
+
+        XCTAssertEqual(
+            view.findMatches.count, 1,
+            "Regex mode must never clear findMatches via the replace-refresh guard")
+    }
+
+    /// SUBSTRING + stale cache → the guard must trigger a synchronous
+    /// rescan. With no live session wired, that rescan clears findMatches
+    /// (the session-less guard path), which is the observable side-effect
+    /// proving the refresh fired. This is the counterpart that the regex
+    /// branch deliberately skips.
+    func test_refreshForReplace_substringStale_rescansAndClearsMatches() throws {
+        let view = try makeView()
+        let snap = try freshSnapshot()
+
+        view.findBar = substringFindBar()
+        view.findQuery = "alpha"                       // non-empty substring query
+        view.currentSnapshot = snap
+        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findMatchesSeq = snap.sequenceID &+ 1     // stale
+
+        view.refreshFindMatchesIfStaleForReplace()
+
+        XCTAssertTrue(
+            view.findMatches.isEmpty,
+            "Substring mode must synchronously rescan a stale cache; with no "
+            + "session the rescan clears findMatches. (Counterpart to the "
+            + "regex-skip guard — Bugs 5/6.)")
     }
 }
