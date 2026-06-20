@@ -1386,4 +1386,67 @@ final class TerminalViewTests: XCTestCase {
                        "https://example.com/ab",
                        "VS17-256 (U+E0100) must be stripped from the display scrubber")
     }
+
+    // MARK: - Option-as-Meta chord gate (IME dead-key bypass)
+
+    /// `isOptionMetaChord` gates whether an Option+key event is treated as a
+    /// Meta chord (sending ESC+letter) and therefore bypasses the macOS
+    /// dead-key / IME accent composer. Regression: in Meta mode, Option+e /
+    /// Option+a / Option+i / Option+u / Option+n were being swallowed by the
+    /// composer (producing "´" / "å" etc.) instead of sending M-e/M-i/M-u/M-n,
+    /// breaking those Emacs/readline Meta bindings. The gate must fire TRUE
+    /// only when "Use Option as Meta" is on AND Option is held AND neither
+    /// Control nor Command is held.
+    func test_isOptionMetaChord_metaModeOptionAlone_isChord() {
+        // Use Option as Meta + plain Option held → Meta chord, bypass IME.
+        XCTAssertTrue(
+            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option])
+        )
+    }
+
+    func test_isOptionMetaChord_metaModeOptionShift_isChordShiftIrrelevant() {
+        // Shift is just a shift level (Option+Shift+e is still a Meta chord);
+        // it must not disqualify the chord.
+        XCTAssertTrue(
+            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .shift])
+        )
+    }
+
+    func test_isOptionMetaChord_metaModeOptionControl_isNotChord() {
+        // Control+Option is handled by a different path (C0 / control
+        // encoding); the Meta-chord IME bypass must not claim it.
+        XCTAssertFalse(
+            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .control])
+        )
+    }
+
+    func test_isOptionMetaChord_metaModeOptionCommand_isNotChord() {
+        // Command is a menu/app shortcut surface; an Option+Command event is
+        // never a Meta chord.
+        XCTAssertFalse(
+            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .command])
+        )
+    }
+
+    func test_isOptionMetaChord_metaModeControlWithoutOption_isNotChord() {
+        // No Option held at all → not a Meta chord regardless of mode.
+        XCTAssertFalse(
+            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.control])
+        )
+    }
+
+    func test_isOptionMetaChord_metaModeNoModifiers_isNotChord() {
+        // No Option held → not a Meta chord.
+        XCTAssertFalse(
+            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [])
+        )
+    }
+
+    func test_isOptionMetaChord_nativeModeOptionAlone_isNotChord() {
+        // Native-Option mode: the user wants macOS accent composition
+        // preserved, so even plain Option must NOT be treated as a Meta chord.
+        XCTAssertFalse(
+            TerminalView.isOptionMetaChord(optionIsMeta: false, modifierFlags: [.option])
+        )
+    }
 }
