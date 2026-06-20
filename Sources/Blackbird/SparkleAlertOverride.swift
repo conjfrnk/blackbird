@@ -106,7 +106,12 @@ enum SparkleAlertOverride {
             return term.bb_selectedTabWindow
         }
         // No terminal window at all (e.g. only Settings open) — fall back so
-        // the alert still appears rather than being silently dropped.
+        // the alert still appears rather than being silently dropped. NOTE:
+        // this returns the window AS-IS (not via bb_selectedTabWindow); it is
+        // the untabbed-only escape hatch. Callers must not route a selectable
+        // tab group through this branch, or the tab-yank bug this resolver
+        // fixes would re-open. Unreachable today: a terminal key/main window is
+        // caught by the selected-tab branches above.
         return keyWindow ?? mainWindow
     }
 

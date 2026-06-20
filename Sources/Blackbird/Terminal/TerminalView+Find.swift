@@ -169,6 +169,7 @@ extension TerminalView {
         // is debounced via DispatchQueue.main.async and may not have fired yet
         // when ⌘G runs in the same runloop turn.
         let willRegexRescan = regexSearchWouldRescan()
+        let scanIDBeforeRefresh = activeRegexSearchID
         refreshFindMatchesIfStale()
 
         // Regex rescan is asynchronous: refreshFindMatchesIfStale cleared
@@ -177,7 +178,13 @@ extension TerminalView {
         // here) and don't let the scan's publish reset to match 1 — defer the
         // cycle to the publish, which resumes from priorAnchor. Audit
         // findbar-selection: regex ⌘G swallow + reset-to-1.
-        if willRegexRescan, findMatches.isEmpty {
+        //
+        // Defer ONLY when a scan actually started (a fresh scan ID was minted).
+        // An invalid / too-complex regex makes performSearch bail before
+        // starting one; deferring then would strand pendingRegexAdvance with no
+        // publish to consume it (review: code-reviewer). Fall through to the
+        // empty-guard return in that case.
+        if willRegexRescan, findMatches.isEmpty, activeRegexSearchID != scanIDBeforeRefresh {
             pendingRegexAdvance = (direction, priorAnchor)
             return
         }
@@ -572,6 +579,12 @@ extension TerminalView {
             // whole buffer for a result that will be discarded.
             cancelFlag.value = true
             guard self.activeRegexSearchID == mySearchID else { return }
+            // A deferred ⌘G (pendingRegexAdvance) was owed to THIS scan, which
+            // is now abandoned — drop it deterministically so it isn't silently
+            // stranded and can't fire a surprising delayed jump if a later
+            // re-run of the same query publishes. Mirrors the success path's
+            // consume-and-clear. (review: silent-failure-hunter)
+            self.pendingRegexAdvance = nil
             self.findBar?.setMatchCount(0, of: 0)
             self.findBar?.showTransientMessage("Regex too complex")
             self.selection = nil

@@ -827,3 +827,84 @@ final class FindReplaceStaleRefreshGuardTests: XCTestCase {
             + "regex-skip guard — Bugs 5/6.)")
     }
 }
+
+// MARK: - advanceFind regex-deferral guard: invalid query must not strand
+//         pendingRegexAdvance.
+//
+// In regex mode, ⌘G (Find-Next) on a STALE cache defers the cycle by
+// stashing the press in `pendingRegexAdvance`, to be consumed when the
+// background regex rescan publishes a fresh match set. But that stash is
+// only safe IF a rescan actually started. If the regex query is invalid
+// (fails to compile) or too complex (rejected by the ReDoS gate), the
+// search bails BEFORE launching any scan. Setting `pendingRegexAdvance`
+// in that case would strand it forever — no scan will ever fire to drain
+// it, and a later valid press could pick up the wrong deferred direction.
+//
+// Contract pinned (review finding regression guard):
+//   advanceFind(direction:) in regex mode, with a stale findMatchesSeq and
+//   an INVALID regex query, must leave `pendingRegexAdvance` == nil because
+//   no background scan was started to consume it.
+//
+// Reuses the exact headless-view + regex-find-bar + installed-snapshot +
+// stale-seq idiom from FindReplaceStaleRefreshGuardTests. One headless
+// TerminalView (< a few MB) + one tiny BBTerm snapshot (20×4, < 5 KB). No
+// PTY, no session. Derived from the documented contract — the advanceFind
+// and regexSearchWouldRescan bodies were NOT read.
+final class FindAdvanceRegexDeferralGuardTests: XCTestCase {
+
+    override class func setUp() {
+        super.setUp()
+        TestHostTermination.shared.register()
+    }
+
+    private func makeView() throws -> TerminalView {
+        try XCTUnwrap(TerminalView.makeHeadlessForTests())
+    }
+
+    /// A fresh snapshot from a tiny BBTerm — only its `sequenceID` matters
+    /// here; we stamp `findMatchesSeq` to a deliberately different value to
+    /// force the stale condition that triggers the regex deferral path.
+    private func freshSnapshot() throws -> BBSnapshot {
+        let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 4)))
+        term.input("alpha")
+        return try XCTUnwrap(term.snapshot())
+    }
+
+    /// A FindBar with regex mode ON (the default is OFF; `toggleRegexMode`
+    /// flips it, verified inline).
+    private func regexFindBar() -> FindBar {
+        let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 400, height: 60))
+        bar.toggleRegexMode(nil)
+        XCTAssertTrue(bar.options.regex, "test setup: regex option must be ON")
+        return bar
+    }
+
+    /// INVALID regex + stale cache → advanceFind must bail before starting
+    /// a scan, so `pendingRegexAdvance` must remain nil. "(((" is an
+    /// unbalanced-paren pattern that fails to compile; there is no scan to
+    /// ever drain a deferred press, so stashing one would strand it.
+    func test_advanceFind_invalidRegexStale_doesNotStrandPendingRegexAdvance() throws {
+        let view = try makeView()
+        let snap = try freshSnapshot()
+
+        view.findBar = regexFindBar()
+        view.findQuery = "((("                          // unbalanced parens — won't compile
+        view.currentSnapshot = snap
+        view.findMatches = []
+        view.findMatchesSeq = snap.sequenceID &+ 1      // stale → would normally defer
+        view.pendingRegexAdvance = nil
+
+        view.advanceFind(direction: .forward)
+
+        XCTAssertNil(
+            view.pendingRegexAdvance,
+            "invalid-regex ⌘G must not strand pendingRegexAdvance — no scan "
+            + "was started, so a deferred press could never be consumed.")
+    }
+    // NOTE: a "valid regex defers" counterpart isn't unit-testable headlessly —
+    // performSearch bails at `guard let session` with no session, so no scan
+    // ever starts and nothing defers regardless of the pattern. The deferral's
+    // resume math is covered by FindResolveResumeIndexTests; the guard above is
+    // non-vacuous on its own (the pre-fix advanceFind, lacking the
+    // scan-actually-started check, WOULD strand pendingRegexAdvance here).
+}
