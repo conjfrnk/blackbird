@@ -474,4 +474,72 @@ final class TabOrderCoordinatorTests: XCTestCase {
         let n2 = try XCTUnwrap(coord.nextWindow(after: v1, in: group))
         XCTAssertTrue(n2 === v2)
     }
+
+    // MARK: - neighborIndexAfterClose (pure static contract)
+
+    /// Pure arithmetic helper: after closing the tab at `closingIndex`
+    /// in a strip of `count` tabs, which VISUAL index should become
+    /// active? Contract (no peek at the impl body):
+    ///   - nil when `count <= 1`, `closingIndex < 0`, or
+    ///     `closingIndex >= count` (nothing left to focus / out of
+    ///     range).
+    ///   - otherwise the RIGHT neighbour (`closingIndex + 1`) when one
+    ///     exists (`closingIndex + 1 < count`), else the LEFT neighbour
+    ///     (`closingIndex - 1`) when closing the last tab.
+    ///
+    /// Why this matters: after a pill drag-reorder, closing the active
+    /// tab should select the strip-adjacent (visual) neighbour, not
+    /// AppKit's arrival-order auto-promotion. This is the seam that pins
+    /// the visual-neighbour choice independent of `group.windows`.
+    func test_neighborIndexAfterClose_picksRightNeighbourWhenPresent() {
+        // count == 3 strip.
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: 0, count: 3),
+            1,
+            "closing the first of three must focus its right neighbour (1)")
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: 1, count: 3),
+            2,
+            "closing a middle tab must focus its right neighbour (2)")
+        // count == 2 strip.
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: 0, count: 2),
+            1,
+            "closing the first of two must focus its right neighbour (1)")
+    }
+
+    func test_neighborIndexAfterClose_picksLeftNeighbourWhenClosingLast() {
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: 2, count: 3),
+            1,
+            "closing the last of three (no right neighbour) must fall back "
+                + "to the left neighbour (1)")
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: 1, count: 2),
+            0,
+            "closing the last of two (no right neighbour) must fall back "
+                + "to the left neighbour (0)")
+    }
+
+    func test_neighborIndexAfterClose_returnsNilWhenNoNeighbourExists() {
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: 0, count: 1),
+            nil,
+            "the only tab has no neighbour to focus → nil")
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: 0, count: 0),
+            nil,
+            "an empty strip has no neighbour → nil")
+    }
+
+    func test_neighborIndexAfterClose_returnsNilForOutOfRangeIndex() {
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: -1, count: 3),
+            nil,
+            "negative closingIndex is out of range → nil")
+        XCTAssertEqual(
+            TabOrderCoordinator.neighborIndexAfterClose(closingIndex: 3, count: 3),
+            nil,
+            "closingIndex == count is out of range → nil")
+    }
 }

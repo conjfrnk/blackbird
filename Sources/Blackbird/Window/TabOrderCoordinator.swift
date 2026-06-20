@@ -114,6 +114,17 @@ final class TabOrderCoordinator {
         return order[(idx - 1 + order.count) % order.count]
     }
 
+    /// Index to select after closing the tab at `closingIndex` within a visual
+    /// order of `count` tabs: the right neighbour, or the left neighbour when
+    /// closing the last tab. Returns `nil` when there is no surviving neighbour
+    /// (`count <= 1`) or the index is out of range. Pure + static so the
+    /// close-promotion choice — visual adjacency, not AppKit's arrival-order
+    /// auto-promotion — is unit-testable.
+    static func neighborIndexAfterClose(closingIndex: Int, count: Int) -> Int? {
+        guard count > 1, closingIndex >= 0, closingIndex < count else { return nil }
+        return closingIndex + 1 < count ? closingIndex + 1 : closingIndex - 1
+    }
+
     // MARK: - Internal (testable)
 
     /// Pure reconciliation: stored order projected onto `live`, then any
