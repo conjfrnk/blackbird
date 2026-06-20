@@ -655,6 +655,131 @@ final class HyperlinkTests: XCTestCase {
         )
     }
 
+    // MARK: - F-S6-001: divergent-anchor escape hatch (Copy Link host-mismatch)
+
+    /// Bug 13 / F-S6-001. `resolveClickURL` deliberately blocks an OSC 8
+    /// link whose visible anchor host diverges from the href host (the
+    /// anti-phishing gate). That left a legitimately-divergent link with
+    /// *no* way to reach the real href — the right-click "Copy Link (host
+    /// mismatch)" escape hatch needs the URL that ⌘-click refused to open.
+    ///
+    /// `blockedDivergentOSC8Href` is that accessor: it returns the real
+    /// href ONLY when the cell carries an allowed-scheme OSC 8 link that
+    /// `resolveClickURL` is blocking *specifically* for anchor/host
+    /// divergence. This pairs the two: ⌘-click is blocked (resolveClickURL
+    /// == nil) AND the escape hatch surfaces exactly the href that was
+    /// blocked.
+    ///
+    /// Uses the same `installHyperlinkSnapshotForTests` seam as
+    /// `testCmdClick_blocksDivergentAnchor`: the row string is the visible
+    /// anchor text, the span `url` is the (divergent) href.
+    func testBlockedDivergentOSC8Href_surfacesRealHrefForDivergentLink() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        // Visible anchor claims apple.com; href points at evil.tld —
+        // allowed scheme on both, hosts differ → divergence gate fires.
+        let visibleAnchor = "https://apple.com/login"
+        let realHref = "https://evil.tld/login"
+        view.installHyperlinkSnapshotForTests(
+            rows: [visibleAnchor + String(repeating: " ", count: 80 - visibleAnchor.count)],
+            linkAt: [(row: 0, cols: 0..<visibleAnchor.count, url: realHref)]
+        )
+        // Pairing half 1: plain ⌘-click is blocked.
+        XCTAssertNil(
+            view.resolveClickURL(screenRow: 0, col: 5),
+            "divergent anchor (apple.com visible, evil.tld href) must block the ⌘-click"
+        )
+        // Pairing half 2: the escape hatch surfaces exactly the blocked href.
+        let escaped = view.blockedDivergentOSC8Href(screenRow: 0, col: 5)
+        XCTAssertEqual(
+            escaped?.absoluteString,
+            realHref,
+            "escape hatch must return the real divergent href that ⌘-click refused"
+        )
+    }
+
+    /// F-S6-001. Non-divergent link: anchor host matches href host, so
+    /// `resolveClickURL` opens it normally and there is nothing for the
+    /// escape hatch to surface — `blockedDivergentOSC8Href` returns nil.
+    func testBlockedDivergentOSC8Href_nilWhenAnchorMatchesHost() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let visibleAnchor = "https://apple.com/x"
+        view.installHyperlinkSnapshotForTests(
+            rows: [visibleAnchor + String(repeating: " ", count: 80 - visibleAnchor.count)],
+            linkAt: [(row: 0, cols: 0..<visibleAnchor.count, url: "https://apple.com/x")]
+        )
+        // resolveClickURL handles a matching-host link normally.
+        XCTAssertEqual(
+            view.resolveClickURL(screenRow: 0, col: 5)?.absoluteString,
+            "https://apple.com/x",
+            "matching anchor/href host must resolve normally"
+        )
+        XCTAssertNil(
+            view.blockedDivergentOSC8Href(screenRow: 0, col: 5),
+            "non-divergent link is not blocked, so the escape hatch must return nil"
+        )
+    }
+
+    /// F-S6-001. Empty / non-URL-shaped anchor: no claim of identity in
+    /// the visible text, so divergence never fires. `resolveClickURL`
+    /// opens the link and the escape hatch stays nil. Uses the
+    /// documented `rows: []` short-circuit (osc8AnchorText → "").
+    func testBlockedDivergentOSC8Href_nilWhenAnchorEmpty() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        view.installHyperlinkSnapshotForTests(
+            rows: [],
+            linkAt: [(row: 0, cols: 0..<8, url: "https://apple.com/x")]
+        )
+        XCTAssertEqual(
+            view.resolveClickURL(screenRow: 0, col: 2)?.absoluteString,
+            "https://apple.com/x",
+            "empty-anchor link has no URL-shaped claim and must resolve normally"
+        )
+        XCTAssertNil(
+            view.blockedDivergentOSC8Href(screenRow: 0, col: 2),
+            "empty-anchor link is not divergence-blocked, so the escape hatch must return nil"
+        )
+    }
+
+    /// F-S6-001. Disallowed scheme: `resolveClickURL` blocks the link
+    /// because the scheme is not on the allowlist — NOT because of
+    /// anchor divergence. The escape hatch must NOT surface the href
+    /// (a `javascript:` URL must never reach Copy Link), so
+    /// `blockedDivergentOSC8Href` returns nil even though the anchor
+    /// host diverges.
+    func testBlockedDivergentOSC8Href_nilForDisallowedScheme() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let visibleAnchor = "https://apple.com/login"
+        view.installHyperlinkSnapshotForTests(
+            rows: [visibleAnchor + String(repeating: " ", count: 80 - visibleAnchor.count)],
+            linkAt: [(row: 0, cols: 0..<visibleAnchor.count, url: "javascript:alert(1)")]
+        )
+        XCTAssertNil(
+            view.resolveClickURL(screenRow: 0, col: 5),
+            "disallowed-scheme OSC 8 link must block the ⌘-click"
+        )
+        XCTAssertNil(
+            view.blockedDivergentOSC8Href(screenRow: 0, col: 5),
+            "disallowed scheme must NOT surface via the host-mismatch escape hatch"
+        )
+    }
+
+    /// F-S6-001. No OSC 8 link under the clicked cell at all (regex-only
+    /// or bare text): the escape hatch is OSC-8-specific and must return
+    /// nil. The click column here is outside the span.
+    func testBlockedDivergentOSC8Href_nilWhenNoOsc8Link() throws {
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+        let visibleAnchor = "https://apple.com/login"
+        view.installHyperlinkSnapshotForTests(
+            rows: [visibleAnchor + String(repeating: " ", count: 80 - visibleAnchor.count)],
+            linkAt: [(row: 0, cols: 0..<visibleAnchor.count, url: "https://evil.tld/login")]
+        )
+        // Column 60 is past the span (anchor is 23 chars) — no OSC 8 link.
+        XCTAssertNil(
+            view.blockedDivergentOSC8Href(screenRow: 0, col: 60),
+            "no OSC 8 link under the cell → escape hatch must return nil"
+        )
+    }
+
     // MARK: - M12: ⌘-click in titlebar inset region suppresses URL resolution
 
     /// Pre-fix: `bufferPointFromEvent` snaps any titlebar-region click
