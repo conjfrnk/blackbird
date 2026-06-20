@@ -228,6 +228,18 @@ public final class KeyEncoder {
                 return Data()
             }
             if let ctrlByte = controlByte(for: scalar) {
+                // Ctrl+Option+letter in Meta mode is the Emacs/readline M-C-*
+                // chord (forward-sexp, beginning-of-defun, …). The bare C0
+                // byte drops the Meta bit, silently degrading M-C-f to plain
+                // ^F. Prepend ESC so the shell sees ESC + C0 — matching how
+                // arrows already report mod=7 for Ctrl+Option (audit H7) and
+                // Terminal.app / iTerm2's Option-as-Meta behaviour. Only in
+                // Meta mode: Native-Option has no Meta bit to carry, and the
+                // kitty / modifyOtherKeys branches above already frame the
+                // chord with the full modifier param.
+                if optionIsMeta && modifiers.contains(.option) {
+                    return Data([0x1B, ctrlByte])
+                }
                 return Data([ctrlByte])
             }
         }

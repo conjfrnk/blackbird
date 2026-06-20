@@ -714,4 +714,56 @@ final class KeyEncoderExtendedTests: XCTestCase {
             "Single-scalar U+00E0 must take the CSI u path, not UTF-8 fallback"
         )
     }
+
+    // MARK: - Ctrl+Option+letter Meta prefix (legacy mode)
+
+    /// Bug: in legacy mode (empty `mode`, optionIsMeta=true) the encoder
+    /// dropped the ESC Meta prefix for Ctrl+Option+letter and sent the bare
+    /// C0 byte (`^F`), degrading Emacs/readline `M-C-f` (backward/forward-
+    /// word over s-expressions) down to a plain forward-char. The arrow keys
+    /// already report mod=7 (alt+ctrl) via the H7 fix; printable Ctrl+Option
+    /// chords must match — "Option as Meta" prepends ESC (0x1B) before the
+    /// C0 control byte, so Ctrl+Option+f → ESC + 0x06.
+    func test_ctrlOptionLetter_metaMode_prependsEscBeforeC0() {
+        let encoder = KeyEncoder(optionIsMeta: true)
+        // Ctrl+f → C0 0x06; "Option as Meta" prepends ESC (0x1B).
+        XCTAssertEqual(
+            encoder.encode(chars: "f", modifiers: [.control, .option], mode: []),
+            Data([0x1B, 0x06]),
+            "Ctrl+Option+f in legacy/Meta mode must be ESC + ^F (M-C-f), not bare ^F"
+        )
+    }
+
+    func test_ctrlOptionLetterA_metaMode_prependsEscBeforeC0() {
+        let encoder = KeyEncoder(optionIsMeta: true)
+        // Ctrl+a → C0 0x01; Meta prepends ESC.
+        XCTAssertEqual(
+            encoder.encode(chars: "a", modifiers: [.control, .option], mode: []),
+            Data([0x1B, 0x01]),
+            "Ctrl+Option+a in legacy/Meta mode must be ESC + ^A (M-C-a), not bare ^A"
+        )
+    }
+
+    func test_ctrlOptionLetter_nativeMode_noEscPrefix() {
+        let encoder = KeyEncoder(optionIsMeta: false)
+        // Native-Option mode has no Meta bit — Option is invisible, so
+        // Ctrl+Option+f encodes as just the bare C0 byte ^F (0x06).
+        XCTAssertEqual(
+            encoder.encode(chars: "f", modifiers: [.control, .option], mode: []),
+            Data([0x06]),
+            "Native-Option mode must send bare ^F for Ctrl+Option+f — no ESC prefix"
+        )
+    }
+
+    func test_ctrlLetter_noOption_unchanged() {
+        let encoder = KeyEncoder(optionIsMeta: true)
+        // Plain Ctrl+f (Option not held) is unchanged: bare C0 0x06.
+        // Pins the no-regression case — the Meta prefix only attaches when
+        // Option is actually held.
+        XCTAssertEqual(
+            encoder.encode(chars: "f", modifiers: [.control], mode: []),
+            Data([0x06]),
+            "Plain Ctrl+f (no Option) must stay bare ^F — no ESC prefix"
+        )
+    }
 }
