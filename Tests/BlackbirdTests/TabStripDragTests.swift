@@ -555,4 +555,84 @@ final class TabStripDragTests: XCTestCase {
             TabStripView.intermediateSlot(originalIdx: 4, draggedFrom: 3, draggedTo: 1),
             4)
     }
+
+    // MARK: - changedTitleIndices (pure static)
+
+    /// Contract: `changedTitleIndices(previous:current:)` returns the
+    /// ascending list of indices `i` in `0 ..< min(previous.count,
+    /// current.count)` where `previous[i] != current[i]`. It compares
+    /// ONLY the overlapping prefix; trailing elements in the longer
+    /// array are ignored.
+    ///
+    /// Purpose: this drives the VoiceOver tab-title value-changed posts.
+    /// The previous title-diff compared identical live window refs and
+    /// never fired; this pure function makes the diff testable on the
+    /// title strings themselves.
+
+    func test_changedTitleIndices_identicalArrays_returnsEmpty() {
+        XCTAssertEqual(
+            TabStripView.changedTitleIndices(
+                previous: ["a", "b", "c"],
+                current: ["a", "b", "c"]),
+            [],
+            "no titles changed → no indices")
+    }
+
+    func test_changedTitleIndices_singleMiddleChange_returnsThatIndex() {
+        XCTAssertEqual(
+            TabStripView.changedTitleIndices(
+                previous: ["a", "b", "c"],
+                current: ["a", "X", "c"]),
+            [1],
+            "only index 1 differs")
+    }
+
+    func test_changedTitleIndices_twoChanges_returnsAscending() {
+        XCTAssertEqual(
+            TabStripView.changedTitleIndices(
+                previous: ["a", "b", "c"],
+                current: ["X", "b", "Y"]),
+            [0, 2],
+            "indices 0 and 2 differ, ascending")
+    }
+
+    func test_changedTitleIndices_currentLonger_comparesOverlapOnly() {
+        // current has an extra trailing element; index 2 is NOT compared
+        // because it falls outside the overlapping prefix (min count = 2).
+        XCTAssertEqual(
+            TabStripView.changedTitleIndices(
+                previous: ["a", "b"],
+                current: ["a", "b", "c"]),
+            [],
+            "extra trailing element in current is ignored → no diff in overlap")
+    }
+
+    func test_changedTitleIndices_previousLonger_comparesOverlapOnly() {
+        // overlap is the first 2 indices (min count = 2); index 2 of
+        // previous ("c") is dropped. Within the overlap, index 1 differs.
+        XCTAssertEqual(
+            TabStripView.changedTitleIndices(
+                previous: ["a", "b", "c"],
+                current: ["a", "Z"]),
+            [1],
+            "overlap = first 2; index 1 differs, trailing 'c' ignored")
+    }
+
+    func test_changedTitleIndices_emptyPrevious_returnsEmpty() {
+        XCTAssertEqual(
+            TabStripView.changedTitleIndices(
+                previous: [],
+                current: ["a"]),
+            [],
+            "empty overlap → no indices")
+    }
+
+    func test_changedTitleIndices_emptyCurrent_returnsEmpty() {
+        XCTAssertEqual(
+            TabStripView.changedTitleIndices(
+                previous: ["a"],
+                current: []),
+            [],
+            "empty overlap → no indices")
+    }
 }
