@@ -242,26 +242,21 @@ proptest! {
         ..ProptestConfig::default()
     })]
 
-    /// PRODUCT-BUG (deferred): this property test correctly identified
-    /// a real parser-idempotence bug on 2026-05-10 — the alacritty
-    /// VTE parser produces different `viewport_text` output when a
-    /// 2299-byte payload is fed split at index 2207 vs all at once.
-    /// Single byte (`0x73 's'`) appears in the whole-feed path but is
-    /// dropped in the split-feed path, somewhere around the OSC/CSI
-    /// boundary. Captured failing seed:
-    ///   cc de803e6a71e8eaa582ded0bc2a92ad56f7188931d6da90d3f9cf494561634a17
+    /// Split-idempotence: feeding a payload all at once must produce the
+    /// same `viewport_text` as feeding it split at an arbitrary index.
     ///
-    /// The bug is in alacritty_terminal=0.26.0 (or our wrapping of it)
-    /// — split-mid-CSI/OSC reset state in a way that drops a byte. Not
-    /// a crash, not user-visible in normal operation (real PTYs don't
-    /// fragment payloads at adversarial offsets); proptest found the
-    /// pathological case. Until the parser-state-preservation fix
-    /// lands, the test is `#[ignore]`'d so PR CI can stay green. The
-    /// other three invariants in this file (snapshot back-to-back,
-    /// mode set/reset, scroll roundtrip) continue to run on every PR.
-    /// Tracking in KNOWN_ISSUES.md.
+    /// History: this test found a real parser bug on 2026-05-10 and was
+    /// `#[ignore]`'d. ROOT-CAUSED + FIXED 2026-06-20: vte's
+    /// `advance_partial_utf8` over-consumed when a partial UTF-8 lead from a
+    /// prior `advance` completed a codepoint AND the buffer also held the
+    /// start of further valid characters — it printed only the first char but
+    /// returned `valid_bytes - old_bytes`, dropping the rest (e.g. a space
+    /// after U+0080). Fixed in the vendored vte (`return c.len_utf8() -
+    /// old_bytes`, matching the `Ok` arm). Un-ignored — runs on every PR
+    /// again. See also `parse_idempotent_across_every_split` (heavy
+    /// exhaustive-split probe, kept `#[ignore]`'d) and the deterministic
+    /// `split_idempotence_utf8_boundary_regression` unit test below.
     #[test]
-    #[ignore = "PRODUCT-BUG: real parser idempotence violation found 2026-05-10; see comment + KNOWN_ISSUES.md"]
     fn parse_idempotent_across_arbitrary_split(
         payload in arb_payload(),
         // Generate split index in `[0, MAX_PAYLOAD]` and clamp at use
@@ -311,6 +306,109 @@ proptest! {
                 "viewport text diverged across split={} (payload_len={})",
                 split,
                 payload.len()
+            );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 4000,
+        ..ProptestConfig::default()
+    })]
+
+    /// Exhaustive-split variant of the idempotence probe (debugging aid for
+    /// the deferred split-idempotence bug). Where the test above splits each
+    /// payload at ONE random index, this sweeps EVERY split index per payload
+    /// — so a payload that contains a boundary bug is caught regardless of
+    /// where the random split would have landed, which multiplies the
+    /// boundary coverage per generated case by ~payload_len. Payloads are
+    /// capped at 192 bytes (boundary bugs are LOCAL — the original 2299-byte
+    /// repro was just the random size, not a requirement) to keep the
+    /// O(len²) sweep fast. `#[ignore]`'d like its sibling; run with
+    /// `--ignored` to hunt the bug or capture a fresh reproduction.
+    #[test]
+    #[ignore = "debugging probe: sweeps all split indices to catch the deferred idempotence bug"]
+    fn parse_idempotent_across_every_split(
+        payload in prop::collection::vec(arb_vt_byte(), 0..=192usize),
+    ) {
+        unsafe {
+            SAW_FATAL.store(false, Ordering::SeqCst);
+            let t_whole = bc::bb_term_new(COLS, ROWS, SCROLLBACK);
+            prop_assert!(!t_whole.is_null());
+            let _g_whole = TermGuard(t_whole);
+            if !payload.is_empty() {
+                bc::bb_term_input(t_whole, payload.as_ptr(), payload.len());
+            }
+            let text_whole = viewport_text(t_whole);
+
+            for split in 0..=payload.len() {
+                let t = bc::bb_term_new(COLS, ROWS, SCROLLBACK);
+                prop_assert!(!t.is_null());
+                let _g = TermGuard(t);
+                let (head, tail) = payload.split_at(split);
+                if !head.is_empty() {
+                    bc::bb_term_input(t, head.as_ptr(), head.len());
+                }
+                if !tail.is_empty() {
+                    bc::bb_term_input(t, tail.as_ptr(), tail.len());
+                }
+                let text_split = viewport_text(t);
+                prop_assert_eq!(
+                    &text_whole,
+                    &text_split,
+                    "DIVERGENCE at split={} payload(hex)={:02x?}",
+                    split,
+                    payload
+                );
+            }
+            prop_assert!(!SAW_FATAL.swap(false, Ordering::SeqCst), "Fatal during probe");
+        }
+    }
+}
+
+/// Deterministic regression for the vte `advance_partial_utf8` over-consume
+/// bug (FIXED 2026-06-20). A multi-byte UTF-8 sequence split mid-sequence,
+/// when the partial buffer also captured the start of the following
+/// character(s), used to drop that following char in the split-feed. Runs on
+/// every PR (unlike the `#[ignore]`'d proptests) and is fast + deterministic.
+#[test]
+fn split_idempotence_utf8_boundary_regression() {
+    // (payload, split-index). Each split lands inside a multi-byte sequence.
+    let cases: &[(&[u8], usize)] = &[
+        // The proptest-shrunk minimal case: U+0080 (c2 80) + space + lone-0x80
+        // noise + '[', split inside `c2 80`. Pre-fix dropped the space.
+        (
+            &[
+                0xC2, 0x80, 0x20, 0x80, 0x20, 0x20, 0x20, 0x20, 0x20, 0x80, 0x5B,
+            ],
+            1,
+        ),
+        (&[0xC2, 0x80, 0x41], 1),             // U+0080 then 'A'
+        (&[0xE2, 0x82, 0xAC, 0x42], 1),       // € (3-byte) split after lead, then 'B'
+        (&[0xE2, 0x82, 0xAC, 0x42], 2),       // € split after 2 bytes, then 'B'
+        (&[0xF0, 0x9F, 0x98, 0x80, 0x43], 2), // 😀 (4-byte) split, then 'C'
+    ];
+    unsafe {
+        for (payload, split) in cases {
+            let t_whole = bc::bb_term_new(COLS, ROWS, SCROLLBACK);
+            assert!(!t_whole.is_null());
+            let _gw = TermGuard(t_whole);
+            bc::bb_term_input(t_whole, payload.as_ptr(), payload.len());
+            let whole = viewport_text(t_whole);
+
+            let t_split = bc::bb_term_new(COLS, ROWS, SCROLLBACK);
+            assert!(!t_split.is_null());
+            let _gs = TermGuard(t_split);
+            let (head, tail) = payload.split_at(*split);
+            bc::bb_term_input(t_split, head.as_ptr(), head.len());
+            bc::bb_term_input(t_split, tail.as_ptr(), tail.len());
+            let split_text = viewport_text(t_split);
+
+            assert_eq!(
+                whole, split_text,
+                "split-idempotence regression: payload={:02x?} split={}",
+                payload, split
             );
         }
     }
