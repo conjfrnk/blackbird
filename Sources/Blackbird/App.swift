@@ -286,9 +286,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            // `queue: .main` guarantees this runs on the main thread, so the
-            // hop to the now-@MainActor delegate is sound. assumeIsolated keeps
-            // it synchronous (no Task latency before the strip repaints).
+            // `queue: .main` runs this block on the main thread, so the hop to
+            // the now-@MainActor delegate is sound; because the only poster
+            // (TabOrderCoordinator.move, driven by AppKit drag handling) is
+            // itself on the main thread, delivery is synchronous in practice.
+            // assumeIsolated calls the @MainActor delegate INLINE — avoiding the
+            // `Task { @MainActor in }` hop that would otherwise defer the strip
+            // repaint to a later runloop turn.
             MainActor.assumeIsolated {
                 self?.refreshAllTabBars()
             }
