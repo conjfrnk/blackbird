@@ -171,6 +171,54 @@ mod macos {
         }
     }
 
+    /// OSC unbounded-growth DoS regression. An OSC opened with `ESC ]` and
+    /// never terminated (no BEL / ST / CAN / SUB) used to accumulate its
+    /// payload without bound: `bb_term_input` drives TWO `vte::Parser`s over
+    /// the bytes (alacritty's processor + the parallel OSC scanner), each
+    /// buffering into `osc_raw: Vec<u8>` with NO cap under the `std` feature
+    /// (upstream only caps the no-std ArrayVec path). The vendored vte caps
+    /// `osc_raw` at 8 MiB, so even a huge unterminated OSC leaves RSS bounded
+    /// (~2 × 8 MiB) FAR below the streamed byte count. Pre-fix this grew ~2×
+    /// the payload; here we stream 128 MiB and require < 64 MiB growth.
+    #[test]
+    #[ignore = "OSC memory-DoS gate; run with: cargo test --release --test long_session_memory -- --ignored --nocapture"]
+    fn unterminated_osc_growth_is_bounded() {
+        unsafe {
+            let term = bc::bb_term_new(200, 60, 10_000);
+            assert!(!term.is_null());
+            // Open an OSC and never close it.
+            let opener = b"\x1b]2;";
+            bc::bb_term_input(term, opener.as_ptr(), opener.len());
+            let rss_before = rss_bytes();
+
+            // Stream 128 MiB of printable bytes INSIDE the unterminated OSC.
+            let chunk = vec![b'A'; 1024 * 1024]; // 1 MiB
+            let streamed_mib = 128usize;
+            for _ in 0..streamed_mib {
+                bc::bb_term_input(term, chunk.as_ptr(), chunk.len());
+            }
+            let rss_after = rss_bytes();
+            let growth = rss_after.saturating_sub(rss_before);
+            eprintln!(
+                "unterminated-OSC RSS growth after streaming {} MiB: {:.1} MiB",
+                streamed_mib,
+                growth as f64 / (1024.0 * 1024.0)
+            );
+            bc::bb_term_free(term);
+
+            // Cap = 8 MiB/parser × 2 parsers = 16 MiB; 64 MiB allows allocator
+            // slack but is far below the 128 MiB streamed (and the ~256 MiB a
+            // pre-fix run would reach).
+            assert!(
+                growth < 64 * 1024 * 1024,
+                "unterminated OSC grew RSS by {:.1} MiB after streaming {} MiB \
+                 — the osc_raw cap is not bounding growth",
+                growth as f64 / (1024.0 * 1024.0),
+                streamed_mib
+            );
+        }
+    }
+
     #[test]
     #[ignore = "memory growth gate; run with: cargo test --release --test long_session_memory -- --ignored --nocapture"]
     fn snapshot_churn_is_bounded() {

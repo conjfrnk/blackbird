@@ -31,3 +31,11 @@ strip = "symbols"
 # sources`). Re-vendor from the registry + re-apply the patch on any bump.
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
+# In-tree fork of vte 0.15.0 (a transitive dep of alacritty_terminal). Same
+# version, so the resolver still accepts it. Vendored to fix two parser bugs
+# the upstream crate carries (tracked in KNOWN_ISSUES): (1) the OSC payload
+# `osc_raw: Vec<u8>` had NO cap under the `std` feature (the `is_full()` guard
+# is gated `#[cfg(not(feature = "std"))]`), so an unterminated OSC grew without
+# bound — a memory DoS; (2) parser-state byte-drop across feed split
+# boundaries. Re-vendor from the registry + re-apply the patches on any bump.
+vte = { path = "vendor/vte" }
