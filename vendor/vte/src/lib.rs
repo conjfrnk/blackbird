@@ -713,7 +713,20 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                     performer.print(c);
 
                     self.partial_utf8_len = 0;
-                    return valid_bytes - old_bytes;
+                    // [Blackbird vendored patch] Consume only the FIRST
+                    // character's bytes, not all `valid_bytes`. When a partial
+                    // lead from a previous `advance` completes a codepoint but
+                    // the buffer ALSO contains the start of further valid
+                    // characters (e.g. a partial `c2`, then `80 20 …` →
+                    // U+0080 followed by a space), the old `valid_bytes -
+                    // old_bytes` over-consumed: it dropped every character
+                    // after the first (the space), making `advance([c2],
+                    // [80,20,…])` diverge from `advance([c2,80,20,…])` — a
+                    // split-idempotence violation. Returning the first char's
+                    // length lets the main loop re-process the rest from
+                    // Ground (matches the `Ok` arm above, which was already
+                    // correct). Upstream vte bug.
+                    return c.len_utf8() - old_bytes;
                 }
 
                 match err.error_len() {
