@@ -369,6 +369,103 @@ final class KittyKeyboardProtocolTests: XCTestCase {
         XCTAssertEqual(out, Data("\u{1B}[13;2:2u".utf8))
     }
 
+    // MARK: - Flag 2: release events on CSI-parameter special keys (F-S3-005)
+
+    // F-S3-005 contract: encodeSpecial now honors Kitty flag 2
+    // (reportEventTypes) for the CSI-parameter special keys (arrows, Home,
+    // End, PageUp/Down, Insert, Delete, F1–F12). A PRESS is byte-identical
+    // to legacy (kitty omits the `:1` press sub-param). A RELEASE emits
+    // `CSI <lead> ; <mod>:3 <terminator>` ONLY when the mode contains
+    // reportEventTypes — otherwise EMPTY Data (legacy emits no post-keystroke
+    // traffic). The modifier field is FORCED present even when unmodified
+    // (mod=1) so the `:3` sub-param has a parameter to attach to.
+    // modParam = 1 + bitmask (shift=1, alt=2, ctrl=4): unmodified=1, Shift=2,
+    // Ctrl=5. Keypad keys have no CSI-parameter form, so their release is
+    // EMPTY even under flag 2.
+
+    /// Flag 1 + flag 2 lit together — the mode a kitty TUI negotiates when it
+    /// wants both disambiguation and event-type reporting.
+    private let flag2Mode: BBTermMode = [.disambiguateEscCodes, .reportEventTypes]
+
+    func test_special_up_release_noMods_flag2_forcesModFieldWithReleaseSuffix() {
+        // F-S3-005: Up release under flag 2, no modifiers. The modifier field
+        // is forced to 1 so `:3` (release) has somewhere to live. Up's lead is
+        // `1` and its terminator is the letter `A`.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.up, modifiers: [], mode: flag2Mode, eventType: .release)
+        XCTAssertEqual(out, Data("\u{1B}[1;1:3A".utf8))
+    }
+
+    func test_special_up_release_shift_flag2_emitsReleaseSuffix() {
+        // F-S3-005: Shift sets modParam = 1 + 1 = 2.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.up, modifiers: [.shift], mode: flag2Mode, eventType: .release)
+        XCTAssertEqual(out, Data("\u{1B}[1;2:3A".utf8))
+    }
+
+    func test_special_left_release_ctrl_flag2_emitsReleaseSuffix() {
+        // F-S3-005: Ctrl sets modParam = 1 + 4 = 5. Left's lead is `1`,
+        // terminator the letter `D`.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.left, modifiers: [.control], mode: flag2Mode, eventType: .release)
+        XCTAssertEqual(out, Data("\u{1B}[1;5:3D".utf8))
+    }
+
+    func test_special_pageUp_release_noMods_flag2_emitsTildeReleaseSuffix() {
+        // F-S3-005: PageUp uses the `~` terminator with lead `5`. Forced
+        // modParam = 1.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.pageUp, modifiers: [], mode: flag2Mode, eventType: .release)
+        XCTAssertEqual(out, Data("\u{1B}[5;1:3~".utf8))
+    }
+
+    func test_special_f1_release_noMods_flag2_emitsLetterReleaseSuffix() {
+        // F-S3-005: F1 uses a LETTER terminator (`P`) with lead `1`.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.f1, modifiers: [], mode: flag2Mode, eventType: .release)
+        XCTAssertEqual(out, Data("\u{1B}[1;1:3P".utf8))
+    }
+
+    func test_special_f5_release_noMods_flag2_emitsTildeReleaseSuffix() {
+        // F-S3-005: F5 crosses into the `~` family with lead `15`.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.f5, modifiers: [], mode: flag2Mode, eventType: .release)
+        XCTAssertEqual(out, Data("\u{1B}[15;1:3~".utf8))
+    }
+
+    func test_special_up_release_withoutFlag2_returnsEmpty() {
+        // F-S3-005: Without reportEventTypes, a release must produce no bytes —
+        // legacy emits no post-keystroke traffic.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.up, modifiers: [], mode: [], eventType: .release)
+        XCTAssertEqual(out, Data())
+    }
+
+    func test_special_up_press_flag2_byteIdenticalToLegacy() {
+        // F-S3-005: A PRESS under flag 2 is unchanged from legacy — kitty omits
+        // the `:1` press sub-param, so unmodified Up is the bare `CSI A`.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.up, modifiers: [], mode: flag2Mode, eventType: .press)
+        XCTAssertEqual(out, Data("\u{1B}[A".utf8))
+    }
+
+    func test_special_left_modifiedPress_flag2_unchangedLegacyForm() {
+        // F-S3-005: A modified PRESS under flag 2 keeps the legacy modified
+        // shape `CSI 1;5D` (default eventType = .press). Flag 2 does not alter
+        // press encoding.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.left, modifiers: [.control], mode: flag2Mode)
+        XCTAssertEqual(out, Data("\u{1B}[1;5D".utf8))
+    }
+
+    func test_special_keypad_release_flag2_returnsEmpty() {
+        // F-S3-005: Keypad keys have no CSI-parameter form, so even under flag 2
+        // a release emits EMPTY Data.
+        let enc = KeyEncoder()
+        let out = enc.encodeSpecial(.kp1, modifiers: [], mode: flag2Mode, eventType: .release)
+        XCTAssertEqual(out, Data())
+    }
+
     func test_flag4_reportAlternateKeys_controlChars_unchanged() {
         // Disambiguation keys (Enter/Esc/Tab/Backspace) have no shifted
         // alternate form. Flag 4 is a no-op on them; the on-wire shape
@@ -635,6 +732,70 @@ final class KittyKeyboardProtocolTests: XCTestCase {
             enc.encode(chars: ".", modifiers: [.shift, .control, .option], mode: [.modifyOtherKeys]),
             Data("\u{1B}[27;8;46~".utf8)
         )
+    }
+
+    // MARK: - Flag 1: Ctrl + printable with NO C0 mapping (F-S3)
+
+    // F-S3 contract: under Kitty enhancement flag 1 (disambiguateEscCodes), a
+    // Ctrl+printable key that has NO C0 control-byte mapping must be reported as
+    // a CSI u sequence so the Ctrl modifier survives — legacy would drop Ctrl
+    // and send the bare char. Keys that DO have a C0 mapping (letters a–z, and
+    // @ [ \ ] ^ _ ? space) keep their C0 byte and must NOT become CSI u.
+    // modParam = 1 + bitmask (shift=1, alt=2, ctrl=4): Ctrl alone = 5,
+    // Ctrl+Shift = 6. The CSI-u codepoint is the UNSHIFTED base of the key.
+
+    func test_ctrlPeriod_flag1_emitsCsiU_noC0Mapping() {
+        // '.' = 0x2E = 46 has no C0 control byte. Ctrl+. → CSI 46;5u.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: ".", modifiers: [.control], mode: kittyOn),
+                       csiU(46, mod: 5))
+    }
+
+    func test_ctrlSlash_flag1_emitsCsiU_noC0Mapping() {
+        // '/' = 47. (Ctrl+/ legacy maps to 0x1F via '_', but '/' itself is the
+        // typed char here — no C0 byte for '/', so it must surface as CSI u.)
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: "/", modifiers: [.control], mode: kittyOn),
+                       csiU(47, mod: 5))
+    }
+
+    func test_ctrlSemicolon_flag1_emitsCsiU_noC0Mapping() {
+        // ';' = 59 has no C0 control byte. Ctrl+; → CSI 59;5u.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: ";", modifiers: [.control], mode: kittyOn),
+                       csiU(59, mod: 5))
+    }
+
+    func test_ctrlDigit1_flag1_emitsCsiU_noC0Mapping() {
+        // Digit '1' = 49 has no C0 control byte. Ctrl+1 → CSI 49;5u.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: "1", modifiers: [.control], mode: kittyOn),
+                       csiU(49, mod: 5))
+    }
+
+    func test_ctrlLetterA_flag1_keepsC0Byte_notCsiU() {
+        // Letter 'a' HAS a C0 mapping (0x01); F-S3 must NOT promote it to CSI u.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: "a", modifiers: [.control], mode: kittyOn),
+                       Data([0x01]))
+    }
+
+    func test_ctrlPeriod_legacyMode_dropsCtrl_bareChar() {
+        // Pin today's legacy behaviour: without any Kitty flag, Ctrl+. has no
+        // C0 byte and no CSI-u path, so Ctrl is dropped and the bare '.' (0x2E)
+        // is what reaches the PTY. F-S3 is the kitty-only fix for exactly this.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: ".", modifiers: [.control], mode: []),
+                       Data([0x2E]))
+    }
+
+    func test_ctrlShiftPeriod_flag1_usesUnshiftedBaseCodepoint() {
+        // US layout: Shift+. yields '>' (0x3E) from the OS, but the CSI-u
+        // codepoint must be the UNSHIFTED base '.' (46), with Shift reported
+        // via modParam = 1 + shift(1) + ctrl(4) = 6.
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: ">", modifiers: [.control, .shift], mode: kittyOn),
+                       csiU(46, mod: 6))
     }
 
     // MARK: - End-to-end: round-trip with real BBTerm
