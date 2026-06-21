@@ -199,3 +199,43 @@ non-vacuous test seam exists yet.
   first-row portion the user sees underlined, and the highlight stays
   clamped to the first row (only the dispatched URL carries the joined
   string). Tests: `URLDetectorMultiRowWrapTests`.
+
+## v0.4 pre-release audit follow-ups (2026-06-21)
+
+Non-blocking residuals surfaced by the 6-dimension adversarial pre-release
+audit of PR #18. None gate v0.4 (the audit verdict was SHIP, zero confirmed
+blockers); logged here so the triaged backlog stays honest.
+
+- **IME drops an Option+letter Meta chord during an active CJK preedit.**
+  `TerminalView`'s `isOptionMetaChord` fast-path bypasses the IME so
+  `optionIsMeta` chords reach the encoder, but when a CJK marked-text
+  (preedit) composition is already in flight, the chord is swallowed by the
+  composition instead of emitting `ESC`+letter. Narrow edge (Meta mode +
+  mid-composition); NOT byte-corruption — it's a dropped chord, and the
+  common Meta-mode-without-IME path is unaffected. Fix would route the chord
+  ahead of the marked-text commit; deferred as low.
+- **Rapid double-⌘G during live output can lose the find cursor anchor.**
+  Two `findNext` invocations landing within the same live-output snapshot
+  refresh window can race the anchor rotation so the second advance resumes
+  from a stale match index (cosmetic: the selection jumps to an unexpected
+  match, no data loss). The single-advance and idle-buffer paths are covered
+  by the F-S5/find fixes already in this PR; the double-tap-during-scroll
+  ordering is the residual. Low UX nit.
+- **`resolveSheetParent` final fallback can theoretically return a
+  non-selected-tab window.** The Sparkle sheet-parent resolver targets
+  `keyWindow.tabGroup?.selectedWindow` (the fix for the "popup jumps to tab
+  1" bug); its last-resort fallback, reached only when there is no key/main
+  window and no terminal tab group at all, could in principle pick a
+  non-selected window. Documented as unreachable in practice (a sheet
+  presents only when a terminal window exists). Consider tightening the
+  fallback or adding an assert; low residual.
+- **Vendored-crate drift detection (tooling follow-up).** `vendor/vte` (and
+  the pre-existing `vendor/alacritty_terminal`) are full-source vendored
+  forks carrying a small set of intended deviations. The pre-release audit
+  verified `vendor/vte` byte-for-byte against the sha256-pinned upstream
+  0.15.0 tarball by hand. Add a `scripts/` check (run in CI on dep bumps)
+  that re-diffs each vendored crate against its pinned upstream and asserts
+  only the known deviations are present, so future drift is caught
+  automatically rather than by manual audit. Deferred to its own PR
+  (a network-fetching gate needs its own flake-proofing — not rushed into
+  the release commit).
