@@ -224,6 +224,25 @@ public final class KeyEncoder {
             if (kitty || allKeys), let cp = ctrlColliderCodepoint(for: scalar) {
                 return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
             }
+            // F-S3: under Kitty flag 1 / 8, a Ctrl+printable that has NO C0
+            // mapping (Ctrl+digit, Ctrl+. , Ctrl+/ , Ctrl+; , …) is LOSSY in
+            // legacy — the Ctrl bit can't be encoded, so the bare char goes out
+            // and the TUI never sees Ctrl. Emit CSI u so the modifier survives.
+            // Letters and @[\]^_ ? space keep their unambiguous C0 bytes
+            // (handled below). The CSI-u codepoint is the UNSHIFTED base (Shift
+            // reports via the mod param): map a US-layout shifted symbol back to
+            // its base (Ctrl+> = Ctrl+Shift+. → '.'), else the scalar already IS
+            // the base. (flag 8 alone already routes these through the
+            // reportAllKeys branch above; this closes the flag-1-only gap.)
+            // Non-US layouts miss the shifted-symbol base map — same
+            // UCKeyTranslate caveat as flag 4.
+            if (kitty || allKeys),
+               controlByte(for: scalar) == nil,
+               scalar.value >= 0x20, scalar.value != 0x7F {
+                let base = (modifiers.contains(.shift)
+                            ? Self.usLayoutUnshiftedSymbol(scalar) : nil) ?? scalar.value
+                return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
+            }
             if eventType == .release {
                 return Data()
             }
@@ -495,12 +514,47 @@ public final class KeyEncoder {
     ///   arrow and Home/End keys use SS3 (`ESC O …`) sequences instead of CSI.
     ///   This is xterm's DECCKM mode, enabled by the shell via `ESC [ ? 1 h`.
     ///   vim, nvim, less, and most full-screen TUIs set this.
+    /// CSI-parameter shape `(lead, terminator)` for the special keys that have
+    /// one — i.e. those encoded as `CSI <lead> [; <mod>[:<event>]] <terminator>`
+    /// (arrows/Home/End/F1–F4 use a final letter terminator; nav + F5–F12 use
+    /// `~`). Used to encode Kitty flag-2 release/repeat events without
+    /// duplicating the press switch's selection logic, so press encoding stays
+    /// byte-identical. Keypad (DECPAM / SS3) keys have no such form → nil.
+    private static func csiParamShape(for key: SpecialKey) -> (lead: String, term: UInt8)? {
+        switch key {
+        case .up:       return ("1", 0x41)   // A
+        case .down:     return ("1", 0x42)   // B
+        case .right:    return ("1", 0x43)   // C
+        case .left:     return ("1", 0x44)   // D
+        case .home:     return ("1", 0x48)   // H
+        case .end:      return ("1", 0x46)   // F
+        case .f1:       return ("1", 0x50)   // P
+        case .f2:       return ("1", 0x51)   // Q
+        case .f3:       return ("1", 0x52)   // R
+        case .f4:       return ("1", 0x53)   // S
+        case .pageUp:   return ("5", 0x7E)   // ~
+        case .pageDown: return ("6", 0x7E)
+        case .delete:   return ("3", 0x7E)
+        case .insert:   return ("2", 0x7E)
+        case .f5:       return ("15", 0x7E)
+        case .f6:       return ("17", 0x7E)
+        case .f7:       return ("18", 0x7E)
+        case .f8:       return ("19", 0x7E)
+        case .f9:       return ("20", 0x7E)
+        case .f10:      return ("21", 0x7E)
+        case .f11:      return ("23", 0x7E)
+        case .f12:      return ("24", 0x7E)
+        default:        return nil           // keypad (DECPAM/SS3) — no mod/event field
+        }
+    }
+
     public func encodeSpecial(
         _ key: SpecialKey,
         modifiers: Modifiers,
         applicationCursorKeys: Bool = false,
         applicationKeypad: Bool = false,
-        mode: BBTermMode = []
+        mode: BBTermMode = [],
+        eventType: EventType = .press
     ) -> Data {
         // Modifier-encoded keys use CSI with a trailing modifier parameter.
         // Modern xterm convention: CSI 1;M <final> where M = 1 + bitmask.
@@ -523,6 +577,31 @@ public final class KeyEncoder {
         }()
         let modBits = modifierParam(effectiveMods)
         let hasMods = modBits > 1
+
+        // F-S3-005: Kitty flag 2 (reportEventTypes) release / repeat events for
+        // the CSI-parameter special keys (arrows, nav, F-keys): `CSI <lead> ;
+        // <mod>:<event> <terminator>`. PRESS is left to the legacy switch below
+        // (byte-identical — kitty omits the `:1` press sub-param), so nothing
+        // changes when this isn't a release/repeat. Without flag 2 a non-press
+        // event emits nothing (legacy TUIs must never see post-keystroke
+        // traffic — matches the printable release path). The mod field is
+        // forced present (even unmodified) because the `:event` sub-param needs
+        // a parameter to attach to. Keypad (DECPAM/SS3) keys have no such form
+        // (`csiParamShape` returns nil) so their releases also emit nothing.
+        if eventType != .press {
+            guard mode.contains(.reportEventTypes),
+                  let shape = Self.csiParamShape(for: key) else {
+                return Data()
+            }
+            var bytes: [UInt8] = [0x1B, 0x5B]                            // ESC [
+            bytes.append(contentsOf: Array(shape.lead.utf8))            // <lead>
+            bytes.append(0x3B)                                          // ;
+            bytes.append(contentsOf: Array(String(max(modBits, 1)).utf8)) // <mod>
+            bytes.append(0x3A)                                          // :
+            bytes.append(contentsOf: Array(String(eventType.rawValue).utf8)) // <event>
+            bytes.append(shape.term)                                   // <final> / ~
+            return Data(bytes)
+        }
 
         switch key {
         case .up, .down, .right, .left, .home, .end:

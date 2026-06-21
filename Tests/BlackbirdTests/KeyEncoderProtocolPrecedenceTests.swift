@@ -199,30 +199,24 @@ final class KeyEncoderProtocolPrecedenceTests: XCTestCase {
             "Only modifyOtherKeys → CSI 27 path"
         )
 
-        // Only kitty disambiguation: documented gap. Per Kitty's spec,
-        // ANY modified printable (including Ctrl+., Alt+s, etc.) should
-        // emit CSI u under flag 1. Blackbird currently only covers the
-        // four C0-aliasing colliders (i/m/h/[) + `?` plus the explicit
-        // disambiguation keys (Enter/Esc/Tab/Backspace). Modified
-        // printables that don't have a C0 alias fall through to the
-        // legacy byte. Tracked as architecture-defer: "flag 1 modified
-        // printable → CSI u" is a separate encoder-shape change that
-        // would need to coordinate with the TerminalView fast-path and
-        // existing legacy callers.
+        // Only kitty disambiguation (F-S3, now implemented): Ctrl+. has no C0
+        // mapping, so legacy would drop the Ctrl bit (bare '.'). Under flag 1
+        // it must emit CSI u so the modifier survives: CSI 46 ; 5 u (46 = '.',
+        // mod 5 = ctrl). (Note: the prior "Alt+s, etc." framing was over-broad
+        // per the Kitty spec — Alt+printable stays ESC-prefixed under flag-1-
+        // only; only Ctrl+printable-with-no-C0 is genuinely lossy and flips.)
         XCTAssertEqual(
             enc.encode(chars: ".", modifiers: [.control], mode: kitty),
-            Data([0x2E]),
-            "Flag 1 alone: modified-printable CSI u shaping is deferred; legacy byte for now"
+            Data("\u{1B}[46;5u".utf8),
+            "Flag 1: Ctrl+. (no C0 mapping) → CSI 46;5u so the Ctrl bit survives"
         )
 
-        // Both → kitty wins (suppresses modifyOtherKeys), but same gap
-        // as above means the output today is the legacy byte. When the
-        // flag-1-modified-printable work lands, this and the single-
-        // protocol case both flip to CSI u together.
+        // Both → kitty wins (suppresses modifyOtherKeys), and the F-S3 flag-1
+        // shaping now emits the same CSI u as the single-protocol case.
         XCTAssertEqual(
             enc.encode(chars: ".", modifiers: [.control], mode: kitty.union(mok)),
-            Data([0x2E]),
-            "Kitty suppresses modifyOtherKeys; legacy shape until flag-1 mod-printable work lands"
+            Data("\u{1B}[46;5u".utf8),
+            "Kitty suppresses modifyOtherKeys; flag-1 Ctrl+. → CSI 46;5u"
         )
     }
 

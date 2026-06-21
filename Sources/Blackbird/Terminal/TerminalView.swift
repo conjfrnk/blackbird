@@ -1968,12 +1968,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         let mods = KeyEncoder.Modifiers(event: event)
         if let special = Self.specialKey(for: event) {
-            // SpecialKey release isn't encoded in flag 2 today — the
-            // Kitty spec only defines release events for the
-            // CSI-u-emitting subset. Arrow / F-key releases fall through
-            // unchanged until flag 8 (all-keys-as-CSI-u) is implemented.
-            _ = special
-            super.keyUp(with: event)
+            // F-S3-005: arrows / nav / F-keys DO have flag-2 release events in
+            // the Kitty spec — `CSI <n> ; <mod>:3 <final>`. encodeSpecial emits
+            // that under reportEventTypes and returns empty otherwise (keypad
+            // DECPAM keys have no event field → empty), so the fallthrough is
+            // preserved for keys/modes that produce nothing.
+            let appCursor = termMode.contains(.appCursor)
+            let appKeypad = termMode.contains(.appKeypad)
+            let bytes = encoder.encodeSpecial(
+                special,
+                modifiers: mods,
+                applicationCursorKeys: appCursor,
+                applicationKeypad: appKeypad,
+                mode: termMode,
+                eventType: .release
+            )
+            if !bytes.isEmpty {
+                sendToSession(bytes)
+            } else {
+                super.keyUp(with: event)
+            }
             return
         }
         let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
