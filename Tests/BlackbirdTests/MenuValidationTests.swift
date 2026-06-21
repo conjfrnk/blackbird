@@ -24,6 +24,9 @@ import AppKit
 ///     exist — see test-by-test notes).
 ///   - Total transient resident set <1 MB across the file.
 ///   - No `Thread.sleep` longer than 50 ms.
+// @MainActor: AppDelegate is now @MainActor-isolated, so its init / menu
+// methods must be called from a main-actor context (these tests run on main).
+@MainActor
 final class MenuValidationTests: XCTestCase {
 
     override class func setUp() {

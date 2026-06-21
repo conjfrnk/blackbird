@@ -22,6 +22,7 @@ enum BlackbirdMain {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var controllers: [MainWindowController] = []
@@ -285,7 +286,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.refreshAllTabBars()
+            // `queue: .main` guarantees this runs on the main thread, so the
+            // hop to the now-@MainActor delegate is sound. assumeIsolated keeps
+            // it synchronous (no Task latency before the strip repaints).
+            MainActor.assumeIsolated {
+                self?.refreshAllTabBars()
+            }
         }
         // First-launch window has no source session to inherit from, so
         // pass the ⌘N "fresh start" cwd (nil → $HOME). Same policy.

@@ -103,12 +103,19 @@ they don't fall off the radar.
   telemetry pipe. A unified collector that an opt-in user could ship
   to `dist/` for triage would close the loop, but the design (privacy
   posture, opt-in affordance, retention) is its own track.
-- **R3 #4 — `@MainActor AppDelegate`.** Promoting `AppDelegate` to
-  `@MainActor` would let the type system enforce what the runtime
-  guarantees today. Currently relies on `dispatchPrecondition(.onQueue(.main))`
-  tripwires (M-12). Promotion needs sweeping every NSApplicationDelegate
-  delegate-call site for actor-isolation soundness; deferred behind a
-  real Swift 6 concurrency pass.
+- **R3 #4 — `@MainActor AppDelegate` — FIXED 2026-06-20.** `AppDelegate` is
+  now `@MainActor`, so the type system enforces at compile time what the
+  `dispatchPrecondition(.onQueue(.main))` tripwires (M-12) only checked at
+  runtime (the tripwires stay as belt-and-suspenders). Turned out to be a
+  BOUNDED change, not the feared full Swift-6 pass: the app code compiled
+  with a single warning (a NotificationCenter `.main`-queue observer hop,
+  fixed with `MainActor.assumeIsolated`), and the only cascade was two test
+  classes that construct `AppDelegate()` (MenuValidationTests,
+  CmdLetterInterceptMatrixTests) which were marked `@MainActor`. Full suite
+  green (369 tests). NB: SparkleAlertOverride still carries pre-existing
+  strict-concurrency warnings (its F-S7-001 `OSAllocatedUnfairLock<IMP?>` +
+  non-Sendable `IMP`/`OpaquePointer` captures) — independent of this change,
+  a separate cleanup for a future Swift-6-mode pass.
 - **R3 #5 — `BatchCloseToken`.** The window-close batching path uses
   ad-hoc Bool flags; a typed token (struct with explicit lifecycle) would
   make the batch boundary discoverable and testable. Quick refactor but

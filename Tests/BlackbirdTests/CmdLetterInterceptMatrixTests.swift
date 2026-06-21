@@ -84,6 +84,9 @@ import AppKit
 ///     each event. This avoids the ASan / CATransaction hazard that
 ///     gates `test_commandKeyDoesNotSendToPty` behind
 ///     `BB_RUN_STRESS_TESTS`.
+// @MainActor: AppDelegate is now @MainActor-isolated (its init + installMainMenu
+// must run on the main actor; these tests already run on main).
+@MainActor
 final class CmdLetterInterceptMatrixTests: XCTestCase {
 
     override class func setUp() {
