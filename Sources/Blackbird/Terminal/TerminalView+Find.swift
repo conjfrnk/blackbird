@@ -135,7 +135,7 @@ extension TerminalView {
         guard let sel = selection, let session, let snap = currentSnapshot else {
             return nil
         }
-        let (start, end) = Self.copyRange(for: sel, cols: snap.cols)
+        let (start, end) = sel.copyRange(cols: snap.cols)
         let text = session.textRange(from: start, to: end, rectangular: sel.mode == .rectangular)
         return text.isEmpty ? nil : text
     }

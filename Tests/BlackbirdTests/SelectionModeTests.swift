@@ -177,7 +177,7 @@ final class SelectionModeTests: XCTestCase {
         let anchor = BufferPoint(line: 3, col: 7)
         let cursor = BufferPoint(line: 6, col: 2)
         let sel = Selection(anchor: anchor, cursor: cursor, mode: .line)
-        let (start, end) = TerminalView.copyRange(for: sel, cols: 80)
+        let (start, end) = sel.copyRange(cols: 80)
         // Regardless of where the pointer left the anchor/cursor cols on a
         // line-mode drag, copy must cover whole rows.
         XCTAssertEqual(start, BufferPoint(line: 3, col: 0))
@@ -188,7 +188,7 @@ final class SelectionModeTests: XCTestCase {
         let anchor = BufferPoint(line: 3, col: 7)
         let cursor = BufferPoint(line: 6, col: 2)
         let sel = Selection(anchor: anchor, cursor: cursor, mode: .character)
-        let (start, end) = TerminalView.copyRange(for: sel, cols: 80)
+        let (start, end) = sel.copyRange(cols: 80)
         // .character uses prose normalization (line-major, col-minor). Anchor
         // is earlier here so the pair passes through verbatim — the helper
         // must not rewrite columns like it does for .line mode.
@@ -201,7 +201,7 @@ final class SelectionModeTests: XCTestCase {
         let anchor = BufferPoint(line: 6, col: 2)
         let cursor = BufferPoint(line: 3, col: 7)
         let sel = Selection(anchor: anchor, cursor: cursor, mode: .character)
-        let (start, end) = TerminalView.copyRange(for: sel, cols: 80)
+        let (start, end) = sel.copyRange(cols: 80)
         XCTAssertEqual(start, cursor)
         XCTAssertEqual(end, anchor)
     }
@@ -212,7 +212,7 @@ final class SelectionModeTests: XCTestCase {
             cursor: BufferPoint(line: 1, col: 14),
             mode: .word
         )
-        let (start, end) = TerminalView.copyRange(for: sel, cols: 80)
+        let (start, end) = sel.copyRange(cols: 80)
         XCTAssertEqual(start, BufferPoint(line: 1, col: 10))
         XCTAssertEqual(end, BufferPoint(line: 1, col: 14))
     }
@@ -225,7 +225,7 @@ final class SelectionModeTests: XCTestCase {
             cursor: BufferPoint(line: 5, col: 3),
             mode: .rectangular
         )
-        let (start, end) = TerminalView.copyRange(for: sel, cols: 80)
+        let (start, end) = sel.copyRange(cols: 80)
         XCTAssertEqual(start, BufferPoint(line: 2, col: 3))
         XCTAssertEqual(end, BufferPoint(line: 5, col: 10))
     }
@@ -257,7 +257,7 @@ final class SelectionModeTests: XCTestCase {
             cursor: BufferPoint(line: 3, col: 2),
             mode: .line
         )
-        let (a, b) = TerminalView.copyRange(for: cjkSel, cols: 80)
+        let (a, b) = cjkSel.copyRange(cols: 80)
         XCTAssertEqual(a, BufferPoint(line: 3, col: 0))
         XCTAssertEqual(b, BufferPoint(line: 3, col: 79))
     }
@@ -273,7 +273,7 @@ final class SelectionModeTests: XCTestCase {
             cursor: BufferPoint(line: 5, col: 3),
             mode: .rectangular
         )
-        let (a, b) = TerminalView.copyRange(for: sel, cols: 80)
+        let (a, b) = sel.copyRange(cols: 80)
         // Expected: top-left (2,3) → bottom-right (5,15). Pure
         // buffer-point math — no content inspection.
         XCTAssertEqual(a, BufferPoint(line: 2, col: 3))

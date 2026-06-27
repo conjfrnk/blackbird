@@ -276,3 +276,26 @@ public func wordRange(
 
     return (BufferPoint(line: point.line, col: l), BufferPoint(line: point.line, col: r))
 }
+
+extension Selection {
+    /// Compute the (start, end) buffer points to pass into
+    /// `TerminalSession.textRange` for this selection given the current grid
+    /// width. Pure so the mode-specific fixups can be unit-tested.
+    ///
+    /// `.line` mode highlights full rows on screen; mirror that in the copy
+    /// so triple-click + drag yields "every whole line between the anchor
+    /// and the pointer" instead of truncating the first/last line to the
+    /// pointer's column. All other modes copy the normalized pair as-is.
+    func copyRange(cols: Int) -> (start: BufferPoint, end: BufferPoint) {
+        let (a, b) = normalized
+        switch mode {
+        case .line:
+            return (
+                BufferPoint(line: a.line, col: 0),
+                BufferPoint(line: b.line, col: max(0, cols - 1))
+            )
+        case .character, .word, .rectangular:
+            return (a, b)
+        }
+    }
+}
