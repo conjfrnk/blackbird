@@ -164,7 +164,7 @@ extension TerminalView {
             // command the shell can't resolve. fix-#16 added them on the
             // wrong assumption that "legitimate writers emit only
             // printable ASCII" — false for filenames. The diagnostics
-            // display-scrubber (`DiagnosticsView.stripControlCharacters`)
+            // display-scrubber (`DiagnosticFileLoader.stripControlCharacters`)
             // intentionally still strips VS: it scrubs an untrusted
             // crash-log file purely for safe display, where exact glyph
             // fidelity is not a goal — the opposite trade-off from this

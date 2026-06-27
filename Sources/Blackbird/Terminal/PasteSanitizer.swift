@@ -297,7 +297,7 @@ enum PasteSanitizer {
         // affordance, where exact glyph fidelity is a non-goal and an
         // invisible scalar riding a host character must not survive into
         // the tooltip. So strip VS here, matching the display posture of
-        // `DiagnosticsView.stripControlCharacters`. VS only restyle the
+        // `DiagnosticFileLoader.stripControlCharacters`. VS only restyle the
         // preceding glyph and can't reorder a host, so this is
         // defense-in-depth, not the primary bidi guard above.
         let scrubbed = String(decoding: bytes, as: UTF8.self)
