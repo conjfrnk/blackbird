@@ -839,95 +839,114 @@ public final class PTY {
                 self.markStopped()
                 break
             }
-            // Drain any pending writes before close so they don't land on a
-            // closed-and-reused fd belonging to some unrelated part of the
-            // process. The write-queue block checks shouldKeepRunning() at
-            // entry — markStopped above guarantees every NOT-yet-started
-            // write will short-circuit, so this sync just waits for an
-            // in-flight Darwin.write (if any) to return.
-            self.writeQueue.sync { }
-            // The read queue is the sole owner of masterFD's close. Doing it
-            // here avoids a double-close / fd-reuse race against terminate()
-            // calling close() on another thread. The stateQueue sync serialises
-            // with writeImmediate's Darwin.write so an urgent control byte
-            // (Ctrl+C, Ctrl+D) in flight from the main thread can't land on a
-            // freshly-closed — and potentially reused — fd.
-            self.stateQueue.sync {
-                close(self.masterFD)
-            }
-            // Reap the child. Usually the slave close that made read()
-            // return 0 also means the child has exited; waitpid is just
-            // collecting the zombie. But a shell that `trap 'exit' HUP`
-            // ignored SIGHUP can linger — read() still returned 0 (slave
-            // fd closed by our ioctl/signal side), yet the process is
-            // alive and a blocking waitpid would wedge the read queue
-            // indefinitely. Poll with WNOHANG first; if the child is
-            // still alive, escalate to SIGKILL and wait the hard way.
-            // 200 ms of grace is plenty for a well-behaved shell to clean
-            // up while still giving the window a prompt teardown.
-            var status: Int32 = 0
-            let gracePeriod: useconds_t = 200_000  // 200 ms
-            // `reaped` guards against ever treating an un-reaped child as
-            // having an exit status. Also serves as a structural barrier
-            // to double-reap if this teardown block is ever re-entered
-            // (it shouldn't be — the read loop runs once per PTY — but
-            // the flag keeps the invariant explicit rather than implicit).
-            var reaped = false
-            // Announce reap intent BEFORE the first waitpid (audit
-            // S1-003): from the instant waitpid succeeds, the PID is
-            // free for kernel reuse, so the terminate() escalation
-            // rungs must observe `.reaping` and stand down before any
-            // recycling can occur. stateQueue orders this write against
-            // the rungs' reads.
-            self.stateQueue.sync { self.reapState = .reaping }
-            let waited = waitpid(self.childPID, &status, WNOHANG)
-            if waited == self.childPID {
+            // Read loop has exited (genuine EOF, a fatal errno, or an
+            // external markStopped via terminate()). The read queue is the
+            // sole owner of the fd-close + child reap; this is the loop's
+            // single exit path, so the one-shot teardown runs here.
+            self.teardownAndReap()
+        }
+    }
+
+    /// One-shot teardown + child reaper. Called ONLY from the read loop's
+    /// single exit path in `startReading()`, so the "read queue is the sole
+    /// owner of the fd-close + reap" invariant (audit S1-003) holds exactly
+    /// as it did inline: drain the write queue, close the master fd under the
+    /// state lock, then reap the child (WNOHANG poll → 200 ms grace → SIGKILL
+    /// escalation → blocking waitpid), decode the exit status, and dispatch
+    /// `onExit` on main. The `reapState` transitions (.reaping before the
+    /// first waitpid, .reaped before decode) are what make the `terminate()`
+    /// escalation rungs stand down once the PID is free for kernel reuse.
+    private func teardownAndReap() {
+        // Drain any pending writes before close so they don't land on a
+        // closed-and-reused fd belonging to some unrelated part of the
+        // process. The write-queue block checks shouldKeepRunning() at
+        // entry — by the time the read loop reaches this teardown _isRunning
+        // is already false (set by the loop's own markStopped() on a break,
+        // or by terminate() on a condition-false exit), so every NOT-yet-
+        // started write will short-circuit and this sync just waits for an
+        // in-flight Darwin.write (if any) to return.
+        self.writeQueue.sync { }
+        // The read queue is the sole owner of masterFD's close. Doing it
+        // here avoids a double-close / fd-reuse race against terminate()
+        // calling close() on another thread. The stateQueue sync serialises
+        // with writeImmediate's Darwin.write so an urgent control byte
+        // (Ctrl+C, Ctrl+D) in flight from the main thread can't land on a
+        // freshly-closed — and potentially reused — fd.
+        self.stateQueue.sync {
+            close(self.masterFD)
+        }
+        // Reap the child. Usually the slave close that made read()
+        // return 0 also means the child has exited; waitpid is just
+        // collecting the zombie. But a shell that `trap 'exit' HUP`
+        // ignored SIGHUP can linger — read() still returned 0 (slave
+        // fd closed by our ioctl/signal side), yet the process is
+        // alive and a blocking waitpid would wedge the read queue
+        // indefinitely. Poll with WNOHANG first; if the child is
+        // still alive, escalate to SIGKILL and wait the hard way.
+        // 200 ms of grace is plenty for a well-behaved shell to clean
+        // up while still giving the window a prompt teardown.
+        var status: Int32 = 0
+        let gracePeriod: useconds_t = 200_000  // 200 ms
+        // `reaped` guards against ever treating an un-reaped child as
+        // having an exit status. Also serves as a structural barrier
+        // to double-reap if this teardown block is ever re-entered
+        // (it shouldn't be — the read loop runs once per PTY — but
+        // the flag keeps the invariant explicit rather than implicit).
+        var reaped = false
+        // Announce reap intent BEFORE the first waitpid (audit
+        // S1-003): from the instant waitpid succeeds, the PID is
+        // free for kernel reuse, so the terminate() escalation
+        // rungs must observe `.reaping` and stand down before any
+        // recycling can occur. stateQueue orders this write against
+        // the rungs' reads.
+        self.stateQueue.sync { self.reapState = .reaping }
+        let waited = waitpid(self.childPID, &status, WNOHANG)
+        if waited == self.childPID {
+            reaped = true
+        } else if waited < 0 && errno == ECHILD {
+            // Already reaped elsewhere (shouldn't happen — no one else
+            // waits on childPID — but treat as "unknown" rather than
+            // looping on a non-existent child).
+            reaped = false
+        } else {
+            usleep(gracePeriod)
+            let retry = waitpid(self.childPID, &status, WNOHANG)
+            if retry == self.childPID {
                 reaped = true
-            } else if waited < 0 && errno == ECHILD {
-                // Already reaped elsewhere (shouldn't happen — no one else
-                // waits on childPID — but treat as "unknown" rather than
-                // looping on a non-existent child).
+            } else if retry < 0 && errno == ECHILD {
                 reaped = false
             } else {
-                usleep(gracePeriod)
-                let retry = waitpid(self.childPID, &status, WNOHANG)
-                if retry == self.childPID {
-                    reaped = true
-                } else if retry < 0 && errno == ECHILD {
-                    reaped = false
-                } else {
-                    // Still here — SIGHUP was ignored. Force the exit.
-                    //
-                    // Audit follow-up (2026-04-29): sibling of L-4
-                    // SIGHUP rc/errno capture (commits d12d96e +
-                    // 8a78a94). A failure here means SIGKILL didn't
-                    // reach the child — useful to know. ESRCH (child
-                    // already exited between the previous `waitpid`
-                    // and this `kill`) is normal teardown; everything
-                    // else is a real failure worth logging.
-                    let killRC = kill(self.childPID, SIGKILL)
-                    if killRC != 0 {
-                        let savedErrno = errno
-                        let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
-                        Self.logger.log(level: level, "PTY read-loop teardown: kill(\(self.childPID, privacy: .public), SIGKILL) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
-                    }
-                    let forced = waitpid(self.childPID, &status, 0)
-                    reaped = (forced == self.childPID)
+                // Still here — SIGHUP was ignored. Force the exit.
+                //
+                // Audit follow-up (2026-04-29): sibling of L-4
+                // SIGHUP rc/errno capture (commits d12d96e +
+                // 8a78a94). A failure here means SIGKILL didn't
+                // reach the child — useful to know. ESRCH (child
+                // already exited between the previous `waitpid`
+                // and this `kill`) is normal teardown; everything
+                // else is a real failure worth logging.
+                let killRC = kill(self.childPID, SIGKILL)
+                if killRC != 0 {
+                    let savedErrno = errno
+                    let level: OSLogType = (savedErrno == ESRCH) ? .info : .error
+                    Self.logger.log(level: level, "PTY read-loop teardown: kill(\(self.childPID, privacy: .public), SIGKILL) failed errno=\(savedErrno, privacy: .public) (\(String(cString: strerror(savedErrno)), privacy: .public))")
                 }
+                let forced = waitpid(self.childPID, &status, 0)
+                reaped = (forced == self.childPID)
             }
-            // Decode the child's termination status per POSIX. Callers
-            // historically treated -1 as "unknown / session torn down";
-            // preserve that for timeout / un-reaped paths. Otherwise:
-            //   - WIFEXITED: raw exit code 0..255
-            //   - WIFSIGNALED: 128 + signum (standard shell convention so
-            //     e.g. a SIGSEGV (11) surfaces as 139, SIGKILL (9) as 137,
-            //     letting a future crash-reporter distinguish "shell
-            //     exited cleanly" from "shell died of signal").
-            self.stateQueue.sync { self.reapState = .reaped }
-            let exitCode = Self.decodeExitStatus(status, reaped: reaped)
-            DispatchQueue.main.async { [weak self] in
-                self?.onExit?(exitCode)
-            }
+        }
+        // Decode the child's termination status per POSIX. Callers
+        // historically treated -1 as "unknown / session torn down";
+        // preserve that for timeout / un-reaped paths. Otherwise:
+        //   - WIFEXITED: raw exit code 0..255
+        //   - WIFSIGNALED: 128 + signum (standard shell convention so
+        //     e.g. a SIGSEGV (11) surfaces as 139, SIGKILL (9) as 137,
+        //     letting a future crash-reporter distinguish "shell
+        //     exited cleanly" from "shell died of signal").
+        self.stateQueue.sync { self.reapState = .reaped }
+        let exitCode = Self.decodeExitStatus(status, reaped: reaped)
+        DispatchQueue.main.async { [weak self] in
+            self?.onExit?(exitCode)
         }
     }
 
