@@ -71,7 +71,11 @@ public final class LatencyProbe {
         #endif
     }
 
-    public init() {}
+    /// `internal` (not `public`): production reaches the probe via `.shared`;
+    /// only the same-module tests construct fresh instances to exercise the
+    /// per-instance percentile/enable math in isolation. Dropping `public`
+    /// keeps a singleton's init off the public API surface.
+    init() {}
 
     /// Record the moment a keystroke dispatches. Caller is responsible for
     /// placing this as close as possible to the byte-send site so the delta
