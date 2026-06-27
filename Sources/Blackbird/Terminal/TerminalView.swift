@@ -2814,139 +2814,29 @@ extension TerminalView {
         replacement: String
     ) {
         guard !matches.isEmpty, let snap = effectiveSnapshot() else { return }
-        let line = matches[0].line
-        let screenRow = Int(line) + snap.displayOffset
-        // Character count helper over the ORIGINAL snapshot; the whole
-        // splice is computed against one consistent line state and sent
-        // as a single byte sequence (the shell echoes asynchronously,
-        // so re-reading the snapshot mid-splice would see stale cells).
-        func chars(_ startCol: Int, _ endCol: Int) -> Int {
-            guard startCol <= endCol else { return 0 }
-            return snap.nonSpacerCellCount(
-                row: screenRow, startCol: startCol, endCol: endCol
-            ) ?? (endCol - startCol + 1)
-        }
-        // Scrub the replacement bytes through the same pipeline paste
-        // uses. The find-bar Replace field accepts arbitrary user input
-        // — typed or pasted via NSTextField's own paste handler, which
-        // bypasses our paste sanitizer. A user pasting a Trojan-Source
-        // RLO into Replace would otherwise smuggle the bidi byte
-        // straight into the shell. Same C0/C1/bidi/ZWJ/tag-block list
-        // as the paste pipeline. Audit M10.
+        // Scrub the replacement through the same pipeline paste uses (the
+        // find-bar Replace field bypasses our paste sanitizer): a Trojan-Source
+        // RLO typed/pasted there would otherwise smuggle the bidi byte straight
+        // into the shell. Same C0/C1/bidi/ZWJ/tag-block set. Audit M10.
         let cleanedReplacement = Self.stripBidiOverrides(
             Self.sanitizePasteControls(Data(replacement.utf8))
         )
-        // Shell-character length of the replacement, for cursor math.
-        let replacementChars = String(decoding: cleanedReplacement, as: UTF8.self).count
-        // Audit L20. sanitizePasteControls intentionally preserves LF
-        // (the paste path treats it as "user pressed Enter, run the
-        // line"). For find-replace at a non-bracketed-paste prompt
-        // the same posture is wrong — a replacement string typed or
-        // pasted into the Replace field with an embedded `\n` would
-        // execute the leading fragment as a separate command. The
-        // audit verdict was "local user input, no remote vector",
-        // but a Replace All across a buffer can amplify a single
-        // typo into many shell commands, and the find bar field
-        // doesn't visually represent the newline. Refuse with a
-        // transient message; the user re-types or re-pastes without
-        // the newline. A 0x0D in the cleaned bytes follows the same
-        // logic — pasteText's convertLoneCRToLF would just turn it
-        // into LF anyway.
-        //
-        // Audit S3-009: TAB (0x09) joins LF/CR in the refusal set.
-        // A Replace All emitting DEL × matchLen + replacement-with-TAB
-        // at a bare shell prompt fires readline / zsh tab-completion
-        // mid-stream, splicing completion text into the byte stream
-        // unpredictably. The TUI guard already prevents this under
-        // alt-screen / mouse-reporting / bracketed-paste, but a
-        // command-line prompt is the failing case.
-        if cleanedReplacement.contains(0x0A) || cleanedReplacement.contains(0x0D) {
-            findBar?.showTransientMessage("Refusing: replacement contains a line break")
-            return
-        }
-        if cleanedReplacement.contains(0x09) {
-            findBar?.showTransientMessage("Refusing: replacement contains a tab")
-            return
-        }
-        // Review follow-up: readline/ZLE move and delete per CODEPOINT,
-        // while the walk/DEL counts here are grapheme/cell units. A
-        // replacement carrying a multi-scalar grapheme (decomposed
-        // accent, ZWJ emoji) would under-count the arrows the shell
-        // actually needs, landing the NEXT span's DELs off-target in a
-        // Replace All. Refuse rather than corrupt; precomposed input is
-        // unaffected.
-        let cleanedString = String(decoding: cleanedReplacement, as: UTF8.self)
-        if cleanedString.count != cleanedString.unicodeScalars.count {
-            findBar?.showTransientMessage("Refusing: replacement contains a multi-codepoint character")
-            return
-        }
-
-        // Build the full splice against the tracked cursor position
-        // (char index = count of shell characters left of a column).
-        // Moves are BIDIRECTIONAL: the cursor may legitimately sit left
-        // of (or inside) a match — the user can arrow back through
-        // typed input before invoking Replace — so each hop emits
-        // CSI C (right) or CSI D (left) as needed.
-        let escLeft: [UInt8] = [0x1B, 0x5B, 0x44]   // CSI D
-        let escRight: [UInt8] = [0x1B, 0x5B, 0x43]  // CSI C
-        func appendMoves(_ delta: Int, to bytes: inout Data) {
-            if delta > 0 {
-                for _ in 0..<delta { bytes.append(contentsOf: escRight) }
-            } else if delta < 0 {
-                for _ in 0..<(-delta) { bytes.append(contentsOf: escLeft) }
+        switch ShellLineEditor.spliceBytes(
+            matches: matches, cleanedReplacement: cleanedReplacement, snapshot: snap
+        ) {
+        case .failure(let reason):
+            findBar?.showTransientMessage(reason.message)
+        case .success(let bytes):
+            guard !bytes.isEmpty else { return }
+            #if DEBUG
+            if let capture = replaceByteCapture {
+                capture(bytes)
+                return
             }
+            #endif
+            guard let session else { return }
+            session.send(bytes)
         }
-        // Pending-wrap correction (review follow-up): when the input
-        // line exactly fills the row, the grid cursor parks ON the last
-        // cell but the shell's logical position is one past it — without
-        // the +1 every move and DEL landed one character left of target
-        // on width-exact lines.
-        let p0 = chars(0, snap.cursorCol - 1) + (snap.cursorPendingWrap ? 1 : 0)
-        var p = p0
-        var bytes = Data()
-        // Original-space coordinates stay valid throughout because
-        // matches are processed right-to-left: edits never move content
-        // to the LEFT of the region being edited next.
-        var spliced: [(sChar: Int, eChar: Int, len: Int)] = []
-        for m in matches {
-            let sChar = chars(0, m.startCol - 1)
-            let len = chars(m.startCol, m.endCol)
-            guard len > 0 else { continue }
-            let eChar = sChar + len
-            appendMoves(eChar - p, to: &bytes)
-            bytes.append(Data(repeating: 0x7F, count: len))
-            bytes.append(cleanedReplacement)
-            p = sChar + replacementChars
-            spliced.append((sChar, eChar, len))
-        }
-        guard !bytes.isEmpty else { return }
-        // Land the cursor back where the user had it, mapped through
-        // the edits: positions right of a replaced span shift by
-        // (replacement − match) per span; a position INSIDE a span maps
-        // to just after its replacement.
-        var finalTarget = p0
-        var insideAdjusted = false
-        for r in spliced {
-            if r.eChar <= p0 {
-                finalTarget += replacementChars - r.len
-            } else if r.sChar < p0, p0 < r.eChar, !insideAdjusted {
-                // p0 inside this span: anchor to the replacement's end
-                // (shifts from spans further left still apply via the
-                // eChar <= p0 branch — spans are disjoint).
-                finalTarget += (r.sChar + replacementChars) - p0
-                insideAdjusted = true
-            }
-        }
-        appendMoves(finalTarget - p, to: &bytes)
-
-        #if DEBUG
-        if let capture = replaceByteCapture {
-            capture(bytes)
-            return
-        }
-        #endif
-        guard let session else { return }
-        session.send(bytes)
     }
 
     /// Returns true when the match's buffer line equals the cursor's buffer line,
