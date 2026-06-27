@@ -1313,6 +1313,51 @@ public final class MetalRenderer {
         )
     }
 
+    /// Build the partial-rebuild cache key: every input the per-row instance
+    /// builder consumes (grid dims, selection, cursor, insets, colours, blink,
+    /// cmd-hover, atlas/metrics generations). When this equals `lastCacheKey`
+    /// the row cache is reusable and only alacritty's damaged rows need a
+    /// rebuild. Pure: touches no GPU state. Sibling of `makeFrameKey` — same
+    /// `clampDisplayOffset` (M-16) and generation rationale.
+    private func makeCacheKey(
+        snap: BBSnapshot,
+        focused: Bool,
+        selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
+        effectiveShape: UInt8,
+        blinkSkip: Bool
+    ) -> CacheKey {
+        return CacheKey(
+            cols: snap.cols,
+            rows: snap.rows,
+            hoveredLinkID: hoveredLinkID,
+            selMode: selFields.mode,
+            selALine: selFields.aLine,
+            selBLine: selFields.bLine,
+            selACol: selFields.aCol,
+            selBCol: selFields.bCol,
+            focused: focused,
+            cursorShape: effectiveShape,
+            cursorVisible: snap.cursorVisible,
+            // Sibling of the FrameKey site — same clamping rationale,
+            // routed through `clampDisplayOffset` for the one-shot
+            // negative-detected warning. Audit M-16 (2026-04-29).
+            displayOffset: Self.clampDisplayOffset(snap.displayOffset),
+            topInsetPoints: topInsetPoints,
+            leftInsetPoints: leftInsetPoints,
+            defaultBgRgb: defaultBgRgb,
+            backgroundOpacity: backgroundOpacity,
+            keepBgOpaque: keepBgOpaque,
+            accentColor: accentColor,
+            cursorColor: cursorColor,
+            blinkSkip: blinkSkip,
+            cmdHoverBufferLine: cmdHoverBufferLine,
+            cmdHoverStartCol: cmdHoverStartCol,
+            cmdHoverEndCol: cmdHoverEndCol,
+            atlasGeneration: atlas.generation,
+            metricsGeneration: metricsGeneration
+        )
+    }
+
     public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
         // Compute the current frame's visual-state key BEFORE reaching for
         // currentDrawable. Acquiring a drawable is expensive (blocks on
@@ -1542,35 +1587,9 @@ public final class MetalRenderer {
             // where damage covers most of the screen anyway: the
             // per-row-skip overhead would exceed the savings. Above the
             // threshold, just rebuild everything.
-            let newCacheKey = CacheKey(
-                cols: snap.cols,
-                rows: snap.rows,
-                hoveredLinkID: hoveredLinkID,
-                selMode: selFields.mode,
-                selALine: selFields.aLine,
-                selBLine: selFields.bLine,
-                selACol: selFields.aCol,
-                selBCol: selFields.bCol,
-                focused: focused,
-                cursorShape: effectiveShape,
-                cursorVisible: snap.cursorVisible,
-                // Sibling of the FrameKey site — same clamping rationale,
-                // routed through `clampDisplayOffset` for the one-shot
-                // negative-detected warning. Audit M-16 (2026-04-29).
-                displayOffset: Self.clampDisplayOffset(snap.displayOffset),
-                topInsetPoints: topInsetPoints,
-                leftInsetPoints: leftInsetPoints,
-                defaultBgRgb: defaultBgRgb,
-                backgroundOpacity: backgroundOpacity,
-                keepBgOpaque: keepBgOpaque,
-                accentColor: accentColor,
-                cursorColor: cursorColor,
-                blinkSkip: blinkSkipNow,
-                cmdHoverBufferLine: cmdHoverBufferLine,
-                cmdHoverStartCol: cmdHoverStartCol,
-                cmdHoverEndCol: cmdHoverEndCol,
-                atlasGeneration: atlas.generation,
-                metricsGeneration: metricsGeneration
+            let newCacheKey = makeCacheKey(
+                snap: snap, focused: focused, selFields: selFields,
+                effectiveShape: effectiveShape, blinkSkip: blinkSkipNow
             )
             let cacheCompatible = !dirtyRowsDisabled
                 && lastCacheKey == newCacheKey
