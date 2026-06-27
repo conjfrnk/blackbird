@@ -1321,6 +1321,19 @@ pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
     })
 }
 
+/// FFI: true when `scalar` (a Unicode code point) is a bidi-control /
+/// zero-width / invisible scalar per the core's canonical set. The single
+/// source of truth the Swift HyperlinkResolver percent-encoded blocklist is
+/// pinned against (drift detection). Invalid code points (surrogates / out of
+/// range) return false.
+#[no_mangle]
+pub extern "C" fn bb_is_bidi_or_invisible_scalar(scalar: u32) -> bool {
+    match char::from_u32(scalar) {
+        Some(c) => scrub::is_bidi_or_invisible_scalar(c),
+        None => false,
+    }
+}
+
 /// Test-only: force a panic inside the FFI boundary to verify Fatal event delivery.
 ///
 /// # Safety
