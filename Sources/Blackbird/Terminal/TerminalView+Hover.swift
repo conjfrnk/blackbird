@@ -425,10 +425,9 @@ extension TerminalView {
         tooltipController.dismiss()
     }
 
-    // `expandSelectionUnderAnchor()` and `sendMouseEvent(...)` moved to
-    // `TerminalView+Mouse.swift`. Those helpers had no intra-Hover
-    // callers except this file's DEC 1003 any-event report (which
-    // still calls `sendMouseEvent` cross-file via its internal
-    // visibility there).
+    // `expandSelectionUnderAnchor()` and `sendMouseEvent(...)` live in
+    // `TerminalView+Mouse.swift` — the mouse-reporting layer. The DEC 1003
+    // any-event report that used to call `sendMouseEvent` from here now lives
+    // there too (`reportPointerMotionIfNeeded`); `mouseMoved` just drives it.
 
 }
