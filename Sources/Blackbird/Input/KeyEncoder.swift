@@ -741,71 +741,74 @@ public final class KeyEncoder {
         case .kp0, .kp1, .kp2, .kp3, .kp4, .kp5, .kp6, .kp7, .kp8, .kp9,
              .kpEnter, .kpPlus, .kpMinus, .kpMultiply, .kpDivide,
              .kpDecimal, .kpEquals:
-            // DECPAM (application keypad mode). Only active when the TUI
-            // has requested it via `ESC =`; otherwise the caller should
-            // pass the plain digit / operator through `encode(chars:)`
-            // instead of routing through here. xterm keypad mappings:
-            //   0…9  → ESC O p … ESC O y
-            //   +    → ESC O k       −    → ESC O m
-            //   *    → ESC O j       /    → ESC O o
-            //   .    → ESC O n       =    → ESC O X
-            //   Enter→ ESC O M
-            // See xterm's termcap `ka1..kc3` plus `kp*` entries.
-            let final: UInt8 = {
-                switch key {
-                case .kp0: return 0x70  // p
-                case .kp1: return 0x71  // q
-                case .kp2: return 0x72  // r
-                case .kp3: return 0x73  // s
-                case .kp4: return 0x74  // t
-                case .kp5: return 0x75  // u
-                case .kp6: return 0x76  // v
-                case .kp7: return 0x77  // w
-                case .kp8: return 0x78  // x
-                case .kp9: return 0x79  // y
-                case .kpEnter:    return 0x4D // M
-                case .kpPlus:     return 0x6B // k
-                case .kpMinus:    return 0x6D // m
-                case .kpMultiply: return 0x6A // j
-                case .kpDivide:   return 0x6F // o
-                case .kpDecimal:  return 0x6E // n
-                case .kpEquals:   return 0x58 // X
-                default: return 0x70
-                }
-            }()
-            if applicationKeypad {
-                // SS3 <final> — ESC O <final>
-                return Data([0x1B, 0x4F, final])
-            }
-            // DECPAM off: a keypad key is just its plain character, so route
-            // it through `encode(chars:)` — the same path a normal printable
-            // key takes — instead of emitting a bare byte that silently drops
-            // modifiers. This makes Option-as-Meta (ESC prefix), Kitty
-            // disambiguation / flag-8, and xterm modifyOtherKeys framing all
-            // apply to keypad keys exactly as they do to the top-row digits.
-            // Audit S3S-002. With no modifiers and no protocol mode the result
-            // is the same bare legacy byte as before (e.g. kp5 -> 0x35,
-            // kpEnter -> CR 0x0D), so the unmodified fast path is unchanged.
-            let legacyChar: String = {
-                switch key {
-                case .kp0: return "0";  case .kp1: return "1"
-                case .kp2: return "2";  case .kp3: return "3"
-                case .kp4: return "4";  case .kp5: return "5"
-                case .kp6: return "6";  case .kp7: return "7"
-                case .kp8: return "8";  case .kp9: return "9"
-                case .kpEnter:    return "\r"  // CR (0x0D)
-                case .kpPlus:     return "+"
-                case .kpMinus:    return "-"
-                case .kpMultiply: return "*"
-                case .kpDivide:   return "/"
-                case .kpDecimal:  return "."
-                case .kpEquals:   return "="
-                default: return ""
-                }
-            }()
-            guard !legacyChar.isEmpty else { return Data() }
-            return encode(chars: legacyChar, modifiers: modifiers, mode: mode)
+            return encodeKeypadKey(key, applicationKeypad: applicationKeypad,
+                                   modifiers: modifiers, mode: mode)
         }
+    }
+
+    /// Keypad (DECPAM) encoding. When `applicationKeypad` is on (the TUI sent
+    /// `ESC =`), emit `SS3 <final>` per xterm's keypad map:
+    ///   0…9 → ESC O p…y;  + → ESC O k;  − → ESC O m;  * → ESC O j;
+    ///   / → ESC O o;  . → ESC O n;  = → ESC O X;  Enter → ESC O M.
+    /// Otherwise (DECPAM off) a keypad key is just its plain character, so route
+    /// it through `encode(chars:)` — the same path a top-row digit takes —
+    /// instead of emitting a bare byte that silently drops modifiers. That makes
+    /// Option-as-Meta (ESC prefix), Kitty disambiguation / flag-8, and xterm
+    /// modifyOtherKeys framing all apply to keypad keys too (audit S3S-002).
+    /// With no modifiers and no protocol mode the result is the same bare legacy
+    /// byte as before (kp5 → 0x35, kpEnter → CR 0x0D), so the fast path is
+    /// unchanged.
+    private func encodeKeypadKey(
+        _ key: SpecialKey,
+        applicationKeypad: Bool,
+        modifiers: Modifiers,
+        mode: BBTermMode
+    ) -> Data {
+        let final: UInt8 = {
+            switch key {
+            case .kp0: return 0x70  // p
+            case .kp1: return 0x71  // q
+            case .kp2: return 0x72  // r
+            case .kp3: return 0x73  // s
+            case .kp4: return 0x74  // t
+            case .kp5: return 0x75  // u
+            case .kp6: return 0x76  // v
+            case .kp7: return 0x77  // w
+            case .kp8: return 0x78  // x
+            case .kp9: return 0x79  // y
+            case .kpEnter:    return 0x4D // M
+            case .kpPlus:     return 0x6B // k
+            case .kpMinus:    return 0x6D // m
+            case .kpMultiply: return 0x6A // j
+            case .kpDivide:   return 0x6F // o
+            case .kpDecimal:  return 0x6E // n
+            case .kpEquals:   return 0x58 // X
+            default: return 0x70
+            }
+        }()
+        if applicationKeypad {
+            // SS3 <final> — ESC O <final>
+            return Data([0x1B, 0x4F, final])
+        }
+        let legacyChar: String = {
+            switch key {
+            case .kp0: return "0";  case .kp1: return "1"
+            case .kp2: return "2";  case .kp3: return "3"
+            case .kp4: return "4";  case .kp5: return "5"
+            case .kp6: return "6";  case .kp7: return "7"
+            case .kp8: return "8";  case .kp9: return "9"
+            case .kpEnter:    return "\r"  // CR (0x0D)
+            case .kpPlus:     return "+"
+            case .kpMinus:    return "-"
+            case .kpMultiply: return "*"
+            case .kpDivide:   return "/"
+            case .kpDecimal:  return "."
+            case .kpEquals:   return "="
+            default: return ""
+            }
+        }()
+        guard !legacyChar.isEmpty else { return Data() }
+        return encode(chars: legacyChar, modifiers: modifiers, mode: mode)
     }
 
     /// xterm `modifyOtherKeys` emit — `CSI 27 ; <mod> ; <cp> ~`. Uses
