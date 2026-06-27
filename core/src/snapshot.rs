@@ -305,6 +305,39 @@ impl BBSnapOwned {
     }
 }
 
+// Compile-time ABI layout guards (Part I §3-5). A field reorder, insertion, or
+// size change that would desync the cbindgen-generated BBCore.h or the Swift
+// bridge is a BUILD error here — not merely a runtime test failure. These pin
+// exactly the offsets the runtime `snap_layout_matches_expected` test asserts;
+// keeping both means a layout drift is caught whether or not tests are run.
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    // BBSnapOwned: `snap` at offset 0 so `*const BBSnap` recovers the whole
+    // allocation via a plain cast (from_snap_ptr). Part I §3 — the load-bearing
+    // miri-H5 invariant.
+    assert!(offset_of!(BBSnapOwned, snap) == 0);
+    // BBSnap head + appended fields are append-only (Part I §4); offsets frozen.
+    assert!(offset_of!(BBSnap, cols) == 0);
+    assert!(offset_of!(BBSnap, rows) == 2);
+    assert!(offset_of!(BBSnap, cursor_col) == 4);
+    assert!(offset_of!(BBSnap, cursor_row) == 6);
+    assert!(offset_of!(BBSnap, cursor_visible) == 8);
+    assert!(offset_of!(BBSnap, display_offset) == 12);
+    assert!(offset_of!(BBSnap, mode) == 16);
+    assert!(offset_of!(BBSnap, cells_len) == 24);
+    assert!(offset_of!(BBSnap, cells) == 32);
+    assert!(offset_of!(BBSnap, history_size) == 40);
+    assert!(offset_of!(BBSnap, cursor_shape) == 44);
+    assert!(offset_of!(BBSnap, lines_scrolled) == 48);
+    assert!(offset_of!(BBSnap, cursor_pending_wrap) == 56);
+    assert!(size_of::<BBSnap>() == 64);
+    // BBCell: 20-byte ABI (Part I §5). Any further field needs a stride bump in
+    // CellInstance / Shaders.metal too.
+    assert!(size_of::<BBCell>() == 20);
+    assert!(offset_of!(BBCell, link_id) == 14);
+    assert!(offset_of!(BBCell, underline_color) == 16);
+};
+
 /// Extract our stable `cell_flags` bitset from alacritty's `Flags`.
 pub(crate) fn extract_cell_flags(f: CellFlags) -> u16 {
     let mut out: u16 = 0;
