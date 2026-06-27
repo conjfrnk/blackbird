@@ -107,7 +107,7 @@ public struct SettingsView: View {
                 }
                 LabeledContent("Size") {
                     HStack(spacing: 8) {
-                        Slider(value: $prefs.fontSize, in: 9...32, step: 1)
+                        Slider(value: $prefs.fontSize, in: Preferences.fontSizeRange, step: 1)
                         Text("\(Int(prefs.fontSize)) pt")
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
@@ -137,7 +137,7 @@ public struct SettingsView: View {
                         Text("Solid")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Slider(value: $prefs.translucency, in: 1...10, step: 1)
+                        Slider(value: $prefs.translucency, in: Preferences.translucencyRange, step: 1)
                         Text("Ghost")
                             .font(.caption)
                             .foregroundStyle(.secondary)

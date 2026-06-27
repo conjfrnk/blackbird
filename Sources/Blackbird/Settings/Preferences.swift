@@ -10,6 +10,25 @@ import os
 public final class Preferences: ObservableObject {
     public static let shared = Preferences()
 
+    // MARK: - Single-source-of-truth envelopes (REFACTOR.md Part III §4)
+
+    /// Font-size clamp envelope — the ONE definition shared by the model
+    /// `fontSize.didSet` clamp and the SettingsView slider's `in:`. Keeping
+    /// these aligned by construction is why the M-13/DI-6 "model ceiling 64 vs
+    /// slider 32" mismatch (tampered value renders with the thumb pinned at max)
+    /// can't reappear.
+    public static let fontSizeRange: ClosedRange<Double> = 9...32
+    /// Translucency clamp envelope (10 = opaque). Shared by the model clamp and
+    /// the slider, same rationale as `fontSizeRange`.
+    public static let translucencyRange: ClosedRange<Double> = 1...10
+
+    /// The UserDefaults persistent domain for every security-relevant
+    /// `persistentDomain(forName:)` read (bundle id in production; the literal
+    /// id only as a test/edge fallback). One definition so the domain a config
+    /// decision is read from can't drift between call sites — it was inlined as
+    /// `Bundle.main.bundleIdentifier ?? "..."` at 6 sites.
+    public static let persistentDomainName = Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+
     // MARK: - Schema version
     //
     // `bb.prefsSchemaVersion` is the integer on-disk version of the
@@ -24,7 +43,7 @@ public final class Preferences: ObservableObject {
     // (keys like "theme", "bell", "fontName", "fontSize" are plausibly used by
     // other apps/tools). The migration copies each legacy unprefixed key into
     // its prefixed counterpart and removes the original so `defaults read
-    // dev.conjfrnk.blackbird` returns a dump that's self-identifying.
+    // <bundle-id>` returns a dump that's self-identifying.
     // (settings F3)
     public static let currentSchemaVersion: Int = 2
     // Audit H-8: the schema-version key sits under the `bb.` namespace so
@@ -146,7 +165,7 @@ public final class Preferences: ObservableObject {
             // user-visible objectWillChange.
             guard !clampingFontSize else { return }
             let normalised = fontSize.isFinite ? fontSize : 13
-            let clamped = max(9, min(32, normalised))
+            let clamped = max(Self.fontSizeRange.lowerBound, min(Self.fontSizeRange.upperBound, normalised))
             guard clamped != fontSize else { return }
             clampingFontSize = true
             defer { clampingFontSize = false }
@@ -211,7 +230,7 @@ public final class Preferences: ObservableObject {
             // Re-entry guard: same shape as fontSize — see comment there.
             guard !clampingTranslucency else { return }
             let normalised = translucency.isFinite ? translucency : 1
-            let clamped = max(1, min(10, normalised))
+            let clamped = max(Self.translucencyRange.lowerBound, min(Self.translucencyRange.upperBound, normalised))
             guard clamped != translucency else { return }
             clampingTranslucency = true
             defer { clampingTranslucency = false }
@@ -283,7 +302,7 @@ public final class Preferences: ObservableObject {
 
     private init() {
         // Register defaults in NSRegistrationDomain BEFORE the first
-        // `@AppStorage` read so that `defaults read dev.conjfrnk.blackbird`
+        // `@AppStorage` read so that `defaults read <bundle-id>`
         // surfaces our full pref set even on a fresh install (where no
         // persistent-domain values exist yet), and so `@AppStorage`'s
         // default-on-missing-key path matches the registered defaults
@@ -332,7 +351,7 @@ public final class Preferences: ObservableObject {
         ])
 
         // Type-guard pass. `@AppStorage<Double>` trusts the KVC getter — a
-        // CLI write like `defaults write dev.conjfrnk.blackbird bb.fontSize
+        // CLI write like `defaults write <bundle-id> bb.fontSize
         // -string "big"` stores a String under the key, and the next
         // `UserDefaults.standard.double(forKey:)` bridge returns 0 (or, in
         // some Swift versions, crashes on an Objective-C cast). Remove
@@ -342,7 +361,7 @@ public final class Preferences: ObservableObject {
         // migrator tries to carry it forward. (settings F7)
         Preferences.sanitizeStoredTypes(
             in: defaults,
-            domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+            domain: Self.persistentDomainName
         )
 
         migrateIfNeeded()
@@ -377,14 +396,14 @@ public final class Preferences: ObservableObject {
         // typo / hand-edited plist" recovery path, which we still want.
         let storedSchemaVersion = Preferences.storedSchemaVersion(
             in: defaults,
-            domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+            domain: Self.persistentDomainName
         )
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
             Preferences.repairEnumRawValues(
                 in: self,
                 defaults: defaults,
-                domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+                domain: Self.persistentDomainName
             )
         }
 
@@ -416,7 +435,7 @@ public final class Preferences: ObservableObject {
         // falls through to the registered default cleanly, and only
         // an actual tampered app-domain value triggers the clamp.
         if !isDowngrade {
-            let domain = Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+            let domain = Self.persistentDomainName
             if Preferences.doubleInPersistentDomain(
                 in: defaults, domain: domain, key: Preferences.k("fontSize")
             ) != nil {
@@ -518,14 +537,14 @@ public final class Preferences: ObservableObject {
         // poison the gate.
         let storedSchemaVersion = Preferences.storedSchemaVersion(
             in: defaults,
-            domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+            domain: Self.persistentDomainName
         )
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
             Preferences.repairEnumRawValues(
                 in: self,
                 defaults: defaults,
-                domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+                domain: Self.persistentDomainName
             )
         }
 
@@ -559,7 +578,7 @@ public final class Preferences: ObservableObject {
         // would have walked NSGlobalDomain → registration → 13 in that
         // case, then either matched (no write) or re-clamped to a
         // global-poisoned value.
-        let domain = Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+        let domain = Self.persistentDomainName
 
         if let diskFontSize = Preferences.doubleInPersistentDomain(
             in: defaults, domain: domain, key: Preferences.k("fontSize")
@@ -738,7 +757,7 @@ public final class Preferences: ObservableObject {
         // with their own suite name. (H-8 bootstrap path)
         Preferences.migrateIfNeeded(
             in: UserDefaults.standard,
-            domain: Bundle.main.bundleIdentifier ?? "dev.conjfrnk.blackbird"
+            domain: Self.persistentDomainName
         )
     }
 
