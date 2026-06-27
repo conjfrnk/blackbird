@@ -536,7 +536,7 @@ public final class TerminalSession: ObservableObject {
     /// `.local` to preserve the historical "OSC 7 just lands in tests"
     /// ergonomics; tests that exercise the gate explicitly set
     /// `_testForegroundNamespaceOverride`.
-    public func classifyForegroundNamespace() -> PTY.ForegroundNamespace {
+    public func classifyForegroundNamespace() -> ForegroundNamespace {
         #if DEBUG
         if let override = _testForegroundNamespaceOverride {
             return override
@@ -555,7 +555,7 @@ public final class TerminalSession: ObservableObject {
     /// lets tests simulate `.local`, `.remote(...)`, or `.unknown(...)`
     /// without spawning a real foreground child. Cleared with `nil` to
     /// fall back to the real path. Mirrors `_testForegroundChildOverride`.
-    var _testForegroundNamespaceOverride: PTY.ForegroundNamespace?
+    var _testForegroundNamespaceOverride: ForegroundNamespace?
     #endif
 
     /// Send a POSIX signal directly to the terminal's foreground process group.
