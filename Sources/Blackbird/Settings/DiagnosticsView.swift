@@ -52,7 +52,7 @@ struct DiagnosticsView: View {
             } header: {
                 Text("Reports")
             } footer: {
-                Self.footer("""
+                SettingsChrome.footer("""
                     Reports are written to ~/Library/Logs/Blackbird (hang reports) \
                     and ~/Library/Logs/DiagnosticReports (crashes). Email Diagnostics \
                     opens your default mail client; nothing is sent automatically. \
@@ -78,19 +78,6 @@ struct DiagnosticsView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .onAppear { store.reload() }
-    }
-
-    // Section-footer helper. Mirrors `SettingsView.footer(_:)` — see that
-    // helper's doc comment for why the HStack + Spacer + explicit
-    // `multilineTextAlignment(.leading)` is necessary instead of the simpler
-    // `frame(maxWidth: .infinity)`.
-    private static func footer(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            Text(text)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
     }
 
     // MARK: - Actions
@@ -404,7 +391,7 @@ struct DiagnosticsView: View {
             // space; the explicit encoding below adds a belt-and-
             // suspenders pass for the subject line, which contains a
             // filename that can have `+`, `&`, `?`, or non-ASCII.
-            let subject = "Blackbird \(versionString()) diagnostic — \(report.url.lastPathComponent)"
+            let subject = "Blackbird \(SettingsChrome.versionString) diagnostic — \(report.url.lastPathComponent)"
             let body = "Diagnostic copied to clipboard — paste below this line, then describe what you were doing.\n\n"
             let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&?#=/"))
             guard let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: allowed),
@@ -421,11 +408,6 @@ struct DiagnosticsView: View {
         }
     }
 
-    private func versionString() -> String {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-        return short == build ? short : "\(short) (\(build))"
-    }
 }
 
 private struct DiagnosticRow: View {

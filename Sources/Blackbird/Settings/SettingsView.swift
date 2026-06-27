@@ -1,6 +1,43 @@
 import SwiftUI
 import AppKit
 
+/// Shared chrome for the Settings + Diagnostics surfaces — one definition of
+/// the version string and the grouped-Form section-footer layout, consumed by
+/// both `SettingsView` and `DiagnosticsView` (REFACTOR.md Part III §4; was
+/// duplicated across the two files).
+enum SettingsChrome {
+    /// Human-readable "short (build)" version string. Read once per launch;
+    /// neither Info.plist value changes at runtime. (The "—" fallback is
+    /// unreachable in a built bundle — both keys are always present.)
+    static let versionString: String = {
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
+        return short == build ? short : "\(short) (\(build))"
+    }()
+
+    /// Section-footer helper. SwiftUI's grouped Form on macOS treats a bare
+    /// `Text` in a footer as label-column content: it gets the narrow left
+    /// column and defaults `multilineTextAlignment` to `.center`, producing
+    /// the ragged centered column the user sees. `.frame(maxWidth: .infinity,
+    /// alignment: .leading)` alone doesn't fix it — that only says "accept
+    /// up to ∞ if offered," and the parent never offers more than the label
+    /// column. The HStack with a trailing `Spacer(minLength: 0)` is the
+    /// standard workaround: HStack is a flexible-width container the footer
+    /// parent does propose the full row to, and the Spacer absorbs whatever
+    /// is left of the Text so the Text pins leading.
+    /// `.multilineTextAlignment(.leading)` is the explicit override of the
+    /// Form's centered default — the HStack on its own would still leave
+    /// wrapped lines center-aligned within the Text's frame.
+    static func footer(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            Text(text)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
 public struct SettingsView: View {
     // `Preferences.shared` is a long-lived singleton; using `@ObservedObject`
     // (rather than `@StateObject`) makes it explicit that SettingsView doesn't
@@ -25,36 +62,6 @@ public struct SettingsView: View {
             }
             .sorted()
     }()
-
-    /// Human-readable "short (build)" version string used in the Updates
-    /// tab. Read once per launch; neither value changes at runtime.
-    private static let versionString: String = {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "—"
-        return short == build ? short : "\(short) (\(build))"
-    }()
-
-    /// Section-footer helper. SwiftUI's grouped Form on macOS treats a bare
-    /// `Text` in a footer as label-column content: it gets the narrow left
-    /// column and defaults `multilineTextAlignment` to `.center`, producing
-    /// the ragged centered column the user sees. `.frame(maxWidth: .infinity,
-    /// alignment: .leading)` alone doesn't fix it — that only says "accept
-    /// up to ∞ if offered," and the parent never offers more than the label
-    /// column. The HStack with a trailing `Spacer(minLength: 0)` is the
-    /// standard workaround: HStack is a flexible-width container the footer
-    /// parent does propose the full row to, and the Spacer absorbs whatever
-    /// is left of the Text so the Text pins leading.
-    /// `.multilineTextAlignment(.leading)` is the explicit override of the
-    /// Form's centered default — the HStack on its own would still leave
-    /// wrapped lines center-aligned within the Text's frame.
-    private static func footer(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            Text(text)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-    }
 
     public init() {}
 
@@ -146,7 +153,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Window")
             } footer: {
-                Self.footer("Higher values make the window background more translucent and apply a stronger blur.")
+                SettingsChrome.footer("Higher values make the window background more translucent and apply a stronger blur.")
             }
         }
         .formStyle(.grouped)
@@ -182,7 +189,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Terminal")
             } footer: {
-                Self.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs.")
+                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs.")
             }
 
             Section {
@@ -199,7 +206,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Security")
             } footer: {
-                Self.footer("OSC 10/11/12 lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors. Off by default — the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
+                SettingsChrome.footer("OSC 10/11/12 lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors. Off by default — the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
             }
         }
         .formStyle(.grouped)
@@ -212,7 +219,7 @@ public struct SettingsView: View {
         Form {
             Section("About") {
                 LabeledContent("Version") {
-                    Text(Self.versionString)
+                    Text(SettingsChrome.versionString)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .textSelection(.enabled)
@@ -224,7 +231,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Automatic updates")
             } footer: {
-                Self.footer("Check the release feed at launch and notify when a new version is available.")
+                SettingsChrome.footer("Check the release feed at launch and notify when a new version is available.")
             }
 
             if AppDelegate.isUpdaterConfigured {
