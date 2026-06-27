@@ -972,76 +972,80 @@ final class TabStripView: NSView {
         // covers the DESTINATION window AND only fires on actual value
         // changes — clicking the already-selected pill ((self-)select
         // is a no-op) leaves the strip parked. Restoring here unifies
-        // every mouse exit through one spot.
+        // every mouse exit through one spot. Because it's a `defer`, it
+        // also fires after each of the dispatch helpers below returns.
         defer { yieldFirstResponderToTerminalIfParked() }
 
-        // While a pill is being renamed, a click inside the edit field
-        // belongs to the field editor — we shouldn't see it here at all
-        // (subviews hit-test first), but the containing pill bounds still
-        // route through this method when the click lands on the pill body
-        // outside the field (e.g., the close hotspot area). Commit the
-        // in-flight edit on any outside click before processing so the
-        // click doesn't silently drop the edit.
-        if let idx = editingPill, idx < pillFrames.count {
-            let editingRect = pillFrames[idx]
-            if !NSPointInRect(p, editingRect) {
-                commitEdit()
-                // Fall through — the click was outside the editing pill,
-                // treat it as a normal click on whatever it landed on.
-            } else {
-                // Click inside the editing pill but outside the field
-                // (close hotspot area). Treat as commit-and-stay-put.
-                commitEdit()
-                return
-            }
-        }
-
+        if commitEditOnOutsideClick(p) { return }
         if NSPointInRect(p, addButtonFrame) {
             onAddTab?()
             return
         }
+        if beginRenameOnDoubleClick(p, event: event) { return }
+        handlePillClick(p, event: event)
+    }
 
-        // Double-click on a pill body (outside the close hotspot) → enter
-        // inline rename mode. Matches Safari / Chrome / iTerm2 tab rename
-        // idiom — no modal alert, no menu trip. `beginEditing` makes the
-        // edit field first responder; the `defer` above sees that and
-        // skips the terminal-focus restore so the rename field keeps
-        // focus.
-        if event.clickCount == 2 {
-            for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
-                let closeRect = closeHotspot(in: rect)
-                if !NSPointInRect(p, closeRect), i < tabs.count {
-                    beginEditing(pillIndex: i)
-                    return
-                }
+    /// While a pill is being renamed, a click inside the edit field belongs to
+    /// the field editor — we shouldn't see it here (subviews hit-test first),
+    /// but the containing pill bounds still route here when the click lands on
+    /// the pill body outside the field (e.g. the close hotspot area). Commit
+    /// the in-flight edit on any outside click so the click doesn't silently
+    /// drop the edit. Returns `true` (commit-and-stay-put) when the click was
+    /// inside the editing pill but outside the field; `false` when it was
+    /// outside the editing pill entirely (the caller then treats it as a normal
+    /// click on whatever it landed on) or when nothing is being edited.
+    private func commitEditOnOutsideClick(_ p: CGPoint) -> Bool {
+        guard let idx = editingPill, idx < pillFrames.count else { return false }
+        let editingRect = pillFrames[idx]
+        if !NSPointInRect(p, editingRect) {
+            commitEdit()
+            return false
+        } else {
+            commitEdit()
+            return true
+        }
+    }
+
+    /// Double-click on a pill body (outside the close hotspot) → enter inline
+    /// rename mode. Matches Safari / Chrome / iTerm2 tab rename — no modal, no
+    /// menu trip. `beginEditing` makes the edit field first responder; the
+    /// `defer` in `mouseDown` sees that and skips the terminal-focus restore so
+    /// the rename field keeps focus. Returns `true` when rename began.
+    private func beginRenameOnDoubleClick(_ p: CGPoint, event: NSEvent) -> Bool {
+        guard event.clickCount == 2 else { return false }
+        for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
+            let closeRect = closeHotspot(in: rect)
+            if !NSPointInRect(p, closeRect), i < tabs.count {
+                beginEditing(pillIndex: i)
+                return true
             }
         }
+        return false
+    }
 
+    /// A single click that landed on a pill: close it (only when the × is
+    /// actually hovered), or arm a potential drag, or select. Selection is
+    /// DEFERRED to mouseUp-as-click (see `mouseUp`'s `.armed` case) so a drag —
+    /// reorder OR window move — never switches tabs. Grabbing a background pill
+    /// to move the window used to eagerly select it here, yanking the
+    /// foreground session onto that tab before the gesture was classified (user
+    /// report 2026-06-07; critique complaint C). Arming lets `mouseDragged`
+    /// promote it; the tab only switches if the press is released without a
+    /// drag. Arming is suppressed for single-tab windows (no peer to reorder
+    /// against), a click that also begins rename (clickCount ≥ 2), and any
+    /// pill being renamed elsewhere — there we select now to keep the
+    /// click-to-switch contract.
+    private func handlePillClick(_ p: CGPoint, event: NSEvent) {
         for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
             guard i < tabs.count else { return }
-            // Only honour a close click when the user is actually hovered
-            // on the × — otherwise a stationary click near the leading edge
-            // of a pill would quietly close it even though the × wasn't
-            // visible to the user yet. Selecting is the safe default; to
-            // close, the user has to hover the pill first (which paints
-            // the ×) and then click.
+            // Only honour a close click when the user is actually hovered on
+            // the × — otherwise a stationary click near the leading edge of a
+            // pill would quietly close it even though the × wasn't visible to
+            // the user yet. Selecting is the safe default.
             if hoveredPill == i, hoveredClose, NSPointInRect(p, closeHotspot(in: rect)) {
                 onCloseWindow?(tabs[i])
                 return
             }
-            // Selection is DEFERRED to mouseUp-as-click (see `mouseUp`'s
-            // `.armed` case) so a drag — reorder OR window move — never
-            // switches tabs. Grabbing a background pill to move the window
-            // used to eagerly select it here, yanking the foreground session
-            // onto that tab before the gesture was even classified (user
-            // report 2026-06-07; critique complaint C). Arm a potential drag
-            // and let `mouseDragged` promote it; the tab only switches if the
-            // press is released without a drag.
-            //
-            // Suppressed for: single-tab windows (no peer to reorder against),
-            // a click that also begins inline rename (clickCount ≥ 2), and any
-            // pill currently being renamed elsewhere — the field editor owns
-            // first responder and a drag would steal focus mid-edit.
             let canReorder = tabs.count > 1
                 && event.clickCount == 1
                 && !isEditing
@@ -1052,10 +1056,6 @@ final class TabStripView: NSView {
                     downOffsetX: p.x - rect.minX
                 ))
             } else {
-                // No drag can start from this press (single-tab strip, an
-                // in-flight rename, or a multi-click), so there is no
-                // mouseUp-as-click to defer to — select now to preserve the
-                // click-to-switch contract.
                 onSelectWindow?(tabs[i])
             }
             return
