@@ -137,7 +137,7 @@ public final class ThemeManager {
         // Unconditional apply — first-show blur wiring needs this even when
         // the palette itself hasn't changed since the last apply (the window
         // number wasn't live last time). Bypass the equality gate.
-        applyToAll()
+        applyToAll(inputs: currentPaletteInputs())
     }
 
     /// Called from the Preferences-change sink and the effectiveAppearance
@@ -152,8 +152,10 @@ public final class ThemeManager {
             reapDeadRegistrations()
             return
         }
-        lastPaletteInputs = inputs
-        applyToAll()
+        // Hand the already-computed inputs straight to the apply so the cache
+        // is computed once and assigned once per change (not re-derived inside
+        // applyToAll). settings F1.
+        applyToAll(inputs: inputs)
     }
 
     private func currentPaletteInputs() -> PaletteInputs {
@@ -175,13 +177,16 @@ public final class ThemeManager {
         }
     }
 
-    private func applyToAll() {
+    /// Push the resolved palette to every (live) registration and stamp the
+    /// dedup cache with `inputs` — the snapshot the caller already computed, so
+    /// the inputs are derived once per apply, not twice.
+    private func applyToAll(inputs: PaletteInputs) {
         // Reap registrations whose owner (MainWindowController) has been
         // deallocated. Weak-owner keying means dead windows self-evict
         // here — no explicit unregister call is required from the caller
         // side. (main-window F1)
         reapDeadRegistrations()
-        lastPaletteInputs = currentPaletteInputs()
+        lastPaletteInputs = inputs
         for reg in registrations.values {
             apply(session: reg.sessionProvider(), view: reg.viewProvider())
         }
