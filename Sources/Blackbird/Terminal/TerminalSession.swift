@@ -1,6 +1,6 @@
 import Foundation
 import Combine
-import AppKit
+import QuartzCore
 import os
 
 /// Owns a PTY and a BBTerm. Wires PTY output into the VT parser, publishes
@@ -1476,24 +1476,11 @@ public final class TerminalSession: ObservableObject {
                     // diagnostic is in the unified log even if this hop
                     // landed on a terminating session.
                     if osc52OversizeAtDispatch { break }
-                    // Scrub C0/C1 controls + bidi overrides before handing
-                    // the payload to NSPasteboard. A compromised remote
-                    // would otherwise push a Trojan Source blob or raw ESC
-                    // sequences into the user's system clipboard —
-                    // invisible to Blackbird's own paste scrubber because
-                    // that runs on *inbound* paste, not on the write side.
-                    // Symmetric treatment: anything dirty enough to strip
-                    // on paste-in is dirty enough to strip on paste-out.
-                    let data = Data(text.utf8)
-                    let scrubbed = PasteSanitizer.stripBidiOverrides(
-                        PasteSanitizer.sanitizePasteControls(data)
-                    )
-                    let clean = String(decoding: scrubbed, as: UTF8.self)
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    if !clean.isEmpty {
-                        pb.setString(clean, forType: .string)
-                    }
+                    // Scrub + write goes through ClipboardWriter so the model
+                    // doesn't touch NSPasteboard directly; the symmetric
+                    // control/bidi scrub (dirty-enough-to-strip-on-paste-in is
+                    // dirty-enough-on-paste-out) lives there.
+                    ClipboardWriter.writeOSC52(text)
                 case .cursorShape:
                     // Cursor shape is pinned by `Preferences.shared.cursorShape`
                     // (Settings → Cursor) and resolved into the renderer via
