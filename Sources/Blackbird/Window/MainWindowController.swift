@@ -406,47 +406,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // "Blackbird" before the shell emits OSC 0/2. The TerminalView
         // subscriber will replace this the moment the shell sets its own.
         window?.title = (shell as NSString).lastPathComponent
-        let metrics = view.metrics
-        // Mirror `TerminalView.propagateResize` exactly — share the
-        // formula via `usableViewSize` so the start-size and the first
-        // SIGWINCH from `propagateResize` can never disagree. Earlier
-        // this used raw `view.bounds.size` which over-counted by ~2 cols
-        // on launch; the shell would emit a wider prompt that wrapped
-        // wrong until the first layout pass corrected it.
-        let usable = TerminalView.usableViewSize(
-            forBounds: view.bounds.size,
-            titlebarTopInset: view.titlebarOnlyTopInset,
-            metrics: metrics
-        )
-        let grid = metrics.grid(forPixelSize: usable)
         do {
-            // `clamping:` avoids a trap on pathological bounds. See the
-            // equivalent fix in `TerminalView.applyResizeIfNeeded` — with
-            // CGFloat.sanePx = 1M px, a degenerate 1×1 cell can push
-            // grid.cols above UInt16.max. TerminalSession.resize clamps
-            // again to ≤1000 so the downstream grid is always sensible.
-            #if DEBUG
-            let testFactory = Self.sessionFactoryForTests
-            #else
-            let testFactory: (() -> TerminalSession)? = nil
-            #endif
-            let s: TerminalSession
-            if let testFactory {
-                // Window-lifecycle tests (F-S6) inject a headless, no-PTY
-                // session so a real MainWindowController can be exercised
-                // without the zsh/PTY spawn that destabilises the xctest host.
-                s = testFactory()
-            } else {
-                s = try TerminalSession.start(
-                    shell: shell,
-                    arguments: ["-il"],  // interactive login shell
-                    size: .init(
-                        cols: UInt16(clamping: grid.cols),
-                        rows: UInt16(clamping: grid.rows)
-                    ),
-                    initialWorkingDirectory: initialWorkingDirectory
-                )
-            }
+            let s = try makeSession(shell: shell, size: startGridSize(for: view))
             view.session = s
             self.session = s
             // Registration is keyed by `owner: self` inside ThemeManager and
@@ -458,47 +419,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 sessionProvider: { [weak self] in self?.session },
                 viewProvider:    { [weak self] in self?.terminalView }
             )
-            // Close the window when the shell exits (typed `exit`, SIGHUP, etc).
-            // applicationShouldTerminateAfterLastWindowClosed then quits the app.
-            //
-            // Defer auto-close when an alert / sheet is in flight. With a
-            // modal up, `alert.runModal()` pumps a private runloop mode so
-            // this sink's dispatch is queued but won't drain until the
-            // modal returns. If the shell dies during that deliberation
-            // and the user picks Cancel, we were previously firing
-            // `performClose(nil)` anyway — overriding the user's choice.
-            // Peek at NSApp's modal state; when active, re-queue the auto
-            // close on the next tick so the modal's result handler runs
-            // first. If the modal returned Cancel, `windowWillClose` has
-            // NOT yet fired (window stayed); but the session has died so
-            // we still want to close the window. The re-queue succeeds.
-            // (main-window F4)
-            exitCancellable = s.$exitCode
-                .compactMap { $0 }
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in
-                    guard let self else { return }
-                    self.deferredAutoCloseIfNeeded()
-                }
-            // Bind the macOS proxy icon to the shell's current working
-            // directory (via OSC 7). Gives the user a draggable directory
-            // chip in the title bar — drop onto Finder to reveal, onto
-            // another app to hand off the path. iTerm2 and Terminal.app
-            // both do this; it's the classic macOS document-window
-            // citizenship cue. Nil URL (shell hasn't emitted OSC 7 yet, or
-            // cwd points at a path that resolves through a symlink we
-            // shouldn't chase) leaves the title bar iconless — same as
-            // any non-document window.
-            cwdCancellable = s.$lastKnownCwd
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] path in
-                    guard let win = self?.window else { return }
-                    if let path, !path.isEmpty {
-                        win.representedURL = URL(fileURLWithPath: path, isDirectory: true)
-                    } else {
-                        win.representedURL = nil
-                    }
-                }
+            bindSessionAutoClose(s)
+            bindSessionProxyIcon(s)
         } catch {
             // Shell spawn failed (bad $SHELL, exec permission denied, etc.).
             // Leave the window up with a diagnostic title and present an
@@ -508,6 +430,77 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             window?.title = "Blackbird — failed to start shell: \(error)"
             presentShellStartFailureAlert(error: error, inView: view)
         }
+    }
+
+    /// The clamped (cols, rows) to start the shell at. Mirrors
+    /// `TerminalView.propagateResize` via the shared `usableViewSize` formula so
+    /// the start size and the first SIGWINCH can't disagree (raw `bounds.size`
+    /// over-counted by ~2 cols, wrapping the first prompt until the first layout
+    /// pass). `clamping:` avoids a UInt16 trap on a degenerate 1×1-cell bounds
+    /// (CGFloat.sanePx = 1M px); TerminalSession.resize re-clamps to ≤1000.
+    private func startGridSize(for view: TerminalView) -> (cols: UInt16, rows: UInt16) {
+        let usable = TerminalView.usableViewSize(
+            forBounds: view.bounds.size,
+            titlebarTopInset: view.titlebarOnlyTopInset,
+            metrics: view.metrics
+        )
+        let grid = view.metrics.grid(forPixelSize: usable)
+        return (UInt16(clamping: grid.cols), UInt16(clamping: grid.rows))
+    }
+
+    /// Create the terminal session: a headless, no-PTY test double when one is
+    /// injected — window-lifecycle tests (F-S6) exercise a real
+    /// MainWindowController without the zsh/PTY spawn that destabilises the
+    /// xctest host — else a real interactive login shell.
+    private func makeSession(shell: String, size: (cols: UInt16, rows: UInt16)) throws -> TerminalSession {
+        #if DEBUG
+        if let testFactory = Self.sessionFactoryForTests {
+            return testFactory()
+        }
+        #endif
+        return try TerminalSession.start(
+            shell: shell,
+            arguments: ["-il"],  // interactive login shell
+            size: .init(cols: size.cols, rows: size.rows),
+            initialWorkingDirectory: initialWorkingDirectory
+        )
+    }
+
+    /// Close the window when the shell exits (typed `exit`, SIGHUP, etc.);
+    /// `applicationShouldTerminateAfterLastWindowClosed` then quits the app.
+    /// Auto-close is deferred when an alert / sheet is in flight: a modal's
+    /// `runModal()` pumps a private runloop mode so this sink's dispatch queues
+    /// but won't drain until the modal returns. If the shell dies during that
+    /// deliberation and the user picks Cancel, firing `performClose` anyway
+    /// would override the choice — `deferredAutoCloseIfNeeded` re-queues on the
+    /// next tick so the modal's result handler runs first. (main-window F4)
+    private func bindSessionAutoClose(_ s: TerminalSession) {
+        exitCancellable = s.$exitCode
+            .compactMap { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.deferredAutoCloseIfNeeded()
+            }
+    }
+
+    /// Bind the macOS proxy icon to the shell's current working directory (via
+    /// OSC 7) — a draggable directory chip in the title bar (drop onto Finder to
+    /// reveal, onto another app to hand off the path), the classic macOS
+    /// document-window cue iTerm2 / Terminal.app both show. A nil/empty cwd
+    /// (no OSC 7 yet, or a path we shouldn't chase through a symlink) leaves the
+    /// title bar iconless, like any non-document window.
+    private func bindSessionProxyIcon(_ s: TerminalSession) {
+        cwdCancellable = s.$lastKnownCwd
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] path in
+                guard let win = self?.window else { return }
+                if let path, !path.isEmpty {
+                    win.representedURL = URL(fileURLWithPath: path, isDirectory: true)
+                } else {
+                    win.representedURL = nil
+                }
+            }
     }
 
     /// Show a recovery alert after `TerminalSession.start` threw. "Retry"
