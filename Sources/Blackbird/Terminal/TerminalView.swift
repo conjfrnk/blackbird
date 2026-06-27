@@ -246,17 +246,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     struct BBXYPoint: Equatable { let col: Int; let row: Int }
     var lastReportedMotionCell: BBXYPoint?
 
-    /// ⌘ + right-drag resizes the window from the nearest corner. The
-    /// types + stored property live here (not on the mouse extension)
-    /// because Swift disallows stored properties on extensions. The
-    /// mouse extension references these by name only.
-    enum ResizeCorner { case topLeft, topRight, bottomLeft, bottomRight }
-    struct ResizeContext {
-        let corner: ResizeCorner
-        let startMouseGlobal: CGPoint
-        let startFrame: CGRect
-    }
-    var resizeContext: ResizeContext?
+    /// ⌘ + right-drag resizes the window from the nearest corner. The gesture
+    /// state + frame math live in their own `WindowResizeController` (the
+    /// corner context is `private` there, not an `internal` view field); the
+    /// mouse extension drives it.
+    let windowResizeController = WindowResizeController()
 
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)

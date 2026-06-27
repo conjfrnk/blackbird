@@ -19,7 +19,7 @@ import BBCore
 ///     resizes from the nearest corner. Matches Amethyst-style tiling
 ///     workflows and Blackbird's own keybinding table.
 ///
-/// Stored state (`isDragging`, `selection`, `resizeContext`) lives on the
+/// Stored state (`isDragging`, `selection`) lives on the
 /// class body — `TerminalView.swift` — because Swift requires stored
 /// properties on the declaring type. The selection-autoscroll timer +
 /// direction were hoisted out of the view into the owned
@@ -273,20 +273,11 @@ extension TerminalView {
         // pinned.
         let windowResizeMask = Preferences.shared.windowResizeModifier.modifierMask
         if !windowResizeMask.isEmpty, event.modifierFlags.contains(windowResizeMask), let win = window {
-            let local = convert(event.locationInWindow, from: nil)
-            let left = local.x < bounds.width / 2
-            // AppKit's Y-axis points up, so "below the midline" = smaller y.
-            let lower = local.y < bounds.height / 2
-            let corner: ResizeCorner = switch (left, lower) {
-                case (true,  true):  .bottomLeft
-                case (false, true):  .bottomRight
-                case (true,  false): .topLeft
-                case (false, false): .topRight
-            }
-            resizeContext = ResizeContext(
-                corner: corner,
+            windowResizeController.begin(
+                localPoint: convert(event.locationInWindow, from: nil),
+                in: bounds,
                 startMouseGlobal: NSEvent.mouseLocation,
-                startFrame: win.frame
+                windowFrame: win.frame
             )
             return
         }
@@ -302,58 +293,28 @@ extension TerminalView {
     }
 
     public override func rightMouseDragged(with event: NSEvent) {
-        if let ctx = resizeContext, let win = window {
-            let now = NSEvent.mouseLocation
-            let dx = now.x - ctx.startMouseGlobal.x
-            let dy = now.y - ctx.startMouseGlobal.y
-            var frame = ctx.startFrame
-            switch ctx.corner {
-            case .topLeft:
-                frame.origin.x    += dx
-                frame.size.width  -= dx
-                frame.size.height += dy
-            case .topRight:
-                frame.size.width  += dx
-                frame.size.height += dy
-            case .bottomLeft:
-                frame.origin.x    += dx
-                frame.size.width  -= dx
-                frame.origin.y    += dy
-                frame.size.height -= dy
-            case .bottomRight:
-                frame.size.width  += dx
-                frame.origin.y    += dy
-                frame.size.height -= dy
-            }
-            // Clamp to contentMinSize (set by MainWindowController). When the
-            // dragged corner would shrink the window below the minimum, pin
-            // its corresponding edge instead of letting the opposite corner
-            // drift.
+        if windowResizeController.isResizing, let win = window {
+            // Clamp to contentMinSize (set by MainWindowController). The
+            // controller pins the dragged edge on underflow; we just supply the
+            // window-derived minimums.
             let minContent = win.contentMinSize
             let chrome = win.frame.height - (win.contentView?.bounds.height ?? win.frame.height)
             let minWidth  = max(minContent.width, 200)
             let minHeight = max(minContent.height + chrome, 120)
-            if frame.size.width < minWidth {
-                if ctx.corner == .topLeft || ctx.corner == .bottomLeft {
-                    frame.origin.x = ctx.startFrame.maxX - minWidth
-                }
-                frame.size.width = minWidth
+            if let frame = windowResizeController.frameForCurrentDrag(
+                currentMouseGlobal: NSEvent.mouseLocation,
+                minWidth: minWidth,
+                minHeight: minHeight
+            ) {
+                win.setFrame(frame, display: true)
             }
-            if frame.size.height < minHeight {
-                if ctx.corner == .bottomLeft || ctx.corner == .bottomRight {
-                    frame.origin.y = ctx.startFrame.maxY - minHeight
-                }
-                frame.size.height = minHeight
-            }
-            win.setFrame(frame, display: true)
             return
         }
         super.rightMouseDragged(with: event)
     }
 
     public override func rightMouseUp(with event: NSEvent) {
-        if resizeContext != nil {
-            resizeContext = nil
+        if windowResizeController.end() {
             return
         }
         let optionHeld = event.modifierFlags.contains(.option)
@@ -416,11 +377,10 @@ extension TerminalView {
         return mode.contains(.mouseDrag)
     }
 
-    // `ResizeCorner`, `ResizeContext`, and `resizeContext` are declared
-    // on the class body in `TerminalView.swift`. Swift disallows
-    // stored properties on extensions; the nested types move too so
-    // this extension can still name them (`ResizeContext(corner:
-    // ...)`).
+    // The window-resize gesture state + frame math live in
+    // `WindowResizeController` (`windowResizeController` on the view); the
+    // rightMouse* overrides above just drive `begin` / `frameForCurrentDrag`
+    // / `end`.
 
     public override func scrollWheel(with event: NSEvent) {
         // Scrolling moves the grid beneath the pointer — the cell the
