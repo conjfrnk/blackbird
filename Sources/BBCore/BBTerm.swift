@@ -153,6 +153,17 @@ public final class BBTerm {
     /// explicit hook lets `deinit` become a no-op for the FFI portion
     /// when an owner properly tears down through `terminate()`. Audit
     /// M6.
+    /// The FFI teardown triple, shared by `terminate()` and the `deinit`
+    /// fallback. The ORDER is safety-critical (Part I §6/§9): detach the
+    /// trampoline's back-reference FIRST (so a straggler trampoline reads a nil
+    /// owner and short-circuits), then clear the Rust callback slot, then free
+    /// the core handle. Callers decide what to do with `handle`/`ctxBox` after.
+    private func freeHandle(_ h: OpaquePointer) {
+        ctxBox.pointee.owner = nil
+        bb_term_set_event_cb(h, nil, nil)
+        bb_term_free(h)
+    }
+
     public func terminate() {
         guard let h = handle else { return }
         // Audit fix-#02 (2026-05-21): pair with Rust's ffi_reentry_blocked
@@ -172,14 +183,7 @@ public final class BBTerm {
         if isInsideEventDispatch {
             return
         }
-        // Clear the trampoline's back-reference BEFORE the FFI free
-        // so any straggler trampoline call (which only happens off
-        // the contract — same-queue discipline forbids it — but we
-        // defend anyway) reads a nil owner and short-circuits before
-        // touching `self`.
-        ctxBox.pointee.owner = nil
-        bb_term_set_event_cb(h, nil, nil)
-        bb_term_free(h)
+        freeHandle(h)
         handle = nil
     }
 
@@ -209,9 +213,7 @@ public final class BBTerm {
         // (e.g. `dispatchPrecondition(.onQueue(owningQueue))` if
         // BBTerm grew an explicit `owningQueue` field).
         if let h = handle {
-            ctxBox.pointee.owner = nil
-            bb_term_set_event_cb(h, nil, nil)
-            bb_term_free(h)
+            freeHandle(h)
             // Audit fix-#01/#02 (2026-05-21): if this deinit fires while
             // an FFI callback is still in flight (e.g. the consumer
             // released the last strong reference inside an event
