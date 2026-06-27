@@ -857,6 +857,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // is better) and the NotificationCenter token. (main-window F2)
         teardownTitleObservers()
         guard let group = window?.tabGroup else { return }
+        installTabGroupKVO(group)
+        installTabTitleObservers()
+    }
+
+    /// Install the three `NSWindowTabGroup` KVO observers into
+    /// `tabGroupObservers` (windows add/remove, selection, native-strip
+    /// re-show). Split out of `observeTabGroup`; the teardown + guard stay
+    /// there. KVO fires on the mutating thread — `NSWindowTabGroup` mutates
+    /// on main — and the handlers touch AppKit views, so each trips a
+    /// `dispatchPrecondition(.onQueue(.main))` rather than risk an off-main
+    /// layout assertion (audit L-2). Called synchronously (no main.async) so
+    /// the native strip is hidden in the same transaction as AppKit's insert
+    /// — the async wrappers used to add a one-tick flash on ⌘T.
+    private func installTabGroupKVO(_ group: NSWindowTabGroup) {
         // KVO callbacks fire on the thread that mutated the observed
         // property. `NSWindowTabGroup` mutates on main, so these blocks
         // run on main already — the `DispatchQueue.main.async` wrappers
@@ -920,7 +934,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             self?.hideNativeTabStrip()
         }
         tabGroupObservers = [winObs, selObs, visObs]
+    }
 
+    /// Install the window-title KVO + the same-tab-group title-broadcast
+    /// notification observer, so the custom pill strip stays in sync with the
+    /// shell's OSC 0/2 title (which TerminalView writes straight into
+    /// `window.title`, bypassing the add/remove/select refresh paths). Split
+    /// out of `observeTabGroup`; both are torn down by `teardownTitleObservers`.
+    private func installTabTitleObservers() {
         // When the shell emits OSC 2 / OSC 0, TerminalView writes the new
         // string into window.title — but the custom pill strip doesn't
         // auto-redraw from that (refreshTabBar is only invoked on
