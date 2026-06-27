@@ -1492,8 +1492,8 @@ public final class TerminalSession: ObservableObject {
                     // Symmetric treatment: anything dirty enough to strip
                     // on paste-in is dirty enough to strip on paste-out.
                     let data = Data(text.utf8)
-                    let scrubbed = TerminalView.stripBidiOverrides(
-                        TerminalView.sanitizePasteControls(data)
+                    let scrubbed = PasteSanitizer.stripBidiOverrides(
+                        PasteSanitizer.sanitizePasteControls(data)
                     )
                     let clean = String(decoding: scrubbed, as: UTF8.self)
                     let pb = NSPasteboard.general

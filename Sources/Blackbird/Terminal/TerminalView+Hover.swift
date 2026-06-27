@@ -456,7 +456,7 @@ extension TerminalView {
         // a tooltip without the gate, embedded credentials still don't
         // leak to the AX API or screen capture.
         let redacted = OSC8URLPolicy.redactCredentialsForDisplay(urlString)
-        let scrubbed = Self.scrubURLForDisplay(redacted)
+        let scrubbed = PasteSanitizer.scrubURLForDisplay(redacted)
         // Clamp the displayed URL. A misbehaving remote could stuff
         // megabytes of OSC 8 target into the link table; sizing an
         // NSTextField against it would hang the UI and push the panel

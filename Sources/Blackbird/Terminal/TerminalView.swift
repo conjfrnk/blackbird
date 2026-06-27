@@ -1961,8 +1961,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // world" case. Same sanitizer as paste-inbound (symmetric).
         let copyMax = 16 * 1024 * 1024
         let data = Data(raw.utf8).prefix(copyMax)
-        let scrubbed = Self.stripBidiOverrides(
-            Self.sanitizePasteControls(Data(data))
+        let scrubbed = PasteSanitizer.stripBidiOverrides(
+            PasteSanitizer.sanitizePasteControls(Data(data))
         )
         let clean = String(decoding: scrubbed, as: UTF8.self)
         let pb = NSPasteboard.general
@@ -2742,8 +2742,8 @@ extension TerminalView {
         // find-bar Replace field bypasses our paste sanitizer): a Trojan-Source
         // RLO typed/pasted there would otherwise smuggle the bidi byte straight
         // into the shell. Same C0/C1/bidi/ZWJ/tag-block set. Audit M10.
-        let cleanedReplacement = Self.stripBidiOverrides(
-            Self.sanitizePasteControls(Data(replacement.utf8))
+        let cleanedReplacement = PasteSanitizer.stripBidiOverrides(
+            PasteSanitizer.sanitizePasteControls(Data(replacement.utf8))
         )
         switch ShellLineEditor.spliceBytes(
             matches: matches, cleanedReplacement: cleanedReplacement, snapshot: snap

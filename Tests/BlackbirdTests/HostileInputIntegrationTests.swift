@@ -131,10 +131,10 @@ final class HostileInputIntegrationTests: XCTestCase {
         input.append(Data("[2J".utf8))
         input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]) // ESC[201~
 
-        let step1 = TerminalView.normalizePasteLineEndings(input)
-        let step2 = TerminalView.sanitizePasteControls(step1)
-        let step3 = TerminalView.stripBidiOverrides(step2)
-        let step4 = TerminalView.sanitizeBracketedPaste(step3)
+        let step1 = PasteSanitizer.normalizePasteLineEndings(input)
+        let step2 = PasteSanitizer.sanitizePasteControls(step1)
+        let step3 = PasteSanitizer.stripBidiOverrides(step2)
+        let step4 = PasteSanitizer.sanitizeBracketedPaste(step3)
 
         // None of the dangerous bytes may survive.
         XCTAssertFalse(step4.contains(0x03), "Ctrl+C must be gone")
@@ -164,10 +164,10 @@ final class HostileInputIntegrationTests: XCTestCase {
         // converter — applied only on the non-bracketed paste branch —
         // is the layer that maps it to LF.
         let input = Data("foo\rbar".utf8)
-        let normalized = TerminalView.normalizePasteLineEndings(input)
-        let sanitized = TerminalView.sanitizePasteControls(normalized)
-        let stripped = TerminalView.stripBidiOverrides(sanitized)
-        let nonBracketed = TerminalView.convertLoneCRToLF(stripped)
+        let normalized = PasteSanitizer.normalizePasteLineEndings(input)
+        let sanitized = PasteSanitizer.sanitizePasteControls(normalized)
+        let stripped = PasteSanitizer.stripBidiOverrides(sanitized)
+        let nonBracketed = PasteSanitizer.convertLoneCRToLF(stripped)
         XCTAssertEqual(
             nonBracketed, Data("foo\nbar".utf8),
             "lone CR in non-bracketed paste must become LF (audit L4)"
@@ -187,10 +187,10 @@ final class HostileInputIntegrationTests: XCTestCase {
     /// when normalisation has already run.
     func testNonBracketedPaste_crlfStillCollapsesToSingleLF() {
         let input = Data("foo\r\nbar".utf8)
-        let normalized = TerminalView.normalizePasteLineEndings(input)
-        let sanitized = TerminalView.sanitizePasteControls(normalized)
-        let stripped = TerminalView.stripBidiOverrides(sanitized)
-        let nonBracketed = TerminalView.convertLoneCRToLF(stripped)
+        let normalized = PasteSanitizer.normalizePasteLineEndings(input)
+        let sanitized = PasteSanitizer.sanitizePasteControls(normalized)
+        let stripped = PasteSanitizer.stripBidiOverrides(sanitized)
+        let nonBracketed = PasteSanitizer.convertLoneCRToLF(stripped)
         XCTAssertEqual(
             nonBracketed, Data("foo\nbar".utf8),
             "CRLF must collapse to a single LF (no spurious doubling)"
@@ -220,8 +220,8 @@ final class HostileInputIntegrationTests: XCTestCase {
         payload.append(contentsOf: [0xE2, 0x80, 0xAE])             // U+202E RLO
         payload.append(Data("tail-bytes".utf8))
 
-        let step1 = TerminalView.sanitizePasteControls(payload)
-        let step2 = TerminalView.stripBidiOverrides(step1)
+        let step1 = PasteSanitizer.sanitizePasteControls(payload)
+        let step2 = PasteSanitizer.stripBidiOverrides(step1)
 
         XCTAssertFalse(step2.contains(0x1B),
                        "ESC must be stripped before OSC 52 write")
