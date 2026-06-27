@@ -325,7 +325,7 @@ extension TerminalView {
             //       adversary, since NSRegularExpression has no match
             //       timeout API.
             // Audit findbar-selection F2.
-            guard Self.isReasonableRegexPattern(query) else {
+            guard RegexSafetyGate.isReasonable(query) else {
                 findBar?.setMatchCount(0, of: 0)
                 findBar?.showTransientMessage("Regex too complex")
                 selection = nil

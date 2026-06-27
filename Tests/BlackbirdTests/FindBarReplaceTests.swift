@@ -345,7 +345,7 @@ final class FindRegexGuardTests: XCTestCase {
             "suffix$",
         ] {
             XCTAssertTrue(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "legitimate pattern must pass: \(pattern)"
             )
         }
@@ -363,7 +363,7 @@ final class FindRegexGuardTests: XCTestCase {
             "(\\s*)*",
         ] {
             XCTAssertFalse(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "catastrophic-backtrack pattern must be rejected: \(pattern)"
             )
         }
@@ -375,7 +375,7 @@ final class FindRegexGuardTests: XCTestCase {
         // be accepted.
         let giant = String(repeating: "a", count: 512)
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern(giant),
+            RegexSafetyGate.isReasonable(giant),
             "over-length pattern must be rejected"
         )
     }
@@ -402,7 +402,7 @@ final class FindRegexGuardTests: XCTestCase {
             "(\\d{0,9})+",
         ] {
             XCTAssertFalse(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "brace-quantified nested-group ReDoS pattern must be rejected: \(pattern)"
             )
         }
@@ -421,7 +421,7 @@ final class FindRegexGuardTests: XCTestCase {
             "[a-z]{2,}",
         ] {
             XCTAssertTrue(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "legitimate brace-quantified pattern must be accepted: \(pattern)"
             )
         }
@@ -432,7 +432,7 @@ final class FindRegexGuardTests: XCTestCase {
         // check. The fix iterates redundant `((` / `))` collapses before
         // re-running the dangerous-shape match.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("(((a+)))+$"),
+            RegexSafetyGate.isReasonable("(((a+)))+$"),
             "extra-grouping wrappers around (a+)+ must be rejected"
         )
     }
@@ -442,7 +442,7 @@ final class FindRegexGuardTests: XCTestCase {
         // substring list. The fix normalises `(?:` → `(` before
         // checking.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("(?:a+)+"),
+            RegexSafetyGate.isReasonable("(?:a+)+"),
             "non-capturing group around (a+)+ must be rejected"
         )
     }
@@ -452,7 +452,7 @@ final class FindRegexGuardTests: XCTestCase {
         // group is the second textbook ReDoS shape. The fix detects
         // any `(...|...)` followed by `+` or `*`.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("(a|aa)+b"),
+            RegexSafetyGate.isReasonable("(a|aa)+b"),
             "alternation inside a quantified group must be rejected"
         )
     }
@@ -461,7 +461,7 @@ final class FindRegexGuardTests: XCTestCase {
         // Composition test: non-capturing group AND alternation in the
         // same pattern. Either rule is sufficient to reject.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("(?:a|aa)*"),
+            RegexSafetyGate.isReasonable("(?:a|aa)*"),
             "alternation inside a quantified non-capturing group must be rejected"
         )
     }
@@ -480,7 +480,7 @@ final class FindRegexGuardTests: XCTestCase {
             "(?:x|xx|xxx|xxxx)+",
         ] {
             XCTAssertFalse(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "multi-way alternation inside quantified group must be rejected: \(pattern)"
             )
         }
@@ -490,7 +490,7 @@ final class FindRegexGuardTests: XCTestCase {
         // Defensive cap: more than 6 quantifiers in one query is a
         // strong "this isn't a legitimate find" signal.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("a*b*c*d*e*f*g*"),
+            RegexSafetyGate.isReasonable("a*b*c*d*e*f*g*"),
             "patterns with > 6 quantifiers must be rejected"
         )
     }
@@ -500,7 +500,7 @@ final class FindRegexGuardTests: XCTestCase {
         // alone is not dangerous, only alternation INSIDE a quantified
         // group (`(...|...)+`) overlaps catastrophically.
         XCTAssertTrue(
-            TerminalView.isReasonableRegexPattern("(cat|dog|fish)"),
+            RegexSafetyGate.isReasonable("(cat|dog|fish)"),
             "plain alternation without a trailing quantifier must pass"
         )
     }
@@ -514,7 +514,7 @@ final class FindRegexGuardTests: XCTestCase {
             "\\b\\w+@\\w+\\.\\w+\\b",
         ] {
             XCTAssertTrue(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "realistic query must pass: \(pattern)"
             )
         }

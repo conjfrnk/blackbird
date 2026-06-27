@@ -160,7 +160,7 @@ final class FindBarAdversarialTests: XCTestCase {
         let pattern = "(a+)+b"
         // First-line defence: the static heuristic gate rejects it.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern(pattern),
+            RegexSafetyGate.isReasonable(pattern),
             "(a+)+b is the textbook ReDoS shape and must be rejected "
             + "by the static gate; otherwise the find loop hangs the UI"
         )
@@ -229,7 +229,7 @@ final class FindBarAdversarialTests: XCTestCase {
     func test_fourWayPlainAlternation_isAcceptedByGate() {
         // Positive: plain 4-way alternation must remain accepted.
         XCTAssertTrue(
-            TerminalView.isReasonableRegexPattern("(foo|bar|baz|qux)"),
+            RegexSafetyGate.isReasonable("(foo|bar|baz|qux)"),
             "4-way plain alternation (no trailing quantifier) is safe "
             + "and must remain accepted — the 400c265 widen targets "
             + "the QUANTIFIED form only"
