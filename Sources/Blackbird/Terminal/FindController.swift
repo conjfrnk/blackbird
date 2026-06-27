@@ -3,30 +3,111 @@ import Foundation
 import os
 import BBCore
 
-/// The find bar for `TerminalView`: ⌘F spawns a `FindBar` subview; ⌘G / ⌘⇧G
-/// cycle matches; `performSearch(query:)` runs the regex / substring search
+/// Owns the find bar for `TerminalView`: ⌘F spawns a `FindBar` subview; ⌘G /
+/// ⌘⇧G cycle matches; `performSearch(query:)` runs the regex / substring search
 /// across the visible viewport + scrollback (the regex path is async with a
 /// cooperative-cancel + ReDoS pre-gate). Find-mode toggles (⌘⌥C case-sensitive,
-/// ⌘⌥R regex) round-trip through `FindBarDelegate` on the main class. The
-/// sibling responder concerns moved to their own files: macOS Services + Look
-/// Up → `TerminalView+Services.swift`; right-click menu + `validateMenuItem`
-/// → `TerminalView+ContextMenu.swift`.
+/// ⌘⌥R regex) round-trip through `FindBarDelegate` on `TerminalView`, which
+/// forwards them here.
 ///
-/// Stored state (`findMatches`, `findCurrentIndex`, `findQuery`)
-/// lives on the class body and is bumped from `private` to internal
-/// so this extension can read/write across the file boundary.
-extension TerminalView {
+/// This type owns ALL find state (was the `find*` fields on `TerminalView`) and
+/// the search/cycle/regex engine (was `TerminalView+Find.swift`). The view holds
+/// it as a `lazy var` and forwards its menu actions + `FindBarDelegate`
+/// conformance; `TerminalView+Accessibility` / `+ContextMenu` and the Replace
+/// helpers in `TerminalView.swift` read `findController.findBar` / `.findMatches`
+/// across the file boundary.
+///
+/// The `view` back-reference is `unowned`: the controller's lifetime is a strict
+/// subset of the view's (the view owns it via `let`/`lazy var`), so it never
+/// dangles for any reachable call. The async regex closures capture `[weak self]`
+/// (self = this controller) — a publish/timeout that lands after the view (hence
+/// this controller) is gone finds `self == nil` and returns before touching
+/// `view`, exactly as the old `[weak self]` (self = the view) did.
+final class FindController {
+    unowned let view: TerminalView
+
+    init(view: TerminalView) {
+        self.view = view
+    }
+
+    // MARK: - State
+
+    /// Only `installFindBar()` and the FindBarDelegate close/open path mutate it.
+    var findBar: FindBar?
+    var findMatches: [(line: Int32, startCol: Int, endCol: Int)] = []
+    var findCurrentIndex: Int = 0
+    var findQuery: String = ""
+    /// `BBSnapshot.sequenceID` of the snapshot `findMatches` was scanned
+    /// against. `nil` when no scan has run yet (or the cache was just
+    /// cleared). Used by `advanceFind` / `highlightCurrentMatch` to
+    /// detect that output arrived between `performSearch` and the user
+    /// pressing ⌘G — in that case the stored (line, col) tuples may
+    /// reference cells that now hold different text, so we re-run
+    /// `performSearch` against the live snapshot before advancing.
+    /// Audit findbar-selection F11.
+    var findMatchesSeq: UInt64?
+    /// Monotonic ID assigned to each background regex scan. The latest
+    /// scan's ID is `activeRegexSearchID`; when a scan publishes
+    /// results, it sets `regexSearchCompletedID = mySearchID` so the
+    /// 250 ms timeout sibling task knows whether to fire its
+    /// "regex too complex" banner. All three fields are touched only
+    /// on the main thread, and only within this file now that the whole
+    /// regex engine lives here — hence `private`. Audit findbar-selection F2.
+    private var regexSearchIDCounter: UInt64 = 0
+    private var activeRegexSearchID: UInt64 = 0
+    private var regexSearchCompletedID: UInt64 = 0
+    /// Set when ⌘G / ⌘⇧G is pressed while a regex stale-rescan is in flight
+    /// (the rescan clears findMatches and repopulates asynchronously). The
+    /// scan's main-thread publish honours this instead of resetting to match
+    /// 1, so the cycle isn't swallowed and the user's position is preserved.
+    /// `anchor` is the (line, startCol) of the match the user was on before
+    /// the rescan, used to resume from the equivalent position. Audit
+    /// findbar-selection: regex ⌘G swallow + reset.
+    var pendingRegexAdvance: (direction: FindBar.Direction, anchor: (line: Int32, startCol: Int)?)?
+
+    /// Track that a find-refresh is pending so concurrent snapshot bursts
+    /// collapse to one main-queue dispatch.
+    private var findRefreshPending: Bool = false
+
+    // MARK: - Bar lifecycle
 
     func installFindBar() {
         let h: CGFloat = 32
         // Sit just below the titlebar, not under it.
-        let top = titlebarOnlyTopInset
-        let bar = FindBar(frame: NSRect(x: 0, y: bounds.height - h - top, width: bounds.width, height: h))
+        let top = view.titlebarOnlyTopInset
+        let bar = FindBar(frame: NSRect(x: 0, y: view.bounds.height - h - top, width: view.bounds.width, height: h))
         bar.autoresizingMask = [.width, .minYMargin]
-        bar.delegate = self
-        addSubview(bar)
+        bar.delegate = view
+        view.addSubview(bar)
         findBar = bar
     }
+
+    // MARK: - Snapshot observation
+
+    /// Called from `TerminalView.currentSnapshot.didSet`. Find-match coordinates
+    /// are relative to the buffer at the time `performSearch` ran; any snapshot
+    /// swap may have scrolled history, wrapped lines, or overwritten matched
+    /// rows, so rerun the search against the fresh grid (debounced) when the bar
+    /// is open with a live query. Audit findbar-selection F11.
+    func snapshotDidChange() {
+        guard findBar != nil, !findQuery.isEmpty else { return }
+        scheduleFindRefresh()
+    }
+
+    private func scheduleFindRefresh() {
+        guard !findRefreshPending else { return }
+        findRefreshPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.findRefreshPending = false
+            // Query could have been cleared by the time the dispatch fires
+            // (FindBar closed, user cleared the field). Early-return then.
+            guard !self.findQuery.isEmpty, self.findBar != nil else { return }
+            self.performSearch(query: self.findQuery)
+        }
+    }
+
+    // MARK: - Cycle (⌘G / ⌘⇧G)
 
     func advanceFind(direction: FindBar.Direction) {
         // Capture where the user currently is BEFORE any stale-rescan wipes
@@ -81,7 +162,7 @@ extension TerminalView {
     /// substring path rescans synchronously, so it returns false there.
     func regexSearchWouldRescan() -> Bool {
         guard findBar?.options.regex ?? false else { return false }
-        guard !findQuery.isEmpty, let snap = currentSnapshot else { return false }
+        guard !findQuery.isEmpty, let snap = view.currentSnapshot else { return false }
         return findMatchesSeq != snap.sequenceID
     }
 
@@ -117,6 +198,8 @@ extension TerminalView {
         }
     }
 
+    // MARK: - Search
+
     /// Rerun the active search if the cached `findMatches` were computed
     /// against an earlier snapshot than the live one. No-op when the
     /// query is empty (nothing to refresh) or the snapshot's sequenceID
@@ -128,13 +211,13 @@ extension TerminalView {
     /// observe `findMatchesSeq == snap.sequenceID` the matches are
     /// known-good against `snap`.
     /// Audit findbar-selection F11.
-    /// Audit fix-#18 (2026-05-11): promoted from private to internal so
-    /// replaceAllMatches (in TerminalView.swift) can call it before
-    /// iterating cached col-real findMatches against a possibly newer
-    /// snapshot — the wide-char DEL overcount window the audit names.
+    /// Audit fix-#18 (2026-05-11): callable by `replaceAllMatches` (in
+    /// TerminalView.swift) before iterating cached col-real findMatches
+    /// against a possibly newer snapshot — the wide-char DEL overcount
+    /// window the audit names.
     func refreshFindMatchesIfStale() {
         guard !findQuery.isEmpty else { return }
-        guard let snap = currentSnapshot else { return }
+        guard let snap = view.currentSnapshot else { return }
         if findMatchesSeq != snap.sequenceID {
             performSearch(query: findQuery)
         }
@@ -167,9 +250,9 @@ extension TerminalView {
         // a stale-cache rerun against the new (empty) match set.
         findMatchesSeq = nil
         findCurrentIndex = 0
-        guard let session, let snap = currentSnapshot, !query.isEmpty else {
+        guard let session = view.session, let snap = view.currentSnapshot, !query.isEmpty else {
             findBar?.setMatchCount(0, of: 0)
-            selection = nil
+            view.selection = nil
             return
         }
         let opts = findBar?.options ?? FindBar.Options()
@@ -205,7 +288,7 @@ extension TerminalView {
             guard RegexSafetyGate.isReasonable(query) else {
                 findBar?.setMatchCount(0, of: 0)
                 findBar?.showTransientMessage("Regex too complex")
-                selection = nil
+                view.selection = nil
                 return
             }
             var regexOpts: NSRegularExpression.Options = []
@@ -216,7 +299,7 @@ extension TerminalView {
                 // "valid pattern with no hits" (SFH-006).
                 findBar?.setMatchCount(0, of: 0)
                 findBar?.showTransientMessage("Invalid regex pattern")
-                selection = nil
+                view.selection = nil
                 return
             }
             // Reflect the cleared-match state in the label immediately
@@ -288,21 +371,6 @@ extension TerminalView {
         highlightCurrentMatch()
     }
 
-    /// Runs the regex scan on a background queue with a hard 250 ms
-    /// deadline. Cancels the scan and surfaces a "Regex too complex"
-    /// banner if the deadline fires. Stale results from earlier searches
-    /// (user typed another keystroke before this one finished) are
-    /// dropped via a monotonic search ID.
-    ///
-    /// The heavy work here is `enumerateMatches` over each row's text;
-    /// observing the cancel flag inside the per-row loop lets the
-    /// timeout actually take effect mid-scan instead of waiting for the
-    /// regex engine to exhaust its backtracking budget on every row.
-    /// Worst-case latency on a single row is still bounded by
-    /// NSRegularExpression's own per-row work, but pre-gating with
-    /// `isReasonableRegexPattern` keeps that bounded in practice.
-    /// Audit findbar-selection F2.
-
     /// Map a cell-derived UTF-16 `[lo, hi)` range to grid columns. Both ends
     /// clamp into `utf16ToCol`; `endCol` is the column of the LAST included
     /// unit (`hi - 1`) and never drops below `startCol`. The ONE viewport-row
@@ -318,12 +386,28 @@ extension TerminalView {
         return (startCol, endCol)
     }
 
+    // MARK: - Async regex scan
+
     /// Hard timeout for an async regex scan. Past this the worker is cancelled
     /// and a "too complex" banner shown. Cancellation is cooperative — a long
     /// `enumerateMatches` on a single row still runs to completion, but it
     /// can't block subsequent rows.
     private static let regexSearchTimeout: TimeInterval = 0.25
 
+    /// Runs the regex scan on a background queue with a hard 250 ms
+    /// deadline. Cancels the scan and surfaces a "Regex too complex"
+    /// banner if the deadline fires. Stale results from earlier searches
+    /// (user typed another keystroke before this one finished) are
+    /// dropped via a monotonic search ID.
+    ///
+    /// The heavy work here is `enumerateMatches` over each row's text;
+    /// observing the cancel flag inside the per-row loop lets the
+    /// timeout actually take effect mid-scan instead of waiting for the
+    /// regex engine to exhaust its backtracking budget on every row.
+    /// Worst-case latency on a single row is still bounded by
+    /// NSRegularExpression's own per-row work, but pre-gating with
+    /// `RegexSafetyGate` keeps that bounded in practice.
+    /// Audit findbar-selection F2.
     private func runRegexSearchAsync(
         regex: NSRegularExpression,
         topLine: Int32,
@@ -331,7 +415,7 @@ extension TerminalView {
         cols: Int,
         limit: Int
     ) {
-        guard let session else { return }
+        guard let session = view.session else { return }
         let (rows, scanSeq) = captureRegexRows(
             topLine: topLine, bottomLine: bottomLine, cols: cols, session: session
         )
@@ -381,7 +465,7 @@ extension TerminalView {
         cols: Int,
         session: TerminalSession
     ) -> (rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)], scanSeq: UInt64?) {
-        let snap = currentSnapshot
+        let snap = view.currentSnapshot
         let scanSeq = snap?.sequenceID
         var rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)] = []
         rows.reserveCapacity(Int(bottomLine - topLine + 1))
@@ -496,7 +580,7 @@ extension TerminalView {
         pendingRegexAdvance = nil
         findBar?.setMatchCount(0, of: 0)
         findBar?.showTransientMessage("Regex too complex")
-        selection = nil
+        view.selection = nil
     }
 
     /// Heap-allocated cancellation token between the regex worker and
@@ -524,13 +608,15 @@ extension TerminalView {
         return regexSearchIDCounter
     }
 
+    // MARK: - Highlight / scroll
+
     private func highlightCurrentMatch() {
         guard !findMatches.isEmpty, findCurrentIndex < findMatches.count else {
-            selection = nil
+            view.selection = nil
             return
         }
         let m = findMatches[findCurrentIndex]
-        selection = Selection(
+        view.selection = Selection(
             anchor: BufferPoint(line: m.line, col: m.startCol),
             cursor: BufferPoint(line: m.line, col: m.endCol),
             mode: .character
@@ -538,13 +624,12 @@ extension TerminalView {
         // Scroll the match into view. displayOffset is how many lines
         // the viewport is above the live grid; positive delta to scroll()
         // means "show older content" (upward).
-        guard let snap = currentSnapshot else { return }
+        guard let snap = view.currentSnapshot else { return }
         let displayRowForMatch = Int(m.line) + snap.displayOffset
         if displayRowForMatch < 0 {
-            session?.scroll(delta: Int32(clamping: -displayRowForMatch))
+            view.session?.scroll(delta: Int32(clamping: -displayRowForMatch))
         } else if displayRowForMatch >= snap.rows {
-            session?.scroll(delta: Int32(clamping: snap.rows - 1 - displayRowForMatch))
+            view.session?.scroll(delta: Int32(clamping: snap.rows - 1 - displayRowForMatch))
         }
     }
-
 }

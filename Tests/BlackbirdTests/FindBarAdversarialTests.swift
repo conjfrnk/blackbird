@@ -104,12 +104,12 @@ final class FindBarAdversarialTests: XCTestCase {
         view.currentSnapshot = snap
         // Pre-populate as if a previous search had matches; the empty
         // bail-out must wipe them.
-        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
-        view.findMatchesSeq = snap.sequenceID
-        view.findQuery = "hello"
+        view.findController.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findController.findMatchesSeq = snap.sequenceID
+        view.findController.findQuery = "hello"
 
         let ms = measureTimeMS {
-            view.performSearch(query: "")
+            view.findController.performSearch(query: "")
         }
 
         XCTAssertLessThan(
@@ -118,7 +118,7 @@ final class FindBarAdversarialTests: XCTestCase {
             + "the scan loop; ran for \(ms) ms"
         )
         XCTAssertTrue(
-            view.findMatches.isEmpty,
+            view.findController.findMatches.isEmpty,
             "empty query must clear findMatches"
         )
     }
@@ -138,14 +138,14 @@ final class FindBarAdversarialTests: XCTestCase {
         let oversized = String(repeating: "x", count: 256)
 
         let ms = measureTimeMS {
-            view.performSearch(query: oversized)
+            view.findController.performSearch(query: oversized)
         }
 
         XCTAssertLessThan(ms, 50.0, "oversized-query search must stay bounded")
         XCTAssertTrue(
-            view.findMatches.isEmpty,
+            view.findController.findMatches.isEmpty,
             "needle longer than every row must yield zero matches; "
-            + "got \(view.findMatches.count)"
+            + "got \(view.findController.findMatches.count)"
         )
     }
 
@@ -209,11 +209,11 @@ final class FindBarAdversarialTests: XCTestCase {
         XCTAssertTrue(bar.options.regex, "test setup: regex mode must be on")
 
         let ms = measureTimeMS {
-            view.performSearch(query: "[unclosed")
+            view.findController.performSearch(query: "[unclosed")
         }
         XCTAssertLessThan(ms, 50.0, "invalid-regex path must stay bounded")
         XCTAssertTrue(
-            view.findMatches.isEmpty,
+            view.findController.findMatches.isEmpty,
             "invalid regex must produce zero matches, not crash"
         )
     }
@@ -273,28 +273,28 @@ final class FindBarAdversarialTests: XCTestCase {
         term.input("a..a..a")
         let snap = try XCTUnwrap(term.snapshot())
         view.currentSnapshot = snap
-        view.findQuery = "a"
-        view.findMatches = [
+        view.findController.findQuery = "a"
+        view.findController.findMatches = [
             (line: 0, startCol: 0, endCol: 0),
             (line: 0, startCol: 3, endCol: 3),
             (line: 0, startCol: 6, endCol: 6),
         ]
-        view.findMatchesSeq = snap.sequenceID
-        view.findCurrentIndex = 0
+        view.findController.findMatchesSeq = snap.sequenceID
+        view.findController.findCurrentIndex = 0
 
         // 3 advances from index 0 → 1 → 2 → 0 (wrap). The fourth call
         // is the test's belt-and-braces: still 0.
-        view.advanceFind(direction: .forward)
-        view.advanceFind(direction: .forward)
-        view.advanceFind(direction: .forward)
+        view.findController.advanceFind(direction: .forward)
+        view.findController.advanceFind(direction: .forward)
+        view.findController.advanceFind(direction: .forward)
         XCTAssertEqual(
-            view.findCurrentIndex, 0,
+            view.findController.findCurrentIndex, 0,
             "three forward advances from index 0 across 3 matches must "
             + "wrap back to index 0"
         )
-        view.advanceFind(direction: .backward)
+        view.findController.advanceFind(direction: .backward)
         XCTAssertEqual(
-            view.findCurrentIndex, 2,
+            view.findController.findCurrentIndex, 2,
             "one backward advance from index 0 must wrap to the last "
             + "match (index 2)"
         )
@@ -312,11 +312,11 @@ final class FindBarAdversarialTests: XCTestCase {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 4)))
         let snap = try XCTUnwrap(term.snapshot())
         view.currentSnapshot = snap
-        view.performSearch(query: "anything")
+        view.findController.performSearch(query: "anything")
         XCTAssertTrue(
-            view.findMatches.isEmpty,
+            view.findController.findMatches.isEmpty,
             "search against an empty terminal must yield zero matches; "
-            + "got \(view.findMatches.count)"
+            + "got \(view.findController.findMatches.count)"
         )
     }
 
@@ -338,14 +338,14 @@ final class FindBarAdversarialTests: XCTestCase {
         wideTerm.input("hi................................hi")
         let wide = try XCTUnwrap(wideTerm.snapshot())
         view.currentSnapshot = wide
-        view.findQuery = "hi"
+        view.findController.findQuery = "hi"
         // Plant stale matches whose columns sit beyond the post-resize
         // grid (col 34 > 20).
-        view.findMatches = [
+        view.findController.findMatches = [
             (line: 0, startCol: 0,  endCol: 1),
             (line: 0, startCol: 34, endCol: 35),
         ]
-        view.findMatchesSeq = wide.sequenceID
+        view.findController.findMatchesSeq = wide.sequenceID
 
         // Post-resize: 20-col grid holding one "hi".
         let narrowTerm = try XCTUnwrap(BBTerm(size: .init(cols: 20, rows: 4)))
@@ -357,8 +357,8 @@ final class FindBarAdversarialTests: XCTestCase {
         // preserve matches across a seq change, this assertion would
         // catch the regression because the col-34 stale match would
         // survive into a 20-col grid.
-        view.performSearch(query: "hi")
-        for m in view.findMatches {
+        view.findController.performSearch(query: "hi")
+        for m in view.findController.findMatches {
             XCTAssertLessThan(
                 m.startCol, narrow.cols,
                 "no match can have startCol beyond the post-resize grid "
@@ -418,9 +418,9 @@ final class FindBarAdversarialTests: XCTestCase {
         let view = try makeView()
         let snap = try snapshotWithRow0("hello world", cols: 12)
         view.currentSnapshot = snap
-        view.performSearch(query: "中")
+        view.findController.performSearch(query: "中")
         XCTAssertTrue(
-            view.findMatches.isEmpty,
+            view.findController.findMatches.isEmpty,
             "unicode needle absent from ASCII corpus must yield zero matches"
         )
     }
@@ -471,9 +471,9 @@ final class FindBarAdversarialTests: XCTestCase {
         // matches each call; the invariant is that findMatches is a
         // proper Array at every observable point (no torn read).
         for q in ["hello", "world", "x", "", "hello"] {
-            view.performSearch(query: q)
-            let snapshotCount = view.findMatches.count
-            let reread = view.findMatches.count
+            view.findController.performSearch(query: q)
+            let snapshotCount = view.findController.findMatches.count
+            let reread = view.findController.findMatches.count
             XCTAssertEqual(
                 snapshotCount, reread,
                 "findMatches.count must not change between consecutive "

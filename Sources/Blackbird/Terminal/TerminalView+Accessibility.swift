@@ -36,7 +36,7 @@ extension TerminalView {
         // exposes the find bar (and every other subview) so VO can reach
         // them. When the bar is absent, keep the leaf behaviour so VO
         // focus lands on a single "Terminal" element.
-        findBar == nil
+        findController.findBar == nil
     }
 
     public override func accessibilityRole() -> NSAccessibility.Role? {
@@ -58,7 +58,7 @@ extension TerminalView {
         // AppKit ignores `accessibilityChildren()` on a leaf, but returning
         // the default (super) here keeps behaviour symmetric in case a
         // future tool inspects the value directly.
-        guard let bar = findBar else { return super.accessibilityChildren() }
+        guard let bar = findController.findBar else { return super.accessibilityChildren() }
         // Order matters for VO navigation: bar on top visually, every
         // other subview below. Covers drop-highlight / bell flash / scroll
         // indicator in case any of them ever grow accessibility affordances.

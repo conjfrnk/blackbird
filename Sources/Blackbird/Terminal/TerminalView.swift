@@ -127,35 +127,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // identity gets stamped next.
             a11yCache.snapshotIdentity = nil
             a11yCache.lineOffsets = nil
-            // Find-match coordinates are relative to the buffer at the
-            // time performSearch ran. Any snapshot swap may have scrolled
-            // history, wrapped lines, or overwritten matched rows; rerun
-            // the search against the fresh grid so ⌘G cycles live hits
-            // instead of ghost rows. Debounce via the displaylink so a
-            // burst of snapshots collapses to one re-scan. Audit
-            // findbar-selection F11.
-            if findBar != nil, !findQuery.isEmpty {
-                scheduleFindRefresh()
-            }
+            // Find-match coordinates are relative to the buffer at the time
+            // performSearch ran. Any snapshot swap may have scrolled history,
+            // wrapped lines, or overwritten matched rows; the controller reruns
+            // the search against the fresh grid (debounced) so ⌘G cycles live
+            // hits instead of ghost rows. Audit findbar-selection F11.
+            findController.snapshotDidChange()
         }
     }
 
-    /// Track that a find-refresh is pending so concurrent snapshot bursts
-    /// collapse to one main-queue dispatch.
-    private var findRefreshPending: Bool = false
-
-    private func scheduleFindRefresh() {
-        guard !findRefreshPending else { return }
-        findRefreshPending = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.findRefreshPending = false
-            // Query could have been cleared by the time the dispatch fires
-            // (FindBar closed, user cleared the field). Early-return then.
-            guard !self.findQuery.isEmpty, self.findBar != nil else { return }
-            self.performSearch(query: self.findQuery)
-        }
-    }
     /// Optional test-only override that feeds the NSAccessibility value
     /// path without a real `BBTerm`. Production never sets this — the live
     /// render path uses `currentSnapshot`. Visibility relaxed from
@@ -346,43 +326,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// terminal-view-2 F2.
     let selectionAutoscroller = SelectionAutoscroller()
 
-    // `internal` (no modifier) so `TerminalView+Accessibility.swift`'s
-    // `isAccessibilityElement` / `accessibilityChildren` can test for
-    // its presence across the file boundary. Only `installFindBar()`
-    // and the FindBarDelegate close/open path mutate it.
-    var findBar: FindBar?
-    var findMatches: [(line: Int32, startCol: Int, endCol: Int)] = []   // internal for TerminalView+Find.swift
-    var findCurrentIndex: Int = 0                                       // internal for TerminalView+Find.swift
-    var findQuery: String = ""                                          // internal for TerminalView+Find.swift
-    /// `BBSnapshot.sequenceID` of the snapshot `findMatches` was scanned
-    /// against. `nil` when no scan has run yet (or the cache was just
-    /// cleared). Used by `advanceFind` / `highlightCurrentMatch` to
-    /// detect that output arrived between `performSearch` and the user
-    /// pressing ⌘G — in that case the stored (line, col) tuples may
-    /// reference cells that now hold different text, so we re-run
-    /// `performSearch` against the live snapshot before advancing.
-    /// Same `Optional<UInt64>` shape as `cachedURLMatchesSeq` (above) so
-    /// "never scanned" and "scanned at seq 0" don't collide. Audit
-    /// findbar-selection F11.
-    var findMatchesSeq: UInt64?                                         // internal for TerminalView+Find.swift
-    /// Monotonic ID assigned to each background regex scan. The latest
-    /// scan's ID is `activeRegexSearchID`; when a scan publishes
-    /// results, it sets `regexSearchCompletedID = mySearchID` so the
-    /// 250 ms timeout sibling task knows whether to fire its
-    /// "regex too complex" banner. All three fields are touched only
-    /// on the main thread (see TerminalView+Find.swift).
-    /// Audit findbar-selection F2.
-    var regexSearchIDCounter: UInt64 = 0
-    var activeRegexSearchID: UInt64 = 0
-    var regexSearchCompletedID: UInt64 = 0
-    /// Set when ⌘G / ⌘⇧G is pressed while a regex stale-rescan is in flight
-    /// (the rescan clears findMatches and repopulates asynchronously). The
-    /// scan's main-thread publish honours this instead of resetting to match
-    /// 1, so the cycle isn't swallowed and the user's position is preserved.
-    /// `anchor` is the (line, startCol) of the match the user was on before
-    /// the rescan, used to resume from the equivalent position. Audit
-    /// findbar-selection: regex ⌘G swallow + reset.
-    var pendingRegexAdvance: (direction: FindBar.Direction, anchor: (line: Int32, startCol: Int)?)?
+    /// Owns all find-bar state (was the `find*` fields here) + the
+    /// search/cycle/regex engine (was `TerminalView+Find.swift`). The view
+    /// forwards ⌘F / ⌘G / the ⌘⌥C/⌘⌥R option toggles and its `FindBarDelegate`
+    /// conformance here; `TerminalView+Accessibility` / `+ContextMenu` and the
+    /// Replace helpers below read `findController.findBar` / `.findMatches`
+    /// across the file boundary. `lazy` because it needs `self`; the
+    /// controller's back-reference to the view is `unowned`, so no retain cycle.
+    lazy var findController = FindController(view: self)
 
     /// True while an active drag with file URLs is hovering the view. Drives
     /// the accent-coloured drop-target ring. Set by the NSDraggingDestination
@@ -1560,8 +1511,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // terminal-view-1 F5.
         guard let session else {
             currentSnapshot = nil
-            findMatches.removeAll()
-            findMatchesSeq = nil
+            findController.findMatches.removeAll()
+            findController.findMatchesSeq = nil
             // Per-session sequence ids (audit S6-003) can collide across
             // sessions, so the URL-hover cache key must be cleared on any
             // rebind — global uniqueness no longer invalidates it for
@@ -1569,8 +1520,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // harmless.
             cachedURLMatches = []
             cachedURLMatchesSeq = nil
-            findCurrentIndex = 0
-            findQuery = ""
+            findController.findCurrentIndex = 0
+            findController.findQuery = ""
             setNeedsDisplay(bounds)
             return
         }
@@ -1593,7 +1544,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // follow-up). `!=`-gated consumers make over-clearing harmless.
         cachedURLMatches = []
         cachedURLMatchesSeq = nil
-        findMatchesSeq = nil
+        findController.findMatchesSeq = nil
 
         session.$snapshot
             .receive(on: DispatchQueue.main)
@@ -1983,24 +1934,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public func performFindPanelAction(_ sender: Any?) {
         // Cocoa's Edit > Find submenu maps ⌘F to this selector.
-        if findBar == nil { installFindBar() }
-        findBar?.focus()
+        if findController.findBar == nil { findController.installFindBar() }
+        findController.findBar?.focus()
     }
 
-    @objc public func performFindNextAction(_ sender: Any?)     { advanceFind(direction: .forward) }
-    @objc public func performFindPreviousAction(_ sender: Any?) { advanceFind(direction: .backward) }
+    @objc public func performFindNextAction(_ sender: Any?)     { findController.advanceFind(direction: .forward) }
+    @objc public func performFindPreviousAction(_ sender: Any?) { findController.advanceFind(direction: .backward) }
 
     /// ⌘⌥C: toggle case-sensitive find. Installs the find bar if
     /// needed so the menu item works even when the bar is closed.
     @objc public func toggleFindCaseSensitive(_ sender: Any?) {
-        if findBar == nil { installFindBar() }
-        findBar?.toggleCaseSensitive(sender)
+        if findController.findBar == nil { findController.installFindBar() }
+        findController.findBar?.toggleCaseSensitive(sender)
     }
 
     /// ⌘⌥R: toggle regex find.
     @objc public func toggleFindRegex(_ sender: Any?) {
-        if findBar == nil { installFindBar() }
-        findBar?.toggleRegexMode(sender)
+        if findController.findBar == nil { findController.installFindBar() }
+        findController.findBar?.toggleRegexMode(sender)
     }
 
     @objc public func clearBufferAndScrollback(_ sender: Any?) {
@@ -2432,29 +2383,29 @@ final class FakeHyperlinkSnapshot: HyperlinkResolver {
 
 extension TerminalView: FindBarDelegate {
     public func findBar(_ bar: FindBar, didChangeQuery query: String) {
-        performSearch(query: query)
+        findController.performSearch(query: query)
     }
 
     public func findBar(_ bar: FindBar, didAdvance direction: FindBar.Direction) {
-        advanceFind(direction: direction)
+        findController.advanceFind(direction: direction)
     }
 
     public func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options) {
         // Re-run the current query with the new options. Safe no-op
         // when the query is empty (performSearch short-circuits).
-        performSearch(query: findQuery)
+        findController.performSearch(query: findController.findQuery)
     }
 
     public func findBarDidClose(_ bar: FindBar) {
-        findBar?.removeFromSuperview()
-        findBar = nil
+        findController.findBar?.removeFromSuperview()
+        findController.findBar = nil
         // F10: wipe match state so ⌘G after close doesn't cycle stale
         // coordinates against a mutated buffer or a new (yet-unissued) query.
-        findMatches.removeAll()
-        findMatchesSeq = nil
-        findCurrentIndex = 0
-        findQuery = ""
-        pendingRegexAdvance = nil
+        findController.findMatches.removeAll()
+        findController.findMatchesSeq = nil
+        findController.findCurrentIndex = 0
+        findController.findQuery = ""
+        findController.pendingRegexAdvance = nil
         // F30: deliberately preserve `selection` so Esc-then-⌘C on a found
         // match still copies. The selection is wiped by the next mouse click
         // or shell-bound keystroke (see keyDown handler).
@@ -2505,22 +2456,22 @@ extension TerminalView {
         // grid and corrupt the input line. Replace-safe variant: substring
         // refreshes synchronously, regex keeps the already-scanned matches
         // (its rescan is async and would empty the set).
-        refreshFindMatchesIfStaleForReplace()
+        findController.refreshFindMatchesIfStaleForReplace()
         let matches = effectiveFindMatches()
-        guard !matches.isEmpty, findCurrentIndex < matches.count else { return }
-        let m = matches[findCurrentIndex]
+        guard !matches.isEmpty, findController.findCurrentIndex < matches.count else { return }
+        let m = matches[findController.findCurrentIndex]
         guard isOnLiveInputLine(m) else {
-            findBar?.showTransientMessage("Only input-line matches can be replaced")
+            findController.findBar?.showTransientMessage("Only input-line matches can be replaced")
             return
         }
         spliceReplacements(matches: [m], replacement: replacement)
         // The replacement edits the shell line; every recorded match on that
         // line has now shifted or vanished. Drop the cache so find-next
         // doesn't scroll to a stale coordinate.
-        findMatches.removeAll()
-        findMatchesSeq = nil
-        findCurrentIndex = 0
-        findBar?.setMatchCount(0, of: 0)
+        findController.findMatches.removeAll()
+        findController.findMatchesSeq = nil
+        findController.findCurrentIndex = 0
+        findController.findBar?.setMatchCount(0, of: 0)
         // F5: re-run the search after the byte stream has had a chance to
         // land, so the label reads the live post-replace count (standard
         // VS Code / TextEdit behaviour).
@@ -2540,11 +2491,11 @@ extension TerminalView {
         // assertions against `findMatches` don't race the dispatch.
         if replaceByteCapture != nil { return }
         #endif
-        let query = findQuery
-        guard !query.isEmpty, findBar != nil else { return }
+        let query = findController.findQuery
+        guard !query.isEmpty, findController.findBar != nil else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, !self.findQuery.isEmpty, self.findBar != nil else { return }
-            self.performSearch(query: query)
+            guard let self, !self.findController.findQuery.isEmpty, self.findController.findBar != nil else { return }
+            self.findController.performSearch(query: query)
         }
     }
 
@@ -2574,7 +2525,7 @@ extension TerminalView {
         // replaceAllMatches needs the same discipline. Use the replace-safe
         // variant so a stale REGEX query doesn't async-clear findMatches and
         // turn Replace All into a silent no-op.
-        refreshFindMatchesIfStaleForReplace()
+        findController.refreshFindMatchesIfStaleForReplace()
         let matches = effectiveFindMatches()
         guard !matches.isEmpty else { return }
         guard let snap = effectiveSnapshot() else { return }
@@ -2583,7 +2534,7 @@ extension TerminalView {
 
         let hadOffLine = inputLineMatches.count < matches.count
         if inputLineMatches.isEmpty {
-            findBar?.showTransientMessage("No input-line matches to replace")
+            findController.findBar?.showTransientMessage("No input-line matches to replace")
             return
         }
         // Wrap-ambiguity guard: a match on the row immediately above the
@@ -2610,7 +2561,7 @@ extension TerminalView {
            snap.cols > 0,
            let priorLastCell = snap.character(at: snap.cols - 1, row: priorViewportRow),
            !priorLastCell.isWhitespace {
-            findBar?.showTransientMessage("Refusing: matches span a possible wrapped input line")
+            findController.findBar?.showTransientMessage("Refusing: matches span a possible wrapped input line")
             return
         }
         // Process right-to-left as ONE splice: the cursor walks left
@@ -2623,12 +2574,12 @@ extension TerminalView {
             replacement: replacement
         )
         // All input-line matches have been spliced; invalidate the cache.
-        findMatches.removeAll()
-        findMatchesSeq = nil
-        findCurrentIndex = 0
-        findBar?.setMatchCount(0, of: 0)
+        findController.findMatches.removeAll()
+        findController.findMatchesSeq = nil
+        findController.findCurrentIndex = 0
+        findController.findBar?.setMatchCount(0, of: 0)
         if hadOffLine {
-            findBar?.showTransientMessage("Replaced input-line matches (scrollback skipped)")
+            findController.findBar?.showTransientMessage("Replaced input-line matches (scrollback skipped)")
         } else {
             // F5: re-run the search so the user sees fresh match counts
             // against the newly-edited line. Without this, the label reads
@@ -2693,7 +2644,7 @@ extension TerminalView {
             matches: matches, cleanedReplacement: cleanedReplacement, snapshot: snap
         ) {
         case .failure(let reason):
-            findBar?.showTransientMessage(reason.message)
+            findController.findBar?.showTransientMessage(reason.message)
         case .success(let bytes):
             guard !bytes.isEmpty else { return }
             #if DEBUG
@@ -2727,7 +2678,7 @@ extension TerminalView {
         #if DEBUG
         if let override = replaceFindMatchesForTests { return override }
         #endif
-        return findMatches
+        return findController.findMatches
     }
 
     /// Responder action for ⌘⌥E. Behaviour:
@@ -2736,13 +2687,13 @@ extension TerminalView {
     ///   - Bar visible, replace already expanded → trigger replace-current on
     ///     the active match (same effect as clicking the "Replace" button).
     @objc public func performReplaceCurrent(_ sender: Any?) {
-        if findBar == nil {
-            installFindBar()
-            findBar?.setReplaceVisible(true)
-            findBar?.focus()
+        if findController.findBar == nil {
+            findController.installFindBar()
+            findController.findBar?.setReplaceVisible(true)
+            findController.findBar?.focus()
             return
         }
-        guard let bar = findBar else { return }
+        guard let bar = findController.findBar else { return }
         if !bar.isReplaceVisible {
             bar.setReplaceVisible(true)
             return

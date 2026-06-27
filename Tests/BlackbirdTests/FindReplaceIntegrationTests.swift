@@ -509,16 +509,16 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
         let (s1, _) = try twoFreshSnapshots()
         view.currentSnapshot = s1
         // Pre-populate state as if a previous search had run.
-        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
-        view.findMatchesSeq = 99
-        view.findQuery = "alpha"
+        view.findController.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findController.findMatchesSeq = 99
+        view.findController.findQuery = "alpha"
         // Empty query → performSearch enters its bail-out branch which
         // clears findMatches; the seq must clear in lockstep so
         // refreshFindMatchesIfStale doesn't gate the next rescan on a
         // stale (and now meaningless) stamp.
-        view.performSearch(query: "")
+        view.findController.performSearch(query: "")
         XCTAssertNil(
-            view.findMatchesSeq,
+            view.findController.findMatchesSeq,
             "performSearch must clear findMatchesSeq when it clears "
             + "findMatches so the two stay coupled. Bug #16."
         )
@@ -536,10 +536,10 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
 
         // Simulate: performSearch was run against s1 and found one match.
         view.currentSnapshot = s1
-        view.findQuery = "alpha"
-        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
-        view.findMatchesSeq = s1.sequenceID
-        view.findCurrentIndex = 0
+        view.findController.findQuery = "alpha"
+        view.findController.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findController.findMatchesSeq = s1.sequenceID
+        view.findController.findCurrentIndex = 0
 
         // Output arrives → snapshot swaps. (The didSet's
         // scheduleFindRefresh is debounced via DispatchQueue.main.async,
@@ -547,20 +547,20 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
         view.currentSnapshot = s2
 
         // ⌘G fires while findMatches still holds the stale s1-tuples.
-        view.advanceFind(direction: .forward)
+        view.findController.advanceFind(direction: .forward)
 
         // The stale-cache path took over and called performSearch. With
         // no session wired, performSearch hits its session/snapshot guard
         // and nils findMatchesSeq + clears findMatches. Either side-effect
         // is sufficient evidence the rerun happened.
         XCTAssertNil(
-            view.findMatchesSeq,
+            view.findController.findMatchesSeq,
             "advanceFind must rerun performSearch when currentSnapshot's "
             + "sequenceID differs from findMatchesSeq; the rerun cleared "
             + "the seq stamp via the session-less guard. Bug #16."
         )
         XCTAssertTrue(
-            view.findMatches.isEmpty,
+            view.findController.findMatches.isEmpty,
             "Stale findMatches from the prior snapshot must be discarded "
             + "before advanceFind cycles, so the highlight can't land on "
             + "a row that no longer holds the match. Bug #16."
@@ -576,29 +576,29 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
         let (s1, _) = try twoFreshSnapshots()
 
         view.currentSnapshot = s1
-        view.findQuery = "alpha"
-        view.findMatches = [
+        view.findController.findQuery = "alpha"
+        view.findController.findMatches = [
             (line: 0, startCol: 0, endCol: 4),
             (line: 1, startCol: 5, endCol: 9),
         ]
-        view.findMatchesSeq = s1.sequenceID
-        view.findCurrentIndex = 0
+        view.findController.findMatchesSeq = s1.sequenceID
+        view.findController.findCurrentIndex = 0
 
         // No snapshot swap. ⌘G should advance to index 1.
-        view.advanceFind(direction: .forward)
+        view.findController.advanceFind(direction: .forward)
 
         XCTAssertEqual(
-            view.findCurrentIndex, 1,
+            view.findController.findCurrentIndex, 1,
             "advanceFind must cycle to the next match when matches are "
             + "still valid against the live snapshot — the stale-check "
             + "cannot fire on a snapshot that hasn't moved on."
         )
         XCTAssertEqual(
-            view.findMatches.count, 2,
+            view.findController.findMatches.count, 2,
             "Existing matches must survive a same-seq advanceFind"
         )
         XCTAssertEqual(
-            view.findMatchesSeq, s1.sequenceID,
+            view.findController.findMatchesSeq, s1.sequenceID,
             "findMatchesSeq must remain stamped to the live snapshot"
         )
     }

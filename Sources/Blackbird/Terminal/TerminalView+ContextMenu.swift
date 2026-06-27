@@ -25,13 +25,13 @@ extension TerminalView {
             // Audit terminal-view-2 F13.
             return session != nil && NSPasteboard.general.string(forType: .string) != nil
         case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
-        case #selector(performFindNextAction(_:)):     return !findMatches.isEmpty
-        case #selector(performFindPreviousAction(_:)): return !findMatches.isEmpty
+        case #selector(performFindNextAction(_:)):     return !findController.findMatches.isEmpty
+        case #selector(performFindPreviousAction(_:)): return !findController.findMatches.isEmpty
         case #selector(toggleFindCaseSensitive(_:)):
-            item.state = (findBar?.options.caseSensitive == true) ? .on : .off
+            item.state = (findController.findBar?.options.caseSensitive == true) ? .on : .off
             return currentSnapshot != nil
         case #selector(toggleFindRegex(_:)):
-            item.state = (findBar?.options.regex == true) ? .on : .off
+            item.state = (findController.findBar?.options.regex == true) ? .on : .off
             return currentSnapshot != nil
         case #selector(clearBufferAndScrollback(_:)):  return session != nil
         case #selector(jumpToPreviousPrompt(_:)),
