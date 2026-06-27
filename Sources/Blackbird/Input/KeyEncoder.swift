@@ -61,6 +61,25 @@ public final class KeyEncoder {
         self.optionIsMeta = optionIsMeta
     }
 
+    /// Apply the Native-Option (audit H7) rule to `mods`: when the Option key
+    /// is "Native" (`optionIsMeta == false`), Option is invisible to the shell
+    /// for printables — Option-e produces 'é', Option-Arrow emits plain ESC[A,
+    /// etc. — so it's stripped from the effective modifier set. EXCEPTION: when
+    /// `.control` is also held there's no dead-key / OS-printable to compete
+    /// with, and the user clearly wants the full chord (Emacs / readline
+    /// Meta+Ctrl); stripping Option there would silently degrade Ctrl+Opt+key
+    /// to bare Ctrl+key (modifyOtherKeys mod=5 instead of mod=7), losing the
+    /// meta bit. Returns `mods` unchanged when Option should stay visible
+    /// (`optionIsMeta`, or Control present), else `mods` minus `.option`.
+    ///
+    /// One definition shared by `encode` (over `nonCmdMods`) and
+    /// `encodeSpecial` (over `modifiers`).
+    private func applyNativeOptionRule(_ mods: Modifiers) -> Modifiers {
+        if optionIsMeta { return mods }
+        if mods.contains(.control) { return mods }
+        return mods.subtracting(.option)
+    }
+
     /// Encode a character sequence plus modifiers into bytes.
     ///
     /// - Parameter mode: terminal mode bits from the current snapshot.
@@ -105,23 +124,11 @@ public final class KeyEncoder {
         let associatedText = mode.contains(.reportAssociatedText)
         let nonCmdMods = modifiers.subtracting(.command)
         // In Native-Option mode the shell should not see Option for
-        // *printable* keystrokes — Option-e produces 'é', Option-Enter
-        // produces a plain CR, etc. Stripping `.option` keeps `hasMods`
-        // and the CSI u modifier param agreeing that Option is invisible.
-        //
-        // EXCEPTION: when `.control` is also held there is no dead-key /
-        // OS-printable to compete with — the user clearly wants the
-        // Option modifier (Emacs M-C-* bindings, terminal Meta+Ctrl).
-        // Stripping Option in that case silently degrades Ctrl+Opt+letter
-        // to bare Ctrl+letter, which means modifyOtherKeys reports
-        // mod=5 (Ctrl) instead of mod=7 (Ctrl+Alt) and Emacs can't see
-        // the meta bit. Preserve Option whenever Ctrl is present so the
-        // mod param surfaces the full chord. Audit H7.
-        let effectiveMods: Modifiers = {
-            if optionIsMeta { return nonCmdMods }
-            if nonCmdMods.contains(.control) { return nonCmdMods }
-            return nonCmdMods.subtracting(.option)
-        }()
+        // *printable* keystrokes; the H7 rule (with the Ctrl-held exception)
+        // lives in `applyNativeOptionRule`. Stripping `.option` keeps
+        // `hasMods` and the CSI u modifier param agreeing that Option is
+        // invisible.
+        let effectiveMods = applyNativeOptionRule(nonCmdMods)
         let hasMods = !effectiveMods.isEmpty
 
         // Kitty disambiguation: Enter / Esc / Tab / Backspace with any
@@ -560,21 +567,13 @@ public final class KeyEncoder {
         // Modern xterm convention: CSI 1;M <final> where M = 1 + bitmask.
         // Bitmask: shift=1, alt=2, ctrl=4, meta=8.
         //
-        // `optionIsMeta=false` means the user picked "Native" for the
-        // Option key: Option produces macOS-native glyphs for printables
-        // and is invisible to the shell otherwise — Option+Arrow emits
-        // plain ESC[A rather than alt-modified ESC[1;3A.
-        //
-        // EXCEPTION: when `.control` is also held there's no dead-key /
-        // OS-printable to compete with. The user clearly wants Option
-        // surfaced as the alt bit so Emacs / readline can see Meta+Ctrl
-        // chords. Stripping Option here would silently degrade
-        // Ctrl+Opt+Up to bare Ctrl+Up and lose the meta bit. Audit H7.
-        let effectiveMods: Modifiers = {
-            if optionIsMeta { return modifiers }
-            if modifiers.contains(.control) { return modifiers }
-            return modifiers.subtracting(.option)
-        }()
+        // `optionIsMeta=false` means the user picked "Native" for the Option
+        // key: Option produces macOS-native glyphs for printables and is
+        // invisible to the shell otherwise — Option+Arrow emits plain ESC[A
+        // rather than alt-modified ESC[1;3A. The H7 rule (with the Ctrl-held
+        // exception that keeps Meta+Ctrl chords intact) lives in
+        // `applyNativeOptionRule`.
+        let effectiveMods = applyNativeOptionRule(modifiers)
         let modBits = modifierParam(effectiveMods)
         let hasMods = modBits > 1
 
