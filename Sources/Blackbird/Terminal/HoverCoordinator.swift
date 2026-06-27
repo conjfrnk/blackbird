@@ -60,9 +60,20 @@ final class HoverCoordinator {
     private var cmdHoverURLMatch: URLMatch?
     /// URL match list for the current snapshot, rebuilt only when
     /// `snapshot.sequenceID` changes (`Optional` seq so "never scanned" and
-    /// "scanned at seq 0" don't collide; per-session ids, audit S6-003).
-    var cachedURLMatches: [URLMatch] = []
-    var cachedURLMatchesSeq: UInt64?
+    /// "scanned at seq 0" don't collide; per-session ids, audit S6-003). The
+    /// two fields are one invariant — keyed cache — so they move together;
+    /// `private(set)` + `invalidateURLMatchCache()` keep the pair from drifting
+    /// apart at a caller that clears one and forgets the other.
+    private(set) var cachedURLMatches: [URLMatch] = []
+    private(set) var cachedURLMatchesSeq: UInt64?
+
+    /// Drop the URL-match cache (both fields together) so the next ⌘-hover scan
+    /// repopulates. Used by the session-rebind paths (per-session sequence ids
+    /// can collide, audit F-S5-018) and the internal reset paths.
+    func invalidateURLMatchCache() {
+        cachedURLMatches = []
+        cachedURLMatchesSeq = nil
+    }
     // The scheduled tooltip reveal (`hoverTooltipItem`) lives on the VIEW, not
     // here: the view's `deinit` / `viewWillMove` cancel it, and reaching through
     // this controller's `unowned view` during the view's own deinit would trap.
@@ -214,8 +225,7 @@ final class HoverCoordinator {
     /// delivery. Audit cwd-hyperlink F7.
     private func refreshURLMatchCacheIfNeeded() {
         guard let snap = view.currentSnapshot else {
-            cachedURLMatches = []
-            cachedURLMatchesSeq = nil
+            invalidateURLMatchCache()
             // Snapshot disappeared — drop the hover cell too. Its row was
             // computed against the now-vanished snapshot's displayOffset and
             // would mis-translate against any successor.
@@ -332,8 +342,7 @@ final class HoverCoordinator {
     func resetModifierAndHoverState() {
         cmdModifierHeld = false
         lastHoverCell = nil
-        cachedURLMatches = []
-        cachedURLMatchesSeq = nil
+        invalidateURLMatchCache()
         clearCmdHoverURLMatch()
         clearHoveredLink()
         cancelHoverTooltip()

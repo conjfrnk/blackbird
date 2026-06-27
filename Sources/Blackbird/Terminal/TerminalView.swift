@@ -1485,8 +1485,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // rebind — global uniqueness no longer invalidates it for
             // free (F-S5-018 follow-up). `!=`-gated, so over-clearing is
             // harmless.
-            hoverCoordinator.cachedURLMatches = []
-            hoverCoordinator.cachedURLMatchesSeq = nil
+            hoverCoordinator.invalidateURLMatchCache()
             findController.findCurrentIndex = 0
             findController.findQuery = ""
             setNeedsDisplay(bounds)
@@ -1509,8 +1508,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // new session's numbering — clear the seq-keyed caches so a
         // stale URL-match set can't survive the swap (F-S5-018
         // follow-up). `!=`-gated consumers make over-clearing harmless.
-        hoverCoordinator.cachedURLMatches = []
-        hoverCoordinator.cachedURLMatchesSeq = nil
+        hoverCoordinator.invalidateURLMatchCache()
         findController.findMatchesSeq = nil
 
         session.$snapshot
