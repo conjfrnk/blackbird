@@ -169,9 +169,12 @@ public final class LatencyProbe {
         log.log("latency n=\(snapshot.count, privacy: .public) p50=\(p50, format: .fixed(precision: 2), privacy: .public)ms p99=\(p99, format: .fixed(precision: 2), privacy: .public)ms p999=\(p999, format: .fixed(precision: 2), privacy: .public)ms max=\(maxMs, format: .fixed(precision: 2), privacy: .public)ms")
     }
 
+    #if DEBUG
     /// For tests: inject samples without going through the timing path.
     /// No-op when the probe is disabled so tests can still exercise the
-    /// shape without flipping the env var.
+    /// shape without flipping the env var. DEBUG-only — these never ship in
+    /// Release (REFACTOR.md Part VI #4: test scaffolding stays out of prod),
+    /// matching the `_forceEnableForTests` siblings above.
     internal func _injectSampleMs(_ ms: Double) {
         lock.lock()
         samplesMs.append(ms)
@@ -184,4 +187,5 @@ public final class LatencyProbe {
         lock.lock(); defer { lock.unlock() }
         return samplesMs.count
     }
+    #endif
 }
