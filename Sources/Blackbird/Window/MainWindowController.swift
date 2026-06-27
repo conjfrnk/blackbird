@@ -129,7 +129,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// saved size — the inverse of the close-time-clobber the
     /// dropped `windowWillClose` save protected against. Caught in
     /// the 2026-05-14 code-reviewer pass on the cross-window save fix.
-    private var isPerformingShowWindow = false
+    // `internal` (not private) so `WindowFramePersistence.saveCurrentFrame()`
+    // can gate on it across the file boundary.
+    var isPerformingShowWindow = false
+
+    /// Persists the window frame on user-driven move/resize (the explicit-save
+    /// driver AppKit's implicit autosave doesn't fire for this tabbing config),
+    /// with the S5-006 screen-reconfig settle suppression. The move/resize
+    /// delegate methods + the screen-params handler forward here.
+    lazy var framePersistence = WindowFramePersistence(controller: self)
 
     /// One-shot guard for re-applying the theme (and thus the CGS background
     /// blur) after the window has a live `windowNumber`. The first theme
@@ -147,29 +155,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// also `isVisible == false` — is still auto-closed when its shell exits,
     /// instead of lingering as a permanent Dock zombie (F-S6-001).
     private var isClosing = false
-
-    /// Deadline until which frame saves are suppressed because macOS is
-    /// reconfiguring displays (audit S5-006). When a display is
-    /// unplugged, AppKit relocates and clamps windows onto the remaining
-    /// screens and fires the SAME windowDidMove/windowDidResize delegate
-    /// callbacks as a user drag — saveCurrentFrame then silently
-    /// overwrote the user's multi-display frame with the laptop-
-    /// constrained one, so re-attaching the display did NOT restore the
-    /// original geometry (the v0.3.2 recovery comment held only at
-    /// launch). NSApplication.didChangeScreenParametersNotification
-    /// fires for every reconfiguration; suppressing saves for a short
-    /// settle window after each one keeps system-initiated geometry out
-    /// of the autosave while a user's deliberate post-reconfig move
-    /// (necessarily later) still persists.
-    private var suppressFrameSavesUntil: Date = .distantPast
-
-    /// Settle window after a screen-parameters change during which
-    /// delegate-reported moves/resizes are treated as system-initiated.
-    /// AppKit performs its relocation synchronously with (or within a
-    /// few runloop ticks of) the notification; 2 s is generous for the
-    /// cascade of constraint passes without meaningfully delaying
-    /// persistence of a real user drag that follows a display change.
-    private static let screenReconfigurationSettleInterval: TimeInterval = 2.0
 
     /// User-defaults key every Blackbird main window persists its frame
     /// under. Hoisted to one place so the explicit save / restore drivers
@@ -633,58 +618,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     ///      screen-size *without* fullscreen mode, burying traffic
     ///      lights and overlapping the menu bar. Save only the
     ///      windowed-mode frame.
-    private func saveCurrentFrame() {
-        guard !isPerformingShowWindow else { return }
-        guard let win = window else { return }
-        // Audit S5-006 (gate 3): a display reconfiguration is in
-        // progress or just happened — the move/resize that triggered us
-        // is AppKit relocating the window, not the user. Persisting it
-        // would clobber the user's saved multi-display frame. A
-        // USER-driven change bypasses the gate (review follow-up: a
-        // drag finished within the settle window was silently dropped):
-        // AppKit's reconfiguration relocations never occur during a
-        // live left-button drag or a live resize, so those signals
-        // positively identify the user.
-        // NSEvent.pressedMouseButtons is GLOBAL (app-wide), so a left button
-        // held for an unrelated reason — dragging a DIFFERENT window, a
-        // force-press elsewhere — would misclassify THIS window's
-        // reconfiguration relocation as user-driven and clobber the saved
-        // multi-display frame. Scope the button signal to this window: a real
-        // title-bar drag keeps the pointer over the window as it moves, so
-        // require the pointer within this window's frame. inLiveResize is
-        // already per-window.
-        let userDriven = Self.isUserDrivenFrameChange(
-            leftButtonDown: (NSEvent.pressedMouseButtons & 1) != 0,
-            pointerInWindowFrame: win.frame.contains(NSEvent.mouseLocation),
-            inLiveResize: win.inLiveResize
-        )
-        guard userDriven || Date() >= suppressFrameSavesUntil else { return }
-        guard !win.styleMask.contains(.fullScreen) else { return }
-        win.saveFrame(usingName: Self.frameAutosaveName)
-    }
-
-    /// Decide whether a windowDidMove/Resize is genuinely user-driven (and so
-    /// may bypass the S5-006 screen-reconfig settle suppression). A live
-    /// resize is always user-driven. A left-button drag counts ONLY when the
-    /// pointer is over THIS window — a title-bar drag carries the pointer with
-    /// the window, whereas a left button held while a different window or app
-    /// is being manipulated must not green-light saving this window's
-    /// AppKit-relocated frame. Extracted as a pure function so the
-    /// window-scoping logic is unit-testable without synthesizing NSEvents.
-    static func isUserDrivenFrameChange(
-        leftButtonDown: Bool,
-        pointerInWindowFrame: Bool,
-        inLiveResize: Bool
-    ) -> Bool {
-        inLiveResize || (leftButtonDown && pointerInWindowFrame)
-    }
-
-    /// Installed in init; arms the S5-006 suppression window. Selector
-    /// target for NSApplication.didChangeScreenParametersNotification.
+    /// Installed in init; arms the S5-006 suppression window. Selector target
+    /// for NSApplication.didChangeScreenParametersNotification (the controller
+    /// stays the notification target; the suppression state lives in
+    /// `framePersistence`).
     @objc private func screenParametersDidChange(_ note: Notification) {
-        suppressFrameSavesUntil = Date().addingTimeInterval(
-            Self.screenReconfigurationSettleInterval
-        )
+        framePersistence.armScreenReconfigSuppression()
     }
 
     /// Forward window-focus gains to the TUI as a `CSI I` escape when it
@@ -1117,7 +1056,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // drive the save ourselves on every resize. Idempotent. ALL
         // windows save — the saved frame on disk tracks the user's most
         // recent resize regardless of which window owned it.
-        saveCurrentFrame()
+        framePersistence.saveCurrentFrame()
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -1126,7 +1065,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // explicitly. Without this, the user's "drag the window to a
         // new corner of the screen, type `exit`" workflow loses the
         // new position on relaunch.
-        saveCurrentFrame()
+        framePersistence.saveCurrentFrame()
     }
 
     // MARK: - Tab bar affordances
