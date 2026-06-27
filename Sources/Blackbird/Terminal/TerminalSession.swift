@@ -63,16 +63,21 @@ public final class TerminalSession: ObservableObject {
     /// caller's thread and read from `feed(_:)` on coreQueue with
     /// no synchronization. Promote to `let` and pass through init
     /// — the value is fixed at construction so there's no race.
-    private let spawnedAt: CFTimeInterval
-    /// Set once when the first PTY byte arrives so the read path stops
-    /// re-logging on every chunk. Session-local: each new tab starts its
-    /// own clock.
-    private var loggedFirstByte = false
-    /// Set once the first snapshot lands on the main queue. Protected by
-    /// `publishLock` because `publishPendingSnapshot` is the only writer.
-    private var publishedFirstSnapshot = false
+    /// Internal (not private) so `SnapshotCoalescer` can read it for the
+    /// first-byte / first-snapshot telemetry timestamps.
+    let spawnedAt: CFTimeInterval
+    // `loggedFirstByte` (first-byte log latch) and `publishedFirstSnapshot`
+    // (first-snapshot-on-main latch) moved to `SnapshotCoalescer` along with
+    // the feed/publish paths that own them.
 
     @Published public private(set) var snapshot: BBSnapshot?
+
+    /// Single write site for the SwiftUI-observed snapshot. Called by
+    /// `SnapshotCoalescer` on the main thread (the `@Published` store stays
+    /// owned by the session; the coalescer publishes through this seam).
+    func publish(_ snap: BBSnapshot) {
+        self.snapshot = snap
+    }
     /// Window / tab title state (OSC 0/2 + user override → one observable
     /// title). Hoisted out of this class — UI binds to `session.titleState.$title`;
     /// the rename flow sets `session.titleState.titleOverride`.
@@ -157,7 +162,12 @@ public final class TerminalSession: ObservableObject {
         public let gridRow: Int
     }
 
-    private let bbterm: BBTerm
+    /// Internal (not private) so the `SnapshotCoalescer` / `PaletteApplier`
+    /// collaborators can reach the FFI handle. Part I §6 single-queue ownership
+    /// is preserved by discipline, not access control: those collaborators only
+    /// touch `bbterm` from `coreQueue` (feed + the deferred snapshot/palette
+    /// work items all run on `coreQueue`).
+    let bbterm: BBTerm
     /// Optional so tests can construct a title-only headless session without
     /// spawning a child process. Production paths always have a PTY.
     private let pty: PTY?
@@ -165,7 +175,9 @@ public final class TerminalSession: ObservableObject {
     /// it's already running on this session's coreQueue and avoid a
     /// `coreQueue.sync` self-deadlock (PS-01 / NEW-01).
     private let coreQueueToken: ObjectIdentifier
-    private let coreQueue: DispatchQueue
+    /// Internal (not private) so `SnapshotCoalescer` / `PaletteApplier` can
+    /// serialize their `bbterm` access through the same single owner queue.
+    let coreQueue: DispatchQueue
     /// Process-wide key used by `setSpecific`. Different sessions have
     /// distinct token VALUES on the same key, so `getSpecific(key:)` on a
     /// thread that's servicing session A's coreQueue returns A's token but
@@ -180,49 +192,38 @@ public final class TerminalSession: ObservableObject {
 
     // MARK: - Main-publish coalescer (audit F1)
     //
-    // F1 flagged that a runaway producer (`yes | cat`, `cat hugefile`) would
-    // queue unbounded `DispatchQueue.main.async { self.snapshot = snap }`
-    // work items from `feed(_:)` — every 128 KiB PTY chunk produced one main-
-    // queue write, each retaining a BBSnapshot, each waking TerminalView's
-    // Combine sink and scheduling a Metal draw. On a bursty producer this
-    // floods main and grows RSS linearly with the producer/consumer gap.
+    // The snapshot-publish machinery (the pending slot, the dispatch-scheduled
+    // flag, the burst scheduler, the snapshot/first-byte counters and the
+    // feed/publish paths) lives in `SnapshotCoalescer`. The session keeps two
+    // things here because they are SHARED with the terminate latch:
     //
-    // We picked the "coalesce on the main-publish side" approach from the
-    // audit's Alternative: snapshots are retained-reference objects, so
-    // dropping intermediates is safe — the renderer only needs the latest.
-    // We keep at most one pending main dispatch per session: feeds that
-    // arrive while a dispatch is in flight overwrite the pending slot
-    // instead of enqueueing a new work item. This caps main-queue snapshot
-    // traffic at a constant regardless of PTY throughput.
-    //
-    // We did not pursue the full read-side backpressure path (bytes-in-
-    // flight counter + semaphore-blocked PTY read loop) because the main-
-    // queue flood was the observable half of F1 (bounded by producer rate
-    // on coreQueue, but main is far more contention-sensitive) and the
-    // coalescer fixes it without reaching into PTY's read loop or adding
-    // a cross-queue blocking primitive — which would change the thread
-    // model documented at the top of this file and complicate teardown.
+    //   - `publishLock`: the coalescer locks THIS instance (no second lock), so
+    //     user-action publishes (publishImmediate), feed-driven publishes, and
+    //     `terminate()` all serialize on one lock exactly as before the split.
+    //   - `isTerminated`: the F1/F11 gate read by the coalescer (under the lock)
+    //     and by every other `coreQueue.async` path via `isTerminatedLocked()`.
     //
     // F11: queued feeds kept publishing snapshots after `onExit` / window
-    // close. `isTerminated` gates the feed path so post-termination feeds
-    // are dropped instead of still waking main.
-    private let publishLock = NSLock()
-    private var pendingSnapshot: BBSnapshot?
-    private var snapshotDispatchScheduled: Bool = false
-    private var isTerminated: Bool = false
+    // close. `isTerminated` gates the feed path so post-termination feeds are
+    // dropped instead of still waking main.
+    //
+    // Internal (not private): the coalescer shares this exact `NSLock`.
+    let publishLock = NSLock()
+    /// Terminate latch. `private(set)` so only `terminate()` flips it; the
+    /// coalescer reads it (under `publishLock`) but never writes it.
+    private(set) var isTerminated: Bool = false
 
-    /// True while a deferred feed-path snapshot work item is sitting in
-    /// `coreQueue` (see `scheduleSnapshotAfterBurst`). coreQueue-confined:
-    /// only touched from `feed(_:)` and the work item itself, both of
-    /// which run on `coreQueue` — no lock.
-    private var snapshotWorkQueued = false
+    /// The main-publish coalescer. Owns the F1/F11/H8 pending-slot machinery
+    /// and the feed/scheduleSnapshotAfterBurst/publish paths, sharing this
+    /// session's `publishLock` (IUO: needs `self` at init, assigned before
+    /// `wire()` so no async path observes it nil). `private(set)` internal so
+    /// `PaletteApplier` can route its post-apply snapshot through the same
+    /// single-slot coalescer; only this session assigns it.
+    private(set) var snapshotCoalescer: SnapshotCoalescer!
 
-    /// Count of feed-path snapshot generations. coreQueue-confined like
-    /// `snapshotWorkQueued` (incremented only inside the deferred work
-    /// item); read via `snapshotsTakenForTests`, which syncs onto
-    /// `coreQueue`. Deliberately NOT in the `publishLock` set — that lock's
-    /// contract is the F1/F11 publish-coalescer state only.
-    private var snapshotsTakenCount: Int = 0
+    /// Pushes resolved theme palettes into the core (Finding 1 peel). Stateless
+    /// collaborator; assigned alongside the coalescer.
+    private var paletteApplier: PaletteApplier!
 
     /// Last focus state actually emitted to the TUI (`CSI I`/`CSI O`),
     /// guarded by `coreQueue`. Dedups consecutive same-state focus
@@ -274,6 +275,10 @@ public final class TerminalSession: ObservableObject {
         q.setSpecific(key: Self.coreQueueKey, value: token)
         self.coreQueue = q
         self.coreQueueToken = token
+        // Assigned before `wire()` so the async feed/snapshot/palette closures
+        // it schedules never observe these IUO collaborators as nil.
+        self.snapshotCoalescer = SnapshotCoalescer(session: self)
+        self.paletteApplier = PaletteApplier(session: self)
         wire()
     }
 
@@ -307,6 +312,8 @@ public final class TerminalSession: ObservableObject {
         q.setSpecific(key: Self.coreQueueKey, value: token)
         self.coreQueue = q
         self.coreQueueToken = token
+        self.snapshotCoalescer = SnapshotCoalescer(session: self)
+        self.paletteApplier = PaletteApplier(session: self)
         // `wire()` is safe in headless mode: every PTY hookup uses optional
         // chaining, so with `pty == nil` only the bbterm.onEvent handler is
         // installed. That's exactly what the OSC 7 / cwd tests need — feed
@@ -325,7 +332,7 @@ public final class TerminalSession: ObservableObject {
     /// and proved flaky under CI contention.
     func feedBytesForTests(_ bytes: Data) {
         coreQueue.sync {
-            self.feed(bytes)
+            self.snapshotCoalescer.feed(bytes)
         }
     }
 
@@ -337,7 +344,7 @@ public final class TerminalSession: ObservableObject {
     /// the next chunk is enqueued.
     func enqueueBytesForTests(_ bytes: Data) {
         coreQueue.async { [weak self] in
-            self?.feed(bytes)
+            self?.snapshotCoalescer.feed(bytes)
         }
     }
 
@@ -349,7 +356,7 @@ public final class TerminalSession: ObservableObject {
     /// snapshot work they deferred have finished — regardless of how many
     /// levels deep a future change makes the deferral.
     func waitForFeedsForTests() {
-        while coreQueue.sync(execute: { snapshotWorkQueued }) {
+        while coreQueue.sync(execute: { snapshotCoalescer.snapshotWorkQueued }) {
             // Each pass queues behind whatever is currently in flight;
             // no spin in practice (≤2 iterations for a single burst).
         }
@@ -361,7 +368,7 @@ public final class TerminalSession: ObservableObject {
     /// coreQueue-confined storage; the sync read also gives the caller
     /// natural ordering behind any queued feeds.
     var snapshotsTakenForTests: Int {
-        coreQueue.sync { snapshotsTakenCount }
+        coreQueue.sync { snapshotCoalescer.snapshotsTakenCount }
     }
 
     /// Test-only synchronous snapshot accessor. Drives the same code path
@@ -795,7 +802,7 @@ public final class TerminalSession: ObservableObject {
         // any in-flight coalescer; it also already mirrors the M-1 / F11
         // isTerminated re-check on the off-main hop, so the prior inline
         // termination guard is subsumed.
-        publishImmediate(newSnap)
+        snapshotCoalescer.publishImmediate(newSnap)
     }
 
     /// Async sibling of `resize(to:)` for non-drag callers. Trades the
@@ -829,7 +836,7 @@ public final class TerminalSession: ObservableObject {
                 )
             }
             guard let snap = self.bbterm.snapshot() else { return }
-            self.publishPendingSnapshot(snap)
+            self.snapshotCoalescer.publishPendingSnapshot(snap)
         }
     }
 
@@ -896,7 +903,7 @@ public final class TerminalSession: ObservableObject {
             bbterm.scroll(delta: delta)
             snap = bbterm.snapshot()
         }
-        if let snap { publishImmediate(snap) }
+        if let snap { snapshotCoalescer.publishImmediate(snap) }
     }
 
     /// Snap the viewport back to the live grid. Call from the input path
@@ -909,7 +916,7 @@ public final class TerminalSession: ObservableObject {
             bbterm.scrollToBottom()
             snap = bbterm.snapshot()
         }
-        if let snap { publishImmediate(snap) }
+        if let snap { snapshotCoalescer.publishImmediate(snap) }
     }
 
     /// ⌘K target — clear viewport + scrollback while preserving palette /
@@ -970,7 +977,7 @@ public final class TerminalSession: ObservableObject {
             self.lastPromptMark = nil
         }
         onMain(resetPromptState)
-        if let s { publishImmediate(s) }
+        if let s { snapshotCoalescer.publishImmediate(s) }
         // L-24: re-apply the resolved theme palette so OSC 4 mutations
         // from the pre-clear shell don't survive into the post-clear
         // session. `applyPalette` is async on `coreQueue` so it orders
@@ -996,7 +1003,9 @@ public final class TerminalSession: ObservableObject {
     /// in `terminate()`, so reading the bare `Bool` would race that store. The
     /// lock guards only the read; callers branch on the returned value outside
     /// it, exactly as the inline `lock / read / unlock` dance this replaces did.
-    private func isTerminatedLocked() -> Bool {
+    /// Internal (not private) so `SnapshotCoalescer` / `PaletteApplier` share
+    /// the one termination-gate read against this session's `publishLock`.
+    func isTerminatedLocked() -> Bool {
         publishLock.lock()
         defer { publishLock.unlock() }
         return isTerminated
@@ -1018,124 +1027,11 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
-    /// Synchronous publish path used by user-input-driven snapshots
-    /// (scroll, scrollToBottom, clearAll). Combines two semantics that
-    /// pure inline writes and pure publishPendingSnapshot each fail to
-    /// give us in isolation:
-    ///
-    ///   - Synchronous visibility: `self.snapshot = snap` lands before
-    ///     the call returns (when invoked on main; otherwise hops to
-    ///     main but stays one runloop tick away). Tests that read
-    ///     `session.snapshot` immediately after `scroll()` get the
-    ///     scroll's snapshot, not the prior one.
-    ///   - Stale-pending invalidation: the coalescer's `pendingSnapshot`
-    ///     slot is cleared under publishLock BEFORE the inline write,
-    ///     so an already-queued main dispatch from a prior feed (which
-    ///     would otherwise clobber our fresh snapshot when it fires)
-    ///     reads `pendingSnapshot == nil` and bails. Audit H8.
-    ///
-    /// This is the right shape for the "user-action wins over chatty
-    /// background output" semantics: ⌘K on a flooding shell must
-    /// instantly show empty; scroll-into-history must instantly show
-    /// the new offset.
-    private func publishImmediate(_ snap: BBSnapshot) {
-        publishLock.lock()
-        // Drop any queued stale snapshot — a feed-driven coalesced
-        // dispatch that fires AFTER our inline write would otherwise
-        // overwrite the user-action snapshot with pre-action content.
-        pendingSnapshot = nil
-        publishLock.unlock()
-        if Thread.isMainThread {
-            self.snapshot = snap
-        } else {
-            // Mirror publishPendingSnapshot's shape: weak self + post-hop
-            // isTerminated re-check under publishLock. Without this the
-            // closure strongly retains the session across the main hop and
-            // can write `@Published` after terminate() had its chance to
-            // tear consumers down (sibling of M-1 / F11).
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                guard !self.isTerminatedLocked() else { return }
-                self.snapshot = snap
-            }
-        }
-    }
-
-    /// Push a full palette into the Rust term + publish a fresh snapshot so
-    /// cells re-color on the next draw. Serialized through `coreQueue` as
-    /// `async` — the previous `sync` flavour blocked main waiting for any
-    /// pending `feed(_:)` items to drain, which on a chatty shell
-    /// (`xcodebuild test`, tailing logs, Claude streaming) turns every
-    /// Settings click that changes the palette / cursor / translucency into
-    /// a visible beachball. Async preserves ordering against feeds because
-    /// `coreQueue` is serial, and the resulting snapshot is routed through
-    /// the same single-slot coalescer that `feed(_:)` publishes through
-    /// (see `publishPendingSnapshot`), so a palette change mid-burst can't
-    /// jump ahead of or duplicate the snapshot stream.
+    /// Push a resolved theme palette into the core + republish. The color-math
+    /// + OSC-slot mapping lives in `PaletteApplier` (REFACTOR.md Finding 1
+    /// peel); this is the thin public seam `ThemeManager` and `clearAll` call.
     public func applyPalette(_ palette: ThemePalette) {
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            // L-1: same termination gate as `feed` (F11). All other coreQueue.async
-            // paths bail when isTerminated is set; without the check here a
-            // theme apply that races terminate() can publish a snapshot through
-            // the coalescer for a session whose consumer is tearing down.
-            if self.isTerminatedLocked() { return }
-            for (i, c) in palette.ansi.enumerated() {
-                self.bbterm.setColor(slot: i, rgb: c)
-            }
-            // NamedColor layout in alacritty 0.26 (per vte-0.15.0/src/ansi.rs):
-            //   256 = Foreground, 257 = Background, 258 = Cursor
-            //   259..=266 = DimBlack..DimWhite
-            //   267 = BrightForeground, 268 = DimForeground
-            self.bbterm.setColor(slot: 256, rgb: palette.foreground)
-            self.bbterm.setColor(slot: 257, rgb: palette.background)
-            self.bbterm.setColor(slot: 258, rgb: palette.cursor)
-            // Audit fix-#24 (2026-05-11): without explicit writes for slots
-            // 267/268 the renderer falls through to named_color_rgb's
-            // hardcoded 0xEEEEEE for both BrightForeground and
-            // DimForeground (lib.rs:2513,2524). A TUI that emits bold
-            // default-fg (xterm bold-color path) or SGR 2 dim default-fg
-            // would render the xterm default regardless of theme — wrong
-            // under Solarized Dark / Catppuccin / Light variants where
-            // 0xEEEEEE clashes with the chosen palette. Derive from the
-            // theme's foreground: lighten 20% toward white for Bright,
-            // darken 30% toward black for Dim. Matches alacritty's own
-            // SGR-1 / SGR-2 expected behaviour reasonably well; users
-            // with explicit OSC 4/10 overrides for these slots still win
-            // because OSC writes land via the same setColor path.
-            let brightFg = Self.lightenRGB(palette.foreground, by: 0.20)
-            let dimFg = Self.darkenRGB(palette.foreground, by: 0.30)
-            self.bbterm.setColor(slot: 267, rgb: brightFg)
-            self.bbterm.setColor(slot: 268, rgb: dimFg)
-            guard let snap = self.bbterm.snapshot() else { return }
-            self.publishPendingSnapshot(snap)
-        }
-    }
-
-    /// Audit fix-#24 helper: blend a 0xRRGGBB color toward white by
-    /// `factor` in [0, 1]. factor=0 returns the input unchanged;
-    /// factor=1 returns 0xFFFFFF. Saturating at 255 per channel.
-    private static func lightenRGB(_ rgb: UInt32, by factor: Double) -> UInt32 {
-        let r = Double((rgb >> 16) & 0xFF)
-        let g = Double((rgb >> 8) & 0xFF)
-        let b = Double(rgb & 0xFF)
-        let nr = UInt32(min(255.0, r + (255.0 - r) * factor).rounded())
-        let ng = UInt32(min(255.0, g + (255.0 - g) * factor).rounded())
-        let nb = UInt32(min(255.0, b + (255.0 - b) * factor).rounded())
-        return (nr << 16) | (ng << 8) | nb
-    }
-
-    /// Audit fix-#24 helper: blend a 0xRRGGBB color toward black by
-    /// `factor` in [0, 1]. factor=0 returns the input unchanged;
-    /// factor=1 returns 0x000000.
-    private static func darkenRGB(_ rgb: UInt32, by factor: Double) -> UInt32 {
-        let r = Double((rgb >> 16) & 0xFF)
-        let g = Double((rgb >> 8) & 0xFF)
-        let b = Double(rgb & 0xFF)
-        let nr = UInt32(max(0.0, r * (1.0 - factor)).rounded())
-        let ng = UInt32(max(0.0, g * (1.0 - factor)).rounded())
-        let nb = UInt32(max(0.0, b * (1.0 - factor)).rounded())
-        return (nr << 16) | (ng << 8) | nb
+        paletteApplier.apply(palette)
     }
 
     /// Extract text between two buffer points. Serialized through the core
@@ -1170,7 +1066,9 @@ public final class TerminalSession: ObservableObject {
         isTerminated = true
         // Drop any pending main dispatch's payload — the already-scheduled
         // work item will observe `isTerminated` and bail before assigning.
-        pendingSnapshot = nil
+        // Same `publishLock` critical section as before the coalescer split:
+        // the latch-set + slot-clear stay atomic under one lock acquisition.
+        snapshotCoalescer.dropPendingSnapshotLocked()
         publishLock.unlock()
         // Bug #24: tear down the Preferences sink. Without this, a session
         // that's been terminated (window closed, child reaped) keeps a
@@ -1382,7 +1280,7 @@ public final class TerminalSession: ObservableObject {
         pty?.setOnBytes { [weak self] data in
             guard let self else { return }
             self.coreQueue.async { [weak self] in
-                self?.feed(data)
+                self?.snapshotCoalescer.feed(data)
             }
         }
         pty?.startReading()
@@ -1403,7 +1301,7 @@ public final class TerminalSession: ObservableObject {
             // observable in tests that race construct/terminate.
             if self.isTerminatedLocked() { return }
             if let snap = self.bbterm.snapshot() {
-                self.publishPendingSnapshot(snap)
+                self.snapshotCoalescer.publishPendingSnapshot(snap)
             }
         }
     }
@@ -1557,106 +1455,8 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
-    /// Called on `coreQueue`.
-    private func feed(_ data: Data) {
-        // F11: drop feeds that raced past `terminate()`. Reading under the
-        // lock pairs with the store in `terminate()`; the lock also covers
-        // the pending-snapshot slot updated below, so we can't end up with
-        // a scheduled dispatch for a session that has since terminated.
-        publishLock.lock()
-        if isTerminated {
-            publishLock.unlock()
-            return
-        }
-        publishLock.unlock()
-
-        // First-byte marker: the time from `spawnedAt` to this point is
-        // dominated by the user's shell startup (rc-file loading + prompt
-        // computation). Logged once per session so we can distinguish
-        // "our spawn path is slow" from "the shell is slow".
-        if !loggedFirstByte {
-            loggedFirstByte = true
-            if StartupTelemetry.isEnabled {
-                let dt = (CACurrentMediaTime() - spawnedAt) * 1000
-                Self.startupLogger.log(
-                    "first PTY byte \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn (bytes=\(data.count, privacy: .public))"
-                )
-            }
-        }
-
-        let bytes = [UInt8](data)
-        bbterm.input(bytes)
-        scheduleSnapshotAfterBurst()
-    }
-
-    /// Called on `coreQueue`. Defer snapshot generation to a single work
-    /// item at the TAIL of `coreQueue`: every chunk already enqueued
-    /// behind the current one is parsed before the item runs, so a burst
-    /// of N chunks costs one grid serialization instead of N.
-    ///
-    /// Why: `bbterm.snapshot()` is ~10 ms at a 200×50 grid while parsing
-    /// a 128 KiB chunk is ~2–4 ms. Taking a snapshot per chunk capped
-    /// sustained end-to-end throughput at ~8 MB/s (kitten __benchmark__,
-    /// 2026-06-09) even though the core parses at 25–90 MB/s — and the
-    /// publish coalescer (F1) was discarding almost all of those
-    /// snapshots anyway. Idle/interactive cadence is unchanged: with no
-    /// second chunk queued, the deferred item runs immediately after the
-    /// current one and publishes exactly as before.
-    private func scheduleSnapshotAfterBurst() {
-        dispatchPrecondition(condition: .onQueue(coreQueue))
-        if snapshotWorkQueued { return }
-        snapshotWorkQueued = true
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            self.snapshotWorkQueued = false
-            // F11/S1-007: skip generation entirely for a session that
-            // terminated while this item sat in the queue — same contract
-            // as the per-feed gate above.
-            if self.isTerminatedLocked() { return }
-            guard let snap = self.bbterm.snapshot() else { return }
-            self.snapshotsTakenCount += 1
-            self.publishPendingSnapshot(snap)
-        }
-    }
-
-    /// Coalesce snapshot publishes to at most one in-flight main dispatch
-    /// (F1). The pending slot holds the latest snapshot; a second feed
-    /// that arrives before the dispatch fires overwrites the slot instead
-    /// of enqueueing another work item. The scheduled handler reads-and-
-    /// clears the slot on main and assigns `self.snapshot`, which is still
-    /// `@Published` so all existing Combine subscribers (TerminalView,
-    /// tests) see the latest value — just not every intermediate.
-    private func publishPendingSnapshot(_ snap: BBSnapshot) {
-        publishLock.lock()
-        pendingSnapshot = snap
-        if snapshotDispatchScheduled {
-            publishLock.unlock()
-            return
-        }
-        snapshotDispatchScheduled = true
-        publishLock.unlock()
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.publishLock.lock()
-            let latest = self.pendingSnapshot
-            self.pendingSnapshot = nil
-            self.snapshotDispatchScheduled = false
-            let terminated = self.isTerminated
-            let wasFirst = !self.publishedFirstSnapshot
-            if wasFirst, latest != nil { self.publishedFirstSnapshot = true }
-            self.publishLock.unlock()
-            // F11: if the session terminated between schedule and fire,
-            // don't write to `@Published` — the consumer may already be
-            // tearing down and we'd waste a downstream render cycle.
-            guard !terminated, let latest else { return }
-            self.snapshot = latest
-            if wasFirst, StartupTelemetry.isEnabled {
-                let dt = (CACurrentMediaTime() - self.spawnedAt) * 1000
-                Self.startupLogger.log(
-                    "first snapshot on main \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn"
-                )
-            }
-        }
-    }
+    // The feed / scheduleSnapshotAfterBurst / publishPendingSnapshot paths and
+    // their pending-slot state moved to `SnapshotCoalescer` (REFACTOR.md Part
+    // IV — Finding 2). The session reaches them via `snapshotCoalescer`; the
+    // shared `publishLock` keeps every critical section byte-faithful.
 }
