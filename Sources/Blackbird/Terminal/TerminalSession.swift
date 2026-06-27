@@ -1356,8 +1356,6 @@ public final class TerminalSession: ObservableObject {
     /// coalescer so it orders deterministically against the first real feed.
     private func wireEventAndPTY() {
         // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
-
-        // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
         // M-4 / PS-01: BOTH closures use [weak self]. The outer captures
         // weakly so a closing window can drop the session promptly; the
         // INNER also captures weakly so an in-flight `feed(data)` block
