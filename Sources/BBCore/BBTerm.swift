@@ -694,13 +694,14 @@ public final class BBSnapshot {
         return Self.classify(handle.pointee.cells[idx])
     }
 
-    /// The single source of truth for decoding one already-fetched `BBCell`
-    /// into a `CellKind`. Every cell walker — `cellKind(at:row:)`,
-    /// `character(at:row:)`, `visibleRowsAsText()`, and (via `cellKind`) the
-    /// find/replace row-walkers — routes its per-cell decision through here, so
-    /// the spacer / empty / invalid / character policy can never diverge across
-    /// them (REFACTOR.md Part IV). The caller owns the bounds check; this is
-    /// pure decoding of a cell the caller already fetched.
+    /// The single source of truth for the spacer/empty/invalid/character
+    /// CLASSIFICATION of one already-fetched `BBCell`. The classifying walkers —
+    /// `cellKind(at:row:)`, `visibleRowsAsText()`, and (via `cellKind`) the
+    /// find/replace row-walkers — route their per-cell decision through here so
+    /// their invalid-scalar policy can never diverge (REFACTOR.md Part IV).
+    /// `character(at:row:)` is intentionally NOT a client: it is a raw `.ch`
+    /// accessor that ignores the spacer flag (see its body). The caller owns
+    /// the bounds check; this is pure decoding of a cell already fetched.
     static func classify(_ cell: BBCell) -> CellKind {
         let spacerMask = UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER)
         if cell.flags & spacerMask != 0 {
@@ -844,14 +845,19 @@ public final class BBSnapshot {
         // that lifts that bound gets a safe fallback.
         guard let idx = Self.flatIndex(row: row, col: col, cols: cols) else { return nil }
         guard idx < cellCount else { return nil }
-        // "What to render here": only a leading character cell yields a glyph;
-        // spacer / empty / invalid all collapse to nil. Routes through the
-        // shared `classify` decoder (spacer cells carry `.ch == 0`, so the
-        // result is identical to the former raw `.ch` read).
-        if case .character(let ch) = Self.classify(handle.pointee.cells[idx]) {
-            return ch
-        }
-        return nil
+        // Raw scalar accessor: reads `.ch` directly, deliberately WITHOUT the
+        // spacer-flag classification in `classify`/`cellKind`. A wide-glyph
+        // spacer cell carries `.ch == 0x20` (alacritty writes spacers as ' '),
+        // so this returns " " on a spacer column — NOT nil. That behavior is
+        // load-bearing for `HyperlinkResolver.osc8AnchorText` (anchor-text
+        // host-divergence gate) and the `?? " "` URL-continuation scan, so it
+        // is kept byte-identical rather than routed through the shared decoder.
+        // (NB: the doc-comment claim that this "collapses spacer into nil" is a
+        // pre-existing impl/doc mismatch — left as-is; changing it is a
+        // behavior change to validate separately against the OSC 8 path.)
+        let scalar = handle.pointee.cells[idx].ch
+        guard scalar != 0, let us = Unicode.Scalar(scalar) else { return nil }
+        return Character(us)
     }
 
     /// Raw cell pointer for bulk iteration by the renderer. Returned pointer
