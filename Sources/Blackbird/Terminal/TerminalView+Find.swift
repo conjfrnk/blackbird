@@ -3,19 +3,14 @@ import Foundation
 import os
 import BBCore
 
-/// Find-bar + context-menu integration for `TerminalView`. Two
-/// loosely-related responder-chain concerns kept together because they share
-/// the same FindBar / selection state (the macOS Services + Look Up overrides
-/// live in `TerminalView+Services.swift`):
-///
-///   - **Find bar** — ⌘F spawns a `FindBar` subview; ⌘G / ⌘⇧G cycle
-///     matches; `performSearch(query:)` runs the regex / substring
-///     search across the visible viewport + scrollback. Find-mode
-///     toggles (⌘⌥C case-sensitive, ⌘⌥R regex) round-trip through
-///     FindBarDelegate on the main class.
-///   - **Context menu** — `menu(for:)` produces the right-click
-///     menu, with Open-Link / Copy-Link items when a URL was
-///     resolved at the click position (OSC 8 first, regex fallback).
+/// The find bar for `TerminalView`: ⌘F spawns a `FindBar` subview; ⌘G / ⌘⇧G
+/// cycle matches; `performSearch(query:)` runs the regex / substring search
+/// across the visible viewport + scrollback (the regex path is async with a
+/// cooperative-cancel + ReDoS pre-gate). Find-mode toggles (⌘⌥C case-sensitive,
+/// ⌘⌥R regex) round-trip through `FindBarDelegate` on the main class. The
+/// sibling responder concerns moved to their own files: macOS Services + Look
+/// Up → `TerminalView+Services.swift`; right-click menu + `validateMenuItem`
+/// → `TerminalView+ContextMenu.swift`.
 ///
 /// Stored state (`findMatches`, `findCurrentIndex`, `findQuery`)
 /// lives on the class body and is bumped from `private` to internal
@@ -519,96 +514,6 @@ extension TerminalView {
         } else if displayRowForMatch >= snap.rows {
             session?.scroll(delta: Int32(clamping: snap.rows - 1 - displayRowForMatch))
         }
-    }
-
-    public func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        switch item.action {
-        case #selector(copy(_:)):                      return selection != nil
-        case #selector(selectAll(_:)):                 return currentSnapshot != nil
-        case #selector(paste(_:)):
-            // Paste needs BOTH a session to receive the bytes AND string
-            // content on the pasteboard. Before this check, a paste on a
-            // view with no session silently dropped the clipboard content
-            // instead of clearly disabling the menu item.
-            // Audit terminal-view-2 F13.
-            return session != nil && NSPasteboard.general.string(forType: .string) != nil
-        case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
-        case #selector(performFindNextAction(_:)):     return !findMatches.isEmpty
-        case #selector(performFindPreviousAction(_:)): return !findMatches.isEmpty
-        case #selector(toggleFindCaseSensitive(_:)):
-            item.state = (findBar?.options.caseSensitive == true) ? .on : .off
-            return currentSnapshot != nil
-        case #selector(toggleFindRegex(_:)):
-            item.state = (findBar?.options.regex == true) ? .on : .off
-            return currentSnapshot != nil
-        case #selector(clearBufferAndScrollback(_:)):  return session != nil
-        case #selector(jumpToPreviousPrompt(_:)),
-             #selector(jumpToNextPrompt(_:)):
-            // Same pattern: disabling until OSC 133 marks exist is more
-            // honest than beeping on every press.
-            return (session?.promptMarks.isEmpty == false)
-        case #selector(increaseFontSize(_:)),
-             #selector(decreaseFontSize(_:)),
-             #selector(resetFontSize(_:)): return session != nil
-        default:                                       return true
-        }
-    }
-
-    public override func menu(for event: NSEvent) -> NSMenu? {
-        let m = NSMenu()
-        // Surface "Open Link" / "Copy Link" when the right-click lands on
-        // a resolvable URL (OSC 8 hyperlink or regex-detected). Safari-
-        // parity affordance; without it users can only reach URLs via
-        // ⌘-click which is hidden UI. Audit terminal-view-2 F27.
-        let p = bufferPointFromEvent(event)
-        let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
-        if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
-            let openItem = NSMenuItem(title: "Open Link",
-                                      action: #selector(openResolvedLink(_:)),
-                                      keyEquivalent: "")
-            openItem.target = self
-            openItem.representedObject = url
-            let copyLinkItem = NSMenuItem(title: "Copy Link",
-                                          action: #selector(copyResolvedLink(_:)),
-                                          keyEquivalent: "")
-            copyLinkItem.target = self
-            copyLinkItem.representedObject = url
-            m.addItem(openItem)
-            m.addItem(copyLinkItem)
-            m.addItem(NSMenuItem.separator())
-        } else if let blockedHref = blockedDivergentOSC8Href(screenRow: screenRow, col: p.col) {
-            // The ⌘-click anti-phishing gate blocks this OSC 8 link because the
-            // visible anchor's host differs from the href. Offer a deliberate,
-            // clearly-labelled COPY (not open) so a legitimate divergent link
-            // isn't permanently unreachable — the user pastes into the browser
-            // and sees the real destination host before committing.
-            let copyMismatch = NSMenuItem(title: "Copy Link (host mismatch)",
-                                          action: #selector(copyResolvedLink(_:)),
-                                          keyEquivalent: "")
-            copyMismatch.target = self
-            copyMismatch.representedObject = blockedHref
-            m.addItem(copyMismatch)
-            m.addItem(NSMenuItem.separator())
-        }
-        let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
-        let pasteItem = NSMenuItem(title: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
-        copyItem.target = self
-        pasteItem.target = self
-        m.addItem(copyItem)
-        m.addItem(pasteItem)
-        return m
-    }
-
-    @objc private func openResolvedLink(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        urlOpener.open(url)
-    }
-
-    @objc private func copyResolvedLink(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(url.absoluteString, forType: .string)
     }
 
 }
