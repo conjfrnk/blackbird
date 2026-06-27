@@ -7,7 +7,7 @@ use std::sync::{Arc, Once};
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use alacritty_terminal::vte::Parser;
 
@@ -60,9 +60,8 @@ use color::*;
 pub use event::{BBEvent, BBEventCb, BBEventKind};
 use osc::*;
 use rate_limit::*;
-use scrub::*;
 pub use snapshot::{bb_mode, cell_flags, BBCell, BBSnap};
-use snapshot::{extract_cell_flags, extract_mode, BBSnapOwned};
+use snapshot::{extract_mode_with_extras, snapshot, BBSnapOwned};
 
 // NB: kept at the crate root (not in `snapshot`) purely so cbindgen emits this
 // `#define` ahead of `BB_STRING_MAGIC`, keeping the generated header byte-for-
@@ -105,8 +104,8 @@ pub enum BBPromptMarkKind {
 /// each Arc keeps its inner cell alive as long as any clone exists, so an
 /// event firing during `Term`'s destruction still lands on live memory.
 pub struct BBTerm {
-    term: Term<RoutingListener>,
-    processor: Processor,
+    pub(crate) term: Term<RoutingListener>,
+    pub(crate) processor: Processor,
     /// Parallel `vte::Parser` that drives `OscScanner` for OSC 7 (cwd) and
     /// OSC 133 (prompt marks). Stateful across `bb_term_input` calls so
     /// fragmented sequences resolve to a single event. Kept separate from
@@ -114,13 +113,13 @@ pub struct BBTerm {
     /// path. Consolidated from two parsers into one on 2026-04-19 —
     /// throughput tests showed running bytes through three parsers
     /// (alacritty + 2 parallels) cost ~15 % versus two parsers.
-    osc_parser: Parser,
+    pub(crate) osc_parser: Parser,
     /// Deferred queue of OSC 10/11/12 color-query responses — see
     /// ColorRequestQueue. Drained after every `processor.advance` call in
     /// `bb_term_input` so the response writes land in the same input
     /// batch that emitted the query. Responses are actually emitted only
     /// when `color_query_enabled` is true.
-    color_queue: Arc<ColorRequestQueue>,
+    pub(crate) color_queue: Arc<ColorRequestQueue>,
     /// Whether OSC 10 / 11 / 12 `?` queries produce a reply. Off by
     /// default: historically, replying leaked the palette back into the
     /// PTY, which zsh-vi-mode could interpret as commands (CVE class on
@@ -128,7 +127,7 @@ pub struct BBTerm {
     /// modern shell can opt in via Preferences. See
     /// `core/tests/terminal_replies.rs::osc_10_11_color_queries_are_silent`
     /// for the default-off pinning.
-    color_query_enabled: bool,
+    pub(crate) color_query_enabled: bool,
     /// Latch: "the prior `bb_term_input` chunk contained an ESC byte and
     /// may have left the OSC parser mid-sequence." When this is set, we
     /// advance the OSC parser regardless of whether the current chunk has
@@ -139,31 +138,31 @@ pub struct BBTerm {
     /// pure-text streams (no ESC anywhere), both bits stay false and we
     /// skip the osc_parser entirely — the dominant case for `yes(1)`,
     /// `cat` on logs, and pipe output. Saves ~10-15 % on plain_text.
-    osc_possibly_pending: bool,
+    pub(crate) osc_possibly_pending: bool,
     /// XTGETTCAP (Kitty capability query) parser state. `in_xtgettcap`
     /// latches true between `hook` (header `DCS + q` seen) and `unhook`
     /// (ST terminator seen); `xtgettcap_buf` accumulates the payload
     /// bytes. Persists across `bb_term_input` calls so a DCS fragmented
     /// across PTY reads resolves to a single reply. See `OscScanner`'s
     /// `hook`/`put`/`unhook` and `core/tests/xtgettcap.rs`.
-    in_xtgettcap: bool,
-    xtgettcap_buf: Vec<u8>,
+    pub(crate) in_xtgettcap: bool,
+    pub(crate) xtgettcap_buf: Vec<u8>,
     /// xterm `modifyOtherKeys` current level. `0` = off, `1` = level 1
     /// (encode colliders + "unmapped" Ctrl combos), `2` = level 2
     /// (encode every modified printable, overriding legacy byte
     /// mappings). Driven by parser observations of `CSI > 4 ; N m`.
     /// Swift-side KeyEncoder reads this indirectly via
     /// `bb_mode::MODIFY_OTHER_KEYS` (any non-zero level → bit set).
-    modify_other_keys: u8,
+    pub(crate) modify_other_keys: u8,
     /// OSC 133 A/B/C rate-limit window (audit synthesis #10). See
     /// `PromptMarkRateState`. Persisted across `bb_term_input` calls so
     /// the sliding window covers prompt marks that arrive in different
     /// PTY chunks.
-    prompt_mark_rate: PromptMarkRateState,
+    pub(crate) prompt_mark_rate: PromptMarkRateState,
     /// OSC 7 (CWD) ingest rate-limit window (audit M-7). See
     /// `Osc7RateState`. Persisted across `bb_term_input` calls — same
     /// rationale as `prompt_mark_rate`.
-    osc7_rate: Osc7RateState,
+    pub(crate) osc7_rate: Osc7RateState,
     /// OSC 7 reject-log latches, one bool per `OSC7_REJECT_*` class
     /// index. Audit L3: pre-fix these were a process-wide
     /// `static [Once; 8]`, so the first BBTerm in the process to hit
@@ -171,19 +170,19 @@ pub struct BBTerm {
     /// reborn shells in the same tab) silently dropped the same
     /// reject. Per-instance flags restore one-shot-per-session log
     /// semantics without re-introducing log flood.
-    osc7_reject_logged: [bool; 8],
+    pub(crate) osc7_reject_logged: [bool; 8],
     /// One-shot latch for the OSC 133 D non-digit reject path (audit
     /// L1 + reviewer follow-up). Same per-instance / one-shot rule
     /// as `osc7_reject_logged` but only one class so a single bool
     /// suffices.
-    osc133_d_nondigit_logged: bool,
+    pub(crate) osc133_d_nondigit_logged: bool,
     /// One-shot latch for the OSC 133 A/B/C tainted-payload reject path
     /// (audit S3R-001/S3R-002). Same per-instance / one-shot rule as
     /// `osc133_d_nondigit_logged`.
-    osc133_abc_tainted_logged: bool,
+    pub(crate) osc133_abc_tainted_logged: bool,
     /// One-shot latch for the OSC 133 rate-cap drop breadcrumb (audit
     /// S5-009). Same per-instance / one-shot rule as its siblings.
-    osc133_rate_limited_logged: bool,
+    pub(crate) osc133_rate_limited_logged: bool,
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
     /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
     /// 256+ allocations, but a hostile stream can fan replies across many
@@ -191,9 +190,9 @@ pub struct BBTerm {
     /// this 1-second window with `COLOR_QUERY_REPLY_PER_SECOND` cap makes
     /// the rate limit total, not per-call. Persisted across
     /// `bb_term_input` calls for the same reason as `prompt_mark_rate`.
-    color_query_reply_window_start: std::time::Instant,
-    color_query_reply_window_count: u32,
-    callback: Arc<CallbackCell>,
+    pub(crate) color_query_reply_window_start: std::time::Instant,
+    pub(crate) color_query_reply_window_count: u32,
+    pub(crate) callback: Arc<CallbackCell>,
     /// Persistent OSC 8 URI intern store (rust-core-3 F1). Maps URI string →
     /// shared `Arc<CStr>`; entries survive across snapshots so the same URI
     /// appearing frame after frame is interned exactly once (not per-snapshot).
@@ -209,11 +208,11 @@ pub struct BBTerm {
     /// eviction would invalidate the `*const c_char` returned by
     /// `bb_snap_link_url` on still-live snapshots that reference those
     /// Arcs.
-    uri_cstr_cache: std::collections::HashMap<String, Arc<std::ffi::CStr>>,
+    pub(crate) uri_cstr_cache: std::collections::HashMap<String, Arc<std::ffi::CStr>>,
     /// Total bytes currently retained by `uri_cstr_cache` (sum of URI byte
     /// lengths, excluding the terminating NUL). Drives the
     /// `OSC8_TOTAL_INTERN_BYTES_CAP` gate in `bb_term_take_snapshot`.
-    uri_cache_bytes: usize,
+    pub(crate) uri_cache_bytes: usize,
     /// One-shot latch: have we already emitted the per-snapshot
     /// `id-exhaustion` breadcrumb? OSC 8 link-id space is u16, leaving
     /// 65 534 distinct URIs per snapshot before attribution is silently
@@ -223,7 +222,7 @@ pub struct BBTerm {
     /// hook, support engineers triaging "my OSC 8 links stopped working"
     /// have no breadcrumb. Latch keeps the log one-shot per session to
     /// avoid eprintln spam on a streaming hostile payload. Audit S2-014.
-    osc8_id_exhaustion_logged: bool,
+    pub(crate) osc8_id_exhaustion_logged: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -986,19 +985,6 @@ pub unsafe extern "C" fn bb_term_set_event_cb(
     })
 }
 
-/// Like `extract_mode` but also folds in the `modifyOtherKeys` bit
-/// sourced from `BBTerm.modify_other_keys` (any non-zero level → bit
-/// set). Kept separate from `extract_mode` so the pure
-/// `TermMode → u32` mapping (exposed to callers that only see the
-/// alacritty mode) stays argument-clean.
-fn extract_mode_with_extras(bb: &BBTerm) -> u32 {
-    let mut m = extract_mode(bb.term.mode());
-    if bb.modify_other_keys > 0 {
-        m |= bb_mode::MODIFY_OTHER_KEYS;
-    }
-    m
-}
-
 /// Take an immutable snapshot of the current grid state.
 ///
 /// # Safety
@@ -1018,299 +1004,7 @@ pub unsafe extern "C" fn bb_term_take_snapshot(term: *mut BBTerm) -> *const BBSn
         if ffi_reentry_blocked("bb_term_take_snapshot") {
             return std::ptr::null();
         }
-        let bb = &mut *term;
-
-        // Drain the damage set BEFORE reading the grid. `Term::damage` takes
-        // `&mut self`; the grid borrow below is immutable, so the two can't
-        // coexist. Capturing damage first lets us hold it in a plain Vec<u16>
-        // that outlives the grid borrow. After reading, reset damage so the
-        // next `bb_term_input` cycle starts with a clean slate — the renderer
-        // gets one set of damaged rows per snapshot, not a growing union.
-        use alacritty_terminal::term::TermDamage;
-        let (damaged_rows, damage_full): (Vec<u16>, bool) = match bb.term.damage() {
-            TermDamage::Full => (Vec::new(), true),
-            TermDamage::Partial(iter) => (iter.map(|b| b.line as u16).collect(), false),
-        };
-        bb.term.reset_damage();
-
-        let palette = bb.term.colors();
-        let grid = bb.term.grid();
-
-        let rows = grid.screen_lines() as u16;
-        let cols = grid.columns() as u16;
-        let mut cells: Vec<BBCell> = Vec::with_capacity(rows as usize * cols as usize);
-
-        // OSC 8 hyperlink interning is split into two phases to keep the
-        // term borrow disjoint from the persistent cache mutation
-        // (audit RC-01). Phase 1 (here, under `&bb.term`) collects each
-        // unique URI as an owned `String` and records each cell's
-        // local-id (1..=N). Phase 2 (after the term borrow ends)
-        // resolves those local ids against `bb.uri_cstr_cache` and
-        // builds the final `links: Vec<Arc<CStr>>`. Translating cells
-        // from local id → final id then walks `cells` once.
-        //
-        // The earlier shape used `mem::take` to pluck the cache out of
-        // `bb` for the duration of the grid loop, then wrote it back at
-        // the end. Any panic between the take and the write-back left
-        // `bb.uri_cstr_cache` empty while `bb.uri_cache_bytes` retained
-        // its non-zero value — every future snapshot would then fail
-        // the byte-cap check against an empty cache, permanently
-        // dropping all OSC 8 attribution. The two-phase shape removes
-        // the take entirely.
-        //
-        // Caps preserved:
-        //   - distinct URIs per snapshot: `u16::MAX - 1 = 65534` (local ids)
-        //   - per-URI bytes: 4 KiB (covers any realistic http URL)
-        //   - total interned bytes ACROSS the persistent cache:
-        //     `OSC8_TOTAL_INTERN_BYTES_CAP` = 1 MiB. Over the ceiling,
-        //     new URIs drop to no-link rather than evict — eviction
-        //     would invalidate pointers held by still-live snapshots
-        //     that `Arc::clone`d the existing CStr.
-        //
-        // rust-core-3 F9: `links` stays empty until phase 2 sees that
-        // phase 1 actually collected URIs. The common case — ProMotion
-        // frame re-render with no OSC 8 on screen — pays zero heap
-        // allocations for the intern table.
-        const OSC8_URI_MAX: usize = 4096;
-        const OSC8_TOTAL_INTERN_BYTES_CAP: usize = 1024 * 1024;
-        // Phase 1 state: dedup'd URIs in insertion order, plus a parallel
-        // dedup map sharing the same allocation. Audit L-7 (2026-05-03):
-        // wrap each unique URI in `Arc<str>` once and clone the Arc into
-        // both the vec and the dedup map — cloning an Arc is one atomic
-        // increment, much cheaper than the prior shape that allocated a
-        // fresh `String` per side (one `to_owned`, one `clone`).
-        let mut phase1_uris: Vec<Arc<str>> = Vec::new();
-        let mut local_uri_to_id: std::collections::HashMap<Arc<str>, u16> =
-            std::collections::HashMap::new();
-        // Track whether this snapshot ran out of u16 link ids so we can
-        // emit a one-shot diagnostic AFTER the grid borrow ends (the
-        // `bb.osc8_id_exhaustion_logged` field can't be touched while
-        // `grid` borrows `bb.term`). Audit S2-014.
-        let mut osc8_id_exhausted_this_snapshot = false;
-        for indexed in grid.display_iter() {
-            let link_id: u16 = match indexed.cell.hyperlink() {
-                Some(h) => {
-                    let uri = h.uri();
-                    // alacritty's OSC 8 parser rejects empty URIs upstream, but
-                    // we defensively treat an empty uri as "no link".
-                    if uri.is_empty() || uri.len() > OSC8_URI_MAX {
-                        0
-                    } else if contains_bidi_or_invisible(uri.as_bytes()) {
-                        // Audit S4-001 / fix-#03. Parity with the OSC 7 path
-                        // (lib.rs:1146) and the OSC 0/2 title scrubber
-                        // (scrub_title_controls): drop attribution for URIs
-                        // carrying raw bidi-override / invisible scalars.
-                        // Foundation's URL(string:) percent-encodes them on
-                        // the Swift side, slipping the URI past the
-                        // containsPercentEncodedControlBytes regex (which
-                        // matches %00-%1F and %7F only); QuickLook / future
-                        // chrome surfaces that render the raw stored bytes
-                        // would honour U+202E (RIGHT-TO-LEFT OVERRIDE) and
-                        // visually flip the URL the user reads. Rejecting
-                        // here matches the OSC 7 posture rather than relying
-                        // on every display-side consumer to scrub.
-                        0
-                    } else if let Some(&id) = local_uri_to_id.get(uri) {
-                        id
-                    } else if phase1_uris.len() + 1 >= u16::MAX as usize {
-                        // Out of per-snapshot ids — drop attribution.
-                        // 65 534 links per snapshot is already well past
-                        // any realistic TUI; reaching the cap implies a
-                        // hostile remote emitting unique per-cell URIs.
-                        // Latch a one-shot breadcrumb (deferred until
-                        // after the grid borrow ends) so support
-                        // engineers triaging "my OSC 8 links stopped
-                        // working" have a signal. Audit S2-014.
-                        osc8_id_exhausted_this_snapshot = true;
-                        0
-                    } else {
-                        let id = (phase1_uris.len() + 1) as u16; // 1-based; 0 = no link
-                        let owned: Arc<str> = Arc::from(uri);
-                        local_uri_to_id.insert(Arc::clone(&owned), id);
-                        phase1_uris.push(owned);
-                        id
-                    }
-                }
-                None => 0,
-            };
-            // Underline colour (CSI 58): alacritty stores as Option<Color>.
-            // None → sentinel (shader falls back to fg). Some(c) → resolve
-            // through the palette, same as fg/bg so indexed colours route
-            // correctly.
-            let underline_color = match indexed.cell.underline_color() {
-                Some(c) => color_to_rgb(&c, palette),
-                None => UNDERLINE_COLOR_UNSET,
-            };
-            // Emoji-presentation: a text-default base carrying a VS16 (U+FE0F)
-            // renders as the colour emoji (base + VS16 grapheme), not the
-            // monochrome base scalar. Width parity is already handled by the
-            // alacritty Term::input promotion (WIDE_CHAR); this flag only
-            // drives the renderer's colour / glyph selection.
-            let mut flags = extract_cell_flags(indexed.flags);
-            if let Some(zw) = indexed.cell.zerowidth() {
-                if zw.contains(&'\u{FE0F}') {
-                    flags |= cell_flags::EMOJI_PRESENTATION;
-                }
-            }
-            cells.push(BBCell {
-                ch: indexed.c as u32,
-                fg: color_to_rgb(&indexed.fg, palette),
-                bg: color_to_rgb(&indexed.bg, palette),
-                flags,
-                link_id,
-                underline_color,
-            });
-        }
-
-        let cursor_point = grid.cursor.point;
-        let cursor_pending_wrap = grid.cursor.input_needs_wrap;
-        // cursor_point.line.0 is a 0-based screen row (Line wraps i32; visible rows are 0..rows-1).
-        // cursor_point.column.0 is a 0-based column (Column wraps usize).
-        let cursor_row = cursor_point.line.0.max(0) as u16;
-        // column.0 is a usize; saturate at u16::MAX rather than truncating, so
-        // the cast can never silently wrap to a small column. Symmetric with
-        // the row's `.max(0)` clamp above and the display_offset/history_size
-        // `.min(u32::MAX as usize)` clamps below. Bounded by MAX_DIM today, but
-        // a defensive clamp keeps the snapshot's cursor honest unconditionally.
-        // Audit S6-002.
-        let cursor_col = cursor_point.column.0.min(u16::MAX as usize) as u16;
-        // display_offset: lines scrolled above the live grid. When > 0 the
-        // `cells` above are from scrollback; the live cursor at `cursor_row`
-        // is actually `cursor_row + display_offset` from the top of the
-        // visible viewport — and may be below it entirely.
-        let display_offset = grid.display_offset().min(u32::MAX as usize) as u32;
-        let history_size = grid.history_size().min(u32::MAX as usize) as u32;
-        let lines_scrolled = bb.term.primary_lines_scrolled();
-        // Drop the `grid`/`palette` borrows (and by extension the `&bb.term`
-        // borrow) before we touch `bb.uri_cstr_cache` mutably below.
-        let _ = grid;
-        let _ = palette;
-        // `local_uri_to_id` lives and dies with this snapshot.
-        drop(local_uri_to_id);
-
-        // Deferred S2-014 breadcrumb: if any cell hit the u16 link-id
-        // ceiling during phase 1, log exactly once per BBTerm session.
-        // Mutating bb here is sound because the grid borrow ended above.
-        if osc8_id_exhausted_this_snapshot && !bb.osc8_id_exhaustion_logged {
-            bb.osc8_id_exhaustion_logged = true;
-            eprintln!(
-                "[blackbird_core] OSC 8 link-id cap (u16) saturated for this snapshot — \
-                 attribution silently dropped on cells past 65 534 distinct URIs. \
-                 Symptom: 'links stopped working'. One-shot per session."
-            );
-        }
-
-        // Phase 2: intern the URIs collected in phase 1 against the
-        // persistent cache. Entries survive across snapshots
-        // (rust-core-3 F1): the same URI appearing frame after frame is
-        // an `Arc::clone` (one atomic increment, zero allocation) on
-        // the second sighting. New URIs dropped silently once the
-        // global byte footprint crosses `OSC8_TOTAL_INTERN_BYTES_CAP`
-        // (1 MiB).
-        //
-        // `links` is empty when phase 1 collected zero URIs (the common
-        // case). When non-empty, `links[0]` is the "no link" sentinel
-        // so cell `link_id == 0` always means "no OSC 8 attribution"
-        // and subsequent URIs get 1-based final indices (matching the
-        // C ABI documented in `bb_snap_link_url`).
-        let mut links: Vec<Arc<std::ffi::CStr>> = Vec::new();
-        // `local_to_final[local_id]` = final id (or 0 if interning
-        // failed for this URI). Built in lockstep with `phase1_uris`,
-        // so `local_to_final[0]` is unused (local id 0 = no link).
-        let mut local_to_final: Vec<u16> = Vec::new();
-        if !phase1_uris.is_empty() {
-            let sentinel: Arc<std::ffi::CStr> = std::ffi::CString::default().into();
-            links.push(sentinel);
-            local_to_final.push(0); // local 0 reserved for "no link"
-            for uri in &phase1_uris {
-                let uri_str: &str = uri.as_ref();
-                let cstr_arc: Option<Arc<std::ffi::CStr>> =
-                    if let Some(existing) = bb.uri_cstr_cache.get(uri_str).cloned() {
-                        Some(existing)
-                    } else if bb.uri_cache_bytes.saturating_add(uri_str.len())
-                        > OSC8_TOTAL_INTERN_BYTES_CAP
-                    {
-                        None
-                    } else {
-                        match std::ffi::CString::new(uri_str) {
-                            Ok(cs) => {
-                                let arc: Arc<std::ffi::CStr> = cs.into();
-                                bb.uri_cstr_cache
-                                    .insert(uri_str.to_owned(), Arc::clone(&arc));
-                                bb.uri_cache_bytes += uri_str.len();
-                                Some(arc)
-                            }
-                            Err(_) => None,
-                        }
-                    };
-                match cstr_arc {
-                    Some(arc) => {
-                        let final_id = links.len() as u16;
-                        links.push(arc);
-                        local_to_final.push(final_id);
-                    }
-                    None => local_to_final.push(0),
-                }
-            }
-            // Translate every cell's local id to its final id. Cells
-            // with local id 0 stay 0 (no link). Cells whose URI failed
-            // to intern (byte-cap exceeded, NUL in URI) get 0 too —
-            // matching the previous shape's "drop attribution silently"
-            // semantics.
-            for cell in cells.iter_mut() {
-                let local = cell.link_id as usize;
-                if local != 0 && local < local_to_final.len() {
-                    cell.link_id = local_to_final[local];
-                }
-            }
-        }
-        let term_mode = bb.term.mode();
-        let mode = extract_mode_with_extras(bb);
-        // DECTCEM (ESC [ ? 25 h/l) toggles SHOW_CURSOR. Previously we
-        // hardcoded true, so a TUI asking for a hidden cursor (less in
-        // page view, fzf, nvim during paint) would still get drawn by
-        // the Metal renderer.
-        let cursor_visible = term_mode.contains(TermMode::SHOW_CURSOR);
-        // Read current DECSCUSR cursor shape. alacritty_terminal 0.26 exposes
-        // `Term::cursor_style() -> CursorStyle` whose `.shape` is one of
-        // Block/Underline/Beam/HollowBlock/Hidden. We pack to a stable u8:
-        // 0 = block (default), 1 = bar/beam, 2 = underline, 3 = hidden.
-        // HollowBlock renders as block in v1 (no dedicated outline shape).
-        let cursor_shape: u8 = {
-            use alacritty_terminal::vte::ansi::CursorShape;
-            match bb.term.cursor_style().shape {
-                CursorShape::Block => 0,
-                CursorShape::Beam => 1,
-                CursorShape::Underline => 2,
-                CursorShape::Hidden => 3,
-                CursorShape::HollowBlock => 0,
-            }
-        };
-        let owned = BBSnapOwned::new(
-            cols,
-            rows,
-            (cursor_col, cursor_row, cursor_visible),
-            cursor_pending_wrap,
-            display_offset,
-            history_size,
-            lines_scrolled,
-            mode,
-            cursor_shape,
-            cells,
-            links,
-            damaged_rows,
-            damage_full,
-        );
-        // Expose the public `snap` field (first field at offset 0). Cast the
-        // BBSnapOwned pointer rather than forming `&(*owned_ptr).snap`: snap is
-        // the first `#[repr(C)]` field (identical address), but a `&BBSnap`
-        // reference would narrow the Stacked/Tree Borrows tag to snap's extent
-        // [0x0..size_of::<BBSnap>()), making the later `rc` access in
-        // bb_snap_retain / bb_snap_release (a field PAST snap) an out-of-range
-        // retag → UB. The pointer cast preserves provenance over the whole
-        // allocation, so the rc field is legally reachable. (miri H-5 surface.)
-        let owned_ptr = Box::into_raw(owned);
-        owned_ptr as *const BBSnap
+        snapshot(&mut *term)
     })
 }
 

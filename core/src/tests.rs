@@ -2,6 +2,8 @@ use super::*;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::vte::ansi::{Handler, Rgb};
 
+use crate::scrub::scrub_title_controls;
+
 #[test]
 fn alacritty_terminal_is_linked() {
     let _ = std::mem::size_of::<alacritty_terminal::term::Config>();
