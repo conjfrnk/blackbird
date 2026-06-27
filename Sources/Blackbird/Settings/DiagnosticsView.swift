@@ -30,6 +30,10 @@ struct DiagnosticsView: View {
     /// user to Reveal in Finder and attach manually.
     private static let inlineLoadCapBytes: Int64 = 16 * 1024 * 1024
 
+    /// Support address for the "Email Diagnostics" mailto flow. One definition
+    /// rather than inlined in the URL string (REFACTOR.md Area 7).
+    private static let supportEmail = "conjfrnk@gmail.com"
+
     init() {}
 
     var body: some View {
@@ -396,7 +400,7 @@ struct DiagnosticsView: View {
             let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "+&?#=/"))
             guard let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: allowed),
                   let encodedBody = body.addingPercentEncoding(withAllowedCharacters: allowed),
-                  let url = URL(string: "mailto:conjfrnk@gmail.com?subject=\(encodedSubject)&body=\(encodedBody)") else {
+                  let url = URL(string: "mailto:\(Self.supportEmail)?subject=\(encodedSubject)&body=\(encodedBody)") else {
                 lastError = "Report copied to clipboard. Could not construct the mail URL — paste manually into a new message."
                 return
             }
