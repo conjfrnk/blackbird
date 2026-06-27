@@ -39,61 +39,66 @@ final class SettingsWindowController {
     /// `Preferences.shared` via `@ObservedObject`, so the cached view picks
     /// up any preference change automatically; no need to rebuild it.
     func show() {
-        if window == nil {
-            let w = makeWindow()
-            let h = NSHostingController(rootView: SettingsView())
-            // IMPORTANT: set `contentView`, not `contentViewController`.
-            // Assigning a fresh NSHostingController as contentViewController
-            // triggers NSWindow to adopt the controller's preferredContentSize,
-            // which is (0, 0) until SwiftUI first lays out. The window
-            // collapses to titlebar-only (~0×28 content), nothing ever draws,
-            // and the user sees an empty white window. Keep `host` as a
-            // property so SwiftUI's view controller lifecycle stays alive.
-            //
-            // Liquid Glass: we wrap the hosting controller in a container
-            // whose backing is an NSVisualEffectView with the `.sidebar`
-            // material. On macOS 26 (Tahoe) this material renders as native
-            // Liquid Glass; on earlier systems it falls back to the classic
-            // translucent sidebar blur so the window still looks modern.
-            // `.fullSizeContentView` on the window (see `makeWindow`) lets
-            // the glass extend all the way under the titlebar as one
-            // continuous surface — the hallmark of the Liquid Glass look.
-            let content = NSView(frame: NSRect(origin: .zero, size: w.frame.size))
-            content.autoresizingMask = [.width, .height]
-            let blur = NSVisualEffectView(frame: content.bounds)
-            blur.autoresizingMask = [.width, .height]
-            blur.material = .sidebar
-            blur.blendingMode = .behindWindow
-            blur.state = .active
-            content.addSubview(blur)
-            h.view.frame = content.bounds
-            h.view.autoresizingMask = [.width, .height]
-            content.addSubview(h.view)
-            w.contentView = content
-            window = w
-            host = h
-        }
+        if window == nil { buildContent() }
         guard let w = window else { return }
-        if !w.isVisible {
-            // Audit M-18 / MS-2 (2026-04-29): only center the window
-            // when there's no autosaved frame yet. Calling `center()`
-            // on every reopen overwrites the frame the user just
-            // dragged into place — `setFrameAutosaveName` had already
-            // restored that frame at window construction, so a center
-            // here clobbers it and the autosave records the new
-            // (centered) origin a moment later. Cocoa keys autosaved
-            // frames under `NSWindow Frame <autosaveName>` in the
-            // standard defaults; if that key is missing, we know the
-            // user has never positioned this window and centering is
-            // the right first-show behaviour.
-            let autosaveDefaultsKey = "NSWindow Frame \(SettingsWindowController.frameAutosaveName)"
-            if UserDefaults.standard.string(forKey: autosaveDefaultsKey) == nil {
-                w.center()
-            }
-            // else: setFrameAutosaveName already applied the saved origin.
-        }
+        applyFirstShowFrame(w)
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Build the window + SwiftUI host (wrapped in the Liquid-Glass blur
+    /// container) exactly once. Uses `contentView` — NOT
+    /// contentViewController, which collapses the window to titlebar-only —
+    /// and keeps `host` alive so SwiftUI's lifecycle survives.
+    private func buildContent() {
+        let w = makeWindow()
+        let h = NSHostingController(rootView: SettingsView())
+        // IMPORTANT: set `contentView`, not `contentViewController`.
+        // Assigning a fresh NSHostingController as contentViewController
+        // triggers NSWindow to adopt the controller's preferredContentSize,
+        // which is (0, 0) until SwiftUI first lays out. The window
+        // collapses to titlebar-only (~0×28 content), nothing ever draws,
+        // and the user sees an empty white window. Keep `host` as a
+        // property so SwiftUI's view controller lifecycle stays alive.
+        //
+        // Liquid Glass: we wrap the hosting controller in a container
+        // whose backing is an NSVisualEffectView with the `.sidebar`
+        // material. On macOS 26 (Tahoe) this material renders as native
+        // Liquid Glass; on earlier systems it falls back to the classic
+        // translucent sidebar blur so the window still looks modern.
+        // `.fullSizeContentView` on the window (see `makeWindow`) lets
+        // the glass extend all the way under the titlebar as one
+        // continuous surface — the hallmark of the Liquid Glass look.
+        let content = NSView(frame: NSRect(origin: .zero, size: w.frame.size))
+        content.autoresizingMask = [.width, .height]
+        let blur = NSVisualEffectView(frame: content.bounds)
+        blur.autoresizingMask = [.width, .height]
+        blur.material = .sidebar
+        blur.blendingMode = .behindWindow
+        blur.state = .active
+        content.addSubview(blur)
+        h.view.frame = content.bounds
+        h.view.autoresizingMask = [.width, .height]
+        content.addSubview(h.view)
+        w.contentView = content
+        window = w
+        host = h
+    }
+
+    /// First-show frame policy: center only when no frame was ever autosaved
+    /// (else setFrameAutosaveName already restored the user's position, and
+    /// centering would clobber it). Audit M-18 / MS-2.
+    private func applyFirstShowFrame(_ w: NSWindow) {
+        guard !w.isVisible else { return }
+        if UserDefaults.standard.string(forKey: Self.autosaveDefaultsKey) == nil {
+            w.center()
+        }
+        // else: setFrameAutosaveName already applied the saved origin.
+    }
+
+    /// Cocoa keys the autosaved frame under `NSWindow Frame <autosaveName>`.
+    private static var autosaveDefaultsKey: String {
+        "NSWindow Frame \(frameAutosaveName)"
     }
 
     /// The autosave name the Settings window registers with AppKit.
