@@ -1429,140 +1429,12 @@ public final class TerminalSession: ObservableObject {
             // coreQueue.async site for `feed`.
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                switch event {
-                case .title(let t):
-                    // Route through applyOscTitle so a user-set override
-                    // isn't trampled by a late shell OSC 0/2, and so the
-                    // .terminalSessionTitleDidChange notification fires.
-                    self.applyOscTitle(t)
-                case .bell:
-                    self.bellCounter &+= 1
-                case .ptyWrite:
-                    break  // handled above, before the main hop
-                case .osc52Clipboard(let text):
-                    // alacritty_terminal 0.26 already decodes the OSC 52
-                    // payload: ClipboardStore(target, plaintext). The
-                    // `target` char (c/p/q/s/0-7) isn't surfaced through
-                    // the C ABI — we always write to NSPasteboard.general,
-                    // which is the only clipboard macOS exposes anyway.
-                    //
-                    // The previous implementation assumed `text` was
-                    // "target;base64" and stripped the first ';' then
-                    // base64-decoded the tail. With the real payload that
-                    // silently dropped every write (no ';' in decoded
-                    // plaintext, or base64 decode failed on the text
-                    // after it), so OSC 52 never actually pasted.
-                    //
-                    // Treat an empty payload as a clipboard-clear (OSC 52
-                    // ; c ; ST). Silently drop when the pref is off —
-                    // a misbehaving remote shouldn't stuff arbitrary
-                    // bytes into the user's clipboard or crash the
-                    // session.
-                    //
-                    // L-14: read the captured `osc52EnabledAtDispatch`
-                    // (snapshotted on coreQueue before the hop), not
-                    // `Preferences.shared` directly. A user disabling
-                    // OSC 52 mid-hop must NOT have the now-disabled
-                    // payload still land — and a user enabling it
-                    // mid-hop must NOT see a payload they couldn't have
-                    // intercepted. Either direction, the captured value
-                    // is the one consistent with the event-handler
-                    // ordering and the user's intent at dispatch time.
-                    guard osc52EnabledAtDispatch else { break }
-                    // SFH-005: oversize check + forensic breadcrumb
-                    // already fired on coreQueue before the main hop
-                    // (see osc52OversizeAtDispatch). Honour the captured
-                    // decision here to skip the NSPasteboard write —
-                    // diagnostic is in the unified log even if this hop
-                    // landed on a terminating session.
-                    if osc52OversizeAtDispatch { break }
-                    // Scrub + write goes through ClipboardWriter so the model
-                    // doesn't touch NSPasteboard directly; the symmetric
-                    // control/bidi scrub (dirty-enough-to-strip-on-paste-in is
-                    // dirty-enough-on-paste-out) lives there.
-                    ClipboardWriter.writeOSC52(text)
-                case .cursorShape:
-                    // Cursor shape is pinned by `Preferences.shared.cursorShape`
-                    // (Settings → Cursor) and resolved into the renderer via
-                    // `MetalRenderer.setCursorShapeOverride`. Shell-driven
-                    // DECSCUSR is intentionally ignored when an override is
-                    // active so the user's preference wins over a TUI's
-                    // assumptions about the host terminal.
-                    break
-                case .cwdChanged(let path):
-                    // Rust core already gates on scheme=file and validates
-                    // UTF-8; the payload is a ready-to-use filesystem path.
-                    // Store on the main thread so reads from ⌘T / ⌘N stay
-                    // trivially race-free (those actions also run on main).
-                    //
-                    // SSH-trust gate (audit synthesis #4 / KNOWN_ISSUES
-                    // "OSC 7 trust over SSH"): trust the shell-reported
-                    // cwd ONLY when the foreground process tree
-                    // classifies as `.local`. A `.remote` (ssh, mosh-
-                    // client, docker exec, kubectl exec, …) means the
-                    // path describes the remote fs; `.unknown` means we
-                    // failed to classify (PTY closing, syscall error,
-                    // BFS cap hit). Both cases drop the OSC 7 payload
-                    // — fail-closed posture, opposite of the advisory
-                    // `hasForegroundChild` / `foregroundWorkingDirectory`
-                    // helpers.
-                    //
-                    // Cost: one syscall to read fg pgroup + at most ~256
-                    // node BFS (capped). Per `cd` only; well under the
-                    // frame budget on main.
-                    let classification = self.classifyForegroundNamespace()
-                    switch classification {
-                    case .local:
-                        self.lastKnownCwd = path
-                        // Re-arm the L3 latch on each .local transition so
-                        // a subsequent .local → .unknown cycle logs again.
-                        // Without this, a real-world ssh-disconnect-then-
-                        // reconnect-then-disconnect-again leaves only the
-                        // first breadcrumb and support engineers see no
-                        // log for the second loss.
-                        self.loggedUnknownNamespaceDrop = false
-                    case .remote:
-                        break
-                    case .unknown(let reason):
-                        // Audit L3: drop OSC 7 silently on every emit
-                        // would leave a support engineer with no
-                        // breadcrumb when ⌘T inheritance "isn't picking
-                        // up the cwd". Surface the reason once per
-                        // .local→.unknown transition so unified-log
-                        // readers see why without flooding on every cd.
-                        if !self.loggedUnknownNamespaceDrop {
-                            self.loggedUnknownNamespaceDrop = true
-                            Self.sessionLogger.notice(
-                                "OSC 7 dropped: foreground namespace classified .unknown (\(reason, privacy: .public)); ⌘T cwd inheritance disabled until classification recovers"
-                            )
-                        }
-                    }
-                case .promptMark(let kind, let exitCode):
-                    // Shell integration: A = prompt start, B = command start,
-                    // C = output start, D = command end (with exit code).
-                    self.lastPromptMark = (kind, exitCode)
-                    // Record kind-A positions so the user can jump back to
-                    // previous prompts. A fresh snapshot pins (history, row)
-                    // at this instant — the main-queue hop means the core
-                    // queue may have advanced slightly, but missing a line
-                    // or two of drift is negligible next to a multi-screen
-                    // scrollback jump.
-                    if kind == .promptStart {
-                        self.recordPromptStart(eventClearEpoch: clearEpochAtDispatch)
-                    }
-                case .fatal(let msg):
-                    // Surface as a title prefix for visibility — the unified
-                    // log carries the full message via os.Logger, but a title
-                    // prefix is the only diagnostic surface most users
-                    // notice. Fatal must display regardless of any user-set
-                    // override AND must not let a stale override resurface
-                    // later. Clear the override and route through the state
-                    // machine so the oscTitle / titleOverride / displayTitle
-                    // invariant holds — single writer, no divergence between
-                    // `title` and `displayTitle`.
-                    self.titleOverride = nil
-                    self.applyOscTitle("[fatal] core panic: \(msg)")
-                }
+                self.handleCoreEventOnMain(
+                    event,
+                    osc52EnabledAtDispatch: osc52EnabledAtDispatch,
+                    osc52OversizeAtDispatch: osc52OversizeAtDispatch,
+                    clearEpochAtDispatch: clearEpochAtDispatch
+                )
             }
         }
 
@@ -1613,6 +1485,155 @@ public final class TerminalSession: ObservableObject {
             if let snap = self.bbterm.snapshot() {
                 self.publishPendingSnapshot(snap)
             }
+        }
+    }
+
+    /// Apply a core event on the MAIN thread. Split out of `wire()`'s
+    /// `bbterm.onEvent` handler (REFACTOR.md Area 4). The dispatch-time gates
+    /// that MUST be read on coreQueue at event-fire time — the OSC 52
+    /// enabled/oversize decision (L-14 / SFH-005) and the clear epoch (S5-008)
+    /// — are captured before the main hop and threaded in here, so this method
+    /// never re-reads `Preferences.shared` or `clearEpochCore` (which could
+    /// have changed during the hop).
+    private func handleCoreEventOnMain(
+        _ event: BBTerm.Event,
+        osc52EnabledAtDispatch: Bool,
+        osc52OversizeAtDispatch: Bool,
+        clearEpochAtDispatch: UInt64
+    ) {
+        switch event {
+        case .title(let t):
+            // Route through applyOscTitle so a user-set override
+            // isn't trampled by a late shell OSC 0/2, and so the
+            // .terminalSessionTitleDidChange notification fires.
+            self.applyOscTitle(t)
+        case .bell:
+            self.bellCounter &+= 1
+        case .ptyWrite:
+            break  // handled above, before the main hop
+        case .osc52Clipboard(let text):
+            // alacritty_terminal 0.26 already decodes the OSC 52
+            // payload: ClipboardStore(target, plaintext). The
+            // `target` char (c/p/q/s/0-7) isn't surfaced through
+            // the C ABI — we always write to NSPasteboard.general,
+            // which is the only clipboard macOS exposes anyway.
+            //
+            // The previous implementation assumed `text` was
+            // "target;base64" and stripped the first ';' then
+            // base64-decoded the tail. With the real payload that
+            // silently dropped every write (no ';' in decoded
+            // plaintext, or base64 decode failed on the text
+            // after it), so OSC 52 never actually pasted.
+            //
+            // Treat an empty payload as a clipboard-clear (OSC 52
+            // ; c ; ST). Silently drop when the pref is off —
+            // a misbehaving remote shouldn't stuff arbitrary
+            // bytes into the user's clipboard or crash the
+            // session.
+            //
+            // L-14: read the captured `osc52EnabledAtDispatch`
+            // (snapshotted on coreQueue before the hop), not
+            // `Preferences.shared` directly. A user disabling
+            // OSC 52 mid-hop must NOT have the now-disabled
+            // payload still land — and a user enabling it
+            // mid-hop must NOT see a payload they couldn't have
+            // intercepted. Either direction, the captured value
+            // is the one consistent with the event-handler
+            // ordering and the user's intent at dispatch time.
+            guard osc52EnabledAtDispatch else { break }
+            // SFH-005: oversize check + forensic breadcrumb
+            // already fired on coreQueue before the main hop
+            // (see osc52OversizeAtDispatch). Honour the captured
+            // decision here to skip the NSPasteboard write —
+            // diagnostic is in the unified log even if this hop
+            // landed on a terminating session.
+            if osc52OversizeAtDispatch { break }
+            // Scrub + write goes through ClipboardWriter so the model
+            // doesn't touch NSPasteboard directly; the symmetric
+            // control/bidi scrub (dirty-enough-to-strip-on-paste-in is
+            // dirty-enough-on-paste-out) lives there.
+            ClipboardWriter.writeOSC52(text)
+        case .cursorShape:
+            // Cursor shape is pinned by `Preferences.shared.cursorShape`
+            // (Settings → Cursor) and resolved into the renderer via
+            // `MetalRenderer.setCursorShapeOverride`. Shell-driven
+            // DECSCUSR is intentionally ignored when an override is
+            // active so the user's preference wins over a TUI's
+            // assumptions about the host terminal.
+            break
+        case .cwdChanged(let path):
+            // Rust core already gates on scheme=file and validates
+            // UTF-8; the payload is a ready-to-use filesystem path.
+            // Store on the main thread so reads from ⌘T / ⌘N stay
+            // trivially race-free (those actions also run on main).
+            //
+            // SSH-trust gate (audit synthesis #4 / KNOWN_ISSUES
+            // "OSC 7 trust over SSH"): trust the shell-reported
+            // cwd ONLY when the foreground process tree
+            // classifies as `.local`. A `.remote` (ssh, mosh-
+            // client, docker exec, kubectl exec, …) means the
+            // path describes the remote fs; `.unknown` means we
+            // failed to classify (PTY closing, syscall error,
+            // BFS cap hit). Both cases drop the OSC 7 payload
+            // — fail-closed posture, opposite of the advisory
+            // `hasForegroundChild` / `foregroundWorkingDirectory`
+            // helpers.
+            //
+            // Cost: one syscall to read fg pgroup + at most ~256
+            // node BFS (capped). Per `cd` only; well under the
+            // frame budget on main.
+            let classification = self.classifyForegroundNamespace()
+            switch classification {
+            case .local:
+                self.lastKnownCwd = path
+                // Re-arm the L3 latch on each .local transition so
+                // a subsequent .local → .unknown cycle logs again.
+                // Without this, a real-world ssh-disconnect-then-
+                // reconnect-then-disconnect-again leaves only the
+                // first breadcrumb and support engineers see no
+                // log for the second loss.
+                self.loggedUnknownNamespaceDrop = false
+            case .remote:
+                break
+            case .unknown(let reason):
+                // Audit L3: drop OSC 7 silently on every emit
+                // would leave a support engineer with no
+                // breadcrumb when ⌘T inheritance "isn't picking
+                // up the cwd". Surface the reason once per
+                // .local→.unknown transition so unified-log
+                // readers see why without flooding on every cd.
+                if !self.loggedUnknownNamespaceDrop {
+                    self.loggedUnknownNamespaceDrop = true
+                    Self.sessionLogger.notice(
+                        "OSC 7 dropped: foreground namespace classified .unknown (\(reason, privacy: .public)); ⌘T cwd inheritance disabled until classification recovers"
+                    )
+                }
+            }
+        case .promptMark(let kind, let exitCode):
+            // Shell integration: A = prompt start, B = command start,
+            // C = output start, D = command end (with exit code).
+            self.lastPromptMark = (kind, exitCode)
+            // Record kind-A positions so the user can jump back to
+            // previous prompts. A fresh snapshot pins (history, row)
+            // at this instant — the main-queue hop means the core
+            // queue may have advanced slightly, but missing a line
+            // or two of drift is negligible next to a multi-screen
+            // scrollback jump.
+            if kind == .promptStart {
+                self.recordPromptStart(eventClearEpoch: clearEpochAtDispatch)
+            }
+        case .fatal(let msg):
+            // Surface as a title prefix for visibility — the unified
+            // log carries the full message via os.Logger, but a title
+            // prefix is the only diagnostic surface most users
+            // notice. Fatal must display regardless of any user-set
+            // override AND must not let a stale override resurface
+            // later. Clear the override and route through the state
+            // machine so the oscTitle / titleOverride / displayTitle
+            // invariant holds — single writer, no divergence between
+            // `title` and `displayTitle`.
+            self.titleOverride = nil
+            self.applyOscTitle("[fatal] core panic: \(msg)")
         }
     }
 
