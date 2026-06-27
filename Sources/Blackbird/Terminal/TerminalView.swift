@@ -272,19 +272,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             if oldValue != selection { setNeedsDisplay(bounds) }
         }
     }
-    var isDragging = false                        // internal for TerminalView+Mouse.swift
-    /// The fully-resolved word (start, end) selected by the initiating
-    /// double-click, captured ONCE in `mouseDown` for `.word` mode while
-    /// the anchor is guaranteed on-screen. Word-drag extension unions THIS
-    /// fixed range with the word under the live cursor. Capturing the
-    /// resolved range (rather than re-running `wordRange` on a stored point
-    /// every tick) is deliberate: an autoscroll drag can push the anchor
-    /// off the viewport, where `wordRange` returns nil — re-resolving there
-    /// would collapse the original word to a single cell. Storing the
-    /// resolved range makes that failure mode unrepresentable. Cleared /
-    /// re-captured on every fresh mouseDown. Internal for
-    /// TerminalView+Mouse.swift. Audit double-click-drag word-extend.
-    var wordDragAnchorWord: (BufferPoint, BufferPoint)?  // internal for TerminalView+Mouse.swift
+
+    /// Owns the mouse-driven selection gesture machine — the drag state
+    /// (`isDragging`, the `.word`-drag anchor) + the click/drag/word-line-extend
+    /// logic that was in `TerminalView+Mouse.swift`. The view's mouse overrides
+    /// forward their select branch here (`beginSelection`/`endDrag`/`handleDrag`)
+    /// AFTER the URL-open / window-drag / mouse-reporting early returns; the
+    /// snapshot-reconcile path reads/writes `selectionController.wordDragAnchorWord`.
+    /// The `selection` property stays on the view (public API, drawn, a render
+    /// parameter). `lazy` because it needs `self`; back-ref is `unowned`.
+    lazy var selectionController = SelectionController(view: self)
 
     /// Drives edge-autoscroll while the user drags a selection past the
     /// top/bottom of the viewport. AppKit only delivers `mouseDragged` on
@@ -955,14 +952,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if let sel = selection, let prev = currentSnapshot {
             let result = SelectionReconciler.reconciled(
                 selection: sel,
-                wordDragAnchor: wordDragAnchorWord,
+                wordDragAnchor: selectionController.wordDragAnchorWord,
                 prev: prev,
                 next: snapshot
             )
             // `selection`'s didSet has a same-value guard, so re-assigning an
             // unchanged value is a no-op (no spurious setNeedsDisplay).
             selection = result.selection
-            wordDragAnchorWord = result.wordDragAnchor
+            selectionController.wordDragAnchorWord = result.wordDragAnchor
         }
         self.currentSnapshot = snapshot
         // If ⌘ is held while the grid reshapes under the pointer (scrolling

@@ -56,6 +56,7 @@
 		47BA9441F21CF19E830A8865 /* ScrollIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D3DA02452AD49F357F6F80E /* ScrollIndicatorTests.swift */; };
 		47C98A15F7530D2D7BC49CA3 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */; };
 		4D998CBEB54F5EBA512EE58F /* TerminalView+IME.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */; };
+		52310493C35874C62D8BC37D /* SelectionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20CE086EA354443743E30486 /* SelectionController.swift */; };
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
 		55E12C125E67E7550C67E506 /* RecordingPTY.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21725BF76F3013670913A84E /* RecordingPTY.swift */; };
 		580317F6EA8ED27E02060F8D /* SwiftSessionRSSReturnsToBaselineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDAF66C9AB7E24C8E9869235 /* SwiftSessionRSSReturnsToBaselineTests.swift */; };
@@ -228,6 +229,7 @@
 		173C25905C5C1D2D008F3EEA /* TerminalSessionBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionBoundaryTests.swift; sourceTree = "<group>"; };
 		189F9BFCE6B0F46BED00E135 /* MouseReportEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseReportEncoder.swift; sourceTree = "<group>"; };
 		1CA9E6BAC56657CC6C61F678 /* TerminalView+ContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+ContextMenu.swift"; sourceTree = "<group>"; };
+		20CE086EA354443743E30486 /* SelectionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionController.swift; sourceTree = "<group>"; };
 		20D4A2742422F440F7C65BB5 /* IMEAstralRectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEAstralRectTests.swift; sourceTree = "<group>"; };
 		21725BF76F3013670913A84E /* RecordingPTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingPTY.swift; sourceTree = "<group>"; };
 		22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdResolver.swift; sourceTree = "<group>"; };
@@ -612,6 +614,7 @@
 				7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */,
 				00E03399349EE1327FBF8F2F /* Selection.swift */,
 				51BD18F9A4B904F415752829 /* SelectionAutoscroller.swift */,
+				20CE086EA354443743E30486 /* SelectionController.swift */,
 				A28AB63EC9CBA4574314FEC0 /* SelectionReconciler.swift */,
 				E7BBE3439BF3FFEC73D5983E /* SessionTitleState.swift */,
 				76F1C34DADDEA264B9A8AD55 /* ShellLineEditor.swift */,
@@ -881,6 +884,7 @@
 				C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */,
 				C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */,
 				9F19C00C0A9328C8DF97E23F /* SelectionAutoscroller.swift in Sources */,
+				52310493C35874C62D8BC37D /* SelectionController.swift in Sources */,
 				EC6FA2D81E65611AC200F330 /* SelectionReconciler.swift in Sources */,
 				468B067308988E53BACCC99B /* SessionTitleState.swift in Sources */,
 				EEA685668C43AB5E5DECAAED /* SettingsView.swift in Sources */,

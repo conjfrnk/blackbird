@@ -1,7 +1,7 @@
 import XCTest
 @testable import Blackbird
 
-/// Tests for `TerminalView.wordDragSelectionEndpoints(anchorWord:cursorPoint:in:displayOffset:)`.
+/// Tests for `SelectionController.wordDragSelectionEndpoints(anchorWord:cursorPoint:in:displayOffset:)`.
 ///
 /// This computes the two endpoints for a double-click-drag WORD selection.
 /// After a double-click selects a word, dragging extends the selection
@@ -88,7 +88,7 @@ final class WordDragExtendTests: XCTestCase {
             "test anchor must land inside a word",
             file: file, line: line
         )
-        let (a, c) = TerminalView.wordDragSelectionEndpoints(
+        let (a, c) = SelectionController.wordDragSelectionEndpoints(
             anchorWord: anchorWord,
             cursorPoint: cursor,
             in: snap,
@@ -277,7 +277,7 @@ final class WordDragExtendTests: XCTestCase {
         // double-clicked word, on the same line as the selection anchor.
         let wordStart = BufferPoint(line: anchorLine, col: 6)
         let wordEnd = BufferPoint(line: anchorLine, col: 10)
-        view.wordDragAnchorWord = (wordStart, wordEnd)
+        view.selectionController.wordDragAnchorWord = (wordStart, wordEnd)
 
         // Scroll output: feed more lines than fit, advancing linesScrolled.
         // cols/rows unchanged, no alt-screen, history already populated.
@@ -305,7 +305,7 @@ final class WordDragExtendTests: XCTestCase {
                           + "this is the lockstep the word anchor must match")
 
         // The fix under test: wordDragAnchorWord rotated by the SAME delta.
-        let rotatedWord = try XCTUnwrap(view.wordDragAnchorWord,
+        let rotatedWord = try XCTUnwrap(view.selectionController.wordDragAnchorWord,
                                         "wordDragAnchorWord must survive a small in-history scroll")
         XCTAssertEqual(rotatedWord.0.line, wordStart.line + selectionDelta,
                        "word anchor START line must rotate in lockstep with the selection "
