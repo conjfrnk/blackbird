@@ -251,22 +251,30 @@ extension TerminalView {
         selectionAutoscrollDirection = 0
     }
 
-    /// Same math as `bufferPointFromEvent` but takes an already-converted
-    /// local point so the autoscroll timer — which doesn't have an
-    /// `NSEvent` to pass — can derive a selection cursor from the raw
-    /// mouse location. Audit terminal-view-2 F2.
+    /// The single view-local → buffer mapping: nil-snap guard (M-17),
+    /// titlebar-Y pre-clamp (F13), and the grid math. `bufferPointFromEvent`
+    /// converts an `NSEvent`'s window location and delegates here; the
+    /// autoscroll timer — which has no `NSEvent` to pass — calls this directly
+    /// with the raw mouse location. Audit terminal-view-2 F2.
     private func bufferPointFromLocalPoint(_ local: CGPoint) -> BufferPoint {
         // M-17 / pass-2: surface the pre-first-publish click race
         // before silently mapping into a synthetic 80×24 zero-history
         // grid. Pulling the nil-snap path out into a logged early-
-        // return makes the regression discoverable in Release; the
-        // same one-shot lock is shared with `bufferPointFromEvent`
-        // (lives on `TerminalView` proper) so two callsites firing in
-        // sequence still produce at most one log line per process.
+        // return makes the regression discoverable in Release;
+        // `logEarlyClickOnce` (on `TerminalView` proper) holds a one-shot
+        // lock so repeated early clicks still produce at most one log line
+        // per process.
         guard let snap = currentSnapshot else {
             TerminalView.logEarlyClickOnce()
             return BufferPoint(line: 0, col: 0)
         }
+        // `.fullSizeContentView` means `bounds.height` includes the titlebar
+        // region the text grid doesn't occupy. `bufferPoint` below derives the
+        // display-row Y via `viewportHeight - local.y`; a click in the titlebar
+        // region (AppKit Y-up → high y) would push that subtraction negative
+        // and snap to row 0. Pre-clamp y to the text-area range so
+        // titlebar-region clicks land on the first-real-row edge instead of
+        // silently re-attributing to row 0. Audit findbar-selection F13.
         let textAreaHeight = bounds.height - titlebarOnlyTopInset
         let clampedY = min(max(0, local.y), max(0, textAreaHeight))
         let clampedLocal = CGPoint(x: local.x, y: clampedY)
@@ -579,43 +587,11 @@ extension TerminalView {
     }
 
     func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
-        let local = convert(event.locationInWindow, from: nil)
-        // M-17 / pass-2: nil-snap means the click landed before the
-        // first BBSnapshot publish — there is no real grid to map
-        // against, so the previous "synthetic 80×24, zero history"
-        // fallback would silently produce bogus selection coordinates.
-        // Early-return the origin sentinel and warn once. Shared one-
-        // shot lock with `bufferPointFromLocalPoint` keeps the log
-        // line count bounded across both callsites.
-        guard let snap = currentSnapshot else {
-            TerminalView.logEarlyClickOnce()
-            return BufferPoint(line: 0, col: 0)
-        }
-        // `.fullSizeContentView` means `bounds.height` includes the titlebar
-        // region which the text grid doesn't occupy. `bufferPoint` below does
-        // `viewportHeight - localPoint.y` to derive the display-row Y; if the
-        // click landed inside the titlebar region (AppKit's Y-up coord system
-        // puts the titlebar at the *top* → high y), that subtraction goes
-        // negative and the clamp snaps to row 0 — grid clicks in the text
-        // area work fine because the offset cancels, but a ⌘-drag across the
-        // titlebar would still map to (row 0, col ≈ x/cellWidth). Pre-clamp
-        // y to the text-area range so titlebar-region clicks land on the
-        // first-real-row edge instead of silently re-attributing to row 0.
-        // Audit findbar-selection F13.
-        let textAreaHeight = bounds.height - titlebarOnlyTopInset
-        let clampedY = min(max(0, local.y), max(0, textAreaHeight))
-        let clampedLocal = CGPoint(x: local.x, y: clampedY)
-        return bufferPoint(
-            forView: clampedLocal,
-            cellWidth: metrics.cellWidth,
-            cellHeight: metrics.cellHeight,
-            viewportHeight: textAreaHeight,
-            displayOffset: snap.displayOffset,
-            cols: snap.cols,
-            rows: snap.rows,
-            historySize: snap.historySize,
-            leftInsetPoints: TerminalView.horizontalContentInsetPoints
-        )
+        // `bufferPointFromLocalPoint` owns the whole mapping — the nil-snap
+        // guard (M-17), the titlebar-Y pre-clamp (F13), and the grid math.
+        // This entry point only converts the event's window location into
+        // view-local coordinates first.
+        bufferPointFromLocalPoint(convert(event.locationInWindow, from: nil))
     }
 
     // MARK: - Selection + reporting helpers
