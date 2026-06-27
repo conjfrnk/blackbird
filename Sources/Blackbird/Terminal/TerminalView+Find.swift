@@ -266,10 +266,9 @@ extension TerminalView {
                         from: hay.utf16.startIndex,
                         to: r.upperBound.samePosition(in: hay.utf16) ?? hay.utf16.endIndex
                     )
-                    let loIdx = max(0, min(lo16, utf16ToCol.count - 1))
-                    let hiIdx = max(loIdx, min(hi16, utf16ToCol.count - 1))
-                    startCol = utf16ToCol[loIdx]
-                    endCol   = max(startCol, utf16ToCol[hiIdx] - 1)
+                    let cols = Self.mapUTF16RangeToCols(lo: lo16, hi: hi16, utf16ToCol: utf16ToCol)
+                    startCol = cols.startCol
+                    endCol = cols.endCol
                 } else {
                     // Scrollback row — legacy approximation. Off-by-N for
                     // rows containing wide chars; documented limitation.
@@ -303,6 +302,22 @@ extension TerminalView {
     /// NSRegularExpression's own per-row work, but pre-gating with
     /// `isReasonableRegexPattern` keeps that bounded in practice.
     /// Audit findbar-selection F2.
+
+    /// Map a cell-derived UTF-16 `[lo, hi)` range to grid columns. Both ends
+    /// clamp into `utf16ToCol`; `endCol` is the column of the LAST included
+    /// unit (`hi - 1`) and never drops below `startCol`. The ONE viewport-row
+    /// match→column mapping, shared by the substring (`performSearch`) and
+    /// regex (`runRegexSearchAsync`) paths — keeping them from drifting on the
+    /// wide-char / non-BMP column math (H4/H5). Scrollback rows use the legacy
+    /// approximation at the call sites, not this.
+    static func mapUTF16RangeToCols(lo: Int, hi: Int, utf16ToCol: [Int]) -> (startCol: Int, endCol: Int) {
+        let loIdx = max(0, min(lo, utf16ToCol.count - 1))
+        let hiIdx = max(loIdx, min(hi, utf16ToCol.count - 1))
+        let startCol = utf16ToCol[loIdx]
+        let endCol = max(startCol, utf16ToCol[hiIdx] - 1)
+        return (startCol, endCol)
+    }
+
     private func runRegexSearchAsync(
         regex: NSRegularExpression,
         topLine: Int32,
@@ -378,10 +393,9 @@ extension TerminalView {
                         // NSRegularExpression returns UTF-16 offsets;
                         // translate via the row's parallel map so wide
                         // / non-BMP chars don't skew the column report.
-                        let loIdx = max(0, min(r.location, utf16ToCol.count - 1))
-                        let hiIdx = max(loIdx, min(r.location + r.length, utf16ToCol.count - 1))
-                        startCol = utf16ToCol[loIdx]
-                        endCol   = max(startCol, utf16ToCol[hiIdx] - 1)
+                        let cols = Self.mapUTF16RangeToCols(lo: r.location, hi: r.location + r.length, utf16ToCol: utf16ToCol)
+                        startCol = cols.startCol
+                        endCol = cols.endCol
                     } else {
                         // Scrollback row — legacy approximation.
                         startCol = r.location
