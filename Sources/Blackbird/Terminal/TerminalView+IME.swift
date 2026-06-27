@@ -173,8 +173,8 @@ extension TerminalView: NSTextInputClient {
         let plain = c.attributedText.string as NSString
         let leadingSubstring = plain.substring(with: NSRange(location: 0, length: clamped.location))
         let spanSubstring = plain.substring(with: clamped)
-        let leadingCells = Self.terminalCellWidth(of: leadingSubstring)
-        let spanCells = max(1, Self.terminalCellWidth(of: spanSubstring))
+        let leadingCells = CellWidth.terminalCellWidth(of: leadingSubstring)
+        let spanCells = max(1, CellWidth.terminalCellWidth(of: spanSubstring))
         let offsetRect = NSRect(
             x: cellRect.minX + CGFloat(leadingCells) * cellWidth,
             y: cellRect.minY,
@@ -230,7 +230,7 @@ extension TerminalView: NSTextInputClient {
         var consumed = 0
         var utf16Index = 0
         for cluster in composition.attributedText.string {
-            let clusterCells = Self.terminalCellWidth(of: String(cluster))
+            let clusterCells = CellWidth.terminalCellWidth(of: String(cluster))
             if consumed + clusterCells > cellOffset {
                 return utf16Index
             }
@@ -357,7 +357,7 @@ extension TerminalView: NSTextInputClient {
         // terminal-ime F4. Walk the composition's scalars and weight
         // each by its East Asian Width so the overlay matches what
         // the grid will paint.
-        let cellCount = Self.terminalCellWidth(
+        let cellCount = CellWidth.terminalCellWidth(
             of: composition.attributedText.string
         )
         let width = max(metrics.cellWidth, metrics.cellWidth * CGFloat(cellCount))
@@ -451,81 +451,5 @@ extension TerminalView: NSTextInputClient {
         }
         #endif
         session?.send(bytes)
-    }
-
-    /// Approximate terminal-cell width of a string. Each grapheme cluster
-    /// contributes 1 cell for ASCII/Latin/Cyrillic, 2 cells for CJK
-    /// ideographs and wide emoji, 0 cells for combining marks or
-    /// zero-width joiners. Good enough for preedit overlay sizing;
-    /// exact glyph metrics would require a CoreText pass per composition
-    /// update which is too slow for per-keystroke refreshes.
-    ///
-    /// Walks `Character` (grapheme clusters), not `UnicodeScalar` — a ZWJ
-    /// sequence like 👨‍👩‍👧 is one grapheme that renders as one wide
-    /// glyph, so it must count as 2 cells, not 2+0+2+0+2=6. Per-grapheme
-    /// we take the max scalar width (ignoring ZWJ / VS / combiners which
-    /// would otherwise mask the real width-contributing scalar).
-    static func terminalCellWidth(of string: String) -> Int {
-        var total = 0
-        for grapheme in string {
-            var widest = 0
-            var promotesToWide = false
-            for scalar in grapheme.unicodeScalars {
-                widest = max(widest, cellWidth(for: scalar))
-                // VS-16 (U+FE0F) forces the preceding base into emoji
-                // presentation, and U+20E3 builds keycap sequences
-                // (`#️⃣`, `1️⃣`). Neither base scalar is in our wide
-                // ranges (U+2764, U+0023, …) but the rendered grapheme
-                // occupies two cells. Don't let the per-scalar table
-                // miss them.
-                if scalar.value == 0xFE0F || scalar.value == 0x20E3 {
-                    promotesToWide = true
-                }
-            }
-            if promotesToWide && widest < 2 {
-                widest = 2
-            }
-            // A grapheme that's purely zero-width (e.g. an isolated
-            // combining mark) still occupies no cells.
-            total += widest
-        }
-        return total
-    }
-
-    /// Rough cell-width classification for a single scalar. Based on
-    /// Unicode's East Asian Width property plus the emoji / symbol
-    /// ranges that terminal emulators conventionally treat as wide.
-    static func cellWidth(for scalar: UnicodeScalar) -> Int {
-        let v = scalar.value
-        // Combining marks / zero-width joiners / VS16 etc. → 0 cells.
-        if (0x0300...0x036F).contains(v)   // Combining Diacriticals
-            || (0x200B...0x200F).contains(v) // ZW* + bidi marks
-            || (0xFE00...0xFE0F).contains(v) // Variation Selectors 1-16
-            || v == 0x200D                   // ZWJ
-            || (0xFE20...0xFE2F).contains(v) // Combining Half Marks
-        {
-            return 0
-        }
-        // Common wide ranges. Covers the cases users actually hit at
-        // Blackbird's prompt: CJK ideographs, Hangul syllables,
-        // fullwidth forms, wide emoji.
-        if (0x1100...0x115F).contains(v)    // Hangul Jamo
-            || (0x2E80...0x303E).contains(v) // CJK Radicals + Kangxi
-            || (0x3041...0x33FF).contains(v) // Hiragana + Katakana + CJK Symbols
-            || (0x3400...0x4DBF).contains(v) // CJK Ext A
-            || (0x4E00...0x9FFF).contains(v) // CJK Unified Ideographs
-            || (0xA000...0xA4CF).contains(v) // Yi
-            || (0xAC00...0xD7A3).contains(v) // Hangul Syllables
-            || (0xF900...0xFAFF).contains(v) // CJK Compatibility Ideographs
-            || (0xFE30...0xFE4F).contains(v) // CJK Compatibility Forms
-            || (0xFF00...0xFF60).contains(v) // Fullwidth Forms
-            || (0xFFE0...0xFFE6).contains(v) // Fullwidth signs
-            || (0x1F300...0x1F9FF).contains(v) // Misc symbols + emoji
-            || (0x20000...0x2FFFD).contains(v) // CJK Ext B/C/D/E
-            || (0x30000...0x3FFFD).contains(v) // CJK Ext G
-        {
-            return 2
-        }
-        return 1
     }
 }
