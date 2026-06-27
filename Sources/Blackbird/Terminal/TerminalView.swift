@@ -5,7 +5,8 @@ import Combine
 import Metal
 import MetalKit
 // `os.Logger` is used by `securityLogger` (Release-visible, audit
-// channel) and by the DEBUG-only fpsLogger / keyLogger / hoverLogger.
+// channel) and by the DEBUG-only fpsLogger / keyLogger. (The hover
+// near-miss logger moved to `HoverCoordinator`.)
 // The audit-H1 fix moved security logging out of the DEBUG block, so
 // the import must follow.
 import os
@@ -160,59 +161,36 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// match what the click path actually dispatched.
     var urlOpener: URLOpener = DefaultURLOpener()
 
-    // MARK: - Hover state (OSC 8 dwell tooltip + hover underline)
+    // MARK: - Hover (OSC 8 dwell tooltip + ⌘-held URL highlight)
 
-    /// Buffer row under the cursor on the last `mouseMoved` delivery, used
-    /// to cancel the dwell timer as soon as the pointer leaves the current
-    /// cell. `nil` means the pointer is outside the grid.
-    var lastHoverCell: (row: Int, col: Int)?       // internal for TerminalView+Hover.swift
-    /// Link id under the pointer right now, or 0 when the hovered cell has
-    /// no OSC 8 attribution. The renderer reads this each frame to draw
-    /// the accent underline on every cell sharing the id.
-    var hoveredLinkID: UInt32 = 0                 // internal for TerminalView+Hover.swift
+    /// Owns all hover state + the OSC 8 / ⌘-regex highlighting engine (was the
+    /// `lastHoverCell` / `hoveredLinkID` / `cmdModifierHeld` / `cmdHoverURLMatch`
+    /// / `cachedURLMatches*` / `hoverTooltipItem` fields here + the logic in
+    /// `TerminalView+Hover.swift`). The NSResponder overrides in `+Hover`
+    /// forward to it; `+Services` (Look Up) and the draw path read
+    /// `hoverCoordinator.hoveredLinkID` across the file boundary. `lazy` because
+    /// it needs `self`; its back-reference to the view is `unowned` (no cycle).
+    lazy var hoverCoordinator = HoverCoordinator(view: self)
 
-    /// Latched ⌘-modifier state. Updated via `flagsChanged`, reconciled
-    /// against `NSEvent.modifierFlags` on every `mouseMoved` (so a key
-    /// release missed during a focus switch is caught on the next
-    /// mouse movement), and force-cleared on `didResignKeyNotification`
-    /// so a stale "⌘ held" can't survive a tab or window switch.
-    var cmdModifierHeld: Bool = false             // internal for TerminalView+Hover.swift
-
-    /// While ⌘ is held and the pointer rests on a regex-detected URL,
-    /// this holds the match so `clearHover`, the cursor updater, and
-    /// the renderer can coordinate without re-running the scan. Cleared
-    /// when ⌘ releases, the pointer leaves the match, or the view loses
-    /// focus.
-    var cmdHoverURLMatch: URLMatch?               // internal for TerminalView+Hover.swift
-
-    /// Lazily computed URL match list for the current snapshot. Rebuilt
-    /// only when `snapshot.sequenceID` changes so trackpad-cadence
-    /// `mouseMoved` with ⌘ held costs O(1) lookups, not an O(rows × cols)
-    /// scan per move. Audit cwd-hyperlink F7.
-    ///
-    /// `cachedURLMatchesSeq` is `Optional<UInt64>` rather than a `0`
-    /// sentinel: "never scanned" and "scanned at seq 0" would otherwise
-    /// compare equal and skip a legitimate scan. Sequence ids are
-    /// PER-SESSION since audit S6-003 (each BBTerm numbers its own
-    /// snapshots from 1), so this cache must be reset when the view is
-    /// bound to a session — two sessions' ids can legitimately collide.
-    var cachedURLMatches: [URLMatch] = []         // internal for TerminalView+Hover.swift
-    var cachedURLMatchesSeq: UInt64?              // internal for TerminalView+Hover.swift
     /// Trackpad pinch gesture accumulator. Magnification events deliver
     /// fractional deltas; we wait until the running sum crosses ±0.15
     /// before bumping `Preferences.shared.fontSize`. Without the accumulator
     /// a single flick would fire dozens of font-size changes and fly past
     /// the intended zoom level.
     private var pinchAccumulator: CGFloat = 0
-    /// Scheduled tooltip reveal. Cancelled on pointer movement, scroll,
-    /// keydown, or view teardown.
-    var hoverTooltipItem: DispatchWorkItem?       // internal for TerminalView+Hover.swift
     /// Owns the lightweight URL-preview panel shown after the 500 ms dwell. The
-    /// panel + label live here (private) instead of as two more `internal` view
-    /// fields; +Hover scrubs the href and hands the controller a safe string.
+    /// panel + label live here (private); the hover coordinator scrubs the href
+    /// and hands the controller a safe string.
     let tooltipController = TooltipController()
+    /// Scheduled tooltip reveal. Owned here (not on `hoverCoordinator`) because
+    /// the view's lifecycle teardown — `viewWillMove(toWindow:)` and `deinit` —
+    /// cancels it directly; reaching through the coordinator's `unowned view`
+    /// back-ref during the view's OWN deinit traps. The coordinator
+    /// schedules/cancels it via `view.hoverTooltipItem` during normal
+    /// (view-alive) operation.
+    var hoverTooltipItem: DispatchWorkItem?
     /// Tracking area that delivers `mouseMoved` / `mouseExited`. Rebuilt on
-    /// bounds changes via `updateTrackingAreas`.
+    /// bounds changes via `updateTrackingAreas` (which stays on the view).
     var hoverTrackingArea: NSTrackingArea?        // internal for TerminalView+Hover.swift
 
     /// Paired coordinate used by DEC 1003 any-event mouse tracking to
@@ -375,12 +353,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// keeps the keystroke trail visible in Console.
     private static let keyLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                           category: "keyboard")
-    /// Diagnostic channel for the hover/cmd-URL-highlight path. Used only
-    /// to log near-misses (cache populated, match lookup returned nil) so
-    /// a column-mapping or wrap-join regression is discoverable via
-    /// `log stream --predicate 'category == "hover"'`. Off the hot path.
-    static let hoverLogger = Logger(subsystem: "dev.conjfrnk.blackbird",  // internal for TerminalView+Hover.swift
-                                                category: "hover")
     #endif
 
     /// Production-visible channel for security-relevant decisions —
@@ -1001,8 +973,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // painting the previous URL's range even though the URL itself
         // scrolled away. Gated on `cmdModifierHeld` so the scan cache
         // stays cold when the feature isn't engaged.
-        if cmdModifierHeld {
-            reevaluateCmdHoverHighlight()
+        if hoverCoordinator.cmdModifierHeld {
+            hoverCoordinator.reevaluateCmdHoverHighlight()
         }
         // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.
         // Scroll indicator consumes the same snapshot — keep it in lockstep
@@ -1066,7 +1038,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // panel is parented to the current window; leaving it up across a
         // reparent lands it at stale coordinates (and, if the old window
         // is being torn down, against a freed NSWindow). Audit
-        // terminal-view-2 F19.
+        // terminal-view-2 F19. Touch the view's own `hoverTooltipItem` +
+        // `tooltipController` directly (not via `hoverCoordinator`) — this is a
+        // view-lifecycle teardown and the panel dismiss must not depend on the
+        // coordinator's `unowned view` back-ref.
         hoverTooltipItem?.cancel()
         hoverTooltipItem = nil
         tooltipController.dismiss()
@@ -1128,7 +1103,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // Re-evaluation itself is deferred to the next mouseMoved:
             // we don't know the pointer's current cell on the new tab
             // until it reports in.
-            self?.syncCmdModifierHeld(fromEventFlags: NSEvent.modifierFlags)
+            self?.hoverCoordinator.syncCmdModifierHeld(fromEventFlags: NSEvent.modifierFlags)
         })
         focusObservers.append(center.addObserver(
             forName: NSWindow.didResignKeyNotification,
@@ -1149,7 +1124,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // doesn't leave a stale ⌘-hover highlight painted into the
             // next focus cycle. mouseMoved will sync back as soon as the
             // pointer moves over the view again.
-            self?.resetModifierAndHoverState()
+            self?.hoverCoordinator.resetModifierAndHoverState()
         })
         #if DEBUG
         // Window-attach logging (above) fires once per view⇄window pairing,
@@ -1290,7 +1265,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         // Tear down any pending hover tooltip. The DispatchWorkItem
         // captures self weakly so it won't crash on late fire, but the
-        // panel would otherwise linger briefly after the view is gone.
+        // panel would otherwise linger briefly after the view is gone. Touch
+        // the view's own fields directly — `deinit` must not read the
+        // coordinator's `unowned view` back-ref (it traps mid-deinit).
         hoverTooltipItem?.cancel()
         tooltipController.dismiss()
         // Selection-autoscroll timer, if the user tore the view down
@@ -1422,7 +1399,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // snapshot API returns u32 to leave room for future expansion —
         // truncation here is safe because the FFI only ever returns ids
         // that originated as u16.
-        renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoveredLinkID))
+        renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoverCoordinator.hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         // Any frame after a keystroke counts as "the keystroke landed on
         // screen" for probe purposes. The renderer can short-circuit
@@ -1508,8 +1485,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // rebind — global uniqueness no longer invalidates it for
             // free (F-S5-018 follow-up). `!=`-gated, so over-clearing is
             // harmless.
-            cachedURLMatches = []
-            cachedURLMatchesSeq = nil
+            hoverCoordinator.cachedURLMatches = []
+            hoverCoordinator.cachedURLMatchesSeq = nil
             findController.findCurrentIndex = 0
             findController.findQuery = ""
             setNeedsDisplay(bounds)
@@ -1532,8 +1509,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // new session's numbering — clear the seq-keyed caches so a
         // stale URL-match set can't survive the swap (F-S5-018
         // follow-up). `!=`-gated consumers make over-clearing harmless.
-        cachedURLMatches = []
-        cachedURLMatchesSeq = nil
+        hoverCoordinator.cachedURLMatches = []
+        hoverCoordinator.cachedURLMatchesSeq = nil
         findController.findMatchesSeq = nil
 
         session.$snapshot
@@ -1573,7 +1550,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Typing dismisses any dwell-tooltip the pointer might be about
         // to reveal — otherwise a hovered URL tooltip would obscure the
         // user's own output as it scrolls past.
-        cancelHoverTooltip()
+        hoverCoordinator.cancelHoverTooltip()
         #if DEBUG
         let keyCode = event.keyCode
         let modBits = UInt(event.modifierFlags.rawValue)

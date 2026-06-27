@@ -407,20 +407,20 @@ extension TerminalView {
         // tooltip would pop up with a stale URL. Cancel both the pending
         // reveal and the accent underline; the next mouseMoved delivery
         // will repaint them against the fresh cell if appropriate.
-        cancelHoverTooltip()
-        clearHoveredLink()
+        hoverCoordinator.cancelHoverTooltip()
+        hoverCoordinator.clearHoveredLink()
         // Drop the ⌘-hover highlight for the same reason: the renderer's
         // range is keyed on buffer line, but the *pointer* is still at a
         // fixed (row, col) pair whose buffer line flipped with the scroll.
         // Leaving the range intact paints the old URL at a cell the user
         // is no longer over until the next mouseMoved repaints.
-        clearCmdHoverURLMatch()
+        hoverCoordinator.clearCmdHoverURLMatch()
         // The cached hover cell is also stale once the grid moved, so the
         // next mouseMoved will re-resolve the link id even if the pointer
         // hasn't physically moved a pixel between the scroll and the next
         // delivery (otherwise updateHover would early-return on the same
         // (row, col) and leave hoveredLinkID at zero).
-        lastHoverCell = nil
+        hoverCoordinator.lastHoverCell = nil
         guard let session else { super.scrollWheel(with: event); return }
         // ⌥-scroll bypasses mouse reporting so the user can always reach
         // scrollback locally, even inside a TUI that captured the wheel.

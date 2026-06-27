@@ -63,8 +63,8 @@ extension TerminalView {
             if let sel = selectedStringForServices(), !sel.isEmpty {
                 return sel
             }
-            if let snap = currentSnapshot, hoveredLinkID != 0,
-               let url = snap.linkURL(id: hoveredLinkID) {
+            if let snap = currentSnapshot, hoverCoordinator.hoveredLinkID != 0,
+               let url = snap.linkURL(id: hoverCoordinator.hoveredLinkID) {
                 return url
             }
             return nil

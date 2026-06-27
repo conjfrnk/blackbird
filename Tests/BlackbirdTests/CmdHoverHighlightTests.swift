@@ -402,17 +402,17 @@ final class CmdHoverHighlightTests: XCTestCase {
         // production path reaches this assignment via TerminalView+Hover's
         // `updateHover`; the test seam mirrors that without spinning up a
         // real NSEvent / tracking area.
-        view.lastHoverCell = (row: 2, col: 3)
-        view.cmdModifierHeld = true
+        view.hoverCoordinator.lastHoverCell = (row: 2, col: 3)
+        view.hoverCoordinator.cmdModifierHeld = true
 
         // First reevaluate primes `cachedURLMatchesSeq` with snap1's id.
         // The snapshot has no detected URLs, so reevaluate falls through
         // to `clearCmdHoverURLMatch()` after the cache scan. Crucially, it
         // does NOT clear `lastHoverCell` on this pass — same sequenceID,
         // no invalidation.
-        view.reevaluateCmdHoverHighlight()
+        view.hoverCoordinator.reevaluateCmdHoverHighlight()
         XCTAssertNotNil(
-            view.lastHoverCell,
+            view.hoverCoordinator.lastHoverCell,
             "no-op reevaluate against the same snapshot must not drop the hover cell"
         )
 
@@ -441,10 +441,10 @@ final class CmdHoverHighlightTests: XCTestCase {
         // snap1.sequenceID`, the fix clears `lastHoverCell` here. Pre-fix
         // code left it in place and the next render translated through a
         // stale screen row.
-        view.reevaluateCmdHoverHighlight()
+        view.hoverCoordinator.reevaluateCmdHoverHighlight()
 
         XCTAssertNil(
-            view.lastHoverCell,
+            view.hoverCoordinator.lastHoverCell,
             "snapshot identity change must clear the stale screen-space "
             + "lastHoverCell — its row was baked against the previous "
             + "displayOffset and would mistranslate against snap2"

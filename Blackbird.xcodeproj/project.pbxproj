@@ -64,6 +64,7 @@
 		5E835DC2E5C1FC93CF846CA0 /* KeyEventClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C38502E3AE812D844D18B9A /* KeyEventClassifier.swift */; };
 		5ECD3BBAADD2CBCA23CD599C /* TabOrderCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82EFC0C140D3593E2905D923 /* TabOrderCoordinator.swift */; };
 		634C2FC6047F0DC32157ED31 /* FindController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F898FCB057ABD93D67AD8855 /* FindController.swift */; };
+		650493A92BD8EA000173236C /* HoverCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 674D4AA52A316FEE51641A8D /* HoverCoordinator.swift */; };
 		66BDCBF186346C6913023FC5 /* DamageTrackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */; };
 		6733787F66C34604391376B8 /* AppDelegate+Menu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 652F3910146BA23469557490 /* AppDelegate+Menu.swift */; };
 		67E62A52456063618EA6931D /* DiagnosticReportStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D94AD8A655DA72C5D57ED5E /* DiagnosticReportStoreTests.swift */; };
@@ -276,6 +277,7 @@
 		652F3910146BA23469557490 /* AppDelegate+Menu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+Menu.swift"; sourceTree = "<group>"; };
 		6674F348ADE914C0EEBB0E90 /* TestHostSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHostSupport.swift; sourceTree = "<group>"; };
 		673FE2E71DCD08F9286D5C60 /* kitty.terminfo */ = {isa = PBXFileReference; path = kitty.terminfo; sourceTree = "<group>"; };
+		674D4AA52A316FEE51641A8D /* HoverCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoverCoordinator.swift; sourceTree = "<group>"; };
 		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
 		68CAFA8323F8AFCE7D4C52C9 /* FindBarAdversarialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarAdversarialTests.swift; sourceTree = "<group>"; };
 		6B8663C860AF68F9A6D150F8 /* SparkleAlertOverrideTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SparkleAlertOverrideTests.swift; sourceTree = "<group>"; };
@@ -595,6 +597,7 @@
 				F455C591EC38A7B3955CD5B8 /* FindBar.swift */,
 				F898FCB057ABD93D67AD8855 /* FindController.swift */,
 				844C117AA11DACEB21977650 /* ForegroundProcessProbe.swift */,
+				674D4AA52A316FEE51641A8D /* HoverCoordinator.swift */,
 				3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */,
 				EF2E535DE7BB1D225E2F58E2 /* KittyTerminfo.swift */,
 				26B359BBCEB85D55F2981EDD /* LatencyProbe.swift */,
@@ -855,6 +858,7 @@
 				9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */,
 				AED697821DF433FFA6BAE0ED /* GlyphBitmapCache.swift in Sources */,
 				A725395BC74894D1AB8F746A /* HangReportStore.swift in Sources */,
+				650493A92BD8EA000173236C /* HoverCoordinator.swift in Sources */,
 				1DFA371FD2502A8FA6AB320B /* HyperlinkResolver.swift in Sources */,
 				AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */,
 				5E835DC2E5C1FC93CF846CA0 /* KeyEventClassifier.swift in Sources */,
