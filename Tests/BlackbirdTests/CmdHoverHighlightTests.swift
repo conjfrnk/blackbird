@@ -97,8 +97,15 @@ final class CmdHoverHighlightTests: XCTestCase {
             return nil
         }
         let keyMirror = Mirror(reflecting: wrapped)
+        // The cmd-hover fields now live in the shared `visual: VisualState`
+        // that both FrameKey and CacheKey embed (the M-20/H3 dedup), so reflect
+        // one level deeper. A missing `visual` child is itself a regression.
+        guard let visual = keyMirror.children.first(where: { $0.label == "visual" })?.value else {
+            return nil
+        }
+        let visualMirror = Mirror(reflecting: visual)
         func readInt32(_ label: String) -> Int32? {
-            guard let v = keyMirror.children.first(where: { $0.label == label })?.value else {
+            guard let v = visualMirror.children.first(where: { $0.label == label })?.value else {
                 return nil
             }
             return v as? Int32

@@ -183,27 +183,16 @@ public final class MetalRenderer {
     private var lastCursorRow: Int32 = -1
     private var lastCursorCol: Int32 = -1
 
-    /// Identity of every input that affects pixels on screen, packed for
-    /// Equatable comparison. When `render()` is called with a key equal to
-    /// the one rendered last frame, the GPU already holds the correct
-    /// pixels: we skip buildInstances, encoding, and present entirely.
-    /// CAMetalLayer's compositor retains the previously presented drawable
-    /// so the screen stays correct.
-    ///
-    /// Typed storage (struct, not a hash) because hashing would either:
-    ///   - be too loose (collisions silently miss redraws), or
-    ///   - pay the Hashable overhead every frame anyway.
-    /// Equatable on 13 fields comes out to a handful of CPU instructions;
-    /// the branch predictor handles the common "identical" case fast.
-    private struct FrameKey: Equatable {
-        /// Monotonic sequence id from BBSnapshot (0 when snapshot is nil).
-        /// Intentionally NOT the handle pointer: the allocator can reuse an
-        /// address after a snapshot is released, which would make two
-        /// distinct snapshots look identical to pointer-equality and cause
-        /// a popup-close or cursor-move repaint to be silently dropped.
-        /// The sequence counter is assigned once at BBSnapshot init and
-        /// never repeats within a process lifetime.
-        let snapshotSeq: UInt64
+    /// The pixel-affecting inputs shared by `FrameKey` (the per-frame skip
+    /// cache) and `CacheKey` (the per-row rebuild cache). Extracted into one
+    /// Equatable struct both keys embed so the ~23 fields are authored ONCE: a
+    /// field added here must be populated in BOTH `makeFrameKey` and
+    /// `makeCacheKey` (the compiler enforces it via the memberwise init), which
+    /// converts the prior "add to one struct, forget the other" hazard (Part I
+    /// §34 / M-20 / H3 — a dropped field silently misses redraws) into a build
+    /// error. Equatable derives field-by-field, so embedding it leaves both
+    /// keys' comparison semantics byte-identical to the prior flat layout.
+    private struct VisualState: Equatable {
         let hoveredLinkID: UInt16
         /// Flattened selection identity. 0 mode tag means "no selection"; 1-4
         /// are the four Selection.Mode variants. Separate fields for
@@ -217,22 +206,24 @@ public final class MetalRenderer {
         let selACol: Int32
         let selBCol: Int32
         let focused: Bool
-        let cursorRow: Int32
-        let cursorCol: Int32
+        /// Effective cursor shape: user override if set, else the snapshot's
+        /// DECSCUSR shape. `setCursorShapeOverride` also invalidates the keys
+        /// directly, so pinning a shape that happens to equal the current
+        /// snapshot shape still repaints exactly once.
         let cursorShape: UInt8
         let cursorVisible: Bool
         /// Widened from UInt16 to UInt32: default scrollback is 100 000 lines
         /// and the Rust core caps at 200 000, both well past UInt16.max
-        /// (65 535). A truncating narrowing here would silently wrap once
-        /// the user scrolled past row 65 535, leaving the frame-skip path
-        /// unable to distinguish two visually-different scroll positions
-        /// and dragging hover/selection/cursor uniforms out of alignment.
+        /// (65 535). A truncating narrowing here would silently wrap once the
+        /// user scrolled past row 65 535, leaving the skip path unable to
+        /// distinguish two visually-different scroll positions and dragging
+        /// hover/selection/cursor uniforms out of alignment.
         let displayOffset: UInt32
         let topInsetPoints: Float
         /// Horizontal inset in points. Folded in for the same reason as
         /// `topInsetPoints` — a re-inset (theoretically possible if the
         /// font-size pref ever drives a different inset constant) must
-        /// invalidate the per-frame skip cache.
+        /// invalidate the skip caches.
         let leftInsetPoints: Float
         let defaultBgRgb: UInt32
         let backgroundOpacity: Float
@@ -240,30 +231,54 @@ public final class MetalRenderer {
         let accentColor: SIMD4<Float>     // Equatable; avoids collision risk
         let cursorColor: SIMD4<Float>
         let blinkSkip: Bool
-        /// ⌘-held regex URL range under pointer. Bundled into FrameKey so
-        /// the frame-skip optimisation correctly repaints when the
-        /// highlighted run changes without a new snapshot arriving.
+        /// ⌘-held regex URL range under pointer. Bundled in so the skip
+        /// optimisations correctly repaint when the highlighted run changes
+        /// without a new snapshot arriving (FrameKey) / when linkHover flags on
+        /// those cells flip (CacheKey).
         let cmdHoverBufferLine: Int32
         let cmdHoverStartCol: Int32
         let cmdHoverEndCol: Int32
-        /// `MetalRenderer.metricsGeneration` snapshot. Folded in so a
-        /// metrics mutation (font-size change, future external setter)
-        /// invalidates the frame-skip cache automatically — without
-        /// this, the invariant relied on every mutator remembering to
-        /// null `lastFrameKey` by hand. Mirrors `CacheKey.atlasGeneration`.
-        /// Audit M-20.
+        /// `MetalRenderer.metricsGeneration` snapshot. Folded in so a metrics
+        /// mutation (font-size change, future external setter) invalidates the
+        /// caches automatically — without this, the invariant relied on every
+        /// mutator remembering to null the keys by hand. Audit M-20.
         let metricsGeneration: UInt64
-        /// `GlyphAtlas.generation` snapshot. A saturation flush bumps the
-        /// atlas generation mid-encode (the `flushBarrier` only drains the
-        /// GPU; it does NOT touch `lastFrameKey`). `CacheKey` already keys
-        /// on `atlasGeneration` so per-row instance data rebuilds, but
-        /// without it here the FRAME-SKIP cache could short-circuit the
-        /// next identical frame and leave a glyph that was rasterised
-        /// against the pre-flush atlas on screen indefinitely. Folding it
-        /// in forces a single re-encode after any flush, converting a
-        /// persistent stale-glyph artifact into a self-correcting one.
-        /// Mirrors `metricsGeneration` / `CacheKey.atlasGeneration`.
+        /// `GlyphAtlas.generation` snapshot. A saturation flush bumps the atlas
+        /// generation mid-encode (the `flushBarrier` only drains the GPU; it
+        /// does NOT touch the keys). Cached `CellInstance`s carry baked-in UV
+        /// coords pointing at slots the flush rewrites — a stale row would
+        /// silently sample the post-flush occupant. Including generation forces
+        /// a single re-encode / full rebuild after any flush, converting a
+        /// persistent stale-glyph artifact into a self-correcting one. Audit H3.
         let atlasGeneration: UInt64
+    }
+
+    /// Identity of every input that affects pixels on screen, packed for
+    /// Equatable comparison. When `render()` is called with a key equal to
+    /// the one rendered last frame, the GPU already holds the correct
+    /// pixels: we skip buildInstances, encoding, and present entirely.
+    /// CAMetalLayer's compositor retains the previously presented drawable
+    /// so the screen stays correct.
+    ///
+    /// Typed storage (struct, not a hash) because hashing would either:
+    ///   - be too loose (collisions silently miss redraws), or
+    ///   - pay the Hashable overhead every frame anyway.
+    /// Equatable comes out to a handful of CPU instructions; the branch
+    /// predictor handles the common "identical" case fast. The shared
+    /// pixel-affecting fields live in `visual`; the three fields below are
+    /// FrameKey-only (CacheKey deliberately excludes them — see `CacheKey`).
+    private struct FrameKey: Equatable {
+        /// Monotonic sequence id from BBSnapshot (0 when snapshot is nil).
+        /// Intentionally NOT the handle pointer: the allocator can reuse an
+        /// address after a snapshot is released, which would make two
+        /// distinct snapshots look identical to pointer-equality and cause
+        /// a popup-close or cursor-move repaint to be silently dropped.
+        /// The sequence counter is assigned once at BBSnapshot init and
+        /// never repeats within a process lifetime.
+        let snapshotSeq: UInt64
+        let cursorRow: Int32
+        let cursorCol: Int32
+        let visual: VisualState
     }
     private var lastFrameKey: FrameKey?
     /// Observable frame-skip signal. `true` when the most recent
@@ -300,57 +315,13 @@ public final class MetalRenderer {
     private struct CacheKey: Equatable {
         let cols: Int
         let rows: Int
-        let hoveredLinkID: UInt16
-        let selMode: UInt8
-        let selALine: Int32
-        let selBLine: Int32
-        let selACol: Int32
-        let selBCol: Int32
-        let focused: Bool
-        /// Effective cursor shape: user override if set, else the snapshot's
-        /// DECSCUSR shape. `setCursorShapeOverride` also invalidates
-        /// `lastCacheKey` directly, so pinning a shape that happens to equal
-        /// the current snapshot shape still repaints exactly once.
-        let cursorShape: UInt8
-        let cursorVisible: Bool
-        /// Same UInt16 → UInt32 widening as `FrameKey.displayOffset`. See
-        /// the rationale on that field; a stale per-row cache from a
-        /// truncated scroll position would let scrollback rows render
-        /// against the wrong selection / hover state.
-        let displayOffset: UInt32
-        let topInsetPoints: Float
-        /// Horizontal inset in points. Same rationale as `FrameKey.leftInsetPoints`.
-        let leftInsetPoints: Float
-        let defaultBgRgb: UInt32
-        let backgroundOpacity: Float
-        let keepBgOpaque: Bool
-        let accentColor: SIMD4<Float>
-        let cursorColor: SIMD4<Float>
-        let blinkSkip: Bool
-        /// ⌘-held regex URL range (same fields as FrameKey). A change to
-        /// the range alone — no new snapshot — must invalidate the
-        /// per-row cache since linkHover flags on those cells flip.
-        let cmdHoverBufferLine: Int32
-        let cmdHoverStartCol: Int32
-        let cmdHoverEndCol: Int32
-        /// `GlyphAtlas.generation` at the time this row cache was
-        /// built. The atlas saturation flush rewrites slot 0..N with
-        /// fresh glyphs, but our cached `CellInstance`s carry baked-in
-        /// UV coords pointing at those slots. A stale row would
-        /// silently sample the post-flush occupant of its cells'
-        /// slots — visible-but-undamaged rows render the wrong
-        /// glyphs until the row is independently damaged. Including
-        /// generation in the key forces a full rebuild on every
-        /// flush. Audit H3.
-        let atlasGeneration: UInt64
-        /// `MetalRenderer.metricsGeneration` at the time this row cache
-        /// was built. Cached `CellInstance`s carry baked-in pixel
-        /// positions computed against the metrics that were live when
-        /// the row was built; a metrics change (font size flip)
-        /// invalidates those positions. Including generation here
-        /// forces a full rebuild whenever metrics rotate, even on a
-        /// path that didn't go through `reconfigure`. Audit M-20.
-        let metricsGeneration: UInt64
+        /// The shared pixel-affecting inputs (selection, cursor shape/visibility,
+        /// insets, colours, blink, cmd-hover range, atlas/metrics generations).
+        /// Same struct `FrameKey` embeds — see `VisualState` for the per-field
+        /// rationale (the displayOffset widening, the atlas/metrics-generation
+        /// H3/M-20 invalidation, the cmd-hover bundling). CacheKey adds only the
+        /// grid dims and omits FrameKey's snapshotSeq/cursorRow/cursorCol.
+        let visual: VisualState
     }
     private var lastCacheKey: CacheKey?
 
@@ -1273,43 +1244,45 @@ public final class MetalRenderer {
     ) -> FrameKey {
         return FrameKey(
             snapshotSeq: snapshot?.sequenceID ?? 0,
-            hoveredLinkID: hoveredLinkID,
-            selMode: selFields.mode,
-            selALine: selFields.aLine,
-            selBLine: selFields.bLine,
-            selACol: selFields.aCol,
-            selBCol: selFields.bCol,
-            focused: focused,
             // `Int32(clamping:)` / `UInt8(clamping:)` for parity
             // with the M-16 displayOffset sites: defense-in-depth on
             // Rust-snapshot integers entering the FrameKey hot path.
             // Audit UR-2 (2026-04-29).
             cursorRow: Int32(clamping: snapshot?.cursorRow ?? -1),
             cursorCol: Int32(clamping: snapshot?.cursorCol ?? -1),
-            cursorShape: cursorShapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
-            cursorVisible: snapshot?.cursorVisible ?? false,
-            // `clampDisplayOffset` not `UInt32(_:)` — defense-in-depth on
-            // the hot per-frame path. Today `BBSnapshot.displayOffset`
-            // returns `Int` from a Rust `u32` so it's never negative,
-            // but a future regression that lets a negative slip through
-            // would trap the renderer mid-frame; clamping pins the
-            // contract at the cast site, and the helper one-shots a
-            // `.error` log so the violation surfaces without spamming.
-            // Audit M-16 / UR follow-up (2026-04-29).
-            displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
-            topInsetPoints: topInsetPoints,
-            leftInsetPoints: leftInsetPoints,
-            defaultBgRgb: defaultBgRgb,
-            backgroundOpacity: backgroundOpacity,
-            keepBgOpaque: keepBgOpaque,
-            accentColor: accentColor,
-            cursorColor: cursorColor,
-            blinkSkip: blinkSkip,
-            cmdHoverBufferLine: cmdHoverBufferLine,
-            cmdHoverStartCol: cmdHoverStartCol,
-            cmdHoverEndCol: cmdHoverEndCol,
-            metricsGeneration: metricsGeneration,
-            atlasGeneration: atlas.generation
+            visual: VisualState(
+                hoveredLinkID: hoveredLinkID,
+                selMode: selFields.mode,
+                selALine: selFields.aLine,
+                selBLine: selFields.bLine,
+                selACol: selFields.aCol,
+                selBCol: selFields.bCol,
+                focused: focused,
+                cursorShape: cursorShapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
+                cursorVisible: snapshot?.cursorVisible ?? false,
+                // `clampDisplayOffset` not `UInt32(_:)` — defense-in-depth on
+                // the hot per-frame path. Today `BBSnapshot.displayOffset`
+                // returns `Int` from a Rust `u32` so it's never negative,
+                // but a future regression that lets a negative slip through
+                // would trap the renderer mid-frame; clamping pins the
+                // contract at the cast site, and the helper one-shots a
+                // `.error` log so the violation surfaces without spamming.
+                // Audit M-16 / UR follow-up (2026-04-29).
+                displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
+                topInsetPoints: topInsetPoints,
+                leftInsetPoints: leftInsetPoints,
+                defaultBgRgb: defaultBgRgb,
+                backgroundOpacity: backgroundOpacity,
+                keepBgOpaque: keepBgOpaque,
+                accentColor: accentColor,
+                cursorColor: cursorColor,
+                blinkSkip: blinkSkip,
+                cmdHoverBufferLine: cmdHoverBufferLine,
+                cmdHoverStartCol: cmdHoverStartCol,
+                cmdHoverEndCol: cmdHoverEndCol,
+                metricsGeneration: metricsGeneration,
+                atlasGeneration: atlas.generation
+            )
         )
     }
 
@@ -1329,32 +1302,34 @@ public final class MetalRenderer {
         return CacheKey(
             cols: snap.cols,
             rows: snap.rows,
-            hoveredLinkID: hoveredLinkID,
-            selMode: selFields.mode,
-            selALine: selFields.aLine,
-            selBLine: selFields.bLine,
-            selACol: selFields.aCol,
-            selBCol: selFields.bCol,
-            focused: focused,
-            cursorShape: effectiveShape,
-            cursorVisible: snap.cursorVisible,
-            // Sibling of the FrameKey site — same clamping rationale,
-            // routed through `clampDisplayOffset` for the one-shot
-            // negative-detected warning. Audit M-16 (2026-04-29).
-            displayOffset: Self.clampDisplayOffset(snap.displayOffset),
-            topInsetPoints: topInsetPoints,
-            leftInsetPoints: leftInsetPoints,
-            defaultBgRgb: defaultBgRgb,
-            backgroundOpacity: backgroundOpacity,
-            keepBgOpaque: keepBgOpaque,
-            accentColor: accentColor,
-            cursorColor: cursorColor,
-            blinkSkip: blinkSkip,
-            cmdHoverBufferLine: cmdHoverBufferLine,
-            cmdHoverStartCol: cmdHoverStartCol,
-            cmdHoverEndCol: cmdHoverEndCol,
-            atlasGeneration: atlas.generation,
-            metricsGeneration: metricsGeneration
+            visual: VisualState(
+                hoveredLinkID: hoveredLinkID,
+                selMode: selFields.mode,
+                selALine: selFields.aLine,
+                selBLine: selFields.bLine,
+                selACol: selFields.aCol,
+                selBCol: selFields.bCol,
+                focused: focused,
+                cursorShape: effectiveShape,
+                cursorVisible: snap.cursorVisible,
+                // Sibling of the FrameKey site — same clamping rationale,
+                // routed through `clampDisplayOffset` for the one-shot
+                // negative-detected warning. Audit M-16 (2026-04-29).
+                displayOffset: Self.clampDisplayOffset(snap.displayOffset),
+                topInsetPoints: topInsetPoints,
+                leftInsetPoints: leftInsetPoints,
+                defaultBgRgb: defaultBgRgb,
+                backgroundOpacity: backgroundOpacity,
+                keepBgOpaque: keepBgOpaque,
+                accentColor: accentColor,
+                cursorColor: cursorColor,
+                blinkSkip: blinkSkip,
+                cmdHoverBufferLine: cmdHoverBufferLine,
+                cmdHoverStartCol: cmdHoverStartCol,
+                cmdHoverEndCol: cmdHoverEndCol,
+                metricsGeneration: metricsGeneration,
+                atlasGeneration: atlas.generation
+            )
         )
     }
 
