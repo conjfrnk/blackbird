@@ -49,6 +49,12 @@ public enum TargetFrameRate: Equatable {
 /// 60 Hz panel is wasteful (MTKView's CVDisplayLink will pin at
 /// vblank anyway, but the Metal command-buffer allocator sizes buffers
 /// for the stated rate, which we'd rather not oversize).
+/// Frame-rate ceiling applied under Low Power Mode or serious/critical thermal
+/// pressure — still smooth for terminal output while easing battery/heat
+/// (mirrors Ghostty). Capped against the display's native max so a 60 Hz panel
+/// never asks for more than it can show.
+private let throttledFPS = 30
+
 public func preferredFrameRate(
     isOccluded: Bool,
     isLowPowerMode: Bool,
@@ -58,11 +64,11 @@ public func preferredFrameRate(
     if isOccluded { return .paused }
     let cap = max(1, nativeMaxFPS)
     if isLowPowerMode {
-        return .fps(min(30, cap))
+        return .fps(min(throttledFPS, cap))
     }
     switch thermalState {
     case .serious, .critical:
-        return .fps(min(30, cap))
+        return .fps(min(throttledFPS, cap))
     case .nominal, .fair:
         return .fps(cap)
     @unknown default:
