@@ -225,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // freshness, not the thread it runs on, is what protects a live
         // partial.
         DispatchQueue.global(qos: .utility).async {
-            MainThreadWatchdog.pruneOrphanPartials()
+            HangReportStore.pruneOrphanPartials()
         }
         // `installMainMenu` builds the full menu tree (including the
         // conditional Sparkle "Check for Updates…" item via

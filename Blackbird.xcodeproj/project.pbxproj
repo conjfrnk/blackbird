@@ -112,6 +112,7 @@
 		A25683CF4210AC620DBBBB72 /* FindBarAltScreenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 952020A922B8A99F336257AD /* FindBarAltScreenTests.swift */; };
 		A25F8643DAD775E8251392EC /* FocusEventsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */; };
 		A2A3F1C9087CDA86E7A2B1A8 /* TerminalView+Paste.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2D7C60D8EDCD6659DD9161 /* TerminalView+Paste.swift */; };
+		A725395BC74894D1AB8F746A /* HangReportStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC0E515FB8692545E4B1FF18 /* HangReportStore.swift */; };
 		A847775801D9AA7617140968 /* SelectionBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1E1EBA9E7B0204B67A3BCB /* SelectionBlindTests.swift */; };
 		A867066B7521F3033D1766D7 /* TerminalView+Mouse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CC2349BAF9EB4C640D5A38F /* TerminalView+Mouse.swift */; };
 		AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6E41D23703A7FE0195559D6 /* KeyEncoder.swift */; };
@@ -342,6 +343,7 @@
 		F7EBD4A52B5D2F862E778207 /* PreferencesAdversarialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesAdversarialTests.swift; sourceTree = "<group>"; };
 		F89FAA17C3055BBE6D0556C1 /* MetalDrawableCountSourcePinTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDrawableCountSourcePinTests.swift; sourceTree = "<group>"; };
 		F9C2B3AC096BA3AF2FC3BB6C /* KeyEncoderRoundtripProps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderRoundtripProps.swift; sourceTree = "<group>"; };
+		FC0E515FB8692545E4B1FF18 /* HangReportStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HangReportStore.swift; sourceTree = "<group>"; };
 		FD696E3368D938805401E981 /* PTYLifetimeRaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYLifetimeRaceTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -638,6 +640,7 @@
 		FB013EA713396934645D471C /* Window */ = {
 			isa = PBXGroup;
 			children = (
+				FC0E515FB8692545E4B1FF18 /* HangReportStore.swift */,
 				A13EEDE788104CDCE7BAF53C /* MainThreadWatchdog.swift */,
 				E51A54ACD363A09E47E79F62 /* MainWindowController.swift */,
 				82EFC0C140D3593E2905D923 /* TabOrderCoordinator.swift */,
@@ -786,6 +789,7 @@
 				75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */,
 				9373DAF0792C4FD24F6FE178 /* GlyphAtlas.swift in Sources */,
 				AED697821DF433FFA6BAE0ED /* GlyphBitmapCache.swift in Sources */,
+				A725395BC74894D1AB8F746A /* HangReportStore.swift in Sources */,
 				1DFA371FD2502A8FA6AB320B /* HyperlinkResolver.swift in Sources */,
 				AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */,
 				5E835DC2E5C1FC93CF846CA0 /* KeyEventClassifier.swift in Sources */,
