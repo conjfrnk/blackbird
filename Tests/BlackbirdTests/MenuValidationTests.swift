@@ -212,8 +212,8 @@ final class MenuValidationTests: XCTestCase {
         // Establish baseline: bypassCloseConfirm starts false (and we
         // want it false after this test runs, so other tests in the same
         // process don't observe a leaked-true flag).
-        MainWindowController.bypassCloseConfirm = false
-        defer { MainWindowController.bypassCloseConfirm = false }
+        MainWindowController.setCloseConfirmBypass(false)
+        defer { MainWindowController.setCloseConfirmBypass(false) }
 
         let delegate = freshAppDelegate()
         let selector = #selector(AppDelegate.closeWindow(_:))

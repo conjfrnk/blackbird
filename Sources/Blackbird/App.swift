@@ -134,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // after `.terminateNow`; the synchronous reset in willTerminate
         // is robust against that hypothetical and avoids leaving an
         // async closure pending against a half-torn-down process.
-        MainWindowController.bypassCloseConfirm = true
+        MainWindowController.setCloseConfirmBypass(true)
         return .terminateNow
     }
 
@@ -374,7 +374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // before process exit so a hypothetical downstream delegate that
         // ever cancels termination doesn't leave the flag stuck on for
         // the rest of the session.
-        MainWindowController.bypassCloseConfirm = false
+        MainWindowController.setCloseConfirmBypass(false)
     }
 
     /// macOS 14+ emits a runtime warning on launch when the delegate
@@ -597,9 +597,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // keep the per-tab confirm (matching plain ⌘W), else it kills a
         // running process with no confirmation at all. (F-S6-002)
         if MainWindowController.shouldBypassPerTabConfirm(tabCount: tabs.count) {
-            MainWindowController.bypassCloseConfirm = true
+            MainWindowController.setCloseConfirmBypass(true)
         }
-        defer { MainWindowController.bypassCloseConfirm = false }
+        defer { MainWindowController.setCloseConfirmBypass(false) }
         for tab in tabs {
             tab.performClose(nil)
         }

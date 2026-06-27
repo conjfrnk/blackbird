@@ -237,16 +237,11 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
         try XCTSkipUnless(controller.window?.isMiniaturized == true,
                           "headless xctest host did not honor miniaturize; skipping")
 
-        // Trigger the deferred-auto-close logic. `deferredAutoCloseIfNeeded`
-        // is `private`, so we probe via the Obj-C runtime (as the prior
-        // scaffolding did) so the test compiles regardless of access
-        // modifier.
-        let sel = NSSelectorFromString("deferredAutoCloseIfNeeded")
-        XCTAssertTrue(controller.responds(to: sel),
-                      "deferredAutoCloseIfNeeded selector must exist")
-        if controller.responds(to: sel) {
-            _ = controller.perform(sel)
-        }
+        // Trigger the deferred-auto-close logic. It lives on the
+        // `SessionLifecycle` collaborator now (an internal method on the
+        // controller's `sessionLifecycle` lazy var), so call it directly via
+        // `@testable` rather than probing the Obj-C runtime.
+        controller.sessionLifecycle.deferredAutoCloseIfNeeded()
 
         // Spin one runloop tick so the deferred close settles.
         let exp = expectation(description: "tick")
