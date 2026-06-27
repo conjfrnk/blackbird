@@ -64,30 +64,30 @@ final class DiagnosticReportStore: ObservableObject {
     /// Re-enumerate both directories and update `reports`. Sorted by
     /// modification date descending — newest first.
     func reload() {
-        let hangs = enumerate(directory: hangDirectory, kind: .hang) { name in
-            // Hang reports written by `MainThreadWatchdog` follow
-            // `hang-<ts>.txt`. The length check rejects degenerate
-            // filenames like `hang-.txt` (prefix+suffix only with no
-            // timestamp content).
-            let prefix = "hang-"
-            let suffix = ".txt"
-            return name.hasPrefix(prefix)
-                && name.hasSuffix(suffix)
-                && name.count > prefix.count + suffix.count
+        // Hang reports (`MainThreadWatchdog`) are `hang-<ts>.txt`. Crash
+        // reports (macOS ReportCrash) are `Blackbird-<ts>-<random>.ips`
+        // (modern) or `.crash` (legacy); the crash directory holds reports for
+        // every crashed process, so the app prefix filters to just ours.
+        let hangs = enumerate(directory: hangDirectory, kind: .hang) {
+            Self.acceptsReport($0, prefix: "hang-", suffixes: [".txt"])
         }
-        let crashes = enumerate(directory: crashDirectory, kind: .crash) { name in
-            // macOS writes `Blackbird-<ts>-<random>.ips` (modern) or
-            // `Blackbird-<ts>-<random>.crash` (legacy). The crash directory
-            // contains reports for every crashed process on the system, so
-            // filter by app prefix to surface only ours. Length check
-            // rejects `Blackbird-.ips` and `Blackbird-.crash` (prefix-only
-            // filenames that would otherwise render as zero-byte rows).
-            let prefix = "Blackbird-"
-            return name.hasPrefix(prefix)
-                && (name.hasSuffix(".ips") || name.hasSuffix(".crash"))
-                && name.count > prefix.count + (name.hasSuffix(".ips") ? 4 : 6)
+        let crashes = enumerate(directory: crashDirectory, kind: .crash) {
+            Self.acceptsReport($0, prefix: "Blackbird-", suffixes: [".ips", ".crash"])
         }
         reports = (hangs + crashes).sorted { $0.modificationDate > $1.modificationDate }
+    }
+
+    /// True when `name` is `<prefix><non-empty body><suffix>` for one of
+    /// `suffixes`. The strict `>` length check rejects degenerate
+    /// prefix+suffix-only filenames (`hang-.txt`, `Blackbird-.ips`,
+    /// `Blackbird-.crash`) that carry no timestamp/body and would otherwise
+    /// render as zero-content rows. The matched suffix's own length is used,
+    /// so `.ips` (4) and `.crash` (6) each gate correctly. `suffixes` are
+    /// mutually exclusive tails here, so match order is irrelevant.
+    private static func acceptsReport(_ name: String, prefix: String, suffixes: [String]) -> Bool {
+        guard name.hasPrefix(prefix),
+              let suffix = suffixes.first(where: { name.hasSuffix($0) }) else { return false }
+        return name.count > prefix.count + suffix.count
     }
 
     private func enumerate(directory: URL, kind: Kind, accept: (String) -> Bool) -> [Report] {
