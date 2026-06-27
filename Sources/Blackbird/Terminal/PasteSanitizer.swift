@@ -345,4 +345,22 @@ enum PasteSanitizer {
         }
         return out
     }
+
+    /// Wrap a file path in single quotes using the POSIX `'\''` recipe to
+    /// escape any embedded single quote. Single-quoted strings in sh/zsh
+    /// suppress *all* metacharacter interpretation (spaces, `$`, backticks,
+    /// newlines, globs), so this is safe against arbitrary filesystem paths
+    /// including ones that contain quotes. (Drop-path shell-quoting,
+    /// co-located with the paste/drop sanitizers — REFACTOR.md Part III §3.)
+    static func shellQuote(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Join N dropped file paths into a single space-separated, shell-quoted
+    /// string. Matches Terminal.app / iTerm2 behaviour: no trailing slash on
+    /// directories, no trailing newline, no per-file prompt. The caller feeds
+    /// the result through `pasteText(_:)`.
+    static func joinedDroppedPaths(_ paths: [String]) -> String {
+        paths.map(shellQuote).joined(separator: " ")
+    }
 }
