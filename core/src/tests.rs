@@ -1,6 +1,6 @@
 use super::*;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::vte::ansi::Handler;
+use alacritty_terminal::vte::ansi::{Handler, Rgb};
 
 #[test]
 fn alacritty_terminal_is_linked() {
