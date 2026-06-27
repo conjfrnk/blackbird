@@ -125,8 +125,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // next `accessibilityValue()` call would build offsets
             // against the OLD value and cache them under whatever
             // identity gets stamped next.
-            a11yCache.snapshotIdentity = nil
-            a11yCache.lineOffsets = nil
+            a11yCache.invalidate()
             // Find-match coordinates are relative to the buffer at the time
             // performSearch ran. Any snapshot swap may have scrolled history,
             // wrapped lines, or overwritten matched rows; the controller reruns
@@ -2178,6 +2177,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         /// O(N) read into O(N²) for grids with hundreds of lines.
         /// Invalidated alongside `value` on snapshot identity change.
         var lineOffsets: [Int]? = nil
+
+        /// Cache a freshly-computed `value` under `identity`, atomically
+        /// clearing the derived `lineOffsets` (keyed on `value`, so a stale
+        /// table would mis-map line ranges) and bumping the recompute counter
+        /// tests assert on. The ONE place value + identity + lineOffsets move
+        /// together — callers can't update one and forget the correlated others.
+        mutating func store(value: String, identity: UnsafeRawPointer?) {
+            self.value = value
+            self.snapshotIdentity = identity
+            self.lineOffsets = nil
+            self.computations += 1
+        }
+
+        /// Invalidate so the next `accessibilityValue()` recomputes: drop the
+        /// `identity` (forces a cache miss) and the `value`-keyed `lineOffsets`.
+        /// The stale `value` is left in place — it's gated behind the now-nil
+        /// identity, so it can never be returned without a recompute first.
+        mutating func invalidate() {
+            self.snapshotIdentity = nil
+            self.lineOffsets = nil
+        }
     }
 
     var a11yCache = A11yCache()

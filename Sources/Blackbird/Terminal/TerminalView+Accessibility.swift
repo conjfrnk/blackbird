@@ -86,12 +86,9 @@ extension TerminalView {
         let computed = source.visibleRowsAsText()
             .map { $0.trimmingTrailingWhitespace() }
             .joined(separator: "\n")
-        a11yCache.snapshotIdentity = identity
-        a11yCache.value = computed
-        // The line-offset table is keyed on `value`; invalidate it whenever
-        // the value changes so the next line-related accessor rebuilds.
-        a11yCache.lineOffsets = nil
-        a11yCache.computations += 1
+        // One mutation point: stamps value + identity and clears the
+        // value-keyed `lineOffsets` (+ bumps the recompute counter) together.
+        a11yCache.store(value: computed, identity: identity)
         return computed
     }
 
@@ -321,8 +318,7 @@ extension TerminalView {
     func installSnapshotForTests(rows: [String]) {
         a11ySnapshotOverride = A11yFakeSnapshot(rows: rows)
         // New identity ⇒ next accessibilityValue() must recompute.
-        a11yCache.snapshotIdentity = nil
-        a11yCache.lineOffsets = nil
+        a11yCache.invalidate()
     }
 
     /// Reset the one-shot selection-setter log latch so tests can
