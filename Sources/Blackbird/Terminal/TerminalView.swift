@@ -277,17 +277,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     var replaceFindMatchesForTests: [(line: Int32, startCol: Int, endCol: Int)]?
     #endif
 
-    private final class FlashView: NSView {
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-    private let bellFlashView: FlashView = {
-        let v = FlashView(frame: .zero)
-        v.wantsLayer = true
-        v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.25).cgColor
-        v.alphaValue = 0
-        return v
-    }()
-    private var lastBellCounter: UInt64 = 0
+    /// Owns the terminal bell — the visual flash overlay (driven by
+    /// `session.$bellCounter`) and the audible no-op beep. Self-contained;
+    /// `attach(to:)` installs its overlay from `init`.
+    let bellController = BellController()
 
     // Public read; writer is `internal` so the hover extension's
     // `expandSelectionUnderAnchor()` and the mouse-selection path on
@@ -511,9 +504,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // the bottom inset shared with the grid.
         addSubview(scrollIndicator)
 
-        bellFlashView.frame = bounds
-        bellFlashView.autoresizingMask = [.width, .height]
-        addSubview(bellFlashView)
+        bellController.attach(to: self)
 
         // Drop-target ring sits on top of the bell flash so a dropped file
         // feedback never gets visually swamped by a simultaneous ^G bell.
@@ -1502,7 +1493,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // (counter=1) always flashes, even if a prior session's counter
         // had grown past 0. Only matters if the view ever reuses sessions;
         // still belt-and-braces.
-        lastBellCounter = 0
+        bellController.resetCounter()
         // Clear the stale snapshot + find-match state BEFORE returning on
         // a nil session — otherwise the previous session's grid lingers
         // on screen (rendered from `currentSnapshot`) after `view.session =
@@ -1571,25 +1562,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         session.$bellCounter
             .receive(on: DispatchQueue.main)
             .sink { [weak self] counter in
-                guard let self else { return }
-                guard counter > self.lastBellCounter else { return }
-                self.lastBellCounter = counter
-                self.flashBell()
+                self?.bellController.handleBellCounter(counter)
             }
             .store(in: &cancellables)
-    }
-
-    private func flashBell() {
-        guard Preferences.shared.bell == .visual else { return }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.08
-            bellFlashView.animator().alphaValue = 1.0
-        } completionHandler: { [weak self] in
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.12
-                self?.bellFlashView.animator().alphaValue = 0
-            }
-        }
     }
 
     // MARK: - Input
@@ -1976,21 +1951,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// `TEST_RUNNER_BB_SUPPRESS_BELL`) so an automated full-suite run doesn't
     /// emit a stream of system beeps. Read once; production and Xcode Cmd-U
     /// runs (env unset) ring normally.
-    private static let bellSuppressed =
-        ProcessInfo.processInfo.environment["BB_SUPPRESS_BELL"] == "1"
-
-    /// Ring the system "no-op feedback" bell, unless suppressed under test.
-    private func ringBell() {
-        guard !Self.bellSuppressed else { return }
-        NSSound.beep()
-    }
-
     /// AppKit rings NSBeep here for a key event that no responder handled.
     /// Under the test harness, swallow it so key-input tests that drive
     /// `keyDown(with:)` on an out-of-window view don't beep; real runs defer
     /// to `super` for the normal feedback.
     public override func noResponder(for eventSelector: Selector) {
-        guard !Self.bellSuppressed else { return }
+        guard !BellController.suppressed else { return }
         super.noResponder(for: eventSelector)
     }
 
@@ -2003,8 +1969,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // Ring empty (no shell integration, or no commands yet) OR
             // already at the oldest prompt. NSBeep is the standard macOS
             // "no-op" feedback — quiet, doesn't steal focus. Audit
-            // terminal-view-2 F25. Via ringBell() so the test harness mutes it.
-            ringBell()
+            // terminal-view-2 F25. Via bellController.ring() so the test
+            // harness mutes it.
+            bellController.ring()
         }
     }
 
@@ -2013,7 +1980,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// newest prompt is always live.
     @objc public func jumpToNextPrompt(_ sender: Any?) {
         if session?.jumpToNextPrompt() != true {
-            ringBell()
+            bellController.ring()
         }
     }
 
