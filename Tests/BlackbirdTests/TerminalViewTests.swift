@@ -993,7 +993,7 @@ final class TerminalViewTests: XCTestCase {
     // MARK: - Mouse-report encoding (pure path)
 
     func test_mouseReport_sgr_leftPress_final_M() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: true, button: 0, press: true, col: 10, row: 5
         )
         // ESC [ < 0 ; 11 ; 6 M
@@ -1001,7 +1001,7 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_mouseReport_sgr_leftRelease_final_m() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: true, button: 0, press: false, col: 10, row: 5
         )
         // SGR preserves the button number; lowercase m indicates release.
@@ -1009,14 +1009,14 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_mouseReport_sgr_wheelUp() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: true, button: 64, press: true, col: 0, row: 0
         )
         XCTAssertEqual(String(data: bytes!, encoding: .utf8), "\u{1B}[<64;1;1M")
     }
 
     func test_mouseReport_x10_leftPress_hasCbButton() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: false, button: 0, press: true, col: 0, row: 0
         )
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 32, 33, 33]))
@@ -1025,7 +1025,7 @@ final class TerminalViewTests: XCTestCase {
     func test_mouseReport_x10_leftRelease_cbForcesButton3() {
         // Regression: previously emitted cb=32 (indistinguishable from
         // left-press). The fix sets the low bits to 3 for releases.
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: false, button: 0, press: false, col: 0, row: 0
         )
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 35, 33, 33]),
@@ -1033,7 +1033,7 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_mouseReport_x10_rightRelease_alsoCb35() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: false, button: 2, press: false, col: 0, row: 0
         )
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 35, 33, 33]),
@@ -1041,17 +1041,17 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_mouseReport_x10_outsideRange_returnsNil() {
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: false, button: 0, press: true, col: 500, row: 0
         ), "X10 can't address cols >= 223")
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: false, button: 0, press: true, col: 0, row: 500
         ), "X10 can't address rows >= 223")
     }
 
     func test_mouseReport_x10_motion() {
         // Motion with button held: button=32 (bit 5). cb = 32+32 = 64.
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: false, button: 32, press: true, col: 3, row: 7
         )
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 64, 36, 40]))
@@ -1060,13 +1060,13 @@ final class TerminalViewTests: XCTestCase {
     func test_mouseReport_rejectsNegativeCoord() {
         // Pre-guards before any encoding mode — negative col/row from a
         // misbehaving input device would otherwise produce nonsense.
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: 0, press: true, col: -1, row: 0
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: 0, press: true, col: 0, row: -1
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: false, button: 0, press: true, col: -1, row: 0
         ))
     }
@@ -1075,16 +1075,16 @@ final class TerminalViewTests: XCTestCase {
         // X10 encoding would trap on `UInt8(button + 32)` for button
         // >= 224. SGR encoding doesn't trap but would stringify an
         // absurd value. Reject both up front.
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: -1, press: true, col: 0, row: 0
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: 224, press: true, col: 0, row: 0
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: Int.max, press: true, col: 0, row: 0
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: false, button: 224, press: true, col: 0, row: 0
         ))
     }
@@ -1093,7 +1093,7 @@ final class TerminalViewTests: XCTestCase {
         // SGR encoding doesn't cap col/row (digits only, no byte truncation).
         // Callers clamp to 10k upstream. Verify the encoder handles those
         // values without drama.
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: true, button: 0, press: true, col: 9999, row: 9999
         )
         XCTAssertEqual(bytes, Data("\u{1B}[<0;10000;10000M".utf8))

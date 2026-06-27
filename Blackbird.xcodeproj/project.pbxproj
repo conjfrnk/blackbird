@@ -84,6 +84,7 @@
 		82D7C5B2AE6FE6B31300D62F /* BBTermTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11194E0650067380506F53B2 /* BBTermTests.swift */; };
 		838612ABE0367B712E2888B7 /* CursorShapeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34BBC64F7AC3CB3CE971A1DF /* CursorShapeTests.swift */; };
 		839D0B792073C9A8B16DCF44 /* MainWindowControllerLifetimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBFA60B5BFD8E81CC6FAC4BE /* MainWindowControllerLifetimeTests.swift */; };
+		84E2B2AB3E81BD6EB1195FEF /* MouseReportEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 189F9BFCE6B0F46BED00E135 /* MouseReportEncoder.swift */; };
 		85FF81EC8B3EDAE4FE6BD44A /* TerminalSessionBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 173C25905C5C1D2D008F3EEA /* TerminalSessionBoundaryTests.swift */; };
 		8743B171BF258DCAF8182762 /* IMETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CFAD8B88865C349CC141C65 /* IMETests.swift */; };
 		8ABE26FA9AECA5A0AF213670 /* StartupTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC563B552C1105D7EA9558F5 /* StartupTelemetry.swift */; };
@@ -213,6 +214,7 @@
 		15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasTests.swift; sourceTree = "<group>"; };
 		169183A826D6D1D5DD4471B9 /* TabStripWindowDragTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStripWindowDragTests.swift; sourceTree = "<group>"; };
 		173C25905C5C1D2D008F3EEA /* TerminalSessionBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionBoundaryTests.swift; sourceTree = "<group>"; };
+		189F9BFCE6B0F46BED00E135 /* MouseReportEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseReportEncoder.swift; sourceTree = "<group>"; };
 		20D4A2742422F440F7C65BB5 /* IMEAstralRectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEAstralRectTests.swift; sourceTree = "<group>"; };
 		22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdResolver.swift; sourceTree = "<group>"; };
 		24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRendererTests.swift; sourceTree = "<group>"; };
@@ -570,6 +572,7 @@
 				3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */,
 				EF2E535DE7BB1D225E2F58E2 /* KittyTerminfo.swift */,
 				26B359BBCEB85D55F2981EDD /* LatencyProbe.swift */,
+				189F9BFCE6B0F46BED00E135 /* MouseReportEncoder.swift */,
 				8B9FC36E18F7230ED943F1A0 /* PasteSanitizer.swift */,
 				C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */,
 				28AC18E4DFA1B4F34FA78C71 /* PowerAwareRendering.swift */,
@@ -826,6 +829,7 @@
 				26551D9D45C969B410CFE79C /* MainWindowController.swift in Sources */,
 				92F85478B5B065F702AD717B /* MetalDeviceSelection.swift in Sources */,
 				25F0BDE5FF93EEACCBE4DA8C /* MetalRenderer.swift in Sources */,
+				84E2B2AB3E81BD6EB1195FEF /* MouseReportEncoder.swift in Sources */,
 				EB1B99FE4ED4AAB9385037BE /* NativeTabStripHider.swift in Sources */,
 				7462C02E74143E52FD628DA5 /* PTY.swift in Sources */,
 				0A38D6D97FCE22C1211E33E3 /* PasteSanitizer.swift in Sources */,
