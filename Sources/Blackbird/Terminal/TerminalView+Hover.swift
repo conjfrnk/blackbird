@@ -398,47 +398,6 @@ extension TerminalView {
 
     private func showHoverTooltip(urlString: String, anchor: NSPoint) {
         guard let window else { return }
-        let panel: NSPanel
-        let label: NSTextField
-        if let existingPanel = hoverTooltipPanel, let existingLabel = hoverTooltipLabel {
-            panel = existingPanel
-            label = existingLabel
-        } else {
-            // .nonactivatingPanel keeps the terminal's key-window / first-
-            // responder state intact while the tooltip is visible, so a
-            // hover-peek doesn't disrupt typing.
-            panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 200, height: 20),
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered,
-                defer: true
-            )
-            panel.isFloatingPanel = true
-            panel.hidesOnDeactivate = true
-            panel.hasShadow = true
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-            panel.ignoresMouseEvents = true
-
-            let container = NSView(frame: .zero)
-            container.wantsLayer = true
-            container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-            container.layer?.cornerRadius = 4
-            container.layer?.borderWidth = 0.5
-            container.layer?.borderColor = NSColor.separatorColor.cgColor
-
-            let lbl = NSTextField(labelWithString: "")
-            lbl.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            lbl.textColor = .labelColor
-            lbl.lineBreakMode = .byTruncatingMiddle
-            lbl.maximumNumberOfLines = 1
-            container.addSubview(lbl)
-            panel.contentView = container
-
-            hoverTooltipPanel = panel
-            hoverTooltipLabel = lbl
-            label = lbl
-        }
         // Scrub before truncation. A hostile remote can stuff a
         // U+202E into the OSC 8 href; `URL(string:)` percent-encodes
         // it so the click target stays the literal hostile host, but
@@ -463,42 +422,20 @@ extension TerminalView {
         // off-screen. 512 chars covers every realistic URL; anything
         // over that gets an ellipsis so the user still sees the origin.
         // Truncating AFTER scrub means a bidi byte can't hide past the
-        // ellipsis at character 513.
+        // ellipsis at character 513. The panel (which receives this safe
+        // string) lives in `tooltipController`.
         let maxDisplay = 512
-        label.stringValue = scrubbed.count > maxDisplay
+        let display = scrubbed.count > maxDisplay
             ? String(scrubbed.prefix(maxDisplay)) + "…"
             : scrubbed
-        label.sizeToFit()
-        let padX: CGFloat = 8, padY: CGFloat = 4
-        let labelFrame = NSRect(
-            x: padX, y: padY,
-            width: min(label.frame.width, 600),
-            height: label.frame.height
-        )
-        label.frame = labelFrame
-        let panelSize = NSSize(
-            width: labelFrame.width + padX * 2,
-            height: labelFrame.height + padY * 2
-        )
-        panel.contentView?.frame = NSRect(origin: .zero, size: panelSize)
-
-        // Anchor just below the pointer. Convert the view-local anchor to
-        // screen space via the window's coordinate system.
-        let windowPoint = anchor
-        let screenPoint = window.convertPoint(toScreen: windowPoint)
-        let origin = NSPoint(
-            x: screenPoint.x + 12,
-            y: screenPoint.y - panelSize.height - 12
-        )
-        panel.setFrame(
-            NSRect(origin: origin, size: panelSize),
-            display: true
-        )
-        panel.orderFront(nil)
+        // Convert the view-local anchor to screen space; the controller
+        // anchors the panel just below-right of it.
+        let screenPoint = window.convertPoint(toScreen: anchor)
+        tooltipController.show(text: display, near: screenPoint)
     }
 
     private func dismissHoverTooltip() {
-        hoverTooltipPanel?.orderOut(nil)
+        tooltipController.dismiss()
     }
 
     // `expandSelectionUnderAnchor()` and `sendMouseEvent(...)` moved to

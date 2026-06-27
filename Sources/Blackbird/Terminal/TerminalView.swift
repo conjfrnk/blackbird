@@ -228,11 +228,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// Scheduled tooltip reveal. Cancelled on pointer movement, scroll,
     /// keydown, or view teardown.
     var hoverTooltipItem: DispatchWorkItem?       // internal for TerminalView+Hover.swift
-    /// Lightweight panel that shows the resolved URL after the 500 ms dwell.
-    /// Kept around between shows so repeated hovers don't thrash NSPanel
-    /// allocation; hidden when not in use.
-    var hoverTooltipPanel: NSPanel?               // internal for TerminalView+Hover.swift
-    var hoverTooltipLabel: NSTextField?           // internal for TerminalView+Hover.swift
+    /// Owns the lightweight URL-preview panel shown after the 500 ms dwell. The
+    /// panel + label live here (private) instead of as two more `internal` view
+    /// fields; +Hover scrubs the href and hands the controller a safe string.
+    let tooltipController = TooltipController()
     /// Tracking area that delivers `mouseMoved` / `mouseExited`. Rebuilt on
     /// bounds changes via `updateTrackingAreas`.
     var hoverTrackingArea: NSTrackingArea?        // internal for TerminalView+Hover.swift
@@ -1129,7 +1128,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // terminal-view-2 F19.
         hoverTooltipItem?.cancel()
         hoverTooltipItem = nil
-        hoverTooltipPanel?.orderOut(nil)
+        tooltipController.dismiss()
         // M-7 / RW-04: also kill the selection autoscroll timer. `deinit`
         // already invalidates it (terminal-view-2 F2), but tab tear-out
         // moves the view between windows WITHOUT calling deinit. Between
@@ -1352,7 +1351,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // captures self weakly so it won't crash on late fire, but the
         // panel would otherwise linger briefly after the view is gone.
         hoverTooltipItem?.cancel()
-        hoverTooltipPanel?.orderOut(nil)
+        tooltipController.dismiss()
         // Selection-autoscroll timer, if the user tore the view down
         // mid-drag (rare but possible on app quit). `selectionAutoscroller`
         // is a stored `let`, so reaching it in deinit can't race a property
