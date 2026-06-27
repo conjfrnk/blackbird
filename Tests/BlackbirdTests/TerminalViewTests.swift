@@ -1400,7 +1400,7 @@ final class TerminalViewTests: XCTestCase {
     func test_isOptionMetaChord_metaModeOptionAlone_isChord() {
         // Use Option as Meta + plain Option held → Meta chord, bypass IME.
         XCTAssertTrue(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option])
         )
     }
 
@@ -1408,7 +1408,7 @@ final class TerminalViewTests: XCTestCase {
         // Shift is just a shift level (Option+Shift+e is still a Meta chord);
         // it must not disqualify the chord.
         XCTAssertTrue(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .shift])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .shift])
         )
     }
 
@@ -1416,7 +1416,7 @@ final class TerminalViewTests: XCTestCase {
         // Control+Option is handled by a different path (C0 / control
         // encoding); the Meta-chord IME bypass must not claim it.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .control])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .control])
         )
     }
 
@@ -1424,21 +1424,21 @@ final class TerminalViewTests: XCTestCase {
         // Command is a menu/app shortcut surface; an Option+Command event is
         // never a Meta chord.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .command])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .command])
         )
     }
 
     func test_isOptionMetaChord_metaModeControlWithoutOption_isNotChord() {
         // No Option held at all → not a Meta chord regardless of mode.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.control])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.control])
         )
     }
 
     func test_isOptionMetaChord_metaModeNoModifiers_isNotChord() {
         // No Option held → not a Meta chord.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [])
         )
     }
 
@@ -1446,7 +1446,7 @@ final class TerminalViewTests: XCTestCase {
         // Native-Option mode: the user wants macOS accent composition
         // preserved, so even plain Option must NOT be treated as a Meta chord.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: false, modifierFlags: [.option])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: false, modifierFlags: [.option])
         )
     }
 }
