@@ -7,7 +7,8 @@ import os
 ///
 /// Visibility is driven entirely by the snapshot:
 ///   - `historySize == 0`         → never shown (no content to scroll).
-///   - `displayOffset == 0`       → fades out over 0.4s (you're at the bottom).
+///   - `displayOffset == 0`       → fades out after a 1.2 s delay (a 0.25 s
+///                                  cross-fade), since you are at the bottom.
 ///   - `displayOffset > 0`        → visible full opacity.
 ///
 /// Not interactive in v1 — it's a read-only hint. Drag-to-scroll is a
@@ -34,6 +35,28 @@ final class ScrollIndicator: NSView {
     /// than removed so rapid prompt emission doesn't thrash CALayer alloc.
     private var markLayers: [CALayer] = []
     private var fadeOutWorkItem: DispatchWorkItem?
+
+    // MARK: - Geometry & timing (single source of truth)
+
+    /// Horizontal inset of the thumb / ticks from the right edge.
+    private static let edgePad: CGFloat = 3
+    /// Minimum thumb height so the pill stays visible on a short window.
+    private static let minThumbHeight: CGFloat = 24
+    /// Delay before the thumb auto-hides after the viewport returns to the
+    /// live grid.
+    private static let autoHideDelay: TimeInterval = 1.2
+    /// Opacity cross-fade duration for show/hide.
+    private static let fadeAnimationDuration: CFTimeInterval = 0.25
+
+    /// Map a `[0, 1]` fraction (0 = bottom, 1 = top) to the y-origin for an
+    /// element of `elementHeight` within a `track`-tall column. The ONE
+    /// fraction→y mapping, shared by the thumb and the prompt-mark ticks so the
+    /// two stay in lockstep.
+    private static func yForFraction(
+        _ fraction: CGFloat, elementHeight: CGFloat, track: CGFloat
+    ) -> CGFloat {
+        fraction * max(0, track - elementHeight)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -96,14 +119,13 @@ final class ScrollIndicator: NSView {
         // `maxThumbY < 0` and renders the thumb above its parent's
         // origin. The 24pt floor still applies when the track is at
         // least that tall.
-        let thumbHeight = min(track, max(24, track * viewportFraction))
+        let thumbHeight = min(track, max(Self.minThumbHeight, track * viewportFraction))
         // Thumb y: at displayOffset == 0 (bottom) → thumb at bottom.
         //          at displayOffset == historySize (top) → thumb at top.
-        let maxThumbY = max(0, track - thumbHeight)
-        let thumbY = maxThumbY * scrollFromBottom
+        let thumbY = Self.yForFraction(scrollFromBottom, elementHeight: thumbHeight, track: track)
 
         let thumbWidth: CGFloat = 4
-        let pad: CGFloat = 3
+        let pad = Self.edgePad
         // Disable implicit Core Animation to avoid smearing during rapid
         // scroll — the geometry catches up every frame, so animating the
         // change would look behind.
@@ -136,7 +158,7 @@ final class ScrollIndicator: NSView {
         let target: Float = visible ? 1.0 : 0.0
         if animated {
             CATransaction.begin()
-            CATransaction.setAnimationDuration(0.25)
+            CATransaction.setAnimationDuration(Self.fadeAnimationDuration)
             thumbLayer.opacity = target
             CATransaction.commit()
         } else {
@@ -174,7 +196,7 @@ final class ScrollIndicator: NSView {
         // colour at ~60 % alpha so the thumb over it still reads clearly.
         let tickHeight: CGFloat = 8
         let tickWidth: CGFloat = 2
-        let pad: CGFloat = 3
+        let pad = Self.edgePad
         // Re-use or create one layer per mark. Excess hidden.
         while markLayers.count < marks.count {
             let l = CALayer()
@@ -206,7 +228,7 @@ final class ScrollIndicator: NSView {
                 continue
             }
             let fraction = CGFloat(dist) / CGFloat(total)
-            let y = fraction * max(0, track - tickHeight)
+            let y = Self.yForFraction(fraction, elementHeight: tickHeight, track: track)
             l.isHidden = false
             l.backgroundColor = color
             l.frame = NSRect(
@@ -228,6 +250,6 @@ final class ScrollIndicator: NSView {
             self?.fadeOutWorkItem = nil
         }
         fadeOutWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoHideDelay, execute: item)
     }
 }
