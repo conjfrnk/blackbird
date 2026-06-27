@@ -646,6 +646,28 @@ public final class GlyphAtlas {
     /// cell sample the 1×1 placeholder. Returning `false` lets the caller
     /// drop the insert so the glyph re-rasterises (and self-heals) on its
     /// next appearance — same contract as the atlas-full path returning nil.
+    /// Blit a cached glyph bitmap straight into `texture` at the slot origin,
+    /// skipping CoreText — the shared cache-hit blit for the mono
+    /// (`texture`) and color (`colorTexture`) rasterize paths. Each caller
+    /// keeps its own size `assert` (and, for color, the `ensureRealColorTexture`
+    /// gate) before this; only the identical `withUnsafeBytes` → `texture.replace`
+    /// is shared.
+    private func blitCachedGlyph(
+        _ cached: GlyphBitmapCache.Bitmap,
+        into texture: MTLTexture,
+        at origin: (x: Int, y: Int)
+    ) {
+        cached.bytes.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            texture.replace(
+                region: MTLRegionMake2D(origin.x, origin.y, cached.width, cached.height),
+                mipmapLevel: 0,
+                withBytes: base,
+                bytesPerRow: cached.bytesPerRow
+            )
+        }
+    }
+
     @discardableResult
     private func rasterize(
         scalar: UnicodeScalar,
@@ -676,15 +698,7 @@ public final class GlyphAtlas {
             // off the slot. Trap loudly in DEBUG rather than risk an OOB.
             assert(cached.width == w && cached.height == h,
                    "cached mono glyph \(cached.width)×\(cached.height) != slot \(w)×\(h)")
-            cached.bytes.withUnsafeBytes { ptr in
-                guard let base = ptr.baseAddress else { return }
-                texture.replace(
-                    region: MTLRegionMake2D(origin.x, origin.y, cached.width, cached.height),
-                    mipmapLevel: 0,
-                    withBytes: base,
-                    bytesPerRow: cached.bytesPerRow
-                )
-            }
+            blitCachedGlyph(cached, into: texture, at: origin)
             return true
         }
         let cs = CGColorSpaceCreateDeviceGray()
@@ -816,15 +830,7 @@ public final class GlyphAtlas {
             guard ensureRealColorTexture() else { return false }
             assert(cached.width == w && cached.height == h,
                    "cached color glyph \(cached.width)×\(cached.height) != slot \(w)×\(h)")
-            cached.bytes.withUnsafeBytes { ptr in
-                guard let base = ptr.baseAddress else { return }
-                colorTexture.replace(
-                    region: MTLRegionMake2D(origin.x, origin.y, cached.width, cached.height),
-                    mipmapLevel: 0,
-                    withBytes: base,
-                    bytesPerRow: cached.bytesPerRow
-                )
-            }
+            blitCachedGlyph(cached, into: colorTexture, at: origin)
             return true
         }
         // Audit L16. We rasterize emoji into an sRGB context even on
