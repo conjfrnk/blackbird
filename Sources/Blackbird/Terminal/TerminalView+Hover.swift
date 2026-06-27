@@ -82,24 +82,11 @@ extension TerminalView {
         if cmdChanged || cmdModifierHeld {
             reevaluateCmdHoverHighlight()
         }
-        // DEC mode 1003 — any-event tracking. When the TUI has asked for
-        // motion reports (without requiring a button), emit a motion
-        // event even in the no-button case. xterm uses button 35 (32 +
-        // 3 "release", which the protocol uses to mean "no button
-        // currently pressed"). Fires only when the hover cell actually
-        // changed so we don't flood the PTY at pointer-update cadence.
-        // Audit terminal-view-2 F14.
-        if let session, mouseReportingEnabled(), anyEventMouseEnabled(),
-           !event.modifierFlags.contains(.option),
-           lastReportedMotionCell != BBXYPoint(col: col, row: screenRow) {
-            lastReportedMotionCell = BBXYPoint(col: col, row: screenRow)
-            sendMouseEvent(event, button: 35, press: true, session: session)
-        }
+        // DEC mode 1003 any-event motion report. This is a mouse-reporting
+        // responsibility, not a hover one — it lives in `TerminalView+Mouse`;
+        // `mouseMoved` is just the AppKit entry point that drives it.
+        reportPointerMotionIfNeeded(for: event, screenRow: screenRow, col: col)
     }
-
-    // `BBXYPoint` and `lastReportedMotionCell` are declared on the
-    // class body in `TerminalView.swift`. Extensions can't add stored
-    // properties; see the main file for their definitions.
 
     public override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)

@@ -372,6 +372,25 @@ extension TerminalView {
         return mode.contains(.mouseMotion)
     }
 
+    /// DEC mode 1003 (any-event tracking) motion report. When a TUI asked for
+    /// motion reports without requiring a button, emit one even in the no-button
+    /// case — xterm uses button 35 (32 + the "release" bit 3, which the protocol
+    /// reads as "no button currently pressed"). Fires ONLY when the hover cell
+    /// actually changed (`lastReportedMotionCell`) so we don't flood the PTY at
+    /// pointer-update cadence; Option bypasses reporting. Driven by
+    /// `TerminalView+Hover`'s `mouseMoved` (the AppKit entry point), but the
+    /// emission is a mouse-reporting concern so it lives here. Audit
+    /// terminal-view-2 F14.
+    func reportPointerMotionIfNeeded(for event: NSEvent, screenRow: Int, col: Int) {
+        guard let session, mouseReportingEnabled(), anyEventMouseEnabled(),
+              !event.modifierFlags.contains(.option),
+              lastReportedMotionCell != BBXYPoint(col: col, row: screenRow) else {
+            return
+        }
+        lastReportedMotionCell = BBXYPoint(col: col, row: screenRow)
+        sendMouseEvent(event, button: 35, press: true, session: session)
+    }
+
     private func dragReportingEnabled() -> Bool {
         guard let mode = currentSnapshot?.termMode else { return false }
         return mode.contains(.mouseDrag)
