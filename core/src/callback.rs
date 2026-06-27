@@ -12,12 +12,12 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::vte::ansi::Rgb;
 
 use crate::event::{BBEvent, BBEventCb, BBEventKind};
+use crate::guard::HandlerInFlightGuard;
 use crate::rate_limit::{
     EventRateState, PtyWriteRateCell, BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW,
     TITLE_EVENT_PER_SECOND,
 };
 use crate::scrub::scrub_title_controls;
-use crate::HandlerInFlightGuard;
 
 // ---------------------------------------------------------------------------
 // CallbackCell — shared mutable slot between BBTerm and RoutingListener
