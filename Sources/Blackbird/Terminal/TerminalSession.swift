@@ -586,10 +586,7 @@ public final class TerminalSession: ObservableObject {
             // contracts that rely on a sibling subsystem's defensive
             // check rot quietly when that sibling refactors. Mirrors
             // the gate every other coreQueue.async path uses.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
+            if self.isTerminatedLocked() { return }
             guard let bytes = self.focusEmissionBytes(focused: focused) else { return }
             self.pty?.writeImmediate(bytes)
         }
@@ -667,20 +664,14 @@ public final class TerminalSession: ObservableObject {
             // already in flight when terminate() runs would still capture
             // a snapshot and queue a main-hop append, mutating
             // promptMarks on a session whose consumers are tearing down.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
+            if self.isTerminatedLocked() { return }
             guard let snap = self.bbterm.snapshot() else { return }
             let mark = PromptMark(linesScrolled: snap.linesScrolled, gridRow: snap.cursorRow)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 // Re-check on the main hop: terminate() could have run
                 // between the coreQueue body and main drain.
-                self.publishLock.lock()
-                let terminatedNow = self.isTerminated
-                self.publishLock.unlock()
-                if terminatedNow { return }
+                if self.isTerminatedLocked() { return }
                 // Audit S5-008: a clear/reflow between capture and this
                 // drain invalidated the anchor — drop instead of
                 // re-inserting a phantom mark.
@@ -863,10 +854,7 @@ public final class TerminalSession: ObservableObject {
             // panic anywhere — a false alarm that would misdirect
             // triage of REAL core panics (the only consumer of that
             // message).
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
+            if self.isTerminatedLocked() { return }
             // Audit M3: when bb_term_resize2 panics, BBTerm.resize returns
             // nil. Skip TIOCSWINSZ so the kernel winsize stays in lockstep
             // with the grid (which kept its prior dims). Snapshot still
@@ -919,10 +907,7 @@ public final class TerminalSession: ObservableObject {
             // path — a font-change resizeAsync queued behind terminate()
             // used to reach a nil'd handle and emit the false
             // 'Rust panic fallback' warning.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
+            if self.isTerminatedLocked() { return }
             // Same Bug #3/#9 ordering as the sync `resize(to:)`: bbterm
             // first, then pty with the actually-applied (post-clamp) dims.
             // Audit M3 sibling of the sync path: nil => Rust panic
@@ -1111,6 +1096,18 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
+    /// Reads the `terminate()` latch under `publishLock`. Every `coreQueue`
+    /// body and its main-hop re-check calls this to bail when the session tore
+    /// down between scheduling and execution — the lock pairs with the store
+    /// in `terminate()`, so reading the bare `Bool` would race that store. The
+    /// lock guards only the read; callers branch on the returned value outside
+    /// it, exactly as the inline `lock / read / unlock` dance this replaces did.
+    private func isTerminatedLocked() -> Bool {
+        publishLock.lock()
+        defer { publishLock.unlock() }
+        return isTerminated
+    }
+
     /// Synchronous publish path used by user-input-driven snapshots
     /// (scroll, scrollToBottom, clearAll). Combines two semantics that
     /// pure inline writes and pure publishPendingSnapshot each fail to
@@ -1148,10 +1145,7 @@ public final class TerminalSession: ObservableObject {
             // tear consumers down (sibling of M-1 / F11).
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.publishLock.lock()
-                let terminated = self.isTerminated
-                self.publishLock.unlock()
-                guard !terminated else { return }
+                guard !self.isTerminatedLocked() else { return }
                 self.snapshot = snap
             }
         }
@@ -1175,10 +1169,7 @@ public final class TerminalSession: ObservableObject {
             // paths bail when isTerminated is set; without the check here a
             // theme apply that races terminate() can publish a snapshot through
             // the coalescer for a session whose consumer is tearing down.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
+            if self.isTerminatedLocked() { return }
             for (i, c) in palette.ansi.enumerated() {
                 self.bbterm.setColor(slot: i, rgb: c)
             }
@@ -1629,10 +1620,7 @@ public final class TerminalSession: ObservableObject {
             // single trailing snapshot from landing on the @Published
             // pipeline after consumers have torn down their sinks —
             // observable in tests that race construct/terminate.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
+            if self.isTerminatedLocked() { return }
             if let snap = self.bbterm.snapshot() {
                 self.publishPendingSnapshot(snap)
             }
@@ -1694,10 +1682,7 @@ public final class TerminalSession: ObservableObject {
             // F11/S1-007: skip generation entirely for a session that
             // terminated while this item sat in the queue — same contract
             // as the per-feed gate above.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
+            if self.isTerminatedLocked() { return }
             guard let snap = self.bbterm.snapshot() else { return }
             self.snapshotsTakenCount += 1
             self.publishPendingSnapshot(snap)
