@@ -131,63 +131,22 @@ public final class KeyEncoder {
         let effectiveMods = applyNativeOptionRule(nonCmdMods)
         let hasMods = !effectiveMods.isEmpty
 
-        // Kitty disambiguation: Enter / Esc / Tab / Backspace with any
-        // effective modifier must emit `CSI <cp>;<mod>u` so the TUI can
-        // distinguish Shift+Enter from plain Enter, Option+Esc from plain
-        // Esc (which previously leaked as two raw ESCs), etc.
-        if kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) {
-            // Flag 16 adds the actual text the key would have produced
-            // as a `;<utf32>` trailing section. Disambiguation keys
-            // (Enter/Esc/Tab/Backspace) don't produce visible text on
-            // their own, so associatedText stays empty and the on-wire
-            // shape is unchanged. `.shift` on these keys also doesn't
-            // produce a distinct shifted codepoint — Shift+Enter is
-            // still Enter, just with the mod bit — so flag 4 similarly
-            // adds nothing on this path.
-            return csiU(
-                codepoint: cp,
-                modifiers: effectiveMods,
-                eventType: eventType,
-                associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
-            )
+        // Kitty disambiguation (Enter / Esc / Tab / Backspace + a modifier) →
+        // `CSI <cp>;<mod>u` so the TUI can tell Shift+Enter from Enter, etc.
+        if let bytes = tryKittyDisambiguation(
+            chars: chars, kitty: kitty, hasMods: hasMods,
+            effectiveMods: effectiveMods, eventType: eventType, associatedText: associatedText
+        ) {
+            return bytes
         }
 
-        // Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u
-        // including plain unmodified keys. Breaks the default shell
-        // contract by design — only TUIs that asked for it see it.
-        // Ctrl+letter still routes through the collider branch below so
-        // the colliders get lowercase-normalized codepoints.
-        // CSI u carries one base codepoint — IME-committed multi-scalar
-        // input (NFD `à`, keycaps, VS-16-paired emoji) falls back to plain
-        // UTF-8 to avoid silently dropping every scalar after the first.
-        if allKeys, chars.unicodeScalars.count > 1 {
-            return Data(chars.utf8)
-        }
-        if allKeys, let scalar = chars.unicodeScalars.first,
-           ctrlColliderCodepoint(for: scalar) == nil || !modifiers.contains(.control) {
-            // Kitty's "all keys as CSI u" uses the lowercase of a letter
-            // as the base codepoint; Shift is reported via the mod
-            // param. For non-letter scalars the scalar value is used
-            // directly.
-            let cp = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
-            // Flag 4: surface the shifted form (uppercase of the base
-            // letter) when the user is actually shifting. `alt=0` in
-            // the payload since macOS doesn't expose a true alternate
-            // layout per key.
-            let shifted: UInt32? = {
-                guard alternateKeys, modifiers.contains(.shift),
-                      let shiftedCp = shiftedCodepointForLetter(scalar) else {
-                    return nil
-                }
-                return shiftedCp
-            }()
-            return csiU(
-                codepoint: cp,
-                shiftedCodepoint: shifted,
-                modifiers: effectiveMods,
-                eventType: eventType,
-                associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
-            )
+        // Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u.
+        if let bytes = tryKittyAllKeys(
+            chars: chars, modifiers: modifiers, effectiveMods: effectiveMods,
+            allKeys: allKeys, alternateKeys: alternateKeys,
+            associatedText: associatedText, eventType: eventType
+        ) {
+            return bytes
         }
 
         // xterm `modifyOtherKeys` — `CSI 27 ; <mod> ; <cp> ~`.
@@ -318,6 +277,79 @@ public final class KeyEncoder {
             return Data([ctrlByte])
         }
         return nil
+    }
+
+    /// Kitty disambiguation: Enter / Esc / Tab / Backspace with any effective
+    /// modifier emit `CSI <cp>;<mod>u` so the TUI can distinguish Shift+Enter
+    /// from plain Enter, Option+Esc from plain Esc (which previously leaked as
+    /// two raw ESCs), etc. Returns nil when this isn't a kitty disambiguation
+    /// key (fall through). Flag 16's associated text stays empty for these keys
+    /// (they produce no visible text), and flag 4 adds nothing (Shift+Enter is
+    /// still Enter, just with the mod bit), so the on-wire shape is unchanged.
+    private func tryKittyDisambiguation(
+        chars: String,
+        kitty: Bool,
+        hasMods: Bool,
+        effectiveMods: Modifiers,
+        eventType: EventType,
+        associatedText: Bool
+    ) -> Data? {
+        guard kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) else {
+            return nil
+        }
+        return csiU(
+            codepoint: cp,
+            modifiers: effectiveMods,
+            eventType: eventType,
+            associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
+        )
+    }
+
+    /// Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u including
+    /// plain unmodified keys — breaks the default shell contract by design, only
+    /// TUIs that asked for it see it. Returns nil when flag 8 is off, OR for a
+    /// single Ctrl+collider scalar (which the Ctrl+printable collider branch
+    /// handles instead, with lowercase-normalized codepoints) — both fall
+    /// through. Multi-scalar IME-committed input (NFD `à`, keycaps, VS-16-paired
+    /// emoji) falls back to plain UTF-8 so no scalar past the first is dropped.
+    private func tryKittyAllKeys(
+        chars: String,
+        modifiers: Modifiers,
+        effectiveMods: Modifiers,
+        allKeys: Bool,
+        alternateKeys: Bool,
+        associatedText: Bool,
+        eventType: EventType
+    ) -> Data? {
+        guard allKeys else { return nil }
+        if chars.unicodeScalars.count > 1 {
+            return Data(chars.utf8)
+        }
+        guard let scalar = chars.unicodeScalars.first,
+              ctrlColliderCodepoint(for: scalar) == nil || !modifiers.contains(.control) else {
+            return nil
+        }
+        // Kitty's "all keys as CSI u" uses the lowercase of a letter as the base
+        // codepoint; Shift is reported via the mod param. Non-letter scalars use
+        // the scalar value directly.
+        let cp = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
+        // Flag 4: surface the shifted form (uppercase of the base letter) when
+        // the user is actually shifting. `alt=0` since macOS doesn't expose a
+        // true alternate layout per key.
+        let shifted: UInt32? = {
+            guard alternateKeys, modifiers.contains(.shift),
+                  let shiftedCp = shiftedCodepointForLetter(scalar) else {
+                return nil
+            }
+            return shiftedCp
+        }()
+        return csiU(
+            codepoint: cp,
+            shiftedCodepoint: shifted,
+            modifiers: effectiveMods,
+            eventType: eventType,
+            associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
+        )
     }
 
     /// Kitty progressive-enhancement maps one of four "ambiguous" keys to its
