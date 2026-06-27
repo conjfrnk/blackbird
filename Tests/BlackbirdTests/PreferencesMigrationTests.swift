@@ -685,6 +685,12 @@ final class PreferencesMigrationTests: XCTestCase {
         // expect the unified `min(32,` to appear in the same neighbourhood.
         let prefersClampAt64 = src.contains("min(64,")
         let prefersClampAt32 = src.contains("min(32,")
+        // After the M-13/DI-6 centralization, the fontSize clamps route through
+        // the `Self.fontSizeRange` envelope symbol rather than a bare literal —
+        // the IDEAL single-source form, since a stray `min(32,`/`min(64,` literal
+        // can no longer drift from the `9...32` envelope. Recognize the symbol
+        // clamp as a valid (preferred) single ceiling.
+        let usesRangeSymbol = src.contains("Self.fontSizeRange.upperBound")
 
         // Now scan the SettingsView slider (forbidden direct read), but
         // we can find it via grep-equivalent on the file system. The
@@ -719,11 +725,12 @@ final class PreferencesMigrationTests: XCTestCase {
         // Pin the present-day state so a regression that introduces a
         // third ceiling is caught early. Either 32 or 64 alone is OK.
         XCTAssertTrue(
-            prefersClampAt64 || prefersClampAt32,
+            prefersClampAt64 || prefersClampAt32 || usesRangeSymbol,
             """
             F-S7-004: expected a single fontSize ceiling clamp in
-            Preferences.swift (`min(32,` or `min(64,`). Neither found —
-            the clamp may have moved, or the implementation changed
+            Preferences.swift — either the centralized `Self.fontSizeRange.upperBound`
+            symbol (preferred) or a single `min(32,` / `min(64,` literal. None
+            found — the clamp may have moved, or the implementation changed
             shape. Update this test in lockstep with the migration.
             """
         )

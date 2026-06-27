@@ -289,8 +289,8 @@ public final class Preferences: ObservableObject {
         // translucency as NaN / ±Infinity. min/max pass NaN through, which
         // would propagate into Int(round(...)) and crash. Normalise to the
         // opaque end first.
-        let raw = translucency.isFinite ? translucency : 1.0
-        let v = max(1.0, min(10.0, raw))
+        let raw = translucency.isFinite ? translucency : Self.translucencyRange.lowerBound
+        let v = max(Self.translucencyRange.lowerBound, min(Self.translucencyRange.upperBound, raw))
         let opacity: Double
         let blurFloat: Double
         if v <= 5 {
@@ -589,7 +589,7 @@ public final class Preferences: ObservableObject {
             in: defaults, domain: domain, key: Preferences.k("fontSize")
         ) {
             let normalisedFont = diskFontSize.isFinite ? diskFontSize : 13
-            let clampedFont = max(9, min(32, normalisedFont))
+            let clampedFont = max(Self.fontSizeRange.lowerBound, min(Self.fontSizeRange.upperBound, normalisedFont))
             if clampedFont != diskFontSize {
                 Preferences.logger.log("re-clamping fontSize after external defaults write: \(diskFontSize, privacy: .public) → \(clampedFont, privacy: .public)")
                 self.fontSize = clampedFont
@@ -599,8 +599,8 @@ public final class Preferences: ObservableObject {
         if let diskTrans = Preferences.doubleInPersistentDomain(
             in: defaults, domain: domain, key: Preferences.k("translucency")
         ) {
-            let normalisedTrans = diskTrans.isFinite ? diskTrans : 1
-            let clampedTrans = max(1, min(10, normalisedTrans))
+            let normalisedTrans = diskTrans.isFinite ? diskTrans : Self.translucencyRange.lowerBound
+            let clampedTrans = max(Self.translucencyRange.lowerBound, min(Self.translucencyRange.upperBound, normalisedTrans))
             if clampedTrans != diskTrans {
                 Preferences.logger.log("re-clamping translucency after external defaults write: \(diskTrans, privacy: .public) → \(clampedTrans, privacy: .public)")
                 self.translucency = clampedTrans
