@@ -1061,14 +1061,7 @@ public final class TerminalSession: ObservableObject {
             self.promptCursor = nil
             self.lastPromptMark = nil
         }
-        if Thread.isMainThread {
-            // We're on main but the function isn't `@MainActor`, so the
-            // wrapper is what the compiler accepts to call a
-            // `@MainActor` closure synchronously.
-            MainActor.assumeIsolated(resetPromptState)
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated(resetPromptState) }
-        }
+        onMain(resetPromptState)
         if let s { publishImmediate(s) }
         // L-24: re-apply the resolved theme palette so OSC 4 mutations
         // from the pre-clear shell don't survive into the post-clear
@@ -1086,14 +1079,7 @@ public final class TerminalSession: ObservableObject {
             let palette = ThemeManager.shared.resolvedPalette
             self.applyPalette(palette)
         }
-        if Thread.isMainThread {
-            // We're on main but the function isn't `@MainActor`, so the
-            // wrapper is what the compiler accepts to call a
-            // `@MainActor` closure synchronously.
-            MainActor.assumeIsolated(applyResolved)
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated(applyResolved) }
-        }
+        onMain(applyResolved)
     }
 
     /// Reads the `terminate()` latch under `publishLock`. Every `coreQueue`
@@ -1106,6 +1092,22 @@ public final class TerminalSession: ObservableObject {
         publishLock.lock()
         defer { publishLock.unlock() }
         return isTerminated
+    }
+
+    /// Run `work` on the main actor: synchronously via `assumeIsolated` when
+    /// the caller is already on the main thread (no extra runloop turn — the
+    /// synchronous-visibility paths rely on landing this tick), otherwise
+    /// hopped via `main.async`. `work` is typed `@MainActor` so the compiler
+    /// enforces the isolation the runtime assumes — a caller that mis-routes it
+    /// onto a background queue fails to compile instead of trapping at runtime.
+    /// One definition for the possibly-off-main paths that mutate `@MainActor`
+    /// state (prompt-state reset, palette re-apply).
+    private func onMain(_ work: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(work)
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated(work) }
+        }
     }
 
     /// Synchronous publish path used by user-input-driven snapshots
