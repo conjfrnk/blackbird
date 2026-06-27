@@ -318,6 +318,12 @@ extension TerminalView {
         return (startCol, endCol)
     }
 
+    /// Hard timeout for an async regex scan. Past this the worker is cancelled
+    /// and a "too complex" banner shown. Cancellation is cooperative — a long
+    /// `enumerateMatches` on a single row still runs to completion, but it
+    /// can't block subsequent rows.
+    private static let regexSearchTimeout: TimeInterval = 0.25
+
     private func runRegexSearchAsync(
         regex: NSRegularExpression,
         topLine: Int32,
@@ -326,22 +332,56 @@ extension TerminalView {
         limit: Int
     ) {
         guard let session else { return }
-        // Snapshot rows on the main thread — `session.textRange` reads
-        // from the BBTerm grid which lives on the main actor. For
-        // in-viewport rows, also capture the cell-derived UTF-16-to-col
-        // map so the worker thread can translate `NSRange` offsets back
-        // to grid columns without skewing across wide / non-BMP chars.
-        // Scrollback rows fall back to `session.textRange` with a nil
-        // map (legacy approximation). Audit H5.
+        let (rows, scanSeq) = captureRegexRows(
+            topLine: topLine, bottomLine: bottomLine, cols: cols, session: session
+        )
+
+        let mySearchID = nextRegexSearchID()
+        activeRegexSearchID = mySearchID
+
+        // Cooperative cancellation via a heap-allocated atomic-ish flag — a
+        // stable reference both the timeout (writes, main) and the worker
+        // (reads, off-main) can touch. Per-row checks are racy but harmless:
+        // worst case we run one extra row.
+        let cancelFlag = AtomicFlag()
+
+        let workItem = DispatchWorkItem {
+            let matches = Self.scanRegexRows(rows, regex: regex, limit: limit, cancelFlag: cancelFlag)
+            // If we were cancelled, the timeout already published its banner —
+            // don't overwrite it with stale results.
+            if cancelFlag.value { return }
+            // Hop back to main to publish — UI state + findMatches storage are
+            // main-thread-only.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.publishRegexResults(matches, searchID: mySearchID, scanSeq: scanSeq)
+            }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.regexSearchTimeout) { [weak self] in
+            guard let self else { return }
+            self.handleRegexTimeout(searchID: mySearchID, cancelFlag: cancelFlag)
+        }
+    }
+
+    /// Snapshot the rows to scan, on the main thread (`session.textRange` reads
+    /// the BBTerm grid which lives on the main actor). For in-viewport rows
+    /// also capture the cell-derived UTF-16-to-col map so the worker can map
+    /// `NSRange` offsets to columns without skewing across wide / non-BMP
+    /// chars; scrollback rows fall back to `session.textRange` with a nil map
+    /// (legacy approximation, H5). Returns the rows AND the snapshot
+    /// `sequenceID` they were sourced from, snapped together (L-16 / DI-10) so
+    /// a publish that swaps the snapshot mid-loop can't stamp a stale row-set
+    /// with a fresher seq.
+    private func captureRegexRows(
+        topLine: Int32,
+        bottomLine: Int32,
+        cols: Int,
+        session: TerminalSession
+    ) -> (rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)], scanSeq: UInt64?) {
         let snap = currentSnapshot
-        // L-16 / DI-10: snap the seq BEFORE the row-build loop, against
-        // the same snapshot the rows are about to be sourced from. The
-        // earlier shape captured `currentSnapshot?.sequenceID` AFTER
-        // the loop — if a publish swapped the snapshot during the loop,
-        // the rows came from snap[N] but the seq stamped was snap[N+1],
-        // and the publish gate downstream would think a stale-seq
-        // result was current. Tying the seq to `snap` (the locally-held
-        // reference) makes them snap atomically.
         let scanSeq = snap?.sequenceID
         var rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)] = []
         rows.reserveCapacity(Int(bottomLine - topLine + 1))
@@ -362,124 +402,101 @@ extension TerminalView {
                 }
             }
         }
+        return (rows, scanSeq)
+    }
 
-        let mySearchID = nextRegexSearchID()
-        activeRegexSearchID = mySearchID
-
-        // Cooperative cancellation via a heap-allocated atomic-ish flag.
-        // We can't use `DispatchWorkItem.isCancelled` from inside the
-        // work item closure without forming a self-referential capture
-        // dance; a class wrapping a Bool gives us a stable reference
-        // both the timeout and the worker can read/write. Reads in the
-        // worker happen on a single thread; writes from the timeout
-        // happen on the main thread. Per-row checks are racy but
-        // harmless — worst case we run one extra row.
-        let cancelFlag = AtomicFlag()
-
-        let workItem = DispatchWorkItem { [weak self] in
-            var matches: [(line: Int32, startCol: Int, endCol: Int)] = []
-            for row in rows {
-                if cancelFlag.value { break }
-                let ns = row.hay as NSString
-                regex.enumerateMatches(
-                    in: row.hay,
-                    options: [],
-                    range: NSRange(location: 0, length: ns.length)
-                ) { result, _, stop in
-                    guard let r = result?.range, r.length > 0 else { return }
-                    let startCol: Int
-                    let endCol: Int
-                    if let utf16ToCol = row.utf16ToCol {
-                        // NSRegularExpression returns UTF-16 offsets;
-                        // translate via the row's parallel map so wide
-                        // / non-BMP chars don't skew the column report.
-                        let cols = Self.mapUTF16RangeToCols(lo: r.location, hi: r.location + r.length, utf16ToCol: utf16ToCol)
-                        startCol = cols.startCol
-                        endCol = cols.endCol
-                    } else {
-                        // Scrollback row — legacy approximation.
-                        startCol = r.location
-                        endCol = r.location + r.length - 1
-                    }
-                    matches.append((line: row.line, startCol: startCol, endCol: endCol))
-                    if matches.count >= limit { stop.pointee = true }
-                }
-                if matches.count >= limit { break }
-            }
-            // If we were cancelled, the timeout already published its
-            // banner — don't overwrite it with stale results.
-            if cancelFlag.value { return }
-            // Hop back to main to publish results — UI state and
-            // findMatches storage are main-thread-only.
-            DispatchQueue.main.async {
-                guard let self else { return }
-                // Stale-result guard: a newer search has started (user
-                // typed another character, or toggled options); drop
-                // this batch so it doesn't overwrite the live scan.
-                guard self.activeRegexSearchID == mySearchID else { return }
-                self.regexSearchCompletedID = mySearchID
-                self.findMatches = matches
-                // Stamp the seq the regex scanned against (NOT the live
-                // currentSnapshot at publish time, which may have moved
-                // on while the scan ran). On the next ⌘G, advanceFind
-                // sees the cached seq trail the live one and re-runs the
-                // search before cycling.
-                self.findMatchesSeq = scanSeq
-                // If a ⌘G arrived while this scan was in flight, honour it
-                // here (resume from the user's position + one step) instead of
-                // resetting to match 1 — otherwise the press is lost and the
-                // cycle jumps back to the top during live output.
-                if let pending = self.pendingRegexAdvance {
-                    self.pendingRegexAdvance = nil
-                    self.findCurrentIndex = self.resolveResumeIndex(
-                        anchor: pending.anchor,
-                        direction: pending.direction,
-                        in: matches
-                    )
+    /// The off-main scan core: run `regex` over each captured row, mapping
+    /// match offsets to grid columns (viewport rows via the cell-derived map,
+    /// scrollback via the legacy approximation). Pure — no `self`, no shared
+    /// mutable state beyond the cooperative `cancelFlag` it polls per row — so
+    /// it's safe on the worker queue and unit-testable in isolation. Stops at
+    /// `limit` matches.
+    private static func scanRegexRows(
+        _ rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)],
+        regex: NSRegularExpression,
+        limit: Int,
+        cancelFlag: AtomicFlag
+    ) -> [(line: Int32, startCol: Int, endCol: Int)] {
+        var matches: [(line: Int32, startCol: Int, endCol: Int)] = []
+        for row in rows {
+            if cancelFlag.value { break }
+            let ns = row.hay as NSString
+            regex.enumerateMatches(
+                in: row.hay,
+                options: [],
+                range: NSRange(location: 0, length: ns.length)
+            ) { result, _, stop in
+                guard let r = result?.range, r.length > 0 else { return }
+                let startCol: Int
+                let endCol: Int
+                if let utf16ToCol = row.utf16ToCol {
+                    // NSRegularExpression returns UTF-16 offsets; translate via
+                    // the row's parallel map so wide / non-BMP chars don't skew
+                    // the column report.
+                    let cols = mapUTF16RangeToCols(lo: r.location, hi: r.location + r.length, utf16ToCol: utf16ToCol)
+                    startCol = cols.startCol
+                    endCol = cols.endCol
                 } else {
-                    self.findCurrentIndex = 0
+                    // Scrollback row — legacy approximation.
+                    startCol = r.location
+                    endCol = r.location + r.length - 1
                 }
-                self.findBar?.setMatchCount(self.findCurrentIndex, of: self.findMatches.count)
-                self.highlightCurrentMatch()
+                matches.append((line: row.line, startCol: startCol, endCol: endCol))
+                if matches.count >= limit { stop.pointee = true }
             }
+            if matches.count >= limit { break }
         }
+        return matches
+    }
 
-        let queue = DispatchQueue.global(qos: .userInitiated)
-        queue.async(execute: workItem)
-
-        // Hard timeout. If the work item hasn't finished in 250 ms,
-        // flip the cancel flag and surface a banner. Cancellation is
-        // cooperative — the per-row loop re-checks `cancelFlag.value`
-        // so a long-running enumerateMatches on a single row can still
-        // run to completion, but it can't block subsequent rows.
-        //
-        // The success path sets `regexSearchCompletedID = mySearchID`
-        // when it publishes results on the main queue. Because both the
-        // success-path publish AND this timeout fire on the main queue,
-        // they're serialised: by the time we observe
-        // `regexSearchCompletedID == mySearchID` the publish has fully
-        // landed and there's nothing for us to do.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            guard let self else { return }
-            // Already published successfully — nothing to do.
-            if self.regexSearchCompletedID == mySearchID { return }
-            // Stale (newer search started) — let the in-flight work
-            // item finish on its own; its results are discarded by the
-            // search ID guard at publish time. Still flip the flag so
-            // the worker bails out promptly rather than scanning the
-            // whole buffer for a result that will be discarded.
-            cancelFlag.value = true
-            guard self.activeRegexSearchID == mySearchID else { return }
-            // A deferred ⌘G (pendingRegexAdvance) was owed to THIS scan, which
-            // is now abandoned — drop it deterministically so it isn't silently
-            // stranded and can't fire a surprising delayed jump if a later
-            // re-run of the same query publishes. Mirrors the success path's
-            // consume-and-clear. (review: silent-failure-hunter)
-            self.pendingRegexAdvance = nil
-            self.findBar?.setMatchCount(0, of: 0)
-            self.findBar?.showTransientMessage("Regex too complex")
-            self.selection = nil
+    /// Publish a completed regex scan on the main thread. Drops the batch when
+    /// a newer search has started (stale-ID guard); stamps `findMatchesSeq`
+    /// with the seq the scan ran against (NOT the live `currentSnapshot`, which
+    /// may have moved on); honours a ⌘G that arrived mid-scan
+    /// (`pendingRegexAdvance`) by resuming from the user's position instead of
+    /// resetting to match 1; then highlights.
+    private func publishRegexResults(
+        _ matches: [(line: Int32, startCol: Int, endCol: Int)],
+        searchID mySearchID: UInt64,
+        scanSeq: UInt64?
+    ) {
+        guard activeRegexSearchID == mySearchID else { return }
+        regexSearchCompletedID = mySearchID
+        findMatches = matches
+        findMatchesSeq = scanSeq
+        if let pending = pendingRegexAdvance {
+            pendingRegexAdvance = nil
+            findCurrentIndex = resolveResumeIndex(
+                anchor: pending.anchor,
+                direction: pending.direction,
+                in: matches
+            )
+        } else {
+            findCurrentIndex = 0
         }
+        findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
+        highlightCurrentMatch()
+    }
+
+    /// Fired `regexSearchTimeout` after a scan starts. No-op if the scan
+    /// already published. Otherwise flip the cancel flag so the worker bails
+    /// promptly; then, if this is still the active search, consume any deferred
+    /// ⌘G so it can't fire a surprise delayed jump, and show the "too complex"
+    /// banner. Runs on main — serialised with the success-path publish, so
+    /// observing `regexSearchCompletedID == mySearchID` means it fully landed.
+    private func handleRegexTimeout(searchID mySearchID: UInt64, cancelFlag: AtomicFlag) {
+        if regexSearchCompletedID == mySearchID { return }
+        cancelFlag.value = true
+        guard activeRegexSearchID == mySearchID else { return }
+        // A deferred ⌘G (pendingRegexAdvance) was owed to THIS scan, which is
+        // now abandoned — drop it deterministically so it isn't silently
+        // stranded and can't fire a surprising delayed jump if a later re-run
+        // publishes. Mirrors the success path's consume-and-clear.
+        // (review: silent-failure-hunter)
+        pendingRegexAdvance = nil
+        findBar?.setMatchCount(0, of: 0)
+        findBar?.showTransientMessage("Regex too complex")
+        selection = nil
     }
 
     /// Heap-allocated cancellation token between the regex worker and
