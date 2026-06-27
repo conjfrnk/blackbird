@@ -63,6 +63,37 @@ enum SparkleAlertOverride {
         return "\(name) \(version) is the latest version."
     }
 
+    /// How to present the "up to date" alert.
+    enum UpToDatePresentation: Equatable {
+        /// Window-modal sheet attached to an eligible parent window.
+        case sheet
+        /// App-modal `runModal()` — no eligible sheet parent, but nothing else
+        /// is modal and the app is foreground.
+        case runModal
+        /// Don't present — something modal is already in flight, the app isn't
+        /// foreground, or the parent already has a sheet (so `runModal()` would
+        /// deadlock against it). The user can re-trigger via Check for Updates.
+        case drop
+    }
+
+    /// Pure presentation truth-table (audit #23 / L11) — extracted so the
+    /// modal-stacking decision is unit-testable even though the modal
+    /// interactions themselves aren't headless-testable. `parentHasSheet` is
+    /// `false` when there's no parent (`hasParent == false`).
+    ///   - sheet  ⇐ an eligible parent (no sheet) AND nothing app-modal AND app foreground
+    ///   - drop   ⇐ anything app-modal OR app not foreground OR the parent already has a sheet
+    ///   - runModal ⇐ otherwise (no parent, but presentable)
+    static func presentationDecision(
+        hasParent: Bool,
+        parentHasSheet: Bool,
+        appModal: Bool,
+        appActive: Bool
+    ) -> UpToDatePresentation {
+        if hasParent && !parentHasSheet && !appModal && appActive { return .sheet }
+        if appModal || !appActive || parentHasSheet { return .drop }
+        return .runModal
+    }
+
     /// Resolve which window an "up to date" sheet should attach to.
     ///
     /// Returns the currently-SELECTED tab of the frontmost terminal window —
@@ -184,34 +215,30 @@ enum SparkleAlertOverride {
                 keyWindow: NSApp.keyWindow,
                 mainWindow: NSApp.mainWindow
             ) as? NSWindow
-            if let window = parentWindow,
-               window.attachedSheet == nil,
-               NSApp.modalWindow == nil,
-               NSApp.isActive {
-                alert.beginSheetModal(for: window) { _ in
-                    ack()
+            switch Self.presentationDecision(
+                hasParent: parentWindow != nil,
+                parentHasSheet: parentWindow?.attachedSheet != nil,
+                appModal: NSApp.modalWindow != nil,
+                appActive: NSApp.isActive
+            ) {
+            case .sheet:
+                // `.sheet` is only returned when `hasParent` — parentWindow is
+                // non-nil here; the `if let` can't fail.
+                if let window = parentWindow {
+                    alert.beginSheetModal(for: window) { _ in ack() }
                 }
-                return
-            }
-
-            // Drop the alert if anything modal is in flight or the app
-            // isn't foreground. The third branch (parentWindow has an
-            // attached sheet but no app-modal session) was previously
-            // missing — execution would fall through to runModal() and
-            // deadlock against the existing sheet, exactly the case the
-            // sheet-path guard above means to prevent. (audit #23)
-            if NSApp.modalWindow != nil
-                || !NSApp.isActive
-                || (parentWindow?.attachedSheet != nil) {
+            case .drop:
+                // Audit #23: anything modal in flight, app not foreground, or
+                // the parent already has a sheet (which would deadlock a
+                // blocking runModal()). Skip rather than stack modals.
                 logger.warning(
                     "Sparkle 'up to date' alert dropped: another modal is active or app is not foreground"
                 )
                 ack()
-                return
+            case .runModal:
+                _ = alert.runModal()
+                ack()
             }
-
-            _ = alert.runModal()
-            ack()
         }
         let imp = imp_implementationWithBlock(block as Any)
         // F-S7-001: free the previously-installed block IMP, if any. We

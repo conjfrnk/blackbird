@@ -220,4 +220,63 @@ final class SparkleAlertOverrideTests: XCTestCase {
         XCTAssertTrue(result === settingsKey,
                       "with no terminal window available, fall back to the key window so the alert still shows")
     }
+
+    // MARK: - presentationDecision truth table (audit #23 / L11)
+
+    /// Expected decision derived from the ORIGINAL inline conditions the pure
+    /// function replaced (a byte-faithful extraction must reproduce them):
+    ///   sheet ⇐ parentWindow != nil && attachedSheet == nil && modalWindow == nil && isActive
+    ///   drop  ⇐ modalWindow != nil || !isActive || parentWindow?.attachedSheet != nil
+    ///   else  ⇐ runModal
+    /// mapped to (hasParent, parentHasSheet, appModal, appActive). Sheet is
+    /// checked first, so it wins when both sheet and drop conditions hold.
+    private func expectedDecision(hasParent: Bool, parentHasSheet: Bool,
+                                  appModal: Bool, appActive: Bool)
+        -> SparkleAlertOverride.UpToDatePresentation {
+        if hasParent && !parentHasSheet && !appModal && appActive { return .sheet }
+        if appModal || !appActive || parentHasSheet { return .drop }
+        return .runModal
+    }
+
+    func testPresentationDecision_fullTruthTable() {
+        for hasParent in [true, false] {
+            for parentHasSheet in [true, false] {
+                for appModal in [true, false] {
+                    for appActive in [true, false] {
+                        let expected = expectedDecision(
+                            hasParent: hasParent, parentHasSheet: parentHasSheet,
+                            appModal: appModal, appActive: appActive)
+                        let actual = SparkleAlertOverride.presentationDecision(
+                            hasParent: hasParent, parentHasSheet: parentHasSheet,
+                            appModal: appModal, appActive: appActive)
+                        XCTAssertEqual(actual, expected,
+                            "decision(hasParent: \(hasParent), parentHasSheet: \(parentHasSheet), appModal: \(appModal), appActive: \(appActive))")
+                    }
+                }
+            }
+        }
+    }
+
+    func testPresentationDecision_canonicalCases() {
+        // Eligible terminal window, foreground, nothing else modal → sheet.
+        XCTAssertEqual(
+            SparkleAlertOverride.presentationDecision(hasParent: true, parentHasSheet: false, appModal: false, appActive: true),
+            .sheet)
+        // No terminal window, but foreground and nothing modal → runModal.
+        XCTAssertEqual(
+            SparkleAlertOverride.presentationDecision(hasParent: false, parentHasSheet: false, appModal: false, appActive: true),
+            .runModal)
+        // App-modal in flight → drop (the audit-#23 deadlock guard).
+        XCTAssertEqual(
+            SparkleAlertOverride.presentationDecision(hasParent: true, parentHasSheet: false, appModal: true, appActive: true),
+            .drop)
+        // Parent already has a sheet → drop (a blocking runModal would deadlock).
+        XCTAssertEqual(
+            SparkleAlertOverride.presentationDecision(hasParent: true, parentHasSheet: true, appModal: false, appActive: true),
+            .drop)
+        // App not foreground → drop.
+        XCTAssertEqual(
+            SparkleAlertOverride.presentationDecision(hasParent: false, parentHasSheet: false, appModal: false, appActive: false),
+            .drop)
+    }
 }
