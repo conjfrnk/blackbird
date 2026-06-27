@@ -826,16 +826,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     private func hideNativeTabStrip() {
         guard let window else { return }
-        // NSWindowTabGroup's public API only exposes a read-only
-        // isTabBarVisible and a toggleTabBar(_:) that some macOS builds
-        // decline to call when KVO-driven. Walk the theme frame instead
-        // and hide any view whose class name contains "TabBar" — that's
-        // what both iTerm2 and WezTerm end up doing. `isHidden` also
-        // removes the view's height contribution, so safeAreaInsets.top
-        // drops back to the titlebar-only 32pt value.
+        // Walk the theme frame and hide the AppKit-private native tab strip so
+        // it doesn't stack on top of our pill strip. The fragile private-class
+        // string match lives in `NativeTabStripHider`.
         if let themeFrame = window.contentView?.superview {
-            var matches = 0
-            hideTabBarViews(in: themeFrame, matchesFound: &matches)
+            let matches = NativeTabStripHider.hide(in: themeFrame)
             // Log when the walker finds zero TabBar-classed views in a
             // multi-tab context. That's the canary for a future macOS
             // that renamed its private view class — our strip-hiding
@@ -851,30 +846,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             if inGroup, matches == 0 {
                 Self.tabsLogger.warning("hideNativeTabStrip: 0 'TabBar' views found in a multi-tab window — AppKit may have renamed its private class; pill + native strip may both be visible.")
             }
-        }
-    }
-
-    /// Recursively hide AppKit-private "TabBar" views so they don't
-    /// stack on top of our pill strip. `matchesFound` lets the caller
-    /// log a canary when the walker turns up empty in a multi-tab
-    /// window (a future macOS renaming the private class).
-    ///
-    /// Audit L12. Previously this also set `view.frame = .zero` as a
-    /// belt-and-braces height-elimination measure. Mutating the frame
-    /// of an AppKit-private view is fragile against macOS layout
-    /// changes (a future version that reads the frame for cached
-    /// insets / safe-area math could end up reading our zero). Rely
-    /// on `isHidden = true` alone — the documented contract from
-    /// AppKit is that hidden views contribute no layout space and no
-    /// rendering, which is exactly what we want.
-    private func hideTabBarViews(in view: NSView, matchesFound: inout Int) {
-        let className = String(describing: type(of: view))
-        if className.contains("TabBar") {
-            matchesFound += 1
-            view.isHidden = true
-        }
-        for sub in view.subviews {
-            hideTabBarViews(in: sub, matchesFound: &matchesFound)
         }
     }
 
