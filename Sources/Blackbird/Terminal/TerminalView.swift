@@ -2468,10 +2468,7 @@ extension TerminalView {
         // The replacement edits the shell line; every recorded match on that
         // line has now shifted or vanished. Drop the cache so find-next
         // doesn't scroll to a stale coordinate.
-        findController.findMatches.removeAll()
-        findController.findMatchesSeq = nil
-        findController.findCurrentIndex = 0
-        findController.findBar?.setMatchCount(0, of: 0)
+        findController.clearMatches()
         // F5: re-run the search after the byte stream has had a chance to
         // land, so the label reads the live post-replace count (standard
         // VS Code / TextEdit behaviour).
@@ -2574,10 +2571,7 @@ extension TerminalView {
             replacement: replacement
         )
         // All input-line matches have been spliced; invalidate the cache.
-        findController.findMatches.removeAll()
-        findController.findMatchesSeq = nil
-        findController.findCurrentIndex = 0
-        findController.findBar?.setMatchCount(0, of: 0)
+        findController.clearMatches()
         if hadOffLine {
             findController.findBar?.showTransientMessage("Replaced input-line matches (scrollback skipped)")
         } else {

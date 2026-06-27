@@ -69,6 +69,21 @@ final class FindController {
     /// collapse to one main-queue dispatch.
     private var findRefreshPending: Bool = false
 
+    // MARK: - State mutation
+
+    /// Drop the cached match set and reset the cycle index + label to "0/0".
+    /// The Replace paths call this after a splice edits the live input line,
+    /// so find-next can't scroll to a now-stale coordinate. Deliberately does
+    /// NOT touch `findQuery` or `pendingRegexAdvance` — the query is still
+    /// active (a re-run follows) and any deferred ⌘G is consumed on its own
+    /// scan's publish/timeout, not here.
+    func clearMatches() {
+        findMatches.removeAll()
+        findMatchesSeq = nil
+        findCurrentIndex = 0
+        findBar?.setMatchCount(0, of: 0)
+    }
+
     // MARK: - Bar lifecycle
 
     func installFindBar() {
