@@ -1048,76 +1048,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         //    Picked "was-non-zero, now-zero" rather than "shrank" so a
         //    natural scrollback eviction (history wraps at the cap) — which
         //    keeps history positive — doesn't drop a live selection.
-        if selection != nil, let prev = currentSnapshot {
-            let colsChanged = prev.cols != snapshot.cols
-            let altScreenChanged = prev.termMode.contains(.altScreen)
-                != snapshot.termMode.contains(.altScreen)
-            let historyCollapsed = prev.historySize > 0 && snapshot.historySize == 0
-            if colsChanged || altScreenChanged || historyCollapsed {
-                selection = nil
-            } else if prev.rows == snapshot.rows,
-                      snapshot.linesScrolled > prev.linesScrolled, var sel = selection {
-                // rows-equal gate: vertical resize moves content through
-                // grow/shrink paths that ALSO bump linesScrolled (the
-                // counter's documented any-resize caveat) — rotating on
-                // that delta would shift a selection the row-only-resize
-                // contract (Bug #14) promises to preserve. Row-only
-                // resizes therefore keep the selection unrotated, same
-                // as before this fix; only genuine output flow (rows
-                // unchanged) rotates.
-                // Audit S5-005: keep the selection GLUED TO ITS CONTENT
-                // when output scrolls. Selection endpoints are
-                // grid-relative (line 0 = top of the live grid); every
-                // scrolled line moves the selected text one row up, and
-                // the vendored core rotates only its own internal
-                // selection — never this one. Without compensation the
-                // highlight visibly slid onto different text and ⌘C
-                // copied whatever now occupied the stale coordinates
-                // instead of what the user selected. Rotate both
-                // endpoints by the snapshot-to-snapshot lines-scrolled
-                // delta (the S5-004 counter — exact even after
-                // scrollback saturates); drop the selection once any
-                // endpoint scrolls past retention (its content is gone).
-                // Mid-drag this is still correct: the anchor tracks its
-                // content and the next mouseDragged recomputes the
-                // cursor endpoint from the pointer anyway.
-                let delta = Int64(snapshot.linesScrolled - prev.linesScrolled)
-                let anchorLine = Int64(sel.anchor.line) - delta
-                let cursorLine = Int64(sel.cursor.line) - delta
-                let retentionFloor = -Int64(snapshot.historySize)
-                if min(anchorLine, cursorLine) < retentionFloor {
-                    selection = nil
-                    // The drag's content scrolled out with the selection; drop
-                    // the stored .word drag anchor too so a resumed drag can't
-                    // re-pin to vacated coordinates.
-                    wordDragAnchorWord = nil
-                } else {
-                    sel.anchor.line = Int32(clamping: anchorLine)
-                    sel.cursor.line = Int32(clamping: cursorLine)
-                    selection = sel
-                    // Rotate the stored .word drag anchor by the SAME delta.
-                    // A double-click-drag selection unions this anchor word
-                    // (captured once at mouseDown, in buffer-line coordinates)
-                    // with the word under the live cursor. S5-005 rotated
-                    // sel.anchor/cursor but NOT this tuple, so after output
-                    // scrolled the next mouseDragged re-pinned sel.anchor to the
-                    // word's OLD line — detaching the highlight from the
-                    // double-clicked word and copying the wrong span. Keep them
-                    // in lockstep; drop if it scrolls past retention (the drag
-                    // path falls back to sel.anchor when this is nil).
-                    if var anchorWord = wordDragAnchorWord {
-                        let w0 = Int64(anchorWord.0.line) - delta
-                        let w1 = Int64(anchorWord.1.line) - delta
-                        if min(w0, w1) < retentionFloor {
-                            wordDragAnchorWord = nil
-                        } else {
-                            anchorWord.0.line = Int32(clamping: w0)
-                            anchorWord.1.line = Int32(clamping: w1)
-                            wordDragAnchorWord = anchorWord
-                        }
-                    }
-                }
-            }
+        // Bugs #14/#15/H-6/S5-005: reconcile the active selection (and its word-
+        // drag anchor) against the cells the new snapshot moved/deleted. Pure;
+        // exercised on snapshot pairs in SelectionReconciler. Gated on a prior
+        // snapshot so the first render (selection still nil) doesn't misfire.
+        if let sel = selection, let prev = currentSnapshot {
+            let result = SelectionReconciler.reconciled(
+                selection: sel,
+                wordDragAnchor: wordDragAnchorWord,
+                prev: prev,
+                next: snapshot
+            )
+            // `selection`'s didSet has a same-value guard, so re-assigning an
+            // unchanged value is a no-op (no spurious setNeedsDisplay).
+            selection = result.selection
+            wordDragAnchorWord = result.wordDragAnchor
         }
         self.currentSnapshot = snapshot
         // If ⌘ is held while the grid reshapes under the pointer (scrolling
