@@ -1049,27 +1049,46 @@ final class MetalRendererTests: XCTestCase {
         if let guardIdx = guardLineIdx {
             let scanWindow = 50
             let endIdx = min(guardIdx + scanWindow, lines.count)
-            var foundSignal = false
+            // The slot release is now a co-located CALL to `releaseSlotUnused()`
+            // (the slot-lifecycle helper extracted from render()), or the bare
+            // `inflightSemaphore.signal()` if a future refactor re-inlines it.
+            // Either is the synchronous, same-code-path release F20 requires;
+            // accept both so the pin survives the extraction while still catching
+            // a regression that moves the release into a deinit/async context.
+            var foundRelease = false
             for idx in guardIdx..<endIdx {
-                if lines[idx].contains("inflightSemaphore.signal()") {
-                    foundSignal = true
+                if lines[idx].contains("releaseSlotUnused()")
+                    || lines[idx].contains("inflightSemaphore.signal()") {
+                    foundRelease = true
                     break
                 }
             }
             XCTAssertTrue(
-                foundSignal,
-                "the nil-drawable guard and the inflight-semaphore signal must " +
+                foundRelease,
+                "the nil-drawable guard and the inflight-semaphore release must " +
                 "be in the same code path; they appear too far apart in the " +
                 "file. Found `guard let drawable = view.currentDrawable` at " +
-                "line \(guardIdx + 1) (1-based) but no `inflightSemaphore.signal()` " +
-                "within the next \(scanWindow) lines. A refactor that separates " +
-                "them — e.g. moves the signal into a deinit handler or a different " +
-                "function — re-opens the slot-leak shape that audit F20 fixed: " +
-                "render() claims a slot via wait(), bails on nil drawable, and " +
-                "the slot is never released. Restore proximity or update this " +
-                "test to point at the new co-located pair."
+                "line \(guardIdx + 1) (1-based) but no `releaseSlotUnused()` / " +
+                "`inflightSemaphore.signal()` within the next \(scanWindow) lines. " +
+                "A refactor that separates them — e.g. moves the release into a " +
+                "deinit handler or an async block — re-opens the slot-leak shape " +
+                "that audit F20 fixed: render() claims a slot via wait(), bails on " +
+                "nil drawable, and the slot is never released. Restore proximity " +
+                "or update this test to point at the new co-located pair."
             )
         }
+        // The co-located release goes through `releaseSlotUnused()`; pin that
+        // the helper actually signals the semaphore (so the indirection can't
+        // silently become a no-op that re-opens the F20 slot leak).
+        XCTAssertNotNil(
+            src.range(
+                of: #"func releaseSlotUnused\(\)\s*\{\s*inflightSemaphore\.signal\(\)\s*\}"#,
+                options: .regularExpression
+            ),
+            "releaseSlotUnused() must signal inflightSemaphore — the abort-1 path's " +
+            "actual slot release. If this helper stops signalling, the nil-drawable " +
+            "frame leaks its triple-buffer slot (audit F20)."
+        )
         // If guardLineIdx is nil the substring assertion above already
         // failed with a more actionable message; no need to fail twice.
     }

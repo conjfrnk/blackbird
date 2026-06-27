@@ -1370,6 +1370,50 @@ public final class MetalRenderer {
         )
     }
 
+    // MARK: - Triple-buffer slot lifecycle
+    //
+    // The four phases of a frame's claim on a `.storageModeShared` instance
+    // buffer slot, factored out of `render()` so the load-bearing S2-006 /
+    // M-3 / S2-007 ordering invariants live in one named place each rather
+    // than open-coded inline at the claim + two abort + commit sites.
+
+    /// Block until a triple-buffer slot frees, then bind `currentSlot` to the
+    /// current rotation index. Does NOT advance the rotation turn — that is
+    /// consumed only on commitment (audit S2-006), so an aborted frame returns
+    /// both its semaphore token (via `releaseSlotUnused`/`rollbackSlotRotation`)
+    /// AND its turn, and the next attempt reuses the same untouched slot. (If
+    /// the rotation advanced on claim, an aborted frame would leave the wait
+    /// guard one frame too few — frame D could claim a slot frame A's GPU work
+    /// is still reading, then CPU-write the shared buffer mid-read → torn frame.)
+    private func claimSlot() -> Int {
+        inflightSemaphore.wait()
+        currentSlot = frameIndex
+        return currentSlot
+    }
+
+    /// Return a slot token claimed but never committed (no drawable / encoder
+    /// acquired). The rotation turn was never consumed, so nothing rolls back.
+    private func releaseSlotUnused() {
+        inflightSemaphore.signal()
+    }
+
+    /// Consume the rotation turn for a frame we are committed to encoding
+    /// (audit S2-006). The semaphore signal is DEFERRED to the GPU completion
+    /// handler (audit M-3, strong-captured semaphore), NOT issued here — so the
+    /// slot stays reserved until the GPU finishes reading it.
+    private func commitSlotRotation() {
+        frameIndex = (frameIndex + 1) % 3
+    }
+
+    /// Abort a frame AFTER its rotation turn was consumed (instance-buffer grow
+    /// failure, audit S2-007): return the token and roll the rotation back to
+    /// the claimed slot, so the next attempt reuses the same untouched slot.
+    /// Order matches the original inline site: signal, then rollback.
+    private func rollbackSlotRotation() {
+        inflightSemaphore.signal()
+        frameIndex = currentSlot
+    }
+
     public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
         // Compute the current frame's visual-state key BEFORE reaching for
         // currentDrawable. Acquiring a drawable is expensive (blocks on
@@ -1402,23 +1446,12 @@ public final class MetalRenderer {
         // invariant is: drawable lifetime ≤ encode time, always
         // shorter than a vsync interval. Audit metal-renderer F20
         // reverted 2026-04-22.
-        inflightSemaphore.wait()
-        currentSlot = frameIndex
-        let slot = currentSlot
-        // The rotation advance is deliberately NOT here. It moves below
-        // the guard (audit S2-006): the triple-buffer invariant — any ≤3
-        // concurrent in-flight frames occupy distinct slots — requires
-        // every consumed rotation turn to hold its semaphore token until
-        // GPU completion. The abort path below returns the token; if it
-        // kept the rotation advance, each aborted frame made the wait
-        // guard one frame too few: A encodes slot 0 (in flight), B
-        // aborts slot 1 (token back, rotation advanced), C encodes
-        // slot 2, D waits — succeeds because of B's returned token — and
-        // claims slot 0 while A's GPU work may still be reading it; D's
-        // buildInstances then CPU-writes the same .storageModeShared
-        // buffer mid-read (torn frame). Advancing only on commitment
-        // means an aborted frame returns its token AND its turn, and the
-        // next attempt reuses the same untouched slot.
+        // Claim a triple-buffer slot (blocks until one frees). The rotation
+        // turn is consumed only on commitment, NOT here — so an aborted frame
+        // returns both its token and its turn. See `claimSlot` /
+        // `commitSlotRotation` / `releaseSlotUnused` / `rollbackSlotRotation`
+        // for the S2-006 ordering invariant this lifecycle encapsulates.
+        let slot = claimSlot()
 
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
@@ -1426,8 +1459,9 @@ public final class MetalRenderer {
               let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
         else {
             // Release the slot we just claimed — we're abandoning this
-            // frame without encoding, so the GPU never reads the buffer.
-            inflightSemaphore.signal()
+            // frame without encoding, so the GPU never reads the buffer. The
+            // rotation turn was never consumed, so there is nothing to roll back.
+            releaseSlotUnused()
             // No drawable was presented on this path either: tell
             // callers gating side effects (LatencyProbe.markPresented)
             // that the GPU did not actually paint a frame, so they
@@ -1455,8 +1489,9 @@ public final class MetalRenderer {
         // cache atomically with that commitment so an early-return
         // above leaves `lastFrameKey` pinned to the previous successful
         // frame (audit H7), and consume the rotation turn only now
-        // (audit S2-006 — see the comment at the semaphore wait).
-        frameIndex = (frameIndex + 1) % 3
+        // (audit S2-006). The semaphore signal stays DEFERRED to the GPU
+        // completion handler below (audit M-3).
+        commitSlotRotation()
         didFrameSkipLastRender = false
         lastFrameKey = frameKey
 
@@ -1653,15 +1688,13 @@ public final class MetalRenderer {
                 // leave lastCacheKey/lastRenderedSnapshotSeq stale so
                 // the retry re-walks every row.
                 encoder.endEncoding()
-                inflightSemaphore.signal()
-                // Return the rotation turn together with the token —
-                // the audit S2-006 invariant: a frame that won't reach
-                // GPU completion must not consume a slot rotation, or
-                // each abort makes the triple-buffer wait guard one
-                // frame too few. render() is only entered from the
-                // MTKView draw callback, so no interleaving caller can
-                // observe the rollback.
-                frameIndex = currentSlot
+                // Return the slot token AND roll the rotation turn back to the
+                // claimed slot together (audit S2-006/S2-007): a frame that won't
+                // reach GPU completion must not consume a slot rotation, or each
+                // abort makes the triple-buffer wait guard one frame too few.
+                // render() is only entered from the MTKView draw callback, so no
+                // interleaving caller can observe the rollback.
+                rollbackSlotRotation()
                 lastFrameKey = nil
                 didFrameSkipLastRender = true
                 return
