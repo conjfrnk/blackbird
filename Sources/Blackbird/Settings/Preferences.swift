@@ -52,8 +52,11 @@ public final class Preferences: ObservableObject {
     // current. The legacy unprefixed name is bootstrapped forward (and
     // then removed from the persistent domain) on first launch with the
     // fix — see `migrateIfNeeded(in:domain:)`.
-    private static let schemaVersionKey = "bb.prefsSchemaVersion"
-    private static let legacySchemaVersionKey = "prefsSchemaVersion"
+    // `internal` (not `private`): the migration/sanitize logic moved to
+    // `PrefsMigrator` / `PersistentDomainReader` (same module) reference these
+    // canonical keys.
+    static let schemaVersionKey = "bb.prefsSchemaVersion"
+    static let legacySchemaVersionKey = "prefsSchemaVersion"
 
     // MARK: - Key prefix (settings F3)
     //
@@ -62,15 +65,17 @@ public final class Preferences: ObservableObject {
     // might have set globally. The `k(_:)` helper is used both in the
     // `@AppStorage` declarations and in the migration/registration code so
     // the canonical on-disk form is authored in one place.
+    // `internal` (not `private`): the extracted `PrefsSanitizer` / `PrefsMigrator`
+    // build the same canonical on-disk key form via this one helper.
     @inline(__always)
-    private static func k(_ name: String) -> String { "bb.\(name)" }
+    static func k(_ name: String) -> String { "bb.\(name)" }
 
     /// The unprefixed names we used in schema v1, in the order they appear
-    /// as `@AppStorage` declarations below. Walked by the v1 → v2 migrator
-    /// to copy legacy values forward into `bb.`-prefixed keys. Kept as a
-    /// private static so a future v2 → v3 migration can't accidentally
-    /// reuse these names without reviewing the history.
-    private static let legacyUnprefixedKeys: [String] = [
+    /// as `@AppStorage` declarations below. Walked by `PrefsMigrator`'s v1 → v2
+    /// step to copy legacy values forward into `bb.`-prefixed keys. `internal`
+    /// (not private) so the extracted migrator can read it; a future v2 → v3
+    /// migration must still review this history before reusing any name.
+    static let legacyUnprefixedKeys: [String] = [
         "theme", "themeMode", "fontName", "fontSize", "cursorBlink", "bell",
         "cursorShape", "optionKey", "confirmClose", "autoUpdateChecks",
         "osc52Enabled", "colorQueryEnabled", "translucency",
@@ -603,318 +608,58 @@ public final class Preferences: ObservableObject {
         }
     }
 
-    /// Repair every enum-backed @AppStorage string whose stored value
-    /// doesn't match a known case. Reset to the value the
-    /// `register(defaults:)` table seeds — `Theme.gruvbox`, `ThemeMode.dark`,
-    /// etc. — so the repaired raw matches what a fresh-install user
-    /// would see and the SwiftUI Picker can render the row.
-    ///
-    /// M4 (2026-05-03) realigned the theme + themeMode fallbacks here
-    /// from `Theme.defaultTheme` / `ThemeMode.auto` (the derived getter's
-    /// `?? .` fallback) to the registered defaults. The mismatch only
-    /// surfaces on a corrupted-rawValue path, but when it did the user's
-    /// theme silently flipped to a different value than the one shown on
-    /// first launch.
-    ///
-    /// Same-value guards on every branch — required by
-    /// `feedback_swiftui_userdefaults_feedback_loop.md` because both
-    /// the init caller and the `UserDefaults.didChangeNotification`
-    /// observer can fire this on a path that loops back through the
-    /// SwiftUI bridge.
-    ///
-    /// Reads each rawValue from the persistent domain on disk rather than via
-    /// the `@AppStorage` property. The observer caller MUST read disk because
-    /// @AppStorage's non-`View`-host cache lags behind external
-    /// `defaults.set(…)` writes (see `handleDefaultsChange` header); reading
-    /// `persistentDomain(forName:)` is correct on both the init and observer
-    /// paths.
-    ///
-    /// Audit S5-001: each rawValue is read from the APP's persistent domain
-    /// (`persistentDomain(forName:)`), NOT via `defaults.string(forKey:)` which
-    /// walks the full search list (app persistent → NSGlobalDomain →
-    /// registration). This matches the sibling hardening already applied to the
-    /// numeric clamps (`doubleInPersistentDomain`) and the schema-version gate
-    /// (`storedSchemaVersion`): a `defaults write -g bb.theme <x>` to
-    /// NSGlobalDomain can no longer be surfaced as a "valid" foreign value that
-    /// suppresses repair, nor (when it is garbage) trigger a clobber of the
-    /// app domain. A key absent from the persistent domain reads as nil and
-    /// falls back to the canonical default, which is exactly the registered
-    /// default the @AppStorage getter already returns for an unset key — so
-    /// legitimate first-run / never-customised state is unchanged.
+    // MARK: - Maintenance forwarders
+    //
+    // The migration / sanitize / persistent-domain-read LOGIC lives in
+    // `PrefsMaintenance.swift` (`PrefsMigrator`, `PrefsSanitizer`,
+    // `PersistentDomainReader`) so those concerns are independently testable
+    // off the @AppStorage bag. These thin static forwarders keep the call sites
+    // in `init` / `handleDefaultsChange` and the migration test suites binding
+    // through `Preferences.*` unchanged.
+
+    /// Repair enum-backed @AppStorage strings whose stored rawValue doesn't
+    /// decode to a known case. See `PrefsSanitizer.repairEnumRawValues`.
     static func repairEnumRawValues(in prefs: Preferences, defaults: UserDefaults, domain: String) {
-        let persistent = defaults.persistentDomain(forName: domain) ?? [:]
-        func storedRaw(_ name: String) -> String? { persistent[k(name)] as? String }
-
-        // Repair one enum-backed pref: if the stored rawValue doesn't decode
-        // to a valid case, write the default back — but only when it actually
-        // differs, so a value that's already the default doesn't fire a
-        // redundant `didChangeNotification`. One shape for all seven; the
-        // per-pref blocks this replaces were byte-identical apart from the key,
-        // enum type, default case, and target property.
-        func repair<E: RawRepresentable>(
-            _ key: String, _ type: E.Type, default def: E, assign: (String) -> Void
-        ) where E.RawValue == String {
-            let raw = storedRaw(key) ?? def.rawValue
-            if E(rawValue: raw) == nil {
-                let target = def.rawValue
-                if raw != target { assign(target) }
-            }
-        }
-
-        repair("theme", Theme.self, default: .gruvbox) { prefs.themeRaw = $0 }
-        repair("themeMode", ThemeMode.self, default: .dark) { prefs.themeModeRaw = $0 }
-        repair("bell", BellStyle.self, default: .visual) { prefs.bellRaw = $0 }
-        repair("cursorShape", CursorShape.self, default: .followShell) { prefs.cursorShapeRaw = $0 }
-        repair("optionKey", OptionKey.self, default: .meta) { prefs.optionKeyRaw = $0 }
-        repair("windowDragModifier", WindowGestureModifier.self, default: .command) { prefs.windowDragModifierRaw = $0 }
-        repair("windowResizeModifier", WindowGestureModifier.self, default: .command) { prefs.windowResizeModifierRaw = $0 }
+        PrefsSanitizer.repairEnumRawValues(in: prefs, defaults: defaults, domain: domain)
     }
 
-    /// Remove wrong-type values from numeric pref keys. `@AppStorage<Double>`
-    /// and `@AppStorage<Bool>` trust the key's KVC getter — if an external
-    /// tool stashed a String under a numeric key, the read returns 0/false
-    /// (or trips a Swift bridge assertion on some toolchain/OS combos).
-    /// Removing the offending value lets the registered default take over.
-    /// Covers both `bb.`-prefixed and legacy unprefixed names, so a user
-    /// upgrading from v0.1.5 with a corrupted legacy key still gets cleaned
-    /// up before the migration copies it forward. (settings F7)
+    /// Remove wrong-type values from numeric/bool pref keys. See
+    /// `PrefsSanitizer.sanitizeStoredTypes`.
     private static func sanitizeStoredTypes(in defaults: UserDefaults, domain: String) {
-        let numericDoubleKeys = ["fontSize", "translucency"]
-        let boolKeys = [
-            "cursorBlink", "confirmClose", "autoUpdateChecks",
-            "osc52Enabled", "colorQueryEnabled",
-            // Audit fix-#15: include confirmMultiLinePaste in the
-            // sanitize sweep so a wrong-typed CLI write (e.g. defaults
-            // write … -string yes) is stripped before the registered
-            // default is applied, matching sibling bool prefs.
-            "confirmMultiLinePaste",
-        ]
-        // S5-009: read from the persistent domain only, mirroring the
-        // S5-001 migration fix. `defaults.object(forKey:)` walks the
-        // full search list (app persistent → NSGlobalDomain →
-        // registration); a `defaults write -g fontSize -string foo`
-        // would otherwise trip the sanitize for an unprefixed key, but
-        // `removeObject(forKey:)` only writes to the app's persistent
-        // domain — so the global value persists, no work was done, and
-        // the user-visible behaviour was a misleading no-op.
-        // persistentDomain reads ONLY the app's domain, so we sanitize
-        // what we can actually mutate.
-        guard let persistent = defaults.persistentDomain(forName: domain) else { return }
-        let isNumericLike: (Any) -> Bool = { $0 is NSNumber }
-        for name in numericDoubleKeys {
-            for key in [k(name), name] {
-                if let v = persistent[key], !isNumericLike(v) {
-                    defaults.removeObject(forKey: key)
-                }
-            }
-        }
-        for name in boolKeys {
-            for key in [k(name), name] {
-                if let v = persistent[key], !isNumericLike(v) {
-                    defaults.removeObject(forKey: key)
-                }
-            }
-        }
+        PrefsSanitizer.sanitizeStoredTypes(in: defaults, domain: domain)
     }
 
-    /// Walk the on-disk schema version forward to `currentSchemaVersion`,
-    /// one step at a time. (settings F2)
-    ///
-    /// v1 → v2 (settings F3): move every pref key behind a `bb.` prefix so
-    /// Blackbird's keys no longer collide with `defaults write -g` writes to
-    /// generic names like `fontSize`/`theme`/`bell`. For each legacy key
-    /// with a value on disk, copy it to the prefixed form and delete the
-    /// original. Runs once per user — idempotent on any subsequent launch
-    /// because the stored version is stamped at `currentSchemaVersion` on
-    /// the way out, and the legacy key is gone.
-    ///
-    /// Pattern for future migrations:
-    /// ```
-    /// switch stored {
-    /// case 2: /* migrate 2 → 3 … */
-    ///         stored = 3
-    ///         fallthrough
-    /// default: break
-    /// }
-    /// defaults.set(stored, forKey: Preferences.schemaVersionKey)
-    /// ```
+    /// Walk the on-disk schema version forward to `currentSchemaVersion`. The
+    /// persistent-domain name is the app's bundle identifier; tests drive the
+    /// `migrateIfNeeded(in:domain:)` seam with their own suite name. (H-8)
     private func migrateIfNeeded() {
-        // The persistent-domain name is the app's bundle identifier; that's
-        // where `UserDefaults.standard` reads/writes its on-disk values
-        // when the search list isn't shadowed. Tests use the seam directly
-        // with their own suite name. (H-8 bootstrap path)
         Preferences.migrateIfNeeded(
             in: UserDefaults.standard,
             domain: Self.persistentDomainName
         )
     }
 
-    /// Testable seam for `migrateIfNeeded()`. Drives the same migration
-    /// machinery against any `UserDefaults` instance so we can exercise
-    /// downgrade / upgrade pathways in isolated suites without touching
-    /// `UserDefaults.standard`. Keep this `internal`, not `public` —
-    /// production code should always go through the no-arg instance method.
-    /// `domain` is the persistent-domain name the H-8 bootstrap reads via
-    /// `defaults.persistentDomain(forName:)`; pass the bundle identifier
-    /// for `UserDefaults.standard`, the suite name for tests.
-    /// (F-S7-003 regression seam, H-8 bootstrap path)
-    ///
-    /// F-S7-003 fix — DOWNGRADE-SAFETY INVARIANT
-    /// =========================================
-    /// Bug: previously, when a user ran a future schema (say v3) and
-    /// downgraded to a build whose `currentSchemaVersion` is v2, the
-    /// "already current or newer" branch unconditionally STAMPED the
-    /// stored key down to v2. The on-disk record then said "this user
-    /// is at v2" while the data on disk was actually v3-shaped. A
-    /// subsequent upgrade back to v3 would observe `stored=2 < current=3`
-    /// and re-run the v2→v3 migration against ALREADY v3-shaped data,
-    /// corrupting it.
-    ///
-    /// Fix: on downgrade (`stored > currentSchemaVersion`), do NOT touch
-    /// the stored version key. The disk keeps the high-water mark intact,
-    /// so a future re-upgrade observes `stored == intended` and correctly
-    /// skips the no-op migration. The older build's read paths already
-    /// tolerate unknown keys via the registered-default + enum-fallback
-    /// machinery (`Theme(rawValue:) ?? .defaultTheme`, etc.), so leaving
-    /// a higher version number on disk is safe.
+    /// Testable migration seam — drives the same machinery against any
+    /// `UserDefaults`. Keep `internal`, not `public`: production goes through
+    /// the no-arg instance method. See `PrefsMigrator.migrateIfNeeded` for the
+    /// F-S7-003 downgrade-safety invariant.
     internal static func migrateIfNeeded(in defaults: UserDefaults, domain: String) {
-        // H-8 bootstrap: the schema-version key was renamed from
-        // `prefsSchemaVersion` to `bb.prefsSchemaVersion` to keep it out
-        // of the global-domain search path. On first launch with the
-        // fix, look up the OLD key in the app's PERSISTENT DOMAIN — not
-        // via `defaults.integer(forKey:)`, which walks NSGlobalDomain
-        // and would let `defaults write -g prefsSchemaVersion 99` poison
-        // the migration seam — then copy its value forward and remove
-        // the legacy key from the persistent domain. After this one-shot,
-        // every read goes to the prefixed key.
-        bootstrapSchemaVersionKey(in: defaults, domain: domain)
-
-        // `storedSchemaVersion` reads from the persistent domain only
-        // (audit S5-R-001) and returns 0 if the key is absent there.
-        // Now that we no longer register `schemaVersionKey` in
-        // NSRegistrationDomain (audit EI-02), 0 unambiguously means "no
-        // schema version has ever been stamped to this defaults
-        // instance" — treat as v0, walk through every migration step,
-        // and stamp current at the end. A non-zero `stored` is an
-        // actual persistent-domain value we trust verbatim. The earlier
-        // claim that `bb.`-prefixed keys are immune to `defaults write
-        // -g` was WRONG — NSGlobalDomain doesn't strip prefixes, it
-        // serves the literal key — so the persistent-domain-only read
-        // is the load-bearing defense, not the prefix.
-        let stored = Preferences.storedSchemaVersion(in: defaults, domain: domain)
-        guard stored < Preferences.currentSchemaVersion else {
-            // Already current (stored == current) or NEWER (downgrade).
-            //
-            // Downgrade case (stored > current): leave the key alone. See
-            // the F-S7-003 invariant comment above — clobbering the high-
-            // water mark would cause a future re-upgrade to re-run already-
-            // applied migrations and corrupt v(N+1)-shaped data.
-            //
-            // Equal case (stored == current): nothing to do.
-            return
-        }
-        var v = stored
-        if v < 2 {
-            migrateV1toV2(defaults: defaults, domain: domain)
-            v = 2
-        }
-        // Future steps slot in here: `if v < 3 { migrateV2toV3(...); v = 3 }` etc.
-        defaults.set(v, forKey: Preferences.schemaVersionKey)
+        PrefsMigrator.migrateIfNeeded(in: defaults, domain: domain)
     }
 
-    /// Read the stored schema version from the app's persistent domain
-    /// only — NOT via `defaults.integer(forKey:)` which walks the full
-    /// UserDefaults search list (app persistent → NSGlobalDomain →
-    /// registration). A hostile or accidental `defaults write -g
-    /// bb.prefsSchemaVersion <n>` to NSGlobalDomain would otherwise
-    /// elevate `storedSchemaVersion` to <n>, flip `isDowngrade` true at
-    /// Preferences-init time, and the S6-010 init-time numeric clamp
-    /// (M-14 / DI-7 recovery for tampered NaN / out-of-range fontSize /
-    /// translucency) would be silently skipped. Mirrors the same defense
-    /// already applied to `bootstrapSchemaVersionKey` (H-8) and
-    /// `migrateV1toV2` (S5-001). Audit S5-R-001.
-    ///
-    /// Returns 0 when the key is absent from the persistent domain,
-    /// matching `integer(forKey:)`'s contract for missing keys.
+    /// Read the stored schema version from the app's persistent domain only.
+    /// See `PersistentDomainReader.storedSchemaVersion` (audit S5-R-001).
     static func storedSchemaVersion(in defaults: UserDefaults, domain: String) -> Int {
-        guard let persistent = defaults.persistentDomain(forName: domain) else { return 0 }
-        if let n = persistent[Preferences.schemaVersionKey] as? NSNumber { return n.intValue }
-        return 0
+        PersistentDomainReader.storedSchemaVersion(in: defaults, domain: domain)
     }
 
-    /// Audit fix-#04 (2026-05-21): persistentDomain-scoped double read,
-    /// returning nil when the key is absent. Used by the runtime
-    /// change-handler so `defaults.double(forKey:)`'s full search-list
-    /// walk can't surface an attacker-staged `defaults write -g
-    /// bb.fontSize` on the very first launch (before the through-didSet
-    /// init has populated the app domain) into the user's pref. Mirrors
-    /// the `storedSchemaVersion` hardening (audit S5-R-001).
-    ///
-    /// Returns nil rather than 0 so the caller can distinguish
-    /// "key absent on disk" (use the registered default) from "key set
-    /// to 0" (a legitimate but out-of-envelope value worth re-clamping).
+    /// PersistentDomain-scoped double read, nil when absent. See
+    /// `PersistentDomainReader.double` (audit fix-#04).
     static func doubleInPersistentDomain(
         in defaults: UserDefaults,
         domain: String,
         key: String
     ) -> Double? {
-        guard let persistent = defaults.persistentDomain(forName: domain) else { return nil }
-        if let n = persistent[key] as? NSNumber { return n.doubleValue }
-        return nil
-    }
-
-    /// One-shot promotion of the legacy unprefixed `prefsSchemaVersion`
-    /// key to its `bb.`-prefixed counterpart. Reads through
-    /// `persistentDomain(forName:)` instead of `defaults.integer(forKey:)`
-    /// so a hostile `defaults write -g prefsSchemaVersion <n>` write to
-    /// NSGlobalDomain can't bypass the migration. Idempotent — the second
-    /// launch sees no legacy key in the persistent domain and short-
-    /// circuits. (audit H-8)
-    private static func bootstrapSchemaVersionKey(in defaults: UserDefaults, domain: String) {
-        guard let persistent = defaults.persistentDomain(forName: domain) else { return }
-        guard let legacyValue = persistent[Preferences.legacySchemaVersionKey] else { return }
-        // Prefer an already-stamped prefixed value if both keys ended up
-        // on disk (mid-upgrade-crash window). Either way, drop the legacy
-        // key from the persistent domain so the next launch short-circuits.
-        if persistent[Preferences.schemaVersionKey] == nil {
-            defaults.set(legacyValue, forKey: Preferences.schemaVersionKey)
-        }
-        defaults.removeObject(forKey: Preferences.legacySchemaVersionKey)
-    }
-
-    /// Copy every legacy unprefixed key into its `bb.`-prefixed counterpart
-    /// and remove the original. No-op for keys that are absent on disk —
-    /// they'll fall through to the registered default transparently.
-    ///
-    /// EI-02: previously this conditioned the copy on `alreadyPrefixed
-    /// == nil` (intent: in a mid-upgrade-crash where both keys were
-    /// set, prefer the prefixed value). That check called
-    /// `defaults.object(forKey: prefixed)`, which walks the search list
-    /// and returns the registered default — `bb.theme` always reads
-    /// non-nil because `Preferences.init` registers
-    /// `Theme.gruvbox.rawValue`. So `alreadyPrefixed != nil` was
-    /// effectively always true, and the copy never happened. Result:
-    /// legacy v1 users had their unprefixed keys silently deleted on
-    /// upgrade, and their settings reset to the registered defaults.
-    /// We unconditionally copy now. The mid-crash case becomes "legacy
-    /// wins"; an exotic edge case which is no worse than the previous
-    /// "legacy is silently dropped." (settings F3)
-    private static func migrateV1toV2(defaults: UserDefaults, domain: String) {
-        // Read each legacy key from the persistent domain directly, NOT
-        // via `defaults.object(forKey:)` which walks the full search list
-        // (app persistent → NSGlobalDomain → registration). A hostile or
-        // accidental `defaults write -g theme "X"` / `defaults write -g
-        // fontSize 25` to NSGlobalDomain would otherwise be imported into
-        // `bb.theme` / `bb.fontSize` on first migration, silently
-        // substituting the user's settings. Mirrors the same defense
-        // applied to `bootstrapSchemaVersionKey` (audit H-8) extended
-        // to the legacy data keys. Audit S5-001.
-        guard let persistent = defaults.persistentDomain(forName: domain) else { return }
-        for name in Preferences.legacyUnprefixedKeys {
-            let prefixed = Preferences.k(name)
-            guard let legacy = persistent[name] else { continue }
-            defaults.set(legacy, forKey: prefixed)
-            defaults.removeObject(forKey: name)
-        }
+        PersistentDomainReader.double(in: defaults, domain: domain, key: key)
     }
 }
