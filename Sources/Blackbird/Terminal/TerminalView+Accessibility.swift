@@ -95,13 +95,20 @@ extension TerminalView {
         return computed
     }
 
+    /// `accessibilityValue()` coalesced to a `String`. The
+    /// `(accessibilityValue() as? String) ?? ""` cast was repeated across every
+    /// line-math accessor below; one helper here.
+    private func currentA11yValue() -> String {
+        (accessibilityValue() as? String) ?? ""
+    }
+
     // MARK: - .textArea accessors (F-S5-021)
 
     /// Total character count of `accessibilityValue()` (UTF-16 code unit
     /// count, since AppKit's a11y API is `NSRange`-based and VO reads
     /// indices in UTF-16 units). Same shape as NSTextView.
     public override func accessibilityNumberOfCharacters() -> Int {
-        let value = (accessibilityValue() as? String) ?? ""
+        let value = currentA11yValue()
         return value.utf16.count
     }
 
@@ -118,7 +125,7 @@ extension TerminalView {
     /// `compactMap { Unicode.Scalar($0) }` shape silently dropped UTF-16
     /// surrogates and corrupted any range crossing an emoji boundary.
     public override func accessibilityString(for range: NSRange) -> String? {
-        let value = (accessibilityValue() as? String) ?? ""
+        let value = currentA11yValue()
         let utf16 = value.utf16
         let count = utf16.count
         guard range.location >= 0, range.length >= 0,
@@ -150,7 +157,7 @@ extension TerminalView {
         // (or to the end of the value, for the last line). Strip the
         // newline from the reported range — VO line readers don't
         // include the separator.
-        let value = (accessibilityValue() as? String) ?? ""
+        let value = currentA11yValue()
         let utf16 = value.utf16
         let endExcludingNewline: Int
         if nextStart > start, nextStart <= utf16.count,
@@ -250,7 +257,7 @@ extension TerminalView {
     /// the cursor actually was.
     private func ensureLineOffsets() -> [Int] {
         if let cached = a11yCache.lineOffsets { return cached }
-        let value = (accessibilityValue() as? String) ?? ""
+        let value = currentA11yValue()
         let utf16 = value.utf16
         var offsets: [Int] = [0]
         var idx = 0
