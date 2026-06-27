@@ -513,10 +513,10 @@ final class FindBarAdversarialTests: XCTestCase {
         // Leg (b): TerminalView with no matches → zero bytes.
         let view = try makeView()
         let snap = try snapshotWithRow0("hello world", cols: 12)
-        view.replaceSnapshotForTests = snap
-        view.replaceFindMatchesForTests = []   // no matches
+        view.findController.replaceSnapshotForTests = snap
+        view.findController.replaceFindMatchesForTests = []   // no matches
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
         view._invokeReplaceAllForTests(replacement: "abc")
         XCTAssertTrue(
             captured.isEmpty,
@@ -545,14 +545,14 @@ final class FindBarAdversarialTests: XCTestCase {
             cursorLine, 0,
             "test fixture: cursor must land on the row carrying the corpus"
         )
-        view.replaceSnapshotForTests = snap
+        view.findController.replaceSnapshotForTests = snap
         // Two "hello" spans: cols 0..4 and cols 12..16. 5 chars each.
-        view.replaceFindMatchesForTests = [
+        view.findController.replaceFindMatchesForTests = [
             (line: cursorLine, startCol: 0,  endCol: 4),
             (line: cursorLine, startCol: 12, endCol: 16),
         ]
         var allCaptures: [Data] = []
-        view.replaceByteCapture = { allCaptures.append($0) }
+        view.findController.replaceByteCapture = { allCaptures.append($0) }
 
         view._invokeReplaceAllForTests(replacement: "x")
 

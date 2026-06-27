@@ -4,12 +4,13 @@ import BBCore
 /// The find-replace byte engine: given the matches on the live shell input line
 /// and an already-sanitized replacement, synthesize the readline byte stream
 /// (CSI C / CSI D cursor moves + DEL erasures + replacement bytes) that splices
-/// every match in one consistent pass. Extracted verbatim from
-/// `TerminalView.spliceReplacements` (REFACTOR.md Part IV "critical": the most
-/// correctness-critical logic in the subsystem, mis-tuned by five prior audits)
-/// into a pure, view-independent seam so its cursor math can be exercised on raw
-/// byte arrays. The only view responsibilities left behind are sanitizing the
-/// replacement, surfacing the refusal toast, and writing the bytes to the PTY.
+/// every match in one consistent pass. Extracted verbatim from the splice path
+/// (now `FindController.spliceReplacements`; REFACTOR.md Part IV "critical": the
+/// most correctness-critical logic in the subsystem, mis-tuned by five prior
+/// audits) into a pure, view-independent seam so its cursor math can be
+/// exercised on raw byte arrays. The only responsibilities left to the caller
+/// are sanitizing the replacement, surfacing the refusal toast, and writing the
+/// bytes to the PTY.
 enum ShellLineEditor {
     /// Why a replacement was refused. The shell would mis-execute these, so the
     /// engine emits no bytes and the caller shows a transient message.

@@ -647,4 +647,250 @@ final class FindController {
             view.session?.scroll(delta: Int32(clamping: snap.rows - 1 - displayRowForMatch))
         }
     }
+
+    // MARK: - Replace
+
+    #if DEBUG
+    /// Byte-capture closure for the replace path. When set, `spliceReplacements`
+    /// / `reRunSearchAfterReplace` route bytes here instead of `session.send`,
+    /// so integration tests can assert the exact DEL×N + replacement sequence
+    /// without a real PTY.
+    var replaceByteCapture: ((Data) -> Void)?
+    /// Test-only snapshot override for the replace path.
+    var replaceSnapshotForTests: BBSnapshot?
+    /// Test-only find-matches override for the replace path.
+    var replaceFindMatchesForTests: [(line: Int32, startCol: Int, endCol: Int)]?
+    #endif
+
+    /// F3 TUI-guard (the view's `findBarShouldAllowReplace` forwards here):
+    /// refuse replace when the terminal mode indicates a full-screen TUI (vim,
+    /// less, htop) — alt-screen, any mouse-reporting flag, or bracketed-paste
+    /// active. In those modes the DEL+UTF-8 byte stream would be interpreted as
+    /// key input by the TUI instead of readline-style erase.
+    func shouldAllowReplace() -> Bool {
+        guard let mode = effectiveSnapshot()?.termMode else {
+            // No snapshot yet → nothing to replace anyway; err on "allow" so
+            // tests that don't stub a snapshot still exercise the old path.
+            return true
+        }
+        let tuiSignals: BBTermMode = [
+            .altScreen,
+            .mouseReportClick,
+            .mouseMotion,
+            .mouseDrag,
+            .sgrMouse,
+            .bracketedPaste,
+        ]
+        return mode.intersection(tuiSignals).isEmpty
+    }
+
+    /// Replace the current find match with `replacement`. Only works when the
+    /// match is on the live input line (cursor row). Otherwise a transient
+    /// warning is shown in the find bar.
+    func replaceCurrentMatch(with replacement: String) {
+        // Re-derive against the live snapshot before splicing — advanceFind and
+        // replaceAllMatches both do this (audit fix-#18); replaceCurrentMatch
+        // was missing it, so a buffer scroll since the last search could splice
+        // the stale (line, startCol) of a wide-char match against a different
+        // grid and corrupt the input line. Replace-safe variant: substring
+        // refreshes synchronously, regex keeps the already-scanned matches
+        // (its rescan is async and would empty the set).
+        refreshFindMatchesIfStaleForReplace()
+        let matches = effectiveFindMatches()
+        guard !matches.isEmpty, findCurrentIndex < matches.count else { return }
+        let m = matches[findCurrentIndex]
+        guard isOnLiveInputLine(m) else {
+            findBar?.showTransientMessage("Only input-line matches can be replaced")
+            return
+        }
+        spliceReplacements(matches: [m], replacement: replacement)
+        // The replacement edits the shell line; every recorded match on that
+        // line has now shifted or vanished. Drop the cache so find-next doesn't
+        // scroll to a stale coordinate.
+        clearMatches()
+        // F5: re-run the search after the byte stream has had a chance to land,
+        // so the label reads the live post-replace count (standard VS Code /
+        // TextEdit behaviour).
+        reRunSearchAfterReplace()
+    }
+
+    /// Re-run the current find query on the next runloop tick. Called after a
+    /// successful replace so the match label reflects the edited line instead of
+    /// stale "0/0". Scheduled async so the shell has a moment to echo the
+    /// DEL+replacement bytes back through the render pipeline; the snapshot
+    /// observer also schedules a refresh, so this double-booking is harmless —
+    /// `performSearch` overwrites the match array atomically. Audit
+    /// findbar-selection F5.
+    private func reRunSearchAfterReplace() {
+        #if DEBUG
+        // In tests there's no shell to echo bytes; skip the async hop so
+        // assertions against `findMatches` don't race the dispatch.
+        if replaceByteCapture != nil { return }
+        #endif
+        let query = findQuery
+        guard !query.isEmpty, findBar != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.findQuery.isEmpty, self.findBar != nil else { return }
+            self.performSearch(query: query)
+        }
+    }
+
+    /// Replace all find matches with `replacement`, processing right-to-left so
+    /// earlier column indices stay valid as the shell receives each replacement.
+    /// Matches not on the live input line are skipped; if any were skipped a
+    /// warning is shown in the find bar.
+    ///
+    /// F4 (findbar-selection): when a match sits on the row immediately above
+    /// the cursor AND that row looks soft-wrap-filled (its last cell is
+    /// non-blank — shells fill right up to the wrap column before wrapping),
+    /// refuse with a warning. Without the wrap-flag FFI we can't be certain;
+    /// erring on the side of refusal avoids emitting DEL bytes that overshoot
+    /// into wrapped prior content. Rows with a trailing blank are treated as
+    /// unrelated scrollback and their matches are silently skipped, preserving
+    /// the documented behaviour for non-wrapped off-line matches.
+    func replaceAllMatches(with replacement: String) {
+        // Audit fix-#18 (2026-05-11): re-derive findMatches against the current
+        // snapshot before iterating. A user who scrolls between ⌘F's
+        // performSearch and clicking Replace All can have col-real findMatches
+        // (cell-walked, in-viewport branch) paired with a snapshot whose cursor
+        // is now off-viewport — sendReplacement's nonSpacerCellCount fallback
+        // then col-spans a wide-char match and overcounts DELs by one per wide
+        // glyph. advanceFind already calls refreshFindMatchesIfStale;
+        // replaceAllMatches needs the same discipline. Use the replace-safe
+        // variant so a stale REGEX query doesn't async-clear findMatches and
+        // turn Replace All into a silent no-op.
+        refreshFindMatchesIfStaleForReplace()
+        let matches = effectiveFindMatches()
+        guard !matches.isEmpty else { return }
+        guard let snap = effectiveSnapshot() else { return }
+        let cursorLine = Int32(snap.cursorRow)
+        let inputLineMatches = matches.filter { $0.line == cursorLine }
+
+        let hadOffLine = inputLineMatches.count < matches.count
+        if inputLineMatches.isEmpty {
+            findBar?.showTransientMessage("No input-line matches to replace")
+            return
+        }
+        // Wrap-ambiguity guard: a match on the row immediately above the cursor
+        // *might* be a soft-wrap continuation of the input line. A shell that's
+        // soft-wrapped typically fills right up to the right edge (last cell
+        // non-blank); a scrollback row usually has trailing blanks. Refuse only
+        // when the prior row's last cell is non-blank AND contains a match —
+        // otherwise fall through to the scrollback-skip path. Audit
+        // findbar-selection F4.
+        //
+        // Audit fix-#08 (2026-05-11): the `row` parameter on
+        // BBSnapshot.character(at:row:) indexes the viewport cells array
+        // (0..rows-1), NOT the buffer-line coordinate space. cursorLine is
+        // live-grid-row-relative; the corresponding viewport-row when
+        // displayOffset > 0 is `cursorLine + displayOffset`. Without the offset
+        // addition, a scrolled-back user clicking Replace All would read a stray
+        // scrollback row's last cell instead of the line physically above the
+        // cursor, mis-firing the guard either way (false-negative leads to DEL
+        // bytes overshooting wrapped input — the very corruption the guard
+        // exists to prevent).
+        let priorRow = cursorLine - 1
+        let priorViewportRow = Int(priorRow) + snap.displayOffset
+        if matches.contains(where: { $0.line == priorRow }),
+           snap.cols > 0,
+           let priorLastCell = snap.character(at: snap.cols - 1, row: priorViewportRow),
+           !priorLastCell.isWhitespace {
+            findBar?.showTransientMessage("Refusing: matches span a possible wrapped input line")
+            return
+        }
+        // Process right-to-left as ONE splice: the cursor walks left match by
+        // match, so each match's gap is computed against the post-replacement
+        // position of the matches to its right (audit S5-003 — the old per-match
+        // sends assumed DELs landed at the match columns, which they never did).
+        spliceReplacements(
+            matches: inputLineMatches.sorted(by: { $0.startCol > $1.startCol }),
+            replacement: replacement
+        )
+        // All input-line matches have been spliced; invalidate the cache.
+        clearMatches()
+        if hadOffLine {
+            findBar?.showTransientMessage("Replaced input-line matches (scrollback skipped)")
+        } else {
+            // F5: re-run the search so the user sees fresh match counts against
+            // the newly-edited line. Without this, the label reads "No matches"
+            // even though the replacement string may itself match the query.
+            // `performSearch` short-circuits on an empty query; scheduling is
+            // deferred to the next runloop tick so the shell has time to echo
+            // the bytes back.
+            reRunSearchAfterReplace()
+        }
+    }
+
+    /// Splice replacements into the live input line (audit S5-003).
+    ///
+    /// DEL (0x7F) erases the character LEFT OF THE SHELL CURSOR — not at the
+    /// match's columns. This version repositions in character space: for each
+    /// match (right-to-left, all on the cursor row), emit left-arrows (CSI D)
+    /// from the tracked cursor position to the match end, then DEL×len, then the
+    /// replacement; finish with right-arrows (CSI C) back to the (shifted) end
+    /// of line. All counts are derived from ONE snapshot in shell-character
+    /// units via nonSpacerCellCount (a wide CJK glyph is one character / one DEL
+    /// / one arrow even though it spans two columns — audit H6). Arrows are
+    /// bound to char movement in readline/ZLE emacs AND vi-insert modes, and the
+    /// replace path is already gated off TUI modes.
+    ///
+    /// Known residual: a match inside the PROMPT region — not the typed input —
+    /// cannot be edited; readline stops cursor movement at the input start, so
+    /// such a splice still misfires. OSC 133 B tracking would be the future fix.
+    ///
+    /// All-or-nothing: validation failures (line break / tab / multi-scalar
+    /// grapheme in the replacement) refuse BEFORE any byte is emitted, so the
+    /// line is never left half-spliced.
+    private func spliceReplacements(
+        matches: [(line: Int32, startCol: Int, endCol: Int)],
+        replacement: String
+    ) {
+        guard !matches.isEmpty, let snap = effectiveSnapshot() else { return }
+        // Scrub the replacement through the same pipeline paste uses (the
+        // find-bar Replace field bypasses our paste sanitizer): a Trojan-Source
+        // RLO typed/pasted there would otherwise smuggle the bidi byte straight
+        // into the shell. Same C0/C1/bidi/ZWJ/tag-block set. Audit M10.
+        let cleanedReplacement = PasteSanitizer.stripBidiOverrides(
+            PasteSanitizer.sanitizePasteControls(Data(replacement.utf8))
+        )
+        switch ShellLineEditor.spliceBytes(
+            matches: matches, cleanedReplacement: cleanedReplacement, snapshot: snap
+        ) {
+        case .failure(let reason):
+            findBar?.showTransientMessage(reason.message)
+        case .success(let bytes):
+            guard !bytes.isEmpty else { return }
+            #if DEBUG
+            if let capture = replaceByteCapture {
+                capture(bytes)
+                return
+            }
+            #endif
+            guard let session = view.session else { return }
+            session.send(bytes)
+        }
+    }
+
+    /// True when the match's buffer line equals the cursor's buffer line, i.e.
+    /// the match is on the live shell input line.
+    private func isOnLiveInputLine(_ m: (line: Int32, startCol: Int, endCol: Int)) -> Bool {
+        guard let snap = effectiveSnapshot() else { return false }
+        return m.line == Int32(snap.cursorRow)
+    }
+
+    /// The snapshot to use for replace logic: test override when set, else live.
+    private func effectiveSnapshot() -> BBSnapshot? {
+        #if DEBUG
+        if let override = replaceSnapshotForTests { return override }
+        #endif
+        return view.currentSnapshot
+    }
+
+    /// The find-matches array to use for replace logic: test override, else live.
+    private func effectiveFindMatches() -> [(line: Int32, startCol: Int, endCol: Int)] {
+        #if DEBUG
+        if let override = replaceFindMatchesForTests { return override }
+        #endif
+        return findMatches
+    }
 }
