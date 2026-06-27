@@ -138,6 +138,71 @@ enum SparkleAlertOverride {
         return keyWindow ?? mainWindow
     }
 
+    /// The "up to date" alert body that `install()` swizzles into
+    /// `SPUStandardUserDriver`, extracted so install() stays a thin
+    /// swizzle trampoline. Computes the display name/version, builds the
+    /// alert, and presents it per `presentationDecision`, calling `ack`
+    /// once the alert is shown, dismissed, or deliberately dropped.
+    private static func presentUpToDate(ack: @escaping () -> Void) {
+        let name = Bundle.main
+            .object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Blackbird"
+        let version: String = {
+            if let v = Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+            ) as? String, !v.isEmpty {
+                return v
+            }
+            // Missing/empty version means a corrupted bundle — surface so a
+            // user reporting "the alert says 'Blackbird  is the latest'" can
+            // grep for the cause. One log per session per miss; the alert
+            // path is user-driven (Check for Updates), not a hot path.
+            // Audit EH-005.
+            logger.fault(
+                "SparkleAlertOverride: CFBundleShortVersionString missing from Info.plist"
+            )
+            return ""
+        }()
+        let alert = NSAlert()
+        alert.messageText = "You're up to date"
+        alert.informativeText = Self.upToDateMessage(name: name, version: version)
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+
+        // Audit #23 / L11: avoid stacking modals (a blocking runModal() during
+        // applicationShouldTerminate while a sheet is up can deadlock the quit
+        // flow), and never anchor the sheet to the Settings window
+        // (`resolveSheetParent` targets the selected terminal tab so the sheet
+        // can't yank selection to tab 1). The sheet/runModal/drop choice is the
+        // unit-tested `presentationDecision`; the modal interactions themselves
+        // aren't headless-testable.
+        let parentWindow = Self.resolveSheetParent(
+            windows: NSApp.windows,
+            keyWindow: NSApp.keyWindow,
+            mainWindow: NSApp.mainWindow
+        ) as? NSWindow
+        switch Self.presentationDecision(
+            hasParent: parentWindow != nil,
+            parentHasSheet: parentWindow?.attachedSheet != nil,
+            appModal: NSApp.modalWindow != nil,
+            appActive: NSApp.isActive
+        ) {
+        case .sheet:
+            // `.sheet` is only returned when `hasParent` — parentWindow is
+            // non-nil here; the `if let` can't fail.
+            if let window = parentWindow {
+                alert.beginSheetModal(for: window) { _ in ack() }
+            }
+        case .drop:
+            logger.warning(
+                "Sparkle 'up to date' alert dropped: another modal is active or app is not foreground"
+            )
+            ack()
+        case .runModal:
+            _ = alert.runModal()
+            ack()
+        }
+    }
+
     /// Invoked once during app launch. Idempotent — `method_setImplementation`
     /// is safe to call repeatedly. On re-install, the previous block IMP is
     /// freed via `imp_removeBlock` (F-S7-001); the very first install's prior
@@ -159,86 +224,10 @@ enum SparkleAlertOverride {
         }
 
         typealias Block = @convention(block) (AnyObject, Error, @escaping () -> Void) -> Void
+        // Thin trampoline: the alert presentation lives in `presentUpToDate`
+        // (the swizzled-in selector ignores the driver + error args).
         let block: Block = { _, _, ack in
-            let name = Bundle.main
-                .object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Blackbird"
-            let version: String = {
-                if let v = Bundle.main.object(
-                    forInfoDictionaryKey: "CFBundleShortVersionString"
-                ) as? String, !v.isEmpty {
-                    return v
-                }
-                // Missing/empty version means a corrupted bundle —
-                // surface so a user reporting "the alert says
-                // 'Blackbird  is the latest'" can grep for the cause.
-                // One log per session per miss; the alert path is
-                // user-driven (Check for Updates), not a hot path.
-                // Audit EH-005.
-                logger.fault(
-                    "SparkleAlertOverride: CFBundleShortVersionString missing from Info.plist"
-                )
-                return ""
-            }()
-            let alert = NSAlert()
-            alert.messageText = "You're up to date"
-            alert.informativeText = Self.upToDateMessage(name: name, version: version)
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
-
-            // Audit #23: avoid stacking modals. A blocking `runModal()` here
-            // can deadlock the quit flow if Sparkle fires this during
-            // `applicationShouldTerminate(_:)` while a window-modal sheet
-            // (e.g. "Save changes?") is already up. Prefer a sheet attached
-            // to the key/main window; fall back to `runModal()` only when no
-            // other modal is active and the app is foreground; otherwise
-            // drop the alert (the user can re-trigger via Check for Updates).
-            //
-            // Modal interactions are not unit-testable in headless CI, so
-            // there's no regression test for this — see audit ID #23.
-            // TODO(audit #23): revisit if SPUUpdater grows a non-blocking API.
-            //
-            // Audit L11. NSApp.keyWindow can be the Settings window if the
-            // user clicked "Check for Updates Now" from Settings → Updates.
-            // Attaching the "up to date" sheet to Settings is visually
-            // wrong and dismisses awkwardly when the user closes Settings
-            // mid-presentation. Prefer the first eligible terminal window
-            // (a MainWindowController's window without an attached sheet)
-            // before falling back to keyWindow / mainWindow — that gives
-            // the alert a stable visual home regardless of where the
-            // check was triggered.
-            // Target the ACTIVE/selected tab, not array position. See
-            // `resolveSheetParent` — attaching the sheet to a non-selected tab
-            // forces AppKit to surface (select) that tab, which is exactly the
-            // "Check for Updates kicks me back to tab 1" bug.
-            let parentWindow = Self.resolveSheetParent(
-                windows: NSApp.windows,
-                keyWindow: NSApp.keyWindow,
-                mainWindow: NSApp.mainWindow
-            ) as? NSWindow
-            switch Self.presentationDecision(
-                hasParent: parentWindow != nil,
-                parentHasSheet: parentWindow?.attachedSheet != nil,
-                appModal: NSApp.modalWindow != nil,
-                appActive: NSApp.isActive
-            ) {
-            case .sheet:
-                // `.sheet` is only returned when `hasParent` — parentWindow is
-                // non-nil here; the `if let` can't fail.
-                if let window = parentWindow {
-                    alert.beginSheetModal(for: window) { _ in ack() }
-                }
-            case .drop:
-                // Audit #23: anything modal in flight, app not foreground, or
-                // the parent already has a sheet (which would deadlock a
-                // blocking runModal()). Skip rather than stack modals.
-                logger.warning(
-                    "Sparkle 'up to date' alert dropped: another modal is active or app is not foreground"
-                )
-                ack()
-            case .runModal:
-                _ = alert.runModal()
-                ack()
-            }
+            Self.presentUpToDate(ack: ack)
         }
         let imp = imp_implementationWithBlock(block as Any)
         // F-S7-001: free the previously-installed block IMP, if any. We
