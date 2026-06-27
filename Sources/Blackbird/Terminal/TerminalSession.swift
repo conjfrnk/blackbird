@@ -1306,10 +1306,14 @@ public final class TerminalSession: ObservableObject {
         // tests. If you need eager PTY setup, gate it with `if let pty
         // { … }` and state why in a comment — don't drop the guard.
 
-        // Apply the current OSC 10/11/12 color-query preference to the
-        // core. Core default is off for security reasons; user opt-in
-        // flips it on here at session start. Changes to the pref at
-        // runtime propagate via the Preferences subscription below.
+        wireColorQueryPreference()
+        wireEventAndPTY()
+    }
+
+    /// Apply the OSC 10/11/12 color-query preference to the core now (default
+    /// off for security; user opt-in), and keep it in sync at runtime via a
+    /// `Preferences` subscription.
+    private func wireColorQueryPreference() {
         coreQueue.async { [bbterm] in
             bbterm.setColorQueryEnabled(Preferences.shared.colorQueryEnabled)
         }
@@ -1342,6 +1346,16 @@ public final class TerminalSession: ObservableObject {
                     bbterm.setColorQueryEnabled(enabled)
                 }
             }
+    }
+
+    /// Wire the bbterm event handler + PTY byte/exit handlers, in the
+    /// fix-#06 order: `onEvent` and `setOnExit` MUST be installed before
+    /// `setOnBytes` / `startReading`, so the dispatch chain (read loop →
+    /// coreQueue → feed → bbterm.input → event trampoline) is fully wired
+    /// before any byte can arrive; then take the initial snapshot through the
+    /// coalescer so it orders deterministically against the first real feed.
+    private func wireEventAndPTY() {
+        // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
 
         // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
         // M-4 / PS-01: BOTH closures use [weak self]. The outer captures
