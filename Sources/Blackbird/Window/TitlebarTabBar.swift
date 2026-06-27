@@ -397,10 +397,11 @@ final class TabStripView: NSView {
            let field = editField {
             let pill = pillFrames[idx]
             let closeRect = closeHotspot(in: pill)
+            let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
             field.frame = NSRect(
-                x: pill.minX + closeRect.width + 6,
+                x: title.x,
                 y: pill.minY + 2,
-                width: max(0, pill.width - (closeRect.width + 12)),
+                width: title.width,
                 height: pill.height - 4
             )
         }
@@ -542,13 +543,15 @@ final class TabStripView: NSView {
         editingPill = pillIndex
         let pill = pillFrames[pillIndex]
         let closeRect = closeHotspot(in: pill)
-        // Size the field to the pill's title area (same math as the
-        // drawing path). 2 pt top/bottom inset keeps the field slightly
-        // inside the pill body so its focus-ring-free border is visible.
+        // Size the field to the pill's title area (the SAME horizontal math
+        // the drawing path uses, via TabStripLayout). 2 pt top/bottom inset
+        // keeps the field slightly inside the pill body so its focus-ring-free
+        // border is visible.
+        let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
         let fieldRect = NSRect(
-            x: pill.minX + closeRect.width + 6,
+            x: title.x,
             y: pill.minY + 2,
-            width: max(0, pill.width - (closeRect.width + 12)),
+            width: title.width,
             height: pill.height - 4
         )
         let field = NSTextField(frame: fieldRect)
@@ -830,11 +833,13 @@ final class TabStripView: NSView {
 
             // Title: centered, truncated if pill is narrow. Leave room
             // for the close button's width on the left so titles don't
-            // jump when hover reveals it.
+            // jump when hover reveals it. Same horizontal math as the
+            // inline-rename field, via TabStripLayout.
+            let area = TabStripLayout.titleArea(in: rect, closeWidth: closeRect.width)
             let titleArea = NSRect(
-                x: rect.minX + closeRect.width + 6,
+                x: area.x,
                 y: rect.minY,
-                width: max(0, rect.width - (closeRect.width + 12)),
+                width: area.width,
                 height: rect.height
             )
             let title = w.title.isEmpty ? "Untitled" : w.title
