@@ -157,10 +157,14 @@ final class TabStripView: NSView {
         window.performDrag(with: event)
     }
 
-    private var tabs: [NSWindow] = []
+    // `tabs` / `pillFrames` are `fileprivate` (not `private`) so the hoisted
+    // `TabDragController` + `TabRenameController` in this file can read the
+    // strip's live layout without a parallel copy. The strip remains the
+    // single writer (`update` / `layoutPills`).
+    fileprivate var tabs: [NSWindow] = []
     private weak var selectedTab: NSWindow?
     private var totalWidth: CGFloat = 0
-    private var pillFrames: [CGRect] = []
+    fileprivate var pillFrames: [CGRect] = []
     private var addButtonFrame: CGRect = .zero
 
     /// Snapshot of the pill TITLE strings applied on the previous `update()`.
@@ -173,55 +177,19 @@ final class TabStripView: NSView {
     /// `accessibilityChildren()` handed VO (rather than a throwaway).
     private var cachedPillElements: [NSAccessibilityElement]?
 
-    // MARK: - Drag-to-reorder state
-
-    /// Captured on `mouseDown` over a pill body when reorder is feasible
-    /// (≥ 2 tabs, not on the close hotspot, not entering inline-rename).
-    /// `mouseDragged` checks the threshold against `startPoint.x` to
-    /// decide whether to promote to a real reorder gesture.
-    fileprivate struct PendingDrag {
-        let pillIndex: Int
-        let startPoint: NSPoint
-        /// Horizontal offset inside the pill at mousedown — preserved so
-        /// the dragged pill stays anchored to where the user grabbed it
-        /// rather than snapping its left edge to the cursor.
-        let downOffsetX: CGFloat
-    }
-
-    /// Active drag — promoted from the `.armed` phase once the user
-    /// moves the cursor past `dragThreshold`. `currentIndex` is the
-    /// intermediate slot the dragged pill currently occupies; siblings
-    /// render shifted around that slot. `cursorX` is the live mouse X
-    /// used to draw the dragged pill under the cursor (clamped to
-    /// strip bounds).
-    fileprivate struct DragState {
-        let originalIndex: Int
-        let downOffsetX: CGFloat
-        var cursorX: CGFloat
-        var currentIndex: Int
-    }
-
-    /// Three-phase state machine for reorder gestures. The enum makes
-    /// the "armed but not yet dragging" vs "actively dragging" vs
-    /// "neither" distinction representable in the type system — the
-    /// previous two-optional encoding (`pendingDrag: ?`, `dragState: ?`)
-    /// admitted a representable-but-illegal `(nil, set)` fourth state.
-    /// `mouseDragged` reads + transitions; `mouseUp` always returns to
-    /// `.idle`.
-    fileprivate enum DragPhase {
-        case idle
-        case armed(PendingDrag)
-        case dragging(DragState)
-    }
-    private var dragPhase: DragPhase = .idle
-
-    /// Pixels of horizontal motion required before a mousedown is
-    /// promoted to a reorder drag. Anything smaller is treated as a
-    /// click and falls through to the existing select / close path. 5pt
-    /// matches the macOS-wide drag-recognition tolerance for AppKit
-    /// controls and is high enough to absorb hand-tremor without making
-    /// the gesture feel laggy.
-    private static let dragThreshold: CGFloat = 5
+    // MARK: - Hoisted collaborators
+    //
+    // The drag-to-reorder state machine and the inline-rename engine are
+    // hoisted into dedicated collaborators (REFACTOR.md Area 5: "eight
+    // concerns become named collaborators"). Each holds an `unowned` back-
+    // reference to the strip and reaches into its `fileprivate` layout /
+    // hover / callback surface; the strip strong-references the controller,
+    // so the back-ref is valid for the controller's whole life. The strip's
+    // NSResponder overrides (`mouseDragged` / `mouseUp`) FORWARD to the drag
+    // controller — neither collaborator is itself an NSResponder. `lazy`
+    // because each initializer captures `self`.
+    private lazy var tabDragController = TabDragController(view: self)
+    private lazy var tabRenameController = TabRenameController(view: self)
 
     /// The intent of a pill drag once it has moved far enough to commit.
     /// Kept as a three-case enum (not a `Bool`) because `.pending` — the
@@ -264,23 +232,19 @@ final class TabStripView: NSView {
         return hasMoveModifier ? .windowMove : .reorder
     }
 
-    // MARK: - Inline-edit state
+    // Inline-edit state (`editingPill` / `editField`) lives on
+    // `TabRenameController`; the strip queries it through that collaborator.
 
-    /// Index of the pill currently in inline-edit mode, or `nil`. Only one
-    /// pill edits at a time; opening a second commits the first so the
-    /// user never silently loses an in-flight title edit.
-    private var editingPill: Int? = nil
-    /// Field editor used while a pill is being renamed. Lifetime matches
-    /// `editingPill` — nil'd together by `teardownEdit`.
-    private var editField: NSTextField? = nil
-
+    // Hover state is `fileprivate` so `TabDragController` can snap it off when
+    // a reorder drag starts (stale hover indices would linger under the moving
+    // pill). The strip stays the only reader for paint.
     /// Which pill is the cursor over, if any.
-    private var hoveredPill: Int? = nil
+    fileprivate var hoveredPill: Int? = nil
     /// Is the cursor specifically over the close target inside the hovered
     /// pill (i.e. the small `×` hotspot at the pill's leading edge).
-    private var hoveredClose = false
+    fileprivate var hoveredClose = false
     /// Cursor over the trailing `+` button.
-    private var hoveredAdd = false
+    fileprivate var hoveredAdd = false
     private var trackingArea: NSTrackingArea?
 
     /// Pill index currently holding keyboard focus, or `nil` when the
@@ -340,8 +304,8 @@ final class TabStripView: NSView {
         // field below. (main-window F6)
         let listShapeChanged = self.tabs.count != tabs.count
             || !zip(self.tabs, tabs).allSatisfy { $0 === $1 }
-        if editingPill != nil, listShapeChanged {
-            commitEdit()
+        if tabRenameController.isEditing, listShapeChanged {
+            tabRenameController.commitEdit()
         }
         // If a gesture is in flight — an armed press OR an active reorder —
         // and the underlying tab list shape changed beneath it (sibling
@@ -353,10 +317,7 @@ final class TabStripView: NSView {
         // the post-commit refresh because the commit path returned
         // `dragPhase = .idle` in `mouseUp` before the notification fired.
         if listShapeChanged {
-            switch dragPhase {
-            case .armed, .dragging: cancelDragInProgress()
-            case .idle: break
-            }
+            tabDragController.cancelForListShapeChange()
         }
         self.tabs = tabs
         self.selectedTab = selected
@@ -390,21 +351,9 @@ final class TabStripView: NSView {
         }
         lastAppliedTitles = tabs.map { $0.title }
         // Width-only update: move the edit field to track the pill's new
-        // x/width so the caret doesn't drift off-pill. Geometry mirrors
-        // `beginEditing`'s field-rect computation.
-        if let idx = editingPill,
-           idx < pillFrames.count,
-           let field = editField {
-            let pill = pillFrames[idx]
-            let closeRect = closeHotspot(in: pill)
-            let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
-            field.frame = NSRect(
-                x: title.x,
-                y: pill.minY + 2,
-                width: title.width,
-                height: pill.height - 4
-            )
-        }
+        // x/width so the caret doesn't drift off-pill (no-op when no edit is
+        // in flight). Geometry mirrors `beginEditing`'s field-rect computation.
+        tabRenameController.repositionFieldForWidthChange()
         needsDisplay = true
     }
 
@@ -414,9 +363,7 @@ final class TabStripView: NSView {
     /// of a hidden strip and re-appear on the next grow-back.
     /// (main-window F8)
     func commitEditIfNeeded() {
-        if editingPill != nil {
-            commitEdit()
-        }
+        tabRenameController.commitIfNeeded()
     }
 
     // MARK: - Accessibility
@@ -483,7 +430,7 @@ final class TabStripView: NSView {
     private static let addButtonWidth: CGFloat = 22
     private static let pillSpacing: CGFloat = 2
     private static let trailingInset: CGFloat = 4
-    private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .regular)
+    fileprivate static let titleFont = NSFont.systemFont(ofSize: 12, weight: .regular)
 
     private func layoutPills() {
         // Pill frames are about to change → any cached accessibility elements
@@ -519,145 +466,32 @@ final class TabStripView: NSView {
         addButtonFrame = NSRect(x: x + gap, y: y, width: addW, height: h)
     }
 
-    // MARK: - Inline editing
+    // MARK: - Inline editing (delegated to TabRenameController)
 
-    /// Swap the pill at `pillIndex` into rename mode. Installs an
-    /// `NSTextField` over the pill's title area, pre-fills with the window
-    /// title, selects all. Commits any in-flight edit first so two
-    /// double-clicks in a row don't drop the first edit silently.
+    /// Enter rename mode for the pill at `pillIndex`. The rename engine
+    /// (field install, commit/cancel/teardown, NSTextFieldDelegate) lives on
+    /// `TabRenameController`; this thin forwarder preserves the entry point
+    /// for external callers (`TitlebarTabBarViewController.beginInlineRename`).
     func beginEditing(pillIndex: Int) {
-        guard pillIndex >= 0,
-              pillIndex < tabs.count,
-              pillIndex < pillFrames.count
-        else { return }
-        if let existing = editingPill, existing != pillIndex {
-            commitEdit()
-        }
-        // If the field already exists for the same pill (e.g., user hit
-        // ⌥⌘R a second time on the same pill), just refocus it.
-        if editingPill == pillIndex, let existing = editField {
-            window?.makeFirstResponder(existing)
-            existing.currentEditor()?.selectAll(nil)
-            return
-        }
-        editingPill = pillIndex
-        let pill = pillFrames[pillIndex]
-        let closeRect = closeHotspot(in: pill)
-        // Size the field to the pill's title area (the SAME horizontal math
-        // the drawing path uses, via TabStripLayout). 2 pt top/bottom inset
-        // keeps the field slightly inside the pill body so its focus-ring-free
-        // border is visible.
-        let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
-        let fieldRect = NSRect(
-            x: title.x,
-            y: pill.minY + 2,
-            width: title.width,
-            height: pill.height - 4
-        )
-        let field = NSTextField(frame: fieldRect)
-        field.font = Self.titleFont
-        field.alignment = .center
-        field.isBezeled = false
-        field.drawsBackground = true
-        field.backgroundColor = NSColor.textBackgroundColor
-        field.textColor = NSColor.labelColor
-        field.focusRingType = .none
-        field.stringValue = tabs[pillIndex].title.isEmpty ? "Untitled" : tabs[pillIndex].title
-        field.delegate = self
-        // Enter fires the action; action selector + target here is a
-        // defense-in-depth for environments where the field-editor
-        // `insertNewline:` command path doesn't route through the
-        // delegate. Both paths funnel through `commitEdit`.
-        field.target = self
-        field.action = #selector(editFieldCommitAction(_:))
-        addSubview(field)
-        window?.makeFirstResponder(field)
-        field.currentEditor()?.selectAll(nil)
-        editField = field
-        needsDisplay = true
-    }
-
-    @objc private func editFieldCommitAction(_ sender: Any?) {
-        commitEdit()
-    }
-
-    /// Publish the current edit-field value through `onCommitRename` and
-    /// tear down the field. Trims whitespace; empty → `""` which the
-    /// caller (MainWindowController.applyInlineRename) treats as
-    /// "clear override, revert to auto title".
-    ///
-    /// Note: titlebar-tabs F8 flagged pure-whitespace input over a
-    /// non-empty existing title as an "accidental override clear".
-    /// The current contract — and the existing
-    /// `InlineRenameTests.test_commit_empty_forwards_empty_string`
-    /// pinning — is that whitespace-only commits still forward as the
-    /// empty string so the consumer can map it to "revert to OSC".
-    /// Modifying that behaviour would be a test-owner change; deferred
-    /// here.
-    private func commitEdit() {
-        guard let idx = editingPill,
-              let field = editField,
-              idx < tabs.count
-        else {
-            cancelEdit()
-            return
-        }
-        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let target = tabs[idx]
-        teardownEdit()
-        // Call through AFTER teardown so the consumer's side-effects
-        // (title publication → KVO → refreshTabBar) don't land while
-        // the field subview is still alive. Note that `teardownEdit`
-        // now also yields first-responder back to the terminal view
-        // synchronously (see `yieldFirstResponderToTerminalIfParked`),
-        // so by the time `onCommitRename` runs the FR slot is settled
-        // — the older comment about "racing for the first-responder
-        // slot" no longer applies, but the teardown-then-publish
-        // ordering still does.
-        onCommitRename?(target, trimmed)
-    }
-
-    /// Dismiss the edit without publishing. Used for Escape and for any
-    /// path that takes the field down without consumer notification.
-    private func cancelEdit() {
-        teardownEdit()
-    }
-
-    private func teardownEdit() {
-        editField?.delegate = nil
-        editField?.removeFromSuperview()
-        editField = nil
-        editingPill = nil
-        needsDisplay = true
-        // Removing the field as a subview triggers AppKit's
-        // `makeFirstResponder(nil)`, which lands first responder on the
-        // host NSWindow itself — an NSResponder but not an NSView, so
-        // typed characters fall to `noResponderFor:` and ring NSBeep.
-        // Push first responder back to the terminal in the same
-        // synchronous step so no keystrokes can squeak through the
-        // window-as-FR window. The `onCommitRename` side-effects fired
-        // by `commitEdit` (KVO → refreshTabBar) don't touch first
-        // responder, so doing this here (vs. at every call site) is
-        // safe and keeps the contract local.
-        yieldFirstResponderToTerminalIfParked()
+        tabRenameController.beginEditing(pillIndex: pillIndex)
     }
 
     /// `true` while any pill is in inline-edit mode. Hover / close
     /// rendering short-circuits on this so the editing pill doesn't
     /// paint an `×` hotspot over its own text field.
-    private var isEditing: Bool { editingPill != nil }
+    private var isEditing: Bool { tabRenameController.isEditing }
 
     #if DEBUG
     /// Test hook — sets the editing field's value without going through
     /// a real NSTextField + field-editor dance. Only meaningful while an
     /// edit is in progress; no-op otherwise.
     @objc func setEditTextForTesting(_ text: String) {
-        editField?.stringValue = text
+        tabRenameController.editField?.stringValue = text
     }
     /// Test hook — explicitly commits the in-flight edit.
-    @objc func commitEditForTesting() { commitEdit() }
+    @objc func commitEditForTesting() { tabRenameController.commitEdit() }
     /// Test hook — explicitly cancels the in-flight edit.
-    @objc func cancelEditForTesting() { cancelEdit() }
+    @objc func cancelEditForTesting() { tabRenameController.cancelEdit() }
     /// Test hook — current pill count. Lets stress tests assert pill
     /// geometry tracks the tab list without exposing the internal
     /// `pillFrames` array publicly.
@@ -677,8 +511,7 @@ final class TabStripView: NSView {
     /// `nil` when phase is `.idle` (no pill grabbed) or `.dragging`
     /// (already promoted past `pendingDrag`).
     var pendingDragPillIndexForTesting: Int? {
-        if case .armed(let p) = dragPhase { return p.pillIndex }
-        return nil
+        tabDragController.armedPillIndex
     }
 
     /// Test hook — active drag state, or `nil` when phase is not
@@ -687,10 +520,9 @@ final class TabStripView: NSView {
     /// struct. `cursorX` is the live mouse X used to anchor the
     /// dragged-pill render.
     var dragStateForTesting: (originalIndex: Int, currentIndex: Int, cursorX: CGFloat)? {
-        if case .dragging(let s) = dragPhase {
-            return (s.originalIndex, s.currentIndex, s.cursorX)
+        tabDragController.activeDragState.map {
+            ($0.originalIndex, $0.currentIndex, $0.cursorX)
         }
-        return nil
     }
 
     /// Test hook — pill frames laid out for the current `tabs`/`width`.
@@ -705,180 +537,191 @@ final class TabStripView: NSView {
 
     // MARK: - Drawing
 
+    /// One paint pass' worth of pill colors, computed once per `draw(_:)`.
+    /// Value type — no heap allocation beyond the `CGColor`s the previous
+    /// inline path already built once per frame.
+    ///
+    /// Tint the pill bodies with `labelColor` (dark on light, light on dark)
+    /// so they stay visible regardless of whether the theme has a light or
+    /// dark titlebar. Hard-coding white meant the entire pill strip
+    /// disappeared on Gruvbox-light / Solarized-light / Catppuccin-latte /
+    /// Default-light. The dragged fill (`draggedBg`) is a touch brighter than
+    /// `selectedBg` — visible enough to read as "this is the one I'm holding",
+    /// subtle enough to avoid the heavy "lifted card" look of a shadow.
+    private struct PillPalette {
+        let tint = NSColor.labelColor
+        let selectedBg = NSColor.labelColor.withAlphaComponent(0.18).cgColor
+        let draggedBg = NSColor.labelColor.withAlphaComponent(0.24).cgColor
+        let hoverBg = NSColor.labelColor.withAlphaComponent(0.10).cgColor
+        let inactiveBg = NSColor.labelColor.withAlphaComponent(0.04).cgColor
+        let textColor = NSColor.labelColor
+        let inactiveText = NSColor.secondaryLabelColor
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        // Tint the pill bodies with labelColor (dark on light, light on
-        // dark) so they stay visible regardless of whether the theme has
-        // a light or dark titlebar. Hard-coding white meant the entire
-        // pill strip disappeared on Gruvbox-light / Solarized-light /
-        // Catppuccin-latte / Default-light.
-        let tint = NSColor.labelColor
-        let selectedBg = tint.withAlphaComponent(0.18).cgColor
-        // While a pill is being dragged it gets a slightly brighter fill
-        // than `selectedBg` — visible enough to read as "this is the one
-        // I'm holding", subtle enough to avoid the heavy "lifted card"
-        // look of a shadow or outline. Sits on top of siblings via the
-        // two-pass draw order below.
-        let draggedBg  = tint.withAlphaComponent(0.24).cgColor
-        let hoverBg    = tint.withAlphaComponent(0.10).cgColor
-        let inactiveBg = tint.withAlphaComponent(0.04).cgColor
-        let textColor  = NSColor.labelColor
-        let inactiveText = NSColor.secondaryLabelColor
-
-        // Snapshot of the drag (if any) — captured once so every pill
-        // index in the loop sees a consistent state, and so the dragged
-        // pill draws LAST on top of siblings it visually overlaps.
-        let activeDrag: DragState?
-        if case .dragging(let s) = dragPhase {
-            activeDrag = s
-        } else {
-            activeDrag = nil
-        }
-        let drawOrder: [Int]
-        if let d = activeDrag {
-            drawOrder = (0..<tabs.count).filter { $0 != d.originalIndex } + [d.originalIndex]
-        } else {
-            drawOrder = Array(0..<tabs.count)
-        }
+        let palette = PillPalette()
+        // Snapshot of the drag (if any) — captured once so every pill index in
+        // the loop sees a consistent state, and so the dragged pill draws LAST
+        // (it's moved to the tail of the draw order) on top of the siblings it
+        // visually overlaps.
+        let activeDrag = tabDragController.activeDragState
+        let drawOrder = Self.pillDrawOrder(count: tabs.count,
+                                           draggedOriginalIndex: activeDrag?.originalIndex)
 
         for i in drawOrder where i < tabs.count && i < pillFrames.count {
+            let (rect, isDraggedPill) = pillRect(for: i, activeDrag: activeDrag)
             let w = tabs[i]
-            let rect: NSRect
-            let isDraggedPill: Bool
-            if let d = activeDrag {
-                if i == d.originalIndex {
-                    // Anchor the dragged pill to the cursor — `downOffsetX`
-                    // is the horizontal offset inside the pill where the
-                    // user grabbed it, so the pill doesn't snap-left to
-                    // the cursor on grab. Clamped against the laid-out `+`
-                    // button frame (the single source of truth for the
-                    // trailing boundary) so the dragged pill can never slide
-                    // under it and this can't drift from layoutPills()'s math.
-                    let base = pillFrames[d.originalIndex]
-                    let maxX = max(0, addButtonFrame.minX - Self.pillSpacing - base.width)
-                    let rawX = d.cursorX - d.downOffsetX
-                    let x = max(0, min(maxX, rawX))
-                    rect = NSRect(x: x, y: base.minY, width: base.width, height: base.height)
-                    isDraggedPill = true
-                } else {
-                    // Siblings render at their intermediate slot — they
-                    // appear to "make space" by shifting one slot toward
-                    // the dragged pill's origin.
-                    let slot = Self.intermediateSlot(originalIdx: i,
-                                                     draggedFrom: d.originalIndex,
-                                                     draggedTo: d.currentIndex)
-                    if slot < pillFrames.count {
-                        rect = pillFrames[slot]
-                    } else {
-                        rect = pillFrames[i]
-                    }
-                    isDraggedPill = false
-                }
-            } else {
-                rect = pillFrames[i]
-                isDraggedPill = false
-            }
             let isSelected = w === selectedTab
             // Hover state is meaningless during a drag — both the close
             // hotspot and the lighter "hovered" fill would compete with
             // the dragged-pill highlight for the user's eye.
             let isHovered = hoveredPill == i && !isEditing && activeDrag == nil
-            let isBeingEdited = editingPill == i
-
-            let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).cgPath
-            ctx.addPath(path)
-            if isDraggedPill {
-                ctx.setFillColor(draggedBg)
-            } else if isSelected {
-                ctx.setFillColor(selectedBg)
-            } else if isHovered {
-                ctx.setFillColor(hoverBg)
-            } else {
-                ctx.setFillColor(inactiveBg)
-            }
-            ctx.fillPath()
-
-            // Pill being renamed — skip the title + close-hotspot drawing.
-            // The NSTextField subview covers the title area; drawing a
-            // label underneath would bleed through around the field's
-            // corners and confuse the eye about what's editable.
-            if isBeingEdited { continue }
-
-            // Close `×` shown only when the pill is hovered. Drawn at
-            // leading edge so text center stays stable. Tint with
-            // labelColor so the × circle stays visible on both light and
-            // dark themes (see pill body tinting rationale above).
-            let closeRect = closeHotspot(in: rect)
-            if isHovered {
-                let xFillColor: CGColor
-                if hoveredClose {
-                    xFillColor = tint.withAlphaComponent(0.20).cgColor
-                } else {
-                    xFillColor = tint.withAlphaComponent(0.08).cgColor
-                }
-                ctx.addPath(NSBezierPath(ovalIn: closeRect).cgPath)
-                ctx.setFillColor(xFillColor)
-                ctx.fillPath()
-                let xAttr: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 9, weight: .medium),
-                    .foregroundColor: textColor,
-                ]
-                let xs = NSAttributedString(string: "×", attributes: xAttr)
-                let xsize = xs.size()
-                xs.draw(at: NSPoint(
-                    x: closeRect.midX - xsize.width / 2,
-                    y: closeRect.midY - xsize.height / 2 - 1
-                ))
-            }
-
-            // Title: centered, truncated if pill is narrow. Leave room
-            // for the close button's width on the left so titles don't
-            // jump when hover reveals it. Same horizontal math as the
-            // inline-rename field, via TabStripLayout.
-            let area = TabStripLayout.titleArea(in: rect, closeWidth: closeRect.width)
-            let titleArea = NSRect(
-                x: area.x,
-                y: rect.minY,
-                width: area.width,
-                height: rect.height
-            )
-            let title = w.title.isEmpty ? "Untitled" : w.title
-            let truncated = truncatedString(title, fitting: titleArea.width)
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: Self.titleFont,
-                .foregroundColor: isSelected ? textColor : inactiveText,
-            ]
-            let s = NSAttributedString(string: truncated, attributes: attrs)
-            let tsize = s.size()
-            s.draw(at: NSPoint(
-                x: titleArea.midX - tsize.width / 2,
-                y: titleArea.midY - tsize.height / 2
-            ))
-
-            // Keyboard focus ring. Full-Keyboard-Access users can't
-            // reach the pills without one. Drawn on TOP of the fill +
-            // title so it's visible regardless of selected/hovered
-            // state. Accent-coloured for consistency with the rest of
-            // AppKit's focus indicators. Audit titlebar-tabs F4.
-            if focusedPill == i && isStripFirstResponder() {
-                let focusPath = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1),
-                                             xRadius: 4, yRadius: 4).cgPath
-                ctx.addPath(focusPath)
-                ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
-                ctx.setLineWidth(2)
-                ctx.strokePath()
-            }
+            let isBeingEdited = tabRenameController.editingPill == i
+            drawPill(ctx: ctx, window: w, index: i, rect: rect,
+                     isDraggedPill: isDraggedPill, isSelected: isSelected,
+                     isHovered: isHovered, isBeingEdited: isBeingEdited,
+                     palette: palette)
         }
 
-        // Trailing `+` button. Same label-tint so it stays visible on
-        // light themes too.
+        drawAddButton(ctx: ctx, palette: palette)
+    }
+
+    /// Two-pass draw order: the dragged pill (if any) is moved to the tail so
+    /// it paints LAST, on top of the siblings it overlaps. Pure.
+    private static func pillDrawOrder(count: Int, draggedOriginalIndex: Int?) -> [Int] {
+        if let d = draggedOriginalIndex {
+            return (0..<count).filter { $0 != d } + [d]
+        }
+        return Array(0..<count)
+    }
+
+    /// The rect (and dragged-flag) at which pill `i` paints this frame. With a
+    /// drag in flight the grabbed pill is anchored under the cursor — geometry
+    /// delegated to `TabDragController.draggedPillRect`, the drag-controller's
+    /// concern — and its siblings shift one slot to "make space".
+    private func pillRect(for i: Int,
+                          activeDrag: TabDragController.DragState?) -> (NSRect, Bool) {
+        guard let d = activeDrag else { return (pillFrames[i], false) }
+        if i == d.originalIndex {
+            let rect = TabDragController.draggedPillRect(
+                base: pillFrames[d.originalIndex],
+                cursorX: d.cursorX,
+                downOffsetX: d.downOffsetX,
+                addButtonMinX: addButtonFrame.minX,
+                spacing: Self.pillSpacing
+            )
+            return (rect, true)
+        }
+        // Siblings render at their intermediate slot — they appear to "make
+        // space" by shifting one slot toward the dragged pill's origin.
+        let slot = Self.intermediateSlot(originalIdx: i,
+                                         draggedFrom: d.originalIndex,
+                                         draggedTo: d.currentIndex)
+        let rect = slot < pillFrames.count ? pillFrames[slot] : pillFrames[i]
+        return (rect, false)
+    }
+
+    /// Fill + (hover) close glyph + title + keyboard focus ring for one pill.
+    private func drawPill(ctx: CGContext, window w: NSWindow, index i: Int,
+                          rect: NSRect, isDraggedPill: Bool, isSelected: Bool,
+                          isHovered: Bool, isBeingEdited: Bool,
+                          palette: PillPalette) {
+        let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).cgPath
+        ctx.addPath(path)
+        if isDraggedPill {
+            ctx.setFillColor(palette.draggedBg)
+        } else if isSelected {
+            ctx.setFillColor(palette.selectedBg)
+        } else if isHovered {
+            ctx.setFillColor(palette.hoverBg)
+        } else {
+            ctx.setFillColor(palette.inactiveBg)
+        }
+        ctx.fillPath()
+
+        // Pill being renamed — skip the title + close-hotspot drawing.
+        // The NSTextField subview covers the title area; drawing a
+        // label underneath would bleed through around the field's
+        // corners and confuse the eye about what's editable.
+        if isBeingEdited { return }
+
+        // Close `×` shown only when the pill is hovered. Drawn at
+        // leading edge so text center stays stable. Tint with
+        // labelColor so the × circle stays visible on both light and
+        // dark themes (see pill body tinting rationale above).
+        let closeRect = closeHotspot(in: rect)
+        if isHovered {
+            let xFillColor: CGColor
+            if hoveredClose {
+                xFillColor = palette.tint.withAlphaComponent(0.20).cgColor
+            } else {
+                xFillColor = palette.tint.withAlphaComponent(0.08).cgColor
+            }
+            ctx.addPath(NSBezierPath(ovalIn: closeRect).cgPath)
+            ctx.setFillColor(xFillColor)
+            ctx.fillPath()
+            let xAttr: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+                .foregroundColor: palette.textColor,
+            ]
+            let xs = NSAttributedString(string: "×", attributes: xAttr)
+            let xsize = xs.size()
+            xs.draw(at: NSPoint(
+                x: closeRect.midX - xsize.width / 2,
+                y: closeRect.midY - xsize.height / 2 - 1
+            ))
+        }
+
+        // Title: centered, truncated if pill is narrow. Leave room
+        // for the close button's width on the left so titles don't
+        // jump when hover reveals it. Same horizontal math as the
+        // inline-rename field, via TabStripLayout.
+        let area = TabStripLayout.titleArea(in: rect, closeWidth: closeRect.width)
+        let titleArea = NSRect(
+            x: area.x,
+            y: rect.minY,
+            width: area.width,
+            height: rect.height
+        )
+        let title = w.title.isEmpty ? "Untitled" : w.title
+        let truncated = truncatedString(title, fitting: titleArea.width)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: Self.titleFont,
+            .foregroundColor: isSelected ? palette.textColor : palette.inactiveText,
+        ]
+        let s = NSAttributedString(string: truncated, attributes: attrs)
+        let tsize = s.size()
+        s.draw(at: NSPoint(
+            x: titleArea.midX - tsize.width / 2,
+            y: titleArea.midY - tsize.height / 2
+        ))
+
+        // Keyboard focus ring. Full-Keyboard-Access users can't
+        // reach the pills without one. Drawn on TOP of the fill +
+        // title so it's visible regardless of selected/hovered
+        // state. Accent-coloured for consistency with the rest of
+        // AppKit's focus indicators. Audit titlebar-tabs F4.
+        if focusedPill == i && isStripFirstResponder() {
+            let focusPath = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1),
+                                         xRadius: 4, yRadius: 4).cgPath
+            ctx.addPath(focusPath)
+            ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
+            ctx.setLineWidth(2)
+            ctx.strokePath()
+        }
+    }
+
+    /// Trailing `+` button. Same label-tint so it stays visible on light
+    /// themes too.
+    private func drawAddButton(ctx: CGContext, palette: PillPalette) {
         let addPath = NSBezierPath(ovalIn: addButtonFrame).cgPath
         ctx.addPath(addPath)
-        ctx.setFillColor(tint.withAlphaComponent(hoveredAdd ? 0.16 : 0.08).cgColor)
+        ctx.setFillColor(palette.tint.withAlphaComponent(hoveredAdd ? 0.16 : 0.08).cgColor)
         ctx.fillPath()
         let plusAttr: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: textColor,
+            .foregroundColor: palette.textColor,
         ]
         let plusStr = NSAttributedString(string: "+", attributes: plusAttr)
         let psize = plusStr.size()
@@ -934,7 +777,7 @@ final class TabStripView: NSView {
         return (s as NSString).size(withAttributes: attrs).width
     }
 
-    private func closeHotspot(in pillRect: NSRect) -> NSRect {
+    fileprivate func closeHotspot(in pillRect: NSRect) -> NSRect {
         let side: CGFloat = 14
         return NSRect(
             x: pillRect.minX + 6,
@@ -995,13 +838,13 @@ final class TabStripView: NSView {
     /// outside the editing pill entirely (the caller then treats it as a normal
     /// click on whatever it landed on) or when nothing is being edited.
     private func commitEditOnOutsideClick(_ p: CGPoint) -> Bool {
-        guard let idx = editingPill, idx < pillFrames.count else { return false }
+        guard let idx = tabRenameController.editingPill, idx < pillFrames.count else { return false }
         let editingRect = pillFrames[idx]
         if !NSPointInRect(p, editingRect) {
-            commitEdit()
+            tabRenameController.commitEdit()
             return false
         } else {
-            commitEdit()
+            tabRenameController.commitEdit()
             return true
         }
     }
@@ -1050,11 +893,11 @@ final class TabStripView: NSView {
                 && event.clickCount == 1
                 && !isEditing
             if canReorder {
-                dragPhase = .armed(PendingDrag(
+                tabDragController.arm(
                     pillIndex: i,
                     startPoint: p,
                     downOffsetX: p.x - rect.minX
-                ))
+                )
             } else {
                 onSelectWindow?(tabs[i])
             }
@@ -1062,172 +905,21 @@ final class TabStripView: NSView {
         }
     }
 
-    // MARK: - Drag-to-reorder
+    // MARK: - Drag-to-reorder (delegated to TabDragController)
+    //
+    // The strip's NSResponder overrides forward the gesture to the drag
+    // controller; the three-phase state machine, the `dragThreshold`, the
+    // dropped-click-vs-reorder arbitration, and the `os.Logger` canaries all
+    // live there. `mouseDown`'s arm branch (`handlePillClick`) and
+    // `update(tabs:)`'s list-shape cancellation route through it too.
 
     override func mouseDragged(with event: NSEvent) {
-        let p = convert(event.locationInWindow, from: nil)
-
-        switch dragPhase {
-        case .idle:
-            return
-        case .armed(let pending):
-            let dx = p.x - pending.startPoint.x
-            let dy = p.y - pending.startPoint.y
-            // A plain drag reorders; a drag carrying the configured
-            // window-move modifier (default ⌘) moves the window, in EITHER
-            // axis — the same gesture grammar as the terminal body
-            // (`TerminalView.mouseDown`). Direction no longer decides the
-            // outcome: the old steep-vertical-pull-moves-window heuristic was
-            // removed (critique 2026-06-07, audit titlebar-tabs F10 lives on
-            // as this modifier path).
-            let dragMask = Preferences.shared.windowDragModifier.modifierMask
-            let hasMoveModifier = !dragMask.isEmpty
-                && event.modifierFlags.contains(dragMask)
-            switch Self.classifyPillDrag(dx: dx, dy: dy,
-                                         threshold: Self.dragThreshold,
-                                         hasMoveModifier: hasMoveModifier) {
-            case .pending:
-                // Hasn't moved far enough — still potentially a click.
-                return
-            case .reorder:
-                // Plain drag — promote to an active reorder drag. Snap the
-                // hover state off: we're not painting close hotspots or hover
-                // backgrounds while a drag is in flight, and stale hover
-                // indices would visibly linger under the moving pill.
-                hoveredPill = nil
-                hoveredClose = false
-                hoveredAdd = false
-                dragPhase = .dragging(DragState(
-                    originalIndex: pending.pillIndex,
-                    downOffsetX: pending.downOffsetX,
-                    cursorX: p.x,
-                    currentIndex: pending.pillIndex
-                ))
-                needsDisplay = true
-            case .windowMove:
-                // Modifier held — the user is moving the window, not
-                // reordering. Drop the armed reorder, clear hover paint,
-                // and hand off to a native AppKit window drag. The
-                // hand-off consumes the rest of the gesture (the default
-                // `performDrag(with:)` blocks until mouse-up), so reset
-                // to `.idle` *before* the hand-off — no `mouseUp` will
-                // arrive to clear it for us.
-                hoveredPill = nil
-                hoveredClose = false
-                hoveredAdd = false
-                dragPhase = .idle
-                needsDisplay = true
-                requestWindowDrag(event)
-            }
-        case .dragging(var state):
-            // Bail out cleanly if the underlying tab list changed
-            // shape mid-gesture (a sibling closed, a new tab opened) —
-            // the original index no longer matches the strip.
-            guard state.originalIndex < tabs.count else {
-                cancelDragInProgress()
-                return
-            }
-            // Degenerate strip width (mid-gesture window collapse to ~0):
-            // `computeIntermediateIndex` can't compute a meaningful slot
-            // without a positive pill pitch. Hold the dragged pill at
-            // its original slot rather than yanking it to slot 0.
-            let newIndex = Self.computeIntermediateIndex(
-                cursorX: p.x,
-                downOffsetX: state.downOffsetX,
-                count: tabs.count,
-                pillFrames: pillFrames,
-                fallback: state.originalIndex
-            )
-            state.cursorX = p.x
-            state.currentIndex = newIndex
-            dragPhase = .dragging(state)
-            needsDisplay = true
-        }
+        tabDragController.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer {
-            dragPhase = .idle
-        }
-        // A press that armed a drag but never crossed the threshold is a
-        // click: NOW switch tabs (selection was deferred from `mouseDown` so a
-        // drag never selects — critique complaint C). Guard the index against
-        // a list-shape change between mouseDown and mouseUp.
-        if case .armed(let pending) = dragPhase {
-            // `.armed` is cancelled in `update(tabs:)` on any list-shape
-            // change, so a surviving armed index should always be valid here.
-            // If it isn't, the armed phase outlived a refresh that should have
-            // reconciled it — log (matching the `.dragging` canary below)
-            // rather than dropping the click silently.
-            guard pending.pillIndex < tabs.count else {
-                Self.dragLogger.notice("mouseUp: armed pillIndex \(pending.pillIndex, privacy: .public) >= tabs.count \(self.tabs.count, privacy: .public); armed phase outlived a list-shape change without being cancelled in update(tabs:) — click-to-select dropped, investigate.")
-                return
-            }
-            // Only an index guard is needed here (unlike the reorder-commit
-            // path below, which re-checks `tabGroup`): selecting a window whose
-            // group changed mid-press is benign, whereas committing a reorder
-            // against a detached window is not.
-            onSelectWindow?(tabs[pending.pillIndex])
-            return
-        }
-        // Only the actively-dragging phase has a reorder commit to consider;
-        // `.idle` (no pill grabbed) falls straight through the guard.
-        guard case .dragging(let state) = dragPhase else { return }
-        // No-op when the user lifted on the original slot.
-        guard state.currentIndex != state.originalIndex else {
-            needsDisplay = true
-            return
-        }
-        // Defensive: tabs could have shrunk between the last
-        // `mouseDragged` (where we already checked) and `mouseUp`. The
-        // `update(tabs:)` cancellation path should have nilled the
-        // drag, but the gesture is on the same main thread as the KVO
-        // refresh so a synchronous interleave is theoretically possible
-        // on AppKit's part. Log so a regression is visible.
-        guard state.originalIndex < tabs.count else {
-            Self.dragLogger.notice("mouseUp: dragState.originalIndex \(state.originalIndex, privacy: .public) >= tabs.count \(self.tabs.count, privacy: .public); list shape changed between mouseDragged and mouseUp without an update(tabs:) refresh — investigate.")
-            needsDisplay = true
-            return
-        }
-        let target = tabs[state.originalIndex]
-        // Tab must still be in a group for the coordinator's
-        // group-keyed storage to accept the move. Drag-out (the user
-        // detaching the window) is the documented way `tabGroup` goes
-        // nil mid-drag; treat the reorder as discarded rather than
-        // trying to commit against the now-standalone window.
-        guard let group = target.tabGroup else {
-            Self.dragLogger.notice("mouseUp: dragged window's tabGroup went nil mid-drag (detached?); discarding reorder")
-            needsDisplay = true
-            return
-        }
-        TabOrderCoordinator.shared.move(window: target,
-                                        to: state.currentIndex,
-                                        in: group)
-        // The coordinator's `orderDidChange` notification drives
-        // `refreshAllTabBars()` — every sibling strip in the group
-        // repaints with the new permutation. Setting `needsDisplay` here
-        // covers the (rare) case where notification delivery is delayed
-        // past the next paint pass: we want the dragged pill to settle
-        // into its new slot immediately even if the refresh hasn't
-        // landed yet.
-        needsDisplay = true
+        tabDragController.mouseUp(with: event)
     }
-
-    /// Hard-cancel an in-flight drag without committing. Used when the
-    /// list shape changes underneath the gesture so we don't try to
-    /// reorder against a stale index.
-    private func cancelDragInProgress() {
-        dragPhase = .idle
-        needsDisplay = true
-    }
-
-    /// `os.Logger` for drag diagnostics — kept separate from
-    /// `focusLogger` so the categories don't bleed into each other in
-    /// the unified log. Used to surface "should-never-happen but did"
-    /// branches in `mouseUp` that would otherwise discard a reorder
-    /// gesture silently.
-    private static let dragLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
-                                           category: "tabDrag")
 
     /// Compute which slot the dragged pill is currently over, given the
     /// live cursor X and the offset within the pill where the user
@@ -1318,6 +1010,15 @@ final class TabStripView: NSView {
     private static let focusLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                             category: "tabFocus")
 
+    /// `os.Logger` for drag diagnostics — kept separate from `focusLogger`
+    /// so the categories don't bleed into each other in the unified log.
+    /// `fileprivate` so it is the single source of truth shared by the
+    /// strip's `requestWindowDrag` no-window canary AND `TabDragController`'s
+    /// `mouseUp` "should-never-happen but did" branches (which would
+    /// otherwise discard a reorder gesture silently).
+    fileprivate static let dragLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                               category: "tabDrag")
+
     /// Yield first-responder status from the strip back to the host
     /// window's contentView (the TerminalView in production) when the
     /// strip — or one of its non-edit-field descendants — is currently
@@ -1331,16 +1032,17 @@ final class TabStripView: NSView {
     /// Called from `mouseDown`'s defer, `rightMouseDown`'s defer, and
     /// `teardownEdit` — every path the strip can be silently parked on
     /// after a user gesture.
-    private func yieldFirstResponderToTerminalIfParked() {
+    fileprivate func yieldFirstResponderToTerminalIfParked() {
         guard let win = window, let cv = win.contentView else { return }
-        // When `editField` is non-nil we expect it to be a subview of
-        // the strip (the inline rename text field is added in
+        // When the rename controller's `editField` is non-nil we expect it to
+        // be a subview of the strip (the inline rename text field is added in
         // `beginEditing` via `addSubview`). DEBUG-assert the invariant
         // so a future refactor that breaks the parentage trips loudly
         // instead of producing plausible-looking but wrong yield
         // decisions (an editField from a different strip would
         // short-circuit the protection branch and allow real keystroke
         // theft).
+        let editField = tabRenameController.editField
         #if DEBUG
         if let field = editField {
             assert(field.isDescendant(of: self),
@@ -1501,7 +1203,7 @@ final class TabStripView: NSView {
         // is the user's focus point, and a stale `×` hotspot appearing
         // on a sibling pill mid-drag would compete with it. `mouseDragged`
         // is the only event we care about while a drag is live.
-        if case .dragging = dragPhase { return }
+        if tabDragController.isDragging { return }
         let p = convert(event.locationInWindow, from: nil)
         let prevPill = hoveredPill
         let prevClose = hoveredClose
@@ -1517,7 +1219,7 @@ final class TabStripView: NSView {
                 // Don't arm the close hotspot for the pill under edit —
                 // the `×` isn't drawn there and honouring a close click
                 // would toss the field and kill the session.
-                hoveredClose = editingPill != i
+                hoveredClose = tabRenameController.editingPill != i
                     && NSPointInRect(p, closeHotspot(in: rect))
                 break
             }
@@ -1533,7 +1235,7 @@ final class TabStripView: NSView {
         // us no matter where the cursor lives. Don't clobber hover
         // state (already cleared at drag start anyway) and don't trigger
         // a redraw.
-        if case .dragging = dragPhase { return }
+        if tabDragController.isDragging { return }
         if hoveredPill != nil || hoveredAdd || hoveredClose {
             hoveredPill = nil
             hoveredAdd = false
@@ -1679,7 +1381,480 @@ internal func shouldYieldFirstResponderToTerminal(
     return view === claimant || view.isDescendant(of: claimant)
 }
 
-extension TabStripView: NSTextFieldDelegate {
+// MARK: - Tab drag-to-reorder controller
+
+/// The pill drag-to-reorder state machine, hoisted out of `TabStripView`
+/// (REFACTOR.md Area 5). Owns the three-phase gesture state; the strip's
+/// `mouseDragged` / `mouseUp` overrides forward here, `mouseDown`'s arm branch
+/// calls `arm(...)`, and `update(tabs:)` / `draw(_:)` query it. Holds an
+/// `unowned` back-reference to the strip for its layout (`tabs` / `pillFrames`),
+/// hover paint, and callbacks; the strip strong-references the controller, so
+/// the back-ref is valid for the controller's whole life. Not an NSResponder —
+/// the strip keeps the overrides and forwards.
+private final class TabDragController {
+    unowned let view: TabStripView
+
+    init(view: TabStripView) { self.view = view }
+
+    /// Captured on `mouseDown` over a pill body when reorder is feasible
+    /// (≥ 2 tabs, not on the close hotspot, not entering inline-rename).
+    /// `mouseDragged` checks the threshold against `startPoint.x` to
+    /// decide whether to promote to a real reorder gesture.
+    struct PendingDrag {
+        let pillIndex: Int
+        let startPoint: NSPoint
+        /// Horizontal offset inside the pill at mousedown — preserved so
+        /// the dragged pill stays anchored to where the user grabbed it
+        /// rather than snapping its left edge to the cursor.
+        let downOffsetX: CGFloat
+    }
+
+    /// Active drag — promoted from the `.armed` phase once the user
+    /// moves the cursor past `dragThreshold`. `currentIndex` is the
+    /// intermediate slot the dragged pill currently occupies; siblings
+    /// render shifted around that slot. `cursorX` is the live mouse X
+    /// used to draw the dragged pill under the cursor (clamped to
+    /// strip bounds).
+    struct DragState {
+        let originalIndex: Int
+        let downOffsetX: CGFloat
+        var cursorX: CGFloat
+        var currentIndex: Int
+    }
+
+    /// Three-phase state machine for reorder gestures. The enum makes
+    /// the "armed but not yet dragging" vs "actively dragging" vs
+    /// "neither" distinction representable in the type system — the
+    /// previous two-optional encoding (`pendingDrag: ?`, `dragState: ?`)
+    /// admitted a representable-but-illegal `(nil, set)` fourth state.
+    /// `mouseDragged` reads + transitions; `mouseUp` always returns to
+    /// `.idle`.
+    enum DragPhase {
+        case idle
+        case armed(PendingDrag)
+        case dragging(DragState)
+    }
+    private var phase: DragPhase = .idle
+
+    /// Pixels of horizontal motion required before a mousedown is
+    /// promoted to a reorder drag. Anything smaller is treated as a
+    /// click and falls through to the existing select / close path. 5pt
+    /// matches the macOS-wide drag-recognition tolerance for AppKit
+    /// controls and is high enough to absorb hand-tremor without making
+    /// the gesture feel laggy.
+    private static let dragThreshold: CGFloat = 5
+
+    /// `os.Logger` for the `mouseUp` "should-never-happen but did" canaries.
+    /// Shared single source of truth with the strip's `requestWindowDrag`
+    /// no-window log — lives on `TabStripView` (`tabDrag` category).
+    private static var dragLogger: Logger { TabStripView.dragLogger }
+
+    // MARK: Queries (consumed by the strip's draw / hover / test hooks)
+
+    /// True while an active reorder drag is in flight. The strip freezes
+    /// hover paint and short-circuits `mouseMoved` / `mouseExited` on this.
+    var isDragging: Bool {
+        if case .dragging = phase { return true }
+        return false
+    }
+
+    /// The live drag state while `.dragging`, else `nil`. Drives the
+    /// dragged-pill render in `draw(_:)`.
+    var activeDragState: DragState? {
+        if case .dragging(let s) = phase { return s }
+        return nil
+    }
+
+    /// The armed pill index while `.armed` (pressed, not yet promoted past
+    /// the threshold), else `nil`. Test-hook surface.
+    var armedPillIndex: Int? {
+        if case .armed(let p) = phase { return p.pillIndex }
+        return nil
+    }
+
+    // MARK: Transitions
+
+    /// Arm a potential reorder from a pill mousedown. Called by the strip's
+    /// `handlePillClick` arm branch; selection stays DEFERRED to `mouseUp`
+    /// so a drag — reorder OR window move — never switches tabs.
+    func arm(pillIndex: Int, startPoint: NSPoint, downOffsetX: CGFloat) {
+        phase = .armed(PendingDrag(pillIndex: pillIndex,
+                                   startPoint: startPoint,
+                                   downOffsetX: downOffsetX))
+    }
+
+    /// Hard-cancel an in-flight drag without committing. Used when the
+    /// list shape changes underneath the gesture so we don't try to
+    /// reorder against a stale index.
+    func cancelInProgress() {
+        phase = .idle
+        view.needsDisplay = true
+    }
+
+    /// Cancel an armed-or-active gesture when the tab list changed shape
+    /// beneath it (sibling closed, new tab opened, post-commit reorder). A
+    /// stale `.dragging` would commit a reorder against the wrong slot, and a
+    /// stale `.armed` would fire a wrong selection on the trailing mouseUp.
+    /// `.idle` is left untouched — the post-commit refresh path already
+    /// returned `.idle` in `mouseUp` before the notification fired.
+    func cancelForListShapeChange() {
+        switch phase {
+        case .armed, .dragging: cancelInProgress()
+        case .idle: break
+        }
+    }
+
+    func mouseDragged(with event: NSEvent) {
+        let p = view.convert(event.locationInWindow, from: nil)
+
+        switch phase {
+        case .idle:
+            return
+        case .armed(let pending):
+            let dx = p.x - pending.startPoint.x
+            let dy = p.y - pending.startPoint.y
+            // A plain drag reorders; a drag carrying the configured
+            // window-move modifier (default ⌘) moves the window, in EITHER
+            // axis — the same gesture grammar as the terminal body
+            // (`TerminalView.mouseDown`). Direction no longer decides the
+            // outcome: the old steep-vertical-pull-moves-window heuristic was
+            // removed (critique 2026-06-07, audit titlebar-tabs F10 lives on
+            // as this modifier path).
+            let dragMask = Preferences.shared.windowDragModifier.modifierMask
+            let hasMoveModifier = !dragMask.isEmpty
+                && event.modifierFlags.contains(dragMask)
+            switch TabStripView.classifyPillDrag(dx: dx, dy: dy,
+                                                 threshold: Self.dragThreshold,
+                                                 hasMoveModifier: hasMoveModifier) {
+            case .pending:
+                // Hasn't moved far enough — still potentially a click.
+                return
+            case .reorder:
+                // Plain drag — promote to an active reorder drag. Snap the
+                // hover state off: we're not painting close hotspots or hover
+                // backgrounds while a drag is in flight, and stale hover
+                // indices would visibly linger under the moving pill.
+                view.hoveredPill = nil
+                view.hoveredClose = false
+                view.hoveredAdd = false
+                phase = .dragging(DragState(
+                    originalIndex: pending.pillIndex,
+                    downOffsetX: pending.downOffsetX,
+                    cursorX: p.x,
+                    currentIndex: pending.pillIndex
+                ))
+                view.needsDisplay = true
+            case .windowMove:
+                // Modifier held — the user is moving the window, not
+                // reordering. Drop the armed reorder, clear hover paint,
+                // and hand off to a native AppKit window drag. The
+                // hand-off consumes the rest of the gesture (the default
+                // `performDrag(with:)` blocks until mouse-up), so reset
+                // to `.idle` *before* the hand-off — no `mouseUp` will
+                // arrive to clear it for us.
+                view.hoveredPill = nil
+                view.hoveredClose = false
+                view.hoveredAdd = false
+                phase = .idle
+                view.needsDisplay = true
+                view.requestWindowDrag(event)
+            }
+        case .dragging(var state):
+            // Bail out cleanly if the underlying tab list changed
+            // shape mid-gesture (a sibling closed, a new tab opened) —
+            // the original index no longer matches the strip.
+            guard state.originalIndex < view.tabs.count else {
+                cancelInProgress()
+                return
+            }
+            // Degenerate strip width (mid-gesture window collapse to ~0):
+            // `computeIntermediateIndex` can't compute a meaningful slot
+            // without a positive pill pitch. Hold the dragged pill at
+            // its original slot rather than yanking it to slot 0.
+            let newIndex = TabStripView.computeIntermediateIndex(
+                cursorX: p.x,
+                downOffsetX: state.downOffsetX,
+                count: view.tabs.count,
+                pillFrames: view.pillFrames,
+                fallback: state.originalIndex
+            )
+            state.cursorX = p.x
+            state.currentIndex = newIndex
+            phase = .dragging(state)
+            view.needsDisplay = true
+        }
+    }
+
+    func mouseUp(with event: NSEvent) {
+        defer {
+            phase = .idle
+        }
+        // A press that armed a drag but never crossed the threshold is a
+        // click: NOW switch tabs (selection was deferred from `mouseDown` so a
+        // drag never selects — critique complaint C). Guard the index against
+        // a list-shape change between mouseDown and mouseUp.
+        if case .armed(let pending) = phase {
+            // `.armed` is cancelled in `update(tabs:)` on any list-shape
+            // change, so a surviving armed index should always be valid here.
+            // If it isn't, the armed phase outlived a refresh that should have
+            // reconciled it — log (matching the `.dragging` canary below)
+            // rather than dropping the click silently.
+            guard pending.pillIndex < view.tabs.count else {
+                Self.dragLogger.notice("mouseUp: armed pillIndex \(pending.pillIndex, privacy: .public) >= tabs.count \(self.view.tabs.count, privacy: .public); armed phase outlived a list-shape change without being cancelled in update(tabs:) — click-to-select dropped, investigate.")
+                return
+            }
+            // Only an index guard is needed here (unlike the reorder-commit
+            // path below, which re-checks `tabGroup`): selecting a window whose
+            // group changed mid-press is benign, whereas committing a reorder
+            // against a detached window is not.
+            view.onSelectWindow?(view.tabs[pending.pillIndex])
+            return
+        }
+        // Only the actively-dragging phase has a reorder commit to consider;
+        // `.idle` (no pill grabbed) falls straight through the guard.
+        guard case .dragging(let state) = phase else { return }
+        // No-op when the user lifted on the original slot.
+        guard state.currentIndex != state.originalIndex else {
+            view.needsDisplay = true
+            return
+        }
+        // Defensive: tabs could have shrunk between the last
+        // `mouseDragged` (where we already checked) and `mouseUp`. The
+        // `update(tabs:)` cancellation path should have nilled the
+        // drag, but the gesture is on the same main thread as the KVO
+        // refresh so a synchronous interleave is theoretically possible
+        // on AppKit's part. Log so a regression is visible.
+        guard state.originalIndex < view.tabs.count else {
+            Self.dragLogger.notice("mouseUp: dragState.originalIndex \(state.originalIndex, privacy: .public) >= tabs.count \(self.view.tabs.count, privacy: .public); list shape changed between mouseDragged and mouseUp without an update(tabs:) refresh — investigate.")
+            view.needsDisplay = true
+            return
+        }
+        let target = view.tabs[state.originalIndex]
+        // Tab must still be in a group for the coordinator's
+        // group-keyed storage to accept the move. Drag-out (the user
+        // detaching the window) is the documented way `tabGroup` goes
+        // nil mid-drag; treat the reorder as discarded rather than
+        // trying to commit against the now-standalone window.
+        guard let group = target.tabGroup else {
+            Self.dragLogger.notice("mouseUp: dragged window's tabGroup went nil mid-drag (detached?); discarding reorder")
+            view.needsDisplay = true
+            return
+        }
+        TabOrderCoordinator.shared.move(window: target,
+                                        to: state.currentIndex,
+                                        in: group)
+        // The coordinator's `orderDidChange` notification drives
+        // `refreshAllTabBars()` — every sibling strip in the group
+        // repaints with the new permutation. Setting `needsDisplay` here
+        // covers the (rare) case where notification delivery is delayed
+        // past the next paint pass: we want the dragged pill to settle
+        // into its new slot immediately even if the refresh hasn't
+        // landed yet.
+        view.needsDisplay = true
+    }
+
+    /// Where the dragged pill renders this frame: anchored to the cursor by
+    /// the grab offset (`downOffsetX`, so it doesn't snap-left on grab),
+    /// clamped against the laid-out `+` button frame (the single source of
+    /// truth for the trailing boundary) so it can never slide under the
+    /// button and this can't drift from `layoutPills()`'s math. Pure so the
+    /// strip's draw path delegates the geometry here.
+    static func draggedPillRect(base: NSRect, cursorX: CGFloat,
+                                downOffsetX: CGFloat, addButtonMinX: CGFloat,
+                                spacing: CGFloat) -> NSRect {
+        let maxX = max(0, addButtonMinX - spacing - base.width)
+        let rawX = cursorX - downOffsetX
+        let x = max(0, min(maxX, rawX))
+        return NSRect(x: x, y: base.minY, width: base.width, height: base.height)
+    }
+}
+
+// MARK: - Tab inline-rename controller
+
+/// The inline-rename engine, hoisted out of `TabStripView` (REFACTOR.md
+/// Area 5). Owns the editing pill index + field editor and IS the field's
+/// `NSTextFieldDelegate` + action target. The strip exposes thin
+/// `beginEditing` / `commitEditIfNeeded` forwarders for its external callers
+/// (`TitlebarTabBarViewController`) and queries `editingPill` / `isEditing`
+/// from its draw + hit-test + hover paths. `unowned view`; the strip
+/// strong-references this, so the back-ref is valid for the controller's
+/// whole life. NSObject base is required for the `@objc` action + the
+/// Cocoa text-field delegate protocol.
+private final class TabRenameController: NSObject, NSTextFieldDelegate {
+    unowned let view: TabStripView
+
+    init(view: TabStripView) {
+        self.view = view
+        super.init()
+    }
+
+    /// Index of the pill currently in inline-edit mode, or `nil`. Only one
+    /// pill edits at a time; opening a second commits the first so the
+    /// user never silently loses an in-flight title edit.
+    private(set) var editingPill: Int? = nil
+    /// Field editor used while a pill is being renamed. Lifetime matches
+    /// `editingPill` — nil'd together by `teardownEdit`.
+    private(set) var editField: NSTextField? = nil
+
+    /// `true` while any pill is in inline-edit mode. The strip's hover /
+    /// close / draw paths short-circuit on this so the editing pill doesn't
+    /// paint an `×` hotspot over its own text field.
+    var isEditing: Bool { editingPill != nil }
+
+    /// Swap the pill at `pillIndex` into rename mode. Installs an
+    /// `NSTextField` over the pill's title area, pre-fills with the window
+    /// title, selects all. Commits any in-flight edit first so two
+    /// double-clicks in a row don't drop the first edit silently.
+    func beginEditing(pillIndex: Int) {
+        guard pillIndex >= 0,
+              pillIndex < view.tabs.count,
+              pillIndex < view.pillFrames.count
+        else { return }
+        if let existing = editingPill, existing != pillIndex {
+            commitEdit()
+        }
+        // If the field already exists for the same pill (e.g., user hit
+        // ⌥⌘R a second time on the same pill), just refocus it.
+        if editingPill == pillIndex, let existing = editField {
+            view.window?.makeFirstResponder(existing)
+            existing.currentEditor()?.selectAll(nil)
+            return
+        }
+        editingPill = pillIndex
+        let pill = view.pillFrames[pillIndex]
+        let closeRect = view.closeHotspot(in: pill)
+        // Size the field to the pill's title area (the SAME horizontal math
+        // the drawing path uses, via TabStripLayout). 2 pt top/bottom inset
+        // keeps the field slightly inside the pill body so its focus-ring-free
+        // border is visible.
+        let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
+        let fieldRect = NSRect(
+            x: title.x,
+            y: pill.minY + 2,
+            width: title.width,
+            height: pill.height - 4
+        )
+        let field = NSTextField(frame: fieldRect)
+        field.font = TabStripView.titleFont
+        field.alignment = .center
+        field.isBezeled = false
+        field.drawsBackground = true
+        field.backgroundColor = NSColor.textBackgroundColor
+        field.textColor = NSColor.labelColor
+        field.focusRingType = .none
+        field.stringValue = view.tabs[pillIndex].title.isEmpty ? "Untitled" : view.tabs[pillIndex].title
+        field.delegate = self
+        // Enter fires the action; action selector + target here is a
+        // defense-in-depth for environments where the field-editor
+        // `insertNewline:` command path doesn't route through the
+        // delegate. Both paths funnel through `commitEdit`.
+        field.target = self
+        field.action = #selector(editFieldCommitAction(_:))
+        view.addSubview(field)
+        view.window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+        editField = field
+        view.needsDisplay = true
+    }
+
+    @objc private func editFieldCommitAction(_ sender: Any?) {
+        commitEdit()
+    }
+
+    /// Publish the current edit-field value through `onCommitRename` and
+    /// tear down the field. Trims whitespace; empty → `""` which the
+    /// caller (MainWindowController.applyInlineRename) treats as
+    /// "clear override, revert to auto title".
+    ///
+    /// Note: titlebar-tabs F8 flagged pure-whitespace input over a
+    /// non-empty existing title as an "accidental override clear".
+    /// The current contract — and the existing
+    /// `InlineRenameTests.test_commit_empty_forwards_empty_string`
+    /// pinning — is that whitespace-only commits still forward as the
+    /// empty string so the consumer can map it to "revert to OSC".
+    /// Modifying that behaviour would be a test-owner change; deferred
+    /// here.
+    func commitEdit() {
+        guard let idx = editingPill,
+              let field = editField,
+              idx < view.tabs.count
+        else {
+            cancelEdit()
+            return
+        }
+        let trimmed = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = view.tabs[idx]
+        teardownEdit()
+        // Call through AFTER teardown so the consumer's side-effects
+        // (title publication → KVO → refreshTabBar) don't land while
+        // the field subview is still alive. Note that `teardownEdit`
+        // now also yields first-responder back to the terminal view
+        // synchronously (see `yieldFirstResponderToTerminalIfParked`),
+        // so by the time `onCommitRename` runs the FR slot is settled
+        // — the older comment about "racing for the first-responder
+        // slot" no longer applies, but the teardown-then-publish
+        // ordering still does.
+        view.onCommitRename?(target, trimmed)
+    }
+
+    /// Dismiss the edit without publishing. Used for Escape and for any
+    /// path that takes the field down without consumer notification.
+    func cancelEdit() {
+        teardownEdit()
+    }
+
+    /// Commit the in-flight edit if one is active. No-op otherwise. Used
+    /// by `TabStripView.commitEditIfNeeded` (→
+    /// `MainWindowController.refreshTabBar`) on the multi-tab → single-tab
+    /// transition so the field doesn't survive as a subview of a hidden
+    /// strip. (main-window F8)
+    func commitIfNeeded() {
+        if editingPill != nil {
+            commitEdit()
+        }
+    }
+
+    /// Move the field to track the pill's new x/width on a width-only
+    /// `update` (the path `windowDidResize` takes every tick at 120 Hz on
+    /// ProMotion) so the caret doesn't drift off-pill. No-op when no edit is
+    /// in flight. Geometry mirrors `beginEditing`'s field-rect computation.
+    func repositionFieldForWidthChange() {
+        guard let idx = editingPill,
+              idx < view.pillFrames.count,
+              let field = editField
+        else { return }
+        let pill = view.pillFrames[idx]
+        let closeRect = view.closeHotspot(in: pill)
+        let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
+        field.frame = NSRect(
+            x: title.x,
+            y: pill.minY + 2,
+            width: title.width,
+            height: pill.height - 4
+        )
+    }
+
+    private func teardownEdit() {
+        editField?.delegate = nil
+        editField?.removeFromSuperview()
+        editField = nil
+        editingPill = nil
+        view.needsDisplay = true
+        // Removing the field as a subview triggers AppKit's
+        // `makeFirstResponder(nil)`, which lands first responder on the
+        // host NSWindow itself — an NSResponder but not an NSView, so
+        // typed characters fall to `noResponderFor:` and ring NSBeep.
+        // Push first responder back to the terminal in the same
+        // synchronous step so no keystrokes can squeak through the
+        // window-as-FR window. The `onCommitRename` side-effects fired
+        // by `commitEdit` (KVO → refreshTabBar) don't touch first
+        // responder, so doing this here (vs. at every call site) is
+        // safe and keeps the contract local.
+        view.yieldFirstResponderToTerminalIfParked()
+    }
+
+    // MARK: NSTextFieldDelegate
+
     /// Enter → commit, Escape → cancel. Routed through the field editor's
     /// command dispatch so we get both Return on a physical keyboard and
     /// Enter on the numeric keypad.
