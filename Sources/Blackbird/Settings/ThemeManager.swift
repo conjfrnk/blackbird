@@ -110,13 +110,19 @@ public final class ThemeManager {
         apply(session: sessionProvider(), view: viewProvider())
     }
 
+    /// Whether the app is currently rendering in a dark appearance. The ONE
+    /// resolution, shared by `resolvedPalette` and `currentPaletteInputs` so
+    /// the two can't disagree about light/dark.
+    private func systemIsDark() -> Bool {
+        let app = currentApp ?? NSApp
+        return app?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
     public var resolvedPalette: ThemePalette {
         let p = Preferences.shared
         let dark: Bool
         switch p.themeMode {
-        case .auto:
-            let app = currentApp ?? NSApp
-            dark = app?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        case .auto:  dark = systemIsDark()
         case .light: dark = false
         case .dark:  dark = true
         }
@@ -152,8 +158,7 @@ public final class ThemeManager {
 
     private func currentPaletteInputs() -> PaletteInputs {
         let p = Preferences.shared
-        let app = currentApp ?? NSApp
-        let isDark = app?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let isDark = systemIsDark()
         return PaletteInputs(
             themeRaw: p.themeRaw,
             themeModeRaw: p.themeModeRaw,
