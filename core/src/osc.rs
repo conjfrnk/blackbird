@@ -16,6 +16,34 @@ use crate::scrub::{
 };
 use crate::BBPromptMarkKind;
 
+/// Build an [`OscScanner`] borrowing the scanner-relevant `BBTerm` fields.
+///
+/// A macro rather than a `fn osc_scanner(&mut self)` method on purpose: the
+/// scanner borrows `cell` shared and nine other fields mutably, while the
+/// caller still needs a *disjoint* `&mut bb.osc_parser` to drive it
+/// (`bb.osc_parser.advance(&mut scanner, …)`). A `&mut self` method would lock
+/// the whole `BBTerm` and the parser borrow would conflict; a macro expands
+/// inline so the borrow checker sees the per-field split. Kills the verbatim
+/// 10-field constructor that was copy-pasted at both `process_input` sites
+/// (REFACTOR.md Part IV).
+macro_rules! osc_scanner {
+    ($bb:expr) => {
+        $crate::osc::OscScanner {
+            cell: &$bb.callback,
+            in_xtgettcap: &mut $bb.in_xtgettcap,
+            xtgettcap_buf: &mut $bb.xtgettcap_buf,
+            modify_other_keys: &mut $bb.modify_other_keys,
+            prompt_mark_rate: &mut $bb.prompt_mark_rate,
+            osc7_rate: &mut $bb.osc7_rate,
+            osc7_reject_logged: &mut $bb.osc7_reject_logged,
+            osc133_d_nondigit_logged: &mut $bb.osc133_d_nondigit_logged,
+            osc133_abc_tainted_logged: &mut $bb.osc133_abc_tainted_logged,
+            osc133_rate_limited_logged: &mut $bb.osc133_rate_limited_logged,
+        }
+    };
+}
+pub(crate) use osc_scanner;
+
 // ---------------------------------------------------------------------------
 // OscScanner — parallel vte::Parser tap for OSC sequences we handle outside
 // of alacritty: OSC 7 (cwd) and OSC 133 (prompt marks).

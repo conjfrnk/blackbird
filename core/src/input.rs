@@ -6,7 +6,7 @@
 
 use crate::color::palette_default_rgb;
 use crate::event::{BBEvent, BBEventKind};
-use crate::osc::OscScanner;
+use crate::osc::osc_scanner;
 use crate::rate_limit::{COLOR_QUERY_REPLY_PER_SECOND, COLOR_QUERY_REPLY_WINDOW};
 use crate::BBTerm;
 
@@ -57,18 +57,7 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
         // this branch because `osc_possibly_pending` stays true from
         // the DCS's opening ESC; kept as a safety belt.
         if bb.osc_possibly_pending || has_bel || bb.in_xtgettcap {
-            let mut osc = OscScanner {
-                cell: &bb.callback,
-                in_xtgettcap: &mut bb.in_xtgettcap,
-                xtgettcap_buf: &mut bb.xtgettcap_buf,
-                modify_other_keys: &mut bb.modify_other_keys,
-                prompt_mark_rate: &mut bb.prompt_mark_rate,
-                osc7_rate: &mut bb.osc7_rate,
-                osc7_reject_logged: &mut bb.osc7_reject_logged,
-                osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
-                osc133_abc_tainted_logged: &mut bb.osc133_abc_tainted_logged,
-                osc133_rate_limited_logged: &mut bb.osc133_rate_limited_logged,
-            };
+            let mut osc = osc_scanner!(bb);
             bb.osc_parser.advance(&mut osc, slice);
             if has_bel {
                 bb.osc_possibly_pending = false;
@@ -85,18 +74,7 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // Drive the parallel OSC parser whole-chunk: it watches for OSC 7,
     // OSC 133, and the modify-other-keys CSI. None of those need byte-
     // precise dispatch positions, so a single `advance` is enough.
-    let mut osc = OscScanner {
-        cell: &bb.callback,
-        in_xtgettcap: &mut bb.in_xtgettcap,
-        xtgettcap_buf: &mut bb.xtgettcap_buf,
-        modify_other_keys: &mut bb.modify_other_keys,
-        prompt_mark_rate: &mut bb.prompt_mark_rate,
-        osc7_rate: &mut bb.osc7_rate,
-        osc7_reject_logged: &mut bb.osc7_reject_logged,
-        osc133_d_nondigit_logged: &mut bb.osc133_d_nondigit_logged,
-        osc133_abc_tainted_logged: &mut bb.osc133_abc_tainted_logged,
-        osc133_rate_limited_logged: &mut bb.osc133_rate_limited_logged,
-    };
+    let mut osc = osc_scanner!(bb);
     bb.osc_parser.advance(&mut osc, slice);
     bb.processor.advance(&mut bb.term, slice);
     drain_color_requests(bb);
