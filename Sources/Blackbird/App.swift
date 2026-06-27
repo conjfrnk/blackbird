@@ -421,9 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Dropping a tab shrinks the group — repaint all remaining
             // tabs' pill strips. If the last tab in the group closed,
             // nothing to refresh here anyway.
-            DispatchQueue.main.async { [weak self] in
-                self?.refreshAllTabBars()
-            }
+            self.scheduleTabBarRefresh()
         }
         controllers.append(controller)
         return controller
@@ -438,9 +436,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return match
         }
         // Fallback: last-focused Blackbird window. `orderedIndex` is lower
-        // for more recently used windows.
+        // for more recently used windows. (`controllers` holds non-optional
+        // elements — no compactMap needed to unwrap.)
         return controllers
-            .compactMap { $0 }
             .filter { $0.window != nil }
             .sorted { ($0.window?.orderedIndex ?? .max) < ($1.window?.orderedIndex ?? .max) }
             .first
@@ -479,9 +477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Tell every controller in the group to refresh its custom tab
         // bar. NSWindowTabGroup's `.windows` property is not reliably
         // KVO-fireable on tab-add, so we invalidate explicitly.
-        DispatchQueue.main.async { [weak self] in
-            self?.refreshAllTabBars()
-        }
+        scheduleTabBarRefresh()
     }
 
     /// Re-run `refreshTabBar` on every MainWindowController so the pill
@@ -489,6 +485,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// since NSWindowTabGroup KVO isn't reliable.
     private func refreshAllTabBars() {
         for c in controllers { c.refreshTabBar() }
+    }
+
+    /// Coalesce a pill-strip refresh onto the next main-runloop tick. The
+    /// tab-add / tab-close mutations that change the group run in the current
+    /// turn; deferring the repaint lets the group settle first. One idiom for
+    /// the two async-refresh sites (tab close, ⌘T). The drag-reorder observer
+    /// is already on main and refreshes inline, so it doesn't use this.
+    private func scheduleTabBarRefresh() {
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshAllTabBars()
+        }
     }
 
     /// Opens a new independent window (⌘N). Per spec §3, ⌘N is a *fresh
@@ -653,59 +660,5 @@ extension AppDelegate: NSMenuItemValidation {
         default:
             return true
         }
-    }
-}
-
-
-/// Audit S2-004: idle-based replacement for the test-host 60 s exit
-/// fuse. The TESTS (TestHostTermination, in the injected bundle — same
-/// process) post `activityNotification` on every test start/finish;
-/// this monitor exits the host only when no heartbeat has arrived for
-/// `idleLimit`. A single test legitimately running longer than the
-/// limit would still be shot — 300 s is far past the suite's slowest
-/// test (the project gates test cost deliberately) while keeping
-/// zombie-host cleanup prompt enough for CI.
-///
-/// Exit code stays 0 on the idle path, preserving the original
-/// safety-net semantics: a genuinely red run is caught by
-/// TestHostTermination's issueCount → exit(1) propagation and by CI's
-/// "both suites printed passed" grep, not by this last-resort fuse.
-final class TestHostActivityMonitor {
-    static let shared = TestHostActivityMonitor()
-    static let activityNotification = Notification.Name(
-        "dev.conjfrnk.blackbird.testHostActivity"
-    )
-    private static let idleLimit: TimeInterval = 300
-    private static let checkInterval: TimeInterval = 30
-
-    /// Main-queue confined (observer is delivered on .main; the timer
-    /// fires on the main runloop).
-    private var lastActivity = Date()
-    private var observer: NSObjectProtocol?
-    private var timer: Timer?
-
-    func start() {
-        guard observer == nil else { return }
-        observer = NotificationCenter.default.addObserver(
-            forName: Self.activityNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.lastActivity = Date()
-        }
-        let t = Timer(timeInterval: Self.checkInterval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let idle = Date().timeIntervalSince(self.lastActivity)
-            if idle > Self.idleLimit {
-                FileHandle.standardError.write(Data(
-                    "Blackbird test-host safety net: no test activity for \(Int(idle)) s — exiting host.\n".utf8
-                ))
-                exit(0)
-            }
-        }
-        // .common so the check still fires while XCTest runs the
-        // runloop in non-default modes (modal panels, tracking).
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
     }
 }

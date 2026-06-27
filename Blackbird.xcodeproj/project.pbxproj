@@ -160,6 +160,7 @@
 		E05C1AF142C74AF9E8FB302E /* SingleSessionSteadyStateLeakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 924DCF3EFC76DBFCD0250EBB /* SingleSessionSteadyStateLeakTests.swift */; };
 		E0E1272012D9B7B00E10E664 /* GlyphAtlasTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */; };
 		E2DA3A0049E566F9B9C133AA /* FindBarAdversarialTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68CAFA8323F8AFCE7D4C52C9 /* FindBarAdversarialTests.swift */; };
+		E4A64F722504E7660313F106 /* TestHostSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6674F348ADE914C0EEBB0E90 /* TestHostSupport.swift */; };
 		E4D4AC286368487A8C50C345 /* RSSProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56F60C9EE0A9886FAAAC6E4A /* RSSProbe.swift */; };
 		E4DA4ACE49EE0D3113E8955D /* HyperlinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9400CC161B796E22A62232EE /* HyperlinkTests.swift */; };
 		E5A9050474676254C3FB3554 /* FindBarReplaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5AF4F844A7BAA90FB92C475 /* FindBarReplaceTests.swift */; };
@@ -271,6 +272,7 @@
 		5FF7774133BC836284BDAC66 /* NativeTabStripHiderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTabStripHiderTests.swift; sourceTree = "<group>"; };
 		6160AD20DD99CBE80ABC5C40 /* AccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityTests.swift; sourceTree = "<group>"; };
 		652F3910146BA23469557490 /* AppDelegate+Menu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+Menu.swift"; sourceTree = "<group>"; };
+		6674F348ADE914C0EEBB0E90 /* TestHostSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHostSupport.swift; sourceTree = "<group>"; };
 		673FE2E71DCD08F9286D5C60 /* kitty.terminfo */ = {isa = PBXFileReference; path = kitty.terminfo; sourceTree = "<group>"; };
 		68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderTests.swift; sourceTree = "<group>"; };
 		68CAFA8323F8AFCE7D4C52C9 /* FindBarAdversarialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarAdversarialTests.swift; sourceTree = "<group>"; };
@@ -570,6 +572,7 @@
 				DACE89CC5DC7A082BAF6BF37 /* Info.plist */,
 				0B018D13660AC5582DF7042E /* SparkleAlertOverride.swift */,
 				BC563B552C1105D7EA9558F5 /* StartupTelemetry.swift */,
+				6674F348ADE914C0EEBB0E90 /* TestHostSupport.swift */,
 				38F741D68EDDA0273488DABA /* Input */,
 				9791A004BE38E9D9C74F9CCA /* Resources */,
 				019B2409D2F4991FA45E6153 /* Settings */,
@@ -887,6 +890,7 @@
 				06091BF7C4ABAC9C8EF04124 /* TerminalView+Services.swift in Sources */,
 				CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */,
 				BD4D63111AD3250BC3552962 /* TerminalWindow.swift in Sources */,
+				E4A64F722504E7660313F106 /* TestHostSupport.swift in Sources */,
 				8BC5CD640FC9741E3B81BFD8 /* Theme.swift in Sources */,
 				47C98A15F7530D2D7BC49CA3 /* ThemeManager.swift in Sources */,
 				7849DEE8A0065721883B426D /* TitlebarTabBar.swift in Sources */,
