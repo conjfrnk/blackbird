@@ -31,6 +31,18 @@ extension TerminalView: NSTextInputClient {
         composition?.selectedRange ?? NSRange(location: NSNotFound, length: 0)
     }
 
+    /// Clamp `range` into `[0, total]` — location clamped first, then length to
+    /// the remaining span. The ONE defensive marked-text clamp (was copy-pasted
+    /// across `setMarkedText` / `attributedSubstring(forProposedRange:)` /
+    /// `firstRect(forCharacterRange:)`): a malformed IME handing us a location
+    /// or length that overruns the marked text — including the `(0, NSIntegerMax)`
+    /// "the whole thing" idiom — can't index past it.
+    static func clampedRange(_ range: NSRange, total: Int) -> NSRange {
+        let loc = max(0, min(range.location, total))
+        let len = max(0, min(range.length, total - loc))
+        return NSRange(location: loc, length: len)
+    }
+
     public func setMarkedText(_ string: Any,
                               selectedRange: NSRange,
                               replacementRange: NSRange) {
@@ -50,10 +62,7 @@ extension TerminalView: NSTextInputClient {
             // `selectedRange()` would then return a range the candidate
             // window can't interpret. Use the same pattern
             // `attributedSubstring` uses so behaviour is consistent.
-            let total = attrs.length
-            let loc = max(0, min(selectedRange.location, total))
-            let len = max(0, min(selectedRange.length, total - loc))
-            let clampedSel = NSRange(location: loc, length: len)
+            let clampedSel = Self.clampedRange(selectedRange, total: attrs.length)
             composition = TerminalView.Composition(
                 attributedText: attrs,
                 selectedRange: clampedSel
@@ -105,10 +114,7 @@ extension TerminalView: NSTextInputClient {
         actualRange: NSRangePointer?
     ) -> NSAttributedString? {
         guard let c = composition else { return nil }
-        let total = c.attributedText.length
-        let loc = max(0, min(range.location, total))
-        let len = max(0, min(range.length, total - loc))
-        let clamped = NSRange(location: loc, length: len)
+        let clamped = Self.clampedRange(range, total: c.attributedText.length)
         actualRange?.pointee = clamped
         return c.attributedText.attributedSubstring(from: clamped)
     }
@@ -153,9 +159,7 @@ extension TerminalView: NSTextInputClient {
         // `attributedSubstring(forProposedRange:…)` already applies. An
         // IME that hands us `(0, NSIntegerMax)` to mean "the whole thing"
         // lands here with `clamped == (0, total)`.
-        let loc = max(0, min(range.location, total))
-        let len = max(0, min(range.length, total - loc))
-        let clamped = NSRange(location: loc, length: len)
+        let clamped = Self.clampedRange(range, total: total)
         actualRange?.pointee = clamped
 
         // Cell-count offset from the composition's left edge. UTF-16
