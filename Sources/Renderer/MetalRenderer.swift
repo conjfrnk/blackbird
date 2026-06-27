@@ -1247,22 +1247,31 @@ public final class MetalRenderer {
         return result
     }
 
-    public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
-        // Compute the current frame's visual-state key BEFORE reaching for
-        // currentDrawable. Acquiring a drawable is expensive (blocks on
-        // the pool under contention); if nothing changed we shouldn't even
-        // touch it. Note: blink state is computed here too because it
-        // depends on CACurrentMediaTime.
-        let blinkSkipNow: Bool = {
-            guard cursorBlinkEnabled, focused, let s = snapshot, s.cursorVisible else {
-                return false
-            }
-            let elapsed = CACurrentMediaTime() - blinkPhaseStart
-            let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
-            return phase >= 0.53
-        }()
-        let selFields = Self.selectionFields(selection)
-        let frameKey = FrameKey(
+    /// Whether the cursor is in its "off" blink phase this frame (so it should
+    /// be skipped). Pure of GPU state — depends only on the blink pref, focus,
+    /// the snapshot's cursor visibility, and `CACurrentMediaTime` vs
+    /// `blinkPhaseStart`. 1.06 s period, off for the second half (≥ 0.53 s).
+    private func computeBlinkSkip(snapshot: BBSnapshot?, focused: Bool) -> Bool {
+        guard cursorBlinkEnabled, focused, let s = snapshot, s.cursorVisible else {
+            return false
+        }
+        let elapsed = CACurrentMediaTime() - blinkPhaseStart
+        let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
+        return phase >= 0.53
+    }
+
+    /// Build the per-frame visual-state key from every pixel-affecting input
+    /// (snapshot seq, selection, cursor, insets, colours, blink, cmd-hover, and
+    /// the metrics/atlas generations). Compared against `lastFrameKey` to skip
+    /// an unchanged frame BEFORE the expensive drawable acquire. Pure: touches
+    /// no GPU / semaphore / slot state.
+    private func makeFrameKey(
+        snapshot: BBSnapshot?,
+        focused: Bool,
+        selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
+        blinkSkip: Bool
+    ) -> FrameKey {
+        return FrameKey(
             snapshotSeq: snapshot?.sequenceID ?? 0,
             hoveredLinkID: hoveredLinkID,
             selMode: selFields.mode,
@@ -1295,12 +1304,25 @@ public final class MetalRenderer {
             keepBgOpaque: keepBgOpaque,
             accentColor: accentColor,
             cursorColor: cursorColor,
-            blinkSkip: blinkSkipNow,
+            blinkSkip: blinkSkip,
             cmdHoverBufferLine: cmdHoverBufferLine,
             cmdHoverStartCol: cmdHoverStartCol,
             cmdHoverEndCol: cmdHoverEndCol,
             metricsGeneration: metricsGeneration,
             atlasGeneration: atlas.generation
+        )
+    }
+
+    public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
+        // Compute the current frame's visual-state key BEFORE reaching for
+        // currentDrawable. Acquiring a drawable is expensive (blocks on
+        // the pool under contention); if nothing changed we shouldn't even
+        // touch it. Note: blink state is computed here too because it
+        // depends on CACurrentMediaTime.
+        let blinkSkipNow = computeBlinkSkip(snapshot: snapshot, focused: focused)
+        let selFields = Self.selectionFields(selection)
+        let frameKey = makeFrameKey(
+            snapshot: snapshot, focused: focused, selFields: selFields, blinkSkip: blinkSkipNow
         )
         if !frameSkipDisabled, frameKey == lastFrameKey {
             // Nothing that affects pixels has changed since the last
