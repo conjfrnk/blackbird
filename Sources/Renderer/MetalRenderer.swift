@@ -1623,37 +1623,15 @@ public final class MetalRenderer {
                 lastRenderedSnapshotSeq > 0
                 && snap.sequenceID > lastRenderedSnapshotSeq + 1
 
-            let partialRows: Set<Int>? = {
-                guard cacheCompatible else { return nil }
-                guard !snap.damageIsFull else { return nil }
-                guard !snapshotCoalesced else { return nil }
-                let damaged = snap.damagedRows
-                if damaged.isEmpty || damaged.count >= (snap.rows + 1) / 2 {
-                    return nil
-                }
-                var rows = Set(damaged)
-                // Force-rebuild the row the cursor just left AND the row
-                // it moved to, even when alacritty's damage iterator did
-                // not flag them. The partial-rebuild fast path would
-                // otherwise leave a ghost inverted cell in the old row
-                // (and occasionally miss painting the new one) whenever
-                // pure cursor motion happens without a content delta — a
-                // common case in empty-prompt arrow-key editing. Cheap
-                // insurance; at most two extra row rebuilds per frame.
-                // Audit metal-renderer F3.
-                if cursorMoved {
-                    let prevScreenRow = Int(prevCursorRow) + Int(snap.displayOffset)
-                    if prevScreenRow >= 0 && prevScreenRow < snap.rows {
-                        rows.insert(prevScreenRow)
-                    }
-                    let newScreenRow = Int(curRow) + Int(snap.displayOffset)
-                    if newScreenRow >= 0 && newScreenRow < snap.rows {
-                        rows.insert(newScreenRow)
-                    }
-                    _ = prevCursorCol // silence unused warning; col-level precision not needed
-                }
-                return rows
-            }()
+            let partialRows = decideRebuildRows(
+                snap: snap,
+                cacheCompatible: cacheCompatible,
+                snapshotCoalesced: snapshotCoalesced,
+                cursorMoved: cursorMoved,
+                prevCursorRow: prevCursorRow,
+                prevCursorCol: prevCursorCol,
+                curRow: curRow
+            )
 
             guard let instanceCount = buildInstances(
                 snapshot: snap,
@@ -1697,49 +1675,121 @@ public final class MetalRenderer {
             // aborted mid-encode state.
             lastRenderedSnapshotSeq = snap.sequenceID
             if instanceCount > 0 {
-                var uniforms = FrameUniforms(
-                    viewportPx: viewportPoints,
-                    cellSizePx: cellSizePoints,
-                    accentColor: accentColor
-                )
-                encoder.setRenderPipelineState(pipelineState)
-                encoder.setVertexBuffer(instanceBuffers[slot], offset: 0, index: 0)
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
-                encoder.setFragmentTexture(atlas.texture, index: 0)
-                // Color atlas bound unconditionally. Fragment shader
-                // branches on `BB_ATTR_IS_COLOR_GLYPH` to pick which
-                // texture to sample; Metal requires both bindings to be
-                // addressable for the shader to compile.
-                encoder.setFragmentTexture(atlas.colorTexture, index: 1)
-                encoder.drawPrimitives(
-                    type: .triangle,
-                    vertexStart: 0,
-                    vertexCount: 6,
-                    instanceCount: instanceCount
+                encodeCells(
+                    encoder: encoder, slot: slot, instanceCount: instanceCount,
+                    viewportPoints: viewportPoints, cellSizePoints: cellSizePoints
                 )
             }
             if cursorOnScreen && !useCellInvertedCursor {
-                var cu = CursorUniforms(
-                    viewportPx: viewportPoints,
-                    cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + leftInsetPoints,
-                                              Float(screenCursorRow) * Float(metrics.cellHeight) + topInsetPoints),
-                    cellSizePx: cellSizePoints,
-                    color: cursorColor,
-                    strokeWidthPx: 1.0,
-                    filled: focused ? 1.0 : 0.0,
-                    shape: shape,
-                    _pad: 0
+                encodeCursor(
+                    encoder: encoder, snap: snap, screenCursorRow: screenCursorRow,
+                    shape: shape, viewportPoints: viewportPoints,
+                    cellSizePoints: cellSizePoints, focused: focused
                 )
-                encoder.setRenderPipelineState(cursorPipelineState)
-                encoder.setVertexBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
-                encoder.setFragmentBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }
 
         encoder.endEncoding()
         buffer.present(drawable)
         buffer.commit()
+    }
+
+    /// Decide the partial-rebuild row set for this frame, or nil to force a full
+    /// rebuild. nil when the row cache is incompatible (CacheKey mismatch /
+    /// disabled / row-count drift — passed in via `cacheCompatible`), when
+    /// alacritty reports full damage, when an intermediate snapshot was coalesced
+    /// away (its per-row damage is gone), or when damage is empty / covers ≥ half
+    /// the screen (per-row-skip overhead would exceed the savings). Otherwise the
+    /// damaged rows, plus the rows the cursor just left / moved to (metal-renderer
+    /// F3 — pure cursor motion doesn't always flag those, leaving a ghost inverted
+    /// cell). Pure given its arguments.
+    private func decideRebuildRows(
+        snap: BBSnapshot,
+        cacheCompatible: Bool,
+        snapshotCoalesced: Bool,
+        cursorMoved: Bool,
+        prevCursorRow: Int32,
+        prevCursorCol: Int32,
+        curRow: Int32
+    ) -> Set<Int>? {
+        guard cacheCompatible else { return nil }
+        guard !snap.damageIsFull else { return nil }
+        guard !snapshotCoalesced else { return nil }
+        let damaged = snap.damagedRows
+        if damaged.isEmpty || damaged.count >= (snap.rows + 1) / 2 {
+            return nil
+        }
+        var rows = Set(damaged)
+        if cursorMoved {
+            let prevScreenRow = Int(prevCursorRow) + Int(snap.displayOffset)
+            if prevScreenRow >= 0 && prevScreenRow < snap.rows {
+                rows.insert(prevScreenRow)
+            }
+            let newScreenRow = Int(curRow) + Int(snap.displayOffset)
+            if newScreenRow >= 0 && newScreenRow < snap.rows {
+                rows.insert(newScreenRow)
+            }
+            _ = prevCursorCol // silence unused warning; col-level precision not needed
+        }
+        return rows
+    }
+
+    /// Encode the cell-instance draw: bind the pipeline, the slot's instance
+    /// buffer, frame uniforms, the mono + colour atlases (colour bound
+    /// unconditionally so the `BB_ATTR_IS_COLOR_GLYPH` shader branch is
+    /// addressable), and draw `instanceCount` instanced quads.
+    private func encodeCells(
+        encoder: MTLRenderCommandEncoder,
+        slot: Int,
+        instanceCount: Int,
+        viewportPoints: SIMD2<Float>,
+        cellSizePoints: SIMD2<Float>
+    ) {
+        var uniforms = FrameUniforms(
+            viewportPx: viewportPoints,
+            cellSizePx: cellSizePoints,
+            accentColor: accentColor
+        )
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setVertexBuffer(instanceBuffers[slot], offset: 0, index: 0)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
+        encoder.setFragmentTexture(atlas.texture, index: 0)
+        encoder.setFragmentTexture(atlas.colorTexture, index: 1)
+        encoder.drawPrimitives(
+            type: .triangle,
+            vertexStart: 0,
+            vertexCount: 6,
+            instanceCount: instanceCount
+        )
+    }
+
+    /// Encode the standalone cursor quad (bar / underline / unfocused outline —
+    /// the focused block cursor renders via cell inversion, not here). Filled
+    /// when focused, hollow when not.
+    private func encodeCursor(
+        encoder: MTLRenderCommandEncoder,
+        snap: BBSnapshot,
+        screenCursorRow: Int,
+        shape: UInt32,
+        viewportPoints: SIMD2<Float>,
+        cellSizePoints: SIMD2<Float>,
+        focused: Bool
+    ) {
+        var cu = CursorUniforms(
+            viewportPx: viewportPoints,
+            cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + leftInsetPoints,
+                                      Float(screenCursorRow) * Float(metrics.cellHeight) + topInsetPoints),
+            cellSizePx: cellSizePoints,
+            color: cursorColor,
+            strokeWidthPx: 1.0,
+            filled: focused ? 1.0 : 0.0,
+            shape: shape,
+            _pad: 0
+        )
+        encoder.setRenderPipelineState(cursorPipelineState)
+        encoder.setVertexBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
+        encoder.setFragmentBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
     deinit {
