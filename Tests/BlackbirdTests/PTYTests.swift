@@ -369,7 +369,7 @@ final class PTYTests: XCTestCase {
             probeCalled = true
             return true  // simulate hostile pre-planted entry — probe succeeds
         }
-        let result = PTY.decideKittyTerminfoAvailability(ticExit: 1, probe: probe)
+        let result = KittyTerminfo.decideAvailability(ticExit: 1, probe: probe)
         XCTAssertFalse(
             result,
             "tic non-zero exit must force xterm-256color fallback regardless of probe outcome"
@@ -383,7 +383,7 @@ final class PTYTests: XCTestCase {
     /// Audit L1 happy path: tic exit 0 + successful probe yields the
     /// xterm-kitty TERM. Pins that the success branch still works.
     func test_kittyTerminfoDecision_ticSuccessAndProbeSuccess_returnsTrue() {
-        let result = PTY.decideKittyTerminfoAvailability(ticExit: 0, probe: { true })
+        let result = KittyTerminfo.decideAvailability(ticExit: 0, probe: { true })
         XCTAssertTrue(result, "tic=0 + probe=true should return true")
     }
 
@@ -392,7 +392,7 @@ final class PTYTests: XCTestCase {
     /// we'd advertise xterm-kitty to a child whose ncurses can't find
     /// the entry.
     func test_kittyTerminfoDecision_ticSuccessButProbeFails_returnsFalse() {
-        let result = PTY.decideKittyTerminfoAvailability(ticExit: 0, probe: { false })
+        let result = KittyTerminfo.decideAvailability(ticExit: 0, probe: { false })
         XCTAssertFalse(result, "tic=0 + probe=false should return false (fallback)")
     }
 

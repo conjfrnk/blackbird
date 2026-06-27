@@ -167,6 +167,7 @@
 		F7F8EB9F2C5279E7678CD1EB /* RealLatencyProbeWindowedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD0C55696CF5A5B37F131A49 /* RealLatencyProbeWindowedTests.swift */; };
 		F816DB935D868931D236E114 /* InlineRenameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C36192F62C6E40A498D70D /* InlineRenameTests.swift */; };
 		F8C99250E001E2D862D19244 /* TestHostTermination.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */; };
+		F977657E7B8C250F42E245CD /* KittyTerminfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF2E535DE7BB1D225E2F58E2 /* KittyTerminfo.swift */; };
 		FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */; };
 		FE2DBB21AD9C81867C32FA25 /* TabOrderCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 355144D52D6A74BDCBCF87A0 /* TabOrderCoordinatorTests.swift */; };
 /* End PBXBuildFile section */
@@ -338,6 +339,7 @@
 		EA0F474A7AF422E5AD4E5502 /* TabRenameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabRenameTests.swift; sourceTree = "<group>"; };
 		EC1D8A560291CE5E7A0CAD11 /* URLDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetector.swift; sourceTree = "<group>"; };
 		ECA94E43AEA8DADB1E41DE3B /* HorizontalInsetHelperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HorizontalInsetHelperTests.swift; sourceTree = "<group>"; };
+		EF2E535DE7BB1D225E2F58E2 /* KittyTerminfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyTerminfo.swift; sourceTree = "<group>"; };
 		EF71EC6E09217F7CCAB5FF22 /* PreferencesGuardSweepTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesGuardSweepTests.swift; sourceTree = "<group>"; };
 		F28B81E7D43F3CC0B8F88998 /* TabStripMouseFocusYieldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStripMouseFocusYieldTests.swift; sourceTree = "<group>"; };
 		F455C591EC38A7B3955CD5B8 /* FindBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBar.swift; sourceTree = "<group>"; };
@@ -550,6 +552,7 @@
 				22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */,
 				F455C591EC38A7B3955CD5B8 /* FindBar.swift */,
 				3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */,
+				EF2E535DE7BB1D225E2F58E2 /* KittyTerminfo.swift */,
 				26B359BBCEB85D55F2981EDD /* LatencyProbe.swift */,
 				8B9FC36E18F7230ED943F1A0 /* PasteSanitizer.swift */,
 				C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */,
@@ -796,6 +799,7 @@
 				1DFA371FD2502A8FA6AB320B /* HyperlinkResolver.swift in Sources */,
 				AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */,
 				5E835DC2E5C1FC93CF846CA0 /* KeyEventClassifier.swift in Sources */,
+				F977657E7B8C250F42E245CD /* KittyTerminfo.swift in Sources */,
 				7BACEACA83D3F47078E3B121 /* LatencyProbe.swift in Sources */,
 				325A950015185A2BC420ADAD /* MainThreadWatchdog.swift in Sources */,
 				26551D9D45C969B410CFE79C /* MainWindowController.swift in Sources */,

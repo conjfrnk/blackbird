@@ -183,8 +183,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // here lets it complete concurrently with the ~20 ms of renderer +
         // window construction below, so `PTY.spawn`'s read is (almost
         // always) a memoized no-op. Strictly safe — see
-        // `PTY.prewarmKittyTerminfo()`'s `swift_once` rationale.
-        PTY.prewarmKittyTerminfo()
+        // `KittyTerminfo.prewarm()`'s `swift_once` rationale.
+        KittyTerminfo.prewarm()
 
         // Replace Sparkle's verbose "up to date" alert before any updater
         // session can spin up (scheduled check, menu action, etc.).
