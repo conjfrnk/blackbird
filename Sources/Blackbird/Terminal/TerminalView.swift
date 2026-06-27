@@ -1708,33 +1708,38 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             session.scrollToBottom()
         }
 
-        // Hand the event to the IME first. If macOS's input context is in
-        // the middle of a composition (Japanese kana → kanji, Korean
-        // combining jamo, Option-E dead key → ´) it'll call back into this
-        // view's NSTextInputClient methods (setMarkedText / insertText /
-        // unmarkText). Two outcomes we need to distinguish afterwards:
-        //
-        //   - Still composing (preedit visible): `hasMarkedText()` is true.
-        //     The keystroke has been absorbed; do NOT also encode it.
-        //
-        //   - Committed a grapheme during this event: `insertText` ran and
-        //     emitted bytes via `sendToSession`. `didInsertTextViaIME` is
-        //     the flag that records this. Falling through to the encoder
-        //     would double-write the character.
-        //
-        //   - IME did nothing: the flag stays false and `hasMarkedText`
-        //     stays false. Fall through to the existing encoder path.
+        // IME arbitration first; if the composition absorbed the keystroke
+        // (preedit visible or a grapheme committed via insertText) we're done.
+        if routeKeyDownThroughIME(event) { return }
+
+        // Control-byte fast path (Ctrl+letter → raw 0x01-0x1A); returns true
+        // when it wrote the byte directly, false to fall through to the encoder.
+        if sendControlFastPath(event, session: session) { return }
+
+        // Special-key / printable encoding + protocol framing.
+        encodeAndSendKey(event)
+    }
+
+    /// Hand the keystroke to macOS's input context FIRST. If the IME is mid-
+    /// composition (Japanese kana → kanji, Korean combining jamo, Option-E dead
+    /// key → ´) it calls back into our `NSTextInputClient` methods
+    /// (setMarkedText / insertText / unmarkText). Returns `true` when the
+    /// keystroke was ABSORBED — either still composing (`hasMarkedText()`) or a
+    /// grapheme committed during this event (`didInsertTextViaIME`, set by
+    /// `insertText`) — so `keyDown` must NOT also encode it (double-write).
+    /// Returns `false` when the IME did nothing; the caller falls through to the
+    /// encoder.
+    ///
+    /// "Use Option as Meta" means an Option+key chord is a Meta keystroke (ESC +
+    /// base char), NOT dead-key / accent composition. Bypass the IME for that
+    /// chord so Option+e sends ESC 'e' instead of starting a "´" dead-key
+    /// preedit, and Option+a sends ESC 'a' instead of inserting "å" — otherwise
+    /// handleEvent's setMarkedText/insertText consumes the event and the
+    /// encoder's Meta path is never reached, breaking M-e/M-i/M-u/M-n and every
+    /// other Option+letter in Meta mode. Matches Terminal.app / iTerm2. Ctrl/⌘
+    /// chords and non-Option input (CJK/Korean IME) keep the normal IME path.
+    private func routeKeyDownThroughIME(_ event: NSEvent) -> Bool {
         didInsertTextViaIME = false
-        // "Use Option as Meta" means an Option+key chord is a Meta keystroke
-        // (ESC + base char), NOT dead-key / accent composition. Bypass the
-        // IME for that chord so Option+e sends ESC 'e' instead of starting a
-        // "´" dead-key preedit, and Option+a sends ESC 'a' instead of
-        // inserting "å". Without this, handleEvent's setMarkedText/insertText
-        // consumes the event and the encoder's Meta path is never reached —
-        // breaking M-e/M-i/M-u/M-n and every other Option+letter in Meta mode.
-        // Matches Terminal.app / iTerm2, which disable Option composition when
-        // Option-as-Meta is on. Ctrl/⌘ chords and non-Option input (CJK/Korean
-        // IME) keep the normal IME path.
         let optionMetaChord = KeyEventClassifier.isOptionMetaChord(
             optionIsMeta: encoder.optionIsMeta,
             modifierFlags: event.modifierFlags
@@ -1742,73 +1747,73 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         if !optionMetaChord {
             inputContext?.handleEvent(event)
         }
-        if hasMarkedText() || didInsertTextViaIME { return }
+        return hasMarkedText() || didInsertTextViaIME
+    }
 
-        // Fast path for control characters: macOS translates Ctrl+letter into
-        // the corresponding control byte (0x01-0x1A) in event.characters.
-        // Send that byte directly to the PTY without round-tripping through
-        // the encoder. This is the most reliable path for Ctrl+C (0x03),
-        // Ctrl+D (0x04), Ctrl+Z (0x1A), etc.
-        //
-        // When the TUI has enabled kitty's disambiguate-escape-codes flag, the
-        // four aliasing letters (Ctrl+i, Ctrl+m, Ctrl+[, Ctrl+h) must NOT take
-        // the fast path — they need to become `CSI <cp>;5u` sequences so the
-        // TUI can distinguish them from Tab / Enter / Esc / Backspace.
-        if event.modifierFlags.contains(.control) {
-            #if DEBUG
-            Self.keyLogger.debug("keyDown: Control modifier detected")
-            #endif
-            let termModeForCtrl = currentSnapshot?.termMode ?? []
-            let kittyActive = termModeForCtrl.contains(.disambiguateEscCodes)
-                || termModeForCtrl.contains(.reportAllKeysAsEsc)
-            let modifyOther = termModeForCtrl.contains(.modifyOtherKeys)
-            // Route Ctrl+letter through the encoder whenever a TUI opted
-            // into a protocol that expects CSI-u or CSI 27 shape for
-            // Ctrl-combinations: Kitty flag 1, Kitty flag 8, or xterm
-            // modifyOtherKeys (Emacs, tmux extended-keys, nvim auto-
-            // request). Without this, the fast path would send a bare
-            // 0x01 for Ctrl+A even though the TUI asked for the
-            // protocol-framed form (F-S3-002).
-            if kittyActive || modifyOther
-                || (encoder.optionIsMeta && event.modifierFlags.contains(.option)) {
-                // Fall through — encoder picks the right protocol and
-                // handles Ctrl + C0-aliasing letters too. The Option clause:
-                // Ctrl+Option+letter in Meta mode is an Emacs/readline M-C-*
-                // chord that must carry the ESC Meta prefix (the bare-C0 fast
-                // path below would drop it, degrading M-C-f to plain ^F).
-            } else if let chars = event.characters,
-               let scalar = chars.unicodeScalars.first,
-               scalar.value >= 1, scalar.value <= 0x1F {
-                // Synchronous write so there's no perceptible latency before
-                // the line discipline sees the byte. From here the kernel
-                // does exactly the right thing — without any kill() from us:
-                //
-                //   ISIG on  (shell prompt, `sleep 100`, cmatrix cbreak):
-                //     0x03 matches c_cc[VINTR] → echo `^C\n` (ECHOCTL) →
-                //     SIGINT to fg pgroup → shell/sleep handles, prints the
-                //     new prompt on the next line. Order is correct because
-                //     the echo and the signal come from the same code path
-                //     inside the tty layer.
-                //
-                //   ISIG off (nvim, tmux, htop — apps in raw mode):
-                //     byte passes through to the app's stdin untouched. The
-                //     app handles Ctrl+C internally (cancel op, close prompt)
-                //     instead of dying from a "deadly signal".
-                //
-                // Getting VINTR/VSUSP/VEOF/VERASE right required passing nil
-                // termios to forkpty (see PTY.swift) so the kernel's
-                // TTYDEF_* defaults apply. Without that, c_cc was all-zeros
-                // and Ctrl+C was just data.
-                session.sendImmediate(Data([UInt8(scalar.value)]))
-                return
-            }
-            // Fast path didn't match — fall through to encoder which also
-            // handles Ctrl via controlByte().
-            #if DEBUG
-            Self.keyLogger.debug("keyDown: fast path didn't match, trying encoder")
-            #endif
+    /// Fast path for control characters: macOS translates Ctrl+letter into the
+    /// corresponding control byte (0x01-0x1A) in `event.characters`. Send that
+    /// byte directly to the PTY without round-tripping through the encoder —
+    /// the most reliable path for Ctrl+C (0x03), Ctrl+D (0x04), Ctrl+Z (0x1A).
+    /// Returns `true` iff it wrote the byte; `false` (incl. non-control events)
+    /// to fall through to the encoder.
+    ///
+    /// When a TUI enabled a protocol that expects CSI-u / CSI 27 framing for
+    /// Ctrl-combinations (kitty disambiguate / report-all-as-esc, or xterm
+    /// modifyOtherKeys), the four aliasing letters (Ctrl+i/m/[/h) and indeed all
+    /// Ctrl-combos must route through the encoder instead so they become
+    /// `CSI <cp>;5u` and stay distinguishable from Tab / Enter / Esc / Backspace
+    /// (F-S3-002). The Option clause: Ctrl+Option+letter in Meta mode is an
+    /// Emacs/readline M-C-* chord that must carry the ESC Meta prefix (the bare-
+    /// C0 fast path would drop it, degrading M-C-f to plain ^F).
+    private func sendControlFastPath(_ event: NSEvent, session: TerminalSession) -> Bool {
+        guard event.modifierFlags.contains(.control) else { return false }
+        #if DEBUG
+        Self.keyLogger.debug("keyDown: Control modifier detected")
+        #endif
+        let termModeForCtrl = currentSnapshot?.termMode ?? []
+        let kittyActive = termModeForCtrl.contains(.disambiguateEscCodes)
+            || termModeForCtrl.contains(.reportAllKeysAsEsc)
+        let modifyOther = termModeForCtrl.contains(.modifyOtherKeys)
+        if kittyActive || modifyOther
+            || (encoder.optionIsMeta && event.modifierFlags.contains(.option)) {
+            // Route through the encoder (it picks the right protocol and
+            // handles Ctrl + C0-aliasing letters too).
+        } else if let chars = event.characters,
+           let scalar = chars.unicodeScalars.first,
+           scalar.value >= 1, scalar.value <= 0x1F {
+            // Synchronous write so there's no perceptible latency before the
+            // line discipline sees the byte. From here the kernel does exactly
+            // the right thing — without any kill() from us:
+            //
+            //   ISIG on  (shell prompt, `sleep 100`, cmatrix cbreak):
+            //     0x03 matches c_cc[VINTR] → echo `^C\n` (ECHOCTL) → SIGINT to
+            //     fg pgroup → shell/sleep handles, prints the new prompt on the
+            //     next line. Order is correct because the echo and the signal
+            //     come from the same code path inside the tty layer.
+            //
+            //   ISIG off (nvim, tmux, htop — apps in raw mode):
+            //     byte passes through to the app's stdin untouched.
+            //
+            // Getting VINTR/VSUSP/VEOF/VERASE right required passing nil termios
+            // to forkpty (see PTY.swift) so the kernel's TTYDEF_* defaults
+            // apply. Without that, c_cc was all-zeros and Ctrl+C was just data.
+            session.sendImmediate(Data([UInt8(scalar.value)]))
+            return true
         }
+        // Fast path didn't match — fall through to the encoder, which also
+        // handles Ctrl via controlByte().
+        #if DEBUG
+        Self.keyLogger.debug("keyDown: fast path didn't match, trying encoder")
+        #endif
+        return false
+    }
 
+    /// Final keyDown stage: encode the event into PTY bytes and send. Special
+    /// keys (arrows / function / keypad) route through `encodeSpecial`; every
+    /// other printable through `encode(chars:)`. An empty encoding (F13–F24,
+    /// Mac system keys like brightness / media / eject) forwards to `super` so
+    /// AppKit's responder chain still sees the system key (audit M3).
+    private func encodeAndSendKey(_ event: NSEvent) {
         let mods = KeyEncoder.Modifiers(event: event)
         let termMode = currentSnapshot?.termMode ?? []
 
@@ -1863,9 +1868,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // use scalar that doesn't map to a shell-meaningful sequence.
         // Without the super-forward, AppKit's responder chain never
         // sees the event: F15 brightness-up (and similar) is silently
-        // swallowed while Blackbird is key. Mirroring keyUp's
-        // empty-bytes fall-through (line ~1828) lets the menu chain
-        // and accelerator handlers process the system key.
+        // swallowed while Blackbird is key.
         super.keyDown(with: event)
     }
 
