@@ -2,7 +2,6 @@ import AppKit
 import OSLog
 import Sparkle
 import ObjectiveC.runtime
-import os
 
 /// Sparkle's default "up to date" alert is wordy: it shows the display
 /// version twice (e.g. "Blackbird 0.1.0 (0.1.0)") and tacks on a parenthetical
@@ -32,20 +31,14 @@ enum SparkleAlertOverride {
     /// `imp_implementationWithBlock` are eligible for removal. Discrimination
     /// is by nil-check on this field (nil ⇒ first install ⇒ skip the remove).
     ///
-    /// Wrapped in `OSAllocatedUnfairLock` to match the project's canonical
-    /// shape for shared mutable statics (sibling pattern of
-    /// `MainThreadWatchdog.lastMainHeartbeat`, `WindowBlur.didLogBlurRC`,
-    /// `ScrollIndicator.didLogOutOfRange`, etc.). Today the `@MainActor`
-    /// annotation on the enum guarantees serial access; the lock is
-    /// belt-and-suspenders against a refactor that promotes a non-MainActor
-    /// caller. Note: the lock does NOT eliminate a potential
-    /// imp_removeBlock-while-prior-IMP-still-executing window — that
-    /// would only matter if `install()` ran while a Sparkle UI thread was
-    /// mid-call into the prior trampoline, which the @MainActor invariant
-    /// already prevents. If that invariant is dropped, the lock alone is
-    /// insufficient — defer the free instead.
-    private static let installedBlockIMP =
-        OSAllocatedUnfairLock<IMP?>(initialState: nil)
+    /// A plain `@MainActor`-isolated static — the enum's `@MainActor`
+    /// annotation already serialises every access, so no lock is needed.
+    /// (A lock would not have bought real safety anyway: it does NOT close
+    /// the imp_removeBlock-while-prior-IMP-still-executing window — only the
+    /// @MainActor invariant does, by preventing `install()` from running while
+    /// a Sparkle UI thread is mid-call into the prior trampoline. If that
+    /// invariant were ever dropped, defer the free instead of adding a lock.)
+    private static var installedBlockIMP: IMP?
 
     /// The runtime-owned original IMP captured the first time `install()`
     /// runs. Used by `_resetForTests` so the test seam can restore the
@@ -53,8 +46,7 @@ enum SparkleAlertOverride {
     /// trampoline pointer in the method slot. Nil before any install ran.
     /// Production code never reads this — the original IMP is meaningful
     /// only for test isolation.
-    private static let originalIMP =
-        OSAllocatedUnfairLock<IMP?>(initialState: nil)
+    private static var originalIMP: IMP?
 
     /// Build the "up to date" informative text. Extracted so the empty-
     /// version path is unit-testable without an in-process Sparkle UI hop.
@@ -227,23 +219,20 @@ enum SparkleAlertOverride {
         // (so the prior IMP returned by `method_setImplementation` is the
         // runtime-owned original — leave it alone), non-nil on subsequent
         // calls (so the prior IMP is one we minted via
-        // `imp_implementationWithBlock` and must release). The whole
-        // swap happens under one lock so a hypothetical concurrent
-        // re-install can't observe a half-updated tracking state.
-        installedBlockIMP.withLock { prior in
-            let runtimePrior = method_setImplementation(method, imp)
-            // Capture the runtime-owned original on first install so
-            // `_resetForTests` can restore it. After first install,
-            // `runtimePrior` is our previous IMP and is dropped (we'll
-            // free it via `imp_removeBlock` below).
-            originalIMP.withLock { orig in
-                if orig == nil { orig = runtimePrior }
-            }
-            if let prior {
-                imp_removeBlock(prior)
-            }
-            prior = imp
+        // `imp_implementationWithBlock` and must release). @MainActor
+        // serialises the whole swap so a re-install can't observe a
+        // half-updated tracking state.
+        let prior = installedBlockIMP
+        let runtimePrior = method_setImplementation(method, imp)
+        // Capture the runtime-owned original on first install so
+        // `_resetForTests` can restore it. After first install,
+        // `runtimePrior` is our previous IMP and is dropped (we'll
+        // free it via `imp_removeBlock` below).
+        if originalIMP == nil { originalIMP = runtimePrior }
+        if let prior {
+            imp_removeBlock(prior)
         }
+        installedBlockIMP = imp
     }
 
     #if DEBUG
@@ -251,7 +240,7 @@ enum SparkleAlertOverride {
     /// `SparkleAlertOverrideTests` assert that re-install replaces the
     /// tracked IMP. DEBUG-gated — release builds carry no test surface.
     internal static var _installedBlockIMPForTests: IMP? {
-        installedBlockIMP.withLock { $0 }
+        installedBlockIMP
     }
 
     /// Test-only reset for cross-test isolation. Restores the runtime-
@@ -269,21 +258,17 @@ enum SparkleAlertOverride {
         // can't restore the original to a method we can't find — but we
         // can at least keep the tracking honest.
         defer {
-            installedBlockIMP.withLock { $0 = nil }
-            originalIMP.withLock { $0 = nil }
+            installedBlockIMP = nil
+            originalIMP = nil
         }
         let cls: AnyClass = SPUStandardUserDriver.self
         let sel = NSSelectorFromString("showUpdateNotFoundWithError:acknowledgement:")
         guard let method = class_getInstanceMethod(cls, sel) else { return }
-        installedBlockIMP.withLock { prior in
-            originalIMP.withLock { orig in
-                if let orig {
-                    method_setImplementation(method, orig)
-                }
-            }
-            if let p = prior {
-                imp_removeBlock(p)
-            }
+        if let orig = originalIMP {
+            method_setImplementation(method, orig)
+        }
+        if let p = installedBlockIMP {
+            imp_removeBlock(p)
         }
     }
     #endif
