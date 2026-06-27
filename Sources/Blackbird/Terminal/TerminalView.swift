@@ -343,20 +343,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// TerminalView+Mouse.swift. Audit double-click-drag word-extend.
     var wordDragAnchorWord: (BufferPoint, BufferPoint)?  // internal for TerminalView+Mouse.swift
 
-    /// Repeating timer that drives edge-autoscroll while the user is
-    /// dragging a selection past the top/bottom of the viewport. AppKit
-    /// only delivers `mouseDragged` on pointer motion, so a user who
-    /// holds the pointer stationary past the edge would otherwise see
-    /// the autoscroll stall (the selection can't grow into scrollback
-    /// rows that are off-screen). Fires at a modest ~60 Hz cadence so
-    /// short-duration holds don't feel jittery. Audit terminal-view-2
-    /// F2.
-    var selectionAutoscrollTimer: Timer?          // internal for TerminalView+Mouse.swift
-    /// Latest scroll direction the autoscroll timer is running with: +1
-    /// for "reveal older rows" (drag past the top), -1 for "reveal
-    /// newer rows" (drag past the bottom). Stored so the timer fires
-    /// can replay the same direction without recomputing on each tick.
-    var selectionAutoscrollDirection: Int32 = 0   // internal for TerminalView+Mouse.swift
+    /// Drives edge-autoscroll while the user drags a selection past the
+    /// top/bottom of the viewport. AppKit only delivers `mouseDragged` on
+    /// pointer motion, so a user holding the pointer stationary past the edge
+    /// would otherwise see the autoscroll stall (the selection can't grow into
+    /// off-screen scrollback rows). Owns the timer + direction so they're
+    /// mutated in one place rather than as two more `internal` view fields;
+    /// the +Mouse path drives it via `update(direction:tick:)`. Audit
+    /// terminal-view-2 F2.
+    let selectionAutoscroller = SelectionAutoscroller()
 
     // `internal` (no modifier) so `TerminalView+Accessibility.swift`'s
     // `isAccessibilityElement` / `accessibilityChildren` can test for
@@ -1147,8 +1142,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // `viewWillMove` and `viewDidMoveToWindow` `self.window` is nil;
         // an active timer firing in that gap would call
         // `session?.scroll(delta:)` against stale window coordinates.
-        selectionAutoscrollTimer?.invalidate()
-        selectionAutoscrollTimer = nil
+        selectionAutoscroller.stop()
     }
 
     public override func viewDidMoveToWindow() {
@@ -1365,12 +1359,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // panel would otherwise linger briefly after the view is gone.
         hoverTooltipItem?.cancel()
         hoverTooltipPanel?.orderOut(nil)
-        // Selection-autoscroll timer, if the user torn the view down
-        // mid-drag (rare but possible on app quit). Invalidate directly
-        // rather than via the nil-checking helper so we don't swallow
-        // the intent in the unlikely case the property access races
-        // the deinit. Audit terminal-view-2 F2.
-        selectionAutoscrollTimer?.invalidate()
+        // Selection-autoscroll timer, if the user tore the view down
+        // mid-drag (rare but possible on app quit). `selectionAutoscroller`
+        // is a stored `let`, so reaching it in deinit can't race a property
+        // teardown. Audit terminal-view-2 F2.
+        selectionAutoscroller.stop()
         // Release our EnableSecureEventInput refcount if the window
         // closed while still key. Without this pair, secure-input mode
         // leaks system-wide until the next reboot.

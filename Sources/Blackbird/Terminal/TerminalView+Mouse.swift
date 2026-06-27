@@ -19,10 +19,11 @@ import BBCore
 ///     resizes from the nearest corner. Matches Amethyst-style tiling
 ///     workflows and Blackbird's own keybinding table.
 ///
-/// Stored state (`isDragging`, `selection`, `selectionAutoscrollTimer`,
-/// `selectionAutoscrollDirection`, `resizeContext`) lives on the class
-/// body — `TerminalView.swift` — because Swift requires stored
-/// properties on the declaring type.
+/// Stored state (`isDragging`, `selection`, `resizeContext`) lives on the
+/// class body — `TerminalView.swift` — because Swift requires stored
+/// properties on the declaring type. The selection-autoscroll timer +
+/// direction were hoisted out of the view into the owned
+/// `selectionAutoscroller` (`SelectionAutoscroller`).
 ///
 /// Hover-tooltip + URL-highlight clears (`cancelHoverTooltip`,
 /// `clearHoveredLink`, `clearCmdHoverURLMatch`) live in
@@ -192,36 +193,17 @@ extension TerminalView {
     ///    0 = inside the viewport (stop autoscroll).
     /// Audit terminal-view-2 F2.
     private func updateSelectionAutoscroll(direction: Int32) {
-        if direction == 0 {
-            stopSelectionAutoscroll()
-            return
-        }
-        if selectionAutoscrollDirection == direction,
-           selectionAutoscrollTimer != nil {
-            // Already running in the correct direction — nothing to do.
-            // Keep the timer tick as the sole driver; the user's
-            // `mouseDragged` landing in the same band just confirms the
-            // existing direction.
-            return
-        }
-        selectionAutoscrollDirection = direction
-        selectionAutoscrollTimer?.invalidate()
-        // ~60 Hz cadence: fast enough that holding at the edge feels
-        // responsive, slow enough to avoid 120 Hz Metal-pressure storms
-        // on ProMotion. The timer does one `session.scroll(delta:)` per
-        // tick; the new snapshot propagates through the normal
-        // Combine→render path.
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            guard let self, self.isDragging else {
-                self?.stopSelectionAutoscroll()
-                return
-            }
-            // Re-derive the selection cursor from the current mouse
-            // location so the selection keeps growing as the
-            // viewport scrolls under a stationary pointer. Without
-            // this the selection would freeze to whatever bufferPoint
-            // the last `mouseDragged` recorded.
-            self.session?.scroll(delta: self.selectionAutoscrollDirection)
+        // The timer + direction live on `selectionAutoscroller`; this drives it
+        // with a per-tick closure. The closure returns `false` (→ stop) when the
+        // drag has ended; otherwise it re-derives the selection cursor from the
+        // CURRENT mouse location so the selection keeps growing as the viewport
+        // scrolls under a stationary pointer (else it would freeze to whatever
+        // bufferPoint the last `mouseDragged` recorded). One `session.scroll`
+        // per tick; the new snapshot propagates through the normal Combine→
+        // render path.
+        selectionAutoscroller.update(direction: direction) { [weak self] in
+            guard let self, self.isDragging else { return false }
+            self.session?.scroll(delta: self.selectionAutoscroller.direction)
             if var sel = self.selection,
                let mouseWindow = self.window?.mouseLocationOutsideOfEventStream {
                 let local = self.convert(mouseWindow, from: nil)
@@ -232,23 +214,14 @@ extension TerminalView {
                     self.extendSelectionToCursor()
                 }
             }
+            return true
         }
-        // Install into the main runloop in common mode so the timer
-        // keeps firing during tracking runloops (menu bar, dropdowns,
-        // live resize). Default mode would stall the timer inside
-        // those, which defeats the point — users might trigger one of
-        // those UIs mid-drag via the Edit menu's "Select All" or
-        // similar.
-        RunLoop.main.add(timer, forMode: .common)
-        selectionAutoscrollTimer = timer
     }
 
-    /// Stop any in-flight selection autoscroll timer. Safe to call when
-    /// no timer is running. Audit terminal-view-2 F2.
+    /// Stop any in-flight selection autoscroll. Safe to call when none is
+    /// running. Audit terminal-view-2 F2.
     private func stopSelectionAutoscroll() {
-        selectionAutoscrollTimer?.invalidate()
-        selectionAutoscrollTimer = nil
-        selectionAutoscrollDirection = 0
+        selectionAutoscroller.stop()
     }
 
     /// The single view-local → buffer mapping: nil-snap guard (M-17),
