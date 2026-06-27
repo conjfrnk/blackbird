@@ -224,6 +224,121 @@ final class PTYTests: XCTestCase {
         XCTAssertFalse(PTY.isBlackbirdNamespacedEnvKey(""))
     }
 
+    // MARK: - validatedEnvOverrides
+    //
+    // Pin the contract of the pure `PTY.validatedEnvOverrides` helper:
+    // it returns exactly the subset of caller-supplied env overrides
+    // that are SAFE to hand to POSIX `setenv` in the child. An entry is
+    // dropped iff the key is empty, the key contains NUL, the key
+    // contains "=", or the value contains NUL. Empty values and "=" in
+    // values are legitimate and must survive. The result order derives
+    // from Dictionary iteration and is unspecified, so every comparison
+    // below is order-independent (collapse to a Dictionary first).
+
+    /// Order-independent view of the result. Surviving keys are a subset
+    /// of the (unique) input keys, so collapsing the returned pairs to a
+    /// Dictionary never collides and frees the assertions from depending
+    /// on the unspecified Dictionary-iteration order.
+    private func asDict(_ pairs: [(key: String, value: String)]) -> [String: String] {
+        Dictionary(uniqueKeysWithValues: pairs.map { ($0.key, $0.value) })
+    }
+
+    func test_validatedEnvOverrides_validEntrySurvives() {
+        let input = ["TERM": "xterm-256color"]
+        XCTAssertEqual(
+            asDict(PTY.validatedEnvOverrides(input)),
+            input,
+            "a normal KEY=VALUE-style override must survive validation unchanged"
+        )
+    }
+
+    func test_validatedEnvOverrides_emptyValueSurvives() {
+        let input = ["PS1": ""]
+        XCTAssertEqual(
+            asDict(PTY.validatedEnvOverrides(input)),
+            input,
+            "an empty value is a legitimate env override (e.g. PS1=\"\") and must survive"
+        )
+    }
+
+    func test_validatedEnvOverrides_valueWithEqualsSurvives() {
+        let input = ["FOO": "a=b"]
+        XCTAssertEqual(
+            asDict(PTY.validatedEnvOverrides(input)),
+            input,
+            "'=' is only forbidden in the key; a value containing '=' must survive"
+        )
+    }
+
+    func test_validatedEnvOverrides_emptyKeyDropped() {
+        let result = PTY.validatedEnvOverrides(["": "x"])
+        XCTAssertTrue(
+            result.isEmpty,
+            "an empty key is invalid for setenv and must be dropped; got \(asDict(result))"
+        )
+    }
+
+    func test_validatedEnvOverrides_keyWithEqualsDropped() {
+        let result = PTY.validatedEnvOverrides(["A=B": "x"])
+        XCTAssertTrue(
+            result.isEmpty,
+            "a key containing '=' is invalid for setenv and must be dropped; got \(asDict(result))"
+        )
+    }
+
+    func test_validatedEnvOverrides_keyWithNulDropped() {
+        let result = PTY.validatedEnvOverrides(["A\u{0}B": "x"])
+        XCTAssertTrue(
+            result.isEmpty,
+            "a key containing NUL is invalid for setenv and must be dropped; got \(asDict(result))"
+        )
+    }
+
+    func test_validatedEnvOverrides_valueWithNulDropped() {
+        let result = PTY.validatedEnvOverrides(["FOO": "a\u{0}b"])
+        XCTAssertTrue(
+            result.isEmpty,
+            "a value containing NUL is invalid for setenv and must be dropped; got \(asDict(result))"
+        )
+    }
+
+    func test_validatedEnvOverrides_mixedDictionaryKeepsOnlyValid() {
+        let input: [String: String] = [
+            "TERM": "xterm-256color",  // valid
+            "PS1": "",                 // valid: empty value
+            "FOO": "a=b",              // valid: '=' allowed in value
+            "LANG": "en_US.UTF-8",     // valid
+            "": "empty-key",           // invalid: empty key
+            "BAD=KEY": "x",            // invalid: '=' in key
+            "NUL\u{0}KEY": "y",        // invalid: NUL in key
+            "GOOD": "has\u{0}nul",     // invalid: NUL in value
+        ]
+        let expected: [String: String] = [
+            "TERM": "xterm-256color",
+            "PS1": "",
+            "FOO": "a=b",
+            "LANG": "en_US.UTF-8",
+        ]
+        let result = PTY.validatedEnvOverrides(input)
+        XCTAssertEqual(
+            result.count,
+            expected.count,
+            "exactly the 4 valid entries must survive; got \(asDict(result))"
+        )
+        XCTAssertEqual(
+            asDict(result),
+            expected,
+            "mixed input must yield exactly the valid (key, value) pairs, unchanged"
+        )
+    }
+
+    func test_validatedEnvOverrides_emptyInputReturnsEmpty() {
+        XCTAssertTrue(
+            PTY.validatedEnvOverrides([:]).isEmpty,
+            "empty input must yield an empty result"
+        )
+    }
+
     func test_concurrentWriteAndWriteImmediate_doesNotDeadlock() throws {
         try Self.skipIfFlakyOnCI()
         // Regression guard for the writeImmediate / write lock-order
