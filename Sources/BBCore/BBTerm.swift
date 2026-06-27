@@ -437,6 +437,20 @@ public final class BBTerm {
 
     // MARK: - Event trampoline
 
+    /// Named mirror of the C `BBEventKind` ABI (BBCore.h ← core/src/event.rs).
+    /// See `dispatch(_:)` for why these are local UInt32 constants rather than
+    /// the imported C enum.
+    private enum EventKind {
+        static let title: UInt32 = 1
+        static let bell: UInt32 = 2
+        static let cursorShape: UInt32 = 3
+        static let osc52Clipboard: UInt32 = 4
+        static let ptyWrite: UInt32 = 5
+        static let cwdChanged: UInt32 = 6
+        static let promptMark: UInt32 = 7
+        static let fatal: UInt32 = 99
+    }
+
     private static let eventTrampoline: @convention(c) (BBEvent, UnsafeMutableRawPointer?) -> Void = { ev, ctx in
         guard let ctx else { return }
         let box = ctx.assumingMemoryBound(to: EventCtx.self)
@@ -470,23 +484,28 @@ public final class BBTerm {
         )
         isInsideEventDispatch = true
         defer { isInsideEventDispatch = false }
-        // BBEventKind is typedef uint32_t in C. ev.kind is UInt32.
-        // The BB_EVENT_KIND_* constants are C enum variants; use their integer
-        // values directly to avoid Swift 6 cross-module typedef comparison issues.
+        // `ev.kind` is the C `BBEventKind` (typedef uint32_t). The raw
+        // `BB_EVENT_KIND_*` enum constants are deliberately NOT used as case
+        // labels: Swift 6's cross-module import of a `typedef uint32_t` enum
+        // makes `ev.kind == BB_EVENT_KIND_*` ill-typed. `EventKind` mirrors the
+        // ABI (BBCore.h ← core/src/event.rs) as named UInt32s instead, matched
+        // via expression patterns (`~=` is plain `==` on UInt32). A renumber on
+        // the Rust side changes which kind the core emits; the onEvent
+        // round-trip tests plus the DEBUG `default` arm catch the mis-dispatch.
         switch ev.kind {
-        case 1:   // BB_EVENT_KIND_TITLE
+        case EventKind.title:
             handler(.title(Self.string(from: ev)))
-        case 2:   // BB_EVENT_KIND_BELL
+        case EventKind.bell:
             handler(.bell)
-        case 3:   // BB_EVENT_KIND_CURSOR_SHAPE
+        case EventKind.cursorShape:
             handler(.cursorShape(Int(ev.i32_arg)))
-        case 4:   // BB_EVENT_KIND_OSC52_CLIPBOARD
+        case EventKind.osc52Clipboard:
             handler(.osc52Clipboard(Self.string(from: ev)))
-        case 5:   // BB_EVENT_KIND_PTY_WRITE
+        case EventKind.ptyWrite:
             handler(.ptyWrite(Self.data(from: ev)))
-        case 6:   // BB_EVENT_KIND_CWD_CHANGED
+        case EventKind.cwdChanged:
             handler(.cwdChanged(Self.string(from: ev)))
-        case 7:   // BB_EVENT_KIND_PROMPT_MARK
+        case EventKind.promptMark:
             if let kind = PromptMarkKind(rawValue: UInt8(clamping: ev.i32_arg)) {
                 handler(.promptMark(kind: kind, exitCode: Self.string(from: ev)))
             } else {
@@ -501,7 +520,7 @@ public final class BBTerm {
                     + "Swift PromptMarkKind covers 1..=4; Rust ABI has drifted. Audit L-3."
                 )
             }
-        case 99:  // BB_EVENT_KIND_FATAL
+        case EventKind.fatal:
             handler(.fatal(Self.string(from: ev)))
         default:
             // Audit L-3 (2026-04-29): unknown event kind means the
@@ -670,7 +689,17 @@ public final class BBSnapshot {
         // this with larger `Int` inputs can't silently wrap.
         guard let idx = Self.flatIndex(row: row, col: col, cols: cols) else { return .empty }
         guard idx < cellCount else { return .empty }
-        let cell = handle.pointee.cells[idx]
+        return Self.classify(handle.pointee.cells[idx])
+    }
+
+    /// The single source of truth for decoding one already-fetched `BBCell`
+    /// into a `CellKind`. Every cell walker — `cellKind(at:row:)`,
+    /// `character(at:row:)`, `visibleRowsAsText()`, and (via `cellKind`) the
+    /// find/replace row-walkers — routes its per-cell decision through here, so
+    /// the spacer / empty / invalid / character policy can never diverge across
+    /// them (REFACTOR.md Part IV). The caller owns the bounds check; this is
+    /// pure decoding of a cell the caller already fetched.
+    static func classify(_ cell: BBCell) -> CellKind {
         let spacerMask = UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER)
         if cell.flags & spacerMask != 0 {
             return .spacer
@@ -813,9 +842,14 @@ public final class BBSnapshot {
         // that lifts that bound gets a safe fallback.
         guard let idx = Self.flatIndex(row: row, col: col, cols: cols) else { return nil }
         guard idx < cellCount else { return nil }
-        let scalar = handle.pointee.cells[idx].ch
-        guard scalar != 0, let us = Unicode.Scalar(scalar) else { return nil }
-        return Character(us)
+        // "What to render here": only a leading character cell yields a glyph;
+        // spacer / empty / invalid all collapse to nil. Routes through the
+        // shared `classify` decoder (spacer cells carry `.ch == 0`, so the
+        // result is identical to the former raw `.ch` read).
+        if case .character(let ch) = Self.classify(handle.pointee.cells[idx]) {
+            return ch
+        }
+        return nil
     }
 
     /// Raw cell pointer for bulk iteration by the renderer. Returned pointer
@@ -926,7 +960,6 @@ extension BBSnapshot: A11ySnapshotSource {
         out.reserveCapacity(rows)
         let cellsPtr = cellsPointer
         let cellLen = cellCount
-        let spacerMask = UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER)
         for r in 0..<rows {
             var chars: [Character] = []
             chars.reserveCapacity(cols)
@@ -941,20 +974,17 @@ extension BBSnapshot: A11ySnapshotSource {
                 // corrupted snapshot where cells_len drifts below
                 // rows*cols.
                 guard idx < cellLen else { break }
-                let cell = cellsPtr[idx]
-                if cell.flags & spacerMask != 0 {
+                // Per-cell decode via the shared `classify`; the a11y policy is
+                // skip-spacer, map empty/invalid → space so column alignment is
+                // preserved for screen readers navigating by character.
+                switch Self.classify(cellsPtr[idx]) {
+                case .character(let ch):
+                    chars.append(ch)
+                case .spacer:
                     continue   // wide-glyph tail, already painted by the leading cell
+                case .empty, .invalid:
+                    chars.append(" ")
                 }
-                // Zero means "unrendered" (blank). Treat as space so column
-                // alignment of subsequent non-empty cells is preserved for
-                // screen readers that navigate by character.
-                let scalar: Unicode.Scalar
-                if cell.ch == 0 {
-                    scalar = Unicode.Scalar(32)!
-                } else {
-                    scalar = Unicode.Scalar(cell.ch) ?? Unicode.Scalar(32)!
-                }
-                chars.append(Character(scalar))
             }
             out.append(String(chars))
         }
