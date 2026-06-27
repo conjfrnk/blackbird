@@ -645,41 +645,29 @@ public final class Preferences: ObservableObject {
         let persistent = defaults.persistentDomain(forName: domain) ?? [:]
         func storedRaw(_ name: String) -> String? { persistent[k(name)] as? String }
 
-        let themeRaw = storedRaw("theme") ?? Theme.gruvbox.rawValue
-        if Theme(rawValue: themeRaw) == nil {
-            let target = Theme.gruvbox.rawValue
-            if themeRaw != target { prefs.themeRaw = target }
+        // Repair one enum-backed pref: if the stored rawValue doesn't decode
+        // to a valid case, write the default back — but only when it actually
+        // differs, so a value that's already the default doesn't fire a
+        // redundant `didChangeNotification`. One shape for all seven; the
+        // per-pref blocks this replaces were byte-identical apart from the key,
+        // enum type, default case, and target property.
+        func repair<E: RawRepresentable>(
+            _ key: String, _ type: E.Type, default def: E, assign: (String) -> Void
+        ) where E.RawValue == String {
+            let raw = storedRaw(key) ?? def.rawValue
+            if E(rawValue: raw) == nil {
+                let target = def.rawValue
+                if raw != target { assign(target) }
+            }
         }
-        let themeModeRaw = storedRaw("themeMode") ?? ThemeMode.dark.rawValue
-        if ThemeMode(rawValue: themeModeRaw) == nil {
-            let target = ThemeMode.dark.rawValue
-            if themeModeRaw != target { prefs.themeModeRaw = target }
-        }
-        let bellRaw = storedRaw("bell") ?? BellStyle.visual.rawValue
-        if BellStyle(rawValue: bellRaw) == nil {
-            let target = BellStyle.visual.rawValue
-            if bellRaw != target { prefs.bellRaw = target }
-        }
-        let cursorShapeRaw = storedRaw("cursorShape") ?? CursorShape.followShell.rawValue
-        if CursorShape(rawValue: cursorShapeRaw) == nil {
-            let target = CursorShape.followShell.rawValue
-            if cursorShapeRaw != target { prefs.cursorShapeRaw = target }
-        }
-        let optionKeyRaw = storedRaw("optionKey") ?? OptionKey.meta.rawValue
-        if OptionKey(rawValue: optionKeyRaw) == nil {
-            let target = OptionKey.meta.rawValue
-            if optionKeyRaw != target { prefs.optionKeyRaw = target }
-        }
-        let windowDragModifierRaw = storedRaw("windowDragModifier") ?? WindowGestureModifier.command.rawValue
-        if WindowGestureModifier(rawValue: windowDragModifierRaw) == nil {
-            let target = WindowGestureModifier.command.rawValue
-            if windowDragModifierRaw != target { prefs.windowDragModifierRaw = target }
-        }
-        let windowResizeModifierRaw = storedRaw("windowResizeModifier") ?? WindowGestureModifier.command.rawValue
-        if WindowGestureModifier(rawValue: windowResizeModifierRaw) == nil {
-            let target = WindowGestureModifier.command.rawValue
-            if windowResizeModifierRaw != target { prefs.windowResizeModifierRaw = target }
-        }
+
+        repair("theme", Theme.self, default: .gruvbox) { prefs.themeRaw = $0 }
+        repair("themeMode", ThemeMode.self, default: .dark) { prefs.themeModeRaw = $0 }
+        repair("bell", BellStyle.self, default: .visual) { prefs.bellRaw = $0 }
+        repair("cursorShape", CursorShape.self, default: .followShell) { prefs.cursorShapeRaw = $0 }
+        repair("optionKey", OptionKey.self, default: .meta) { prefs.optionKeyRaw = $0 }
+        repair("windowDragModifier", WindowGestureModifier.self, default: .command) { prefs.windowDragModifierRaw = $0 }
+        repair("windowResizeModifier", WindowGestureModifier.self, default: .command) { prefs.windowResizeModifierRaw = $0 }
     }
 
     /// Remove wrong-type values from numeric pref keys. `@AppStorage<Double>`
