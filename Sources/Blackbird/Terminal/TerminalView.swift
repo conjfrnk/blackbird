@@ -58,9 +58,8 @@ public struct CellMetrics {
         //      Int can't hold them.
         // Clamp to a sane pixel count first; clamps apply per-axis
         // so a valid axis keeps its real measurement.
-        let sanePx: CGFloat = 1_000_000   // far larger than any real display
-        let w = size.width.isFinite ? min(max(0, size.width), sanePx) : 0
-        let h = size.height.isFinite ? min(max(0, size.height), sanePx) : 0
+        let w = size.width.sanitizedPixel   // see `CGFloat.sanitizedPixel`
+        let h = size.height.sanitizedPixel
         let cols = max(1, Int(w / cellWidth))
         let rows = max(1, Int(h / cellHeight))
         return (cols, rows)
@@ -855,10 +854,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         guard cw > 0, ch > 0 else { return (0, 0) }
         // Mirror `Selection.bufferPoint(forView:…)`'s defensive clamp so a
         // stray Core Animation NaN or a misbehaving input device can't
-        // crash the app at `Int(NaN)` / `Int(±Inf)`. Same `sanePx` ceiling.
-        let sanePx: CGFloat = 1_000_000
-        let safeX = point.x.isFinite ? min(max(0, point.x), sanePx) : 0
-        let safeY = point.y.isFinite ? min(max(0, point.y), sanePx) : 0
+        // crash the app at `Int(NaN)` / `Int(±Inf)`. Same `CGFloat.sanePx`
+        // ceiling (see `CGFloat.sanitizedPixel`).
+        let safeX = point.x.sanitizedPixel
+        let safeY = point.y.sanitizedPixel
         let xInGrid = safeX - Self.horizontalContentInsetPoints
         let yInGrid = safeY - titlebarOnlyTopInset
         let rawCol = Int(max(0, xInGrid) / cw)
@@ -898,7 +897,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
         let grid = metrics.grid(forPixelSize: usable)
         guard grid.cols > 0, grid.rows > 0 else { return }
-        // `grid` is bounded by CellMetrics.sanePx (1M px / min cell size),
+        // `grid` is bounded by CGFloat.sanePx (1M px / min cell size),
         // so in theory cols/rows can exceed UInt16.max on a degenerate
         // combination (1×1 cell on a 1 Mpx viewport). `clamping:` avoids
         // the trap; TerminalSession.resize clamps again to ≤1000 so the

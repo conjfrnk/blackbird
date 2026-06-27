@@ -118,6 +118,7 @@
 		AB4C2E6FAB780BFEA012E8AC /* KeyEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6E41D23703A7FE0195559D6 /* KeyEncoder.swift */; };
 		ACDBBA4BF6284D53445C2060 /* TabOrderCoordinatorPurgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1038D22AC215585EB760B2B /* TabOrderCoordinatorPurgeTests.swift */; };
 		AEA0781C3AD2FB9599F76FFB /* ThemeManagerBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 846A3D2CC7F3764F4BD6610C /* ThemeManagerBlindTests.swift */; };
+		AED5790E98A2F6F32023CAB5 /* PixelGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */; };
 		AED697821DF433FFA6BAE0ED /* GlyphBitmapCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAAC9FD6558B761F250337E /* GlyphBitmapCache.swift */; };
 		B37AC88E5CC124787CCED556 /* HyperlinkResolverBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 908DFCA17FCE4685C2E184EE /* HyperlinkResolverBlindTests.swift */; };
 		B3F09FD0F183D209DB5A8A25 /* MouseInsetMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9959E3BB61D8228703D58C58 /* MouseInsetMappingTests.swift */; };
@@ -312,6 +313,7 @@
 		C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeResolutionTests.swift; sourceTree = "<group>"; };
 		C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
 		C4F09C8D4B7B5D585744F5FB /* WindowMultiDisplayNudgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowMultiDisplayNudgeTests.swift; sourceTree = "<group>"; };
+		C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelGeometry.swift; sourceTree = "<group>"; };
 		C735D6264882444369074ACB /* CellInstance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstance.swift; sourceTree = "<group>"; };
 		C81B55889FCFFCA2A3AF0708 /* MainThreadWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainThreadWatchdogTests.swift; sourceTree = "<group>"; };
 		C9E38BAB38899CD10A229243 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
@@ -550,6 +552,7 @@
 				3C34173E1CCE533C77F6B52B /* HyperlinkResolver.swift */,
 				26B359BBCEB85D55F2981EDD /* LatencyProbe.swift */,
 				8B9FC36E18F7230ED943F1A0 /* PasteSanitizer.swift */,
+				C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */,
 				28AC18E4DFA1B4F34FA78C71 /* PowerAwareRendering.swift */,
 				5995252272D652667DB2D2D9 /* PTY.swift */,
 				40C5A8C9337C9EB932DA1A60 /* RegexSafetyGate.swift */,
@@ -800,6 +803,7 @@
 				25F0BDE5FF93EEACCBE4DA8C /* MetalRenderer.swift in Sources */,
 				7462C02E74143E52FD628DA5 /* PTY.swift in Sources */,
 				0A38D6D97FCE22C1211E33E3 /* PasteSanitizer.swift in Sources */,
+				AED5790E98A2F6F32023CAB5 /* PixelGeometry.swift in Sources */,
 				95D6A4034F6872A29F1474AF /* PowerAwareRendering.swift in Sources */,
 				2128B6F807CB069799F1A479 /* Preferences.swift in Sources */,
 				5CE494D770F0D5361B6E8993 /* RegexSafetyGate.swift in Sources */,

@@ -422,7 +422,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         do {
             // `clamping:` avoids a trap on pathological bounds. See the
             // equivalent fix in `TerminalView.applyResizeIfNeeded` — with
-            // CellMetrics.sanePx = 1M px, a degenerate 1×1 cell can push
+            // CGFloat.sanePx = 1M px, a degenerate 1×1 cell can push
             // grid.cols above UInt16.max. TerminalSession.resize clamps
             // again to ≤1000 so the downstream grid is always sensible.
             #if DEBUG

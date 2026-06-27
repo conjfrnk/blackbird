@@ -307,11 +307,12 @@ extension TerminalView: NSTextInputClient {
         // like 1e300 — or +Inf, which slips past the `dx >= 0` guard —
         // would otherwise trap ("Double value cannot be converted to
         // Int because it is outside the representable range") and crash
-        // the app. Mirrors the `sanePx` clamp already applied in
-        // Selection.swift and TerminalView+Mouse.swift before their
-        // point-derived Int() casts.
-        let sanePx: CGFloat = 1_000_000
-        let safeDx = dx.isFinite ? min(dx, sanePx) : 0
+        // the app. `dx >= 0` is guaranteed by the guard above, so
+        // `max(0, dx) == dx` and `sanitizedPixel` matches the original
+        // `min(dx, sanePx)` exactly. Mirrors the `CGFloat.sanePx` clamp
+        // applied in Selection.swift and TerminalView+Mouse.swift before
+        // their point-derived Int() casts.
+        let safeDx = dx.sanitizedPixel
         let cellOffset = Int((safeDx / cw).rounded(.down))
         // Walk graphemes summing width until we reach cellOffset. Per-grapheme
         // width comes from `terminalCellWidth(of:)` — the SAME grapheme-aware

@@ -731,19 +731,19 @@ extension TerminalView {
         // `Int(NaN)` / `Int(±Inf)` trap. Guard before the cast rather
         // than after — the scrollWheel path already uses this pattern.
         guard loc.x.isFinite, loc.y.isFinite else { return }
-        // Audit fix-#19 (2026-05-11): clamp magnitude to `sanePx` BEFORE
-        // the Int() cast. `Int(Double)` traps when the magnitude exceeds
-        // Int.max (~9.2e18 on 64-bit) — `loc.y` is finite but bounded only
-        // by Double.greatestFiniteMagnitude (~1.79e308), so a bridged
+        // Audit fix-#19 (2026-05-11): clamp magnitude to `CGFloat.sanePx`
+        // BEFORE the Int() cast. `Int(Double)` traps when the magnitude
+        // exceeds Int.max (~9.2e18 on 64-bit) — `loc.y` is finite but bounded
+        // only by Double.greatestFiniteMagnitude (~1.79e308), so a bridged
         // CGPoint with a finite-but-absurd value (fault injection,
         // accessibility tool synthesising motion, exotic tablet driver)
         // would trap inside the `min(maxCol, Int(colX))` expression below.
-        // Selection.bufferPoint uses the same sanePx clamp pattern at
-        // Selection.swift:137 — mirror it here so both mouse paths are
-        // protected.
-        let sanePx: CGFloat = 1_000_000
-        let safeY = min(max(0, loc.y), sanePx)
-        let safeX = min(max(0, loc.x), sanePx)
+        // `loc` is already guaranteed finite by the guard above, so
+        // `sanitizedPixel`'s non-finite→0 branch is dead here — the live
+        // path is `min(max(0, loc.*), sanePx)`, the same clamp
+        // Selection.bufferPoint applies. (see `CGFloat.sanitizedPixel`)
+        let safeY = loc.y.sanitizedPixel
+        let safeX = loc.x.sanitizedPixel
         let rowY = (bounds.height - titlebarOnlyTopInset - safeY) / metrics.cellHeight
         // Subtract the L inset so a click at view-x=horizontalContentInsetPoints
         // maps to col 0 (matches the renderer's cell origin). Negative results
