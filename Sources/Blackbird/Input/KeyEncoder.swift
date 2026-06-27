@@ -218,56 +218,11 @@ public final class KeyEncoder {
         }
 
         // Ctrl+printable: only the first character is transformed.
-        if modifiers.contains(.control), let scalar = chars.unicodeScalars.first {
-            // Kitty disambiguation: Ctrl+{i,m,[,h,?} legacy-alias Tab/Enter/
-            // Esc/Backspace/DEL. Under flag 1 OR flag 8 (both contracted to
-            // "every key as CSI u"), any modifier combination including these
-            // collider letters emits CSI u so the TUI can tell them apart
-            // from the unmodified C0 byte they alias. The codepoint is
-            // normalized to the lowercase collider so Shift reports via the
-            // mod param instead of by changing the base key. Other Ctrl+letter
-            // combinations in the flag-1-only case stay as their C0 byte so
-            // shells' SIGINT / SIGQUIT / word-motion bindings keep working.
-            if (kitty || allKeys), let cp = ctrlColliderCodepoint(for: scalar) {
-                return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
-            }
-            // F-S3: under Kitty flag 1 / 8, a Ctrl+printable that has NO C0
-            // mapping (Ctrl+digit, Ctrl+. , Ctrl+/ , Ctrl+; , …) is LOSSY in
-            // legacy — the Ctrl bit can't be encoded, so the bare char goes out
-            // and the TUI never sees Ctrl. Emit CSI u so the modifier survives.
-            // Letters and @[\]^_ ? space keep their unambiguous C0 bytes
-            // (handled below). The CSI-u codepoint is the UNSHIFTED base (Shift
-            // reports via the mod param): map a US-layout shifted symbol back to
-            // its base (Ctrl+> = Ctrl+Shift+. → '.'), else the scalar already IS
-            // the base. (flag 8 alone already routes these through the
-            // reportAllKeys branch above; this closes the flag-1-only gap.)
-            // Non-US layouts miss the shifted-symbol base map — same
-            // UCKeyTranslate caveat as flag 4.
-            if (kitty || allKeys),
-               controlByte(for: scalar) == nil,
-               scalar.value >= 0x20, scalar.value != 0x7F {
-                let base = (modifiers.contains(.shift)
-                            ? Self.usLayoutUnshiftedSymbol(scalar) : nil) ?? scalar.value
-                return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
-            }
-            if eventType == .release {
-                return Data()
-            }
-            if let ctrlByte = controlByte(for: scalar) {
-                // Ctrl+Option+letter in Meta mode is the Emacs/readline M-C-*
-                // chord (forward-sexp, beginning-of-defun, …). The bare C0
-                // byte drops the Meta bit, silently degrading M-C-f to plain
-                // ^F. Prepend ESC so the shell sees ESC + C0 — matching how
-                // arrows already report mod=7 for Ctrl+Option (audit H7) and
-                // Terminal.app / iTerm2's Option-as-Meta behaviour. Only in
-                // Meta mode: Native-Option has no Meta bit to carry, and the
-                // kitty / modifyOtherKeys branches above already frame the
-                // chord with the full modifier param.
-                if optionIsMeta && modifiers.contains(.option) {
-                    return Data([0x1B, ctrlByte])
-                }
-                return Data([ctrlByte])
-            }
+        if let bytes = tryControlPrintable(
+            chars: chars, modifiers: modifiers, effectiveMods: effectiveMods,
+            kitty: kitty, allKeys: allKeys, eventType: eventType
+        ) {
+            return bytes
         }
 
         // Release events past here would end up emitting a legacy byte
@@ -293,6 +248,76 @@ public final class KeyEncoder {
         }
 
         return Data(chars.utf8)
+    }
+
+    /// Ctrl+printable encoding — only the first scalar is transformed. Returns
+    /// the bytes to emit, or `nil` to fall through to the legacy paths in
+    /// `encode`. Order is precedence (preserved from the inline chain it
+    /// replaces):
+    ///   1. Kitty flag 1/8 collider (Ctrl+{i,m,[,h,?} aliasing Tab/Enter/Esc/
+    ///      Backspace/DEL) → CSI u with the lowercase collider codepoint.
+    ///   2. Kitty flag 1/8 lossy gap (Ctrl+digit/`.`/`/`/`;`… with no C0
+    ///      mapping) → CSI u with the unshifted base (F-S3).
+    ///   3. release → empty (no paired release form in legacy).
+    ///   4. a real C0 byte → that byte, or ESC+byte in Option-as-Meta
+    ///      (Emacs/readline M-C-* chord, audit H7).
+    /// `nil` only when there's no `.control` modifier, or a Ctrl+printable with
+    /// no C0 mapping in a non-kitty mode (the caller's legacy fall-through).
+    private func tryControlPrintable(
+        chars: String,
+        modifiers: Modifiers,
+        effectiveMods: Modifiers,
+        kitty: Bool,
+        allKeys: Bool,
+        eventType: EventType
+    ) -> Data? {
+        guard modifiers.contains(.control), let scalar = chars.unicodeScalars.first else {
+            return nil
+        }
+        // Kitty disambiguation: Ctrl+{i,m,[,h,?} legacy-alias Tab/Enter/Esc/
+        // Backspace/DEL. Under flag 1 OR flag 8 any modifier combination
+        // including these collider letters emits CSI u so the TUI can tell them
+        // apart from the unmodified C0 byte they alias. The codepoint is
+        // normalized to the lowercase collider so Shift reports via the mod
+        // param. Other Ctrl+letter combos in the flag-1-only case stay as their
+        // C0 byte so shells' SIGINT / SIGQUIT / word-motion bindings keep working.
+        if (kitty || allKeys), let cp = ctrlColliderCodepoint(for: scalar) {
+            return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
+        }
+        // F-S3: under Kitty flag 1 / 8, a Ctrl+printable with NO C0 mapping
+        // (Ctrl+digit, Ctrl+. , Ctrl+/ , Ctrl+; , …) is LOSSY in legacy — the
+        // Ctrl bit can't be encoded, so emit CSI u so the modifier survives.
+        // The codepoint is the UNSHIFTED base (Shift reports via the mod param):
+        // map a US-layout shifted symbol back to its base (Ctrl+> = Ctrl+Shift+.
+        // → '.'), else the scalar already IS the base. (flag 8 alone routes
+        // these through the reportAllKeys branch; this closes the flag-1-only
+        // gap.) Non-US layouts miss the shifted-symbol base map — same
+        // UCKeyTranslate caveat as flag 4.
+        if (kitty || allKeys),
+           controlByte(for: scalar) == nil,
+           scalar.value >= 0x20, scalar.value != 0x7F {
+            let base = (modifiers.contains(.shift)
+                        ? Self.usLayoutUnshiftedSymbol(scalar) : nil) ?? scalar.value
+            return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
+        }
+        if eventType == .release {
+            return Data()
+        }
+        if let ctrlByte = controlByte(for: scalar) {
+            // Ctrl+Option+letter in Meta mode is the Emacs/readline M-C-* chord
+            // (forward-sexp, beginning-of-defun, …). The bare C0 byte drops the
+            // Meta bit, silently degrading M-C-f to plain ^F. Prepend ESC so the
+            // shell sees ESC + C0 — matching how arrows report mod=7 for
+            // Ctrl+Option (audit H7) and Terminal.app / iTerm2's Option-as-Meta.
+            // Only in Meta mode: Native-Option has no Meta bit, and the kitty /
+            // modifyOtherKeys branches already frame the chord with the full
+            // modifier param.
+            if optionIsMeta && modifiers.contains(.option) {
+                return Data([0x1B, ctrlByte])
+            }
+            return Data([ctrlByte])
+        }
+        return nil
     }
 
     /// Kitty progressive-enhancement maps one of four "ambiguous" keys to its
