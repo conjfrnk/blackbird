@@ -2,6 +2,7 @@ use super::*;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::vte::ansi::{Handler, Rgb};
 
+use crate::osc::OSC7_URL_MAX;
 use crate::scrub::scrub_title_controls;
 
 #[test]
