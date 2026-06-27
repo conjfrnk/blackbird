@@ -4,29 +4,29 @@ import XCTest
 final class TabRenameTests: XCTestCase {
     func testOverrideBeatsOscTitle() {
         let s = TerminalSession.makeHeadlessForTests()
-        s.applyOscTitle("shell-says-this")
-        XCTAssertEqual(s.displayTitle, "shell-says-this")
+        s.titleState.applyOscTitle("shell-says-this")
+        XCTAssertEqual(s.titleState.displayTitle, "shell-says-this")
 
-        s.titleOverride = "My Tab"
-        XCTAssertEqual(s.displayTitle, "My Tab")
+        s.titleState.titleOverride = "My Tab"
+        XCTAssertEqual(s.titleState.displayTitle, "My Tab")
 
-        s.applyOscTitle("shell-changed")
-        XCTAssertEqual(s.displayTitle, "My Tab")
+        s.titleState.applyOscTitle("shell-changed")
+        XCTAssertEqual(s.titleState.displayTitle, "My Tab")
     }
 
     func testResetToAutoResumesOscTitle() {
         let s = TerminalSession.makeHeadlessForTests()
-        s.applyOscTitle("from-shell")
-        s.titleOverride = "Override"
-        s.titleOverride = nil
-        XCTAssertEqual(s.displayTitle, "from-shell")
+        s.titleState.applyOscTitle("from-shell")
+        s.titleState.titleOverride = "Override"
+        s.titleState.titleOverride = nil
+        XCTAssertEqual(s.titleState.displayTitle, "from-shell")
     }
 
     func testEmptyOverrideTreatedAsNil() {
         let s = TerminalSession.makeHeadlessForTests()
-        s.applyOscTitle("from-shell")
-        s.titleOverride = ""
-        XCTAssertEqual(s.displayTitle, "from-shell")
+        s.titleState.applyOscTitle("from-shell")
+        s.titleState.titleOverride = ""
+        XCTAssertEqual(s.titleState.displayTitle, "from-shell")
     }
 
     /// Hostile shells can emit `\e]0;` + KBs of payload + `\e\\` to
@@ -36,10 +36,10 @@ final class TabRenameTests: XCTestCase {
     /// downstream layout can never see an unbounded title.
     func testOscTitleIsCappedAtMaxGraphemes() {
         let s = TerminalSession.makeHeadlessForTests()
-        let cap = TerminalSession.oscTitleMaxGraphemes
+        let cap = SessionTitleState.oscTitleMaxGraphemes
         let payload = String(repeating: "x", count: cap * 8)
-        s.applyOscTitle(payload)
-        let title = s.displayTitle ?? ""
+        s.titleState.applyOscTitle(payload)
+        let title = s.titleState.displayTitle ?? ""
         XCTAssertEqual(title.count, cap + 1,
             "oversize title must be truncated to cap + 1 grapheme (the appended ellipsis)")
         XCTAssertTrue(title.hasSuffix("…"),
@@ -51,11 +51,11 @@ final class TabRenameTests: XCTestCase {
     /// titles aren't visibly altered.
     func testOscTitleAtOrBelowCapPassesThrough() {
         let s = TerminalSession.makeHeadlessForTests()
-        let cap = TerminalSession.oscTitleMaxGraphemes
+        let cap = SessionTitleState.oscTitleMaxGraphemes
         let payload = String(repeating: "y", count: cap)
-        s.applyOscTitle(payload)
-        XCTAssertEqual(s.displayTitle, payload)
-        XCTAssertFalse(s.displayTitle?.hasSuffix("…") ?? true,
+        s.titleState.applyOscTitle(payload)
+        XCTAssertEqual(s.titleState.displayTitle, payload)
+        XCTAssertFalse(s.titleState.displayTitle?.hasSuffix("…") ?? true,
             "an exact-cap title must NOT pick up the truncation marker")
     }
 }

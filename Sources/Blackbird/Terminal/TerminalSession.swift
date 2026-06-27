@@ -73,11 +73,10 @@ public final class TerminalSession: ObservableObject {
     private var publishedFirstSnapshot = false
 
     @Published public private(set) var snapshot: BBSnapshot?
-    /// Effective, observable title for UI binding. Always equals `displayTitle`
-    /// — republished whenever the shell emits OSC 0/2 or the user changes
-    /// `titleOverride`, so Combine subscribers (e.g., `TerminalView` → `window.title`)
-    /// pick up both sources.
-    @Published public private(set) var title: String?
+    /// Window / tab title state (OSC 0/2 + user override → one observable
+    /// title). Hoisted out of this class — UI binds to `session.titleState.$title`;
+    /// the rename flow sets `session.titleState.titleOverride`.
+    public let titleState = SessionTitleState()
     @Published public private(set) var bellCounter: UInt64 = 0
     /// Set once after the shell process has exited. The value is the child's
     /// exit code (-1 for abnormal termination). Observers (e.g. the window
@@ -156,98 +155,6 @@ public final class TerminalSession: ObservableObject {
         /// Grid row (0 = top of the live grid) at the moment the prompt
         /// was emitted.
         public let gridRow: Int
-    }
-
-    // MARK: - Title state
-
-    /// Last title the shell emitted via OSC 0/2. Empty before any emit.
-    /// Mutated on main thread (see the `bbterm.onEvent` dispatch back to main).
-    private var oscTitle: String = ""
-
-    /// User-set manual override. When non-nil and non-empty, the UI shows
-    /// this instead of the shell's OSC title. Setting to nil or an empty
-    /// string reverts to auto (OSC) mode.
-    public var titleOverride: String? {
-        didSet {
-            // Treat empty string as "clear the override" — matches the
-            // Rename alert's empty-field behaviour (see MainWindowController.beginRenameActiveTab).
-            if titleOverride?.isEmpty == true {
-                // Guard against recursion: only reassign if not already nil.
-                if titleOverride != nil {
-                    titleOverride = nil
-                    return  // didSet will re-fire with nil and publish.
-                }
-            }
-            publishTitle()
-        }
-    }
-
-    /// The title to display in the window / tab bar. Override wins when set;
-    /// otherwise the shell-reported OSC title; otherwise `nil` so the
-    /// TerminalView sink keeps the current `window.title` (which the window
-    /// controller seeds with the shell basename at session start). Returning
-    /// a literal "Terminal" placeholder here used to overwrite the
-    /// shell-basename seed the moment a user cleared their rename override
-    /// in a session whose shell hadn't emitted OSC 0/2 yet — bare bash/zsh
-    /// without a precmd-titler is the common trigger.
-    public var displayTitle: String? {
-        if let override = titleOverride, !override.isEmpty { return override }
-        return oscTitle.isEmpty ? nil : oscTitle
-    }
-
-    /// Maximum grapheme-cluster length retained from an OSC 0/2 title.
-    /// A hostile remote that emits `\e]0;` + 2 KB of text + `\e\\` would
-    /// otherwise feed `TabStripView.truncatedString` a multi-thousand-
-    /// character search space on every titlebar redraw — even with the
-    /// binary-search truncation, per-frame `NSString.size(withAttributes:)`
-    /// scales with layout cost on the full string. 256 graphemes is well
-    /// past any legitimate shell-emitted title (`hostname:dir$` style
-    /// fits in 80) and keeps the per-frame cost bounded.
-    public static let oscTitleMaxGraphemes = 256
-
-    /// Called by the event router when the shell emits OSC 0/2. Keeps
-    /// `oscTitle` and the published `title` in sync. Harmless to call with
-    /// the same string twice — the `@Published` will still fire, which is
-    /// fine; downstream is idempotent.
-    public func applyOscTitle(_ newValue: String) {
-        oscTitle = Self.cappedOscTitle(newValue)
-        publishTitle()
-    }
-
-    /// Truncate at `oscTitleMaxGraphemes` so the per-frame pill layout
-    /// stays bounded regardless of payload size. Counted in graphemes so
-    /// combining marks aren't split across a truncation boundary.
-    static func cappedOscTitle(_ value: String) -> String {
-        if value.count <= oscTitleMaxGraphemes { return value }
-        let prefix = value.prefix(oscTitleMaxGraphemes)
-        return String(prefix) + "…"
-    }
-
-    /// Recompute `displayTitle` and republish on the `@Published title`
-    /// pipeline. UI observes via Combine (`TerminalView.$title.sink`);
-    /// there's no notification channel — Combine is canonical. Callers on
-    /// any thread hop to main if needed. A nil value means "no real title
-    /// to set" — the sink falls back to the current window.title (shell
-    /// basename) instead of overwriting it with a placeholder.
-    ///
-    /// Audit L6: when called off main, recompute `displayTitle` INSIDE
-    /// the main-async block rather than capturing a snapshot before the
-    /// hop. The two underlying fields (`oscTitle`, `titleOverride`) are
-    /// both written from main, so reading them off main is itself a
-    /// data race; reading them on main inside the delivery closure
-    /// also closes a small ordering window where two rapid title
-    /// writes (one from a feed event, one from a `titleOverride`
-    /// setter) could interleave their captured snapshots and deliver
-    /// the older value last.
-    private func publishTitle() {
-        if Thread.isMainThread {
-            self.title = displayTitle
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.title = self.displayTitle
-            }
-        }
     }
 
     private let bbterm: BBTerm
@@ -373,9 +280,10 @@ public final class TerminalSession: ObservableObject {
     #if DEBUG
     /// Headless factory for title-logic tests. Creates a BBTerm at a trivial
     /// size and skips the PTY spawn entirely — so no child process, no fd,
-    /// no background queues. Only `applyOscTitle`, `titleOverride`, and
-    /// `displayTitle` are useful on the returned instance; public methods
-    /// that touch the PTY are all no-ops via optional chaining.
+    /// no background queues. Only the `titleState` collaborator (its
+    /// `applyOscTitle` / `titleOverride` / `displayTitle`) is useful on the
+    /// returned instance; public methods that touch the PTY are all no-ops
+    /// via optional chaining.
     static func makeHeadlessForTests() -> TerminalSession {
         // BBTerm.init accepts anything ≥ 2; pick the minimum so we don't
         // waste allocation for unit-test purposes.
@@ -1518,7 +1426,7 @@ public final class TerminalSession: ObservableObject {
             // Route through applyOscTitle so a user-set override
             // isn't trampled by a late shell OSC 0/2, and so the
             // .terminalSessionTitleDidChange notification fires.
-            self.applyOscTitle(t)
+            titleState.applyOscTitle(t)
         case .bell:
             self.bellCounter &+= 1
         case .ptyWrite:
@@ -1644,8 +1552,8 @@ public final class TerminalSession: ObservableObject {
             // machine so the oscTitle / titleOverride / displayTitle
             // invariant holds — single writer, no divergence between
             // `title` and `displayTitle`.
-            self.titleOverride = nil
-            self.applyOscTitle("[fatal] core panic: \(msg)")
+            titleState.titleOverride = nil
+            titleState.applyOscTitle("[fatal] core panic: \(msg)")
         }
     }
 

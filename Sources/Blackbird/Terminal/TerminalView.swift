@@ -1554,7 +1554,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
             .store(in: &cancellables)
 
-        session.$title
+        session.titleState.$title
             .receive(on: DispatchQueue.main)
             .sink { [weak self] title in
                 guard let self else { return }

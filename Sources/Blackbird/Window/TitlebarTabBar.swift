@@ -1594,7 +1594,7 @@ final class TabStripView: NSView {
             menu.addItem(rename)
         }
 
-        if session?.titleOverride != nil {
+        if session?.titleState.titleOverride != nil {
             let reset = NSMenuItem(
                 title: "Reset to Auto",
                 action: #selector(MainWindowController.resetActiveTabTitle(_:)),

@@ -171,7 +171,7 @@ final class InlineRenameTests: XCTestCase {
     }
 
     /// Regression for swift-tests-view F5: the applyInlineRename logic
-    /// on the controller is `session?.titleOverride = trimmed.isEmpty
+    /// on the controller is `session?.titleState.titleOverride = trimmed.isEmpty
     /// ? nil : trimmed` — pure logic that doesn't need a real login
     /// shell. Exercising it against a `TerminalSession.makeHeadless
     /// ForTests()` avoids the heavy login-shell startup and its
@@ -179,16 +179,16 @@ final class InlineRenameTests: XCTestCase {
     func test_applyInlineRename_logic_mapsEmptyToNilViaHeadlessSession() {
         // Pure logic against a session that never launched a shell.
         let session = TerminalSession.makeHeadlessForTests()
-        session.applyOscTitle("from-shell")
+        session.titleState.applyOscTitle("from-shell")
         // Non-empty → override set.
         let nonEmpty = "Custom".trimmingCharacters(in: .whitespacesAndNewlines)
-        session.titleOverride = nonEmpty.isEmpty ? nil : nonEmpty
-        XCTAssertEqual(session.titleOverride, "Custom")
+        session.titleState.titleOverride = nonEmpty.isEmpty ? nil : nonEmpty
+        XCTAssertEqual(session.titleState.titleOverride, "Custom")
         // Empty / whitespace-only → override cleared; session resumes
         // the OSC-reported title.
         let empty = "".trimmingCharacters(in: .whitespacesAndNewlines)
-        session.titleOverride = empty.isEmpty ? nil : empty
-        XCTAssertNil(session.titleOverride)
+        session.titleState.titleOverride = empty.isEmpty ? nil : empty
+        XCTAssertNil(session.titleState.titleOverride)
         // Teardown: headless session has no shell to reap, but the
         // BBTerm Rust state still needs a terminate() to free its ring.
         session.terminate()
@@ -213,13 +213,13 @@ final class InlineRenameTests: XCTestCase {
             controller.window?.close()
         }
         // Simulate a shell title so there's something to revert to.
-        controller.session?.applyOscTitle("from-shell")
+        controller.session?.titleState.applyOscTitle("from-shell")
 
         controller.applyInlineRename("Custom")
-        XCTAssertEqual(controller.session?.titleOverride, "Custom")
+        XCTAssertEqual(controller.session?.titleState.titleOverride, "Custom")
 
         controller.applyInlineRename("")
-        XCTAssertNil(controller.session?.titleOverride)
+        XCTAssertNil(controller.session?.titleState.titleOverride)
 
         // Pin main-window F23: every Blackbird window opts out of
         // NSWindowRestoration explicitly. `required init?(coder:)`

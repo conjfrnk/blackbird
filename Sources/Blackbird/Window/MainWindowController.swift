@@ -1160,7 +1160,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
         if menuItem.action == #selector(resetActiveTabTitle(_:)) {
             // "Reset to Auto" only makes sense when an override is active.
-            return session?.titleOverride != nil
+            return session?.titleState.titleOverride != nil
         }
         return true
     }
@@ -1201,25 +1201,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // optional (returns nil when no override AND no OSC title yet) — fall
         // back to `window.title` so the alert shows the shell-basename seed
         // that's actually on screen instead of an empty field.
-        field.stringValue = session.displayTitle ?? (window?.title ?? "")
+        field.stringValue = session.titleState.displayTitle ?? (window?.title ?? "")
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
 
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else { return }
         let new = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        session.titleOverride = new.isEmpty ? nil : new
+        session.titleState.titleOverride = new.isEmpty ? nil : new
     }
 
     /// Receives the result of an inline pill rename. `trimmedTitle` is
     /// already whitespace-trimmed by `TabStripView.commitEdit`; empty
     /// string → clear override (revert to OSC / auto title).
     func applyInlineRename(_ trimmedTitle: String) {
-        session?.titleOverride = trimmedTitle.isEmpty ? nil : trimmedTitle
+        session?.titleState.titleOverride = trimmedTitle.isEmpty ? nil : trimmedTitle
     }
 
     @objc func resetActiveTabTitle(_ sender: Any?) {
-        session?.titleOverride = nil
+        session?.titleState.titleOverride = nil
     }
 }
 
