@@ -686,11 +686,14 @@ final class PreferencesMigrationTests: XCTestCase {
         let prefersClampAt64 = src.contains("min(64,")
         let prefersClampAt32 = src.contains("min(32,")
         // After the M-13/DI-6 centralization, the fontSize clamps route through
-        // the `Self.fontSizeRange` envelope symbol rather than a bare literal —
-        // the IDEAL single-source form, since a stray `min(32,`/`min(64,` literal
-        // can no longer drift from the `9...32` envelope. Recognize the symbol
-        // clamp as a valid (preferred) single ceiling.
+        // the `Self.fontSizeRange` envelope rather than a bare literal — the
+        // IDEAL single-source form, since a stray `min(32,`/`min(64,` literal
+        // can no longer drift from the `9...32` envelope. Recognize either the
+        // `.upperBound` symbol or the `fontSizeRange.clamping(...)` helper form
+        // (audit M5 folded the clamp op into one `ClosedRange.clamping` helper)
+        // as a valid (preferred) single ceiling.
         let usesRangeSymbol = src.contains("Self.fontSizeRange.upperBound")
+            || src.contains("fontSizeRange.clamping(")
 
         // Now scan the SettingsView slider (forbidden direct read), but
         // we can find it via grep-equivalent on the file system. The

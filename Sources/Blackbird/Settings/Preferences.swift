@@ -3,6 +3,20 @@ import AppKit
 import Combine
 import os
 
+private extension ClosedRange where Bound == Double {
+    /// Clamp `value` into the range, sending NaN / ±Infinity to `fallback`
+    /// first so a tampered plist can't surface a non-finite reading. The one
+    /// clamp envelope shared by the `fontSize` / `translucency` `didSet`
+    /// blocks and the external-defaults re-clamp in
+    /// `applyExternalDefaultsChange` — audit M-13/DI-6: with the clamp routed
+    /// through the `fontSizeRange` / `translucencyRange` symbol, no competing
+    /// inline ceiling literal can drift from the `9...32` / `1...10` envelope.
+    func clamping(_ value: Bound, nonFiniteFallback: Bound) -> Bound {
+        let normalised = value.isFinite ? value : nonFiniteFallback
+        return Swift.max(lowerBound, Swift.min(upperBound, normalised))
+    }
+}
+
 /// Single source of truth for user preferences, backed by `UserDefaults`
 /// via `@AppStorage`. `ObservableObject` so SwiftUI views bind via
 /// `@EnvironmentObject` / `@StateObject` and ThemeManager observes via
@@ -168,16 +182,11 @@ public final class Preferences: ObservableObject {
             // recursive write entirely when we're already inside a
             // clamping pass — the outer `didSet` already produced the
             // user-visible objectWillChange.
-            guard !clampingFontSize else { return }
-            let normalised = fontSize.isFinite ? fontSize : 13
-            let clamped = max(Self.fontSizeRange.lowerBound, min(Self.fontSizeRange.upperBound, normalised))
+            let clamped = Self.fontSizeRange.clamping(fontSize, nonFiniteFallback: 13)
             guard clamped != fontSize else { return }
-            clampingFontSize = true
-            defer { clampingFontSize = false }
-            fontSize = clamped
+            withSelfWriteSuppressed { fontSize = clamped }
         }
     }
-    private var clampingFontSize = false
     @AppStorage("bb.cursorBlink")    public var cursorBlink: Bool = false
     @AppStorage("bb.bell")           public var bellRaw: String = BellStyle.visual.rawValue
     @AppStorage("bb.cursorShape")    public var cursorShapeRaw: String = CursorShape.followShell.rawValue
@@ -233,16 +242,11 @@ public final class Preferences: ObservableObject {
             // see-through windows out of nowhere.
             //
             // Re-entry guard: same shape as fontSize — see comment there.
-            guard !clampingTranslucency else { return }
-            let normalised = translucency.isFinite ? translucency : 1
-            let clamped = max(Self.translucencyRange.lowerBound, min(Self.translucencyRange.upperBound, normalised))
+            let clamped = Self.translucencyRange.clamping(translucency, nonFiniteFallback: Self.translucencyRange.lowerBound)
             guard clamped != translucency else { return }
-            clampingTranslucency = true
-            defer { clampingTranslucency = false }
-            translucency = clamped
+            withSelfWriteSuppressed { translucency = clamped }
         }
     }
-    private var clampingTranslucency = false
 
     public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }
@@ -265,16 +269,48 @@ public final class Preferences: ObservableObject {
     /// `deinit`, both of which run with exclusive access to the singleton.
     private var defaultsObserver: NSObjectProtocol?
 
-    /// Re-entry guard for the `UserDefaults.didChangeNotification` handler.
-    /// Our clamp/repair writes fire `didChangeNotification`, which is
-    /// re-delivered on a later main-queue tick (the observer is
-    /// registered with `queue: .main`, which always wraps delivery in an
-    /// OperationQueue task). The same-value guards inside each branch
-    /// are the canonical defence; this short-circuit is belt-and-braces
-    /// in case Apple ever changes the delivery model. Main-queue-only
-    /// access enforced by `dispatchPrecondition` at the top of
+    /// The single reentry-suppression primitive (audit M5 + the
+    /// "≤ 1 reentry-suppression primitive" A-target). Replaces the three
+    /// former ad-hoc flags `clampingFontSize` / `clampingTranslucency` /
+    /// `isProcessingDefaultsChange`, which had identical shape. Set while a
+    /// self-write is in flight: the `fontSize` / `translucency` recursive
+    /// clamp writes and the `UserDefaults.didChangeNotification` handler all
+    /// route through `withSelfWriteSuppressed`.
+    ///
+    /// The same-value guards inside each `didSet` and the disk-comparison
+    /// guards in `applyExternalDefaultsChange` remain the canonical defence;
+    /// this flag is the documented belt-and-braces against the 982b719
+    /// SwiftUI feedback loop and against `didChangeNotification` re-delivery
+    /// (re-delivered on a later main-queue tick, in case Apple ever makes
+    /// that delivery synchronous). Main-queue-only access for the handler
+    /// path is enforced by `dispatchPrecondition` at the top of
     /// `handleDefaultsChange`.
-    private var isProcessingDefaultsChange = false
+    private var isSuppressingSelfWrite = false
+
+    /// Run `body` unless a self-write is already in flight, in which case it
+    /// is skipped (the outer write already produced the user-visible
+    /// objectWillChange / clamp).
+    ///
+    /// PRECONDITION — every write inside `body` MUST already satisfy the
+    /// `didSet` invariants (pre-clamped into its envelope and finite). While
+    /// the flag is held, the corrective `didSet` clamp is exactly the write
+    /// this primitive suppresses, so a raw / unclamped assignment inside a
+    /// suppressed region would skip its own clamp and could leave an
+    /// out-of-range value on the security-sensitive tampered-plist path. All
+    /// current callers honour this: the `didSet` recursion writes `clamped`,
+    /// and `applyExternalDefaultsChange` writes the pre-clamped `clampedFont`
+    /// / `clampedTrans`.
+    ///
+    /// Main-thread only — `isSuppressingSelfWrite` is a non-atomic `Bool` and
+    /// this is the single shared choke point. The handler path enforces it via
+    /// `dispatchPrecondition(.onQueue(.main))`; the `didSet` paths run on the
+    /// main thread by construction (SwiftUI `@AppStorage` mutation).
+    private func withSelfWriteSuppressed(_ body: () -> Void) {
+        guard !isSuppressingSelfWrite else { return }
+        isSuppressingSelfWrite = true
+        defer { isSuppressingSelfWrite = false }
+        body()
+    }
 
     /// Resolved `(opacity, blurRadius)` from the single translucency slider.
     /// Piecewise-linear with three anchors:
@@ -472,8 +508,9 @@ public final class Preferences: ObservableObject {
         // re-write from inside the callback fires the notification
         // again, immediately, on the same queue. Two guards close it:
         //
-        //   (a) `isProcessingDefaultsChange` re-entrancy flag — cheap
-        //       short-circuit when our own clamp write is the trigger.
+        //   (a) the shared `withSelfWriteSuppressed` primitive (one
+        //       `isSuppressingSelfWrite` flag) — cheap short-circuit when
+        //       our own clamp write is the trigger.
         //   (b) Same-value comparison inside each clamp/repair branch:
         //       a clamp that produces the same value as the current
         //       in-memory state is a no-op WRITE (we skip it), even if
@@ -517,8 +554,8 @@ public final class Preferences: ObservableObject {
     /// IS synchronous on UserDefaults + refreshes the cache + fires
     /// didSet for the same-value guard).
     private func handleDefaultsChange() {
-        // Locks the contract the `isProcessingDefaultsChange` flag relies
-        // on: the observer is registered with `queue: .main`, so this
+        // Locks the contract the `withSelfWriteSuppressed` handler path
+        // relies on: the observer is registered with `queue: .main`, so this
         // handler must execute on the main queue. If a future change
         // moves the queue without revisiting the flag, the precondition
         // catches it before the data race ships.
@@ -529,10 +566,15 @@ public final class Preferences: ObservableObject {
         // branch are the canonical defence; this re-entrancy short-
         // circuit is belt-and-braces in case Apple ever changes the
         // delivery model.
-        guard !isProcessingDefaultsChange else { return }
-        isProcessingDefaultsChange = true
-        defer { isProcessingDefaultsChange = false }
+        withSelfWriteSuppressed { applyExternalDefaultsChange() }
+    }
 
+    /// The external-defaults repair pass: H-8 schema-version gate, enum
+    /// raw-value repair, and the numeric-envelope re-clamp. Always invoked
+    /// through `withSelfWriteSuppressed` from `handleDefaultsChange`, so its
+    /// clamp/repair writes can't re-enter the handler (audit M5 — one
+    /// reentry-suppression primitive).
+    private func applyExternalDefaultsChange() {
         let defaults = UserDefaults.standard
 
         // H-8 downgrade gate: skip the enum repair when the on-disk
@@ -588,8 +630,7 @@ public final class Preferences: ObservableObject {
         if let diskFontSize = Preferences.doubleInPersistentDomain(
             in: defaults, domain: domain, key: Preferences.k("fontSize")
         ) {
-            let normalisedFont = diskFontSize.isFinite ? diskFontSize : 13
-            let clampedFont = max(Self.fontSizeRange.lowerBound, min(Self.fontSizeRange.upperBound, normalisedFont))
+            let clampedFont = Self.fontSizeRange.clamping(diskFontSize, nonFiniteFallback: 13)
             if clampedFont != diskFontSize {
                 Preferences.logger.log("re-clamping fontSize after external defaults write: \(diskFontSize, privacy: .public) → \(clampedFont, privacy: .public)")
                 self.fontSize = clampedFont
@@ -599,8 +640,7 @@ public final class Preferences: ObservableObject {
         if let diskTrans = Preferences.doubleInPersistentDomain(
             in: defaults, domain: domain, key: Preferences.k("translucency")
         ) {
-            let normalisedTrans = diskTrans.isFinite ? diskTrans : Self.translucencyRange.lowerBound
-            let clampedTrans = max(Self.translucencyRange.lowerBound, min(Self.translucencyRange.upperBound, normalisedTrans))
+            let clampedTrans = Self.translucencyRange.clamping(diskTrans, nonFiniteFallback: Self.translucencyRange.lowerBound)
             if clampedTrans != diskTrans {
                 Preferences.logger.log("re-clamping translucency after external defaults write: \(diskTrans, privacy: .public) → \(clampedTrans, privacy: .public)")
                 self.translucency = clampedTrans
