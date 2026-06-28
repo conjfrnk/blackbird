@@ -110,6 +110,7 @@
 		8E940FAAE63AB7BE99D79886 /* SelectionModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83BD7639AA0AD9A74DDB61B6 /* SelectionModeTests.swift */; };
 		903AE2C38D9B7F69973CC158 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 9EE9FF088456C53438AA86BE /* Sparkle */; };
 		91497F92ABED24A383320845 /* TerminalSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */; };
+		9247E4DBBBBA64139260858C /* CellInstanceBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0E2CD4DCD085F5C47CA901B /* CellInstanceBuilder.swift */; };
 		92B08E10BCF3923F92AA994B /* PTYTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */; };
 		92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */; };
 		92F85478B5B065F702AD717B /* MetalDeviceSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14E5F5AA20D171CAD16112AD /* MetalDeviceSelection.swift */; };
@@ -351,6 +352,7 @@
 		9BAAC9FD6558B761F250337E /* GlyphBitmapCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphBitmapCache.swift; sourceTree = "<group>"; };
 		9C9A88764B5EA6114CF35C8C /* TabStripLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStripLayout.swift; sourceTree = "<group>"; };
 		9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
+		A0E2CD4DCD085F5C47CA901B /* CellInstanceBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstanceBuilder.swift; sourceTree = "<group>"; };
 		A13EEDE788104CDCE7BAF53C /* MainThreadWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainThreadWatchdog.swift; sourceTree = "<group>"; };
 		A28AB63EC9CBA4574314FEC0 /* SelectionReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionReconciler.swift; sourceTree = "<group>"; };
 		A3B21EB9F8E347FEDA4676CF /* CwdTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdTracker.swift; sourceTree = "<group>"; };
@@ -601,6 +603,7 @@
 			isa = PBXGroup;
 			children = (
 				C735D6264882444369074ACB /* CellInstance.swift */,
+				A0E2CD4DCD085F5C47CA901B /* CellInstanceBuilder.swift */,
 				75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */,
 				9BAAC9FD6558B761F250337E /* GlyphBitmapCache.swift */,
 				14E5F5AA20D171CAD16112AD /* MetalDeviceSelection.swift */,
@@ -898,6 +901,7 @@
 				B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */,
 				3602A5992EE0441966DD5790 /* BellController.swift in Sources */,
 				BF0ADDAAD252C3F8D7FD3F79 /* CellInstance.swift in Sources */,
+				9247E4DBBBBA64139260858C /* CellInstanceBuilder.swift in Sources */,
 				B898D494B230876C434D5282 /* CellWidth.swift in Sources */,
 				CE133743E0EFED8541FF6F67 /* ClipboardWriter.swift in Sources */,
 				2B00CBAD39BA9D79D29F1CEE /* CwdResolver.swift in Sources */,

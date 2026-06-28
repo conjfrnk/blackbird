@@ -3,8 +3,8 @@ import simd
 @testable import Blackbird
 import BBCore
 
-/// GPU-free unit tests for the two pure static helpers extracted off
-/// `MetalRenderer`: `attributeBits` (cell flags + hover state → the shader's
+/// GPU-free unit tests for the two pure static helpers on
+/// `CellInstanceBuilder`: `attributeBits` (cell flags + hover state → the shader's
 /// `SIMD4<UInt32>` attribute lane bundle) and `resolveColors` (cell fg/bg +
 /// reverse/dim/opacity → resolved fg/bg/`hasBg`). Both are `static func`s
 /// reachable via `@testable` with no `MTLDevice`, so every test here runs
@@ -31,7 +31,7 @@ final class CellRenderHelpersTests: XCTestCase {
                link_id: linkID, underline_color: underlineColor)
     }
 
-    /// Mirrors `MetalRenderer.rgbToSIMD` (which is `private`, so not reachable
+    /// Mirrors `CellInstanceBuilder.rgbToSIMD` (which is `private`, so not reachable
     /// via `@testable`): unpack `0x00RRGGBB`, each byte / 255, alpha = 1.0.
     private func expectedRGB(_ rgb: UInt32) -> SIMD4<Float> {
         let inv: Float = 1.0 / 255.0
@@ -74,7 +74,7 @@ final class CellRenderHelpersTests: XCTestCase {
         cmdHoverEndCol: Int32 = 0,
         col: Int = 0
     ) -> SIMD4<UInt32> {
-        MetalRenderer.attributeBits(
+        CellInstanceBuilder.attributeBits(
             cell: cell,
             hoveredLinkID: hoveredLinkID,
             cmdHoverActiveOnRow: cmdHoverActiveOnRow,
@@ -215,7 +215,7 @@ final class CellRenderHelpersTests: XCTestCase {
         // cell.bg == defaultBg, not reversed → bg alpha forced to 0 and no quad,
         // overriding keepBgOpaque.
         let cell = makeCell(fg: 0x00FF_8040, bg: 0x0010_1010)
-        let out = MetalRenderer.resolveColors(
+        let out = CellInstanceBuilder.resolveColors(
             cell: cell, defaultBg: 0x0010_1010,
             keepBgOpaque: true, backgroundOpacity: 0.5)
         XCTAssertFalse(out.hasBg, "default-bg cell must not paint a background quad")
@@ -227,7 +227,7 @@ final class CellRenderHelpersTests: XCTestCase {
 
     func test_resolveColors_explicitBg_keepOpaque_alphaOne() {
         let cell = makeCell(fg: 0x00FF_FFFF, bg: 0x0020_4060)
-        let out = MetalRenderer.resolveColors(
+        let out = CellInstanceBuilder.resolveColors(
             cell: cell, defaultBg: 0x0000_0000,
             keepBgOpaque: true, backgroundOpacity: 0.5)
         XCTAssertTrue(out.hasBg, "explicit non-default bg must paint a quad")
@@ -241,7 +241,7 @@ final class CellRenderHelpersTests: XCTestCase {
     func test_resolveColors_explicitBg_notOpaque_usesBackgroundOpacity() {
         let cell = makeCell(fg: 0x00FF_FFFF, bg: 0x0020_4060)
         let opacity: Float = 0.35
-        let out = MetalRenderer.resolveColors(
+        let out = CellInstanceBuilder.resolveColors(
             cell: cell, defaultBg: 0x0000_0000,
             keepBgOpaque: false, backgroundOpacity: opacity)
         XCTAssertTrue(out.hasBg, "explicit non-default bg must paint a quad")
@@ -254,7 +254,7 @@ final class CellRenderHelpersTests: XCTestCase {
     func test_resolveColors_reverse_swapsFgAndBg_andForcesQuad() {
         // cell.bg == defaultBg, but REVERSE must still paint a quad and swap.
         let cell = makeCell(fg: 0x0010_2030, bg: 0x0000_0000, flags: UInt16(REVERSE))
-        let out = MetalRenderer.resolveColors(
+        let out = CellInstanceBuilder.resolveColors(
             cell: cell, defaultBg: 0x0000_0000,
             keepBgOpaque: true, backgroundOpacity: 0.5)
         XCTAssertTrue(out.hasBg, "reverse must force a background quad even when cell.bg == defaultBg")
@@ -267,7 +267,7 @@ final class CellRenderHelpersTests: XCTestCase {
 
     func test_resolveColors_dim_halvesFg_leavesAlpha() {
         let cell = makeCell(fg: 0x0080_4020, bg: 0x0000_0000, flags: UInt16(DIM))
-        let out = MetalRenderer.resolveColors(
+        let out = CellInstanceBuilder.resolveColors(
             cell: cell, defaultBg: 0x0000_0000,
             keepBgOpaque: true, backgroundOpacity: 0.5)
         let expectedFg = dimmed(expectedRGB(0x0080_4020))
@@ -280,7 +280,7 @@ final class CellRenderHelpersTests: XCTestCase {
         // originates from cell.bg.
         let cell = makeCell(fg: 0x00FF_FFFF, bg: 0x0080_8080,
                             flags: UInt16(REVERSE) | UInt16(DIM))
-        let out = MetalRenderer.resolveColors(
+        let out = CellInstanceBuilder.resolveColors(
             cell: cell, defaultBg: 0x0000_0000,
             keepBgOpaque: true, backgroundOpacity: 0.5)
         // fg = dim(rgb(cell.bg)); proves dim runs AFTER the reverse swap.
@@ -300,10 +300,10 @@ final class CellRenderHelpersTests: XCTestCase {
         let styled = makeCell(fg: 0x00AA_5500, bg: 0x0022_3344,
                               flags: UInt16(UNDERLINE) | UInt16(STRIKE),
                               underlineColor: 0x00DE_AD12)
-        let a = MetalRenderer.resolveColors(
+        let a = CellInstanceBuilder.resolveColors(
             cell: plain, defaultBg: 0x0000_0000,
             keepBgOpaque: false, backgroundOpacity: 0.4)
-        let b = MetalRenderer.resolveColors(
+        let b = CellInstanceBuilder.resolveColors(
             cell: styled, defaultBg: 0x0000_0000,
             keepBgOpaque: false, backgroundOpacity: 0.4)
         assertSIMDEqual(a.fg, b.fg, "underline/strike flags must not change fg")
