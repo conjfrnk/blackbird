@@ -506,6 +506,7 @@ public final class TerminalSession: ObservableObject {
 
     // MARK: - Test-only access
 
+    #if DEBUG
     /// Internal hook for `PromptJumpTests` — appends a mark with the FIFO
     /// cap applied, without needing a real shell to emit OSC 133. Not
     /// public because the ring lifecycle is otherwise owned entirely by
@@ -534,6 +535,7 @@ public final class TerminalSession: ObservableObject {
     internal var _testPreferencesSubscription: AnyCancellable? {
         preferencesSubscription
     }
+    #endif
 
     /// Resize the grid + PTY winsize in lockstep (drag path: synchronous so the
     /// returned snapshot is already new-size when the next MTKView frame draws).
