@@ -13,15 +13,17 @@ enum DiagnosticFileLoader {
     /// can verify the work runs off the main thread without going through
     /// SwiftUI's @State machinery for `lastError` / pasteboard side effects.
     static func loadAndSanitize(url: URL, cap: Int) async -> Result<String, LoadError> {
-        let (result, _) = await loadAndSanitizeForTesting(url: url, cap: cap)
+        let (result, _) = await loadAndSanitizeTraced(url: url, cap: cap)
         return result
     }
 
-    /// Same as `loadAndSanitize` but additionally returns whether the
-    /// detached worker actually executed off the main thread. Tests use
-    /// the second tuple element to pin the M6 invariant; production
-    /// callers go through `loadAndSanitize` and ignore the flag.
-    static func loadAndSanitizeForTesting(url: URL, cap: Int) async -> (Result<String, LoadError>, ranOffMain: Bool) {
+    /// The core implementation. Returns the load result plus whether the
+    /// detached worker actually executed off the main thread — a small piece
+    /// of observability the M6 off-main test pins on. Production callers go
+    /// through `loadAndSanitize` and ignore the flag. Neutrally named (not a
+    /// `…ForTesting` seam) so no test-only symbol ships in a Release build
+    /// (REFACTOR.md Part VI acceptance §4).
+    static func loadAndSanitizeTraced(url: URL, cap: Int) async -> (Result<String, LoadError>, ranOffMain: Bool) {
         await Task.detached {
             let ranOffMain = !Thread.isMainThread
             // Audit S5-003: open with O_NOFOLLOW so a TOCTOU swap of the

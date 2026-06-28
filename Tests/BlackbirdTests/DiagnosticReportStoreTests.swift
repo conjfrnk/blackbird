@@ -409,7 +409,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let url = hangDir.appendingPathComponent("hang-thread.txt")
         XCTAssertTrue(Thread.isMainThread,
             "test runs on @MainActor — pre-condition for the off-main check")
-        let (result, ranOffMain) = await DiagnosticFileLoader.loadAndSanitizeForTesting(
+        let (result, ranOffMain) = await DiagnosticFileLoader.loadAndSanitizeTraced(
             url: url, cap: 16 * 1024 * 1024
         )
         guard case .success = result else {
