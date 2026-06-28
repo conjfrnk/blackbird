@@ -1082,7 +1082,7 @@ final class MetalRendererTests: XCTestCase {
         // silently become a no-op that re-opens the F20 slot leak).
         XCTAssertNotNil(
             src.range(
-                of: #"func releaseSlotUnused\(\)\s*\{\s*inflightSemaphore\.signal\(\)\s*\}"#,
+                of: #"func releaseSlotUnused\(\)\s*\{\s*ring\.inflightSemaphore\.signal\(\)\s*\}"#,
                 options: .regularExpression
             ),
             "releaseSlotUnused() must signal inflightSemaphore — the abort-1 path's " +

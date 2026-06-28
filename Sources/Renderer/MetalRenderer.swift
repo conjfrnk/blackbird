@@ -93,9 +93,37 @@ public final class MetalRenderer {
     /// Each buffer grows independently — capacity is tracked per-slot so
     /// a ring reallocation only rebuilds the slot that overflowed, not
     /// all three.
-    private var instanceBuffers: [MTLBuffer]
-    private var instanceCapacities: [Int]
-    /// Hard cap on `instanceCapacities[slot]`. The grow path doubles the
+    ///
+    /// Grouped into one value struct (Finding A: stored-field clustering) so
+    /// the renderer's field count reflects concerns, not individual variables.
+    /// Every field keeps its exact name + type; access is now `ring.<field>`.
+    /// `inflightSemaphore` is a `let` holding a reference type — `ring` is one
+    /// stored property of the class and is never copied, so there is exactly
+    /// one semaphore across the renderer's lifetime. The slot-lifecycle helpers
+    /// (`claimSlot`/`releaseSlotUnused`/`commitSlotRotation`/
+    /// `rollbackSlotRotation`) stay methods on the renderer that read/write
+    /// `ring.*`, so the S2-006/M-3/S2-007 wait/signal ordering is unchanged: a
+    /// helper reads `ring.inflightSemaphore` (an instantaneous read of the
+    /// reference) before calling `.wait()`/`.signal()`, holding no exclusive
+    /// access to `ring` across the blocking call.
+    private struct TripleBufferRing {
+        var instanceBuffers: [MTLBuffer]
+        var instanceCapacities: [Int]
+        var frameIndex: Int = 0
+        /// The slot the current `render(in:)` call has locked. Set after
+        /// `inflightSemaphore.wait()`, read by `buildInstances` and the encoder,
+        /// cleared on completion. Not thread-safe on its own — `render(in:)`
+        /// always runs on the main thread.
+        var currentSlot: Int = 0
+        /// Three tokens match three buffers. Every `render(in:)` waits on one
+        /// before touching its slot; the command buffer's completion handler
+        /// signals. The GPU can run up to three frames ahead of the CPU;
+        /// beyond that, the CPU blocks, which is the correct backpressure
+        /// shape for a latency-sensitive text renderer.
+        let inflightSemaphore = DispatchSemaphore(value: 3)
+    }
+    private var ring: TripleBufferRing
+    /// Hard cap on `ring.instanceCapacities[slot]`. The grow path doubles the
     /// current capacity each time it overflows; bounded today only by
     /// "GPU OOM intervenes first" (Audit L-21). Defense-in-depth: cap
     /// the doubling so an Int multiply can't overflow in pathological
@@ -106,49 +134,49 @@ public final class MetalRenderer {
     /// all paint). Sized to fit GPU memory comfortably while leaving
     /// the trap for `* 2` overflow well out of reach.
     private static let instanceCapacityHardCap = 4 * 1024 * 1024
-    private var frameIndex: Int = 0
-    /// The slot the current `render(in:)` call has locked. Set after
-    /// `inflightSemaphore.wait()`, read by `buildInstances` and the encoder,
-    /// cleared on completion. Not thread-safe on its own — `render(in:)`
-    /// always runs on the main thread.
-    private var currentSlot: Int = 0
-    /// Three tokens match three buffers. Every `render(in:)` waits on one
-    /// before touching its slot; the command buffer's completion handler
-    /// signals. The GPU can run up to three frames ahead of the CPU;
-    /// beyond that, the CPU blocks, which is the correct backpressure
-    /// shape for a latency-sensitive text renderer.
-    private let inflightSemaphore = DispatchSemaphore(value: 3)
 
-    private var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
-    /// Accent colour applied by the fragment shader whenever a cell's
-    /// `linkHover` attribute bit is set. Defaults to an sRGB approximation
-    /// of macOS's `controlAccentColor` so the underline looks right even
-    /// without a theme-provided override.
-    private var accentColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.48, 1.0, 1.0)
+    /// Theme-derived colour state (Finding A cluster). Grouped into one value
+    /// struct; every field keeps its name/type and is read as `themeColors.<f>`.
+    /// These feed `makeFrameKey`/`makeCacheKey` and the cell/cursor encoders;
+    /// grouping is a pure relocation — the key values stay byte-identical.
+    private struct ThemeColors {
+        var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
+        /// Accent colour applied by the fragment shader whenever a cell's
+        /// `linkHover` attribute bit is set. Defaults to an sRGB approximation
+        /// of macOS's `controlAccentColor` so the underline looks right even
+        /// without a theme-provided override.
+        var accentColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.48, 1.0, 1.0)
+        /// When a cell's resolved bg equals this value, we treat it as "default
+        /// background" and skip drawing a bg quad. That lets the transparent
+        /// clearColor show through — the window-level transparency effect.
+        /// `0xFFFFFFFF` acts as a sentinel meaning "no theme bg configured yet".
+        var defaultBgRgb: UInt32 = 0xFFFFFFFF
+        /// Overall opacity applied to non-default cell backgrounds. 1.0 keeps
+        /// them solid; lower values let the framebuffer (clearColor) peek
+        /// through — used when the user wants even vim status lines to be
+        /// translucent (keepBgOpaque == false in iTerm2 terms).
+        var backgroundOpacity: Float = 1.0
+        var keepBgOpaque: Bool = true
+    }
+    private var themeColors = ThemeColors()
+
     /// OSC 8 link id currently under the pointer. Cells with matching
     /// `link_id` receive the accent underline via the `linkHover`
     /// attribute bit. Zero means "no hovered link" — the renderer skips
     /// the underline branch entirely.
     private var hoveredLinkID: UInt16 = 0
-    /// Optional "⌘-held, regex URL under pointer" range. Carries a buffer
-    /// line (not screen row — survives scrolling) and an inclusive column
-    /// range. The renderer applies the same `linkHover` accent underline
-    /// to matching cells. `cmdHoverStartCol < 0` is the sentinel for "no
-    /// range" and disables the branch entirely.
-    private var cmdHoverBufferLine: Int32 = 0
-    private var cmdHoverStartCol: Int32 = -1
-    private var cmdHoverEndCol: Int32 = -1
-    /// When a cell's resolved bg equals this value, we treat it as "default
-    /// background" and skip drawing a bg quad. That lets the transparent
-    /// clearColor show through — the window-level transparency effect.
-    /// `0xFFFFFFFF` acts as a sentinel meaning "no theme bg configured yet".
-    private var defaultBgRgb: UInt32 = 0xFFFFFFFF
-    /// Overall opacity applied to non-default cell backgrounds. 1.0 keeps
-    /// them solid; lower values let the framebuffer (clearColor) peek
-    /// through — used when the user wants even vim status lines to be
-    /// translucent (keepBgOpaque == false in iTerm2 terms).
-    private var backgroundOpacity: Float = 1.0
-    private var keepBgOpaque: Bool = true
+
+    /// Optional "⌘-held, regex URL under pointer" range (Finding A cluster).
+    /// Carries a buffer line (not screen row — survives scrolling) and an
+    /// inclusive column range. The renderer applies the same `linkHover` accent
+    /// underline to matching cells. `cmdHover.startCol < 0` is the sentinel for
+    /// "no range" and disables the branch entirely.
+    private struct CmdHover {
+        var bufferLine: Int32 = 0
+        var startCol: Int32 = -1
+        var endCol: Int32 = -1
+    }
+    private var cmdHover = CmdHover()
 
     /// Vertical offset (in points) added to every cell and cursor. Used by
     /// TerminalView to keep text out of the titlebar region when the window
@@ -173,15 +201,33 @@ public final class MetalRenderer {
     public func leftInsetPointsForTesting() -> Float { leftInsetPoints }
     #endif
 
-    /// Whether the cursor should blink when the window is focused. When on,
-    /// the cursor renders for the first half of each ~1.06 s cycle and is
-    /// skipped for the second half. The cycle resets every time the cursor
-    /// moves (typing, arrow keys, output scrolling the prompt) so a moving
-    /// cursor is always visible — just like xterm/iTerm/Terminal.app.
-    private var cursorBlinkEnabled: Bool = false
-    private var blinkPhaseStart: CFTimeInterval = 0
-    private var lastCursorRow: Int32 = -1
-    private var lastCursorCol: Int32 = -1
+    /// Cursor blink + last-position + user-shape-override state (Finding A
+    /// cluster). Grouped into one value struct; fields read as
+    /// `cursorState.<field>`.
+    ///
+    /// Blink: when enabled, the cursor renders for the first half of each
+    /// ~1.06 s cycle and is skipped for the second half. The cycle resets every
+    /// time the cursor moves (typing, arrow keys, output scrolling the prompt)
+    /// so a moving cursor is always visible — just like xterm/iTerm/Terminal.app.
+    private struct CursorState {
+        var blinkEnabled: Bool = false
+        var blinkPhaseStart: CFTimeInterval = 0
+        var lastCursorRow: Int32 = -1
+        var lastCursorCol: Int32 = -1
+        /// User-pinned cursor shape. `nil` → follow the snapshot's DECSCUSR
+        /// value (default behaviour). A non-nil value overrides the shape the
+        /// shell most recently set, so users who want a bar cursor regardless
+        /// of `\e[2 q'` / `\e[0 q'` get it.
+        ///
+        /// Cache invalidation runs through the frame-key / cache-key
+        /// substitution in `render(in:)`: changing the override mutates
+        /// `effectiveShape`, which flows into both keys and forces a rebuild.
+        /// `setCursorShapeOverride` also nulls the last-keys so the override
+        /// lands on the very next frame even if the snapshot is otherwise
+        /// identical.
+        var shapeOverride: UInt8? = nil
+    }
+    private var cursorState = CursorState()
 
     /// The pixel-affecting inputs shared by `FrameKey` (the per-frame skip
     /// cache) and `CacheKey` (the per-row rebuild cache). Extracted into one
@@ -280,19 +326,57 @@ public final class MetalRenderer {
         let cursorCol: Int32
         let visual: VisualState
     }
-    private var lastFrameKey: FrameKey?
-    /// Observable frame-skip signal. `true` when the most recent
-    /// `render(in:snapshot:focused:selection:)` call short-circuited on
-    /// `frameKey == lastFrameKey` (or otherwise returned without
-    /// presenting a drawable); `false` on any path that actually touched
-    /// the encode pipeline through `commit()`. Promoted from a DEBUG-only
-    /// test seam to public-readable in all builds because TerminalView
-    /// needs it to gate `LatencyProbe.shared.markPresented()` — calling
-    /// `markPresented()` after a skipped render records phantom zero-
-    /// latency samples, dragging p50/p99 metrics artificially low.
-    /// Not thread-safe; readers must observe it from the same queue as
-    /// the `render` call (today: main).
-    public private(set) var didFrameSkipLastRender: Bool = false
+    /// Frame-skip + per-row rebuild cache (Finding A cluster). The mutable
+    /// fields that together decide whether `render(in:)` can short-circuit and
+    /// what it may reuse; grouped into one value struct so they read as a single
+    /// concern (`skipCache.<field>`). The Mirror-based `CmdHoverHighlightTests`
+    /// reflects through this container to reach `lastFrameKey`/`lastCacheKey`.
+    private struct SkipCache {
+        /// Last actually-encoded FrameKey. H7: assigned only on a committed
+        /// encode and nil'd on grow-failure (S2-007); `nil` forces the next
+        /// render to encode regardless of FrameKey equality.
+        var lastFrameKey: FrameKey?
+        var lastCacheKey: CacheKey?
+        /// Sequence id of the snapshot that drove the most-recent `render(in:)`
+        /// call. Used to detect coalesced intermediate snapshots: if a render
+        /// receives a snapshot whose `sequenceID` jumped by more than 1, the
+        /// main-queue coalescer in `TerminalSession.publishPendingSnapshot`
+        /// dropped one or more intermediate snapshots on the floor, along
+        /// with their damage sets. Alacritty's damage tracking reset on each
+        /// `bb_term_take_snapshot`, so the latest snapshot's `damagedRows`
+        /// only covers the delta since the *most recent* take — rows that
+        /// changed in the skipped snapshots but not in the latest one would
+        /// stay at their stale cached content on a partial rebuild.
+        /// Full screen programs (cmatrix, vim, nvim alt-screen) expose this
+        /// as tearing streams because they write hundreds of cells per
+        /// mainloop tick while the main queue is still running the last
+        /// render. Detecting the gap and forcing a full rebuild trades a
+        /// tiny bit of CPU work for visual correctness under redraw load.
+        var lastRenderedSnapshotSeq: UInt64 = 0
+        /// Per-row instance cache. Index i holds the CellInstances emitted by
+        /// buildRowInstances for visible row i under the current CacheKey.
+        /// Reused across frames when CacheKey is stable; only damaged rows
+        /// (from `BBSnapshot.damagedRows`) are rebuilt. Flattened into the
+        /// GPU instance buffer each frame — a ~1 MB memcpy that costs far
+        /// less than iterating 16 000 cells.
+        var rowInstanceCache: [[CellInstance]] = []
+        /// Observable frame-skip signal. `true` when the most recent
+        /// `render(in:snapshot:focused:selection:)` call short-circuited on
+        /// `frameKey == lastFrameKey` (or otherwise returned without
+        /// presenting a drawable); `false` on any path that actually touched
+        /// the encode pipeline through `commit()`. Exposed read-only in all
+        /// builds via `MetalRenderer.didFrameSkipLastRender`.
+        var didFrameSkipLastRender: Bool = false
+    }
+    private var skipCache = SkipCache()
+
+    /// Observable frame-skip signal — read-only public mirror of
+    /// `skipCache.didFrameSkipLastRender`. TerminalView reads it to gate
+    /// `LatencyProbe.shared.markPresented()`: calling `markPresented()` after a
+    /// skipped render records phantom zero-latency samples, dragging p50/p99
+    /// metrics artificially low. Not thread-safe; readers must observe it from
+    /// the same queue as the `render` call (today: main).
+    public var didFrameSkipLastRender: Bool { skipCache.didFrameSkipLastRender }
 
     #if DEBUG
     /// Test-only seam: force `lastFrameKey` to advance even when drawable
@@ -323,32 +407,6 @@ public final class MetalRenderer {
         /// grid dims and omits FrameKey's snapshotSeq/cursorRow/cursorCol.
         let visual: VisualState
     }
-    private var lastCacheKey: CacheKey?
-
-    /// Sequence id of the snapshot that drove the most-recent `render(in:)`
-    /// call. Used to detect coalesced intermediate snapshots: if a render
-    /// receives a snapshot whose `sequenceID` jumped by more than 1, the
-    /// main-queue coalescer in `TerminalSession.publishPendingSnapshot`
-    /// dropped one or more intermediate snapshots on the floor, along
-    /// with their damage sets. Alacritty's damage tracking reset on each
-    /// `bb_term_take_snapshot`, so the latest snapshot's `damagedRows`
-    /// only covers the delta since the *most recent* take — rows that
-    /// changed in the skipped snapshots but not in the latest one would
-    /// stay at their stale cached content on a partial rebuild.
-    /// Full screen programs (cmatrix, vim, nvim alt-screen) expose this
-    /// as tearing streams because they write hundreds of cells per
-    /// mainloop tick while the main queue is still running the last
-    /// render. Detecting the gap and forcing a full rebuild trades a
-    /// tiny bit of CPU work for visual correctness under redraw load.
-    private var lastRenderedSnapshotSeq: UInt64 = 0
-
-    /// Per-row instance cache. Index i holds the CellInstances emitted by
-    /// buildRowInstances for visible row i under the current CacheKey.
-    /// Reused across frames when CacheKey is stable; only damaged rows
-    /// (from `BBSnapshot.damagedRows`) are rebuilt. Flattened into the
-    /// GPU instance buffer each frame — a ~1 MB memcpy that costs far
-    /// less than iterating 16 000 cells.
-    private var rowInstanceCache: [[CellInstance]] = []
 
     /// Kill switch for the dirty-rows fast path. Set `BB_NO_DIRTY_ROWS=1`
     /// and restart to force a full rebuild every frame — useful when
@@ -373,41 +431,29 @@ public final class MetalRenderer {
     }()
 
     public func setCursorBlinkEnabled(_ enabled: Bool) {
-        if enabled != cursorBlinkEnabled {
-            cursorBlinkEnabled = enabled
-            blinkPhaseStart = CACurrentMediaTime()
+        if enabled != cursorState.blinkEnabled {
+            cursorState.blinkEnabled = enabled
+            cursorState.blinkPhaseStart = CACurrentMediaTime()
             // Reset the blink phase → visible cursor on the next frame
             // regardless of where in the cycle we were. Clearing the skip
             // cache forces that next frame to actually encode.
-            lastFrameKey = nil
+            skipCache.lastFrameKey = nil
         }
     }
-
-    /// User-pinned cursor shape. `nil` → follow the snapshot's DECSCUSR
-    /// value (default behaviour). A non-nil value overrides the shape the
-    /// shell most recently set, so users who want a bar cursor regardless
-    /// of `\e[2 q'` / `\e[0 q'` get it.
-    ///
-    /// Cache invalidation runs through the frame-key / cache-key
-    /// substitution in `draw(in:)`: changing the override mutates
-    /// `effectiveShape`, which flows into both keys and forces a rebuild.
-    /// We also null the last-keys here so the override lands on the very
-    /// next frame even if the snapshot is otherwise identical.
-    private var cursorShapeOverride: UInt8? = nil
 
     public func setCursorShapeOverride(_ shape: UInt8?) {
-        if shape != cursorShapeOverride {
-            cursorShapeOverride = shape
-            lastFrameKey = nil
-            lastCacheKey = nil
+        if shape != cursorState.shapeOverride {
+            cursorState.shapeOverride = shape
+            skipCache.lastFrameKey = nil
+            skipCache.lastCacheKey = nil
         }
     }
 
-    public func setDefaultBgRgb(_ rgb: UInt32) { defaultBgRgb = rgb }
+    public func setDefaultBgRgb(_ rgb: UInt32) { themeColors.defaultBgRgb = rgb }
 
     public func setBackgroundOpacity(_ opacity: Float, keepBgOpaque: Bool) {
-        self.backgroundOpacity = opacity
-        self.keepBgOpaque = keepBgOpaque
+        self.themeColors.backgroundOpacity = opacity
+        self.themeColors.keepBgOpaque = keepBgOpaque
     }
 
     public func setCursorColor(rgb: UInt32) {
@@ -432,14 +478,14 @@ public final class MetalRenderer {
         // blending on the pipeline.
         let color = SIMD4<Float>(r, g, b, 1.0)
         precondition(color.w == 1.0, "cursorColor must be opaque (cursor pipeline has no blending — see audit L14)")
-        cursorColor = color
+        themeColors.cursorColor = color
     }
 
     /// Replace the accent colour used for link-hover underlines. Themes
     /// that ship an accent override can plumb it through here; otherwise
     /// the default (controlAccentColor-equivalent sRGB blue) applies.
     public func setAccentColor(rgba: SIMD4<Float>) {
-        accentColor = rgba
+        themeColors.accentColor = rgba
     }
 
     /// Set the OSC 8 link id currently under the pointer. The next frame
@@ -467,15 +513,15 @@ public final class MetalRenderer {
     /// unrelated frame will look correct, but interim frames show stale
     /// pixels.
     public func setCmdHoverRange(bufferLine: Int32, startCol: Int32, endCol: Int32) {
-        if cmdHoverBufferLine == bufferLine
-            && cmdHoverStartCol == startCol
-            && cmdHoverEndCol == endCol {
+        if cmdHover.bufferLine == bufferLine
+            && cmdHover.startCol == startCol
+            && cmdHover.endCol == endCol {
             return
         }
-        cmdHoverBufferLine = bufferLine
-        cmdHoverStartCol = startCol
-        cmdHoverEndCol = endCol
-        lastCacheKey = nil
+        cmdHover.bufferLine = bufferLine
+        cmdHover.startCol = startCol
+        cmdHover.endCol = endCol
+        skipCache.lastCacheKey = nil
     }
 
     public init?(device: MTLDevice, metrics: CellMetrics, scale: CGFloat = 2.0) {
@@ -613,8 +659,10 @@ public final class MetalRenderer {
         // counter so FrameKey/CacheKey equality forces a rebuild even
         // if every other key field is identical. Audit M-20.
         self.metricsGeneration = 1
-        self.instanceBuffers = buffers
-        self.instanceCapacities = [startCap, startCap, startCap]
+        self.ring = TripleBufferRing(
+            instanceBuffers: buffers,
+            instanceCapacities: [startCap, startCap, startCap]
+        )
         // Wire the H6 GPU-CPU race barrier AFTER all stored properties
         // are initialized — the closure captures self, and Swift's
         // definite-init analysis forbids capturing self while any
@@ -690,15 +738,15 @@ public final class MetalRenderer {
         // A new atlas points to different texture contents; the skip
         // cache is now stale. Force the next render to encode and present
         // even if every FrameKey field matches the previous frame.
-        self.lastFrameKey = nil
-        self.lastCacheKey = nil
-        self.rowInstanceCache = []
+        self.skipCache.lastFrameKey = nil
+        self.skipCache.lastCacheKey = nil
+        self.skipCache.rowInstanceCache = []
         // Treat the atlas reconfigure as a fresh renderer: a seq the
         // caller used before the atlas swap is no longer meaningful,
         // and keeping the old value here would let a pre-reconfigure
         // seq trip the `snap.sequenceID > lastRenderedSnapshotSeq + 1`
         // coalesced-snapshot guard on what is really a clean start.
-        self.lastRenderedSnapshotSeq = 0
+        self.skipCache.lastRenderedSnapshotSeq = 0
         return true
     }
 
@@ -710,10 +758,10 @@ public final class MetalRenderer {
     public func invalidate() {
         // Same main-thread contract as `reconfigure` — see note there.
         dispatchPrecondition(condition: .onQueue(.main))
-        self.lastFrameKey = nil
-        self.lastCacheKey = nil
-        self.rowInstanceCache = []
-        self.lastRenderedSnapshotSeq = 0
+        self.skipCache.lastFrameKey = nil
+        self.skipCache.lastCacheKey = nil
+        self.skipCache.rowInstanceCache = []
+        self.skipCache.lastRenderedSnapshotSeq = 0
     }
 
     /// Rebuild instances for a single visible row into `out`, consulting
@@ -756,8 +804,8 @@ public final class MetalRenderer {
         // pinned at the cast site. Audit UR-2 (2026-04-29).
         let rowBufferLine = Int32(clamping: row - snapshot.displayOffset)
         let cmdHoverActiveOnThisRow =
-            cmdHoverStartCol >= 0
-            && cmdHoverBufferLine == rowBufferLine
+            cmdHover.startCol >= 0
+            && cmdHover.bufferLine == rowBufferLine
         // Upper bound: every cell emits at most one instance. Reserve so
         // the common case avoids growing the array — a no-op when `out`
         // already has >= cols capacity from the prior frame.
@@ -775,17 +823,17 @@ public final class MetalRenderer {
                 cell: cell,
                 hoveredLinkID: hoveredID,
                 cmdHoverActiveOnRow: cmdHoverActiveOnThisRow,
-                cmdHoverStartCol: cmdHoverStartCol,
-                cmdHoverEndCol: cmdHoverEndCol,
+                cmdHoverStartCol: cmdHover.startCol,
+                cmdHoverEndCol: cmdHover.endCol,
                 col: col
             )
             // Base fg/bg after reverse/dim/default-bg resolution (pre-selection,
             // pre-cursor). `var fg` because the block-cursor path overwrites it.
             let resolved = Self.resolveColors(
                 cell: cell,
-                defaultBg: defaultBgRgb,
-                keepBgOpaque: keepBgOpaque,
-                backgroundOpacity: backgroundOpacity
+                defaultBg: themeColors.defaultBgRgb,
+                keepBgOpaque: themeColors.keepBgOpaque,
+                backgroundOpacity: themeColors.backgroundOpacity
             )
             var fg = resolved.fg
             let hasBg = resolved.hasBg
@@ -808,9 +856,9 @@ public final class MetalRenderer {
                 // Use whatever the cell's bg *would* have been (explicit
                 // or theme-default) as the glyph colour, so the
                 // character reads against the cursor's body.
-                let resolvedBg: UInt32 = hasBg ? cell.bg : defaultBgRgb
+                let resolvedBg: UInt32 = hasBg ? cell.bg : themeColors.defaultBgRgb
                 fg = Self.rgbToSIMD(resolvedBg)
-                effectiveBg = cursorColor
+                effectiveBg = themeColors.cursorColor
                 effectiveBg.w = 1.0
                 effectiveHasBg = true
             }
@@ -1087,8 +1135,8 @@ public final class MetalRenderer {
         // dropped). Growing initializes new rows to empty so the partial
         // path — which assumes the cache is indexable for every visible
         // row — stays sound.
-        if rowInstanceCache.count != rows {
-            rowInstanceCache = Array(repeating: [], count: rows)
+        if skipCache.rowInstanceCache.count != rows {
+            skipCache.rowInstanceCache = Array(repeating: [], count: rows)
         }
 
         if let damaged = partialRowsOnly {
@@ -1101,26 +1149,26 @@ public final class MetalRenderer {
                 // allocated slots, which is exactly the reserve size
                 // `buildRowInstances` asks for. No heap traffic in the
                 // steady state.
-                rowInstanceCache[row].removeAll(keepingCapacity: true)
+                skipCache.rowInstanceCache[row].removeAll(keepingCapacity: true)
                 buildRowInstances(
                     snapshot: snapshot,
                     row: row,
                     isSelected: isSelected,
                     blockCursorCell: blockCursorCell,
-                    into: &rowInstanceCache[row]
+                    into: &skipCache.rowInstanceCache[row]
                 )
             }
         } else {
             // Full rebuild — cache key changed, first frame, or damage
             // exceeded the partial threshold.
             for row in 0..<rows {
-                rowInstanceCache[row].removeAll(keepingCapacity: true)
+                skipCache.rowInstanceCache[row].removeAll(keepingCapacity: true)
                 buildRowInstances(
                     snapshot: snapshot,
                     row: row,
                     isSelected: isSelected,
                     blockCursorCell: blockCursorCell,
-                    into: &rowInstanceCache[row]
+                    into: &skipCache.rowInstanceCache[row]
                 )
             }
         }
@@ -1129,16 +1177,16 @@ public final class MetalRenderer {
         // copies every row — the CPU savings come from skipping the
         // per-cell inner work on unchanged rows, not from skipping the
         // memcpy (which is tiny: ~1 MB at 80-byte stride × 16k cells).
-        let total = rowInstanceCache.reduce(0) { $0 + $1.count }
-        let slot = currentSlot
-        if total > instanceCapacities[slot] {
+        let total = skipCache.rowInstanceCache.reduce(0) { $0 + $1.count }
+        let slot = ring.currentSlot
+        if total > ring.instanceCapacities[slot] {
             // Defense-in-depth on `* 2`: an unguarded `Int` multiply
             // would trap on overflow. Bounded today (GPU OOM
             // intervenes first) but the cap pins the contract at the
             // arithmetic site so a future regression that lets total
             // grow unboundedly can't crash the renderer mid-frame.
             // Audit L-21 (2026-04-29).
-            let doubled = instanceCapacities[slot]
+            let doubled = ring.instanceCapacities[slot]
                 .multipliedReportingOverflow(by: 2)
             let proposed: Int
             if doubled.overflow {
@@ -1166,8 +1214,8 @@ public final class MetalRenderer {
                 length: bufBytes,
                 options: [.storageModeShared]
             ) {
-                instanceBuffers[slot] = newBuf
-                instanceCapacities[slot] = newCap
+                ring.instanceBuffers[slot] = newBuf
+                ring.instanceCapacities[slot] = newCap
             } else {
                 // Out-of-GPU-memory while growing — the frame cannot
                 // be drawn. Return nil (NOT 0): the audit S2-007 trace
@@ -1185,10 +1233,10 @@ public final class MetalRenderer {
             }
         }
 
-        let ptr = instanceBuffers[slot].contents().assumingMemoryBound(to: CellInstance.self)
+        let ptr = ring.instanceBuffers[slot].contents().assumingMemoryBound(to: CellInstance.self)
         var count = 0
         for row in 0..<rows {
-            let rowInsts = rowInstanceCache[row]
+            let rowInsts = skipCache.rowInstanceCache[row]
             if rowInsts.isEmpty { continue }
             rowInsts.withUnsafeBufferPointer { src in
                 guard let base = src.baseAddress else { return }
@@ -1231,6 +1279,40 @@ public final class MetalRenderer {
         )
     }
 
+    /// Build the per-cell "is buffer-(line, col) inside this selection?"
+    /// predicate consumed by `buildInstances` (Finding B seam — pulled out of
+    /// `render()` as a pure factory over the selection; identical hit-test
+    /// semantics to the prior inline closure). Captures `selection` by value, so
+    /// the returned closure is independent of later mutation. Rectangular mode
+    /// hits an axis-aligned bounding box; prose-style modes use the standard
+    /// (start, end) sweep where interior lines select the full width.
+    private static func makeSelectionPredicate(
+        _ selection: Selection?
+    ) -> (Int32, Int) -> Bool {
+        return { line, col in
+            guard let sel = selection else { return false }
+            let (a, b) = sel.normalized
+            switch sel.mode {
+            case .rectangular:
+                let lo = min(a.line, b.line), hi = max(a.line, b.line)
+                let cLo = min(a.col, b.col), cHi = max(a.col, b.col)
+                return line >= lo && line <= hi && col >= cLo && col <= cHi
+            case .line:
+                // Line mode always highlights whole rows between a.line and
+                // b.line — the drag path keeps anchor/cursor on their
+                // original col, so without this the last (or first) dragged
+                // line would only highlight up to the pointer's column.
+                return line >= a.line && line <= b.line
+            case .character, .word:
+                if line < a.line || line > b.line { return false }
+                if a.line == b.line { return col >= a.col && col <= b.col }
+                if line == a.line { return col >= a.col }
+                if line == b.line { return col <= b.col }
+                return true
+            }
+        }
+    }
+
     /// `1.0 / 255.0` precomputed so `rgbToSIMD` can multiply instead of
     /// dividing. Called up to `2 * cols * rows` times per full rebuild
     /// (fg + bg per cell) — at 200x80 that's 32 000 calls/frame. FP-div
@@ -1260,10 +1342,10 @@ public final class MetalRenderer {
     /// the snapshot's cursor visibility, and `CACurrentMediaTime` vs
     /// `blinkPhaseStart`. 1.06 s period, off for the second half (≥ 0.53 s).
     private func computeBlinkSkip(snapshot: BBSnapshot?, focused: Bool) -> Bool {
-        guard cursorBlinkEnabled, focused, let s = snapshot, s.cursorVisible else {
+        guard cursorState.blinkEnabled, focused, let s = snapshot, s.cursorVisible else {
             return false
         }
-        let elapsed = CACurrentMediaTime() - blinkPhaseStart
+        let elapsed = CACurrentMediaTime() - cursorState.blinkPhaseStart
         let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
         return phase >= 0.53
     }
@@ -1295,7 +1377,7 @@ public final class MetalRenderer {
                 selACol: selFields.aCol,
                 selBCol: selFields.bCol,
                 focused: focused,
-                cursorShape: cursorShapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
+                cursorShape: cursorState.shapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
                 cursorVisible: snapshot?.cursorVisible ?? false,
                 // `clampDisplayOffset` not `UInt32(_:)` — defense-in-depth on
                 // the hot per-frame path. Today `BBSnapshot.displayOffset`
@@ -1308,15 +1390,15 @@ public final class MetalRenderer {
                 displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
                 topInsetPoints: topInsetPoints,
                 leftInsetPoints: leftInsetPoints,
-                defaultBgRgb: defaultBgRgb,
-                backgroundOpacity: backgroundOpacity,
-                keepBgOpaque: keepBgOpaque,
-                accentColor: accentColor,
-                cursorColor: cursorColor,
+                defaultBgRgb: themeColors.defaultBgRgb,
+                backgroundOpacity: themeColors.backgroundOpacity,
+                keepBgOpaque: themeColors.keepBgOpaque,
+                accentColor: themeColors.accentColor,
+                cursorColor: themeColors.cursorColor,
                 blinkSkip: blinkSkip,
-                cmdHoverBufferLine: cmdHoverBufferLine,
-                cmdHoverStartCol: cmdHoverStartCol,
-                cmdHoverEndCol: cmdHoverEndCol,
+                cmdHoverBufferLine: cmdHover.bufferLine,
+                cmdHoverStartCol: cmdHover.startCol,
+                cmdHoverEndCol: cmdHover.endCol,
                 metricsGeneration: metricsGeneration,
                 atlasGeneration: atlas.generation
             )
@@ -1355,15 +1437,15 @@ public final class MetalRenderer {
                 displayOffset: Self.clampDisplayOffset(snap.displayOffset),
                 topInsetPoints: topInsetPoints,
                 leftInsetPoints: leftInsetPoints,
-                defaultBgRgb: defaultBgRgb,
-                backgroundOpacity: backgroundOpacity,
-                keepBgOpaque: keepBgOpaque,
-                accentColor: accentColor,
-                cursorColor: cursorColor,
+                defaultBgRgb: themeColors.defaultBgRgb,
+                backgroundOpacity: themeColors.backgroundOpacity,
+                keepBgOpaque: themeColors.keepBgOpaque,
+                accentColor: themeColors.accentColor,
+                cursorColor: themeColors.cursorColor,
                 blinkSkip: blinkSkip,
-                cmdHoverBufferLine: cmdHoverBufferLine,
-                cmdHoverStartCol: cmdHoverStartCol,
-                cmdHoverEndCol: cmdHoverEndCol,
+                cmdHoverBufferLine: cmdHover.bufferLine,
+                cmdHoverStartCol: cmdHover.startCol,
+                cmdHoverEndCol: cmdHover.endCol,
                 metricsGeneration: metricsGeneration,
                 atlasGeneration: atlas.generation
             )
@@ -1386,15 +1468,15 @@ public final class MetalRenderer {
     /// guard one frame too few — frame D could claim a slot frame A's GPU work
     /// is still reading, then CPU-write the shared buffer mid-read → torn frame.)
     private func claimSlot() -> Int {
-        inflightSemaphore.wait()
-        currentSlot = frameIndex
-        return currentSlot
+        ring.inflightSemaphore.wait()
+        ring.currentSlot = ring.frameIndex
+        return ring.currentSlot
     }
 
     /// Return a slot token claimed but never committed (no drawable / encoder
     /// acquired). The rotation turn was never consumed, so nothing rolls back.
     private func releaseSlotUnused() {
-        inflightSemaphore.signal()
+        ring.inflightSemaphore.signal()
     }
 
     /// Consume the rotation turn for a frame we are committed to encoding
@@ -1402,7 +1484,7 @@ public final class MetalRenderer {
     /// handler (audit M-3, strong-captured semaphore), NOT issued here — so the
     /// slot stays reserved until the GPU finishes reading it.
     private func commitSlotRotation() {
-        frameIndex = (frameIndex + 1) % 3
+        ring.frameIndex = (ring.frameIndex + 1) % 3
     }
 
     /// Abort a frame AFTER its rotation turn was consumed (instance-buffer grow
@@ -1410,8 +1492,44 @@ public final class MetalRenderer {
     /// the claimed slot, so the next attempt reuses the same untouched slot.
     /// Order matches the original inline site: signal, then rollback.
     private func rollbackSlotRotation() {
-        inflightSemaphore.signal()
-        frameIndex = currentSlot
+        ring.inflightSemaphore.signal()
+        ring.frameIndex = ring.currentSlot
+    }
+
+    /// Register the command buffer's completion handler: the DEFERRED half of
+    /// the slot lifecycle (audit M-3). Signals `inflightSemaphore` once the GPU
+    /// finishes reading the slot's instance buffer, and logs any GPU fault. MUST
+    /// be called before `commit()` so there's no race with an immediate
+    /// GPU-side completion.
+    ///
+    /// Also inspect `status`/`error` so GPU faults (device lost, page fault,
+    /// shader trap) surface in the unified log instead of silently blanking the
+    /// window. `privacy: .public` is load-bearing for readability — see
+    /// `feedback_nslog_private_format`.
+    ///
+    /// Strong-capture the semaphore (NOT `[weak self]`): if the renderer deinits
+    /// between `commit()` and the GPU completion firing, a weak `self?` resolves
+    /// to nil and silently drops the `signal()`. The semaphore then deinits with
+    /// an unbalanced wait/signal count and libdispatch aborts the process with
+    /// `BUG IN CLIENT OF LIBDISPATCH: Semaphore object deallocated while in
+    /// use`. The semaphore's lifetime is independent of `self`, so capturing it
+    /// strongly here keeps the slot bookkeeping intact across renderer teardown
+    /// — Apple's canonical pattern for triple-buffered Metal ring semaphores.
+    /// The capture-list reads `self.ring.inflightSemaphore` synchronously at
+    /// registration (on the main thread, `self` alive); the closure body then
+    /// references only `semaphore` + the static `Self.logger`, so it captures
+    /// the semaphore strongly and NEVER captures `self`. Audit M-3 (2026-04-29).
+    private func registerSlotReleaseHandler(on buffer: MTLCommandBuffer) {
+        buffer.addCompletedHandler { [semaphore = self.ring.inflightSemaphore] cb in
+            if cb.status == .error {
+                if let err = cb.error {
+                    Self.logger.error("command buffer failed: \(String(describing: err), privacy: .public)")
+                } else {
+                    Self.logger.error("command buffer ended with .error status (no NSError)")
+                }
+            }
+            semaphore.signal()
+        }
     }
 
     public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
@@ -1425,14 +1543,14 @@ public final class MetalRenderer {
         let frameKey = makeFrameKey(
             snapshot: snapshot, focused: focused, selFields: selFields, blinkSkip: blinkSkipNow
         )
-        if !frameSkipDisabled, frameKey == lastFrameKey {
+        if !frameSkipDisabled, frameKey == skipCache.lastFrameKey {
             // Nothing that affects pixels has changed since the last
             // presented frame. Skip the whole pipeline — no CPU instance
             // rebuild, no GPU encode, no drawable acquisition. The
             // compositor keeps displaying the previously-presented frame.
             // Semaphore NOT touched on the skip path: we never claimed
             // a slot, so we don't signal back.
-            didFrameSkipLastRender = true
+            skipCache.didFrameSkipLastRender = true
             return
         }
 
@@ -1475,10 +1593,10 @@ public final class MetalRenderer {
             // — a windowed minimise + identical state could freeze the
             // surface. Leaving it unchanged guarantees the next render
             // attempt enters the encode path again. Audit H7.
-            didFrameSkipLastRender = true
+            skipCache.didFrameSkipLastRender = true
             #if DEBUG
             if _testForceFrameKeyAdvanceOnFailedDrawable {
-                lastFrameKey = frameKey
+                skipCache.lastFrameKey = frameKey
             }
             #endif
             return
@@ -1492,66 +1610,21 @@ public final class MetalRenderer {
         // (audit S2-006). The semaphore signal stays DEFERRED to the GPU
         // completion handler below (audit M-3).
         commitSlotRotation()
-        didFrameSkipLastRender = false
-        lastFrameKey = frameKey
+        skipCache.didFrameSkipLastRender = false
+        skipCache.lastFrameKey = frameKey
 
-        // Signal the slot free when the GPU finishes reading it. Must be
-        // registered before `commit()` so there's no race with an immediate
-        // GPU-side completion.
-        //
-        // Also inspect `status`/`error` so GPU faults (device lost, page
-        // fault, shader trap) surface in the unified log instead of
-        // silently blanking the window. `privacy: .public` is load-bearing
-        // for readability — see `feedback_nslog_private_format`.
-        //
-        // Strong-capture the semaphore (NOT `[weak self]`): if the renderer
-        // deinits between `commit()` and the GPU completion firing, a weak
-        // `self?` resolves to nil and silently drops the `signal()`. The
-        // semaphore then deinits with an unbalanced wait/signal count and
-        // libdispatch aborts the process with `BUG IN CLIENT OF
-        // LIBDISPATCH: Semaphore object deallocated while in use`. The
-        // semaphore's lifetime is independent of `self`, so capturing it
-        // strongly here keeps the slot bookkeeping intact across renderer
-        // teardown — Apple's canonical pattern for triple-buffered Metal
-        // ring semaphores. Audit M-3 (2026-04-29).
-        buffer.addCompletedHandler { [semaphore = self.inflightSemaphore] cb in
-            if cb.status == .error {
-                if let err = cb.error {
-                    Self.logger.error("command buffer failed: \(String(describing: err), privacy: .public)")
-                } else {
-                    Self.logger.error("command buffer ended with .error status (no NSError)")
-                }
-            }
-            semaphore.signal()
-        }
+        // Register the deferred slot-release + GPU-fault logging completion
+        // handler (audit M-3). Must run before `commit()` so there's no race
+        // with an immediate GPU-side completion. See
+        // `registerSlotReleaseHandler` for the strong-captured-semaphore
+        // rationale.
+        registerSlotReleaseHandler(on: buffer)
 
-        // Build a cheap closure that answers "is buffer-(line, col) inside
-        // the current selection?". Called once per cell while building the
-        // instance array. Rectangular mode hits an axis-aligned bounding
-        // box; prose-style modes use the standard (start, end) sweep where
-        // interior lines select the full width.
-        let isSelected: (Int32, Int) -> Bool = { [selection] line, col in
-            guard let sel = selection else { return false }
-            let (a, b) = sel.normalized
-            switch sel.mode {
-            case .rectangular:
-                let lo = min(a.line, b.line), hi = max(a.line, b.line)
-                let cLo = min(a.col, b.col), cHi = max(a.col, b.col)
-                return line >= lo && line <= hi && col >= cLo && col <= cHi
-            case .line:
-                // Line mode always highlights whole rows between a.line and
-                // b.line — the drag path keeps anchor/cursor on their
-                // original col, so without this the last (or first) dragged
-                // line would only highlight up to the pointer's column.
-                return line >= a.line && line <= b.line
-            case .character, .word:
-                if line < a.line || line > b.line { return false }
-                if a.line == b.line { return col >= a.col && col <= b.col }
-                if line == a.line { return col >= a.col }
-                if line == b.line { return col <= b.col }
-                return true
-            }
-        }
+        // Per-cell "is buffer-(line, col) inside the current selection?"
+        // predicate, built once per frame (Finding B seam — see
+        // `makeSelectionPredicate`). Called once per cell while building the
+        // instance array.
+        let isSelected = Self.makeSelectionPredicate(selection)
 
         if let snap = snapshot {
             // Viewport in points, not pixels. NDC conversion in the shader
@@ -1583,7 +1656,7 @@ public final class MetalRenderer {
             // short-circuit, and the cache key.
             // `UInt8(clamping:)` per UR-2 — defense-in-depth on the
             // Rust-snapshot cursorShape entering the cache key path.
-            let effectiveShape: UInt8 = cursorShapeOverride ?? UInt8(clamping: snap.cursorShape)
+            let effectiveShape: UInt8 = cursorState.shapeOverride ?? UInt8(clamping: snap.cursorShape)
             let shape = UInt32(effectiveShape)
             // Reset the blink cycle every time the cursor moves, so a
             // moving cursor is continuously visible. Tracked in
@@ -1596,13 +1669,13 @@ public final class MetalRenderer {
             // `lastCursorRow` — the partial-rebuild path below needs it
             // to force-rebuild the row the cursor just vacated. Audit
             // metal-renderer F3.
-            let prevCursorRow = lastCursorRow
-            let prevCursorCol = lastCursorCol
-            let cursorMoved = curRow != lastCursorRow || curCol != lastCursorCol
+            let prevCursorRow = cursorState.lastCursorRow
+            let prevCursorCol = cursorState.lastCursorCol
+            let cursorMoved = curRow != cursorState.lastCursorRow || curCol != cursorState.lastCursorCol
             if cursorMoved {
-                lastCursorRow = curRow
-                lastCursorCol = curCol
-                blinkPhaseStart = CACurrentMediaTime()
+                cursorState.lastCursorRow = curRow
+                cursorState.lastCursorCol = curCol
+                cursorState.blinkPhaseStart = CACurrentMediaTime()
             }
             // blinkSkip already computed for the frame-key check above.
             // Reuse that value so we never flicker from a phase transition
@@ -1639,8 +1712,8 @@ public final class MetalRenderer {
                 effectiveShape: effectiveShape, blinkSkip: blinkSkipNow
             )
             let cacheCompatible = !dirtyRowsDisabled
-                && lastCacheKey == newCacheKey
-                && rowInstanceCache.count == snap.rows
+                && skipCache.lastCacheKey == newCacheKey
+                && skipCache.rowInstanceCache.count == snap.rows
 
             // Detect coalesced snapshots: `TerminalSession.publishPending
             // Snapshot` coalesces rapid core snapshots into a single main-
@@ -1655,8 +1728,8 @@ public final class MetalRenderer {
             // valid, we just re-walk every row's cells once to catch the
             // lost deltas. Fixes cmatrix / vim / nvim streaming artifacts.
             let snapshotCoalesced: Bool =
-                lastRenderedSnapshotSeq > 0
-                && snap.sequenceID > lastRenderedSnapshotSeq + 1
+                skipCache.lastRenderedSnapshotSeq > 0
+                && snap.sequenceID > skipCache.lastRenderedSnapshotSeq + 1
 
             let partialRows = decideRebuildRows(
                 snap: snap,
@@ -1695,18 +1768,18 @@ public final class MetalRenderer {
                 // render() is only entered from the MTKView draw callback, so no
                 // interleaving caller can observe the rollback.
                 rollbackSlotRotation()
-                lastFrameKey = nil
-                didFrameSkipLastRender = true
+                skipCache.lastFrameKey = nil
+                skipCache.didFrameSkipLastRender = true
                 return
             }
-            lastCacheKey = newCacheKey
+            skipCache.lastCacheKey = newCacheKey
             // Record the snapshot seq we just rendered. `lastRenderedSnapshot
             // Seq` drives the coalesced-snapshot detection on the next
             // render; updating it HERE (after the row cache is in sync
             // with `snap`) means a subsequent skipped-frame detection
             // measures gap from the last successful paint, not from an
             // aborted mid-encode state.
-            lastRenderedSnapshotSeq = snap.sequenceID
+            skipCache.lastRenderedSnapshotSeq = snap.sequenceID
             if instanceCount > 0 {
                 encodeCells(
                     encoder: encoder, slot: slot, instanceCount: instanceCount,
@@ -1781,10 +1854,10 @@ public final class MetalRenderer {
         var uniforms = FrameUniforms(
             viewportPx: viewportPoints,
             cellSizePx: cellSizePoints,
-            accentColor: accentColor
+            accentColor: themeColors.accentColor
         )
         encoder.setRenderPipelineState(pipelineState)
-        encoder.setVertexBuffer(instanceBuffers[slot], offset: 0, index: 0)
+        encoder.setVertexBuffer(ring.instanceBuffers[slot], offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
         encoder.setFragmentTexture(atlas.texture, index: 0)
         encoder.setFragmentTexture(atlas.colorTexture, index: 1)
@@ -1813,7 +1886,7 @@ public final class MetalRenderer {
             cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + leftInsetPoints,
                                       Float(screenCursorRow) * Float(metrics.cellHeight) + topInsetPoints),
             cellSizePx: cellSizePoints,
-            color: cursorColor,
+            color: themeColors.cursorColor,
             strokeWidthPx: 1.0,
             filled: focused ? 1.0 : 0.0,
             shape: shape,

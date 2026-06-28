@@ -83,10 +83,18 @@ final class CmdHoverHighlightTests: XCTestCase {
         keyName: String
     ) -> (bufferLine: Int32, startCol: Int32, endCol: Int32)? {
         let m = Mirror(reflecting: renderer)
+        // `lastFrameKey` / `lastCacheKey` now live inside the grouped
+        // `skipCache` value struct (Finding A field-clustering), so descend
+        // into that container first. A missing `skipCache` child is itself a
+        // regression.
+        guard let skipCacheChild = m.children.first(where: { $0.label == "skipCache" })?.value else {
+            return nil
+        }
+        let skipCacheMirror = Mirror(reflecting: skipCacheChild)
         // `lastFrameKey` / `lastCacheKey` are stored as Optionals. Walk
         // the child labelled keyName; `.value` is `Any` but the runtime
         // box is `Optional<FrameKey>` / `Optional<CacheKey>`.
-        guard let optionalChild = m.children.first(where: { $0.label == keyName })?.value else {
+        guard let optionalChild = skipCacheMirror.children.first(where: { $0.label == keyName })?.value else {
             return nil
         }
         let optionalMirror = Mirror(reflecting: optionalChild)
