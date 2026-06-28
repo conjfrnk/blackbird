@@ -162,20 +162,13 @@ final class TabStripView: NSView {
     // strip's live layout without a parallel copy. The strip remains the
     // single writer (`update` / `layoutPills`).
     fileprivate var tabs: [NSWindow] = []
-    private weak var selectedTab: NSWindow?
+    // `selectedTab` / `addButtonFrame` are `fileprivate` so the hoisted
+    // `TabStripAccessibility` collaborator can build pill/add elements from the
+    // strip's live layout. The strip remains the single writer.
+    fileprivate weak var selectedTab: NSWindow?
     private var totalWidth: CGFloat = 0
     fileprivate var pillFrames: [CGRect] = []
-    private var addButtonFrame: CGRect = .zero
-
-    /// Snapshot of the pill TITLE strings applied on the previous `update()`.
-    /// VoiceOver value-changed posts diff against THIS (not the live window
-    /// refs, which always equal the current title). Audit titlebar-tabs F5.
-    private var lastAppliedTitles: [String] = []
-    /// Cached per-pill accessibility elements. Rebuilt lazily and invalidated
-    /// whenever the layout changes (`layoutPills`), so VoiceOver tracks stable
-    /// element identities AND a value-changed post targets the very element
-    /// `accessibilityChildren()` handed VO (rather than a throwaway).
-    private var cachedPillElements: [NSAccessibilityElement]?
+    fileprivate var addButtonFrame: CGRect = .zero
 
     // MARK: - Hoisted collaborators
     //
@@ -190,6 +183,11 @@ final class TabStripView: NSView {
     // because each initializer captures `self`.
     private lazy var tabDragController = TabDragController(view: self)
     private lazy var tabRenameController = TabRenameController(view: self)
+    /// VoiceOver accessibility — the per-pill + add-button NSAccessibilityElement
+    /// tree (cached for stable VO identity) + the title-changed value-changed
+    /// posts. The NSAccessibility protocol overrides stay on the strip (AppKit
+    /// calls them there) and forward here.
+    private lazy var tabAccessibility = TabStripAccessibility(view: self)
 
     /// The intent of a pill drag once it has moved far enough to commit.
     /// Kept as a three-case enum (not a `Bool`) because `.pending` — the
@@ -324,32 +322,11 @@ final class TabStripView: NSView {
         self.totalWidth = width
         self.frame = NSRect(x: 0, y: 0, width: width, height: Self.height)
         layoutPills()
-        // Post VO value-changed notifications when a title changed but
-        // the list shape didn't. The per-pill accessibility element
-        // exposes the title via `accessibilityLabel`, so a bare
-        // repaint + `NSAccessibility.post(..., valueChanged)` is
-        // enough for VO to re-read the pill. Skip on list-shape
-        // changes — AppKit's container-children invalidation will
-        // handle those more comprehensively. Audit titlebar-tabs F5.
-        if !listShapeChanged {
-            // Diff against lastAppliedTitles — a STORED snapshot of the title
-            // STRINGS from the previous update(). The old code diffed
-            // self.tabs.map { $0.title } captured at the top of this call, but
-            // self.tabs and the incoming tabs hold the SAME NSWindow refs and
-            // window.title was already mutated before update() ran, so the
-            // diff was always false and the notification never fired. Post
-            // against the cached pill elements so VO tracks a stable identity.
-            // Audit titlebar-tabs F5 / KNOWN_ISSUES.
-            let current = tabs.map { $0.title }
-            let changed = Self.changedTitleIndices(previous: lastAppliedTitles, current: current)
-            if !changed.isEmpty {
-                let pills = pillAccessibilityElements()
-                for i in changed where i < pills.count {
-                    NSAccessibility.post(element: pills[i], notification: .valueChanged)
-                }
-            }
-        }
-        lastAppliedTitles = tabs.map { $0.title }
+        // Post VoiceOver value-changed when a title changed but the list shape
+        // didn't (a bare repaint lets VO re-read the pill via accessibilityLabel;
+        // list-shape changes go through AppKit's container-children invalidation),
+        // and refresh the stored title snapshot. Audit titlebar-tabs F5.
+        tabAccessibility.refreshTitlesAndPost(tabs: tabs, listShapeChanged: listShapeChanged)
         // Width-only update: move the edit field to track the pill's new
         // x/width so the caret doesn't drift off-pill (no-op when no edit is
         // in flight). Geometry mirrors `beginEditing`'s field-rect computation.
@@ -380,51 +357,18 @@ final class TabStripView: NSView {
 
     override func accessibilityLabel() -> String? { "Tabs" }
 
+    // The NSAccessibility protocol overrides stay on the NSView (AppKit calls
+    // them here); the element tree + caching live in `TabStripAccessibility`.
     override func accessibilityChildren() -> [Any]? {
-        var out: [NSAccessibilityElement] = pillAccessibilityElements()
-        out.append(makeAddButtonElement())
-        return out
-    }
-
-    /// The per-pill accessibility elements, cached so `accessibilityChildren()`
-    /// and the value-changed posts in `update()` share identical instances
-    /// (VoiceOver tracks element identity). Invalidated by `layoutPills()`.
-    private func pillAccessibilityElements() -> [NSAccessibilityElement] {
-        if let cached = cachedPillElements { return cached }
-        var built: [NSAccessibilityElement] = []
-        for (i, window) in tabs.enumerated() where i < pillFrames.count {
-            built.append(makePillElement(pillIndex: i, window: window))
-        }
-        cachedPillElements = built
-        return built
+        tabAccessibility.children()
     }
 
     /// Indices whose title changed between two title snapshots (positionally).
-    /// Pure + static so the VoiceOver value-changed diff is unit-testable.
+    /// Pure + static so the VoiceOver value-changed diff is unit-testable. Stays
+    /// on `TabStripView` (tests pin it as `TabStripView.changedTitleIndices`);
+    /// `TabStripAccessibility` calls it.
     static func changedTitleIndices(previous: [String], current: [String]) -> [Int] {
         (0 ..< min(previous.count, current.count)).filter { previous[$0] != current[$0] }
-    }
-
-    private func makePillElement(pillIndex: Int, window: NSWindow) -> NSAccessibilityElement {
-        let frame = pillFrames[pillIndex]
-        let element = BBTabPillAccessibilityElement(
-            parent: self,
-            frame: frame,
-            title: window.title.isEmpty ? "Untitled" : window.title,
-            isSelected: window === selectedTab,
-            onSelect: { [weak self] in self?.onSelectWindow?(window) },
-            onClose: { [weak self] in self?.onCloseWindow?(window) }
-        )
-        return element
-    }
-
-    private func makeAddButtonElement() -> NSAccessibilityElement {
-        let element = BBAddTabAccessibilityElement(
-            parent: self,
-            frame: addButtonFrame,
-            onAdd: { [weak self] in self?.onAddTab?() }
-        )
-        return element
     }
 
     private static let addButtonWidth: CGFloat = 22
@@ -435,7 +379,7 @@ final class TabStripView: NSView {
     private func layoutPills() {
         // Pill frames are about to change → any cached accessibility elements
         // (which embed a frame) are stale; rebuild lazily on next access.
-        cachedPillElements = nil
+        tabAccessibility.invalidateCache()
         pillFrames.removeAll(keepingCapacity: true)
         // Pill geometry: the stripView is 28 pt tall (standard titlebar);
         // pills are 24 pt at y=4 → center=16, which matches the traffic-
@@ -1903,6 +1847,90 @@ private extension NSBezierPath {
             }
         }
         return path
+    }
+}
+
+/// VoiceOver accessibility for `TabStripView` (hoisted collaborator, `unowned
+/// view`). Each pill + the `+` button are drawn shapes, not real views, so
+/// NSAccessibility sees nothing by default. This builds per-pill + "New Tab"
+/// `NSAccessibilityElement` buttons (keyed to window titles) so rotor / VO
+/// navigation reach them, caches them for stable VO element identity, and posts
+/// `valueChanged` when a title changes in place. The strip keeps the
+/// NSAccessibility protocol overrides (AppKit calls them on the view) and
+/// forwards here. Audit titlebar-tabs F3 / F5.
+private final class TabStripAccessibility {
+    unowned let view: TabStripView
+    init(view: TabStripView) { self.view = view }
+
+    /// Cached per-pill elements so `accessibilityChildren()` and the
+    /// value-changed posts share identical instances (VoiceOver tracks element
+    /// identity). Rebuilt lazily; invalidated by `layoutPills` via `invalidateCache`.
+    private var cachedPillElements: [NSAccessibilityElement]?
+    /// Snapshot of the pill TITLE strings applied on the previous `update()`.
+    /// Value-changed posts diff against THIS (not the live window refs, which
+    /// always equal the current title). Audit titlebar-tabs F5.
+    private var lastAppliedTitles: [String] = []
+
+    /// The child element list `accessibilityChildren()` returns: the per-pill
+    /// buttons followed by the "New Tab" button.
+    func children() -> [NSAccessibilityElement] {
+        var out = pillElements()
+        out.append(makeAddButtonElement())
+        return out
+    }
+
+    /// Post VoiceOver value-changed for any title that changed in place (skipped
+    /// on a list-shape change — AppKit's container-children invalidation covers
+    /// those), targeting the cached pill elements so VO tracks a stable identity,
+    /// then refresh the stored title snapshot. Audit titlebar-tabs F5 / KNOWN_ISSUES.
+    func refreshTitlesAndPost(tabs: [NSWindow], listShapeChanged: Bool) {
+        if !listShapeChanged {
+            let current = tabs.map { $0.title }
+            let changed = TabStripView.changedTitleIndices(previous: lastAppliedTitles, current: current)
+            if !changed.isEmpty {
+                let pills = pillElements()
+                for i in changed where i < pills.count {
+                    NSAccessibility.post(element: pills[i], notification: .valueChanged)
+                }
+            }
+        }
+        lastAppliedTitles = tabs.map { $0.title }
+    }
+
+    /// Pill frames are about to change → cached elements (which embed a frame)
+    /// are stale; rebuild lazily on next access.
+    func invalidateCache() { cachedPillElements = nil }
+
+    private func pillElements() -> [NSAccessibilityElement] {
+        if let cached = cachedPillElements { return cached }
+        var built: [NSAccessibilityElement] = []
+        for (i, window) in view.tabs.enumerated() where i < view.pillFrames.count {
+            built.append(makePillElement(pillIndex: i, window: window))
+        }
+        cachedPillElements = built
+        return built
+    }
+
+    private func makePillElement(pillIndex: Int, window: NSWindow) -> NSAccessibilityElement {
+        let frame = view.pillFrames[pillIndex]
+        let element = BBTabPillAccessibilityElement(
+            parent: view,
+            frame: frame,
+            title: window.title.isEmpty ? "Untitled" : window.title,
+            isSelected: window === view.selectedTab,
+            onSelect: { [weak view] in view?.onSelectWindow?(window) },
+            onClose: { [weak view] in view?.onCloseWindow?(window) }
+        )
+        return element
+    }
+
+    private func makeAddButtonElement() -> NSAccessibilityElement {
+        let element = BBAddTabAccessibilityElement(
+            parent: view,
+            frame: view.addButtonFrame,
+            onAdd: { [weak view] in view?.onAddTab?() }
+        )
+        return element
     }
 }
 
