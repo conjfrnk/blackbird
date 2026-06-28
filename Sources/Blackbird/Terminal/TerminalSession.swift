@@ -108,59 +108,21 @@ public final class TerminalSession: ObservableObject {
     /// sessions don't grow unbounded.
     @Published public internal(set) var promptMarks: [PromptMark] = []
 
-    /// Current index inside `promptMarks` when cycling via
-    /// `jumpToPreviousPrompt` / `jumpToNextPrompt`. Nil means "not in
-    /// a jump cycle"; any new OSC 133 A resets to nil so the next Prev
-    /// jump starts from the newest mark again.
-    private var promptCursor: Int?
+    /// The prompt-mark navigation concern (the ring's cursor, the scroll-to-mark
+    /// math, the OSC 133 A record path, and the **two-token clear-epoch /
+    /// generation** machinery that defends against phantom marks across a clear
+    /// or reflow) lives in `PromptNavigator`. The `@Published` ring above and
+    /// `lastPromptMark` below stay here as the observable UI surface — the
+    /// navigator drives them through its `unowned session`, exactly as
+    /// `SnapshotCoalescer` drives `@Published snapshot` via `publish(_:)`.
+    /// IUO: needs `self` at init, assigned before `wire()` so no async path
+    /// observes it nil. `private(set)` so only this session assigns it.
+    private(set) var promptNavigator: PromptNavigator!
 
-    private static let promptMarkCap = 200
-
-    /// Generation token for the prompt-mark ring (audit S5-008).
-    /// Main-owned, like the ring itself. Every path that wipes the ring
-    /// (⌘K clearAll, reflow invalidation) bumps it; recordPromptStart
-    /// captures the value at entry (on main, before its coreQueue hop)
-    /// and the main-hop append drops the mark when the generation moved
-    /// — closing the race where a pre-clear snapshot's append drained
-    /// AFTER resetPromptState wiped the ring and re-inserted a mark
-    /// anchored to deleted scrollback (a phantom ⌘[ entry).
-    private var promptMarkGeneration: UInt64 = 0
-
-    /// Clear-epoch pair (audit S5-008, second half — found by the blind
-    /// regression test for the first half). The generation token guards
-    /// the recordPromptStart→append window, but the race ALSO spans the
-    /// event hop: the OSC 133 A event fires on coreQueue during feed
-    /// BEFORE ⌘K's clear, while the main-side event switch (and its
-    /// recordPromptStart call) drains AFTER clearAll completed on main —
-    /// so the generation captured at recordPromptStart entry was already
-    /// post-bump and the phantom mark still landed. The epoch is
-    /// captured AT EVENT-FIRE TIME on coreQueue (`clearEpochCore`,
-    /// coreQueue-confined, bumped inside clearAll's coreQueue.sync) and
-    /// compared on main against `clearEpochMain` (main-owned, bumped in
-    /// resetPromptState): an event that predates the clear carries a
-    /// stale epoch and its append self-discards.
-    private var clearEpochCore: UInt64 = 0
-    private var clearEpochMain: UInt64 = 0
-
-    /// Position of a recorded prompt, anchored to the core's monotonic
-    /// lines-scrolled counter (audit S5-004). The previous
-    /// (historySize, gridRow) anchor broke the moment scrollback
-    /// saturated: history_size plateaus at the cap while content keeps
-    /// rotating out, so post-saturation marks all compared equal and
-    /// ⌘[ silently jumped to the live bottom; the fix-#22 eviction
-    /// guard ('elapsed > 100_000') was unsatisfiable dead code because
-    /// elapsed ≤ cap by construction. linesScrolled never plateaus, so
-    /// the anchor algebra — the marked row sits (now − linesScrolled)
-    /// rows above its recorded gridRow — survives eviction, and
-    /// eviction itself becomes exactly detectable (offset > history).
-    public struct PromptMark: Equatable, Hashable {
-        /// `BBSnapshot.linesScrolled` at the moment the prompt was
-        /// emitted (primary-screen monotonic counter).
-        public let linesScrolled: UInt64
-        /// Grid row (0 = top of the live grid) at the moment the prompt
-        /// was emitted.
-        public let gridRow: Int
-    }
+    /// The `PromptMark` value type lives on the navigator; this alias keeps the
+    /// existing `TerminalSession.PromptMark` spelling (ScrollIndicator, tests)
+    /// binding unchanged.
+    public typealias PromptMark = PromptNavigator.PromptMark
 
     /// Internal (not private) so the `SnapshotCoalescer` / `PaletteApplier`
     /// collaborators can reach the FFI handle. Part I §6 single-queue ownership
@@ -279,6 +241,7 @@ public final class TerminalSession: ObservableObject {
         // it schedules never observe these IUO collaborators as nil.
         self.snapshotCoalescer = SnapshotCoalescer(session: self)
         self.paletteApplier = PaletteApplier(session: self)
+        self.promptNavigator = PromptNavigator(session: self)
         wire()
     }
 
@@ -314,6 +277,7 @@ public final class TerminalSession: ObservableObject {
         self.coreQueueToken = token
         self.snapshotCoalescer = SnapshotCoalescer(session: self)
         self.paletteApplier = PaletteApplier(session: self)
+        self.promptNavigator = PromptNavigator(session: self)
         // `wire()` is safe in headless mode: every PTY hookup uses optional
         // chaining, so with `pty == nil` only the bbterm.onEvent handler is
         // installed. That's exactly what the OSC 7 / cwd tests need — feed
@@ -539,66 +503,11 @@ public final class TerminalSession: ObservableObject {
     }
 
     // MARK: - Prompt navigation
-
-    /// Record the (history, grid row) position at which an OSC 133 A
-    /// fired. Called on main from the event switch; the snapshot read
-    /// is dispatched async to coreQueue so a heavy feed backlog can't
-    /// block main while we wait for `bbterm.snapshot()` to drain.
-    /// A new prompt resets `promptCursor` to nil so the next jump
-    /// starts from the newest mark.
-    private func recordPromptStart(eventClearEpoch: UInt64) {
-        // M-12: tripwire the same way scroll / scrollToBottom / clearAll do.
-        // `coreQueue.sync` self-deadlocks if invoked from coreQueue, and the
-        // bbterm event handler's pre-main fast-path for ptyWrite already
-        // demonstrates a precedent for handlers calling back into us off
-        // their queue. Fail loud if a future caller lands here on coreQueue.
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        // Audit S5-008: capture the ring generation NOW (we're on main,
-        // ahead of the coreQueue hop). If ⌘K's resetPromptState runs
-        // while our snapshot block is in flight, the generation moves
-        // and the append below self-discards instead of re-inserting a
-        // mark anchored to wiped scrollback. The eventClearEpoch guard
-        // covers the OTHER half of the window: an event that fired on
-        // coreQueue before the clear but drained on main after it
-        // arrives here with a stale epoch (blind-test finding on the
-        // first cut of this fix).
-        guard eventClearEpoch == clearEpochMain else { return }
-        let generation = promptMarkGeneration
-        // Audit L7. Was `coreQueue.sync(execute: bbterm.snapshot)` —
-        // under heavy streaming output the sync would block main
-        // until every queued feed ahead of us drained. The audit
-        // acknowledged "missing a line or two of drift is negligible";
-        // hand the snapshot off async, then hop back to main to
-        // mutate `promptMarks` / `promptCursor` (those fields are
-        // owned by main).
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            // Audit fix-#11 (2026-05-11): mirror the F11 / M-1 / L-1
-            // termination-gate pattern that feed / publishPendingSnapshot /
-            // applyPalette use. Without this, a coreQueue.async block
-            // already in flight when terminate() runs would still capture
-            // a snapshot and queue a main-hop append, mutating
-            // promptMarks on a session whose consumers are tearing down.
-            if self.isTerminatedLocked() { return }
-            guard let snap = self.bbterm.snapshot() else { return }
-            let mark = PromptMark(linesScrolled: snap.linesScrolled, gridRow: snap.cursorRow)
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                // Re-check on the main hop: terminate() could have run
-                // between the coreQueue body and main drain.
-                if self.isTerminatedLocked() { return }
-                // Audit S5-008: a clear/reflow between capture and this
-                // drain invalidated the anchor — drop instead of
-                // re-inserting a phantom mark.
-                guard generation == self.promptMarkGeneration else { return }
-                self.promptMarks.append(mark)
-                if self.promptMarks.count > Self.promptMarkCap {
-                    self.promptMarks.removeFirst(self.promptMarks.count - Self.promptMarkCap)
-                }
-                self.promptCursor = nil
-            }
-        }
-    }
+    //
+    // The ring's cursor, the scroll-to-mark math, the OSC 133 A record path, and
+    // the two-token clear-epoch / generation machinery live in `PromptNavigator`
+    // (REFACTOR.md Part IV — prompt-nav peel). These are thin forwarders so menu
+    // actions / `AppDelegate` / `PromptJumpTests` bind unchanged.
 
     /// Scroll the viewport to the previous recorded prompt. First press
     /// from a resting state jumps to the newest mark; subsequent presses
@@ -607,16 +516,7 @@ public final class TerminalSession: ObservableObject {
     /// run yet).
     @discardableResult
     public func jumpToPreviousPrompt() -> Bool {
-        guard !promptMarks.isEmpty else { return false }
-        let next: Int = {
-            if let cur = promptCursor {
-                return max(0, cur - 1)
-            }
-            return promptMarks.count - 1
-        }()
-        promptCursor = next
-        scrollToMark(promptMarks[next])
-        return true
+        promptNavigator.jumpToPreviousPrompt()
     }
 
     /// Walk forward through the prompt ring toward the live view. No-op
@@ -625,11 +525,7 @@ public final class TerminalSession: ObservableObject {
     /// happened so the view can surface "no more prompts" feedback.
     @discardableResult
     public func jumpToNextPrompt() -> Bool {
-        guard let cur = promptCursor, !promptMarks.isEmpty else { return false }
-        let next = min(promptMarks.count - 1, cur + 1)
-        promptCursor = next
-        scrollToMark(promptMarks[next])
-        return true
+        promptNavigator.jumpToNextPrompt()
     }
 
     // MARK: - Test-only access
@@ -639,16 +535,12 @@ public final class TerminalSession: ObservableObject {
     /// public because the ring lifecycle is otherwise owned entirely by
     /// the event switch.
     internal func _testAppendMark(_ mark: PromptMark) {
-        promptMarks.append(mark)
-        if promptMarks.count > Self.promptMarkCap {
-            promptMarks.removeFirst(promptMarks.count - Self.promptMarkCap)
-        }
-        promptCursor = nil
+        promptNavigator._testAppendMark(mark)
     }
 
     /// Internal accessor exposing the otherwise-private cycle index so
     /// tests can assert exact walk behaviour.
-    internal var _testPromptCursor: Int? { promptCursor }
+    internal var _testPromptCursor: Int? { promptNavigator._testPromptCursor }
 
     /// Audit L3: exposes the per-session one-shot latch so tests can
     /// assert "two `.unknown` OSC 7 events flip the latch exactly once".
@@ -665,54 +557,6 @@ public final class TerminalSession: ObservableObject {
     /// `wire()` / `terminate()`.
     internal var _testPreferencesSubscription: AnyCancellable? {
         preferencesSubscription
-    }
-
-    /// Compute and apply the scroll delta that places a given mark near
-    /// the top of the current viewport.
-    ///
-    /// Math (audit S5-004): the mark was recorded at live-grid row
-    /// `gridRow` when the primary screen's monotonic counter read
-    /// `linesScrolled`. Every line scrolled since moves the marked row
-    /// one row further up, so the display offset that puts it at the
-    /// viewport top is `(counterNow − linesScrolled) − gridRow`. Unlike
-    /// the previous history_size anchor, the counter never plateaus at
-    /// the scrollback cap, so this stays exact after saturation — and
-    /// eviction is exactly `target > history` (the row scrolled past
-    /// retention), replacing the unsatisfiable fix-#22 threshold guard.
-    /// A negative target means the marked row is still at/below the
-    /// viewport top in the live grid (or a clear collapsed history);
-    /// clamp to 0 = live bottom.
-    private func scrollToMark(_ mark: PromptMark) {
-        // M-12: same tripwire rationale as recordPromptStart above. The
-        // public callers (jumpToPreviousPrompt / jumpToNextPrompt) run on
-        // main today, but a future event-driven path could land here from
-        // coreQueue and hit the sync self-deadlock invisibly.
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
-            return
-        }
-        // Monotonic by contract; the defensive branch guards a future
-        // regression rather than a reachable state.
-        let scrolledSince = snap.linesScrolled >= mark.linesScrolled
-            ? Int(clamping: snap.linesScrolled - mark.linesScrolled)
-            : 0
-        let target = scrolledSince - mark.gridRow
-        if target > snap.historySize {
-            // Evicted: the anchored row scrolled past retention. Drop
-            // the orphaned mark and let the cycle promotion re-enter on
-            // the next press (audit S5-004 — this check is exact, and
-            // unlike its dead predecessor it actually fires).
-            promptMarks.removeAll { $0 == mark }
-            if let cursor = promptCursor, cursor >= promptMarks.count {
-                promptCursor = promptMarks.isEmpty ? nil : promptMarks.count - 1
-            }
-            return
-        }
-        let clampedTarget = max(0, min(target, snap.historySize))
-        let delta = clampedTarget - snap.displayOffset
-        if delta != 0 {
-            scroll(delta: Int32(clamping: delta))
-        }
     }
 
     public func resize(to size: Size) {
@@ -874,10 +718,9 @@ public final class TerminalSession: ObservableObject {
             guard let self else { return }
             // Bump the generation FIRST so any in-flight
             // recordPromptStart append from the pre-reflow grid
-            // self-discards (audit S5-008's token doubles here).
-            self.promptMarkGeneration &+= 1
-            self.promptMarks = []
-            self.promptCursor = nil
+            // self-discards (audit S5-008's token doubles here), then
+            // wipe the ring + cursor. Main-confined, exactly as before.
+            self.promptNavigator.invalidateForReflow()
         }
     }
 
@@ -943,8 +786,9 @@ public final class TerminalSession: ObservableObject {
             bbterm.clearAll()
             // Audit S5-008: events fired on coreQueue BEFORE this point
             // carry the pre-bump epoch and their prompt-mark appends
-            // self-discard on the main side.
-            clearEpochCore &+= 1
+            // self-discard on the main side. coreQueue-confined bump —
+            // runs inside this `coreQueue.sync`, exactly as before.
+            promptNavigator.bumpClearEpochCore()
             s = bbterm.snapshot()
         }
         // H-6: drop prompt-state tied to the now-deleted scrollback. The
@@ -962,19 +806,16 @@ public final class TerminalSession: ObservableObject {
         // guarantees: a future caller that hands `resetPromptState` to
         // e.g. `coreQueue.async(execute:)` would now fail to compile,
         // instead of trapping at runtime via `MainActor.assumeIsolated`.
+        //
+        // The body (S5-008: bump the ring generation so an in-flight
+        // recordPromptStart whose snapshot predates the clear drops its
+        // append instead of re-inserting a mark anchored to deleted
+        // scrollback — and the main-side clear epoch so events that FIRED
+        // before the clear but drain after self-discard too; then wipe the
+        // ring + last-mark + cursor) lives in `PromptNavigator.resetForClear`.
         let resetPromptState: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
-            // Audit S5-008: bump the ring generation so an in-flight
-            // recordPromptStart whose snapshot predates the clear drops
-            // its append instead of re-inserting a mark anchored to the
-            // scrollback we just deleted — and the main-side clear epoch
-            // so events that FIRED before the clear (but drain after)
-            // self-discard too.
-            self.promptMarkGeneration &+= 1
-            self.clearEpochMain &+= 1
-            self.promptMarks = []
-            self.promptCursor = nil
-            self.lastPromptMark = nil
+            self.promptNavigator.resetForClear()
         }
         onMain(resetPromptState)
         if let s { snapshotCoalescer.publishImmediate(s) }
@@ -1219,8 +1060,10 @@ public final class TerminalSession: ObservableObject {
             // bb_term_input on coreQueue), so this read is ordered
             // against clearAll's coreQueue.sync bump. Rides the hop so
             // the prompt-mark append can tell "event predates the
-            // clear" from "genuine post-clear prompt".
-            let clearEpochAtDispatch = self.clearEpochCore
+            // clear" from "genuine post-clear prompt". The epoch is
+            // coreQueue-confined inside the navigator; this read stays on
+            // coreQueue exactly as the field read did.
+            let clearEpochAtDispatch = self.promptNavigator.currentClearEpochCore
             // SFH-005 sibling: fire the OSC 52 oversize breadcrumb on
             // coreQueue, BEFORE the main hop, so a terminating session
             // can't suppress the security log. The post-hop `guard let
@@ -1438,7 +1281,7 @@ public final class TerminalSession: ObservableObject {
             // or two of drift is negligible next to a multi-screen
             // scrollback jump.
             if kind == .promptStart {
-                self.recordPromptStart(eventClearEpoch: clearEpochAtDispatch)
+                self.promptNavigator.recordPromptStart(eventClearEpoch: clearEpochAtDispatch)
             }
         case .fatal(let msg):
             // Surface as a title prefix for visibility — the unified

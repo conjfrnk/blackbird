@@ -153,6 +153,7 @@
 		C03CA13BDF54F8280BFC75CB /* CwdTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89B63611281711C31CDD3303 /* CwdTests.swift */; };
 		C069AA35BA0D585A12C68B98 /* TerminalView+Dragging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */; };
 		C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E03399349EE1327FBF8F2F /* Selection.swift */; };
+		C3F2AEC2D293A850F2662F96 /* PromptNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DF31065DC87C48754C4E77E /* PromptNavigator.swift */; };
 		C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */; };
 		C7958A8D3B119E9A37DC7C46 /* CellInstanceLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3064BAFAEEFDB859D8B347F7 /* CellInstanceLayoutTests.swift */; };
 		C947D1F4C754046130B5F56E /* BBTermAdversarialTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79802E11417943B26ABEF4EB /* BBTermAdversarialTests.swift */; };
@@ -231,6 +232,7 @@
 		0D725EB10E49F7689EBC93F3 /* WordDragExtendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordDragExtendTests.swift; sourceTree = "<group>"; };
 		0D7DD21160AFF51FCA0B6374 /* Preferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Preferences.swift; sourceTree = "<group>"; };
 		0D94AD8A655DA72C5D57ED5E /* DiagnosticReportStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticReportStoreTests.swift; sourceTree = "<group>"; };
+		0DF31065DC87C48754C4E77E /* PromptNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptNavigator.swift; sourceTree = "<group>"; };
 		0E2A52AD38735646D352E5AF /* osc133.fish */ = {isa = PBXFileReference; path = osc133.fish; sourceTree = "<group>"; };
 		11194E0650067380506F53B2 /* BBTermTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermTests.swift; sourceTree = "<group>"; };
 		1178A5B3ED186EDB37EAB9E2 /* osc133.zsh */ = {isa = PBXFileReference; path = osc133.zsh; sourceTree = "<group>"; };
@@ -640,6 +642,7 @@
 				C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */,
 				28AC18E4DFA1B4F34FA78C71 /* PowerAwareRendering.swift */,
 				E0FB33E683481B949C14F9CB /* PreeditOverlayView.swift */,
+				0DF31065DC87C48754C4E77E /* PromptNavigator.swift */,
 				5995252272D652667DB2D2D9 /* PTY.swift */,
 				21725BF76F3013670913A84E /* RecordingPTY.swift */,
 				40C5A8C9337C9EB932DA1A60 /* RegexSafetyGate.swift */,
@@ -918,6 +921,7 @@
 				8B96E70CA7DBF449FF4E9F19 /* PreeditOverlayView.swift in Sources */,
 				2128B6F807CB069799F1A479 /* Preferences.swift in Sources */,
 				1A6ACD9535EFEAD15A870E34 /* PrefsMaintenance.swift in Sources */,
+				C3F2AEC2D293A850F2662F96 /* PromptNavigator.swift in Sources */,
 				55E12C125E67E7550C67E506 /* RecordingPTY.swift in Sources */,
 				5CE494D770F0D5361B6E8993 /* RegexSafetyGate.swift in Sources */,
 				C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */,
