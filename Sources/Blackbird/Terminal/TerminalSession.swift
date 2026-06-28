@@ -42,15 +42,15 @@ public final class TerminalSession: ObservableObject {
     /// Diagnostics for resize panic-fallbacks (M3) and OSC 7 dropped-on-
     /// `.unknown` classification (L3). Both are non-fatal events the
     /// support engineer needs visible in `log stream` without spamming
-    /// the unified log on each occurrence.
-    private static let sessionLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
-                                              category: "session")
-    /// One-shot latch for the OSC 7 `.unknown` drop log (L3). Per
-    /// session — a hot-reconfigure that flips classification back to
-    /// `.local` and then back to `.unknown` would otherwise miss the
-    /// breadcrumb on the second `.unknown`. We accept that miss; the
-    /// alternative (no latch at all) floods the log on every shell `cd`.
-    private var loggedUnknownNamespaceDrop = false
+    /// the unified log on each occurrence. Internal (not private) so the
+    /// `ResizeController` (M3 warning) and `CwdTracker` (L3 notice)
+    /// collaborators log through the one "session"-category logger — a single
+    /// source of truth for the category, byte-identical to the inline output.
+    static let sessionLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                      category: "session")
+    // `loggedUnknownNamespaceDrop` (the OSC 7 `.unknown` drop-log latch) moved
+    // to `CwdTracker` along with the cwd-change publishing + SSH-trust gate it
+    // guards. The `@Published lastKnownCwd` store stays here (below).
 
     /// Shorthand. Routed through `StartupTelemetry.isEnabled` at each
     /// call site so Release builds don't emit diagnostic chatter unless
@@ -132,7 +132,13 @@ public final class TerminalSession: ObservableObject {
     let bbterm: BBTerm
     /// Optional so tests can construct a title-only headless session without
     /// spawning a child process. Production paths always have a PTY.
-    private let pty: PTY?
+    /// Internal (not private) for the same reason as `bbterm`: the
+    /// `FocusEmitter` (writeImmediate) and `ResizeController` (resize)
+    /// collaborators forward to it. PTY owns its own read/write queue
+    /// serialization, so single-owner discipline is preserved exactly as before
+    /// — these collaborators only touch it from the same coreQueue contexts the
+    /// inline code did.
+    let pty: PTY?
     /// Marker installed on `coreQueue` so any sync-entry helper can detect
     /// it's already running on this session's coreQueue and avoid a
     /// `coreQueue.sync` self-deadlock (PS-01 / NEW-01).
@@ -187,12 +193,19 @@ public final class TerminalSession: ObservableObject {
     /// collaborator; assigned alongside the coalescer.
     private var paletteApplier: PaletteApplier!
 
-    /// Last focus state actually emitted to the TUI (`CSI I`/`CSI O`),
-    /// guarded by `coreQueue`. Dedups consecutive same-state focus
-    /// transitions so the single-owner emitter sends exactly one byte pair
-    /// per real focus change. `nil` = nothing emitted yet; left untouched
-    /// when mode 1004 is off so a later enable still reports current focus.
-    private var lastFocusEmitted: Bool?
+    /// OSC 7 cwd ingest + SSH-trust classification (Part I §18). Owns the L3
+    /// drop-log latch; drives the `@Published lastKnownCwd` store on this
+    /// session. Assigned before `wire()` so the async event handler it backs
+    /// never observes it nil.
+    private var cwdTracker: CwdTracker!
+
+    /// Window-focus escape emitter (DECSET 1004 gate + same-state dedup). Owns
+    /// the `lastFocusEmitted` coreQueue-confined latch.
+    private var focusEmitter: FocusEmitter!
+
+    /// Terminal resize (grid + PTY winsize lockstep + reflow invalidation).
+    /// Owns the `lastAppliedGridSize` coreQueue-confined reflow detector.
+    private var resizeController: ResizeController!
 
     public static func start(
         shell: String,
@@ -242,6 +255,9 @@ public final class TerminalSession: ObservableObject {
         self.snapshotCoalescer = SnapshotCoalescer(session: self)
         self.paletteApplier = PaletteApplier(session: self)
         self.promptNavigator = PromptNavigator(session: self)
+        self.cwdTracker = CwdTracker(session: self)
+        self.focusEmitter = FocusEmitter(session: self)
+        self.resizeController = ResizeController(session: self)
         wire()
     }
 
@@ -278,6 +294,9 @@ public final class TerminalSession: ObservableObject {
         self.snapshotCoalescer = SnapshotCoalescer(session: self)
         self.paletteApplier = PaletteApplier(session: self)
         self.promptNavigator = PromptNavigator(session: self)
+        self.cwdTracker = CwdTracker(session: self)
+        self.focusEmitter = FocusEmitter(session: self)
+        self.resizeController = ResizeController(session: self)
         // `wire()` is safe in headless mode: every PTY hookup uses optional
         // chaining, so with `pty == nil` only the bbterm.onEvent handler is
         // installed. That's exactly what the OSC 7 / cwd tests need — feed
@@ -348,11 +367,11 @@ public final class TerminalSession: ObservableObject {
         return coreQueue.sync { self.bbterm.snapshot() }
     }
 
-    /// Test hook: drive `focusEmissionBytes` on the core queue so unit tests
-    /// can pin the DECSET 1004 gate + same-state dedup without an NSWindow.
-    /// Mirrors `feedBytesForTests`.
+    /// Test hook: drive `FocusEmitter.emissionBytes` on the core queue so unit
+    /// tests can pin the DECSET 1004 gate + same-state dedup without an
+    /// NSWindow. Mirrors `feedBytesForTests`.
     func focusEmissionBytesForTests(focused: Bool) -> Data? {
-        return coreQueue.sync { self.focusEmissionBytes(focused: focused) }
+        return coreQueue.sync { self.focusEmitter.emissionBytes(focused: focused) }
     }
     #endif
 
@@ -450,56 +469,13 @@ public final class TerminalSession: ObservableObject {
     /// hasn't requested focus events — Vim's `:checktime`, tmux's
     /// `focus-events on`, and similar features depend on this.
     ///
-    /// Runs on the core queue so the mode read + PTY write are serialized
-    /// with any in-flight `bb_term_input` call. Immediate rather than
-    /// queued because the byte must land before the next keystroke or
-    /// repaint to be causally correct with the focus change the user just
-    /// made.
+    /// The DECSET 1004 gate (read against the **live** core mode, not the
+    /// async-published snapshot), the same-state dedup, and the coreQueue hop +
+    /// `isTerminated` gate live in `FocusEmitter` (REFACTOR.md Part IV —
+    /// focus-emission peel). This is the thin public seam `TerminalView` /
+    /// `MainWindowController` bind unchanged.
     public func focusChanged(_ focused: Bool) {
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            // S2-010: gate on isTerminated so a focus-change dispatched
-            // before terminate() but processed after doesn't hand bytes
-            // to PTY.writeImmediate on a stopped session. PTY's own
-            // shouldKeepRunning() guard makes this a no-op today, but
-            // contracts that rely on a sibling subsystem's defensive
-            // check rot quietly when that sibling refactors. Mirrors
-            // the gate every other coreQueue.async path uses.
-            if self.isTerminatedLocked() { return }
-            guard let bytes = self.focusEmissionBytes(focused: focused) else { return }
-            self.pty?.writeImmediate(bytes)
-        }
-    }
-
-    /// Single source of truth for window-focus escape emission: applies the
-    /// DECSET 1004 gate (via the **live** core mode, not the async-published
-    /// snapshot) and dedups consecutive same-state transitions. Returns the
-    /// `CSI I` / `CSI O` bytes to write, or nil when nothing should be sent.
-    ///
-    /// MUST run on `coreQueue` — it reads the live core mode and mutates
-    /// `lastFocusEmitted`. This consolidation removed the former second
-    /// emitter in `TerminalView` (which gated on the stale snapshot mode and
-    /// could double-fire per transition, or — across the async window of a
-    /// 1004 toggle — send a stray `CSI I`/`CSI O` to a program that had just
-    /// disabled focus reporting).
-    private func focusEmissionBytes(focused: Bool) -> Data? {
-        dispatchPrecondition(condition: .onQueue(coreQueue))
-        guard let bytes = bbterm.focusChangeBytes(focused: focused) else {
-            // Mode 1004 off: emit nothing and CLEAR the dedup latch, so a
-            // later 1004 re-enable (vim `:e`, tmux re-attach, an alt-screen
-            // app re-initialising its terminal state) is treated as a fresh
-            // first emit. The TerminalView 1004-enable catch-up depends on
-            // this — if the latch stayed set it would swallow the focus-in
-            // the catch-up fires when the window never lost key across the
-            // off→on toggle. (Clearing to nil also keeps the never-enabled
-            // case correct: nil ≠ any focus state, so the first real emit
-            // still fires.)
-            lastFocusEmitted = nil
-            return nil
-        }
-        if lastFocusEmitted == focused { return nil }
-        lastFocusEmitted = focused
-        return bytes
+        focusEmitter.emit(focused)
     }
 
     // MARK: - Prompt navigation
@@ -546,8 +522,8 @@ public final class TerminalSession: ObservableObject {
     /// assert "two `.unknown` OSC 7 events flip the latch exactly once".
     /// Setter is provided so a test can also reset between scenarios.
     internal var _testLoggedUnknownNamespaceDrop: Bool {
-        get { loggedUnknownNamespaceDrop }
-        set { loggedUnknownNamespaceDrop = newValue }
+        get { cwdTracker.loggedUnknownNamespaceDrop }
+        set { cwdTracker.loggedUnknownNamespaceDrop = newValue }
     }
 
     /// Exposes the Preferences Combine subscription so the
@@ -559,169 +535,21 @@ public final class TerminalSession: ObservableObject {
         preferencesSubscription
     }
 
+    /// Resize the grid + PTY winsize in lockstep (drag path: synchronous so the
+    /// returned snapshot is already new-size when the next MTKView frame draws).
+    /// The Bug #3 / Bug #9 ordering, the M3 panic-fallback, the S1-007
+    /// termination gate, and the H8 publishImmediate routing live in
+    /// `ResizeController` (REFACTOR.md Part IV — resize peel). Thin public seam
+    /// `TerminalView` (window-drag) binds unchanged.
     public func resize(to size: Size) {
-        // M-12 sibling: same tripwire rationale as recordPromptStart /
-        // scrollToMark. `coreQueue.sync` self-deadlocks if invoked from
-        // coreQueue, and a future bbterm-event-driven path could land
-        // here on coreQueue and wedge the session invisibly. Public API
-        // surface — fail loud rather than silently hang.
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        // Synchronous on the caller's thread. coreQueue serializes PTY +
-        // BBTerm resize (same guarantee as before) but we block the caller
-        // (typically main during a window drag) so the returned snapshot is
-        // already new-size when the next MTKView frame draws. Async resize
-        // produced a one-frame lag that users saw as jitter — content at old
-        // grid size against new viewport for ~8ms, then catching up.
-        //
-        // Blocking cost under an idle coreQueue: a single bb_term_resize call
-        // plus snapshot, well under a millisecond. Under a coreQueue backlog
-        // (a chatty shell mid-burst) the caller waits for every queued
-        // `feed(_:)` to drain first — callers that don't need the drag-path
-        // jitter-free guarantee should use `resizeAsync` instead (font-change
-        // path, which otherwise beachballs Settings clicks when Claude /
-        // xcodebuild are streaming into the terminal).
-        //
-        // Clamp cols/rows to the same 2×2 floor and 1000×1000 ceiling the
-        // Rust core enforces, so the PTY's TIOCSWINSZ gets dimensions
-        // matching what alacritty will actually reflow into. Without
-        // this, a 1×1 request sizes the PTY to 1×1 but leaves the grid
-        // at 2×2; a UInt16.max request allocates hundreds of GB in the
-        // grid. Keeping PTY + grid in lockstep avoids off-by-one cursor
-        // / wrap bugs after the mismatch.
-        //
-        // Order matters (Bug #9): apply the grid resize FIRST and capture
-        // the actually-applied dims via `bb_term_resize2`, THEN call
-        // `pty.resize` with those post-clamp dims. Reversing the order
-        // opens a window where the shell can read its new winsize via
-        // `stty size` / `tput cols` and start emitting at the new width
-        // before the grid has reflowed — content past the old grid edge
-        // gets dropped. Doing pty AFTER bbterm closes that window: the
-        // SIGWINCH the shell reacts to lands on a grid that's already
-        // sized correctly. And feeding `pty.resize` the
-        // bbterm-actually-applied dims (Bug #3) prevents the shell from
-        // being told a width the renderer can't actually display, which
-        // would cause text past the clamp ceiling to wrap into oblivion.
-        let clamped = Self.clampResize(size)
-        var newSnap: BBSnapshot?
-        coreQueue.sync {
-            // Audit S1-007: gate on termination INSIDE the coreQueue
-            // block — terminate() sets the flag before nil'ing the
-            // handle via this same serial queue, so the read here is
-            // exact. Without it, a resize racing a tab close reached
-            // BBTerm.resize after the handle was nil'd, got nil back,
-            // and logged the 'Rust panic fallback' warning with no
-            // panic anywhere — a false alarm that would misdirect
-            // triage of REAL core panics (the only consumer of that
-            // message).
-            if self.isTerminatedLocked() { return }
-            // Audit M3: when bb_term_resize2 panics, BBTerm.resize returns
-            // nil. Skip TIOCSWINSZ so the kernel winsize stays in lockstep
-            // with the grid (which kept its prior dims). Snapshot still
-            // publishes so the renderer doesn't stall.
-            if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
-                self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
-                // INSIDE the coreQueue block, matching resizeAsync —
-                // lastAppliedGridSize is coreQueue-confined, and calling
-                // from the caller's thread here raced a concurrent
-                // font-change resizeAsync (review finding on this
-                // batch). noteAppliedGridSize never re-enters coreQueue
-                // (its @Published mutations hop to main), so this is
-                // deadlock-free.
-                self.noteAppliedGridSize(Size(cols: applied.cols, rows: applied.rows))
-            } else {
-                Self.sessionLogger.warning(
-                    "BBTerm.resize returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
-                )
-            }
-            newSnap = self.bbterm.snapshot()
-        }
-        guard let newSnap else { return }
-        // Audit fix-#07 (2026-05-11): route through publishImmediate so the
-        // post-resize snapshot honours the H8 user-action-wins invariant.
-        // Previously this path wrote `self.snapshot = newSnap` directly,
-        // leaving `pendingSnapshot` alone — a feed-driven coalescer queued
-        // before the resize would fire AFTER our inline write and clobber
-        // the new-grid frame with pre-resize content. publishImmediate
-        // clears `pendingSnapshot=nil` under publishLock first, dropping
-        // any in-flight coalescer; it also already mirrors the M-1 / F11
-        // isTerminated re-check on the off-main hop, so the prior inline
-        // termination guard is subsumed.
-        snapshotCoalescer.publishImmediate(newSnap)
+        resizeController.resize(to: size)
     }
 
-    /// Async sibling of `resize(to:)` for non-drag callers. Trades the
-    /// in-hand post-resize snapshot (which `resize` returns with so a
-    /// window-drag frame never shows old-grid-at-new-viewport) for a
-    /// guaranteed non-blocking main thread. Used by the font-change path,
-    /// where the resize is a one-off (not a drag loop) and a coreQueue
-    /// backlog must not hold main hostage while shells stream output.
-    /// Ordering against in-flight feeds is preserved because coreQueue is
-    /// serial; the resulting snapshot is routed through the same coalescer
-    /// `feed(_:)` uses.
+    /// Async sibling of `resize(to:)` for non-drag callers (font-change path),
+    /// where a coreQueue backlog must not hold main hostage while shells stream
+    /// output. Logic lives in `ResizeController`; this is the thin public seam.
     public func resizeAsync(to size: Size) {
-        let clamped = Self.clampResize(size)
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            // Audit S1-007: same in-block termination gate as the sync
-            // path — a font-change resizeAsync queued behind terminate()
-            // used to reach a nil'd handle and emit the false
-            // 'Rust panic fallback' warning.
-            if self.isTerminatedLocked() { return }
-            // Same Bug #3/#9 ordering as the sync `resize(to:)`: bbterm
-            // first, then pty with the actually-applied (post-clamp) dims.
-            // Audit M3 sibling of the sync path: nil => Rust panic
-            // fallback, skip TIOCSWINSZ.
-            if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
-                self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
-                self.noteAppliedGridSize(Size(cols: applied.cols, rows: applied.rows))
-            } else {
-                Self.sessionLogger.warning(
-                    "BBTerm.resize (async) returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
-                )
-            }
-            guard let snap = self.bbterm.snapshot() else { return }
-            self.snapshotCoalescer.publishPendingSnapshot(snap)
-        }
-    }
-
-    /// Last grid size BBTerm actually applied. Used to detect real
-    /// reflow (audit S5-004/S5-005 contract: ANY resize invalidates
-    /// lines-scrolled anchors — column reflow rewraps history and
-    /// row-count changes move content through uncounted paths). Reads
-    /// and writes ordered by `coreQueue` on the resize paths plus the
-    /// main hop below; a plain var with no lock is safe because every
-    /// mutation site is either inside a coreQueue block or behind one.
-    private var lastAppliedGridSize: Size?
-
-    /// Invalidate prompt-mark anchors when the applied grid size
-    /// actually changed. First application just records the baseline —
-    /// the window-setup resize precedes any shell prompt, so the ring
-    /// is empty then anyway.
-    private func noteAppliedGridSize(_ applied: Size) {
-        let changed: Bool
-        if let last = lastAppliedGridSize {
-            changed = last != applied
-        } else {
-            changed = false
-        }
-        lastAppliedGridSize = applied
-        guard changed else { return }
-        // Unconditionally async (review follow-up): this runs INSIDE a
-        // coreQueue block — for a main-thread caller of the sync
-        // resize, dispatch_sync executes here ON main while the current
-        // dispatch context is coreQueue, and a synchronous @Published
-        // reaction touching scroll/resize would trip their
-        // .notOnQueue(coreQueue) tripwires from inside the held queue.
-        // Async delivery is safe: the S5-008 generation token already
-        // makes a late ring wipe race-free against in-flight appends.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            // Bump the generation FIRST so any in-flight
-            // recordPromptStart append from the pre-reflow grid
-            // self-discards (audit S5-008's token doubles here), then
-            // wipe the ring + cursor. Main-confined, exactly as before.
-            self.promptNavigator.invalidateForReflow()
-        }
+        resizeController.resizeAsync(to: size)
     }
 
     /// Documented floor 2, ceiling 1000 per axis. Visible to tests
@@ -1223,53 +1051,12 @@ public final class TerminalSession: ObservableObject {
             // assumptions about the host terminal.
             break
         case .cwdChanged(let path):
-            // Rust core already gates on scheme=file and validates
-            // UTF-8; the payload is a ready-to-use filesystem path.
-            // Store on the main thread so reads from ⌘T / ⌘N stay
-            // trivially race-free (those actions also run on main).
-            //
-            // SSH-trust gate (audit synthesis #4 / KNOWN_ISSUES
-            // "OSC 7 trust over SSH"): trust the shell-reported
-            // cwd ONLY when the foreground process tree
-            // classifies as `.local`. A `.remote` (ssh, mosh-
-            // client, docker exec, kubectl exec, …) means the
-            // path describes the remote fs; `.unknown` means we
-            // failed to classify (PTY closing, syscall error,
-            // BFS cap hit). Both cases drop the OSC 7 payload
-            // — fail-closed posture, opposite of the advisory
-            // `hasForegroundChild` / `foregroundWorkingDirectory`
-            // helpers.
-            //
-            // Cost: one syscall to read fg pgroup + at most ~256
-            // node BFS (capped). Per `cd` only; well under the
-            // frame budget on main.
-            let classification = self.classifyForegroundNamespace()
-            switch classification {
-            case .local:
-                self.lastKnownCwd = path
-                // Re-arm the L3 latch on each .local transition so
-                // a subsequent .local → .unknown cycle logs again.
-                // Without this, a real-world ssh-disconnect-then-
-                // reconnect-then-disconnect-again leaves only the
-                // first breadcrumb and support engineers see no
-                // log for the second loss.
-                self.loggedUnknownNamespaceDrop = false
-            case .remote:
-                break
-            case .unknown(let reason):
-                // Audit L3: drop OSC 7 silently on every emit
-                // would leave a support engineer with no
-                // breadcrumb when ⌘T inheritance "isn't picking
-                // up the cwd". Surface the reason once per
-                // .local→.unknown transition so unified-log
-                // readers see why without flooding on every cd.
-                if !self.loggedUnknownNamespaceDrop {
-                    self.loggedUnknownNamespaceDrop = true
-                    Self.sessionLogger.notice(
-                        "OSC 7 dropped: foreground namespace classified .unknown (\(reason, privacy: .public)); ⌘T cwd inheritance disabled until classification recovers"
-                    )
-                }
-            }
+            // OSC 7 ingest + fail-closed SSH-trust gate (Part I §18) +
+            // the L3 drop-log latch live in `CwdTracker`. We're on main
+            // (the `@Published lastKnownCwd` it drives is main-owned), so
+            // the trust classification + store run here exactly as the
+            // inline switch did.
+            cwdTracker.handleCwdChanged(path)
         case .promptMark(let kind, let exitCode):
             // Shell integration: A = prompt start, B = command start,
             // C = output start, D = command end (with exit code).
