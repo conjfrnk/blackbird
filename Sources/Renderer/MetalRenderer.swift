@@ -50,8 +50,19 @@ public final class MetalRenderer {
 
     public let device: MTLDevice
     public let commandQueue: MTLCommandQueue
-    private let pipelineState: MTLRenderPipelineState
-    private let cursorPipelineState: MTLRenderPipelineState
+    /// The two render pipeline states, grouped into one value struct (Finding A
+    /// field-clustering) so the renderer's stored-field count reflects concerns,
+    /// not individual variables. `pipelineState` draws the instanced cell quads;
+    /// `cursorPipelineState` draws the standalone bar / underline / unfocused-
+    /// outline cursor (the focused block cursor renders via cell inversion, not
+    /// through this pipeline). Both are immutable `let`s built once in `init`.
+    /// Fields keep their exact prior names, so the encoders read
+    /// `pipelines.pipelineState` / `pipelines.cursorPipelineState`.
+    private struct Pipelines {
+        let pipelineState: MTLRenderPipelineState
+        let cursorPipelineState: MTLRenderPipelineState
+    }
+    private let pipelines: Pipelines
     /// External read-only by design. A direct `renderer.atlas = newAtlas`
     /// write would publish a fresh `GlyphAtlas` whose `generation`
     /// counter restarts at 0; if `lastCacheKey.atlasGeneration` was also
@@ -178,27 +189,31 @@ public final class MetalRenderer {
     }
     private var cmdHover = CmdHover()
 
-    /// Vertical offset (in points) added to every cell and cursor. Used by
-    /// TerminalView to keep text out of the titlebar region when the window
-    /// uses `.fullSizeContentView` so the Metal clearColor can tint under the
-    /// titlebar. TerminalView passes `safeAreaInsets.top` here on each layout.
-    private var topInsetPoints: Float = 0.0
+    /// Layout offsets in points added to every cell and cursor, grouped into one
+    /// value struct (Finding A field-clustering). `topInsetPoints` keeps text out
+    /// of the titlebar region when the window uses `.fullSizeContentView` so the
+    /// Metal clearColor can tint under the titlebar (TerminalView passes
+    /// `safeAreaInsets.top` here on each layout); `leftInsetPoints` is its
+    /// horizontal sibling (TerminalView passes `horizontalContentInsetPoints` on
+    /// each `layout()`). Default zero keeps pre-feature behaviour for tests that
+    /// build a renderer without a TerminalView. Both fields keep their exact
+    /// prior names/types; access is now `insets.topInsetPoints` /
+    /// `insets.leftInsetPoints`. They are independent scalars (never mutated via
+    /// `&`-subscript) so grouping introduces no exclusivity hazard.
+    private struct Insets {
+        var topInsetPoints: Float = 0.0
+        var leftInsetPoints: Float = 0.0
+    }
+    private var insets = Insets()
 
-    public func setTopInsetPoints(_ points: Float) { topInsetPoints = points }
+    public func setTopInsetPoints(_ points: Float) { insets.topInsetPoints = points }
 
-    /// Horizontal offset (in points) added to every cell and cursor x-coord.
-    /// TerminalView passes its `horizontalContentInsetPoints` here on each
-    /// `layout()`. Mirrors `topInsetPoints` exactly — default zero keeps
-    /// pre-feature behaviour for tests that build a renderer without a
-    /// TerminalView.
-    private var leftInsetPoints: Float = 0.0
-
-    public func setLeftInsetPoints(_ points: Float) { leftInsetPoints = points }
+    public func setLeftInsetPoints(_ points: Float) { insets.leftInsetPoints = points }
 
     #if DEBUG
     /// DEBUG-only accessor for unit tests asserting the renderer received
     /// the correct inset value from TerminalView.layout().
-    public func leftInsetPointsForTesting() -> Float { leftInsetPoints }
+    public func leftInsetPointsForTesting() -> Float { insets.leftInsetPoints }
     #endif
 
     /// Cursor blink + last-position + user-shape-override state (Finding A
@@ -408,27 +423,40 @@ public final class MetalRenderer {
         let visual: VisualState
     }
 
-    /// Kill switch for the dirty-rows fast path. Set `BB_NO_DIRTY_ROWS=1`
-    /// and restart to force a full rebuild every frame — useful when
-    /// debugging a "some rows look stale" artifact to confirm whether
-    /// the cache is responsible. Evaluated once per renderer.
-    private let dirtyRowsDisabled: Bool = {
-        guard let cstr = getenv("BB_NO_DIRTY_ROWS") else { return false }
-        let raw = String(cString: cstr)
-        return !raw.isEmpty && raw != "0"
-    }()
+    /// Debug kill-switches read once from the environment at init (Finding A
+    /// field-clustering). Grouping the two `Bool`s into one value struct collapses
+    /// two stored fields into one AND de-duplicates the identical env-flag parsing
+    /// (one `envFlagSet`). Both are immutable `let`s evaluated once per renderer;
+    /// changes require an app restart.
+    ///
+    /// - `dirtyRowsDisabled` (`BB_NO_DIRTY_ROWS=1`): force a full rebuild every
+    ///   frame — useful when a "some rows look stale" artifact might be the
+    ///   per-row cache.
+    /// - `frameSkipDisabled` (`BB_NO_FRAME_SKIP=1`): disable the skip path
+    ///   entirely so every `render(in:)` runs the full encode + present — useful
+    ///   when a redraw artifact ("looks weird after closing popup X") might be
+    ///   frame-skip.
+    private struct DebugToggles {
+        let dirtyRowsDisabled: Bool
+        let frameSkipDisabled: Bool
 
-    /// Runtime escape hatch. Set the env var `BB_NO_FRAME_SKIP=1` and
-    /// restart to disable the skip path entirely — every draw(in:) call
-    /// runs the full encode + present. Useful when a user reports a
-    /// redraw artifact ("looks weird after closing popup X") and we
-    /// want to A/B test whether frame-skip is responsible. Evaluated
-    /// once per renderer via `getenv` — changes require an app restart.
-    private let frameSkipDisabled: Bool = {
-        guard let cstr = getenv("BB_NO_FRAME_SKIP") else { return false }
-        let raw = String(cString: cstr)
-        return !raw.isEmpty && raw != "0"
-    }()
+        /// Read both flags from the environment. A flag is on when its variable
+        /// is set to a non-empty value other than `"0"` — byte-identical to the
+        /// two prior per-field closures.
+        static func fromEnvironment() -> DebugToggles {
+            DebugToggles(
+                dirtyRowsDisabled: Self.envFlagSet("BB_NO_DIRTY_ROWS"),
+                frameSkipDisabled: Self.envFlagSet("BB_NO_FRAME_SKIP")
+            )
+        }
+
+        private static func envFlagSet(_ name: String) -> Bool {
+            guard let cstr = getenv(name) else { return false }
+            let raw = String(cString: cstr)
+            return !raw.isEmpty && raw != "0"
+        }
+    }
+    private let debugToggles = DebugToggles.fromEnvironment()
 
     public func setCursorBlinkEnabled(_ enabled: Bool) {
         if enabled != cursorState.blinkEnabled {
@@ -651,8 +679,7 @@ public final class MetalRenderer {
 
         self.device = device
         self.commandQueue = queue
-        self.pipelineState = pso
-        self.cursorPipelineState = cursorPSO
+        self.pipelines = Pipelines(pipelineState: pso, cursorPipelineState: cursorPSO)
         self.atlas = atlas
         self.metrics = metrics
         // Initial generation. Subsequent metrics mutations bump this
@@ -1000,8 +1027,8 @@ public final class MetalRenderer {
         attrs: SIMD4<UInt32>, selected: Bool,
         into out: inout [CellInstance]
     ) {
-        let xPx = Float(col) * cellW + leftInsetPoints
-        let yPx = Float(row) * cellH + topInsetPoints
+        let xPx = Float(col) * cellW + insets.leftInsetPoints
+        let yPx = Float(row) * cellH + insets.topInsetPoints
 
         // WIDE_CHAR_SPACER / LEADING_WIDE_CHAR_SPACER sit to the right of (or
         // on the wrapped-leading col before) a wide glyph. The wide glyph's 2x
@@ -1388,8 +1415,8 @@ public final class MetalRenderer {
                 // `.error` log so the violation surfaces without spamming.
                 // Audit M-16 / UR follow-up (2026-04-29).
                 displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
-                topInsetPoints: topInsetPoints,
-                leftInsetPoints: leftInsetPoints,
+                topInsetPoints: insets.topInsetPoints,
+                leftInsetPoints: insets.leftInsetPoints,
                 defaultBgRgb: themeColors.defaultBgRgb,
                 backgroundOpacity: themeColors.backgroundOpacity,
                 keepBgOpaque: themeColors.keepBgOpaque,
@@ -1435,8 +1462,8 @@ public final class MetalRenderer {
                 // routed through `clampDisplayOffset` for the one-shot
                 // negative-detected warning. Audit M-16 (2026-04-29).
                 displayOffset: Self.clampDisplayOffset(snap.displayOffset),
-                topInsetPoints: topInsetPoints,
-                leftInsetPoints: leftInsetPoints,
+                topInsetPoints: insets.topInsetPoints,
+                leftInsetPoints: insets.leftInsetPoints,
                 defaultBgRgb: themeColors.defaultBgRgb,
                 backgroundOpacity: themeColors.backgroundOpacity,
                 keepBgOpaque: themeColors.keepBgOpaque,
@@ -1543,7 +1570,7 @@ public final class MetalRenderer {
         let frameKey = makeFrameKey(
             snapshot: snapshot, focused: focused, selFields: selFields, blinkSkip: blinkSkipNow
         )
-        if !frameSkipDisabled, frameKey == skipCache.lastFrameKey {
+        if !debugToggles.frameSkipDisabled, frameKey == skipCache.lastFrameKey {
             // Nothing that affects pixels has changed since the last
             // presented frame. Skip the whole pipeline — no CPU instance
             // rebuild, no GPU encode, no drawable acquisition. The
@@ -1627,125 +1654,39 @@ public final class MetalRenderer {
         let isSelected = Self.makeSelectionPredicate(selection)
 
         if let snap = snapshot {
-            // Viewport in points, not pixels. NDC conversion in the shader
-            // divides point positions by point viewport, giving a scale-
-            // independent result that the hardware rasterizes to the drawable's
-            // pixel space. Text stays at its absolute cell-sized position as
-            // the window grows/shrinks, with empty space on the right/bottom
-            // when the grid hasn't caught up yet (which synchronous
-            // session.resize now eliminates).
-            let viewportPoints = SIMD2<Float>(
-                Float(view.bounds.size.width),
-                Float(view.bounds.size.height)
+            // All per-frame viewport / cell-size / cursor-rect geometry (pure
+            // math; see `computeFrameGeometry`). The blink-phase reset below is
+            // the only stateful step and stays inline because it mutates
+            // `cursorState`.
+            let geo = computeFrameGeometry(
+                snap: snap, view: view, blinkSkip: blinkSkipNow, focused: focused
             )
-            let cellSizePoints = SIMD2<Float>(
-                Float(metrics.cellWidth),
-                Float(metrics.cellHeight)
-            )
-            // Cursor position in viewport rows. When the user is scrolled back
-            // into history (displayOffset > 0), the live cursor_row is offset
-            // downward on-screen by that amount: rows 0..displayOffset-1 show
-            // scrollback, and the live grid starts at screen row displayOffset.
-            // If the resulting row falls below the viewport, the live cursor
-            // isn't visible and we skip drawing it — scrolling back should
-            // never show a phantom cursor on a scrollback line.
-            let screenCursorRow = snap.cursorRow + snap.displayOffset
-            // User's pinned shape (`cursorShapeOverride`) wins over the
-            // snapshot's DECSCUSR shape. When nil, follow the shell. Used
-            // everywhere below — `useCellInvertedCursor`, the "hidden"
-            // short-circuit, and the cache key.
-            // `UInt8(clamping:)` per UR-2 — defense-in-depth on the
-            // Rust-snapshot cursorShape entering the cache key path.
-            let effectiveShape: UInt8 = cursorState.shapeOverride ?? UInt8(clamping: snap.cursorShape)
-            let shape = UInt32(effectiveShape)
-            // Reset the blink cycle every time the cursor moves, so a
-            // moving cursor is continuously visible. Tracked in
-            // grid-coordinate space (cursorRow/Col), not screen row.
-            // `Int32(clamping:)` per UR-2 — defense-in-depth on
-            // Rust-snapshot cursor coordinates.
-            let curRow = Int32(clamping: snap.cursorRow)
-            let curCol = Int32(clamping: snap.cursorCol)
-            // Capture the prior cursor position BEFORE overwriting
-            // `lastCursorRow` — the partial-rebuild path below needs it
-            // to force-rebuild the row the cursor just vacated. Audit
-            // metal-renderer F3.
-            let prevCursorRow = cursorState.lastCursorRow
-            let prevCursorCol = cursorState.lastCursorCol
-            let cursorMoved = curRow != cursorState.lastCursorRow || curCol != cursorState.lastCursorCol
-            if cursorMoved {
-                cursorState.lastCursorRow = curRow
-                cursorState.lastCursorCol = curCol
+            // Reset the blink cycle every time the cursor moves so a moving
+            // cursor is continuously visible. `computeFrameGeometry` already
+            // captured the prior position into `geo.prevCursor*` / `geo.cursorMoved`
+            // BEFORE this write, so the read-before-write order matches the prior
+            // inline code (audit metal-renderer F3).
+            if geo.cursorMoved {
+                cursorState.lastCursorRow = geo.curRow
+                cursorState.lastCursorCol = geo.curCol
                 cursorState.blinkPhaseStart = CACurrentMediaTime()
             }
-            // blinkSkip already computed for the frame-key check above.
-            // Reuse that value so we never flicker from a phase transition
-            // that happens between the key computation and the draw.
-            let blinkSkip = blinkSkipNow
-            let cursorOnScreen =
-                snap.cursorVisible &&
-                shape != 3 &&                 // DECSCUSR hidden — skip entirely
-                snap.cursorCol < snap.cols &&
-                screenCursorRow < snap.rows &&
-                !blinkSkip
-            // Focused block cursor renders via cell inversion (so the glyph
-            // stays visible). Bar / underline / unfocused-outline go through
-            // the cursor pipeline below. This mirrors iTerm2 behaviour and
-            // keeps reverse-video cells intact when the cursor crosses them.
-            let useCellInvertedCursor = cursorOnScreen && focused && shape == 0
-            let blockCursorCell: (row: Int, col: Int)? = useCellInvertedCursor
-                ? (row: screenCursorRow, col: snap.cursorCol)
-                : nil
 
-            // Decide whether to take the partial-rebuild path. The cache
-            // is "compatible" when every visible-state input to the row
-            // builder matches the prior frame (CacheKey equality). When
-            // it matches AND alacritty reports partial damage with a
-            // manageable count, we only rebuild the damaged rows — the
-            // rest are copied from rowInstanceCache unchanged.
-            //
-            // The row-count threshold (rows / 2) guards against the case
-            // where damage covers most of the screen anyway: the
-            // per-row-skip overhead would exceed the savings. Above the
-            // threshold, just rebuild everything.
-            let newCacheKey = makeCacheKey(
+            // Decide what rows to rebuild this frame: the new CacheKey, the
+            // cache-compatible / coalesced-snapshot flags, and the damaged-row
+            // set (nil = full rebuild); see `planRowRebuild`. Pure — `render`
+            // records the returned CacheKey only after the buildInstances commit
+            // below (H7 / S2-007 ordering).
+            let plan = planRowRebuild(
                 snap: snap, focused: focused, selFields: selFields,
-                effectiveShape: effectiveShape, blinkSkip: blinkSkipNow
-            )
-            let cacheCompatible = !dirtyRowsDisabled
-                && skipCache.lastCacheKey == newCacheKey
-                && skipCache.rowInstanceCache.count == snap.rows
-
-            // Detect coalesced snapshots: `TerminalSession.publishPending
-            // Snapshot` coalesces rapid core snapshots into a single main-
-            // thread handoff, dropping intermediate damage info on the
-            // floor. `BBSnapshot.sequenceID` is a monotonic per-allocation
-            // counter incremented on every `bb_term_take_snapshot`, so a
-            // jump of >1 between the previous rendered snapshot and this
-            // one means ≥1 intermediate was skipped. The partial-rebuild
-            // path keys off `damagedRows`, which alacritty resets on each
-            // snapshot take — the skipped rows' damage is gone. Force a
-            // full rebuild in that case; the cache's CacheKey stays
-            // valid, we just re-walk every row's cells once to catch the
-            // lost deltas. Fixes cmatrix / vim / nvim streaming artifacts.
-            let snapshotCoalesced: Bool =
-                skipCache.lastRenderedSnapshotSeq > 0
-                && snap.sequenceID > skipCache.lastRenderedSnapshotSeq + 1
-
-            let partialRows = decideRebuildRows(
-                snap: snap,
-                cacheCompatible: cacheCompatible,
-                snapshotCoalesced: snapshotCoalesced,
-                cursorMoved: cursorMoved,
-                prevCursorRow: prevCursorRow,
-                prevCursorCol: prevCursorCol,
-                curRow: curRow
+                blinkSkip: blinkSkipNow, geo: geo
             )
 
             guard let instanceCount = buildInstances(
                 snapshot: snap,
                 isSelected: isSelected,
-                blockCursorCell: blockCursorCell,
-                partialRowsOnly: partialRows
+                blockCursorCell: geo.blockCursorCell,
+                partialRowsOnly: plan.partialRows
             ) else {
                 // Instance-buffer grow failure (audit S2-007): abandon
                 // the frame. End the encoder (required before the
@@ -1772,7 +1713,7 @@ public final class MetalRenderer {
                 skipCache.didFrameSkipLastRender = true
                 return
             }
-            skipCache.lastCacheKey = newCacheKey
+            skipCache.lastCacheKey = plan.cacheKey
             // Record the snapshot seq we just rendered. `lastRenderedSnapshot
             // Seq` drives the coalesced-snapshot detection on the next
             // render; updating it HERE (after the row cache is in sync
@@ -1783,14 +1724,14 @@ public final class MetalRenderer {
             if instanceCount > 0 {
                 encodeCells(
                     encoder: encoder, slot: slot, instanceCount: instanceCount,
-                    viewportPoints: viewportPoints, cellSizePoints: cellSizePoints
+                    viewportPoints: geo.viewportPoints, cellSizePoints: geo.cellSizePoints
                 )
             }
-            if cursorOnScreen && !useCellInvertedCursor {
+            if geo.cursorOnScreen && !geo.useCellInvertedCursor {
                 encodeCursor(
-                    encoder: encoder, snap: snap, screenCursorRow: screenCursorRow,
-                    shape: shape, viewportPoints: viewportPoints,
-                    cellSizePoints: cellSizePoints, focused: focused
+                    encoder: encoder, snap: snap, screenCursorRow: geo.screenCursorRow,
+                    shape: geo.shape, viewportPoints: geo.viewportPoints,
+                    cellSizePoints: geo.cellSizePoints, focused: focused
                 )
             }
         }
@@ -1798,6 +1739,176 @@ public final class MetalRenderer {
         encoder.endEncoding()
         buffer.present(drawable)
         buffer.commit()
+    }
+
+    /// Pure per-frame geometry produced by `computeFrameGeometry` and consumed by
+    /// the rebuild planner + encoders. Carries no GPU handles — just the frame's
+    /// viewport (drawable) and cell sizes, the resolved cursor shape/position, and
+    /// the cursor-paint decision (`cursorOnScreen` / `useCellInvertedCursor` /
+    /// `blockCursorCell`). `prevCursor*` / `cursorMoved` snapshot the cursor's
+    /// prior grid position (read BEFORE `render` overwrites `cursorState.lastCursor*`)
+    /// for the blink reset and the partial-rebuild vacated-row forcing.
+    private struct FrameGeometry {
+        let viewportPoints: SIMD2<Float>
+        let cellSizePoints: SIMD2<Float>
+        let screenCursorRow: Int
+        let effectiveShape: UInt8
+        let shape: UInt32
+        let curRow: Int32
+        let curCol: Int32
+        let prevCursorRow: Int32
+        let prevCursorCol: Int32
+        let cursorMoved: Bool
+        let cursorOnScreen: Bool
+        let useCellInvertedCursor: Bool
+        let blockCursorCell: (row: Int, col: Int)?
+    }
+
+    /// Compute this frame's viewport / cell-size / cursor-rect geometry. Pure: it
+    /// reads `metrics`, `cursorState.shapeOverride`, and the snapshot/view but
+    /// mutates nothing — the blink-phase reset that depends on `cursorMoved` stays
+    /// in `render`. Extracted from `render()` so the orchestrator stays a thin
+    /// wait→encode→commit shell over the load-bearing slot lifecycle.
+    private func computeFrameGeometry(
+        snap: BBSnapshot,
+        view: MTKView,
+        blinkSkip: Bool,
+        focused: Bool
+    ) -> FrameGeometry {
+        // Viewport in points, not pixels. NDC conversion in the shader divides
+        // point positions by the point viewport, giving a scale-independent result
+        // that the hardware rasterizes to the drawable's pixel space. Text stays at
+        // its absolute cell-sized position as the window grows/shrinks, with empty
+        // space on the right/bottom when the grid hasn't caught up yet (which
+        // synchronous session.resize now eliminates).
+        let viewportPoints = SIMD2<Float>(
+            Float(view.bounds.size.width),
+            Float(view.bounds.size.height)
+        )
+        let cellSizePoints = SIMD2<Float>(
+            Float(metrics.cellWidth),
+            Float(metrics.cellHeight)
+        )
+        // Cursor position in viewport rows. When the user is scrolled back into
+        // history (displayOffset > 0), the live cursor_row is offset downward
+        // on-screen by that amount: rows 0..displayOffset-1 show scrollback, and
+        // the live grid starts at screen row displayOffset. If the resulting row
+        // falls below the viewport, the live cursor isn't visible and we skip
+        // drawing it — scrolling back should never show a phantom cursor on a
+        // scrollback line.
+        let screenCursorRow = snap.cursorRow + snap.displayOffset
+        // User's pinned shape (`cursorShapeOverride`) wins over the snapshot's
+        // DECSCUSR shape. When nil, follow the shell. `UInt8(clamping:)` per UR-2 —
+        // defense-in-depth on the Rust-snapshot cursorShape entering the cache key.
+        let effectiveShape: UInt8 = cursorState.shapeOverride ?? UInt8(clamping: snap.cursorShape)
+        let shape = UInt32(effectiveShape)
+        // Cursor grid coordinates (`Int32(clamping:)` per UR-2). Captured here —
+        // before `render` overwrites `cursorState.lastCursor*` — so the
+        // partial-rebuild path can force-rebuild the row the cursor just vacated
+        // (audit metal-renderer F3).
+        let curRow = Int32(clamping: snap.cursorRow)
+        let curCol = Int32(clamping: snap.cursorCol)
+        let prevCursorRow = cursorState.lastCursorRow
+        let prevCursorCol = cursorState.lastCursorCol
+        let cursorMoved = curRow != cursorState.lastCursorRow || curCol != cursorState.lastCursorCol
+        // `blinkSkip` is the value already computed for the frame-key check, passed
+        // in so we never flicker from a phase transition between the key
+        // computation and the draw.
+        let cursorOnScreen =
+            snap.cursorVisible &&
+            shape != 3 &&                 // DECSCUSR hidden — skip entirely
+            snap.cursorCol < snap.cols &&
+            screenCursorRow < snap.rows &&
+            !blinkSkip
+        // Focused block cursor renders via cell inversion (so the glyph stays
+        // visible). Bar / underline / unfocused-outline go through the cursor
+        // pipeline. This mirrors iTerm2 behaviour and keeps reverse-video cells
+        // intact when the cursor crosses them.
+        let useCellInvertedCursor = cursorOnScreen && focused && shape == 0
+        let blockCursorCell: (row: Int, col: Int)? = useCellInvertedCursor
+            ? (row: screenCursorRow, col: snap.cursorCol)
+            : nil
+        return FrameGeometry(
+            viewportPoints: viewportPoints,
+            cellSizePoints: cellSizePoints,
+            screenCursorRow: screenCursorRow,
+            effectiveShape: effectiveShape,
+            shape: shape,
+            curRow: curRow,
+            curCol: curCol,
+            prevCursorRow: prevCursorRow,
+            prevCursorCol: prevCursorCol,
+            cursorMoved: cursorMoved,
+            cursorOnScreen: cursorOnScreen,
+            useCellInvertedCursor: useCellInvertedCursor,
+            blockCursorCell: blockCursorCell
+        )
+    }
+
+    /// The per-frame rebuild decision produced by `planRowRebuild`: the fresh
+    /// `CacheKey` (recorded by `render` only AFTER a committed `buildInstances`,
+    /// per H7/S2-007) and the partial-row set (`nil` = full rebuild).
+    private struct RebuildPlan {
+        let cacheKey: CacheKey
+        let partialRows: Set<Int>?
+    }
+
+    /// Decide what this frame must rebuild: build the new `CacheKey`, test it
+    /// against the cached one (+ row-count + the dirty-rows kill switch), detect a
+    /// coalesced-snapshot gap, and resolve the damaged-row set via
+    /// `decideRebuildRows`. Pure: it READS skip-cache state but mutates nothing —
+    /// `render` records `lastCacheKey` / `lastRenderedSnapshotSeq` only after the
+    /// buildInstances commit, preserving the H7/S2-007 ordering.
+    private func planRowRebuild(
+        snap: BBSnapshot,
+        focused: Bool,
+        selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
+        blinkSkip: Bool,
+        geo: FrameGeometry
+    ) -> RebuildPlan {
+        // Decide whether to take the partial-rebuild path. The cache is
+        // "compatible" when every visible-state input to the row builder matches
+        // the prior frame (CacheKey equality). When it matches AND alacritty
+        // reports partial damage with a manageable count, we only rebuild the
+        // damaged rows — the rest are copied from rowInstanceCache unchanged.
+        //
+        // The row-count threshold (damage covering ≥ half the screen, applied in
+        // `decideRebuildRows`) guards against the case where damage covers most of
+        // the screen anyway: the per-row-skip overhead would exceed the savings.
+        // Above the threshold, just rebuild everything.
+        let newCacheKey = makeCacheKey(
+            snap: snap, focused: focused, selFields: selFields,
+            effectiveShape: geo.effectiveShape, blinkSkip: blinkSkip
+        )
+        let cacheCompatible = !debugToggles.dirtyRowsDisabled
+            && skipCache.lastCacheKey == newCacheKey
+            && skipCache.rowInstanceCache.count == snap.rows
+
+        // Detect coalesced snapshots: `TerminalSession.publishPendingSnapshot`
+        // coalesces rapid core snapshots into a single main-thread handoff,
+        // dropping intermediate damage info on the floor. `BBSnapshot.sequenceID`
+        // is a monotonic per-allocation counter incremented on every
+        // `bb_term_take_snapshot`, so a jump of >1 between the previous rendered
+        // snapshot and this one means ≥1 intermediate was skipped. The
+        // partial-rebuild path keys off `damagedRows`, which alacritty resets on
+        // each snapshot take — the skipped rows' damage is gone. Force a full
+        // rebuild in that case; the CacheKey stays valid, we just re-walk every
+        // row's cells once to catch the lost deltas. Fixes cmatrix / vim / nvim
+        // streaming artifacts.
+        let snapshotCoalesced: Bool =
+            skipCache.lastRenderedSnapshotSeq > 0
+            && snap.sequenceID > skipCache.lastRenderedSnapshotSeq + 1
+
+        let partialRows = decideRebuildRows(
+            snap: snap,
+            cacheCompatible: cacheCompatible,
+            snapshotCoalesced: snapshotCoalesced,
+            cursorMoved: geo.cursorMoved,
+            prevCursorRow: geo.prevCursorRow,
+            prevCursorCol: geo.prevCursorCol,
+            curRow: geo.curRow
+        )
+        return RebuildPlan(cacheKey: newCacheKey, partialRows: partialRows)
     }
 
     /// Decide the partial-rebuild row set for this frame, or nil to force a full
@@ -1856,7 +1967,7 @@ public final class MetalRenderer {
             cellSizePx: cellSizePoints,
             accentColor: themeColors.accentColor
         )
-        encoder.setRenderPipelineState(pipelineState)
+        encoder.setRenderPipelineState(pipelines.pipelineState)
         encoder.setVertexBuffer(ring.instanceBuffers[slot], offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
         encoder.setFragmentTexture(atlas.texture, index: 0)
@@ -1883,8 +1994,8 @@ public final class MetalRenderer {
     ) {
         var cu = CursorUniforms(
             viewportPx: viewportPoints,
-            cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + leftInsetPoints,
-                                      Float(screenCursorRow) * Float(metrics.cellHeight) + topInsetPoints),
+            cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + insets.leftInsetPoints,
+                                      Float(screenCursorRow) * Float(metrics.cellHeight) + insets.topInsetPoints),
             cellSizePx: cellSizePoints,
             color: themeColors.cursorColor,
             strokeWidthPx: 1.0,
@@ -1892,7 +2003,7 @@ public final class MetalRenderer {
             shape: shape,
             _pad: 0
         )
-        encoder.setRenderPipelineState(cursorPipelineState)
+        encoder.setRenderPipelineState(pipelines.cursorPipelineState)
         encoder.setVertexBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
         encoder.setFragmentBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
