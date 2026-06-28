@@ -612,6 +612,44 @@ public final class KeyEncoder {
         }
     }
 
+    /// Press-event bytes for a CSI-parameter special key, derived from the
+    /// single `csiParamShape` `(lead, term)` table so press encoding can never
+    /// drift from the Kitty flag-2 release/repeat path. Replaces four nested
+    /// per-category switches that re-encoded the same bytes by hand (and
+    /// carried unreachable `default:` arms) — REFACTOR.md Part IV KeyEncoder
+    /// "duplicated SpecialKey→byte table".
+    ///
+    /// The modified form is uniform — `CSI <lead> ; <mod> <term>`. The
+    /// unmodified base differs by category: arrows/Home/End drop the lead and
+    /// honour DECCKM (`SS3 <term>` vs `CSI <term>`); F1–F4 always use SS3;
+    /// nav (PgUp/PgDn/Del/Ins) and F5–F12 keep the lead (`CSI <lead> <term>`).
+    private static func csiParamPress(
+        _ key: SpecialKey,
+        shape: (lead: String, term: UInt8),
+        modBits: Int,
+        hasMods: Bool,
+        applicationCursorKeys: Bool
+    ) -> Data {
+        if hasMods {
+            // CSI <lead> ; <mod> <term>
+            return Data([0x1B, 0x5B]) + Data(shape.lead.utf8) + Data([0x3B])
+                + Data(String(modBits).utf8) + Data([shape.term])
+        }
+        switch key {
+        case .up, .down, .right, .left, .home, .end:
+            // DECCKM: SS3 (ESC O <term>) under application-cursor-keys, else CSI.
+            return applicationCursorKeys
+                ? Data([0x1B, 0x4F, shape.term])
+                : Data([0x1B, 0x5B, shape.term])
+        case .f1, .f2, .f3, .f4:
+            // SS3 <term> (ESC O P/Q/R/S) — always, regardless of DECCKM.
+            return Data([0x1B, 0x4F, shape.term])
+        default:
+            // Nav + F5–F12 keep the numeric lead: CSI <lead> <term>.
+            return Data([0x1B, 0x5B]) + Data(shape.lead.utf8) + Data([shape.term])
+        }
+    }
+
     public func encodeSpecial(
         _ key: SpecialKey,
         modifiers: Modifiers,
@@ -660,83 +698,20 @@ public final class KeyEncoder {
         }
 
         switch key {
-        case .up, .down, .right, .left, .home, .end:
-            let final: UInt8 = {
-                switch key {
-                case .up: return 0x41       // A
-                case .down: return 0x42     // B
-                case .right: return 0x43    // C
-                case .left: return 0x44     // D
-                case .home: return 0x48     // H
-                case .end: return 0x46      // F
-                default: return 0x41
-                }
-            }()
-            if hasMods {
-                // CSI 1 ; M <final>
-                return Data([0x1B, 0x5B, 0x31, 0x3B]) + Data(String(modBits).utf8) + Data([final])
-            }
-            if applicationCursorKeys {
-                // SS3 <final> — ESC O <final>
-                return Data([0x1B, 0x4F, final])
-            }
-            // CSI <final> — ESC [ <final>
-            return Data([0x1B, 0x5B, final])
-
-        case .pageUp, .pageDown, .delete, .insert:
-            let num: UInt8 = {
-                switch key {
-                case .pageUp: return 0x35   // "5"
-                case .pageDown: return 0x36 // "6"
-                case .delete: return 0x33   // "3"
-                case .insert: return 0x32   // "2"
-                default: return 0x35
-                }
-            }()
-            if hasMods {
-                // CSI <num> ; M ~
-                return Data([0x1B, 0x5B, num, 0x3B]) + Data(String(modBits).utf8) + Data([0x7E])
-            }
-            return Data([0x1B, 0x5B, num, 0x7E])
-
-        case .f1, .f2, .f3, .f4:
-            let final: UInt8 = {
-                switch key {
-                case .f1: return 0x50       // P
-                case .f2: return 0x51       // Q
-                case .f3: return 0x52       // R
-                case .f4: return 0x53       // S
-                default: return 0x50
-                }
-            }()
-            if hasMods {
-                // CSI 1 ; M <final>
-                return Data([0x1B, 0x5B, 0x31, 0x3B]) + Data(String(modBits).utf8) + Data([final])
-            }
-            // SS3 <final> — ESC O P
-            return Data([0x1B, 0x4F, final])
-
-        case .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12:
-            // CSI <code> ~    — codes per xterm:
-            // F5=15, F6=17, F7=18, F8=19, F9=20, F10=21, F11=23, F12=24.
-            let code: String = {
-                switch key {
-                case .f5: return "15"
-                case .f6: return "17"
-                case .f7: return "18"
-                case .f8: return "19"
-                case .f9: return "20"
-                case .f10: return "21"
-                case .f11: return "23"
-                case .f12: return "24"
-                default: return "15"
-                }
-            }()
-            if hasMods {
-                // CSI <code> ; M ~
-                return Data([0x1B, 0x5B]) + Data(code.utf8) + Data([0x3B]) + Data(String(modBits).utf8) + Data([0x7E])
-            }
-            return Data([0x1B, 0x5B]) + Data(code.utf8) + Data([0x7E])
+        case .up, .down, .right, .left, .home, .end,
+             .pageUp, .pageDown, .delete, .insert,
+             .f1, .f2, .f3, .f4,
+             .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12:
+            // Single source of truth: the `(lead, term)` bytes come from
+            // `csiParamShape` — the same table the flag-2 release/repeat path
+            // above uses — so press encoding can never drift from it. `shape`
+            // is non-nil for every key in this case list (only keypad keys map
+            // to nil, and they are the separate case below).
+            guard let shape = Self.csiParamShape(for: key) else { return Data() }
+            return Self.csiParamPress(
+                key, shape: shape, modBits: modBits,
+                hasMods: hasMods, applicationCursorKeys: applicationCursorKeys
+            )
 
         case .kp0, .kp1, .kp2, .kp3, .kp4, .kp5, .kp6, .kp7, .kp8, .kp9,
              .kpEnter, .kpPlus, .kpMinus, .kpMultiply, .kpDivide,
