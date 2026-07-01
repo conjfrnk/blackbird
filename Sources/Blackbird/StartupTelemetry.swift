@@ -10,7 +10,9 @@ import os
 /// Why a central gate (vs. sprinkling `#if DEBUG` at call sites):
 ///   - one source of truth for "is this on"; the four emit sites stay
 ///     identical regardless of build flavour.
-///   - tests can flip `.enabled` directly.
+///   - `isEnabled` is an immutable gate, not a mutable flag: tests run in
+///     DEBUG (so it's on); Release behaviour is env-driven via
+///     `BLACKBIRD_STARTUP_LOG`. Computed once, read identically everywhere.
 ///   - the `os.Logger` itself is reused, not re-created per call.
 ///
 /// Readable via:

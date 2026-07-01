@@ -126,7 +126,7 @@ final class TerminalSessionTests: XCTestCase {
 
         let exp = expectation(description: "title set")
         var c: AnyCancellable?
-        c = session.$title
+        c = session.titleState.$title
             .compactMap { $0 }
             .sink { title in
                 if title == "my-title" {

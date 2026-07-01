@@ -119,39 +119,21 @@ public final class GlyphAtlas {
     /// once per (bold × italic) combination rather than per glyph insertion.
     /// Up to 4 entries total.
     private var styledFonts: [Style: NSFont] = [:]
-    private var nextSlot: Int = 0
+    /// Slot bookkeeping — which slot a glyph lands in, wide-glyph row alignment
+    /// + orphan reclaim (glyph-atlas F4), and the saturation-flush reset
+    /// (audit F3/H3/M-6). Extracted into a pure, GPU-free value type so its
+    /// arithmetic is unit-testable in isolation; `lookupOrInsert` orchestrates
+    /// rasterisation around its plan/commit/flush calls and owns the texture
+    /// writes, the `byKey` cache, and the `flushBarrier`.
+    private var allocator: SlotAllocator
     /// Monotonic counter incremented on every saturation flush. Every
-    /// successful `lookupOrInsert` returns a (kept, generation) pair so
-    /// the renderer can detect when its cached row UVs were issued
-    /// against an older atlas layout — those UVs now point at whatever
-    /// glyph occupies the same slot post-flush, and the cached row
-    /// would silently render the wrong glyph until the row is
-    /// independently damaged. Audit H3.
-    public private(set) var generation: UInt64 = 0
-    /// Single-slot holes that the wide-glyph row-align path opened up.
-    /// When a wide (2-slot) glyph doesn't fit in the current row's
-    /// trailing column we skip to the next row, leaving one orphan
-    /// narrow slot behind. Parked here so the next narrow insert can
-    /// reclaim it before consuming a fresh slot — without this
-    /// bookkeeping, adversarial narrow/wide interleaving could leak
-    /// up to `slotCols - 1` slots per unlucky wide insert, and in a
-    /// 64×64 atlas that can evict enough usable capacity to force
-    /// saturation flushes on otherwise-fine workloads. Audit
-    /// glyph-atlas F4.
-    private var freeNarrowSlots: [Int] = []
-    /// Counter for lookup-or-insert calls that found a full atlas and had
-    /// to return nil (cell ends up blank on screen). Logged via `logger`
-    /// the first time saturation bites and every 1000th event thereafter
-    /// so a future font-mix stretching past the 4096-glyph cap surfaces
-    /// before users notice missing glyphs. Cleared never — atlas lifetime
-    /// matches the window.
-    ///
-    /// Active in Release as well as Debug — atlas saturation flushes
-    /// happen under field load and the diagnostic must survive there to
-    /// be useful. Cost is one Int increment per saturation event
-    /// (negligible). Logger is `os.Logger` so it's eligible for Release
-    /// per `feedback_nslog_private_format`. Audit M-6 (2026-04-29).
-    private var saturationHits: Int = 0
+    /// successful `lookupOrInsert` returns a (kept, generation) pair so the
+    /// renderer can detect when its cached row UVs were issued against an older
+    /// atlas layout — those UVs now point at whatever glyph occupies the same
+    /// slot post-flush, and the cached row would silently render the wrong
+    /// glyph until the row is independently damaged. Audit H3. Forwarded from
+    /// `allocator`, which owns the counter and bumps it on flush.
+    public var generation: UInt64 { allocator.generation }
     /// Hook invoked synchronously immediately before a saturation flush
     /// rewrites slot 0. Set by `MetalRenderer` to drain in-flight command
     /// buffers via `commit + waitUntilCompleted`, so the GPU can no
@@ -192,6 +174,7 @@ public final class GlyphAtlas {
         let rows = (capacityGlyphs + cols - 1) / cols
         self.slotCols = cols
         self.slotRows = rows
+        self.allocator = SlotAllocator(slotCols: cols, capacityGlyphs: capacityGlyphs)
 
         let texW = cols * cellPxWidth
         let texH = rows * cellPxHeight
@@ -301,6 +284,157 @@ public final class GlyphAtlas {
         return true
     }
 
+    /// Pure, GPU-free slot bookkeeping for the atlas grid. Owns NO texture,
+    /// CoreText, or cache state — only slot indices and the saturation/
+    /// generation counters — so its arithmetic is unit-testable in isolation.
+    /// `GlyphAtlas` orchestrates rasterisation around `planFreshInsert` /
+    /// `commitFreshInsert` / `flushReset` and owns the `flushBarrier` + `byKey`
+    /// reset the saturation flush also performs.
+    /// `internal` (not `private`) so same-module tests can construct it via
+    /// `@testable import Blackbird` and pin the slot arithmetic in isolation —
+    /// no `MTLDevice` / GPU needed. The memberwise initializer stays private
+    /// (via the explicit config-only init below), so external code still can't
+    /// fabricate an allocator with hand-set slot/orphan state.
+    struct SlotAllocator {
+        let slotCols: Int
+        let capacityGlyphs: Int
+        private(set) var nextSlot: Int = 0
+        /// Monotonic counter bumped on every saturation flush (audit H3).
+        private(set) var generation: UInt64 = 0
+        /// Saturation-flush count; drives the throttled diagnostic log. Active
+        /// in Release as well as Debug — atlas saturation flushes happen under
+        /// field load and the diagnostic must survive there. Audit M-6.
+        private(set) var saturationHits: Int = 0
+        /// Single-slot holes the wide-glyph row-align path opened up. When a
+        /// wide (2-slot) glyph doesn't fit in the current row's trailing column
+        /// we skip to the next row, leaving one orphan narrow slot behind.
+        /// Parked here so the next narrow insert can reclaim it before consuming
+        /// a fresh slot — without this, adversarial narrow/wide interleaving
+        /// could leak up to `slotCols - 1` slots per unlucky wide insert. Audit
+        /// glyph-atlas F4.
+        private var freeNarrowSlots: [Int] = []
+
+        /// Config-only init; the slot/generation/orphan state starts at its
+        /// declared defaults. The synthesized memberwise initializer is private
+        /// (because `freeNarrowSlots` is), so this is the only way to build an
+        /// allocator — no caller, including tests, can inject inconsistent
+        /// slot/orphan state.
+        init(slotCols: Int, capacityGlyphs: Int) {
+            self.slotCols = slotCols
+            self.capacityGlyphs = capacityGlyphs
+        }
+
+        /// Number of parked orphan slots (surfaced in the saturation log).
+        var orphanCount: Int { freeNarrowSlots.count }
+
+        /// Pop a parked narrow slot for a narrow insert, if any (glyph-atlas F4).
+        mutating func reclaimNarrowSlot() -> Int? { freeNarrowSlots.popLast() }
+
+        /// Return a slot to the free list — backs out a reclaim whose
+        /// rasterisation failed (the cell renders blank and re-rasterises later).
+        mutating func returnNarrowSlot(_ slot: Int) { freeNarrowSlots.append(slot) }
+
+        /// Outcome of planning a fresh (non-reclaimed) insert. Immutable: the
+        /// post-flush "start over at slot 0, no orphans" state is produced by
+        /// `flushReset()` returning a fresh plan, not by the caller hand-patching
+        /// fields — so a half-patched plan can't re-introduce the S2-005 alias.
+        struct InsertPlan {
+            /// The slot to rasterise into, after wide-glyph row alignment.
+            let slot: Int
+            /// Single-slot gaps skipped by wide row-alignment, to free-list
+            /// AFTER rasterisation succeeds (staged — audit S2-005).
+            let pendingOrphans: [Int]
+            /// True when the atlas is full: caller must flush before using `slot`.
+            let needsFlush: Bool
+        }
+
+        /// Compute where a fresh insert of `slotsNeeded` slots (1 narrow, 2
+        /// wide) lands, applying wide-glyph row alignment. Pure — does NOT
+        /// mutate; the caller flushes (if `needsFlush`) and commits separately.
+        func planFreshInsert(wide: Bool, slotsNeeded: Int) -> InsertPlan {
+            var slot = nextSlot
+            // Orphans produced by wide row-alignment are STAGED here and
+            // committed to `freeNarrowSlots` only after rasterization succeeds
+            // (audit S2-005). Appending them before rasterizing risked a
+            // rasterize failure leaving an orphan simultaneously free-listed AND
+            // reachable via `nextSlot` — two glyphs aliasing one atlas region.
+            var pendingOrphans: [Int] = []
+            if wide {
+                let col = slot % slotCols
+                if col + slotsNeeded > slotCols {
+                    // Record every single-slot gap we're skipping over. In the
+                    // common `col == slotCols - 1` case that's exactly one slot;
+                    // a theoretical multi-slot gap from a future >2-slot wide
+                    // glyph is also handled. (Audit L15 / glyph-atlas F4.)
+                    pendingOrphans = Array(slot..<(slot / slotCols + 1) * slotCols)
+                    slot = (slot / slotCols + 1) * slotCols
+                }
+            }
+            let needsFlush = slot + slotsNeeded > capacityGlyphs
+            return InsertPlan(slot: slot, pendingOrphans: pendingOrphans, needsFlush: needsFlush)
+        }
+
+        /// Record a saturation flush: bump the hit counter and report whether
+        /// this hit should be logged (first, then every 1000th), along with the
+        /// pre-flush orphan count for the diagnostic. Returning `orphansBefore`
+        /// here — rather than having the caller read `orphanCount` separately —
+        /// removes the "read it BEFORE flushReset" temporal footgun: the count
+        /// is sampled at this call, before any flush mutation.
+        mutating func recordSaturationHit() -> (hits: Int, shouldLog: Bool, orphansBefore: Int) {
+            saturationHits += 1
+            return (
+                saturationHits,
+                saturationHits == 1 || saturationHits % 1000 == 0,
+                freeNarrowSlots.count
+            )
+        }
+
+        /// The allocator's half of a saturation flush: rewind to slot 0, discard
+        /// stale orphan records (they point into the pre-flush layout), and bump
+        /// `generation` so the renderer rebuilds every cached row (audit H3). The
+        /// caller pairs this with `flushBarrier` + `byKey` reset. Returns the
+        /// post-flush plan (`slot 0`, no orphans) so the caller adopts it
+        /// directly instead of hand-patching its in-flight plan.
+        mutating func flushReset() -> InsertPlan {
+            nextSlot = 0
+            freeNarrowSlots.removeAll(keepingCapacity: true)
+            generation &+= 1
+            return InsertPlan(slot: 0, pendingOrphans: [], needsFlush: false)
+        }
+
+        /// True for a wide glyph that can't fit even an empty atlas row (atlas
+        /// narrower than `slotsNeeded`). The caller gives up on such an insert.
+        func cannotFit(slotsNeeded: Int) -> Bool {
+            slotsNeeded > slotCols
+        }
+
+        /// Commit a successful fresh insert: free-list the staged alignment
+        /// orphans (so narrow inserts can reclaim them — glyph-atlas F4) and
+        /// advance `nextSlot` past the consumed slots. Takes the whole `plan` so
+        /// the slot and its staged orphans can't be passed mismatched. Call ONLY
+        /// after rasterisation succeeded (audit S2-005).
+        mutating func commitFreshInsert(_ plan: InsertPlan, slotsNeeded: Int) {
+            for orphan in plan.pendingOrphans {
+                // The L15 double-append assert stays as a tripwire: with the
+                // commit deferred past every failure path it should be truly
+                // unreachable; if it fires, some new non-monotonic `nextSlot`
+                // math landed the same index twice and `popLast()` would alias
+                // one atlas region to two glyphs.
+                assert(!freeNarrowSlots.contains(orphan),
+                       "freeNarrowSlots double-append for slot=\(orphan); two glyphs would alias the same atlas region")
+                freeNarrowSlots.append(orphan)
+            }
+            nextSlot = plan.slot + slotsNeeded
+        }
+    }
+
+    /// Pixel-space origin of `slot` in the atlas texture grid.
+    private func pixelOrigin(ofSlot slot: Int) -> (x: Int, y: Int) {
+        let col = slot % slotCols
+        let row = slot / slotCols
+        return (col * cellPxWidth, row * cellPxHeight)
+    }
+
     /// Return the atlas entry for `scalar`, rasterizing it into the next free
     /// slot(s) on first use. `wide == true` allocates two adjacent slots and
     /// rasterises into a 2x-wide bitmap — required for CJK and wide emoji so
@@ -325,33 +459,28 @@ public final class GlyphAtlas {
         if let existing = byKey[key] { return existing }
         let slotsNeeded = wide ? 2 : 1
 
-        // Decide mono vs color up front so both allocator branches
-        // below route to the right rasterization path. Per-scalar
-        // detection: the user's configured terminal font is rarely
-        // itself a color font, but CoreText substitutes Apple Color
-        // Emoji (or another color font) for emoji scalars at draw
-        // time. We mirror that substitution to decide the path.
+        // Decide mono vs color up front so both allocator branches below route
+        // to the right rasterization path. Per-scalar detection: the user's
+        // configured terminal font is rarely itself a color font, but CoreText
+        // substitutes Apple Color Emoji (or another color font) for emoji
+        // scalars at draw time. We mirror that substitution to decide the path.
         let font = styledFont(for: style)
         let colorPath = Self.shouldRasterizeAsColor(
             base: font, scalar: scalar, emojiPresentation: emojiPresentation
         )
 
-        // Narrow glyph + a parked orphan slot? Reclaim it before carving
-        // a fresh one off `nextSlot`. This is the other half of the
-        // wide-alignment bookkeeping below (glyph-atlas F4); keeps the
-        // atlas's effective capacity close to its nominal size under
-        // mixed narrow/wide workloads.
-        if !wide, let reclaimed = freeNarrowSlots.popLast() {
-            let col = reclaimed % slotCols
-            let row = reclaimed / slotCols
-            let pxX = col * cellPxWidth
-            let pxY = row * cellPxHeight
-            // If rasterisation failed, give the reclaimed slot back and
-            // return nil WITHOUT caching — the cell renders blank and the
-            // glyph re-rasterises on its next appearance (matches the
-            // atlas-full contract; see `rasterize`).
+        // Narrow glyph + a parked orphan slot? Reclaim it before carving a
+        // fresh one off `nextSlot`. This is the other half of the wide-alignment
+        // bookkeeping below (glyph-atlas F4); keeps the atlas's effective
+        // capacity close to its nominal size under mixed narrow/wide workloads.
+        if !wide, let reclaimed = allocator.reclaimNarrowSlot() {
+            let (pxX, pxY) = pixelOrigin(ofSlot: reclaimed)
+            // If rasterisation failed, give the reclaimed slot back and return
+            // nil WITHOUT caching — the cell renders blank and the glyph
+            // re-rasterises on its next appearance (matches the atlas-full
+            // contract; see `rasterize`).
             guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: false, style: style, color: colorPath, emojiPresentation: emojiPresentation) else {
-                freeNarrowSlots.append(reclaimed)
+                allocator.returnNarrowSlot(reclaimed)
                 return nil
             }
             let entry = Self.makeEntry(
@@ -365,131 +494,64 @@ public final class GlyphAtlas {
             return entry
         }
 
-        // If the wide glyph wouldn't fit in the current row (only one slot
-        // left) we skip that orphan slot so the glyph stays on one row.
-        // Orphan slots land on `freeNarrowSlots` so a subsequent narrow
-        // insert can reclaim them (audit glyph-atlas F4) — pre-fix they
-        // were dead for the atlas's lifetime.
-        var slot = nextSlot
-        // Orphans produced by wide row-alignment are STAGED here and
-        // committed to `freeNarrowSlots` only after rasterization
-        // succeeds (audit S2-005). The previous shape appended them
-        // before rasterizing; a rasterize failure (CGContext alloc, or
-        // the supported ensureRealColorTexture failure under GPU memory
-        // pressure) then returned nil WITHOUT advancing `nextSlot`,
-        // leaving the orphan simultaneously free-listed AND reachable
-        // via `nextSlot`: a narrow reclaim plus the next fresh insert
-        // cached two entries aliasing one atlas region (cells
-        // persistently rendered the wrong character until a flush), and
-        // a retry of the same wide glyph re-staged the same index and
-        // tripped the L15 double-append assert in DEBUG — the exact
-        // "nextSlot only ever moves forward" assumption the failure
-        // path violated.
-        var pendingOrphans: [Int] = []
-        if wide {
-            let col = slot % slotCols
-            if col + slotsNeeded > slotCols {
-                // Record every single-slot gap we're skipping over. In
-                // the common `col == slotCols - 1` case that's exactly
-                // one slot; a theoretical multi-slot gap from a future
-                // >2-slot wide glyph is also handled. (Audit L15 /
-                // glyph-atlas F4.)
-                pendingOrphans = Array(slot..<(slot / slotCols + 1) * slotCols)
-                slot = (slot / slotCols + 1) * slotCols
-            }
-        }
-        if slot + slotsNeeded > capacityGlyphs {
-            // Atlas is full. Before the fix the new glyph dropped silently
-            // and rendered as blank for the rest of the window's lifetime —
-            // one hostile `cat` over a CJK file permanently blanked every
-            // unseen glyph. Audit glyph-atlas F3.
-            //
-            // Recovery: flush the cache and start over. Recently-used
-            // glyphs get re-rasterised on their next appearance (one
-            // CTLineCreate per glyph, ~μs per) which is the right
-            // trade-off vs an unbounded atlas size or full LRU bookkeeping
-            // on every lookup. Prewarmed ASCII + box-drawing are re-
-            // inserted on demand by the render path, same way they
-            // landed initially. One flush per episode.
-            saturationHits += 1
-            if saturationHits == 1 || saturationHits % 1000 == 0 {
-                // Capture the triggering glyph + style flags so a field
-                // report can distinguish wide-glyph saturation (CJK
-                // workload outgrew 4096 slots) from style-explosion
-                // (bold/italic triplication of ASCII keeping every
-                // narrow scalar in three slots). Different fixes:
-                // bigger atlas vs smarter style coalescing. Orphan
-                // slot count surfaces wide-alignment fragmentation
-                // pressure independently. All fields PII-free.
+        // Fresh insert: plan the slot (+ wide row-alignment orphans), flushing
+        // the atlas first if it's full.
+        var plan = allocator.planFreshInsert(wide: wide, slotsNeeded: slotsNeeded)
+        if plan.needsFlush {
+            // Atlas is full. Before the fix the new glyph dropped silently and
+            // rendered as blank for the rest of the window's lifetime — one
+            // hostile `cat` over a CJK file permanently blanked every unseen
+            // glyph. Audit glyph-atlas F3. Recovery: flush the cache and start
+            // over; recently-used glyphs get re-rasterised on their next
+            // appearance (~μs per) — the right trade-off vs an unbounded atlas.
+            let report = allocator.recordSaturationHit()
+            if report.shouldLog {
+                // Capture the triggering glyph + style flags so a field report
+                // can distinguish wide-glyph saturation (CJK workload outgrew
+                // the slot cap) from style-explosion (bold/italic triplication).
+                // `orphansBefore` surfaces wide-alignment fragmentation pressure
+                // independently — sampled pre-flush by `recordSaturationHit`.
+                // All fields PII-free.
                 Self.logger.log(
-                    "atlas saturated at \(self.capacityGlyphs, privacy: .public); flush hit #\(self.saturationHits, privacy: .public); trigger U+\(String(format: "%04X", scalar.value), privacy: .public) wide=\(wide ? 1 : 0, privacy: .public) bold=\(style.bold ? 1 : 0, privacy: .public) italic=\(style.italic ? 1 : 0, privacy: .public); orphan slots=\(self.freeNarrowSlots.count, privacy: .public)"
+                    "atlas saturated at \(self.capacityGlyphs, privacy: .public); flush hit #\(report.hits, privacy: .public); trigger U+\(String(format: "%04X", scalar.value), privacy: .public) wide=\(wide ? 1 : 0, privacy: .public) bold=\(style.bold ? 1 : 0, privacy: .public) italic=\(style.italic ? 1 : 0, privacy: .public); orphan slots=\(report.orphansBefore, privacy: .public)"
                 )
             }
-            // Drain any GPU work still reading the pre-flush atlas
-            // before CPU `texture.replace` overwrites slot 0. The mono
-            // and color textures use `.storageMode = .shared`, so CPU
-            // writes are visible to the GPU immediately; without the
-            // barrier the prior frame's command buffer can sample slot
-            // 0 with old UVs while the new rasterisation lands in the
-            // same shared bytes, producing a torn glyph. Audit H6.
+            // Drain any GPU work still reading the pre-flush atlas before CPU
+            // `texture.replace` overwrites slot 0. The mono and color textures
+            // use `.storageMode = .shared`, so CPU writes are visible to the
+            // GPU immediately; without the barrier the prior frame's command
+            // buffer can sample slot 0 with old UVs while the new rasterisation
+            // lands in the same shared bytes, producing a torn glyph. Audit H6.
             flushBarrier?()
             byKey.removeAll(keepingCapacity: true)
-            nextSlot = 0
-            slot = 0
-            // Stale orphan records point into the pre-flush layout;
-            // discard so the post-flush narrow-reclaim path doesn't
-            // hand out slots that overlap newly-allocated ones. The
-            // STAGED orphans from this very insert are pre-flush layout
-            // too — drop them with it (audit S2-005).
-            freeNarrowSlots.removeAll(keepingCapacity: true)
-            pendingOrphans.removeAll()
-            // Bump generation. Cached row UVs from MetalRenderer
-            // anchored to the pre-flush slot layout will still be
-            // valid byte-wise but point at whatever the post-flush
-            // path writes into those slots — i.e. they'd render the
-            // wrong glyph. The renderer keys its row cache on
-            // (snapshot, atlasGeneration); a generation bump forces
-            // every cached row to rebuild on the next frame, and
-            // freshly-rasterised glyphs in their new slots produce
-            // matching UVs in the rebuilt instances. Audit H3.
-            generation &+= 1
-            if wide && slotsNeeded > slotCols {
-                // Pathological: a wide glyph in an atlas narrower than 2
-                // slots. Give up on this one — the atlas was misconfigured.
+            // The allocator discards its stale orphan records, rewinds nextSlot,
+            // and bumps `generation`, returning the post-flush plan (slot 0, no
+            // orphans). The STAGED orphans from this very insert are pre-flush
+            // layout too — dropped with it (audit S2-005 / H3).
+            plan = allocator.flushReset()
+            if wide && allocator.cannotFit(slotsNeeded: slotsNeeded) {
+                // Pathological: a wide glyph in an atlas narrower than 2 slots.
+                // Give up on this one — the atlas was misconfigured.
                 return nil
             }
         }
 
-        let col = slot % slotCols
-        let row = slot / slotCols
-        let pxX = col * cellPxWidth
-        let pxY = row * cellPxHeight
+        let (pxX, pxY) = pixelOrigin(ofSlot: plan.slot)
 
         // If rasterisation failed, return nil WITHOUT caching the entry or
-        // advancing nextSlot, so this slot is retried (and the glyph
-        // re-rasterises) on the scalar's next appearance rather than being
-        // cached as a permanently-blank entry pointing at unwritten / 1×1-
-        // placeholder bytes. Same contract as the atlas-full path above.
+        // committing, so this slot is retried (and the glyph re-rasterises) on
+        // the scalar's next appearance rather than being cached as a
+        // permanently-blank entry. No bookkeeping was mutated: the staged
+        // orphans are discarded with this return and `nextSlot` is unadvanced,
+        // so the retry re-runs the alignment from a clean slate (audit S2-005).
         guard rasterize(scalar: scalar, intoSlotAt: (pxX, pxY), wide: wide, style: style, color: colorPath, emojiPresentation: emojiPresentation) else {
-            // No bookkeeping was mutated: staged orphans are discarded
-            // with this return and `nextSlot` is unadvanced, so the
-            // retry re-runs the alignment from a clean slate (audit
-            // S2-005).
             return nil
         }
 
-        // Rasterization landed — NOW commit the staged alignment
-        // orphans so narrow inserts can reclaim them (glyph-atlas F4).
-        // The L15 double-append assert stays as a tripwire: with the
-        // commit deferred past every failure path it should be truly
-        // unreachable; if it ever fires, some new non-monotonic
-        // `nextSlot` math landed the same index twice and `popLast()`
-        // would alias one atlas region to two glyphs.
-        for orphan in pendingOrphans {
-            assert(!freeNarrowSlots.contains(orphan),
-                   "freeNarrowSlots double-append for slot=\(orphan); two glyphs would alias the same atlas region")
-            freeNarrowSlots.append(orphan)
-        }
+        // Rasterization landed — NOW commit the staged alignment orphans so
+        // narrow inserts can reclaim them, and advance the slot cursor
+        // (glyph-atlas F4 / S2-005).
+        allocator.commitFreshInsert(plan, slotsNeeded: slotsNeeded)
 
         let entry = Self.makeEntry(
             pxX: pxX, pxY: pxY,
@@ -499,7 +561,6 @@ public final class GlyphAtlas {
             isColor: colorPath
         )
         byKey[key] = entry
-        nextSlot = slot + slotsNeeded
         return entry
     }
 
@@ -636,6 +697,120 @@ public final class GlyphAtlas {
         )
     }
 
+    /// Blit a cached glyph bitmap straight into `texture` at the slot origin,
+    /// skipping CoreText — the shared cache-hit blit for the mono
+    /// (`texture`) and color (`colorTexture`) rasterize paths. Each caller
+    /// keeps its own size `assert` (and, for color, the `ensureRealColorTexture`
+    /// gate) before this; only the identical `withUnsafeBytes` → `texture.replace`
+    /// is shared.
+    private func blitCachedGlyph(
+        _ cached: GlyphBitmapCache.Bitmap,
+        into texture: MTLTexture,
+        at origin: (x: Int, y: Int)
+    ) {
+        cached.bytes.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            texture.replace(
+                region: MTLRegionMake2D(origin.x, origin.y, cached.width, cached.height),
+                mipmapLevel: 0,
+                withBytes: base,
+                bytesPerRow: cached.bytesPerRow
+            )
+        }
+    }
+
+    /// Create the bitmap-backed `CGContext` both rasterization paths draw into.
+    /// Width/height are pixels; `bytesPerRow`, `space`, and `bitmapInfo` are the
+    /// only context-creation inputs that differ between the mono (DeviceGray,
+    /// 1 byte/px) and color (sRGB BGRA, 4 byte/px) paths. `data: nil` lets
+    /// CoreGraphics own the backing buffer, read back later via `ctx.data`.
+    private func makeBitmapContext(
+        width: Int, height: Int, bytesPerRow: Int,
+        space: CGColorSpace, bitmapInfo: UInt32
+    ) -> CGContext? {
+        CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: space,
+            bitmapInfo: bitmapInfo
+        )
+    }
+
+    /// Build the `CTLine` for a glyph cell — the shared
+    /// `glyphString` → `styledFont` → `NSAttributedString` →
+    /// `CTLineCreateWithAttributedString` flow. `foreground` is supplied only
+    /// on the mono path (white ink); the color path passes `nil` because the
+    /// `.foregroundColor` attribute is ignored for color fonts — Apple Color
+    /// Emoji supplies its own pixels.
+    private func makeGlyphLine(
+        scalar: UnicodeScalar, style: Style, emojiPresentation: Bool,
+        foreground: NSColor?
+    ) -> CTLine {
+        let str = Self.glyphString(scalar, emojiPresentation: emojiPresentation)
+        let font = styledFont(for: style)
+        var attrs: [NSAttributedString.Key: Any] = [.font: font]
+        if let foreground = foreground { attrs[.foregroundColor] = foreground }
+        let attr = NSAttributedString(string: str, attributes: attrs)
+        return CTLineCreateWithAttributedString(attr)
+    }
+
+    /// Shared cache-hit path for both rasterizers. On a `GlyphBitmapCache` hit,
+    /// resolve the destination texture (the color path promotes its lazy atlas
+    /// inside `resolveTarget` and yields nil on allocation failure) and blit the
+    /// cached bytes, skipping CoreText. Returns `nil` on a cache MISS (caller
+    /// rasterises), `true` on a hit that blitted, `false` on a hit whose target
+    /// couldn't be resolved (caller drops the insert without caching — see
+    /// `rasterize`). `resolveTarget` is evaluated ONLY on a hit, so the color
+    /// path's `ensureRealColorTexture()` runs exactly when the original did.
+    private func cacheHitBlit(
+        _ cacheKey: GlyphBitmapCache.Key, w: Int, h: Int,
+        resolveTarget: () -> MTLTexture?,
+        at origin: (x: Int, y: Int)
+    ) -> Bool? {
+        guard let cached = GlyphBitmapCache.get(cacheKey) else { return nil }
+        guard let target = resolveTarget() else { return false }
+        // The key makes this hold (same font+size+scale ⇒ same cell px), but
+        // pin it: a wrong-sized cached bitmap would `texture.replace` off the
+        // slot. Trap loudly in DEBUG rather than risk an OOB.
+        assert(cached.width == w && cached.height == h,
+               "cached glyph \(cached.width)×\(cached.height) != slot \(w)×\(h)")
+        blitCachedGlyph(cached, into: target, at: origin)
+        return true
+    }
+
+    /// Shared rasterization tail for both paths: read the drawn bytes back from
+    /// `ctx`, cache them for sibling atlases, then resolve the destination
+    /// texture and `replace` the slot. The cache `put` happens BEFORE
+    /// `resolveTarget` so a color-atlas allocation failure still leaves a cache
+    /// entry a later attempt can blit (matching the original ordering). Returns
+    /// `false` (caller drops the insert) when `ctx.data` is nil or the target
+    /// couldn't be resolved. `bytesPerRow` is `w` for mono, `w*4` for color, and
+    /// also drives the readback byte count (`h * bytesPerRow`).
+    private func commitRasterized(
+        _ ctx: CGContext, cacheKey: GlyphBitmapCache.Key,
+        w: Int, h: Int, bytesPerRow: Int,
+        resolveTarget: () -> MTLTexture?,
+        at origin: (x: Int, y: Int)
+    ) -> Bool {
+        guard let bytes = ctx.data else { return false }
+        // Cache the rasterised bytes so sibling atlases skip CoreText.
+        let copy = Array(UnsafeBufferPointer(
+            start: bytes.assumingMemoryBound(to: UInt8.self), count: h * bytesPerRow
+        ))
+        GlyphBitmapCache.put(cacheKey, .init(bytes: copy, width: w, height: h, bytesPerRow: bytesPerRow))
+        guard let target = resolveTarget() else { return false }
+        target.replace(
+            region: MTLRegionMake2D(origin.x, origin.y, w, h),
+            mipmapLevel: 0,
+            withBytes: bytes,
+            bytesPerRow: bytesPerRow
+        )
+        return true
+    }
+
     /// Rasterise `scalar` into the slot at `origin`. Returns `true` when
     /// glyph pixels actually landed in a texture, `false` when the glyph
     /// could not be rasterised (CGContext creation failed, or — for color
@@ -663,40 +838,21 @@ public final class GlyphAtlas {
         }
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
-        // Cache hit: blit the previously-rasterised bytes straight into the
-        // texture and skip CoreText entirely (the win for every tab after
-        // the first warms the shared cache).
         let cacheKey = bitmapCacheKey(
             scalar: scalar, wide: wide, style: style, isColor: false,
             emojiPresentation: emojiPresentation
         )
-        if let cached = GlyphBitmapCache.get(cacheKey) {
-            // The key makes this hold (same font+size+scale ⇒ same cell px),
-            // but pin it: a wrong-sized cached bitmap would `texture.replace`
-            // off the slot. Trap loudly in DEBUG rather than risk an OOB.
-            assert(cached.width == w && cached.height == h,
-                   "cached mono glyph \(cached.width)×\(cached.height) != slot \(w)×\(h)")
-            cached.bytes.withUnsafeBytes { ptr in
-                guard let base = ptr.baseAddress else { return }
-                texture.replace(
-                    region: MTLRegionMake2D(origin.x, origin.y, cached.width, cached.height),
-                    mipmapLevel: 0,
-                    withBytes: base,
-                    bytesPerRow: cached.bytesPerRow
-                )
-            }
-            return true
+        // Cache hit: blit the previously-rasterised bytes straight into the
+        // texture and skip CoreText entirely (the win for every tab after the
+        // first warms the shared cache). The mono target is always available.
+        if let hit = cacheHitBlit(cacheKey, w: w, h: h,
+                                  resolveTarget: { self.texture }, at: origin) {
+            return hit
         }
         let cs = CGColorSpaceCreateDeviceGray()
         let bitmapInfo = CGImageAlphaInfo.none.rawValue
-        guard let ctx = CGContext(
-            data: nil,
-            width: w,
-            height: h,
-            bitsPerComponent: 8,
-            bytesPerRow: w,
-            space: cs,
-            bitmapInfo: bitmapInfo
+        guard let ctx = makeBitmapContext(
+            width: w, height: h, bytesPerRow: w, space: cs, bitmapInfo: bitmapInfo
         ) else { return false }
 
         ctx.setFillColor(gray: 0, alpha: 1)
@@ -709,13 +865,10 @@ public final class GlyphAtlas {
         ctx.scaleBy(x: scale, y: scale)
         ctx.textMatrix = .identity
 
-        let str = Self.glyphString(scalar, emojiPresentation: emojiPresentation)
-        let font = styledFont(for: style)
-        let attr = NSAttributedString(
-            string: str,
-            attributes: [.font: font, .foregroundColor: NSColor.white]
+        let line = makeGlyphLine(
+            scalar: scalar, style: style, emojiPresentation: emojiPresentation,
+            foreground: .white
         )
-        let line = CTLineCreateWithAttributedString(attr)
 
         // Box-drawing and block-element glyphs must tile edge-to-edge with
         // zero seam so ASCII art like Claude Code's startup avatar or the
@@ -755,19 +908,10 @@ public final class GlyphAtlas {
         ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
         CTLineDraw(line, ctx)
 
-        guard let bytes = ctx.data else { return false }
-        // Cache the rasterised bytes so sibling atlases skip CoreText.
-        let copy = Array(UnsafeBufferPointer(
-            start: bytes.assumingMemoryBound(to: UInt8.self), count: h * w
-        ))
-        GlyphBitmapCache.put(cacheKey, .init(bytes: copy, width: w, height: h, bytesPerRow: w))
-        texture.replace(
-            region: MTLRegionMake2D(origin.x, origin.y, w, h),
-            mipmapLevel: 0,
-            withBytes: bytes,
-            bytesPerRow: w
+        return commitRasterized(
+            ctx, cacheKey: cacheKey, w: w, h: h, bytesPerRow: w,
+            resolveTarget: { self.texture }, at: origin
         )
-        return true
     }
 
     /// Color-glyph rasterization path. Writes a premultiplied-BGRA bitmap
@@ -805,27 +949,19 @@ public final class GlyphAtlas {
     ) -> Bool {
         let w = cellPxWidth * (wide ? 2 : 1)
         let h = cellPxHeight
-        // Cache hit: promote the lazy color atlas (if needed) and blit the
-        // cached premultiplied-BGRA bytes, skipping CoreText. ensureReal must
-        // run before the replace — see the lazy-allocation note on `colorTexture`.
         let cacheKey = bitmapCacheKey(
             scalar: scalar, wide: wide, style: style, isColor: true,
             emojiPresentation: emojiPresentation
         )
-        if let cached = GlyphBitmapCache.get(cacheKey) {
-            guard ensureRealColorTexture() else { return false }
-            assert(cached.width == w && cached.height == h,
-                   "cached color glyph \(cached.width)×\(cached.height) != slot \(w)×\(h)")
-            cached.bytes.withUnsafeBytes { ptr in
-                guard let base = ptr.baseAddress else { return }
-                colorTexture.replace(
-                    region: MTLRegionMake2D(origin.x, origin.y, cached.width, cached.height),
-                    mipmapLevel: 0,
-                    withBytes: base,
-                    bytesPerRow: cached.bytesPerRow
-                )
-            }
-            return true
+        // Cache hit: promote the lazy color atlas (if needed) and blit the
+        // cached premultiplied-BGRA bytes, skipping CoreText. ensureReal must
+        // run before the replace — see the lazy-allocation note on `colorTexture`.
+        if let hit = cacheHitBlit(
+            cacheKey, w: w, h: h,
+            resolveTarget: { self.ensureRealColorTexture() ? self.colorTexture : nil },
+            at: origin
+        ) {
+            return hit
         }
         // Audit L16. We rasterize emoji into an sRGB context even on
         // wide-gamut Display P3 panels (every MacBook Pro since 2016,
@@ -849,14 +985,8 @@ public final class GlyphAtlas {
         // thread 51515 for the canonical derivation.
         let bitmapInfo: UInt32 = CGImageAlphaInfo.premultipliedFirst.rawValue
             | CGBitmapInfo.byteOrder32Little.rawValue
-        guard let ctx = CGContext(
-            data: nil,
-            width: w,
-            height: h,
-            bitsPerComponent: 8,
-            bytesPerRow: w * 4,
-            space: cs,
-            bitmapInfo: bitmapInfo
+        guard let ctx = makeBitmapContext(
+            width: w, height: h, bytesPerRow: w * 4, space: cs, bitmapInfo: bitmapInfo
         ) else { return false }
 
         // Transparent background. The emoji's own colors come from
@@ -869,44 +999,30 @@ public final class GlyphAtlas {
         ctx.scaleBy(x: scale, y: scale)
         ctx.textMatrix = .identity
 
-        let str = Self.glyphString(scalar, emojiPresentation: emojiPresentation)
-        let font = styledFont(for: style)
         // Use the line/attributed-string path so CoreText does font
         // substitution + fallback. `CTFontDrawGlyphs` directly works
         // too, but it requires pre-shaping via CTFontGetGlyphsForCharacters,
         // which duplicates work CTLine does for free. Foreground color
         // is ignored for color fonts — the font's own bitmap tables
         // supply the pixels.
-        let attr = NSAttributedString(
-            string: str,
-            attributes: [.font: font]
+        let line = makeGlyphLine(
+            scalar: scalar, style: style, emojiPresentation: emojiPresentation,
+            foreground: nil
         )
-        let line = CTLineCreateWithAttributedString(attr)
         ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
         CTLineDraw(line, ctx)
 
-        guard let bytes = ctx.data else { return false }
-        // Cache the rasterised bytes (bgra8, bytesPerRow = w*4) so sibling
-        // atlases skip CoreText. Cached BEFORE the allocation guard so that
-        // even if ensureRealColorTexture fails here, a later attempt is a
-        // cache hit (no re-rasterisation) once the texture can be allocated.
-        let copy = Array(UnsafeBufferPointer(
-            start: bytes.assumingMemoryBound(to: UInt8.self), count: h * w * 4
-        ))
-        GlyphBitmapCache.put(cacheKey, .init(bytes: copy, width: w, height: h, bytesPerRow: w * 4))
-        // Promote the 1×1 placeholder to the full-size color atlas on this
-        // first color-glyph write. If the allocation fails, return false so
-        // the caller drops the insert (no cached entry) rather than us
-        // replacing into the 1×1 placeholder; the glyph re-rasterises on its
-        // next appearance and self-heals once allocation succeeds.
-        guard ensureRealColorTexture() else { return false }
-        colorTexture.replace(
-            region: MTLRegionMake2D(origin.x, origin.y, w, h),
-            mipmapLevel: 0,
-            withBytes: bytes,
-            bytesPerRow: w * 4
+        // Cache the rasterised bytes (bgra8, bytesPerRow = w*4) BEFORE the
+        // allocation guard so that even if ensureRealColorTexture fails, a
+        // later attempt is a cache hit (no re-rasterisation) once the texture
+        // can be allocated. The 1×1 placeholder is never replaced into: the
+        // resolveTarget gate promotes the full-size atlas first and returns nil
+        // on failure, so the caller drops the insert and the glyph self-heals.
+        return commitRasterized(
+            ctx, cacheKey: cacheKey, w: w, h: h, bytesPerRow: w * 4,
+            resolveTarget: { self.ensureRealColorTexture() ? self.colorTexture : nil },
+            at: origin
         )
-        return true
     }
 
     /// Pre-populate the atlas with glyphs the first real frame is almost

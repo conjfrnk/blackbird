@@ -377,7 +377,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         try contents.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - DiagnosticsView.loadAndSanitize off-main dispatch (M6)
+    // MARK: - DiagnosticFileLoader.loadAndSanitize off-main dispatch (M6)
 
     /// `DiagnosticsView.copy` used to call `Data(contentsOf:)` synchronously
     /// on `@MainActor`. A 3 MB hang report on a network-mounted home would
@@ -390,7 +390,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let url = hangDir.appendingPathComponent("hang-tiny.txt")
         XCTAssertTrue(Thread.isMainThread,
             "test runs on @MainActor — pre-condition for the off-main check")
-        let result = await DiagnosticsView.loadAndSanitize(
+        let result = await DiagnosticFileLoader.loadAndSanitize(
             url: url, cap: 16 * 1024 * 1024
         )
         guard case .success(let text) = result else {
@@ -409,7 +409,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let url = hangDir.appendingPathComponent("hang-thread.txt")
         XCTAssertTrue(Thread.isMainThread,
             "test runs on @MainActor — pre-condition for the off-main check")
-        let (result, ranOffMain) = await DiagnosticsView.loadAndSanitizeForTesting(
+        let (result, ranOffMain) = await DiagnosticFileLoader.loadAndSanitizeTraced(
             url: url, cap: 16 * 1024 * 1024
         )
         guard case .success = result else {
@@ -433,7 +433,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         try writeFile("hang-bulk.txt", in: hangDir, contents: payload)
         let url = hangDir.appendingPathComponent("hang-bulk.txt")
         let start = Date()
-        let result = await DiagnosticsView.loadAndSanitize(
+        let result = await DiagnosticFileLoader.loadAndSanitize(
             url: url, cap: 16 * 1024 * 1024
         )
         let elapsed = Date().timeIntervalSince(start)
@@ -462,7 +462,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let symlink = hangDir.appendingPathComponent("hang-symlink-target.txt")
         try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
 
-        let result = await DiagnosticsView.loadAndSanitize(
+        let result = await DiagnosticFileLoader.loadAndSanitize(
             url: symlink, cap: 16 * 1024 * 1024
         )
         if case .failure(.symlinkRejected) = result {
@@ -482,7 +482,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let url = hangDir.appendingPathComponent("hang-large.txt")
         // Set the cap below the actual file size so the post-read TOCTOU
         // branch fires inside the worker.
-        let result = await DiagnosticsView.loadAndSanitize(url: url, cap: 32 * 1024)
+        let result = await DiagnosticFileLoader.loadAndSanitize(url: url, cap: 32 * 1024)
         if case .failure(.grewDuringRead(let bytes)) = result {
             XCTAssertEqual(bytes, 64 * 1024)
         } else {
@@ -498,7 +498,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let raw = "before\u{1B}]52;c;abc\u{07}after"
         try writeFile("hang-bel.txt", in: hangDir, contents: raw)
         let url = hangDir.appendingPathComponent("hang-bel.txt")
-        let result = await DiagnosticsView.loadAndSanitize(
+        let result = await DiagnosticFileLoader.loadAndSanitize(
             url: url, cap: 16 * 1024 * 1024
         )
         guard case .success(let text) = result else {
@@ -520,7 +520,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let raw = "crashed: \u{202E}evil.sh\u{200B}#yldnerif_skool\nnext line"
         try writeFile("hang-bidi.txt", in: hangDir, contents: raw)
         let url = hangDir.appendingPathComponent("hang-bidi.txt")
-        let result = await DiagnosticsView.loadAndSanitize(
+        let result = await DiagnosticFileLoader.loadAndSanitize(
             url: url, cap: 16 * 1024 * 1024
         )
         guard case .success(let text) = result else {
@@ -537,7 +537,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
     }
 
     /// Audit fix-#16 (2026-05-21): the doc comment on
-    /// DiagnosticsView.stripControlCharacters claims to mirror
+    /// DiagnosticFileLoader.stripControlCharacters claims to mirror
     /// `stripBidiOverrides`, but the variation-selector blocks VS1-16
     /// (U+FE00..U+FE0F) and VS17-256 (U+E0100..U+E01EF) were missing
     /// — the inbound-paste sanitiser strips them, the diag Copy/Email
@@ -552,7 +552,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         let raw = "crash:\u{FE0F} at frame\u{E0100} 0"
         try writeFile("hang-vs.txt", in: hangDir, contents: raw)
         let url = hangDir.appendingPathComponent("hang-vs.txt")
-        let result = await DiagnosticsView.loadAndSanitize(
+        let result = await DiagnosticFileLoader.loadAndSanitize(
             url: url, cap: 16 * 1024 * 1024
         )
         guard case .success(let text) = result else {
@@ -599,9 +599,9 @@ final class DiagnosticReportStoreTests: XCTestCase {
         // writer-less FIFO that blocks open()+read() forever on buggy code.
 
         let exp = expectation(description: "loadAndSanitize returns for a FIFO")
-        var outcome: Result<String, DiagnosticsView.LoadError>?
+        var outcome: Result<String, DiagnosticFileLoader.LoadError>?
         Task {
-            outcome = await DiagnosticsView.loadAndSanitize(
+            outcome = await DiagnosticFileLoader.loadAndSanitize(
                 url: fifoURL, cap: 16 * 1024 * 1024
             )
             exp.fulfill()
@@ -623,7 +623,7 @@ final class DiagnosticReportStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dirURL) }
 
-        let result = await DiagnosticsView.loadAndSanitize(
+        let result = await DiagnosticFileLoader.loadAndSanitize(
             url: dirURL, cap: 16 * 1024 * 1024
         )
         XCTAssertEqual(result, .failure(.notRegularFile),

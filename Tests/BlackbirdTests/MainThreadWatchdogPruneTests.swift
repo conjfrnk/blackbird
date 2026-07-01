@@ -25,7 +25,7 @@ import Foundation
 ///   1. mkdirs an isolated tmp directory (mktemp-style, UUID suffix),
 ///   2. plants 1-2 small files (a few bytes each — no payload required;
 ///      the prune function makes decisions on filename + mtime alone),
-///   3. invokes `MainThreadWatchdog.pruneOrphanPartials(in:olderThan:)`,
+///   3. invokes `HangReportStore.pruneOrphanPartials(in:olderThan:)`,
 ///   4. asserts the post-prune directory state.
 ///
 /// Memory + safety pre-flight (per CLAUDE.md test-authoring rules):
@@ -107,7 +107,7 @@ final class MainThreadWatchdogPruneTests: XCTestCase {
             ageSeconds: 3600  // 1 h old — well past any sane safety threshold.
         )
 
-        MainThreadWatchdog.pruneOrphanPartials(in: tmpDir.path, olderThan: 0)
+        HangReportStore.pruneOrphanPartials(in: tmpDir.path, olderThan: 0)
 
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: orphan.path),
@@ -148,7 +148,7 @@ final class MainThreadWatchdogPruneTests: XCTestCase {
             ageSeconds: 3600  // old too — proves age alone doesn't gate the reap.
         )
 
-        MainThreadWatchdog.pruneOrphanPartials(in: tmpDir.path, olderThan: 0)
+        HangReportStore.pruneOrphanPartials(in: tmpDir.path, olderThan: 0)
 
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: realReport.path),
@@ -192,7 +192,7 @@ final class MainThreadWatchdogPruneTests: XCTestCase {
             ageSeconds: 3600
         )
 
-        MainThreadWatchdog.pruneOrphanPartials(in: tmpDir.path, olderThan: 0)
+        HangReportStore.pruneOrphanPartials(in: tmpDir.path, olderThan: 0)
 
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: notAHang.path),
@@ -237,7 +237,7 @@ final class MainThreadWatchdogPruneTests: XCTestCase {
             ageSeconds: 0  // mtime = now; younger than 1 h window below.
         )
 
-        MainThreadWatchdog.pruneOrphanPartials(in: tmpDir.path, olderThan: 3600)
+        HangReportStore.pruneOrphanPartials(in: tmpDir.path, olderThan: 3600)
 
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: freshPartial.path),

@@ -134,68 +134,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // after `.terminateNow`; the synchronous reset in willTerminate
         // is robust against that hypothetical and avoids leaving an
         // async closure pending against a half-torn-down process.
-        MainWindowController.bypassCloseConfirm = true
+        MainWindowController.setCloseConfirmBypass(true)
         return .terminateNow
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ThemeManager.shared.attach(toApp: NSApp)
+        configureProcessSignals()
 
-        // Ignore SIGPIPE process-wide. Without this, a write() racing PTY
-        // slave close (or any closed pipe) delivers SIGPIPE → SIG_DFL →
-        // app death. The child resets SIGPIPE to SIG_DFL for itself in
-        // PTY.swift after fork, so subprocesses retain default semantics.
+        // Under XCTest: install only the idle-exit safety net, then stop —
+        // no menu, window, updater, or PTY in the test host.
+        if startTestHostIfUnderTest() { return }
+
+        // Normal (non-test) launch. Order is load-bearing: `prewarmSubsystems`
+        // installs the Sparkle alert override BEFORE any updater session;
+        // `installMainMenu` builds the full tree (incl. the Sparkle item)
+        // BEFORE publishing it (L-27); the auto-update bridge must come after
+        // the updater is reachable.
+        prewarmSubsystems()
+        installDiagnostics()
+        installMainMenu()
+        installAutoUpdateBridge()
+        installTabOrderObserver()
+        openFirstWindow()
+    }
+
+    /// Process-wide signal configuration. Ignore SIGPIPE so a write() racing
+    /// PTY slave close (or any closed pipe) can't deliver SIGPIPE → SIG_DFL →
+    /// app death. The child resets SIGPIPE to SIG_DFL for itself in PTY.swift
+    /// after fork, so subprocesses retain default semantics.
+    private func configureProcessSignals() {
         signal(SIGPIPE, SIG_IGN)
+    }
 
+    /// When running under XCTest, start the idle-exit safety net and return
+    /// `true` so `didFinishLaunching` skips the entire normal-launch path.
+    /// Returns `false` on a normal launch.
+    ///
+    /// Safety net (reworked per audit S2-004): force-exit only when the bundle
+    /// goes IDLE, so a missed `testBundleDidFinish` observer or an abandoned
+    /// host can't linger — without killing healthy long runs. The previous
+    /// shape was an unconditional `asyncAfter(60) { exit(0) }` with no
+    /// cancellation: XCTest spins the main runloop between tests, so any run
+    /// whose wall clock passed 60 s was shot mid-suite. xctest restarts the
+    /// host (each restart re-arming a fresh 60 s fuse), producing the phantom
+    /// exit-65 / "Failing tests: <none>" churn CI documented in 0a8fbbc and a
+    /// misleading failure blamed on whichever test was in flight.
+    /// TestHostTermination posts an activity heartbeat at every test
+    /// start/finish; this monitor exits only after 300 s with no heartbeat — a
+    /// genuinely hung or abandoned host.
+    private func startTestHostIfUnderTest() -> Bool {
         let underTest =
             ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
             || ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] != nil
             || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
             || NSClassFromString("XCTestCase") != nil
+        guard underTest else { return false }
+        TestHostActivityMonitor.shared.start()
+        return true
+    }
 
-        if underTest {
-            // Safety net (reworked per audit S2-004): under XCTest,
-            // force-exit only when the bundle goes IDLE, so a missed
-            // testBundleDidFinish observer or an abandoned host can't
-            // linger — without killing healthy long runs. The previous
-            // shape was an unconditional `asyncAfter(60) { exit(0) }`
-            // with no cancellation: XCTest spins the main runloop
-            // between tests, so any run whose wall clock passed 60 s
-            // was shot mid-suite. xctest restarts the host (each
-            // restart re-arming a fresh 60 s fuse), producing the
-            // phantom exit-65 / "Failing tests: <none>" churn CI
-            // documented in 0a8fbbc and a misleading failure blamed on
-            // whichever test was in flight. TestHostTermination posts
-            // an activity heartbeat at every test start/finish; this
-            // monitor exits only after 300 s with no heartbeat — a
-            // genuinely hung or abandoned host.
-            TestHostActivityMonitor.shared.start()
-            return
-        }
-
-        // Normal (non-test) launch: open the main window with a shell session.
-
-        // Kick the kitty-terminfo resolution onto a background thread NOW,
-        // before we build the menu / window / renderer. That work runs two
-        // synchronous child-process round-trips (`tic` + `infocmp`) the
-        // first time it's touched; left on the main thread it lands on the
-        // first `PTY.spawn` and delays the first window's paint. Starting it
-        // here lets it complete concurrently with the ~20 ms of renderer +
-        // window construction below, so `PTY.spawn`'s read is (almost
-        // always) a memoized no-op. Strictly safe — see
-        // `PTY.prewarmKittyTerminfo()`'s `swift_once` rationale.
-        PTY.prewarmKittyTerminfo()
+    /// Warm up subsystems the first window needs, before we build the menu /
+    /// window / renderer.
+    private func prewarmSubsystems() {
+        // Kick the kitty-terminfo resolution onto a background thread NOW.
+        // That work runs two synchronous child-process round-trips (`tic` +
+        // `infocmp`) the first time it's touched; left on the main thread it
+        // lands on the first `PTY.spawn` and delays the first window's paint.
+        // Starting it here lets it complete concurrently with the ~20 ms of
+        // renderer + window construction, so `PTY.spawn`'s read is (almost
+        // always) a memoized no-op. Strictly safe — see `KittyTerminfo.
+        // prewarm()`'s `swift_once` rationale.
+        KittyTerminfo.prewarm()
 
         // Replace Sparkle's verbose "up to date" alert before any updater
         // session can spin up (scheduled check, menu action, etc.).
         SparkleAlertOverride.install()
-        // Main-thread hang detector. Only the DEFAULT flips between
-        // build flavours — the env var's meaning is consistent across
-        // both: "1" forces on, "0" forces off, unset falls back to the
-        // build default. Debug = default-on (devs want the signal);
-        // Release = default-off (production users shouldn't quietly
-        // gather diagnostics). Any main-thread hang ≥ 0.5 s writes a
-        // sampled stack under `~/Library/Logs/Blackbird/hang-<ts>.txt`.
+    }
+
+    /// Install the main-thread hang watchdog (env/build-gated) and reap orphan
+    /// hang-report partials from a prior session.
+    private func installDiagnostics() {
+        // Main-thread hang detector. Only the DEFAULT flips between build
+        // flavours — the env var's meaning is consistent across both: "1"
+        // forces on, "0" forces off, unset falls back to the build default.
+        // Debug = default-on (devs want the signal); Release = default-off
+        // (production users shouldn't quietly gather diagnostics). Any
+        // main-thread hang ≥ 0.5 s writes a sampled stack under
+        // `~/Library/Logs/Blackbird/hang-<ts>.txt`.
         let hangEnv = ProcessInfo.processInfo.environment["BB_HANG_WATCHDOG"]
         #if DEBUG
         let installWatchdog = (hangEnv != "0")
@@ -203,67 +229,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let installWatchdog = (hangEnv == "1")
         #endif
         if installWatchdog { MainThreadWatchdog.install() }
-        // S4-003 (2026-05-17): reap orphan hang-*.txt.partial siblings
-        // left over from a prior session's force-quit during the
-        // captureHangReport sample(1) window. These are invisible to
-        // the Settings → Diagnostics .txt-only filter and would
-        // otherwise accumulate silently in ~/Library/Logs/Blackbird/.
-        // Called regardless of installWatchdog because the orphan is
-        // from a PRIOR session that may have armed the watchdog even
-        // if this session doesn't.
+        // S4-003 (2026-05-17): reap orphan hang-*.txt.partial siblings left
+        // over from a prior session's force-quit during the captureHangReport
+        // sample(1) window. These are invisible to the Settings → Diagnostics
+        // .txt-only filter and would otherwise accumulate silently in
+        // ~/Library/Logs/Blackbird/. Called regardless of installWatchdog
+        // because the orphan is from a PRIOR session that may have armed the
+        // watchdog even if this session doesn't.
         //
-        // Off the main thread: this enumerates ~/Library/Logs/Blackbird,
-        // stats each entry, and creates the directory on first launch —
-        // synchronous disk I/O that has no business on the cold-launch
-        // critical path before the first window paints. It's pure
-        // FileManager + os.Logger work (thread-safe) reaping files from a
-        // PRIOR session, so it has no ordering dependency on this launch.
-        // Backgrounding does NOT widen the (already-present) race with a
-        // concurrent watchdog capture: the synchronous version ran right
-        // after install() too. A capture-in-progress partial is always
-        // younger than the prune's 60 s age gate, so it's skipped — that
-        // freshness, not the thread it runs on, is what protects a live
-        // partial.
+        // Off the main thread: this enumerates ~/Library/Logs/Blackbird, stats
+        // each entry, and creates the directory on first launch — synchronous
+        // disk I/O that has no business on the cold-launch critical path
+        // before the first window paints. It's pure FileManager + os.Logger
+        // work (thread-safe) reaping files from a PRIOR session, so it has no
+        // ordering dependency on this launch. Backgrounding does NOT widen the
+        // (already-present) race with a concurrent watchdog capture: the
+        // synchronous version ran right after install() too. A
+        // capture-in-progress partial is always younger than the prune's 60 s
+        // age gate, so it's skipped — that freshness, not the thread it runs
+        // on, is what protects a live partial.
         DispatchQueue.global(qos: .utility).async {
-            MainThreadWatchdog.pruneOrphanPartials()
+            HangReportStore.pruneOrphanPartials()
         }
-        // `installMainMenu` builds the full menu tree (including the
-        // conditional Sparkle "Check for Updates…" item via
-        // `insertSparkleMenuItem(into:)`) BEFORE publishing it as the
-        // app's main menu. Earlier this used to publish the menu first,
-        // then mutate it to insert Sparkle — leaving a one-tick window
-        // where a user mid-⌘ at launch could see an inconsistent menu
-        // shape. (audit L-27)
-        installMainMenu()
-        // Live-toggle Sparkle's auto-check when the pref changes, so the
-        // Settings > Updates toggle takes effect without relaunching. No-op
-        // when the updater isn't configured (dev builds); the Preferences
-        // observer still fires, it just hits a nil controller.
-        //
-        // INFINITE-FEEDBACK-LOOP HAZARD — the reason for the same-value guard
-        // below:
-        //   1. writing `automaticallyChecksForUpdates` calls Sparkle's
-        //      SUHost.setBool:forUserDefaultsKey: → UserDefaults write
-        //   2. the write fires NSUserDefaultsDidChangeNotification (synchronously,
-        //      via CoreFoundation)
-        //   3. SwiftUI's GLOBAL UserDefaultObserver is listening for that
-        //      notification (it backs @AppStorage). It bridges EVERY
-        //      UserDefaults change (not just our `bb.*` keys) into an
-        //      Update.enqueueAction that fires objectWillChange on every
-        //      subscribed ObservableObject — including `Preferences.shared`.
-        //   4. our own sink (this closure) re-fires on Preferences.shared's
-        //      objectWillChange and writes Sparkle again → back to step 1.
-        //
-        // Each iteration allocates a `DispatchQueue.main.async` block; the
-        // main queue piles up enqueue-self blocks until the process OOMs.
-        // This was the real cause of the reported "Settings click freezes
-        // the app / beachballs" — the Settings window wasn't the bug site,
-        // our Sparkle-bridging observer was.
-        //
-        // The guard: only write when Sparkle's current state disagrees with
-        // our desired state. On the first real change (user toggles the
-        // pref) we write once; the re-triggered sink immediately sees the
-        // values match and skips, breaking the loop.
+    }
+
+    /// Live-toggle Sparkle's auto-check when the pref changes, so the
+    /// Settings > Updates toggle takes effect without relaunching. No-op when
+    /// the updater isn't configured (dev builds); the Preferences observer
+    /// still fires, it just hits a nil controller.
+    ///
+    /// INFINITE-FEEDBACK-LOOP HAZARD — the reason for the same-value guard:
+    ///   1. writing `automaticallyChecksForUpdates` calls Sparkle's
+    ///      SUHost.setBool:forUserDefaultsKey: → UserDefaults write
+    ///   2. the write fires NSUserDefaultsDidChangeNotification (synchronously,
+    ///      via CoreFoundation)
+    ///   3. SwiftUI's GLOBAL UserDefaultObserver is listening for that
+    ///      notification (it backs @AppStorage). It bridges EVERY UserDefaults
+    ///      change (not just our `bb.*` keys) into an Update.enqueueAction that
+    ///      fires objectWillChange on every subscribed ObservableObject —
+    ///      including `Preferences.shared`.
+    ///   4. our own sink (this closure) re-fires on Preferences.shared's
+    ///      objectWillChange and writes Sparkle again → back to step 1.
+    ///
+    /// Each iteration allocates a `DispatchQueue.main.async` block; the main
+    /// queue piles up enqueue-self blocks until the process OOMs. This was the
+    /// real cause of the reported "Settings click freezes the app / beachballs"
+    /// — the Settings window wasn't the bug site, our Sparkle-bridging observer
+    /// was. The guard: only write when Sparkle's current state disagrees with
+    /// our desired state. On the first real change (user toggles the pref) we
+    /// write once; the re-triggered sink immediately sees the values match and
+    /// skips, breaking the loop.
+    private func installAutoUpdateBridge() {
         autoUpdateObserver = Preferences.shared.objectWillChange
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
@@ -273,14 +289,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     ctrl.updater.automaticallyChecksForUpdates = desired
                 }
             }
-        // A drag-reorder in any window's pill strip commits the new
-        // permutation to `TabOrderCoordinator` and posts a notification
-        // (object = NSWindowTabGroup). Sibling tabs in the same group
-        // need to repaint their strips so the visual order is consistent
-        // across every member of the group; the simplest correct path is
-        // to refresh every controller — refresh is keyed by tab group, so
-        // unrelated windows are no-ops. Stored on the delegate so it
-        // lives for the app's lifetime.
+    }
+
+    /// Refresh every window's pill strip when any window commits a drag-reorder.
+    /// A drag-reorder commits the new permutation to `TabOrderCoordinator` and
+    /// posts a notification (object = NSWindowTabGroup). Sibling tabs in the
+    /// same group need to repaint their strips so the visual order is
+    /// consistent across every member of the group; the simplest correct path
+    /// is to refresh every controller — refresh is keyed by tab group, so
+    /// unrelated windows are no-ops. Stored on the delegate so it lives for the
+    /// app's lifetime.
+    private func installTabOrderObserver() {
         tabOrderObserver = NotificationCenter.default.addObserver(
             forName: TabOrderCoordinator.orderDidChange,
             object: nil,
@@ -297,8 +316,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.refreshAllTabBars()
             }
         }
-        // First-launch window has no source session to inherit from, so
-        // pass the ⌘N "fresh start" cwd (nil → $HOME). Same policy.
+    }
+
+    /// Open the first window with a shell session. First-launch window has no
+    /// source session to inherit from, so pass the ⌘N "fresh start" cwd
+    /// (nil → $HOME). Same policy.
+    private func openFirstWindow() {
         let controller = createTerminalController(cwd: CwdResolver.forNewWindow())
         controller.showWindow(nil)
     }
@@ -351,7 +374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // before process exit so a hypothetical downstream delegate that
         // ever cancels termination doesn't leave the flag stuck on for
         // the rest of the session.
-        MainWindowController.bypassCloseConfirm = false
+        MainWindowController.setCloseConfirmBypass(false)
     }
 
     /// macOS 14+ emits a runtime warning on launch when the delegate
@@ -398,9 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Dropping a tab shrinks the group — repaint all remaining
             // tabs' pill strips. If the last tab in the group closed,
             // nothing to refresh here anyway.
-            DispatchQueue.main.async { [weak self] in
-                self?.refreshAllTabBars()
-            }
+            self.scheduleTabBarRefresh()
         }
         controllers.append(controller)
         return controller
@@ -415,9 +436,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return match
         }
         // Fallback: last-focused Blackbird window. `orderedIndex` is lower
-        // for more recently used windows.
+        // for more recently used windows. (`controllers` holds non-optional
+        // elements — no compactMap needed to unwrap.)
         return controllers
-            .compactMap { $0 }
             .filter { $0.window != nil }
             .sorted { ($0.window?.orderedIndex ?? .max) < ($1.window?.orderedIndex ?? .max) }
             .first
@@ -456,9 +477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Tell every controller in the group to refresh its custom tab
         // bar. NSWindowTabGroup's `.windows` property is not reliably
         // KVO-fireable on tab-add, so we invalidate explicitly.
-        DispatchQueue.main.async { [weak self] in
-            self?.refreshAllTabBars()
-        }
+        scheduleTabBarRefresh()
     }
 
     /// Re-run `refreshTabBar` on every MainWindowController so the pill
@@ -466,6 +485,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// since NSWindowTabGroup KVO isn't reliable.
     private func refreshAllTabBars() {
         for c in controllers { c.refreshTabBar() }
+    }
+
+    /// Coalesce a pill-strip refresh onto the next main-runloop tick. The
+    /// tab-add / tab-close mutations that change the group run in the current
+    /// turn; deferring the repaint lets the group settle first. One idiom for
+    /// the two async-refresh sites (tab close, ⌘T). The drag-reorder observer
+    /// is already on main and refreshes inline, so it doesn't use this.
+    private func scheduleTabBarRefresh() {
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshAllTabBars()
+        }
     }
 
     /// Opens a new independent window (⌘N). Per spec §3, ⌘N is a *fresh
@@ -567,9 +597,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // keep the per-tab confirm (matching plain ⌘W), else it kills a
         // running process with no confirmation at all. (F-S6-002)
         if MainWindowController.shouldBypassPerTabConfirm(tabCount: tabs.count) {
-            MainWindowController.bypassCloseConfirm = true
+            MainWindowController.setCloseConfirmBypass(true)
         }
-        defer { MainWindowController.bypassCloseConfirm = false }
+        defer { MainWindowController.setCloseConfirmBypass(false) }
         for tab in tabs {
             tab.performClose(nil)
         }
@@ -630,59 +660,5 @@ extension AppDelegate: NSMenuItemValidation {
         default:
             return true
         }
-    }
-}
-
-
-/// Audit S2-004: idle-based replacement for the test-host 60 s exit
-/// fuse. The TESTS (TestHostTermination, in the injected bundle — same
-/// process) post `activityNotification` on every test start/finish;
-/// this monitor exits the host only when no heartbeat has arrived for
-/// `idleLimit`. A single test legitimately running longer than the
-/// limit would still be shot — 300 s is far past the suite's slowest
-/// test (the project gates test cost deliberately) while keeping
-/// zombie-host cleanup prompt enough for CI.
-///
-/// Exit code stays 0 on the idle path, preserving the original
-/// safety-net semantics: a genuinely red run is caught by
-/// TestHostTermination's issueCount → exit(1) propagation and by CI's
-/// "both suites printed passed" grep, not by this last-resort fuse.
-final class TestHostActivityMonitor {
-    static let shared = TestHostActivityMonitor()
-    static let activityNotification = Notification.Name(
-        "dev.conjfrnk.blackbird.testHostActivity"
-    )
-    private static let idleLimit: TimeInterval = 300
-    private static let checkInterval: TimeInterval = 30
-
-    /// Main-queue confined (observer is delivered on .main; the timer
-    /// fires on the main runloop).
-    private var lastActivity = Date()
-    private var observer: NSObjectProtocol?
-    private var timer: Timer?
-
-    func start() {
-        guard observer == nil else { return }
-        observer = NotificationCenter.default.addObserver(
-            forName: Self.activityNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.lastActivity = Date()
-        }
-        let t = Timer(timeInterval: Self.checkInterval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let idle = Date().timeIntervalSince(self.lastActivity)
-            if idle > Self.idleLimit {
-                FileHandle.standardError.write(Data(
-                    "Blackbird test-host safety net: no test activity for \(Int(idle)) s — exiting host.\n".utf8
-                ))
-                exit(0)
-            }
-        }
-        // .common so the check still fires while XCTest runs the
-        // runloop in non-default modes (modal panels, tracking).
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
     }
 }

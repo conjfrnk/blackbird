@@ -167,147 +167,14 @@ public enum URLDetector {
                 let startIdx = min(max(0, r.location), utf16ToCol.count - 1)
                 let endIdx = min(r.location + r.length - 1, utf16ToCol.count - 1)
                 let startCol = utf16ToCol[startIdx]
-                var endCol = utf16ToCol[endIdx]
-                var finalURLString = substring
-                // Wrapped-URL heuristic: when the match ends at the right
-                // edge of the grid AND the next row starts with URL-safe
-                // characters, soft-wrap is the likely explanation. Walk the
-                // continuation rows, joining each into the parsed URL so the
-                // user can ⌘-click the whole href. BBSnapshot doesn't surface
-                // alacritty's wrap flag today; this heuristic gets ~99% of
-                // long CI/build-output URLs right. A URL can wrap across MANY
-                // rows (a long path/query on a narrow grid), so the walk
-                // continues while each consumed row is filled edge-to-edge and
-                // the security guards below keep holding at every boundary.
-                // Audit cwd-hyperlink F9 (single-row → multi-row walk).
-                if endCol == snapshot.cols - 1,
-                   row + 1 < snapshot.rows,
-                   Self.isURLContinuationChar(snapshot.character(at: 0, row: row + 1)),
-                   let sub = URL(string: substring),
-                   let subHost = sub.host,
-                   !subHost.isEmpty {
-                    // Wrap-join is a display-vs-dispatch trade-off: the
-                    // highlighted span stops at the right edge (the user only
-                    // SEES the first-row portion) but the dispatched URL
-                    // carries the joined string. Five guards, re-evaluated at
-                    // EVERY row boundary against the FIRST-row portion, keep
-                    // the join honest. Audit S4-001 / S4-007 / cwd-hyperlink F9.
-                    //
-                    // (1) Joined URL must parse — sanity gate.
-                    // (2) Substring URL must parse AND have a non-empty host
-                    //     (checked once in the entry condition above). A first-
-                    //     row substring that parses with `host == nil` (e.g.
-                    //     `https://?`) would make the host-equality check
-                    //     evaluate `nil == nil` and admit arbitrary
-                    //     continuation hosts. `OSC8URLPolicy.isAllowed` would
-                    //     block it downstream, but the gates must not be
-                    //     load-bearing for each other.
-                    // (3) host(joined) == host(first-row). Blocks the classic
-                    //     S4-001 shape where a row-edge break lands mid-host:
-                    //     row N ends `https://apple.com`, row N+1 starts
-                    //     `.evil.com/login` → joined host `apple.com.evil.com`
-                    //     ≠ `apple.com` → REJECT (and stop the walk). Because
-                    //     the host is fixed to what the user saw on the first
-                    //     row, no later row can re-point it.
-                    // (4) port(joined) == port(first-row). Blocks the port-
-                    //     injection variant: `https://example.com` +
-                    //     `:8080/admin` → same host, port 8080. The user saw
-                    //     the apex URL underlined; a non-default port silently
-                    //     re-targets an internal console (`:8443`, `:9200`, …).
-                    // (5) Each continuation row's first character must NOT be
-                    //     one of `?`, `#`, `&`, `@`, `;`, `:`. These introduce
-                    //     query / fragment / userinfo / path-parameter / port-
-                    //     or-path-coercion structure that doesn't exist in the
-                    //     visible substring. The legitimate path-wrap case
-                    //     (alnum / `/` / `.` / `-` / `_` / `~`) is unaffected.
-                    //     The `:` case (S4-007): when the substring ends with
-                    //     `/`, Foundation parses a continuation `:8080/...` as
-                    //     PATH not port — guards 3/4 both pass — so forbidding
-                    //     `:` as a leader closes that gap.
-                    //
-                    // Acknowledged residual (unchanged by the multi-row walk):
-                    // a continuation beginning with a benign char but
-                    // containing `?`/`#` later (`/oauth?return_to=evil`) still
-                    // slips. That shape is same-host injection — the trust
-                    // target matches what the user saw — and is bounded by the
-                    // remote endpoint's own redirect/SSO policy. The structural
-                    // fix would be a multi-row highlight so the dispatched URL
-                    // matches the visible span; F9 notes that as future work.
-                    let subPort = sub.port
-                    let urlStructureLeaders: Set<Character> = ["?", "#", "&", "@", ";", ":"]
-                    let trimSet = Set<Character>([".", ",", ";", ":", ")", "]", "}", ">", "'", "\""])
-                    var accumulated = substring
-                    var contRow = row + 1
-                    while contRow < snapshot.rows,
-                          Self.isURLContinuationChar(snapshot.character(at: 0, row: contRow)) {
-                        // Leading continuation run on `contRow`.
-                        var contEnd = 0
-                        while contEnd < snapshot.cols,
-                              Self.isURLContinuationChar(snapshot.character(at: contEnd, row: contRow)) {
-                            contEnd += 1
-                        }
-                        // Build the continuation text, tracking how many
-                        // COLUMNS each grapheme consumes so the dedup prefix
-                        // recorded below is in column units (what the row's own
-                        // scan skips), not grapheme-count units. They coincide
-                        // today (isURLContinuationChar admits only single-scalar
-                        // ASCII: one cell == one grapheme == one column), but
-                        // recording a grapheme count as a column index is a
-                        // latent unit confusion that would mis-skip if a wide /
-                        // non-BMP continuation char ever landed here. Audit
-                        // S3-004.
-                        var continuation = ""
-                        var graphemeEndColumn: [Int] = []
-                        for c in 0..<contEnd {
-                            if let ch = snapshot.character(at: c, row: contRow) {
-                                continuation.append(ch)
-                                graphemeEndColumn.append(c + 1)
-                            }
-                        }
-                        // Whether this run reaches the row's right edge (filled
-                        // edge-to-edge) decides whether the URL plausibly
-                        // continues onto the NEXT row.
-                        let filledToEdge = (contEnd == snapshot.cols)
-                        // Trim the trailing-punct set so a wrapped URL followed
-                        // by ", thanks" on the final row still yields a clean URL.
-                        var trimmedLen = continuation.count
-                        while trimmedLen > 0 {
-                            let last = continuation[continuation.index(continuation.startIndex, offsetBy: trimmedLen - 1)]
-                            if trimSet.contains(last) { trimmedLen -= 1 } else { break }
-                        }
-                        guard trimmedLen > 0 else { break }
-                        let trimmed = String(continuation.prefix(trimmedLen))
-                        let candidate = accumulated + trimmed
-                        guard let joined = URL(string: candidate),
-                              joined.host == subHost,
-                              joined.port == subPort,
-                              let firstContChar = trimmed.first,
-                              !urlStructureLeaders.contains(firstContChar) else { break }
-                        // Commit this row into the URL.
-                        accumulated = candidate
-                        finalURLString = candidate
-                        // Record how many leading COLUMNS of this row were
-                        // consumed so its own scan skips exactly those cells
-                        // and doesn't double-emit the fragment. (graphemeEnd-
-                        // Column[k] = columns consumed through grapheme k;
-                        // equals trimmedLen today but stays correct if a
-                        // grapheme ever spans >1 column.)
-                        consumedNextRowPrefix[contRow] = graphemeEndColumn[trimmedLen - 1]
-                        // Keep the highlight clamped to the first row — span-on-
-                        // first-row is the display cue; a multi-row highlight is
-                        // future work (F9). endCol is already cols-1 from the
-                        // entry condition.
-                        endCol = snapshot.cols - 1
-                        // Continue onto the next row only when this row was
-                        // consumed in full edge-to-edge with no trailing punct.
-                        // A short or punct-trimmed run means the URL ended here.
-                        if filledToEdge && trimmedLen == contEnd {
-                            contRow += 1
-                        } else {
-                            break
-                        }
-                    }
-                }
+                let endCol = utf16ToCol[endIdx]
+                let finalURLString = Self.wrapJoinedURL(
+                    firstRowSubstring: substring,
+                    row: row,
+                    endCol: endCol,
+                    snapshot: snapshot,
+                    consumedNextRowPrefix: &consumedNextRowPrefix
+                )
                 guard let url = URL(string: finalURLString) else {
                     #if DEBUG
                     // Diagnosability: silent drops mean a future regex
@@ -379,6 +246,163 @@ public enum URLDetector {
             }
         }
         return out
+    }
+
+
+    /// Multi-row wrapped-URL join + its five phishing guards. When a first-row
+    /// URL match ends at the grid's right edge with a URL-safe continuation on
+    /// the next row, walk the continuation rows, joining each into the dispatched
+    /// URL — re-checking host/port equality and the continuation-leader rules at
+    /// EVERY row boundary against the FIRST-row portion (S4-001 / S4-007 /
+    /// cwd-hyperlink F9). Returns the joined URL string, or `substring` unchanged
+    /// when the URL doesn't wrap. Records the consumed leading columns of each
+    /// joined row in `consumedNextRowPrefix` so the per-row scan doesn't
+    /// double-emit the continuation fragment. The visible highlight stays clamped
+    /// to the first row (the caller's `endCol` is already `cols - 1` in the wrap
+    /// case, per the `endCol == snapshot.cols - 1` gate below).
+    private static func wrapJoinedURL(
+        firstRowSubstring substring: String,
+        row: Int,
+        endCol: Int,
+        snapshot: BBSnapshot,
+        consumedNextRowPrefix: inout [Int: Int]
+    ) -> String {
+        var finalURLString = substring
+        // Wrapped-URL heuristic: when the match ends at the right
+        // edge of the grid AND the next row starts with URL-safe
+        // characters, soft-wrap is the likely explanation. Walk the
+        // continuation rows, joining each into the parsed URL so the
+        // user can ⌘-click the whole href. BBSnapshot doesn't surface
+        // alacritty's wrap flag today; this heuristic gets ~99% of
+        // long CI/build-output URLs right. A URL can wrap across MANY
+        // rows (a long path/query on a narrow grid), so the walk
+        // continues while each consumed row is filled edge-to-edge and
+        // the security guards below keep holding at every boundary.
+        // Audit cwd-hyperlink F9 (single-row → multi-row walk).
+        if endCol == snapshot.cols - 1,
+           row + 1 < snapshot.rows,
+           Self.isURLContinuationChar(snapshot.character(at: 0, row: row + 1)),
+           let sub = URL(string: substring),
+           let subHost = sub.host,
+           !subHost.isEmpty {
+            // Wrap-join is a display-vs-dispatch trade-off: the
+            // highlighted span stops at the right edge (the user only
+            // SEES the first-row portion) but the dispatched URL
+            // carries the joined string. Five guards, re-evaluated at
+            // EVERY row boundary against the FIRST-row portion, keep
+            // the join honest. Audit S4-001 / S4-007 / cwd-hyperlink F9.
+            //
+            // (1) Joined URL must parse — sanity gate.
+            // (2) Substring URL must parse AND have a non-empty host
+            //     (checked once in the entry condition above). A first-
+            //     row substring that parses with `host == nil` (e.g.
+            //     `https://?`) would make the host-equality check
+            //     evaluate `nil == nil` and admit arbitrary
+            //     continuation hosts. `OSC8URLPolicy.isAllowed` would
+            //     block it downstream, but the gates must not be
+            //     load-bearing for each other.
+            // (3) host(joined) == host(first-row). Blocks the classic
+            //     S4-001 shape where a row-edge break lands mid-host:
+            //     row N ends `https://apple.com`, row N+1 starts
+            //     `.evil.com/login` → joined host `apple.com.evil.com`
+            //     ≠ `apple.com` → REJECT (and stop the walk). Because
+            //     the host is fixed to what the user saw on the first
+            //     row, no later row can re-point it.
+            // (4) port(joined) == port(first-row). Blocks the port-
+            //     injection variant: `https://example.com` +
+            //     `:8080/admin` → same host, port 8080. The user saw
+            //     the apex URL underlined; a non-default port silently
+            //     re-targets an internal console (`:8443`, `:9200`, …).
+            // (5) Each continuation row's first character must NOT be
+            //     one of `?`, `#`, `&`, `@`, `;`, `:`. These introduce
+            //     query / fragment / userinfo / path-parameter / port-
+            //     or-path-coercion structure that doesn't exist in the
+            //     visible substring. The legitimate path-wrap case
+            //     (alnum / `/` / `.` / `-` / `_` / `~`) is unaffected.
+            //     The `:` case (S4-007): when the substring ends with
+            //     `/`, Foundation parses a continuation `:8080/...` as
+            //     PATH not port — guards 3/4 both pass — so forbidding
+            //     `:` as a leader closes that gap.
+            //
+            // Acknowledged residual (unchanged by the multi-row walk):
+            // a continuation beginning with a benign char but
+            // containing `?`/`#` later (`/oauth?return_to=evil`) still
+            // slips. That shape is same-host injection — the trust
+            // target matches what the user saw — and is bounded by the
+            // remote endpoint's own redirect/SSO policy. The structural
+            // fix would be a multi-row highlight so the dispatched URL
+            // matches the visible span; F9 notes that as future work.
+            let subPort = sub.port
+            let urlStructureLeaders: Set<Character> = ["?", "#", "&", "@", ";", ":"]
+            let trimSet = Set<Character>([".", ",", ";", ":", ")", "]", "}", ">", "'", "\""])
+            var accumulated = substring
+            var contRow = row + 1
+            while contRow < snapshot.rows,
+                  Self.isURLContinuationChar(snapshot.character(at: 0, row: contRow)) {
+                // Leading continuation run on `contRow`.
+                var contEnd = 0
+                while contEnd < snapshot.cols,
+                      Self.isURLContinuationChar(snapshot.character(at: contEnd, row: contRow)) {
+                    contEnd += 1
+                }
+                // Build the continuation text, tracking how many
+                // COLUMNS each grapheme consumes so the dedup prefix
+                // recorded below is in column units (what the row's own
+                // scan skips), not grapheme-count units. They coincide
+                // today (isURLContinuationChar admits only single-scalar
+                // ASCII: one cell == one grapheme == one column), but
+                // recording a grapheme count as a column index is a
+                // latent unit confusion that would mis-skip if a wide /
+                // non-BMP continuation char ever landed here. Audit
+                // S3-004.
+                var continuation = ""
+                var graphemeEndColumn: [Int] = []
+                for c in 0..<contEnd {
+                    if let ch = snapshot.character(at: c, row: contRow) {
+                        continuation.append(ch)
+                        graphemeEndColumn.append(c + 1)
+                    }
+                }
+                // Whether this run reaches the row's right edge (filled
+                // edge-to-edge) decides whether the URL plausibly
+                // continues onto the NEXT row.
+                let filledToEdge = (contEnd == snapshot.cols)
+                // Trim the trailing-punct set so a wrapped URL followed
+                // by ", thanks" on the final row still yields a clean URL.
+                var trimmedLen = continuation.count
+                while trimmedLen > 0 {
+                    let last = continuation[continuation.index(continuation.startIndex, offsetBy: trimmedLen - 1)]
+                    if trimSet.contains(last) { trimmedLen -= 1 } else { break }
+                }
+                guard trimmedLen > 0 else { break }
+                let trimmed = String(continuation.prefix(trimmedLen))
+                let candidate = accumulated + trimmed
+                guard let joined = URL(string: candidate),
+                      joined.host == subHost,
+                      joined.port == subPort,
+                      let firstContChar = trimmed.first,
+                      !urlStructureLeaders.contains(firstContChar) else { break }
+                // Commit this row into the URL.
+                accumulated = candidate
+                finalURLString = candidate
+                // Record how many leading COLUMNS of this row were
+                // consumed so its own scan skips exactly those cells
+                // and doesn't double-emit the fragment. (graphemeEnd-
+                // Column[k] = columns consumed through grapheme k;
+                // equals trimmedLen today but stays correct if a
+                // grapheme ever spans >1 column.)
+                consumedNextRowPrefix[contRow] = graphemeEndColumn[trimmedLen - 1]
+                // Continue onto the next row only when this row was
+                // consumed in full edge-to-edge with no trailing punct.
+                // A short or punct-trimmed run means the URL ended here.
+                if filledToEdge && trimmedLen == contEnd {
+                    contRow += 1
+                } else {
+                    break
+                }
+            }
+        }
+        return finalURLString
     }
 
     /// Find the match under `point`, or nil.

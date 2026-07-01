@@ -85,11 +85,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
 
         // "foo" sits at cols 4..6 on the cursor's row.
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests     = snap
-        view.replaceFindMatchesForTests  = [(line: cursorLine, startCol: 4, endCol: 6)]
+        view.findController.replaceSnapshotForTests     = snap
+        view.findController.replaceFindMatchesForTests  = [(line: cursorLine, startCol: 4, endCol: 6)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         // Inject the match index so replaceCurrentMatch picks the right entry.
         // findCurrentIndex is 0 by default which matches our single entry.
@@ -109,11 +109,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
         let snap = try liveSnapshot()
 
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceCurrentForTests(replacement: "")
 
@@ -134,11 +134,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
         let snap = try liveSnapshot()
 
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceCurrentForTests(replacement: "foo\nbar")
 
@@ -157,11 +157,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
         let snap = try liveSnapshot()
 
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceCurrentForTests(replacement: "foo\rbar")
 
@@ -183,11 +183,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
         let snap = try liveSnapshot()
 
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 2)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceCurrentForTests(replacement: "foo\tbar")
 
@@ -203,11 +203,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
 
         // Put the match on a different buffer line than the cursor.
         let offLine = Int32(snap.cursorRow) + 1
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: offLine, startCol: 0, endCol: 2)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: offLine, startCol: 0, endCol: 2)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceCurrentForTests(replacement: "xyz")
 
@@ -223,14 +223,14 @@ final class FindReplaceIntegrationTests: XCTestCase {
 
         let cursorLine = Int32(snap.cursorRow)
         // Two "foo" matches: cols 0..2 and cols 10..12
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [
             (line: cursorLine, startCol: 0,  endCol: 2),
             (line: cursorLine, startCol: 10, endCol: 12),
         ]
 
         var allCaptures: [Data] = []
-        view.replaceByteCapture = { allCaptures.append($0) }
+        view.findController.replaceByteCapture = { allCaptures.append($0) }
 
         view._invokeReplaceAllForTests(replacement: "bar")
 
@@ -254,14 +254,14 @@ final class FindReplaceIntegrationTests: XCTestCase {
         let otherLine  = cursorLine - 1          // scrollback line
 
         // One match on the input line, one in scrollback.
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [
             (line: cursorLine, startCol: 5, endCol: 7),
             (line: otherLine,  startCol: 0, endCol: 2),
         ]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceAllForTests(replacement: "qux")
 
@@ -292,11 +292,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
         let snap = try liveSnapshot()
 
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 2, endCol: 4)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 2, endCol: 4)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceCurrentForTests(replacement: "longer")
 
@@ -338,14 +338,14 @@ final class FindReplaceIntegrationTests: XCTestCase {
                        "test fixture: cursor must sit on row 0 after typing")
 
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [
             (line: cursorLine, startCol: 0, endCol: 2),   // "foo" → chars [0,3)
             (line: cursorLine, startCol: 4, endCol: 6),   // "bar" → chars [4,7)
         ]
 
         var allCaptures: [Data] = []
-        view.replaceByteCapture = { allCaptures.append($0) }
+        view.findController.replaceByteCapture = { allCaptures.append($0) }
 
         view._invokeReplaceAllForTests(replacement: "xy")
 
@@ -378,11 +378,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
                        "test fixture: cursor must sit on row 0 after typing")
 
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 2, endCol: 3)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 2, endCol: 3)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceCurrentForTests(replacement: "Y")
 
@@ -408,11 +408,11 @@ final class FindReplaceIntegrationTests: XCTestCase {
                        "test fixture: cursor must sit on row 0 after typing")
 
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
 
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
 
         view._invokeReplaceCurrentForTests(replacement: "X")
 
@@ -433,12 +433,12 @@ extension TerminalView {
     /// Calls replaceCurrentMatch(with:) directly — bypasses the delegate chain
     /// so tests don't need a real FindBar wired up.
     func _invokeReplaceCurrentForTests(replacement: String) {
-        replaceCurrentMatch(with: replacement)
+        findController.replaceCurrentMatch(with: replacement)
     }
 
     /// Calls replaceAllMatches(with:) directly.
     func _invokeReplaceAllForTests(replacement: String) {
-        replaceAllMatches(with: replacement)
+        findController.replaceAllMatches(with: replacement)
     }
 }
 #endif
@@ -509,16 +509,16 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
         let (s1, _) = try twoFreshSnapshots()
         view.currentSnapshot = s1
         // Pre-populate state as if a previous search had run.
-        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
-        view.findMatchesSeq = 99
-        view.findQuery = "alpha"
+        view.findController.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findController.findMatchesSeq = 99
+        view.findController.findQuery = "alpha"
         // Empty query → performSearch enters its bail-out branch which
         // clears findMatches; the seq must clear in lockstep so
         // refreshFindMatchesIfStale doesn't gate the next rescan on a
         // stale (and now meaningless) stamp.
-        view.performSearch(query: "")
+        view.findController.performSearch(query: "")
         XCTAssertNil(
-            view.findMatchesSeq,
+            view.findController.findMatchesSeq,
             "performSearch must clear findMatchesSeq when it clears "
             + "findMatches so the two stay coupled. Bug #16."
         )
@@ -536,10 +536,10 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
 
         // Simulate: performSearch was run against s1 and found one match.
         view.currentSnapshot = s1
-        view.findQuery = "alpha"
-        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
-        view.findMatchesSeq = s1.sequenceID
-        view.findCurrentIndex = 0
+        view.findController.findQuery = "alpha"
+        view.findController.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findController.findMatchesSeq = s1.sequenceID
+        view.findController.findCurrentIndex = 0
 
         // Output arrives → snapshot swaps. (The didSet's
         // scheduleFindRefresh is debounced via DispatchQueue.main.async,
@@ -547,20 +547,20 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
         view.currentSnapshot = s2
 
         // ⌘G fires while findMatches still holds the stale s1-tuples.
-        view.advanceFind(direction: .forward)
+        view.findController.advanceFind(direction: .forward)
 
         // The stale-cache path took over and called performSearch. With
         // no session wired, performSearch hits its session/snapshot guard
         // and nils findMatchesSeq + clears findMatches. Either side-effect
         // is sufficient evidence the rerun happened.
         XCTAssertNil(
-            view.findMatchesSeq,
+            view.findController.findMatchesSeq,
             "advanceFind must rerun performSearch when currentSnapshot's "
             + "sequenceID differs from findMatchesSeq; the rerun cleared "
             + "the seq stamp via the session-less guard. Bug #16."
         )
         XCTAssertTrue(
-            view.findMatches.isEmpty,
+            view.findController.findMatches.isEmpty,
             "Stale findMatches from the prior snapshot must be discarded "
             + "before advanceFind cycles, so the highlight can't land on "
             + "a row that no longer holds the match. Bug #16."
@@ -576,29 +576,29 @@ final class FindStaleMatchInvalidationTests: XCTestCase {
         let (s1, _) = try twoFreshSnapshots()
 
         view.currentSnapshot = s1
-        view.findQuery = "alpha"
-        view.findMatches = [
+        view.findController.findQuery = "alpha"
+        view.findController.findMatches = [
             (line: 0, startCol: 0, endCol: 4),
             (line: 1, startCol: 5, endCol: 9),
         ]
-        view.findMatchesSeq = s1.sequenceID
-        view.findCurrentIndex = 0
+        view.findController.findMatchesSeq = s1.sequenceID
+        view.findController.findCurrentIndex = 0
 
         // No snapshot swap. ⌘G should advance to index 1.
-        view.advanceFind(direction: .forward)
+        view.findController.advanceFind(direction: .forward)
 
         XCTAssertEqual(
-            view.findCurrentIndex, 1,
+            view.findController.findCurrentIndex, 1,
             "advanceFind must cycle to the next match when matches are "
             + "still valid against the live snapshot — the stale-check "
             + "cannot fire on a snapshot that hasn't moved on."
         )
         XCTAssertEqual(
-            view.findMatches.count, 2,
+            view.findController.findMatches.count, 2,
             "Existing matches must survive a same-seq advanceFind"
         )
         XCTAssertEqual(
-            view.findMatchesSeq, s1.sequenceID,
+            view.findController.findMatchesSeq, s1.sequenceID,
             "findMatchesSeq must remain stamped to the live snapshot"
         )
     }
@@ -743,10 +743,10 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         // we wrote), so the on-cursor-line guard passes.
         XCTAssertEqual(cursorLine, 0,
                        "test fixture: cursor must land on the row carrying the wide chars")
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 4)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 4)]
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
         view._invokeReplaceCurrentForTests(replacement: "x")
         // Audit S5-003 positioned grammar with the pending-wrap
         // correction: "中abc" exactly fills the 5-col row, so the
@@ -771,10 +771,10 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         )
         let snap = try snapshotWithRow0("中abc", cols: 5)
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
         view._invokeReplaceCurrentForTests(replacement: "Y")
         // Audit S5-003 positioned grammar with the pending-wrap
         // correction: shell logical position is 4 (cursor parked on 'c'
@@ -810,10 +810,10 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         )
         let snap = try snapshotWithRow0("ab", cols: 2)
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
         // Replacement contains an embedded RLO (U+202E) — the canonical
         // homograph attack codepoint. Must be stripped before reaching
         // the PTY.
@@ -840,10 +840,10 @@ final class FindWideGraphemeColumnMapTests: XCTestCase {
         )
         let snap = try snapshotWithRow0("ab", cols: 2)
         let cursorLine = Int32(snap.cursorRow)
-        view.replaceSnapshotForTests    = snap
-        view.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
+        view.findController.replaceSnapshotForTests    = snap
+        view.findController.replaceFindMatchesForTests = [(line: cursorLine, startCol: 0, endCol: 1)]
         var captured = Data()
-        view.replaceByteCapture = { captured.append($0) }
+        view.findController.replaceByteCapture = { captured.append($0) }
         // Replacement contains ESC + a Bell — both should be replaced
         // with space by sanitizePasteControls.
         view._invokeReplaceCurrentForTests(replacement: "x\u{1B}\u{07}y")

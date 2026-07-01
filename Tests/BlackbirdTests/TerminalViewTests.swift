@@ -435,7 +435,7 @@ final class TerminalViewTests: XCTestCase {
 
     func test_bracketedPasteSanitiser_leavesNormalPayloadUntouched() {
         let input = Data("hello\nworld\n".utf8)
-        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), input)
+        XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(input), input)
     }
 
     func test_bracketedPasteSanitiser_stripsEmbeddedClose() {
@@ -444,7 +444,7 @@ final class TerminalViewTests: XCTestCase {
         var input = Data("foo".utf8)
         input.append(Data([0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]))
         input.append(Data("bar".utf8))
-        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), Data("foobar".utf8))
+        XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(input), Data("foobar".utf8))
     }
 
     func test_bracketedPasteSanitiser_stripsMultipleOccurrences() {
@@ -453,7 +453,7 @@ final class TerminalViewTests: XCTestCase {
         input.append(Data("a".utf8))
         input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E])
         input.append(Data("b".utf8))
-        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(input), Data("ab".utf8))
     }
 
     func test_bracketedPasteSanitiser_preservesOpener() {
@@ -462,12 +462,12 @@ final class TerminalViewTests: XCTestCase {
         var input = Data()
         input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E])
         input.append(Data("payload".utf8))
-        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), input)
+        XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(input), input)
     }
 
     func test_bracketedPasteSanitiser_truncatedTerminator_leftIntact() {
         let input = Data([0x1B, 0x5B, 0x32, 0x30, 0x31])  // 5-byte prefix of terminator
-        XCTAssertEqual(TerminalView.sanitizeBracketedPaste(input), input)
+        XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(input), input)
     }
 
     // MARK: - C0 paste sanitiser (CVE-2026-26982 class)
@@ -475,7 +475,7 @@ final class TerminalViewTests: XCTestCase {
     func test_sanitizePasteControls_keepsTabLfCr() {
         let input = Data("a\tb\nc\rd".utf8)
         XCTAssertEqual(
-            TerminalView.sanitizePasteControls(input), input,
+            PasteSanitizer.sanitizePasteControls(input), input,
             "TAB / LF / CR are legitimate whitespace in pasted payload"
         )
     }
@@ -487,7 +487,7 @@ final class TerminalViewTests: XCTestCase {
         var input = Data("echo hi".utf8)
         input.append(0x03)
         input.append(Data("rm -rf ~\n".utf8))
-        let out = TerminalView.sanitizePasteControls(input)
+        let out = PasteSanitizer.sanitizePasteControls(input)
         XCTAssertFalse(out.contains(0x03), "Ctrl+C must be scrubbed")
         XCTAssertEqual(
             out, Data("echo hi rm -rf ~\n".utf8),
@@ -502,7 +502,7 @@ final class TerminalViewTests: XCTestCase {
         // as if typed. Strip unconditionally.
         let input = Data([0x1B, 0x5B, 0x32, 0x4A])  // ESC [ 2 J (clear screen)
         XCTAssertEqual(
-            TerminalView.sanitizePasteControls(input),
+            PasteSanitizer.sanitizePasteControls(input),
             Data([0x20, 0x5B, 0x32, 0x4A]),
             "ESC → space; remaining printable bytes untouched"
         )
@@ -511,7 +511,7 @@ final class TerminalViewTests: XCTestCase {
     func test_sanitizePasteControls_stripsDel() {
         let input = Data([0x61, 0x7F, 0x62])  // a DEL b
         XCTAssertEqual(
-            TerminalView.sanitizePasteControls(input),
+            PasteSanitizer.sanitizePasteControls(input),
             Data([0x61, 0x20, 0x62]),
             "0x7F (DEL) is replaced with space"
         )
@@ -523,7 +523,7 @@ final class TerminalViewTests: XCTestCase {
         var input = Data()
         for b in UInt8(0x00)...UInt8(0x1F) { input.append(b) }
         input.append(0x7F)
-        let out = TerminalView.sanitizePasteControls(input)
+        let out = PasteSanitizer.sanitizePasteControls(input)
         let survivors = out.filter { $0 != 0x20 }
         XCTAssertEqual(
             Array(survivors), [0x09, 0x0A, 0x0D],
@@ -542,7 +542,7 @@ final class TerminalViewTests: XCTestCase {
             var input = Data("a".utf8)
             input.append(contentsOf: [0xC2, c1])
             input.append(Data("b".utf8))
-            let out = TerminalView.sanitizePasteControls(input)
+            let out = PasteSanitizer.sanitizePasteControls(input)
             XCTAssertEqual(
                 out, Data([0x61, 0x20, 0x62]),
                 "UTF-8-encoded C1 control 0xC2 0x\(String(c1, radix: 16)) must be replaced with a space"
@@ -556,9 +556,9 @@ final class TerminalViewTests: XCTestCase {
         // eat `0xC2 0xA0` (non-breaking space). Also make sure a 0xC2
         // without a valid continuation passes through untouched.
         let nbsp = Data([0xC2, 0xA0])
-        XCTAssertEqual(TerminalView.sanitizePasteControls(nbsp), nbsp)
+        XCTAssertEqual(PasteSanitizer.sanitizePasteControls(nbsp), nbsp)
         let trailing = Data([0x61, 0xC2])
-        XCTAssertEqual(TerminalView.sanitizePasteControls(trailing), trailing)
+        XCTAssertEqual(PasteSanitizer.sanitizePasteControls(trailing), trailing)
     }
 
     func test_sanitizePasteControls_passesThroughHighBytes() {
@@ -566,7 +566,7 @@ final class TerminalViewTests: XCTestCase {
         // multi-byte characters (CJK, emoji) paste intact.
         let input = Data("héllo — 日本語".utf8)
         XCTAssertEqual(
-            TerminalView.sanitizePasteControls(input), input,
+            PasteSanitizer.sanitizePasteControls(input), input,
             "Only C0 + DEL are scrubbed; UTF-8 stays intact"
         )
     }
@@ -580,7 +580,7 @@ final class TerminalViewTests: XCTestCase {
         var input = Data("rm -rf ".utf8)
         input.append(contentsOf: [0xE2, 0x80, 0xAE])  // U+202E RLO
         input.append(Data("~\n".utf8))
-        let out = TerminalView.stripBidiOverrides(input)
+        let out = PasteSanitizer.stripBidiOverrides(input)
         XCTAssertFalse(
             out.contains(0xE2), "bidi-override codepoint must be stripped wholesale"
         )
@@ -593,21 +593,21 @@ final class TerminalViewTests: XCTestCase {
         // stripped alongside the stronger overrides.
         let lrm = Data([0x61] + [0xE2, 0x80, 0x8E] + [0x62])
         let rlm = Data([0x61] + [0xE2, 0x80, 0x8F] + [0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(lrm), Data("ab".utf8))
-        XCTAssertEqual(TerminalView.stripBidiOverrides(rlm), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(lrm), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(rlm), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_removesArabicLetterMark() {
         // U+061C ALM is 2-byte UTF-8 (D8 9C). Often overlooked in bidi
         // scrubbers because it's the only 2-byte format control.
         let alm = Data([0x61, 0xD8, 0x9C, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(alm), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(alm), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_removesMongolianVowelSeparator() {
         // U+180E (E1 A0 8E) — deprecated but still Format category.
         let mvs = Data([0x61, 0xE1, 0xA0, 0x8E, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(mvs), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(mvs), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_coversAllNineCodepoints() {
@@ -622,7 +622,7 @@ final class TerminalViewTests: XCTestCase {
         for cp in codepoints { input.append(contentsOf: cp) }
         input.append(Data("end".utf8))
         XCTAssertEqual(
-            TerminalView.stripBidiOverrides(input), Data("startend".utf8),
+            PasteSanitizer.stripBidiOverrides(input), Data("startend".utf8),
             "All nine explicit bidi controls must be removed"
         )
     }
@@ -634,7 +634,7 @@ final class TerminalViewTests: XCTestCase {
         // match on the prefix alone.
         let input = Data("שלום 安全 — 日本語 🇺🇸 tree".utf8)
         XCTAssertEqual(
-            TerminalView.stripBidiOverrides(input), input,
+            PasteSanitizer.stripBidiOverrides(input), input,
             "Non-override UTF-8 passes through unchanged (em dash contains E2 prefix)"
         )
     }
@@ -653,9 +653,9 @@ final class TerminalViewTests: XCTestCase {
             Data(repeating: 0xFF, count: 64),              // all-0xFF
         ]
         for p in payloads {
-            let cleaned = TerminalView.sanitizePasteControls(p)
-            let bidiStripped = TerminalView.stripBidiOverrides(cleaned)
-            let final = TerminalView.sanitizeBracketedPaste(bidiStripped)
+            let cleaned = PasteSanitizer.sanitizePasteControls(p)
+            let bidiStripped = PasteSanitizer.stripBidiOverrides(cleaned)
+            let final = PasteSanitizer.sanitizeBracketedPaste(bidiStripped)
             // Invariant: no crash, output length ≤ input length.
             XCTAssertLessThanOrEqual(final.count, p.count)
         }
@@ -682,9 +682,9 @@ final class TerminalViewTests: XCTestCase {
             for i in 0..<length {
                 input[i] = UInt8.random(in: 0...255, using: &rng)
             }
-            let cleaned = TerminalView.sanitizePasteControls(input)
-            let bidiStripped = TerminalView.stripBidiOverrides(cleaned)
-            let bracketed = TerminalView.sanitizeBracketedPaste(bidiStripped)
+            let cleaned = PasteSanitizer.sanitizePasteControls(input)
+            let bidiStripped = PasteSanitizer.stripBidiOverrides(cleaned)
+            let bracketed = PasteSanitizer.sanitizeBracketedPaste(bidiStripped)
 
             // (5) monotone non-growth
             XCTAssertLessThanOrEqual(
@@ -730,10 +730,10 @@ final class TerminalViewTests: XCTestCase {
         input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E])  // ESC[201~
         input.append(Data("tail".utf8))
 
-        let normalised = TerminalView.normalizePasteLineEndings(input)
-        let cleanedControls = TerminalView.sanitizePasteControls(normalised)
-        let bidiStripped = TerminalView.stripBidiOverrides(cleanedControls)
-        let bracketStripped = TerminalView.sanitizeBracketedPaste(bidiStripped)
+        let normalised = PasteSanitizer.normalizePasteLineEndings(input)
+        let cleanedControls = PasteSanitizer.sanitizePasteControls(normalised)
+        let bidiStripped = PasteSanitizer.stripBidiOverrides(cleanedControls)
+        let bracketStripped = PasteSanitizer.sanitizeBracketedPaste(bidiStripped)
 
         // Every byte <0x20 other than TAB/LF/CR must be gone.
         for b in bracketStripped {
@@ -760,7 +760,7 @@ final class TerminalViewTests: XCTestCase {
     func test_stripBidiOverrides_fastPathWhenNoE2Byte() {
         // Pure ASCII hits the early-return; the assertion is identity.
         let input = Data("pure ascii payload, no bidi".utf8)
-        XCTAssertEqual(TerminalView.stripBidiOverrides(input), input)
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(input), input)
     }
 
     // MARK: - M3 / M4: extended scrub coverage
@@ -772,8 +772,8 @@ final class TerminalViewTests: XCTestCase {
     func test_stripBidiOverrides_removesLineSeparators() {
         let ls = Data([0x61, 0xE2, 0x80, 0xA8, 0x62])  // a U+2028 b
         let ps = Data([0x61, 0xE2, 0x80, 0xA9, 0x62])  // a U+2029 b
-        XCTAssertEqual(TerminalView.stripBidiOverrides(ls), Data("ab".utf8))
-        XCTAssertEqual(TerminalView.stripBidiOverrides(ps), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(ls), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(ps), Data("ab".utf8))
     }
 
     /// Zero-width chars (ZWSP/ZWNJ/ZWJ) — homograph + log-injection
@@ -782,7 +782,7 @@ final class TerminalViewTests: XCTestCase {
         for cp: UInt8 in [0x8B, 0x8C, 0x8D] {  // U+200B / 200C / 200D
             let payload = Data([0x61, 0xE2, 0x80, cp, 0x62])
             XCTAssertEqual(
-                TerminalView.stripBidiOverrides(payload), Data("ab".utf8),
+                PasteSanitizer.stripBidiOverrides(payload), Data("ab".utf8),
                 "U+200\(String(cp - 0x80, radix: 16, uppercase: true)) (zero-width) must strip"
             )
         }
@@ -791,19 +791,19 @@ final class TerminalViewTests: XCTestCase {
     func test_stripBidiOverrides_removesWordJoiner() {
         // U+2060 WORD JOINER — E2 81 A0
         let payload = Data([0x61, 0xE2, 0x81, 0xA0, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(payload), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_removesBOM() {
         // U+FEFF — EF BB BF
         let payload = Data([0x61, 0xEF, 0xBB, 0xBF, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(payload), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_removesSoftHyphen() {
         // U+00AD — C2 AD
         let payload = Data([0x61, 0xC2, 0xAD, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(payload), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_preservesAllVariationSelectors1to16() {
@@ -816,7 +816,7 @@ final class TerminalViewTests: XCTestCase {
         for vs: UInt8 in 0x80...0x8F {
             let payload = Data([0x61, 0xEF, 0xB8, vs, 0x62])
             XCTAssertEqual(
-                TerminalView.stripBidiOverrides(payload), payload,
+                PasteSanitizer.stripBidiOverrides(payload), payload,
                 "VS at byte \(String(vs, radix: 16, uppercase: true)) must be preserved"
             )
         }
@@ -825,10 +825,10 @@ final class TerminalViewTests: XCTestCase {
     func test_stripBidiOverrides_removesTagBlock() {
         // U+E0073 (tag 's') — F3 A0 81 B3.
         let payload = Data([0x61, 0xF3, 0xA0, 0x81, 0xB3, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(payload), Data("ab".utf8))
         // U+E0000 (tag NULL) — F3 A0 80 80.
         let payload2 = Data([0x61, 0xF3, 0xA0, 0x80, 0x80, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload2), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(payload2), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_preservesVariationSelectors17to256() {
@@ -837,11 +837,11 @@ final class TerminalViewTests: XCTestCase {
         // shares the F3 A0 lead and stays stripped.
         // U+E0100 (VS17) — F3 A0 84 80
         let payload = Data([0x61, 0xF3, 0xA0, 0x84, 0x80, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), payload,
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(payload), payload,
                        "VS17 (U+E0100) must be preserved")
         // U+E01EF (VS256) — F3 A0 87 AF
         let payload2 = Data([0x61, 0xF3, 0xA0, 0x87, 0xAF, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload2), payload2,
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(payload2), payload2,
                        "VS256 (U+E01EF) must be preserved")
     }
 
@@ -852,9 +852,9 @@ final class TerminalViewTests: XCTestCase {
         // unchanged (regression guard that the tag-block match didn't
         // over-broaden into the rest of the F3 A0 space).
         let beyondVS = Data([0x61, 0xF3, 0xA0, 0x87, 0xB0, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(beyondVS), beyondVS)
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(beyondVS), beyondVS)
         let pastPage = Data([0x61, 0xF3, 0xA0, 0x88, 0x80, 0x62])
-        XCTAssertEqual(TerminalView.stripBidiOverrides(pastPage), pastPage)
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(pastPage), pastPage)
     }
 
     func test_stripBidiOverrides_attackComboPayload() {
@@ -870,14 +870,14 @@ final class TerminalViewTests: XCTestCase {
         payload.append(contentsOf: [0xF3, 0xA0, 0x81, 0xA1]) // U+E0061 tag 'a'
         payload.append(contentsOf: [0xC2, 0xAD])            // U+00AD SHY
         payload.append(0x62)
-        XCTAssertEqual(TerminalView.stripBidiOverrides(payload), Data("ab".utf8))
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(payload), Data("ab".utf8))
     }
 
     func test_stripBidiOverrides_preservesLegitimateMultibyteScalars() {
         // Em-dash (U+2014, E2 80 94), CJK, emoji, Hebrew/Arabic round-
         // trip unchanged — we only strip the explicit invisibles.
         let input = Data("—中文שלום🚀hello world".utf8)
-        XCTAssertEqual(TerminalView.stripBidiOverrides(input), input)
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(input), input)
     }
 
     func test_stripBidiOverrides_malformedTagBlockLeadDoesNotOverConsume() {
@@ -894,7 +894,7 @@ final class TerminalViewTests: XCTestCase {
         // on it. Audit S3-005.
         let malformed = Data([0xF3, 0xA0, 0x80, 0x41, 0x42])
         XCTAssertEqual(
-            TerminalView.stripBidiOverrides(malformed),
+            PasteSanitizer.stripBidiOverrides(malformed),
             Data([0xF3, 0xA0, 0x80, 0x41, 0x42]),
             "Malformed F3 A0 80 lead followed by a non-continuation byte must "
                 + "not over-consume: no byte may be dropped — the prefix and "
@@ -904,7 +904,7 @@ final class TerminalViewTests: XCTestCase {
         // U+E0000) is still stripped, leaving the trailing 'B' (0x42).
         let wellFormed = Data([0xF3, 0xA0, 0x80, 0x80, 0x42])
         XCTAssertEqual(
-            TerminalView.stripBidiOverrides(wellFormed), Data([0x42]),
+            PasteSanitizer.stripBidiOverrides(wellFormed), Data([0x42]),
             "Well-formed tag-block scalar F3 A0 80 80 must still be stripped")
     }
 
@@ -913,23 +913,23 @@ final class TerminalViewTests: XCTestCase {
     func test_normalizePaste_collapsesCRLF() {
         let input = Data("line1\r\nline2\r\nline3".utf8)
         let expected = Data("line1\nline2\nline3".utf8)
-        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), expected)
+        XCTAssertEqual(PasteSanitizer.normalizePasteLineEndings(input), expected)
     }
 
     func test_normalizePaste_preservesLoneCR() {
         // Lone CR is left alone — progress-bar output (`\r[###  ]`) and some
         // applications legitimately want the bare CR.
         let input = Data("progress\r".utf8)
-        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
+        XCTAssertEqual(PasteSanitizer.normalizePasteLineEndings(input), input)
     }
 
     func test_normalizePaste_preservesLoneLF() {
         let input = Data("unix\nstyle\nlines".utf8)
-        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
+        XCTAssertEqual(PasteSanitizer.normalizePasteLineEndings(input), input)
     }
 
     func test_normalizePaste_emptyInput() {
-        XCTAssertEqual(TerminalView.normalizePasteLineEndings(Data()), Data())
+        XCTAssertEqual(PasteSanitizer.normalizePasteLineEndings(Data()), Data())
     }
 
     func test_normalizePaste_fastPathWhenNoCR() {
@@ -937,14 +937,14 @@ final class TerminalViewTests: XCTestCase {
         // assertion here is functional (unchanged output); the perf claim is
         // in the comment.
         let input = Data("no carriage returns here".utf8)
-        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
+        XCTAssertEqual(PasteSanitizer.normalizePasteLineEndings(input), input)
     }
 
     func test_normalizePaste_trailingCROnly() {
         // Edge case: a CR at the very end, with no following LF, must pass
         // through untouched (can't peek past endIndex).
         let input = Data("hello\r".utf8)
-        XCTAssertEqual(TerminalView.normalizePasteLineEndings(input), input)
+        XCTAssertEqual(PasteSanitizer.normalizePasteLineEndings(input), input)
     }
 
     // MARK: - TerminalMode helpers
@@ -982,8 +982,8 @@ final class TerminalViewTests: XCTestCase {
         var input = Data("line1\r\n".utf8)
         input.append(contentsOf: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E])  // ESC [ 201 ~
         input.append(Data("line2".utf8))
-        let normalised = TerminalView.normalizePasteLineEndings(input)
-        let sanitised = TerminalView.sanitizeBracketedPaste(normalised)
+        let normalised = PasteSanitizer.normalizePasteLineEndings(input)
+        let sanitised = PasteSanitizer.sanitizeBracketedPaste(normalised)
         XCTAssertEqual(
             sanitised, Data("line1\nline2".utf8),
             "Normalise CRLF → LF, then strip the embedded terminator bytes"
@@ -993,7 +993,7 @@ final class TerminalViewTests: XCTestCase {
     // MARK: - Mouse-report encoding (pure path)
 
     func test_mouseReport_sgr_leftPress_final_M() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: true, button: 0, press: true, col: 10, row: 5
         )
         // ESC [ < 0 ; 11 ; 6 M
@@ -1001,7 +1001,7 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_mouseReport_sgr_leftRelease_final_m() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: true, button: 0, press: false, col: 10, row: 5
         )
         // SGR preserves the button number; lowercase m indicates release.
@@ -1009,14 +1009,14 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_mouseReport_sgr_wheelUp() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: true, button: 64, press: true, col: 0, row: 0
         )
         XCTAssertEqual(String(data: bytes!, encoding: .utf8), "\u{1B}[<64;1;1M")
     }
 
     func test_mouseReport_x10_leftPress_hasCbButton() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: false, button: 0, press: true, col: 0, row: 0
         )
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 32, 33, 33]))
@@ -1025,7 +1025,7 @@ final class TerminalViewTests: XCTestCase {
     func test_mouseReport_x10_leftRelease_cbForcesButton3() {
         // Regression: previously emitted cb=32 (indistinguishable from
         // left-press). The fix sets the low bits to 3 for releases.
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: false, button: 0, press: false, col: 0, row: 0
         )
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 35, 33, 33]),
@@ -1033,7 +1033,7 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_mouseReport_x10_rightRelease_alsoCb35() {
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: false, button: 2, press: false, col: 0, row: 0
         )
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 35, 33, 33]),
@@ -1041,17 +1041,17 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_mouseReport_x10_outsideRange_returnsNil() {
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: false, button: 0, press: true, col: 500, row: 0
         ), "X10 can't address cols >= 223")
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: false, button: 0, press: true, col: 0, row: 500
         ), "X10 can't address rows >= 223")
     }
 
     func test_mouseReport_x10_motion() {
         // Motion with button held: button=32 (bit 5). cb = 32+32 = 64.
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: false, button: 32, press: true, col: 3, row: 7
         )
         XCTAssertEqual(bytes, Data([0x1B, 0x5B, 0x4D, 64, 36, 40]))
@@ -1060,13 +1060,13 @@ final class TerminalViewTests: XCTestCase {
     func test_mouseReport_rejectsNegativeCoord() {
         // Pre-guards before any encoding mode — negative col/row from a
         // misbehaving input device would otherwise produce nonsense.
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: 0, press: true, col: -1, row: 0
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: 0, press: true, col: 0, row: -1
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: false, button: 0, press: true, col: -1, row: 0
         ))
     }
@@ -1075,16 +1075,16 @@ final class TerminalViewTests: XCTestCase {
         // X10 encoding would trap on `UInt8(button + 32)` for button
         // >= 224. SGR encoding doesn't trap but would stringify an
         // absurd value. Reject both up front.
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: -1, press: true, col: 0, row: 0
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: 224, press: true, col: 0, row: 0
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: true, button: Int.max, press: true, col: 0, row: 0
         ))
-        XCTAssertNil(TerminalView.encodeMouseReport(
+        XCTAssertNil(MouseReportEncoder.encode(
             sgr: false, button: 224, press: true, col: 0, row: 0
         ))
     }
@@ -1093,7 +1093,7 @@ final class TerminalViewTests: XCTestCase {
         // SGR encoding doesn't cap col/row (digits only, no byte truncation).
         // Callers clamp to 10k upstream. Verify the encoder handles those
         // values without drama.
-        let bytes = TerminalView.encodeMouseReport(
+        let bytes = MouseReportEncoder.encode(
             sgr: true, button: 0, press: true, col: 9999, row: 9999
         )
         XCTAssertEqual(bytes, Data("\u{1B}[<0;10000;10000M".utf8))
@@ -1291,7 +1291,7 @@ final class TerminalViewTests: XCTestCase {
 
     func test_scrubURLForDisplay_passesPlainURL() {
         let input = "https://example.com/path?query=1"
-        XCTAssertEqual(TerminalView.scrubURLForDisplay(input), input)
+        XCTAssertEqual(PasteSanitizer.scrubURLForDisplay(input), input)
     }
 
     func test_scrubURLForDisplay_dropsBidiOverride() {
@@ -1302,7 +1302,7 @@ final class TerminalViewTests: XCTestCase {
         let lhs = "https://evil.tld/login"
         let rls = "moc.elppa//:sptth"
         let attack = lhs + "\u{202E}" + rls
-        let scrubbed = TerminalView.scrubURLForDisplay(attack)
+        let scrubbed = PasteSanitizer.scrubURLForDisplay(attack)
         XCTAssertFalse(scrubbed.contains("\u{202E}"))
         XCTAssertEqual(scrubbed, lhs + rls)
     }
@@ -1321,7 +1321,7 @@ final class TerminalViewTests: XCTestCase {
             s.unicodeScalars.append(cp)
             s += "b"
             XCTAssertEqual(
-                TerminalView.scrubURLForDisplay(s), "ab",
+                PasteSanitizer.scrubURLForDisplay(s), "ab",
                 "bidi codepoint U+\(String(cp.value, radix: 16, uppercase: true)) must be removed"
             )
         }
@@ -1333,7 +1333,7 @@ final class TerminalViewTests: XCTestCase {
         // wrap or layout-break the tooltip, so we drop them.
         let input = "https://example.com/\tpath\nfrag\rment"
         XCTAssertEqual(
-            TerminalView.scrubURLForDisplay(input),
+            PasteSanitizer.scrubURLForDisplay(input),
             "https://example.com/pathfragment"
         )
     }
@@ -1345,7 +1345,7 @@ final class TerminalViewTests: XCTestCase {
         // safer than dropping (a fake space is visually obvious).
         let input = "https://example.com/\u{01}\u{1B}path"
         XCTAssertEqual(
-            TerminalView.scrubURLForDisplay(input),
+            PasteSanitizer.scrubURLForDisplay(input),
             "https://example.com/  path"
         )
     }
@@ -1356,7 +1356,7 @@ final class TerminalViewTests: XCTestCase {
         bytes.append(contentsOf: [0xC2, 0x9D])
         bytes += Data("b".utf8)
         let s = String(decoding: bytes, as: UTF8.self)
-        XCTAssertEqual(TerminalView.scrubURLForDisplay(s), "a b")
+        XCTAssertEqual(PasteSanitizer.scrubURLForDisplay(s), "a b")
     }
 
     func test_scrubURLForDisplay_preservesNonAsciiUtf8() {
@@ -1364,7 +1364,7 @@ final class TerminalViewTests: XCTestCase {
         // must round-trip. The em-dash (E2 80 94) carries the same E2
         // prefix as bidi overrides; verify we don't over-match.
         let input = "https://例え.jp/—path/🌐"
-        XCTAssertEqual(TerminalView.scrubURLForDisplay(input), input)
+        XCTAssertEqual(PasteSanitizer.scrubURLForDisplay(input), input)
     }
 
     func test_scrubURLForDisplay_dropsVariationSelectors() {
@@ -1378,11 +1378,11 @@ final class TerminalViewTests: XCTestCase {
         // (Regression guard for the VS-preservation change: removing VS
         // from stripBidiOverrides must not silently weaken this surface.)
         let vs16 = "https://example.com/a\u{FE0F}b"
-        XCTAssertEqual(TerminalView.scrubURLForDisplay(vs16),
+        XCTAssertEqual(PasteSanitizer.scrubURLForDisplay(vs16),
                        "https://example.com/ab",
                        "VS16 (U+FE0F) must be stripped from the display scrubber")
         let vs256 = "https://example.com/a\u{E0100}b"
-        XCTAssertEqual(TerminalView.scrubURLForDisplay(vs256),
+        XCTAssertEqual(PasteSanitizer.scrubURLForDisplay(vs256),
                        "https://example.com/ab",
                        "VS17-256 (U+E0100) must be stripped from the display scrubber")
     }
@@ -1400,7 +1400,7 @@ final class TerminalViewTests: XCTestCase {
     func test_isOptionMetaChord_metaModeOptionAlone_isChord() {
         // Use Option as Meta + plain Option held → Meta chord, bypass IME.
         XCTAssertTrue(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option])
         )
     }
 
@@ -1408,7 +1408,7 @@ final class TerminalViewTests: XCTestCase {
         // Shift is just a shift level (Option+Shift+e is still a Meta chord);
         // it must not disqualify the chord.
         XCTAssertTrue(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .shift])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .shift])
         )
     }
 
@@ -1416,7 +1416,7 @@ final class TerminalViewTests: XCTestCase {
         // Control+Option is handled by a different path (C0 / control
         // encoding); the Meta-chord IME bypass must not claim it.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .control])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .control])
         )
     }
 
@@ -1424,21 +1424,21 @@ final class TerminalViewTests: XCTestCase {
         // Command is a menu/app shortcut surface; an Option+Command event is
         // never a Meta chord.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .command])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.option, .command])
         )
     }
 
     func test_isOptionMetaChord_metaModeControlWithoutOption_isNotChord() {
         // No Option held at all → not a Meta chord regardless of mode.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.control])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [.control])
         )
     }
 
     func test_isOptionMetaChord_metaModeNoModifiers_isNotChord() {
         // No Option held → not a Meta chord.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: true, modifierFlags: [])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: true, modifierFlags: [])
         )
     }
 
@@ -1446,7 +1446,7 @@ final class TerminalViewTests: XCTestCase {
         // Native-Option mode: the user wants macOS accent composition
         // preserved, so even plain Option must NOT be treated as a Meta chord.
         XCTAssertFalse(
-            TerminalView.isOptionMetaChord(optionIsMeta: false, modifierFlags: [.option])
+            KeyEventClassifier.isOptionMetaChord(optionIsMeta: false, modifierFlags: [.option])
         )
     }
 }

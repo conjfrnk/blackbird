@@ -877,6 +877,15 @@ struct BBString *bb_term_text_range(struct BBTerm *term,
  */
 void bb_string_release(struct BBString *s);
 
+/**
+ * FFI: true when `scalar` (a Unicode code point) is a bidi-control /
+ * zero-width / invisible scalar per the core's canonical set. The single
+ * source of truth the Swift HyperlinkResolver percent-encoded blocklist is
+ * pinned against (drift detection). Invalid code points (surrogates / out of
+ * range) return false.
+ */
+bool bb_is_bidi_or_invisible_scalar(uint32_t scalar);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

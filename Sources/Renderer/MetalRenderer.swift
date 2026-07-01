@@ -50,8 +50,19 @@ public final class MetalRenderer {
 
     public let device: MTLDevice
     public let commandQueue: MTLCommandQueue
-    private let pipelineState: MTLRenderPipelineState
-    private let cursorPipelineState: MTLRenderPipelineState
+    /// The two render pipeline states, grouped into one value struct (Finding A
+    /// field-clustering) so the renderer's stored-field count reflects concerns,
+    /// not individual variables. `pipelineState` draws the instanced cell quads;
+    /// `cursorPipelineState` draws the standalone bar / underline / unfocused-
+    /// outline cursor (the focused block cursor renders via cell inversion, not
+    /// through this pipeline). Both are immutable `let`s built once in `init`.
+    /// Fields keep their exact prior names, so the encoders read
+    /// `pipelines.pipelineState` / `pipelines.cursorPipelineState`.
+    private struct Pipelines {
+        let pipelineState: MTLRenderPipelineState
+        let cursorPipelineState: MTLRenderPipelineState
+    }
+    private let pipelines: Pipelines
     /// External read-only by design. A direct `renderer.atlas = newAtlas`
     /// write would publish a fresh `GlyphAtlas` whose `generation`
     /// counter restarts at 0; if `lastCacheKey.atlasGeneration` was also
@@ -93,9 +104,37 @@ public final class MetalRenderer {
     /// Each buffer grows independently — capacity is tracked per-slot so
     /// a ring reallocation only rebuilds the slot that overflowed, not
     /// all three.
-    private var instanceBuffers: [MTLBuffer]
-    private var instanceCapacities: [Int]
-    /// Hard cap on `instanceCapacities[slot]`. The grow path doubles the
+    ///
+    /// Grouped into one value struct (Finding A: stored-field clustering) so
+    /// the renderer's field count reflects concerns, not individual variables.
+    /// Every field keeps its exact name + type; access is now `ring.<field>`.
+    /// `inflightSemaphore` is a `let` holding a reference type — `ring` is one
+    /// stored property of the class and is never copied, so there is exactly
+    /// one semaphore across the renderer's lifetime. The slot-lifecycle helpers
+    /// (`claimSlot`/`releaseSlotUnused`/`commitSlotRotation`/
+    /// `rollbackSlotRotation`) stay methods on the renderer that read/write
+    /// `ring.*`, so the S2-006/M-3/S2-007 wait/signal ordering is unchanged: a
+    /// helper reads `ring.inflightSemaphore` (an instantaneous read of the
+    /// reference) before calling `.wait()`/`.signal()`, holding no exclusive
+    /// access to `ring` across the blocking call.
+    private struct TripleBufferRing {
+        var instanceBuffers: [MTLBuffer]
+        var instanceCapacities: [Int]
+        var frameIndex: Int = 0
+        /// The slot the current `render(in:)` call has locked. Set after
+        /// `inflightSemaphore.wait()`, read by `buildInstances` and the encoder,
+        /// cleared on completion. Not thread-safe on its own — `render(in:)`
+        /// always runs on the main thread.
+        var currentSlot: Int = 0
+        /// Three tokens match three buffers. Every `render(in:)` waits on one
+        /// before touching its slot; the command buffer's completion handler
+        /// signals. The GPU can run up to three frames ahead of the CPU;
+        /// beyond that, the CPU blocks, which is the correct backpressure
+        /// shape for a latency-sensitive text renderer.
+        let inflightSemaphore = DispatchSemaphore(value: 3)
+    }
+    private var ring: TripleBufferRing
+    /// Hard cap on `ring.instanceCapacities[slot]`. The grow path doubles the
     /// current capacity each time it overflows; bounded today only by
     /// "GPU OOM intervenes first" (Audit L-21). Defense-in-depth: cap
     /// the doubling so an Int multiply can't overflow in pathological
@@ -106,104 +145,115 @@ public final class MetalRenderer {
     /// all paint). Sized to fit GPU memory comfortably while leaving
     /// the trap for `* 2` overflow well out of reach.
     private static let instanceCapacityHardCap = 4 * 1024 * 1024
-    private var frameIndex: Int = 0
-    /// The slot the current `render(in:)` call has locked. Set after
-    /// `inflightSemaphore.wait()`, read by `buildInstances` and the encoder,
-    /// cleared on completion. Not thread-safe on its own — `render(in:)`
-    /// always runs on the main thread.
-    private var currentSlot: Int = 0
-    /// Three tokens match three buffers. Every `render(in:)` waits on one
-    /// before touching its slot; the command buffer's completion handler
-    /// signals. The GPU can run up to three frames ahead of the CPU;
-    /// beyond that, the CPU blocks, which is the correct backpressure
-    /// shape for a latency-sensitive text renderer.
-    private let inflightSemaphore = DispatchSemaphore(value: 3)
 
-    private var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
-    /// Accent colour applied by the fragment shader whenever a cell's
-    /// `linkHover` attribute bit is set. Defaults to an sRGB approximation
-    /// of macOS's `controlAccentColor` so the underline looks right even
-    /// without a theme-provided override.
-    private var accentColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.48, 1.0, 1.0)
+    /// Theme-derived colour state (Finding A cluster). Grouped into one value
+    /// struct; every field keeps its name/type and is read as `themeColors.<f>`.
+    /// These feed `makeFrameKey`/`makeCacheKey` and the cell/cursor encoders;
+    /// grouping is a pure relocation — the key values stay byte-identical.
+    private struct ThemeColors {
+        var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
+        /// Accent colour applied by the fragment shader whenever a cell's
+        /// `linkHover` attribute bit is set. Defaults to an sRGB approximation
+        /// of macOS's `controlAccentColor` so the underline looks right even
+        /// without a theme-provided override.
+        var accentColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.48, 1.0, 1.0)
+        /// When a cell's resolved bg equals this value, we treat it as "default
+        /// background" and skip drawing a bg quad. That lets the transparent
+        /// clearColor show through — the window-level transparency effect.
+        /// `0xFFFFFFFF` acts as a sentinel meaning "no theme bg configured yet".
+        var defaultBgRgb: UInt32 = 0xFFFFFFFF
+        /// Overall opacity applied to non-default cell backgrounds. 1.0 keeps
+        /// them solid; lower values let the framebuffer (clearColor) peek
+        /// through — used when the user wants even vim status lines to be
+        /// translucent (keepBgOpaque == false in iTerm2 terms).
+        var backgroundOpacity: Float = 1.0
+        var keepBgOpaque: Bool = true
+    }
+    private var themeColors = ThemeColors()
+
     /// OSC 8 link id currently under the pointer. Cells with matching
     /// `link_id` receive the accent underline via the `linkHover`
     /// attribute bit. Zero means "no hovered link" — the renderer skips
     /// the underline branch entirely.
     private var hoveredLinkID: UInt16 = 0
-    /// Optional "⌘-held, regex URL under pointer" range. Carries a buffer
-    /// line (not screen row — survives scrolling) and an inclusive column
-    /// range. The renderer applies the same `linkHover` accent underline
-    /// to matching cells. `cmdHoverStartCol < 0` is the sentinel for "no
-    /// range" and disables the branch entirely.
-    private var cmdHoverBufferLine: Int32 = 0
-    private var cmdHoverStartCol: Int32 = -1
-    private var cmdHoverEndCol: Int32 = -1
-    /// When a cell's resolved bg equals this value, we treat it as "default
-    /// background" and skip drawing a bg quad. That lets the transparent
-    /// clearColor show through — the window-level transparency effect.
-    /// `0xFFFFFFFF` acts as a sentinel meaning "no theme bg configured yet".
-    private var defaultBgRgb: UInt32 = 0xFFFFFFFF
-    /// Overall opacity applied to non-default cell backgrounds. 1.0 keeps
-    /// them solid; lower values let the framebuffer (clearColor) peek
-    /// through — used when the user wants even vim status lines to be
-    /// translucent (keepBgOpaque == false in iTerm2 terms).
-    private var backgroundOpacity: Float = 1.0
-    private var keepBgOpaque: Bool = true
 
-    /// Vertical offset (in points) added to every cell and cursor. Used by
-    /// TerminalView to keep text out of the titlebar region when the window
-    /// uses `.fullSizeContentView` so the Metal clearColor can tint under the
-    /// titlebar. TerminalView passes `safeAreaInsets.top` here on each layout.
-    private var topInsetPoints: Float = 0.0
+    /// Optional "⌘-held, regex URL under pointer" range (Finding A cluster).
+    /// Carries a buffer line (not screen row — survives scrolling) and an
+    /// inclusive column range. The renderer applies the same `linkHover` accent
+    /// underline to matching cells. `cmdHover.startCol < 0` is the sentinel for
+    /// "no range" and disables the branch entirely.
+    private struct CmdHover {
+        var bufferLine: Int32 = 0
+        var startCol: Int32 = -1
+        var endCol: Int32 = -1
+    }
+    private var cmdHover = CmdHover()
 
-    public func setTopInsetPoints(_ points: Float) { topInsetPoints = points }
+    /// Layout offsets in points added to every cell and cursor, grouped into one
+    /// value struct (Finding A field-clustering). `topInsetPoints` keeps text out
+    /// of the titlebar region when the window uses `.fullSizeContentView` so the
+    /// Metal clearColor can tint under the titlebar (TerminalView passes
+    /// `safeAreaInsets.top` here on each layout); `leftInsetPoints` is its
+    /// horizontal sibling (TerminalView passes `horizontalContentInsetPoints` on
+    /// each `layout()`). Default zero keeps pre-feature behaviour for tests that
+    /// build a renderer without a TerminalView. Both fields keep their exact
+    /// prior names/types; access is now `insets.topInsetPoints` /
+    /// `insets.leftInsetPoints`. They are independent scalars (never mutated via
+    /// `&`-subscript) so grouping introduces no exclusivity hazard.
+    private struct Insets {
+        var topInsetPoints: Float = 0.0
+        var leftInsetPoints: Float = 0.0
+    }
+    private var insets = Insets()
 
-    /// Horizontal offset (in points) added to every cell and cursor x-coord.
-    /// TerminalView passes its `horizontalContentInsetPoints` here on each
-    /// `layout()`. Mirrors `topInsetPoints` exactly — default zero keeps
-    /// pre-feature behaviour for tests that build a renderer without a
-    /// TerminalView.
-    private var leftInsetPoints: Float = 0.0
+    public func setTopInsetPoints(_ points: Float) { insets.topInsetPoints = points }
 
-    public func setLeftInsetPoints(_ points: Float) { leftInsetPoints = points }
+    public func setLeftInsetPoints(_ points: Float) { insets.leftInsetPoints = points }
 
     #if DEBUG
     /// DEBUG-only accessor for unit tests asserting the renderer received
     /// the correct inset value from TerminalView.layout().
-    public func leftInsetPointsForTesting() -> Float { leftInsetPoints }
+    public func leftInsetPointsForTesting() -> Float { insets.leftInsetPoints }
     #endif
 
-    /// Whether the cursor should blink when the window is focused. When on,
-    /// the cursor renders for the first half of each ~1.06 s cycle and is
-    /// skipped for the second half. The cycle resets every time the cursor
-    /// moves (typing, arrow keys, output scrolling the prompt) so a moving
-    /// cursor is always visible — just like xterm/iTerm/Terminal.app.
-    private var cursorBlinkEnabled: Bool = false
-    private var blinkPhaseStart: CFTimeInterval = 0
-    private var lastCursorRow: Int32 = -1
-    private var lastCursorCol: Int32 = -1
-
-    /// Identity of every input that affects pixels on screen, packed for
-    /// Equatable comparison. When `render()` is called with a key equal to
-    /// the one rendered last frame, the GPU already holds the correct
-    /// pixels: we skip buildInstances, encoding, and present entirely.
-    /// CAMetalLayer's compositor retains the previously presented drawable
-    /// so the screen stays correct.
+    /// Cursor blink + last-position + user-shape-override state (Finding A
+    /// cluster). Grouped into one value struct; fields read as
+    /// `cursorState.<field>`.
     ///
-    /// Typed storage (struct, not a hash) because hashing would either:
-    ///   - be too loose (collisions silently miss redraws), or
-    ///   - pay the Hashable overhead every frame anyway.
-    /// Equatable on 13 fields comes out to a handful of CPU instructions;
-    /// the branch predictor handles the common "identical" case fast.
-    private struct FrameKey: Equatable {
-        /// Monotonic sequence id from BBSnapshot (0 when snapshot is nil).
-        /// Intentionally NOT the handle pointer: the allocator can reuse an
-        /// address after a snapshot is released, which would make two
-        /// distinct snapshots look identical to pointer-equality and cause
-        /// a popup-close or cursor-move repaint to be silently dropped.
-        /// The sequence counter is assigned once at BBSnapshot init and
-        /// never repeats within a process lifetime.
-        let snapshotSeq: UInt64
+    /// Blink: when enabled, the cursor renders for the first half of each
+    /// ~1.06 s cycle and is skipped for the second half. The cycle resets every
+    /// time the cursor moves (typing, arrow keys, output scrolling the prompt)
+    /// so a moving cursor is always visible — just like xterm/iTerm/Terminal.app.
+    private struct CursorState {
+        var blinkEnabled: Bool = false
+        var blinkPhaseStart: CFTimeInterval = 0
+        var lastCursorRow: Int32 = -1
+        var lastCursorCol: Int32 = -1
+        /// User-pinned cursor shape. `nil` → follow the snapshot's DECSCUSR
+        /// value (default behaviour). A non-nil value overrides the shape the
+        /// shell most recently set, so users who want a bar cursor regardless
+        /// of `\e[2 q'` / `\e[0 q'` get it.
+        ///
+        /// Cache invalidation runs through the frame-key / cache-key
+        /// substitution in `render(in:)`: changing the override mutates
+        /// `effectiveShape`, which flows into both keys and forces a rebuild.
+        /// `setCursorShapeOverride` also nulls the last-keys so the override
+        /// lands on the very next frame even if the snapshot is otherwise
+        /// identical.
+        var shapeOverride: UInt8? = nil
+    }
+    private var cursorState = CursorState()
+
+    /// The pixel-affecting inputs shared by `FrameKey` (the per-frame skip
+    /// cache) and `CacheKey` (the per-row rebuild cache). Extracted into one
+    /// Equatable struct both keys embed so the ~23 fields are authored ONCE: a
+    /// field added here must be populated in BOTH `makeFrameKey` and
+    /// `makeCacheKey` (the compiler enforces it via the memberwise init), which
+    /// converts the prior "add to one struct, forget the other" hazard (Part I
+    /// §34 / M-20 / H3 — a dropped field silently misses redraws) into a build
+    /// error. Equatable derives field-by-field, so embedding it leaves both
+    /// keys' comparison semantics byte-identical to the prior flat layout.
+    private struct VisualState: Equatable {
         let hoveredLinkID: UInt16
         /// Flattened selection identity. 0 mode tag means "no selection"; 1-4
         /// are the four Selection.Mode variants. Separate fields for
@@ -217,22 +267,24 @@ public final class MetalRenderer {
         let selACol: Int32
         let selBCol: Int32
         let focused: Bool
-        let cursorRow: Int32
-        let cursorCol: Int32
+        /// Effective cursor shape: user override if set, else the snapshot's
+        /// DECSCUSR shape. `setCursorShapeOverride` also invalidates the keys
+        /// directly, so pinning a shape that happens to equal the current
+        /// snapshot shape still repaints exactly once.
         let cursorShape: UInt8
         let cursorVisible: Bool
         /// Widened from UInt16 to UInt32: default scrollback is 100 000 lines
         /// and the Rust core caps at 200 000, both well past UInt16.max
-        /// (65 535). A truncating narrowing here would silently wrap once
-        /// the user scrolled past row 65 535, leaving the frame-skip path
-        /// unable to distinguish two visually-different scroll positions
-        /// and dragging hover/selection/cursor uniforms out of alignment.
+        /// (65 535). A truncating narrowing here would silently wrap once the
+        /// user scrolled past row 65 535, leaving the skip path unable to
+        /// distinguish two visually-different scroll positions and dragging
+        /// hover/selection/cursor uniforms out of alignment.
         let displayOffset: UInt32
         let topInsetPoints: Float
         /// Horizontal inset in points. Folded in for the same reason as
         /// `topInsetPoints` — a re-inset (theoretically possible if the
         /// font-size pref ever drives a different inset constant) must
-        /// invalidate the per-frame skip cache.
+        /// invalidate the skip caches.
         let leftInsetPoints: Float
         let defaultBgRgb: UInt32
         let backgroundOpacity: Float
@@ -240,44 +292,106 @@ public final class MetalRenderer {
         let accentColor: SIMD4<Float>     // Equatable; avoids collision risk
         let cursorColor: SIMD4<Float>
         let blinkSkip: Bool
-        /// ⌘-held regex URL range under pointer. Bundled into FrameKey so
-        /// the frame-skip optimisation correctly repaints when the
-        /// highlighted run changes without a new snapshot arriving.
+        /// ⌘-held regex URL range under pointer. Bundled in so the skip
+        /// optimisations correctly repaint when the highlighted run changes
+        /// without a new snapshot arriving (FrameKey) / when linkHover flags on
+        /// those cells flip (CacheKey).
         let cmdHoverBufferLine: Int32
         let cmdHoverStartCol: Int32
         let cmdHoverEndCol: Int32
-        /// `MetalRenderer.metricsGeneration` snapshot. Folded in so a
-        /// metrics mutation (font-size change, future external setter)
-        /// invalidates the frame-skip cache automatically — without
-        /// this, the invariant relied on every mutator remembering to
-        /// null `lastFrameKey` by hand. Mirrors `CacheKey.atlasGeneration`.
-        /// Audit M-20.
+        /// `MetalRenderer.metricsGeneration` snapshot. Folded in so a metrics
+        /// mutation (font-size change, future external setter) invalidates the
+        /// caches automatically — without this, the invariant relied on every
+        /// mutator remembering to null the keys by hand. Audit M-20.
         let metricsGeneration: UInt64
-        /// `GlyphAtlas.generation` snapshot. A saturation flush bumps the
-        /// atlas generation mid-encode (the `flushBarrier` only drains the
-        /// GPU; it does NOT touch `lastFrameKey`). `CacheKey` already keys
-        /// on `atlasGeneration` so per-row instance data rebuilds, but
-        /// without it here the FRAME-SKIP cache could short-circuit the
-        /// next identical frame and leave a glyph that was rasterised
-        /// against the pre-flush atlas on screen indefinitely. Folding it
-        /// in forces a single re-encode after any flush, converting a
-        /// persistent stale-glyph artifact into a self-correcting one.
-        /// Mirrors `metricsGeneration` / `CacheKey.atlasGeneration`.
+        /// `GlyphAtlas.generation` snapshot. A saturation flush bumps the atlas
+        /// generation mid-encode (the `flushBarrier` only drains the GPU; it
+        /// does NOT touch the keys). Cached `CellInstance`s carry baked-in UV
+        /// coords pointing at slots the flush rewrites — a stale row would
+        /// silently sample the post-flush occupant. Including generation forces
+        /// a single re-encode / full rebuild after any flush, converting a
+        /// persistent stale-glyph artifact into a self-correcting one. Audit H3.
         let atlasGeneration: UInt64
     }
-    private var lastFrameKey: FrameKey?
-    /// Observable frame-skip signal. `true` when the most recent
-    /// `render(in:snapshot:focused:selection:)` call short-circuited on
-    /// `frameKey == lastFrameKey` (or otherwise returned without
-    /// presenting a drawable); `false` on any path that actually touched
-    /// the encode pipeline through `commit()`. Promoted from a DEBUG-only
-    /// test seam to public-readable in all builds because TerminalView
-    /// needs it to gate `LatencyProbe.shared.markPresented()` — calling
-    /// `markPresented()` after a skipped render records phantom zero-
-    /// latency samples, dragging p50/p99 metrics artificially low.
-    /// Not thread-safe; readers must observe it from the same queue as
-    /// the `render` call (today: main).
-    public private(set) var didFrameSkipLastRender: Bool = false
+
+    /// Identity of every input that affects pixels on screen, packed for
+    /// Equatable comparison. When `render()` is called with a key equal to
+    /// the one rendered last frame, the GPU already holds the correct
+    /// pixels: we skip buildInstances, encoding, and present entirely.
+    /// CAMetalLayer's compositor retains the previously presented drawable
+    /// so the screen stays correct.
+    ///
+    /// Typed storage (struct, not a hash) because hashing would either:
+    ///   - be too loose (collisions silently miss redraws), or
+    ///   - pay the Hashable overhead every frame anyway.
+    /// Equatable comes out to a handful of CPU instructions; the branch
+    /// predictor handles the common "identical" case fast. The shared
+    /// pixel-affecting fields live in `visual`; the three fields below are
+    /// FrameKey-only (CacheKey deliberately excludes them — see `CacheKey`).
+    private struct FrameKey: Equatable {
+        /// Monotonic sequence id from BBSnapshot (0 when snapshot is nil).
+        /// Intentionally NOT the handle pointer: the allocator can reuse an
+        /// address after a snapshot is released, which would make two
+        /// distinct snapshots look identical to pointer-equality and cause
+        /// a popup-close or cursor-move repaint to be silently dropped.
+        /// The sequence counter is assigned once at BBSnapshot init and
+        /// never repeats within a process lifetime.
+        let snapshotSeq: UInt64
+        let cursorRow: Int32
+        let cursorCol: Int32
+        let visual: VisualState
+    }
+    /// Frame-skip + per-row rebuild cache (Finding A cluster). The mutable
+    /// fields that together decide whether `render(in:)` can short-circuit and
+    /// what it may reuse; grouped into one value struct so they read as a single
+    /// concern (`skipCache.<field>`). The Mirror-based `CmdHoverHighlightTests`
+    /// reflects through this container to reach `lastFrameKey`/`lastCacheKey`.
+    private struct SkipCache {
+        /// Last actually-encoded FrameKey. H7: assigned only on a committed
+        /// encode and nil'd on grow-failure (S2-007); `nil` forces the next
+        /// render to encode regardless of FrameKey equality.
+        var lastFrameKey: FrameKey?
+        var lastCacheKey: CacheKey?
+        /// Sequence id of the snapshot that drove the most-recent `render(in:)`
+        /// call. Used to detect coalesced intermediate snapshots: if a render
+        /// receives a snapshot whose `sequenceID` jumped by more than 1, the
+        /// main-queue coalescer in `TerminalSession.publishPendingSnapshot`
+        /// dropped one or more intermediate snapshots on the floor, along
+        /// with their damage sets. Alacritty's damage tracking reset on each
+        /// `bb_term_take_snapshot`, so the latest snapshot's `damagedRows`
+        /// only covers the delta since the *most recent* take — rows that
+        /// changed in the skipped snapshots but not in the latest one would
+        /// stay at their stale cached content on a partial rebuild.
+        /// Full screen programs (cmatrix, vim, nvim alt-screen) expose this
+        /// as tearing streams because they write hundreds of cells per
+        /// mainloop tick while the main queue is still running the last
+        /// render. Detecting the gap and forcing a full rebuild trades a
+        /// tiny bit of CPU work for visual correctness under redraw load.
+        var lastRenderedSnapshotSeq: UInt64 = 0
+        /// Per-row instance cache. Index i holds the CellInstances emitted by
+        /// `CellInstanceBuilder.buildRow` for visible row i under the current CacheKey.
+        /// Reused across frames when CacheKey is stable; only damaged rows
+        /// (from `BBSnapshot.damagedRows`) are rebuilt. Flattened into the
+        /// GPU instance buffer each frame — a ~1 MB memcpy that costs far
+        /// less than iterating 16 000 cells.
+        var rowInstanceCache: [[CellInstance]] = []
+        /// Observable frame-skip signal. `true` when the most recent
+        /// `render(in:snapshot:focused:selection:)` call short-circuited on
+        /// `frameKey == lastFrameKey` (or otherwise returned without
+        /// presenting a drawable); `false` on any path that actually touched
+        /// the encode pipeline through `commit()`. Exposed read-only in all
+        /// builds via `MetalRenderer.didFrameSkipLastRender`.
+        var didFrameSkipLastRender: Bool = false
+    }
+    private var skipCache = SkipCache()
+
+    /// Observable frame-skip signal — read-only public mirror of
+    /// `skipCache.didFrameSkipLastRender`. TerminalView reads it to gate
+    /// `LatencyProbe.shared.markPresented()`: calling `markPresented()` after a
+    /// skipped render records phantom zero-latency samples, dragging p50/p99
+    /// metrics artificially low. Not thread-safe; readers must observe it from
+    /// the same queue as the `render` call (today: main).
+    public var didFrameSkipLastRender: Bool { skipCache.didFrameSkipLastRender }
 
     #if DEBUG
     /// Test-only seam: force `lastFrameKey` to advance even when drawable
@@ -300,153 +414,85 @@ public final class MetalRenderer {
     private struct CacheKey: Equatable {
         let cols: Int
         let rows: Int
-        let hoveredLinkID: UInt16
-        let selMode: UInt8
-        let selALine: Int32
-        let selBLine: Int32
-        let selACol: Int32
-        let selBCol: Int32
-        let focused: Bool
-        /// Effective cursor shape: user override if set, else the snapshot's
-        /// DECSCUSR shape. `setCursorShapeOverride` also invalidates
-        /// `lastCacheKey` directly, so pinning a shape that happens to equal
-        /// the current snapshot shape still repaints exactly once.
-        let cursorShape: UInt8
-        let cursorVisible: Bool
-        /// Same UInt16 → UInt32 widening as `FrameKey.displayOffset`. See
-        /// the rationale on that field; a stale per-row cache from a
-        /// truncated scroll position would let scrollback rows render
-        /// against the wrong selection / hover state.
-        let displayOffset: UInt32
-        let topInsetPoints: Float
-        /// Horizontal inset in points. Same rationale as `FrameKey.leftInsetPoints`.
-        let leftInsetPoints: Float
-        let defaultBgRgb: UInt32
-        let backgroundOpacity: Float
-        let keepBgOpaque: Bool
-        let accentColor: SIMD4<Float>
-        let cursorColor: SIMD4<Float>
-        let blinkSkip: Bool
-        /// ⌘-held regex URL range (same fields as FrameKey). A change to
-        /// the range alone — no new snapshot — must invalidate the
-        /// per-row cache since linkHover flags on those cells flip.
-        let cmdHoverBufferLine: Int32
-        let cmdHoverStartCol: Int32
-        let cmdHoverEndCol: Int32
-        /// `GlyphAtlas.generation` at the time this row cache was
-        /// built. The atlas saturation flush rewrites slot 0..N with
-        /// fresh glyphs, but our cached `CellInstance`s carry baked-in
-        /// UV coords pointing at those slots. A stale row would
-        /// silently sample the post-flush occupant of its cells'
-        /// slots — visible-but-undamaged rows render the wrong
-        /// glyphs until the row is independently damaged. Including
-        /// generation in the key forces a full rebuild on every
-        /// flush. Audit H3.
-        let atlasGeneration: UInt64
-        /// `MetalRenderer.metricsGeneration` at the time this row cache
-        /// was built. Cached `CellInstance`s carry baked-in pixel
-        /// positions computed against the metrics that were live when
-        /// the row was built; a metrics change (font size flip)
-        /// invalidates those positions. Including generation here
-        /// forces a full rebuild whenever metrics rotate, even on a
-        /// path that didn't go through `reconfigure`. Audit M-20.
-        let metricsGeneration: UInt64
+        /// The shared pixel-affecting inputs (selection, cursor shape/visibility,
+        /// insets, colours, blink, cmd-hover range, atlas/metrics generations).
+        /// Same struct `FrameKey` embeds — see `VisualState` for the per-field
+        /// rationale (the displayOffset widening, the atlas/metrics-generation
+        /// H3/M-20 invalidation, the cmd-hover bundling). CacheKey adds only the
+        /// grid dims and omits FrameKey's snapshotSeq/cursorRow/cursorCol.
+        let visual: VisualState
     }
-    private var lastCacheKey: CacheKey?
 
-    /// Sequence id of the snapshot that drove the most-recent `render(in:)`
-    /// call. Used to detect coalesced intermediate snapshots: if a render
-    /// receives a snapshot whose `sequenceID` jumped by more than 1, the
-    /// main-queue coalescer in `TerminalSession.publishPendingSnapshot`
-    /// dropped one or more intermediate snapshots on the floor, along
-    /// with their damage sets. Alacritty's damage tracking reset on each
-    /// `bb_term_take_snapshot`, so the latest snapshot's `damagedRows`
-    /// only covers the delta since the *most recent* take — rows that
-    /// changed in the skipped snapshots but not in the latest one would
-    /// stay at their stale cached content on a partial rebuild.
-    /// Full screen programs (cmatrix, vim, nvim alt-screen) expose this
-    /// as tearing streams because they write hundreds of cells per
-    /// mainloop tick while the main queue is still running the last
-    /// render. Detecting the gap and forcing a full rebuild trades a
-    /// tiny bit of CPU work for visual correctness under redraw load.
-    private var lastRenderedSnapshotSeq: UInt64 = 0
+    /// Debug kill-switches read once from the environment at init (Finding A
+    /// field-clustering). Grouping the two `Bool`s into one value struct collapses
+    /// two stored fields into one AND de-duplicates the identical env-flag parsing
+    /// (one `envFlagSet`). Both are immutable `let`s evaluated once per renderer;
+    /// changes require an app restart.
+    ///
+    /// - `dirtyRowsDisabled` (`BB_NO_DIRTY_ROWS=1`): force a full rebuild every
+    ///   frame — useful when a "some rows look stale" artifact might be the
+    ///   per-row cache.
+    /// - `frameSkipDisabled` (`BB_NO_FRAME_SKIP=1`): disable the skip path
+    ///   entirely so every `render(in:)` runs the full encode + present — useful
+    ///   when a redraw artifact ("looks weird after closing popup X") might be
+    ///   frame-skip.
+    private struct DebugToggles {
+        let dirtyRowsDisabled: Bool
+        let frameSkipDisabled: Bool
 
-    /// Per-row instance cache. Index i holds the CellInstances emitted by
-    /// buildRowInstances for visible row i under the current CacheKey.
-    /// Reused across frames when CacheKey is stable; only damaged rows
-    /// (from `BBSnapshot.damagedRows`) are rebuilt. Flattened into the
-    /// GPU instance buffer each frame — a ~1 MB memcpy that costs far
-    /// less than iterating 16 000 cells.
-    private var rowInstanceCache: [[CellInstance]] = []
+        /// Read both flags from the environment. A flag is on when its variable
+        /// is set to a non-empty value other than `"0"` — byte-identical to the
+        /// two prior per-field closures.
+        static func fromEnvironment() -> DebugToggles {
+            DebugToggles(
+                dirtyRowsDisabled: Self.envFlagSet("BB_NO_DIRTY_ROWS"),
+                frameSkipDisabled: Self.envFlagSet("BB_NO_FRAME_SKIP")
+            )
+        }
 
-    /// Kill switch for the dirty-rows fast path. Set `BB_NO_DIRTY_ROWS=1`
-    /// and restart to force a full rebuild every frame — useful when
-    /// debugging a "some rows look stale" artifact to confirm whether
-    /// the cache is responsible. Evaluated once per renderer.
-    private let dirtyRowsDisabled: Bool = {
-        guard let cstr = getenv("BB_NO_DIRTY_ROWS") else { return false }
-        let raw = String(cString: cstr)
-        return !raw.isEmpty && raw != "0"
-    }()
-
-    /// Runtime escape hatch. Set the env var `BB_NO_FRAME_SKIP=1` and
-    /// restart to disable the skip path entirely — every draw(in:) call
-    /// runs the full encode + present. Useful when a user reports a
-    /// redraw artifact ("looks weird after closing popup X") and we
-    /// want to A/B test whether frame-skip is responsible. Evaluated
-    /// once per renderer via `getenv` — changes require an app restart.
-    private let frameSkipDisabled: Bool = {
-        guard let cstr = getenv("BB_NO_FRAME_SKIP") else { return false }
-        let raw = String(cString: cstr)
-        return !raw.isEmpty && raw != "0"
-    }()
+        private static func envFlagSet(_ name: String) -> Bool {
+            guard let cstr = getenv(name) else { return false }
+            let raw = String(cString: cstr)
+            return !raw.isEmpty && raw != "0"
+        }
+    }
+    private let debugToggles = DebugToggles.fromEnvironment()
 
     public func setCursorBlinkEnabled(_ enabled: Bool) {
-        if enabled != cursorBlinkEnabled {
-            cursorBlinkEnabled = enabled
-            blinkPhaseStart = CACurrentMediaTime()
+        if enabled != cursorState.blinkEnabled {
+            cursorState.blinkEnabled = enabled
+            cursorState.blinkPhaseStart = CACurrentMediaTime()
             // Reset the blink phase → visible cursor on the next frame
             // regardless of where in the cycle we were. Clearing the skip
             // cache forces that next frame to actually encode.
-            lastFrameKey = nil
+            skipCache.lastFrameKey = nil
         }
     }
-
-    /// User-pinned cursor shape. `nil` → follow the snapshot's DECSCUSR
-    /// value (default behaviour). A non-nil value overrides the shape the
-    /// shell most recently set, so users who want a bar cursor regardless
-    /// of `\e[2 q'` / `\e[0 q'` get it.
-    ///
-    /// Cache invalidation runs through the frame-key / cache-key
-    /// substitution in `draw(in:)`: changing the override mutates
-    /// `effectiveShape`, which flows into both keys and forces a rebuild.
-    /// We also null the last-keys here so the override lands on the very
-    /// next frame even if the snapshot is otherwise identical.
-    private var cursorShapeOverride: UInt8? = nil
 
     public func setCursorShapeOverride(_ shape: UInt8?) {
-        if shape != cursorShapeOverride {
-            cursorShapeOverride = shape
-            lastFrameKey = nil
-            lastCacheKey = nil
+        if shape != cursorState.shapeOverride {
+            cursorState.shapeOverride = shape
+            skipCache.lastFrameKey = nil
+            skipCache.lastCacheKey = nil
         }
     }
 
-    public func setDefaultBgRgb(_ rgb: UInt32) { defaultBgRgb = rgb }
+    public func setDefaultBgRgb(_ rgb: UInt32) { themeColors.defaultBgRgb = rgb }
 
     public func setBackgroundOpacity(_ opacity: Float, keepBgOpaque: Bool) {
-        self.backgroundOpacity = opacity
-        self.keepBgOpaque = keepBgOpaque
+        self.themeColors.backgroundOpacity = opacity
+        self.themeColors.keepBgOpaque = keepBgOpaque
     }
 
     public func setCursorColor(rgb: UInt32) {
-        // L-2 / RW-02: use the precomputed `inv255` constant the
-        // F6 optimization introduced for `rgbToSIMD`. Three runtime
-        // divisions become three multiplies; consistency with the
-        // rest of the renderer.
-        let r = Float((rgb >> 16) & 0xFF) * Self.inv255
-        let g = Float((rgb >> 8)  & 0xFF) * Self.inv255
-        let b = Float(rgb & 0xFF) * Self.inv255
+        // L-2 / RW-02: reuse the precomputed `inv255` constant the
+        // F6 optimization introduced for `rgbToSIMD` (now homed on
+        // `CellInstanceBuilder` alongside the cell colour math). Three
+        // runtime divisions become three multiplies; one source for the
+        // reciprocal across the renderer and the builder.
+        let r = Float((rgb >> 16) & 0xFF) * CellInstanceBuilder.inv255
+        let g = Float((rgb >> 8)  & 0xFF) * CellInstanceBuilder.inv255
+        let b = Float(rgb & 0xFF) * CellInstanceBuilder.inv255
         // Audit L14. The cursor render pipeline (line ~573) is built
         // with the default no-blend state — opaque overwrite of the
         // already-composited cell layer. That's correct as long as
@@ -461,14 +507,14 @@ public final class MetalRenderer {
         // blending on the pipeline.
         let color = SIMD4<Float>(r, g, b, 1.0)
         precondition(color.w == 1.0, "cursorColor must be opaque (cursor pipeline has no blending — see audit L14)")
-        cursorColor = color
+        themeColors.cursorColor = color
     }
 
     /// Replace the accent colour used for link-hover underlines. Themes
     /// that ship an accent override can plumb it through here; otherwise
     /// the default (controlAccentColor-equivalent sRGB blue) applies.
     public func setAccentColor(rgba: SIMD4<Float>) {
-        accentColor = rgba
+        themeColors.accentColor = rgba
     }
 
     /// Set the OSC 8 link id currently under the pointer. The next frame
@@ -496,15 +542,15 @@ public final class MetalRenderer {
     /// unrelated frame will look correct, but interim frames show stale
     /// pixels.
     public func setCmdHoverRange(bufferLine: Int32, startCol: Int32, endCol: Int32) {
-        if cmdHoverBufferLine == bufferLine
-            && cmdHoverStartCol == startCol
-            && cmdHoverEndCol == endCol {
+        if cmdHover.bufferLine == bufferLine
+            && cmdHover.startCol == startCol
+            && cmdHover.endCol == endCol {
             return
         }
-        cmdHoverBufferLine = bufferLine
-        cmdHoverStartCol = startCol
-        cmdHoverEndCol = endCol
-        lastCacheKey = nil
+        cmdHover.bufferLine = bufferLine
+        cmdHover.startCol = startCol
+        cmdHover.endCol = endCol
+        skipCache.lastCacheKey = nil
     }
 
     public init?(device: MTLDevice, metrics: CellMetrics, scale: CGFloat = 2.0) {
@@ -634,16 +680,17 @@ public final class MetalRenderer {
 
         self.device = device
         self.commandQueue = queue
-        self.pipelineState = pso
-        self.cursorPipelineState = cursorPSO
+        self.pipelines = Pipelines(pipelineState: pso, cursorPipelineState: cursorPSO)
         self.atlas = atlas
         self.metrics = metrics
         // Initial generation. Subsequent metrics mutations bump this
         // counter so FrameKey/CacheKey equality forces a rebuild even
         // if every other key field is identical. Audit M-20.
         self.metricsGeneration = 1
-        self.instanceBuffers = buffers
-        self.instanceCapacities = [startCap, startCap, startCap]
+        self.ring = TripleBufferRing(
+            instanceBuffers: buffers,
+            instanceCapacities: [startCap, startCap, startCap]
+        )
         // Wire the H6 GPU-CPU race barrier AFTER all stored properties
         // are initialized — the closure captures self, and Swift's
         // definite-init analysis forbids capturing self while any
@@ -719,15 +766,15 @@ public final class MetalRenderer {
         // A new atlas points to different texture contents; the skip
         // cache is now stale. Force the next render to encode and present
         // even if every FrameKey field matches the previous frame.
-        self.lastFrameKey = nil
-        self.lastCacheKey = nil
-        self.rowInstanceCache = []
+        self.skipCache.lastFrameKey = nil
+        self.skipCache.lastCacheKey = nil
+        self.skipCache.rowInstanceCache = []
         // Treat the atlas reconfigure as a fresh renderer: a seq the
         // caller used before the atlas swap is no longer meaningful,
         // and keeping the old value here would let a pre-reconfigure
         // seq trip the `snap.sequenceID > lastRenderedSnapshotSeq + 1`
         // coalesced-snapshot guard on what is really a clean start.
-        self.lastRenderedSnapshotSeq = 0
+        self.skipCache.lastRenderedSnapshotSeq = 0
         return true
     }
 
@@ -739,315 +786,10 @@ public final class MetalRenderer {
     public func invalidate() {
         // Same main-thread contract as `reconfigure` — see note there.
         dispatchPrecondition(condition: .onQueue(.main))
-        self.lastFrameKey = nil
-        self.lastCacheKey = nil
-        self.rowInstanceCache = []
-        self.lastRenderedSnapshotSeq = 0
-    }
-
-    /// Rebuild instances for a single visible row into `out`, consulting
-    /// snapshot cells, selection, hover, and cursor-inversion state. Pure
-    /// apart from the output parameter — does not touch GPU buffers or
-    /// cache state. Called by `buildInstances` for every row on a full
-    /// rebuild, or only for the damaged rows on a partial rebuild.
-    ///
-    /// Appends to `out` in place (pre-cleared by the caller with
-    /// `removeAll(keepingCapacity: true)`) instead of returning a fresh
-    /// `[CellInstance]`: rows emit a variable count of instances (blank
-    /// cells contribute nothing; wide-glyph rows emit fewer than cols;
-    /// selection/link-hover may push to 1-per-cell), and on a partial
-    /// rebuild the caller would otherwise free the prior array's storage
-    /// and allocate a new one each frame. Keeping the backing buffer
-    /// eliminates up to 80 heap alloc/free pairs per full rebuild, which
-    /// at 120 Hz is ~9 600 heap operations/sec off the CPU. Audit
-    /// metal-renderer F5.
-    private func buildRowInstances(
-        snapshot: BBSnapshot,
-        row: Int,
-        isSelected: (Int32, Int) -> Bool,
-        blockCursorCell: (row: Int, col: Int)?,
-        into out: inout [CellInstance]
-    ) {
-        let selectionTint = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)
-        let cellW = Float(metrics.cellWidth)
-        let cellH = Float(metrics.cellHeight)
-        let cellsPtr = snapshot.cellsPointer
-        let cols = snapshot.cols
-        let hoveredID = hoveredLinkID
-        // Row in *buffer* space (scrollback-adjusted) — the ⌘-hover range
-        // is keyed on buffer line so the underline survives scrolling
-        // without the caller re-resolving the pointer on every snapshot.
-        // `Int32(clamping:)` for parity with the M-16 sites: the
-        // subtraction operates on `Int`s sourced from BBCore, and a
-        // future regression that lets either operand exceed Int32's
-        // range (or pushes the difference negative-overflow) would
-        // trap the renderer mid-frame. Clamping keeps the contract
-        // pinned at the cast site. Audit UR-2 (2026-04-29).
-        let rowBufferLine = Int32(clamping: row - snapshot.displayOffset)
-        let cmdHoverActiveOnThisRow =
-            cmdHoverStartCol >= 0
-            && cmdHoverBufferLine == rowBufferLine
-        // Upper bound: every cell emits at most one instance. Reserve so
-        // the common case avoids growing the array — a no-op when `out`
-        // already has >= cols capacity from the prior frame.
-        out.reserveCapacity(cols)
-
-        for col in 0..<cols {
-            let idx = row * cols + col
-            // `cellsPtr` is a raw pointer; reading past `cellCount` would
-            // be UB, not a trap. Same invariant alacritty guarantees but
-            // re-checked here so a buggy snapshot can't cascade.
-            if idx >= snapshot.cellCount { break }
-            let cell = cellsPtr[idx]
-            let scalar = cell.ch
-            var fg = Self.rgbToSIMD(cell.fg)
-            var bg = Self.rgbToSIMD(cell.bg)
-            let attrs: SIMD4<UInt32> = {
-                var flags: UInt32 = 0
-                if hoveredID != 0 && cell.link_id == hoveredID {
-                    flags |= CellAttributeMask.linkHover.rawValue
-                }
-                // ⌘-held regex URL highlight: the same accent underline
-                // the OSC 8 hover uses, but gated on a buffer-line range
-                // instead of a link id. Applies only when the cell falls
-                // inside the active range on the active buffer line.
-                if cmdHoverActiveOnThisRow {
-                    let c = Int32(col)
-                    if c >= cmdHoverStartCol && c <= cmdHoverEndCol {
-                        flags |= CellAttributeMask.linkHover.rawValue
-                    }
-                }
-                // Translate cell_flags bits that the shader needs to
-                // render into our flat renderer-side bitset. Cell flags
-                // live in Rust-stable constants (BBCore bridging header);
-                // mapping here keeps the shader ignorant of the Rust
-                // layout so a future cell_flags reshuffle stays local.
-                let cf = cell.flags
-                if (cf & UInt16(STRIKE)) != 0 {
-                    flags |= CellAttributeMask.strike.rawValue
-                }
-                if (cf & UInt16(UNDERLINE)) != 0 {
-                    flags |= CellAttributeMask.underline.rawValue
-                }
-                if (cf & UInt16(UNDERLINE_DOUBLE)) != 0 {
-                    flags |= CellAttributeMask.underlineDouble.rawValue
-                }
-                if (cf & UInt16(UNDERCURL)) != 0 {
-                    flags |= CellAttributeMask.undercurl.rawValue
-                }
-                if (cf & UInt16(UNDERLINE_DOTTED)) != 0 {
-                    flags |= CellAttributeMask.underlineDotted.rawValue
-                }
-                if (cf & UInt16(UNDERLINE_DASHED)) != 0 {
-                    flags |= CellAttributeMask.underlineDashed.rawValue
-                }
-                // Pack CSI 58 underline colour into attrs.z. The shader
-                // treats UNDERLINE_COLOR_UNSET as "fall back to fg",
-                // so the cheapest path is to forward the u32 as-is.
-                return SIMD4<UInt32>(flags, 0, cell.underline_color, 0)
-            }()
-            // Reverse video (SGR 7): swap the cell's fg and bg so the
-            // glyph reads against the inverted highlight. Forces a bg
-            // quad (we can't skip drawing into the clearColor because
-            // the "new bg" is the original fg, which is a real colour).
-            let reverse = (cell.flags & UInt16(REVERSE)) != 0
-            if reverse {
-                let orig = fg
-                fg = bg
-                bg = orig
-            }
-            // DIM (SGR 2): halve the fg brightness so dimmed text reads
-            // softer without affecting bg. Applied after REVERSE so the
-            // resulting glyph colour is what's visibly dimmed.
-            //
-            // Audit L13. The halve happens on sRGB-encoded float
-            // components (matching `rgbToSIMD` which divides bytes by
-            // 255 without linearization). Strictly correct "perceived
-            // half luminance" would gamma-decode → halve linear →
-            // gamma-encode, which on a midgray maps to roughly 0.73 in
-            // sRGB-encoded space rather than 0.50. We deliberately keep
-            // the sRGB-encoded halve so DIM is consistent with the
-            // rest of the pipeline (cell composition, alpha blending,
-            // selection overlay) which all operate in sRGB-encoded
-            // space — gamma-correcting just DIM would visually clash.
-            // iTerm2 makes the same choice. Re-evaluate as a unit if
-            // the renderer ever moves to a fully-linear pipeline.
-            if (cell.flags & UInt16(DIM)) != 0 {
-                fg.x *= 0.5
-                fg.y *= 0.5
-                fg.z *= 0.5
-            }
-            // Treat the theme's default bg as "no bg" so the transparent
-            // clearColor can show through. Cells with explicit colors
-            // (vim highlights, status lines, syntax bg) still draw their
-            // bg quad; whether they stay solid or become translucent is
-            // a user choice (keepBgOpaque).
-            //
-            // The "no bg quad" decision compares against the active
-            // theme's `defaultBgRgb`, NOT a literal 0x000000. On themes
-            // whose default bg isn't black (Atom dark = 0x282C34,
-            // Catppuccin Mocha = 0x1E1E2E, Solarized = 0x002B36 …) an
-            // explicit `\x1b[40m` (palette black) IS a real background
-            // the user wants painted. Pre-fix the literal-zero check
-            // collapsed `cell.bg == 0x000000` to "no bg" and a vim
-            // status line / htop column that uses ANSI black silently
-            // showed the theme's default bg through. Audit H2.
-            let isDefaultBg = !reverse && cell.bg == defaultBgRgb
-            let hasBg = Self.shouldPaintBgQuad(
-                cellBg: cell.bg, defaultBg: defaultBgRgb, reverse: reverse
-            )
-
-            // Determine the bg alpha for what we'll write into
-            // CellInstance:
-            //   - Default bg → alpha 0 so the shader's mix() produces a
-            //     transparent result where the glyph doesn't cover —
-            //     clearColor (already transparent) shows through.
-            //   - Explicit bg, keepBgOpaque on → alpha 1 (unchanged).
-            //   - Explicit bg, keepBgOpaque off → alpha = opacity.
-            let bgAlpha: Float
-            if isDefaultBg {
-                bgAlpha = 0.0
-            } else if keepBgOpaque {
-                bgAlpha = 1.0
-            } else {
-                bgAlpha = backgroundOpacity
-            }
-            bg.w = bgAlpha
-
-            // `Int32(clamping:)` per UR-2 — same defense-in-depth
-            // rationale as the `rowBufferLine` site above.
-            let bufferLine = Int32(clamping: row) - Int32(clamping: snapshot.displayOffset)
-            let selected = isSelected(bufferLine, col)
-            var effectiveBg = selected ? selectionTint : bg
-            var effectiveHasBg = selected ? true : hasBg
-
-            // Invert at the cursor cell so the block cursor shows the
-            // underlying glyph in reverse-video. Selection wins over
-            // the cursor (matches iTerm2: selection highlight spans a
-            // cell even if the cursor is on it).
-            if !selected,
-               let bc = blockCursorCell,
-               bc.row == row,
-               bc.col == col {
-                // Use whatever the cell's bg *would* have been (explicit
-                // or theme-default) as the glyph colour, so the
-                // character reads against the cursor's body.
-                let resolvedBg: UInt32 = hasBg ? cell.bg : defaultBgRgb
-                fg = Self.rgbToSIMD(resolvedBg)
-                effectiveBg = cursorColor
-                effectiveBg.w = 1.0
-                effectiveHasBg = true
-            }
-
-            let xPx = Float(col) * cellW + leftInsetPoints
-            let yPx = Float(row) * cellH + topInsetPoints
-
-            // WIDE_CHAR_SPACER / LEADING_WIDE_CHAR_SPACER sit to the right
-            // of (or on the wrapped-leading col before) a wide glyph. The
-            // wide glyph's 2x quad already covers this column, so any
-            // draw here would overpaint its right half. Skip unless the
-            // selection highlight needs a bg quad — in that case the
-            // highlight must span both halves of the wide cell.
-            let isSpacer = (cell.flags &
-                (UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER))) != 0
-            if isSpacer {
-                if selected || effectiveHasBg || attrs.x != 0 {
-                    out.append(CellInstance(
-                        cellPosPx: SIMD2<Float>(xPx, yPx),
-                        quadSizePx: SIMD2<Float>(cellW, cellH),
-                        uvOrigin: .zero,
-                        uvSize: .zero,
-                        fgColor: fg,
-                        bgColor: effectiveBg,
-                        attrs: attrs
-                    ))
-                }
-                continue
-            }
-
-            // WIDE_CHAR cells carry a CJK / wide-emoji glyph that logically
-            // spans two cells. The atlas rasterises them into a 2x-wide
-            // slot and reports a doubled uvSize.x; we draw a 2x-wide quad
-            // so the full glyph lands on screen.
-            let isWide = (cell.flags & UInt16(WIDE_CHAR)) != 0
-            // EMOJI_PRESENTATION: a text-default base + VS16 (⚠️ ‼️ ❤️) — the
-            // atlas must rasterise the colour emoji from the base + VS16
-            // grapheme rather than the monochrome base scalar.
-            let isEmojiPresentation = (cell.flags & UInt16(EMOJI_PRESENTATION)) != 0
-            let quadW = isWide ? cellW * 2.0 : cellW
-            let quadSize = SIMD2<Float>(quadW, cellH)
-
-            // Render cell if it has a glyph OR a non-default background.
-            if scalar != 0 && scalar != 0x20 /* space */ {
-                let glyphStyle = GlyphAtlas.Style(
-                    bold: (cell.flags & UInt16(BOLD)) != 0,
-                    italic: (cell.flags & UInt16(ITALIC)) != 0
-                )
-                if let us = Unicode.Scalar(scalar),
-                   let entry = atlas.lookupOrInsert(
-                       scalar: us, wide: isWide, style: glyphStyle,
-                       emojiPresentation: isEmojiPresentation) {
-                    // Tell the fragment shader to sample the color
-                    // atlas (texture 1) instead of the mono coverage
-                    // atlas (texture 0) for this cell. Emoji + other
-                    // CTFont `colorGlyphs`-reporting families land
-                    // here. Atlas `Entry.isColor` is the single source
-                    // of truth; the shader branches on this bit.
-                    var colorAttrs = attrs
-                    if entry.isColor {
-                        colorAttrs.x |= CellAttributeMask.isColorGlyph.rawValue
-                    }
-                    out.append(CellInstance(
-                        cellPosPx: SIMD2<Float>(xPx, yPx),
-                        quadSizePx: quadSize,
-                        uvOrigin: entry.uvOrigin,
-                        uvSize: entry.uvSize,
-                        fgColor: fg,
-                        bgColor: effectiveBg,
-                        attrs: colorAttrs
-                    ))
-                }
-            } else if effectiveHasBg || attrs.x != 0 {
-                // Space with colored background (status lines, vim highlights),
-                // inside an active selection, or carrying an accent
-                // attribute (link hover). Draw a full-cell quad with
-                // zero coverage so the shader's bg/accent paths still fire.
-                out.append(CellInstance(
-                    cellPosPx: SIMD2<Float>(xPx, yPx),
-                    quadSizePx: quadSize,
-                    uvOrigin: .zero,
-                    uvSize: .zero,
-                    fgColor: fg,
-                    bgColor: effectiveBg,
-                    attrs: attrs
-                ))
-            }
-        }
-    }
-
-    /// Pure decision: should `buildInstances` emit a background quad
-    /// for this cell?
-    ///
-    /// `true` when:
-    ///   - the cell has REVERSE attribute (the swapped-in fg is a real
-    ///     palette colour the user wants painted), OR
-    ///   - the cell's `bg` differs from the active theme's
-    ///     `defaultBgRgb` (an explicit `\x1b[4Nm` SGR set this cell's
-    ///     background to a palette colour, and even palette black on a
-    ///     non-black theme is "explicit" — the user wants it painted).
-    ///
-    /// Pre-fix this compared `cell.bg` to literal `0x000000`, which on
-    /// non-black themes (Atom dark, Catppuccin, Solarized …) silently
-    /// dropped every `\x1b[40m` quad: vim status lines, htop column
-    /// shading, syntax highlights using ANSI black all leaked the
-    /// theme bg through. Audit H2.
-    ///
-    /// Internal so MetalRendererTests can pin the decision table.
-    static func shouldPaintBgQuad(
-        cellBg: UInt32, defaultBg: UInt32, reverse: Bool
-    ) -> Bool {
-        if reverse { return true }
-        return cellBg != defaultBg
+        self.skipCache.lastFrameKey = nil
+        self.skipCache.lastCacheKey = nil
+        self.skipCache.rowInstanceCache = []
+        self.skipCache.lastRenderedSnapshotSeq = 0
     }
 
     /// Orchestrates per-row rebuild + GPU buffer flatten using the
@@ -1079,9 +821,35 @@ public final class MetalRenderer {
         // dropped). Growing initializes new rows to empty so the partial
         // path — which assumes the cache is indexable for every visible
         // row — stays sound.
-        if rowInstanceCache.count != rows {
-            rowInstanceCache = Array(repeating: [], count: rows)
+        if skipCache.rowInstanceCache.count != rows {
+            skipCache.rowInstanceCache = Array(repeating: [], count: rows)
         }
+
+        // Cell-row → GPU-instance translation lives in `CellInstanceBuilder`
+        // (the single-responsibility seam): capture this frame's visual inputs
+        // by value plus the live atlas REFERENCE, then hand each row's target
+        // array to `buildRow`. The builder never touches the ring / semaphore /
+        // slot lifecycle — `render()` owns those; this method still owns the
+        // flatten-into-slot-buffer + grow step below. Constructed once here so
+        // both rebuild paths reuse it; the captured inputs only change through
+        // the renderer's main-thread setters / `reconfigure`, never mid-build,
+        // so the by-value snapshot is byte-identical to reading the fields
+        // directly. The atlas stays a reference (it is a class) so a
+        // rasterize-on-miss inside `buildRow` is visible to `encodeCells`.
+        let builder = CellInstanceBuilder(
+            metrics: metrics,
+            hoveredLinkID: hoveredLinkID,
+            cmdHoverBufferLine: cmdHover.bufferLine,
+            cmdHoverStartCol: cmdHover.startCol,
+            cmdHoverEndCol: cmdHover.endCol,
+            defaultBgRgb: themeColors.defaultBgRgb,
+            keepBgOpaque: themeColors.keepBgOpaque,
+            backgroundOpacity: themeColors.backgroundOpacity,
+            cursorColor: themeColors.cursorColor,
+            leftInsetPoints: insets.leftInsetPoints,
+            topInsetPoints: insets.topInsetPoints,
+            atlas: atlas
+        )
 
         if let damaged = partialRowsOnly {
             // Partial rebuild: only the rows alacritty says changed.
@@ -1091,28 +859,28 @@ public final class MetalRenderer {
                 // `removeAll(keepingCapacity: true)` reuses the prior
                 // frame's backing buffer — we keep up to `cols` worth of
                 // allocated slots, which is exactly the reserve size
-                // `buildRowInstances` asks for. No heap traffic in the
+                // `buildRow` asks for. No heap traffic in the
                 // steady state.
-                rowInstanceCache[row].removeAll(keepingCapacity: true)
-                buildRowInstances(
+                skipCache.rowInstanceCache[row].removeAll(keepingCapacity: true)
+                builder.buildRow(
                     snapshot: snapshot,
                     row: row,
                     isSelected: isSelected,
                     blockCursorCell: blockCursorCell,
-                    into: &rowInstanceCache[row]
+                    into: &skipCache.rowInstanceCache[row]
                 )
             }
         } else {
             // Full rebuild — cache key changed, first frame, or damage
             // exceeded the partial threshold.
             for row in 0..<rows {
-                rowInstanceCache[row].removeAll(keepingCapacity: true)
-                buildRowInstances(
+                skipCache.rowInstanceCache[row].removeAll(keepingCapacity: true)
+                builder.buildRow(
                     snapshot: snapshot,
                     row: row,
                     isSelected: isSelected,
                     blockCursorCell: blockCursorCell,
-                    into: &rowInstanceCache[row]
+                    into: &skipCache.rowInstanceCache[row]
                 )
             }
         }
@@ -1121,16 +889,16 @@ public final class MetalRenderer {
         // copies every row — the CPU savings come from skipping the
         // per-cell inner work on unchanged rows, not from skipping the
         // memcpy (which is tiny: ~1 MB at 80-byte stride × 16k cells).
-        let total = rowInstanceCache.reduce(0) { $0 + $1.count }
-        let slot = currentSlot
-        if total > instanceCapacities[slot] {
+        let total = skipCache.rowInstanceCache.reduce(0) { $0 + $1.count }
+        let slot = ring.currentSlot
+        if total > ring.instanceCapacities[slot] {
             // Defense-in-depth on `* 2`: an unguarded `Int` multiply
             // would trap on overflow. Bounded today (GPU OOM
             // intervenes first) but the cap pins the contract at the
             // arithmetic site so a future regression that lets total
             // grow unboundedly can't crash the renderer mid-frame.
             // Audit L-21 (2026-04-29).
-            let doubled = instanceCapacities[slot]
+            let doubled = ring.instanceCapacities[slot]
                 .multipliedReportingOverflow(by: 2)
             let proposed: Int
             if doubled.overflow {
@@ -1158,8 +926,8 @@ public final class MetalRenderer {
                 length: bufBytes,
                 options: [.storageModeShared]
             ) {
-                instanceBuffers[slot] = newBuf
-                instanceCapacities[slot] = newCap
+                ring.instanceBuffers[slot] = newBuf
+                ring.instanceCapacities[slot] = newCap
             } else {
                 // Out-of-GPU-memory while growing — the frame cannot
                 // be drawn. Return nil (NOT 0): the audit S2-007 trace
@@ -1177,10 +945,10 @@ public final class MetalRenderer {
             }
         }
 
-        let ptr = instanceBuffers[slot].contents().assumingMemoryBound(to: CellInstance.self)
+        let ptr = ring.instanceBuffers[slot].contents().assumingMemoryBound(to: CellInstance.self)
         var count = 0
         for row in 0..<rows {
-            let rowInsts = rowInstanceCache[row]
+            let rowInsts = skipCache.rowInstanceCache[row]
             if rowInsts.isEmpty { continue }
             rowInsts.withUnsafeBufferPointer { src in
                 guard let base = src.baseAddress else { return }
@@ -1223,200 +991,17 @@ public final class MetalRenderer {
         )
     }
 
-    /// `1.0 / 255.0` precomputed so `rgbToSIMD` can multiply instead of
-    /// dividing. Called up to `2 * cols * rows` times per full rebuild
-    /// (fg + bg per cell) — at 200x80 that's 32 000 calls/frame. FP-div
-    /// is ~15 cycles on modern cores; multiplying by a constant is ~4.
-    /// Audit metal-renderer F6.
-    private static let inv255: Float = 1.0 / 255.0
-
-    private static func rgbToSIMD(_ rgb: UInt32) -> SIMD4<Float> {
-        // Unpack the 24-bit colour into a 4-lane SIMD so the float
-        // conversion and scaling are vectorised as a single op. `1.0`
-        // in the alpha lane lands in the default fully-opaque result;
-        // callers that need a different alpha (e.g. background-opacity
-        // plumbing) mutate `.w` after the call.
-        let bytes = SIMD4<UInt32>(
-            (rgb >> 16) & 0xFF,
-            (rgb >> 8) & 0xFF,
-            rgb & 0xFF,
-            0
-        )
-        var result = SIMD4<Float>(bytes) * Self.inv255
-        result.w = 1.0
-        return result
-    }
-
-    public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
-        // Compute the current frame's visual-state key BEFORE reaching for
-        // currentDrawable. Acquiring a drawable is expensive (blocks on
-        // the pool under contention); if nothing changed we shouldn't even
-        // touch it. Note: blink state is computed here too because it
-        // depends on CACurrentMediaTime.
-        let blinkSkipNow: Bool = {
-            guard cursorBlinkEnabled, focused, let s = snapshot, s.cursorVisible else {
-                return false
-            }
-            let elapsed = CACurrentMediaTime() - blinkPhaseStart
-            let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
-            return phase >= 0.53
-        }()
-        let selFields = Self.selectionFields(selection)
-        let frameKey = FrameKey(
-            snapshotSeq: snapshot?.sequenceID ?? 0,
-            hoveredLinkID: hoveredLinkID,
-            selMode: selFields.mode,
-            selALine: selFields.aLine,
-            selBLine: selFields.bLine,
-            selACol: selFields.aCol,
-            selBCol: selFields.bCol,
-            focused: focused,
-            // `Int32(clamping:)` / `UInt8(clamping:)` for parity
-            // with the M-16 displayOffset sites: defense-in-depth on
-            // Rust-snapshot integers entering the FrameKey hot path.
-            // Audit UR-2 (2026-04-29).
-            cursorRow: Int32(clamping: snapshot?.cursorRow ?? -1),
-            cursorCol: Int32(clamping: snapshot?.cursorCol ?? -1),
-            cursorShape: cursorShapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
-            cursorVisible: snapshot?.cursorVisible ?? false,
-            // `clampDisplayOffset` not `UInt32(_:)` — defense-in-depth on
-            // the hot per-frame path. Today `BBSnapshot.displayOffset`
-            // returns `Int` from a Rust `u32` so it's never negative,
-            // but a future regression that lets a negative slip through
-            // would trap the renderer mid-frame; clamping pins the
-            // contract at the cast site, and the helper one-shots a
-            // `.error` log so the violation surfaces without spamming.
-            // Audit M-16 / UR follow-up (2026-04-29).
-            displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
-            topInsetPoints: topInsetPoints,
-            leftInsetPoints: leftInsetPoints,
-            defaultBgRgb: defaultBgRgb,
-            backgroundOpacity: backgroundOpacity,
-            keepBgOpaque: keepBgOpaque,
-            accentColor: accentColor,
-            cursorColor: cursorColor,
-            blinkSkip: blinkSkipNow,
-            cmdHoverBufferLine: cmdHoverBufferLine,
-            cmdHoverStartCol: cmdHoverStartCol,
-            cmdHoverEndCol: cmdHoverEndCol,
-            metricsGeneration: metricsGeneration,
-            atlasGeneration: atlas.generation
-        )
-        if !frameSkipDisabled, frameKey == lastFrameKey {
-            // Nothing that affects pixels has changed since the last
-            // presented frame. Skip the whole pipeline — no CPU instance
-            // rebuild, no GPU encode, no drawable acquisition. The
-            // compositor keeps displaying the previously-presented frame.
-            // Semaphore NOT touched on the skip path: we never claimed
-            // a slot, so we don't signal back.
-            didFrameSkipLastRender = true
-            return
-        }
-
-        // Lock a slot BEFORE acquiring the drawable. Flipping this order
-        // (drawable-first) was attempted as metal-renderer F20 and
-        // caused full-screen programs (cmatrix, vim, nvim alt-screen)
-        // to glitch: waiting on the semaphore while holding a drawable
-        // starves `CAMetalLayer`'s 3-slot drawable pool, because the
-        // compositor can't hand out a new drawable for the next vsync
-        // while one is pinned to our CPU-side wait. The correct
-        // invariant is: drawable lifetime ≤ encode time, always
-        // shorter than a vsync interval. Audit metal-renderer F20
-        // reverted 2026-04-22.
-        inflightSemaphore.wait()
-        currentSlot = frameIndex
-        let slot = currentSlot
-        // The rotation advance is deliberately NOT here. It moves below
-        // the guard (audit S2-006): the triple-buffer invariant — any ≤3
-        // concurrent in-flight frames occupy distinct slots — requires
-        // every consumed rotation turn to hold its semaphore token until
-        // GPU completion. The abort path below returns the token; if it
-        // kept the rotation advance, each aborted frame made the wait
-        // guard one frame too few: A encodes slot 0 (in flight), B
-        // aborts slot 1 (token back, rotation advanced), C encodes
-        // slot 2, D waits — succeeds because of B's returned token — and
-        // claims slot 0 while A's GPU work may still be reading it; D's
-        // buildInstances then CPU-writes the same .storageModeShared
-        // buffer mid-read (torn frame). Advancing only on commitment
-        // means an aborted frame returns its token AND its turn, and the
-        // next attempt reuses the same untouched slot.
-
-        guard let drawable = view.currentDrawable,
-              let descriptor = view.currentRenderPassDescriptor,
-              let buffer = commandQueue.makeCommandBuffer(),
-              let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
-        else {
-            // Release the slot we just claimed — we're abandoning this
-            // frame without encoding, so the GPU never reads the buffer.
-            inflightSemaphore.signal()
-            // No drawable was presented on this path either: tell
-            // callers gating side effects (LatencyProbe.markPresented)
-            // that the GPU did not actually paint a frame, so they
-            // don't record a phantom zero-latency sample for the
-            // pending keystroke.
-            //
-            // `lastFrameKey` is NOT advanced on this path. The skip-cache
-            // invariant is "lastFrameKey records the last *encoded*
-            // frame"; advancing it here would let the next call short-
-            // circuit on `frameKey == lastFrameKey` and never re-encode
-            // — a windowed minimise + identical state could freeze the
-            // surface. Leaving it unchanged guarantees the next render
-            // attempt enters the encode path again. Audit H7.
-            didFrameSkipLastRender = true
-            #if DEBUG
-            if _testForceFrameKeyAdvanceOnFailedDrawable {
-                lastFrameKey = frameKey
-            }
-            #endif
-            return
-        }
-
-        // Drawable + descriptor + command buffer + encoder all live —
-        // we are committed to encoding this frame. Advance the skip-
-        // cache atomically with that commitment so an early-return
-        // above leaves `lastFrameKey` pinned to the previous successful
-        // frame (audit H7), and consume the rotation turn only now
-        // (audit S2-006 — see the comment at the semaphore wait).
-        frameIndex = (frameIndex + 1) % 3
-        didFrameSkipLastRender = false
-        lastFrameKey = frameKey
-
-        // Signal the slot free when the GPU finishes reading it. Must be
-        // registered before `commit()` so there's no race with an immediate
-        // GPU-side completion.
-        //
-        // Also inspect `status`/`error` so GPU faults (device lost, page
-        // fault, shader trap) surface in the unified log instead of
-        // silently blanking the window. `privacy: .public` is load-bearing
-        // for readability — see `feedback_nslog_private_format`.
-        //
-        // Strong-capture the semaphore (NOT `[weak self]`): if the renderer
-        // deinits between `commit()` and the GPU completion firing, a weak
-        // `self?` resolves to nil and silently drops the `signal()`. The
-        // semaphore then deinits with an unbalanced wait/signal count and
-        // libdispatch aborts the process with `BUG IN CLIENT OF
-        // LIBDISPATCH: Semaphore object deallocated while in use`. The
-        // semaphore's lifetime is independent of `self`, so capturing it
-        // strongly here keeps the slot bookkeeping intact across renderer
-        // teardown — Apple's canonical pattern for triple-buffered Metal
-        // ring semaphores. Audit M-3 (2026-04-29).
-        buffer.addCompletedHandler { [semaphore = self.inflightSemaphore] cb in
-            if cb.status == .error {
-                if let err = cb.error {
-                    Self.logger.error("command buffer failed: \(String(describing: err), privacy: .public)")
-                } else {
-                    Self.logger.error("command buffer ended with .error status (no NSError)")
-                }
-            }
-            semaphore.signal()
-        }
-
-        // Build a cheap closure that answers "is buffer-(line, col) inside
-        // the current selection?". Called once per cell while building the
-        // instance array. Rectangular mode hits an axis-aligned bounding
-        // box; prose-style modes use the standard (start, end) sweep where
-        // interior lines select the full width.
-        let isSelected: (Int32, Int) -> Bool = { [selection] line, col in
+    /// Build the per-cell "is buffer-(line, col) inside this selection?"
+    /// predicate consumed by `buildInstances` (Finding B seam — pulled out of
+    /// `render()` as a pure factory over the selection; identical hit-test
+    /// semantics to the prior inline closure). Captures `selection` by value, so
+    /// the returned closure is independent of later mutation. Rectangular mode
+    /// hits an axis-aligned bounding box; prose-style modes use the standard
+    /// (start, end) sweep where interior lines select the full width.
+    private static func makeSelectionPredicate(
+        _ selection: Selection?
+    ) -> (Int32, Int) -> Bool {
+        return { line, col in
             guard let sel = selection else { return false }
             let (a, b) = sel.normalized
             switch sel.mode {
@@ -1438,91 +1023,93 @@ public final class MetalRenderer {
                 return true
             }
         }
+    }
 
-        if let snap = snapshot {
-            // Viewport in points, not pixels. NDC conversion in the shader
-            // divides point positions by point viewport, giving a scale-
-            // independent result that the hardware rasterizes to the drawable's
-            // pixel space. Text stays at its absolute cell-sized position as
-            // the window grows/shrinks, with empty space on the right/bottom
-            // when the grid hasn't caught up yet (which synchronous
-            // session.resize now eliminates).
-            let viewportPoints = SIMD2<Float>(
-                Float(view.bounds.size.width),
-                Float(view.bounds.size.height)
-            )
-            let cellSizePoints = SIMD2<Float>(
-                Float(metrics.cellWidth),
-                Float(metrics.cellHeight)
-            )
-            // Cursor position in viewport rows. When the user is scrolled back
-            // into history (displayOffset > 0), the live cursor_row is offset
-            // downward on-screen by that amount: rows 0..displayOffset-1 show
-            // scrollback, and the live grid starts at screen row displayOffset.
-            // If the resulting row falls below the viewport, the live cursor
-            // isn't visible and we skip drawing it — scrolling back should
-            // never show a phantom cursor on a scrollback line.
-            let screenCursorRow = snap.cursorRow + snap.displayOffset
-            // User's pinned shape (`cursorShapeOverride`) wins over the
-            // snapshot's DECSCUSR shape. When nil, follow the shell. Used
-            // everywhere below — `useCellInvertedCursor`, the "hidden"
-            // short-circuit, and the cache key.
-            // `UInt8(clamping:)` per UR-2 — defense-in-depth on the
-            // Rust-snapshot cursorShape entering the cache key path.
-            let effectiveShape: UInt8 = cursorShapeOverride ?? UInt8(clamping: snap.cursorShape)
-            let shape = UInt32(effectiveShape)
-            // Reset the blink cycle every time the cursor moves, so a
-            // moving cursor is continuously visible. Tracked in
-            // grid-coordinate space (cursorRow/Col), not screen row.
-            // `Int32(clamping:)` per UR-2 — defense-in-depth on
-            // Rust-snapshot cursor coordinates.
-            let curRow = Int32(clamping: snap.cursorRow)
-            let curCol = Int32(clamping: snap.cursorCol)
-            // Capture the prior cursor position BEFORE overwriting
-            // `lastCursorRow` — the partial-rebuild path below needs it
-            // to force-rebuild the row the cursor just vacated. Audit
-            // metal-renderer F3.
-            let prevCursorRow = lastCursorRow
-            let prevCursorCol = lastCursorCol
-            let cursorMoved = curRow != lastCursorRow || curCol != lastCursorCol
-            if cursorMoved {
-                lastCursorRow = curRow
-                lastCursorCol = curCol
-                blinkPhaseStart = CACurrentMediaTime()
-            }
-            // blinkSkip already computed for the frame-key check above.
-            // Reuse that value so we never flicker from a phase transition
-            // that happens between the key computation and the draw.
-            let blinkSkip = blinkSkipNow
-            let cursorOnScreen =
-                snap.cursorVisible &&
-                shape != 3 &&                 // DECSCUSR hidden — skip entirely
-                snap.cursorCol < snap.cols &&
-                screenCursorRow < snap.rows &&
-                !blinkSkip
-            // Focused block cursor renders via cell inversion (so the glyph
-            // stays visible). Bar / underline / unfocused-outline go through
-            // the cursor pipeline below. This mirrors iTerm2 behaviour and
-            // keeps reverse-video cells intact when the cursor crosses them.
-            let useCellInvertedCursor = cursorOnScreen && focused && shape == 0
-            let blockCursorCell: (row: Int, col: Int)? = useCellInvertedCursor
-                ? (row: screenCursorRow, col: snap.cursorCol)
-                : nil
+    /// Whether the cursor is in its "off" blink phase this frame (so it should
+    /// be skipped). Pure of GPU state — depends only on the blink pref, focus,
+    /// the snapshot's cursor visibility, and `CACurrentMediaTime` vs
+    /// `blinkPhaseStart`. 1.06 s period, off for the second half (≥ 0.53 s).
+    private func computeBlinkSkip(snapshot: BBSnapshot?, focused: Bool) -> Bool {
+        guard cursorState.blinkEnabled, focused, let s = snapshot, s.cursorVisible else {
+            return false
+        }
+        let elapsed = CACurrentMediaTime() - cursorState.blinkPhaseStart
+        let phase = elapsed.truncatingRemainder(dividingBy: 1.06)
+        return phase >= 0.53
+    }
 
-            // Decide whether to take the partial-rebuild path. The cache
-            // is "compatible" when every visible-state input to the row
-            // builder matches the prior frame (CacheKey equality). When
-            // it matches AND alacritty reports partial damage with a
-            // manageable count, we only rebuild the damaged rows — the
-            // rest are copied from rowInstanceCache unchanged.
-            //
-            // The row-count threshold (rows / 2) guards against the case
-            // where damage covers most of the screen anyway: the
-            // per-row-skip overhead would exceed the savings. Above the
-            // threshold, just rebuild everything.
-            let newCacheKey = CacheKey(
-                cols: snap.cols,
-                rows: snap.rows,
+    /// Build the per-frame visual-state key from every pixel-affecting input
+    /// (snapshot seq, selection, cursor, insets, colours, blink, cmd-hover, and
+    /// the metrics/atlas generations). Compared against `lastFrameKey` to skip
+    /// an unchanged frame BEFORE the expensive drawable acquire. Pure: touches
+    /// no GPU / semaphore / slot state.
+    private func makeFrameKey(
+        snapshot: BBSnapshot?,
+        focused: Bool,
+        selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
+        blinkSkip: Bool
+    ) -> FrameKey {
+        return FrameKey(
+            snapshotSeq: snapshot?.sequenceID ?? 0,
+            // `Int32(clamping:)` / `UInt8(clamping:)` for parity
+            // with the M-16 displayOffset sites: defense-in-depth on
+            // Rust-snapshot integers entering the FrameKey hot path.
+            // Audit UR-2 (2026-04-29).
+            cursorRow: Int32(clamping: snapshot?.cursorRow ?? -1),
+            cursorCol: Int32(clamping: snapshot?.cursorCol ?? -1),
+            visual: VisualState(
+                hoveredLinkID: hoveredLinkID,
+                selMode: selFields.mode,
+                selALine: selFields.aLine,
+                selBLine: selFields.bLine,
+                selACol: selFields.aCol,
+                selBCol: selFields.bCol,
+                focused: focused,
+                cursorShape: cursorState.shapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
+                cursorVisible: snapshot?.cursorVisible ?? false,
+                // `clampDisplayOffset` not `UInt32(_:)` — defense-in-depth on
+                // the hot per-frame path. Today `BBSnapshot.displayOffset`
+                // returns `Int` from a Rust `u32` so it's never negative,
+                // but a future regression that lets a negative slip through
+                // would trap the renderer mid-frame; clamping pins the
+                // contract at the cast site, and the helper one-shots a
+                // `.error` log so the violation surfaces without spamming.
+                // Audit M-16 / UR follow-up (2026-04-29).
+                displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
+                topInsetPoints: insets.topInsetPoints,
+                leftInsetPoints: insets.leftInsetPoints,
+                defaultBgRgb: themeColors.defaultBgRgb,
+                backgroundOpacity: themeColors.backgroundOpacity,
+                keepBgOpaque: themeColors.keepBgOpaque,
+                accentColor: themeColors.accentColor,
+                cursorColor: themeColors.cursorColor,
+                blinkSkip: blinkSkip,
+                cmdHoverBufferLine: cmdHover.bufferLine,
+                cmdHoverStartCol: cmdHover.startCol,
+                cmdHoverEndCol: cmdHover.endCol,
+                metricsGeneration: metricsGeneration,
+                atlasGeneration: atlas.generation
+            )
+        )
+    }
+
+    /// Build the partial-rebuild cache key: every input the per-row instance
+    /// builder consumes (grid dims, selection, cursor, insets, colours, blink,
+    /// cmd-hover, atlas/metrics generations). When this equals `lastCacheKey`
+    /// the row cache is reusable and only alacritty's damaged rows need a
+    /// rebuild. Pure: touches no GPU state. Sibling of `makeFrameKey` — same
+    /// `clampDisplayOffset` (M-16) and generation rationale.
+    private func makeCacheKey(
+        snap: BBSnapshot,
+        focused: Bool,
+        selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
+        effectiveShape: UInt8,
+        blinkSkip: Bool
+    ) -> CacheKey {
+        return CacheKey(
+            cols: snap.cols,
+            rows: snap.rows,
+            visual: VisualState(
                 hoveredLinkID: hoveredLinkID,
                 selMode: selFields.mode,
                 selALine: selFields.aLine,
@@ -1536,77 +1123,231 @@ public final class MetalRenderer {
                 // routed through `clampDisplayOffset` for the one-shot
                 // negative-detected warning. Audit M-16 (2026-04-29).
                 displayOffset: Self.clampDisplayOffset(snap.displayOffset),
-                topInsetPoints: topInsetPoints,
-                leftInsetPoints: leftInsetPoints,
-                defaultBgRgb: defaultBgRgb,
-                backgroundOpacity: backgroundOpacity,
-                keepBgOpaque: keepBgOpaque,
-                accentColor: accentColor,
-                cursorColor: cursorColor,
-                blinkSkip: blinkSkipNow,
-                cmdHoverBufferLine: cmdHoverBufferLine,
-                cmdHoverStartCol: cmdHoverStartCol,
-                cmdHoverEndCol: cmdHoverEndCol,
-                atlasGeneration: atlas.generation,
-                metricsGeneration: metricsGeneration
+                topInsetPoints: insets.topInsetPoints,
+                leftInsetPoints: insets.leftInsetPoints,
+                defaultBgRgb: themeColors.defaultBgRgb,
+                backgroundOpacity: themeColors.backgroundOpacity,
+                keepBgOpaque: themeColors.keepBgOpaque,
+                accentColor: themeColors.accentColor,
+                cursorColor: themeColors.cursorColor,
+                blinkSkip: blinkSkip,
+                cmdHoverBufferLine: cmdHover.bufferLine,
+                cmdHoverStartCol: cmdHover.startCol,
+                cmdHoverEndCol: cmdHover.endCol,
+                metricsGeneration: metricsGeneration,
+                atlasGeneration: atlas.generation
             )
-            let cacheCompatible = !dirtyRowsDisabled
-                && lastCacheKey == newCacheKey
-                && rowInstanceCache.count == snap.rows
+        )
+    }
 
-            // Detect coalesced snapshots: `TerminalSession.publishPending
-            // Snapshot` coalesces rapid core snapshots into a single main-
-            // thread handoff, dropping intermediate damage info on the
-            // floor. `BBSnapshot.sequenceID` is a monotonic per-allocation
-            // counter incremented on every `bb_term_take_snapshot`, so a
-            // jump of >1 between the previous rendered snapshot and this
-            // one means ≥1 intermediate was skipped. The partial-rebuild
-            // path keys off `damagedRows`, which alacritty resets on each
-            // snapshot take — the skipped rows' damage is gone. Force a
-            // full rebuild in that case; the cache's CacheKey stays
-            // valid, we just re-walk every row's cells once to catch the
-            // lost deltas. Fixes cmatrix / vim / nvim streaming artifacts.
-            let snapshotCoalesced: Bool =
-                lastRenderedSnapshotSeq > 0
-                && snap.sequenceID > lastRenderedSnapshotSeq + 1
+    // MARK: - Triple-buffer slot lifecycle
+    //
+    // The four phases of a frame's claim on a `.storageModeShared` instance
+    // buffer slot, factored out of `render()` so the load-bearing S2-006 /
+    // M-3 / S2-007 ordering invariants live in one named place each rather
+    // than open-coded inline at the claim + two abort + commit sites.
 
-            let partialRows: Set<Int>? = {
-                guard cacheCompatible else { return nil }
-                guard !snap.damageIsFull else { return nil }
-                guard !snapshotCoalesced else { return nil }
-                let damaged = snap.damagedRows
-                if damaged.isEmpty || damaged.count >= (snap.rows + 1) / 2 {
-                    return nil
+    /// Block until a triple-buffer slot frees, then bind `currentSlot` to the
+    /// current rotation index. Does NOT advance the rotation turn — that is
+    /// consumed only on commitment (audit S2-006), so an aborted frame returns
+    /// both its semaphore token (via `releaseSlotUnused`/`rollbackSlotRotation`)
+    /// AND its turn, and the next attempt reuses the same untouched slot. (If
+    /// the rotation advanced on claim, an aborted frame would leave the wait
+    /// guard one frame too few — frame D could claim a slot frame A's GPU work
+    /// is still reading, then CPU-write the shared buffer mid-read → torn frame.)
+    private func claimSlot() -> Int {
+        ring.inflightSemaphore.wait()
+        ring.currentSlot = ring.frameIndex
+        return ring.currentSlot
+    }
+
+    /// Return a slot token claimed but never committed (no drawable / encoder
+    /// acquired). The rotation turn was never consumed, so nothing rolls back.
+    private func releaseSlotUnused() {
+        ring.inflightSemaphore.signal()
+    }
+
+    /// Consume the rotation turn for a frame we are committed to encoding
+    /// (audit S2-006). The semaphore signal is DEFERRED to the GPU completion
+    /// handler (audit M-3, strong-captured semaphore), NOT issued here — so the
+    /// slot stays reserved until the GPU finishes reading it.
+    private func commitSlotRotation() {
+        ring.frameIndex = (ring.frameIndex + 1) % 3
+    }
+
+    /// Abort a frame AFTER its rotation turn was consumed (instance-buffer grow
+    /// failure, audit S2-007): return the token and roll the rotation back to
+    /// the claimed slot, so the next attempt reuses the same untouched slot.
+    /// Order matches the original inline site: signal, then rollback.
+    private func rollbackSlotRotation() {
+        ring.inflightSemaphore.signal()
+        ring.frameIndex = ring.currentSlot
+    }
+
+    /// Register the command buffer's completion handler: the DEFERRED half of
+    /// the slot lifecycle (audit M-3). Signals `inflightSemaphore` once the GPU
+    /// finishes reading the slot's instance buffer, and logs any GPU fault. MUST
+    /// be called before `commit()` so there's no race with an immediate
+    /// GPU-side completion.
+    ///
+    /// Also inspect `status`/`error` so GPU faults (device lost, page fault,
+    /// shader trap) surface in the unified log instead of silently blanking the
+    /// window. `privacy: .public` is load-bearing for readability — see
+    /// `feedback_nslog_private_format`.
+    ///
+    /// Strong-capture the semaphore (NOT `[weak self]`): if the renderer deinits
+    /// between `commit()` and the GPU completion firing, a weak `self?` resolves
+    /// to nil and silently drops the `signal()`. The semaphore then deinits with
+    /// an unbalanced wait/signal count and libdispatch aborts the process with
+    /// `BUG IN CLIENT OF LIBDISPATCH: Semaphore object deallocated while in
+    /// use`. The semaphore's lifetime is independent of `self`, so capturing it
+    /// strongly here keeps the slot bookkeeping intact across renderer teardown
+    /// — Apple's canonical pattern for triple-buffered Metal ring semaphores.
+    /// The capture-list reads `self.ring.inflightSemaphore` synchronously at
+    /// registration (on the main thread, `self` alive); the closure body then
+    /// references only `semaphore` + the static `Self.logger`, so it captures
+    /// the semaphore strongly and NEVER captures `self`. Audit M-3 (2026-04-29).
+    private func registerSlotReleaseHandler(on buffer: MTLCommandBuffer) {
+        buffer.addCompletedHandler { [semaphore = self.ring.inflightSemaphore] cb in
+            if cb.status == .error {
+                if let err = cb.error {
+                    Self.logger.error("command buffer failed: \(String(describing: err), privacy: .public)")
+                } else {
+                    Self.logger.error("command buffer ended with .error status (no NSError)")
                 }
-                var rows = Set(damaged)
-                // Force-rebuild the row the cursor just left AND the row
-                // it moved to, even when alacritty's damage iterator did
-                // not flag them. The partial-rebuild fast path would
-                // otherwise leave a ghost inverted cell in the old row
-                // (and occasionally miss painting the new one) whenever
-                // pure cursor motion happens without a content delta — a
-                // common case in empty-prompt arrow-key editing. Cheap
-                // insurance; at most two extra row rebuilds per frame.
-                // Audit metal-renderer F3.
-                if cursorMoved {
-                    let prevScreenRow = Int(prevCursorRow) + Int(snap.displayOffset)
-                    if prevScreenRow >= 0 && prevScreenRow < snap.rows {
-                        rows.insert(prevScreenRow)
-                    }
-                    let newScreenRow = Int(curRow) + Int(snap.displayOffset)
-                    if newScreenRow >= 0 && newScreenRow < snap.rows {
-                        rows.insert(newScreenRow)
-                    }
-                    _ = prevCursorCol // silence unused warning; col-level precision not needed
-                }
-                return rows
-            }()
+            }
+            semaphore.signal()
+        }
+    }
+
+    public func render(in view: MTKView, snapshot: BBSnapshot?, focused: Bool, selection: Selection? = nil) {
+        // Compute the current frame's visual-state key BEFORE reaching for
+        // currentDrawable. Acquiring a drawable is expensive (blocks on
+        // the pool under contention); if nothing changed we shouldn't even
+        // touch it. Note: blink state is computed here too because it
+        // depends on CACurrentMediaTime.
+        let blinkSkipNow = computeBlinkSkip(snapshot: snapshot, focused: focused)
+        let selFields = Self.selectionFields(selection)
+        let frameKey = makeFrameKey(
+            snapshot: snapshot, focused: focused, selFields: selFields, blinkSkip: blinkSkipNow
+        )
+        if !debugToggles.frameSkipDisabled, frameKey == skipCache.lastFrameKey {
+            // Nothing that affects pixels has changed since the last
+            // presented frame. Skip the whole pipeline — no CPU instance
+            // rebuild, no GPU encode, no drawable acquisition. The
+            // compositor keeps displaying the previously-presented frame.
+            // Semaphore NOT touched on the skip path: we never claimed
+            // a slot, so we don't signal back.
+            skipCache.didFrameSkipLastRender = true
+            return
+        }
+
+        // Lock a slot BEFORE acquiring the drawable. Flipping this order
+        // (drawable-first) was attempted as metal-renderer F20 and
+        // caused full-screen programs (cmatrix, vim, nvim alt-screen)
+        // to glitch: waiting on the semaphore while holding a drawable
+        // starves `CAMetalLayer`'s 3-slot drawable pool, because the
+        // compositor can't hand out a new drawable for the next vsync
+        // while one is pinned to our CPU-side wait. The correct
+        // invariant is: drawable lifetime ≤ encode time, always
+        // shorter than a vsync interval. Audit metal-renderer F20
+        // reverted 2026-04-22.
+        // Claim a triple-buffer slot (blocks until one frees). The rotation
+        // turn is consumed only on commitment, NOT here — so an aborted frame
+        // returns both its token and its turn. See `claimSlot` /
+        // `commitSlotRotation` / `releaseSlotUnused` / `rollbackSlotRotation`
+        // for the S2-006 ordering invariant this lifecycle encapsulates.
+        let slot = claimSlot()
+
+        guard let drawable = view.currentDrawable,
+              let descriptor = view.currentRenderPassDescriptor,
+              let buffer = commandQueue.makeCommandBuffer(),
+              let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
+        else {
+            // Release the slot we just claimed — we're abandoning this
+            // frame without encoding, so the GPU never reads the buffer. The
+            // rotation turn was never consumed, so there is nothing to roll back.
+            releaseSlotUnused()
+            // No drawable was presented on this path either: tell
+            // callers gating side effects (LatencyProbe.markPresented)
+            // that the GPU did not actually paint a frame, so they
+            // don't record a phantom zero-latency sample for the
+            // pending keystroke.
+            //
+            // `lastFrameKey` is NOT advanced on this path. The skip-cache
+            // invariant is "lastFrameKey records the last *encoded*
+            // frame"; advancing it here would let the next call short-
+            // circuit on `frameKey == lastFrameKey` and never re-encode
+            // — a windowed minimise + identical state could freeze the
+            // surface. Leaving it unchanged guarantees the next render
+            // attempt enters the encode path again. Audit H7.
+            skipCache.didFrameSkipLastRender = true
+            #if DEBUG
+            if _testForceFrameKeyAdvanceOnFailedDrawable {
+                skipCache.lastFrameKey = frameKey
+            }
+            #endif
+            return
+        }
+
+        // Drawable + descriptor + command buffer + encoder all live —
+        // we are committed to encoding this frame. Advance the skip-
+        // cache atomically with that commitment so an early-return
+        // above leaves `lastFrameKey` pinned to the previous successful
+        // frame (audit H7), and consume the rotation turn only now
+        // (audit S2-006). The semaphore signal stays DEFERRED to the GPU
+        // completion handler below (audit M-3).
+        commitSlotRotation()
+        skipCache.didFrameSkipLastRender = false
+        skipCache.lastFrameKey = frameKey
+
+        // Register the deferred slot-release + GPU-fault logging completion
+        // handler (audit M-3). Must run before `commit()` so there's no race
+        // with an immediate GPU-side completion. See
+        // `registerSlotReleaseHandler` for the strong-captured-semaphore
+        // rationale.
+        registerSlotReleaseHandler(on: buffer)
+
+        // Per-cell "is buffer-(line, col) inside the current selection?"
+        // predicate, built once per frame (Finding B seam — see
+        // `makeSelectionPredicate`). Called once per cell while building the
+        // instance array.
+        let isSelected = Self.makeSelectionPredicate(selection)
+
+        if let snap = snapshot {
+            // All per-frame viewport / cell-size / cursor-rect geometry (pure
+            // math; see `computeFrameGeometry`). The blink-phase reset below is
+            // the only stateful step and stays inline because it mutates
+            // `cursorState`.
+            let geo = computeFrameGeometry(
+                snap: snap, view: view, blinkSkip: blinkSkipNow, focused: focused
+            )
+            // Reset the blink cycle every time the cursor moves so a moving
+            // cursor is continuously visible. `computeFrameGeometry` already
+            // captured the prior position into `geo.prevCursor*` / `geo.cursorMoved`
+            // BEFORE this write, so the read-before-write order matches the prior
+            // inline code (audit metal-renderer F3).
+            if geo.cursorMoved {
+                cursorState.lastCursorRow = geo.curRow
+                cursorState.lastCursorCol = geo.curCol
+                cursorState.blinkPhaseStart = CACurrentMediaTime()
+            }
+
+            // Decide what rows to rebuild this frame: the new CacheKey, the
+            // cache-compatible / coalesced-snapshot flags, and the damaged-row
+            // set (nil = full rebuild); see `planRowRebuild`. Pure — `render`
+            // records the returned CacheKey only after the buildInstances commit
+            // below (H7 / S2-007 ordering).
+            let plan = planRowRebuild(
+                snap: snap, focused: focused, selFields: selFields,
+                blinkSkip: blinkSkipNow, geo: geo
+            )
 
             guard let instanceCount = buildInstances(
                 snapshot: snap,
                 isSelected: isSelected,
-                blockCursorCell: blockCursorCell,
-                partialRowsOnly: partialRows
+                blockCursorCell: geo.blockCursorCell,
+                partialRowsOnly: plan.partialRows
             ) else {
                 // Instance-buffer grow failure (audit S2-007): abandon
                 // the frame. End the encoder (required before the
@@ -1622,71 +1363,311 @@ public final class MetalRenderer {
                 // leave lastCacheKey/lastRenderedSnapshotSeq stale so
                 // the retry re-walks every row.
                 encoder.endEncoding()
-                inflightSemaphore.signal()
-                // Return the rotation turn together with the token —
-                // the audit S2-006 invariant: a frame that won't reach
-                // GPU completion must not consume a slot rotation, or
-                // each abort makes the triple-buffer wait guard one
-                // frame too few. render() is only entered from the
-                // MTKView draw callback, so no interleaving caller can
-                // observe the rollback.
-                frameIndex = currentSlot
-                lastFrameKey = nil
-                didFrameSkipLastRender = true
+                // Return the slot token AND roll the rotation turn back to the
+                // claimed slot together (audit S2-006/S2-007): a frame that won't
+                // reach GPU completion must not consume a slot rotation, or each
+                // abort makes the triple-buffer wait guard one frame too few.
+                // render() is only entered from the MTKView draw callback, so no
+                // interleaving caller can observe the rollback.
+                rollbackSlotRotation()
+                skipCache.lastFrameKey = nil
+                skipCache.didFrameSkipLastRender = true
                 return
             }
-            lastCacheKey = newCacheKey
+            skipCache.lastCacheKey = plan.cacheKey
             // Record the snapshot seq we just rendered. `lastRenderedSnapshot
             // Seq` drives the coalesced-snapshot detection on the next
             // render; updating it HERE (after the row cache is in sync
             // with `snap`) means a subsequent skipped-frame detection
             // measures gap from the last successful paint, not from an
             // aborted mid-encode state.
-            lastRenderedSnapshotSeq = snap.sequenceID
+            skipCache.lastRenderedSnapshotSeq = snap.sequenceID
             if instanceCount > 0 {
-                var uniforms = FrameUniforms(
-                    viewportPx: viewportPoints,
-                    cellSizePx: cellSizePoints,
-                    accentColor: accentColor
-                )
-                encoder.setRenderPipelineState(pipelineState)
-                encoder.setVertexBuffer(instanceBuffers[slot], offset: 0, index: 0)
-                encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
-                encoder.setFragmentTexture(atlas.texture, index: 0)
-                // Color atlas bound unconditionally. Fragment shader
-                // branches on `BB_ATTR_IS_COLOR_GLYPH` to pick which
-                // texture to sample; Metal requires both bindings to be
-                // addressable for the shader to compile.
-                encoder.setFragmentTexture(atlas.colorTexture, index: 1)
-                encoder.drawPrimitives(
-                    type: .triangle,
-                    vertexStart: 0,
-                    vertexCount: 6,
-                    instanceCount: instanceCount
+                encodeCells(
+                    encoder: encoder, slot: slot, instanceCount: instanceCount,
+                    viewportPoints: geo.viewportPoints, cellSizePoints: geo.cellSizePoints
                 )
             }
-            if cursorOnScreen && !useCellInvertedCursor {
-                var cu = CursorUniforms(
-                    viewportPx: viewportPoints,
-                    cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + leftInsetPoints,
-                                              Float(screenCursorRow) * Float(metrics.cellHeight) + topInsetPoints),
-                    cellSizePx: cellSizePoints,
-                    color: cursorColor,
-                    strokeWidthPx: 1.0,
-                    filled: focused ? 1.0 : 0.0,
-                    shape: shape,
-                    _pad: 0
+            if geo.cursorOnScreen && !geo.useCellInvertedCursor {
+                encodeCursor(
+                    encoder: encoder, snap: snap, screenCursorRow: geo.screenCursorRow,
+                    shape: geo.shape, viewportPoints: geo.viewportPoints,
+                    cellSizePoints: geo.cellSizePoints, focused: focused
                 )
-                encoder.setRenderPipelineState(cursorPipelineState)
-                encoder.setVertexBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
-                encoder.setFragmentBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
             }
         }
 
         encoder.endEncoding()
         buffer.present(drawable)
         buffer.commit()
+    }
+
+    /// Pure per-frame geometry produced by `computeFrameGeometry` and consumed by
+    /// the rebuild planner + encoders. Carries no GPU handles — just the frame's
+    /// viewport (drawable) and cell sizes, the resolved cursor shape/position, and
+    /// the cursor-paint decision (`cursorOnScreen` / `useCellInvertedCursor` /
+    /// `blockCursorCell`). `prevCursor*` / `cursorMoved` snapshot the cursor's
+    /// prior grid position (read BEFORE `render` overwrites `cursorState.lastCursor*`)
+    /// for the blink reset and the partial-rebuild vacated-row forcing.
+    private struct FrameGeometry {
+        let viewportPoints: SIMD2<Float>
+        let cellSizePoints: SIMD2<Float>
+        let screenCursorRow: Int
+        let effectiveShape: UInt8
+        let shape: UInt32
+        let curRow: Int32
+        let curCol: Int32
+        let prevCursorRow: Int32
+        let prevCursorCol: Int32
+        let cursorMoved: Bool
+        let cursorOnScreen: Bool
+        let useCellInvertedCursor: Bool
+        let blockCursorCell: (row: Int, col: Int)?
+    }
+
+    /// Compute this frame's viewport / cell-size / cursor-rect geometry. Pure: it
+    /// reads `metrics`, `cursorState.shapeOverride`, and the snapshot/view but
+    /// mutates nothing — the blink-phase reset that depends on `cursorMoved` stays
+    /// in `render`. Extracted from `render()` so the orchestrator stays a thin
+    /// wait→encode→commit shell over the load-bearing slot lifecycle.
+    private func computeFrameGeometry(
+        snap: BBSnapshot,
+        view: MTKView,
+        blinkSkip: Bool,
+        focused: Bool
+    ) -> FrameGeometry {
+        // Viewport in points, not pixels. NDC conversion in the shader divides
+        // point positions by the point viewport, giving a scale-independent result
+        // that the hardware rasterizes to the drawable's pixel space. Text stays at
+        // its absolute cell-sized position as the window grows/shrinks, with empty
+        // space on the right/bottom when the grid hasn't caught up yet (which
+        // synchronous session.resize now eliminates).
+        let viewportPoints = SIMD2<Float>(
+            Float(view.bounds.size.width),
+            Float(view.bounds.size.height)
+        )
+        let cellSizePoints = SIMD2<Float>(
+            Float(metrics.cellWidth),
+            Float(metrics.cellHeight)
+        )
+        // Cursor position in viewport rows. When the user is scrolled back into
+        // history (displayOffset > 0), the live cursor_row is offset downward
+        // on-screen by that amount: rows 0..displayOffset-1 show scrollback, and
+        // the live grid starts at screen row displayOffset. If the resulting row
+        // falls below the viewport, the live cursor isn't visible and we skip
+        // drawing it — scrolling back should never show a phantom cursor on a
+        // scrollback line.
+        let screenCursorRow = snap.cursorRow + snap.displayOffset
+        // User's pinned shape (`cursorShapeOverride`) wins over the snapshot's
+        // DECSCUSR shape. When nil, follow the shell. `UInt8(clamping:)` per UR-2 —
+        // defense-in-depth on the Rust-snapshot cursorShape entering the cache key.
+        let effectiveShape: UInt8 = cursorState.shapeOverride ?? UInt8(clamping: snap.cursorShape)
+        let shape = UInt32(effectiveShape)
+        // Cursor grid coordinates (`Int32(clamping:)` per UR-2). Captured here —
+        // before `render` overwrites `cursorState.lastCursor*` — so the
+        // partial-rebuild path can force-rebuild the row the cursor just vacated
+        // (audit metal-renderer F3).
+        let curRow = Int32(clamping: snap.cursorRow)
+        let curCol = Int32(clamping: snap.cursorCol)
+        let prevCursorRow = cursorState.lastCursorRow
+        let prevCursorCol = cursorState.lastCursorCol
+        let cursorMoved = curRow != cursorState.lastCursorRow || curCol != cursorState.lastCursorCol
+        // `blinkSkip` is the value already computed for the frame-key check, passed
+        // in so we never flicker from a phase transition between the key
+        // computation and the draw.
+        let cursorOnScreen =
+            snap.cursorVisible &&
+            shape != 3 &&                 // DECSCUSR hidden — skip entirely
+            snap.cursorCol < snap.cols &&
+            screenCursorRow < snap.rows &&
+            !blinkSkip
+        // Focused block cursor renders via cell inversion (so the glyph stays
+        // visible). Bar / underline / unfocused-outline go through the cursor
+        // pipeline. This mirrors iTerm2 behaviour and keeps reverse-video cells
+        // intact when the cursor crosses them.
+        let useCellInvertedCursor = cursorOnScreen && focused && shape == 0
+        let blockCursorCell: (row: Int, col: Int)? = useCellInvertedCursor
+            ? (row: screenCursorRow, col: snap.cursorCol)
+            : nil
+        return FrameGeometry(
+            viewportPoints: viewportPoints,
+            cellSizePoints: cellSizePoints,
+            screenCursorRow: screenCursorRow,
+            effectiveShape: effectiveShape,
+            shape: shape,
+            curRow: curRow,
+            curCol: curCol,
+            prevCursorRow: prevCursorRow,
+            prevCursorCol: prevCursorCol,
+            cursorMoved: cursorMoved,
+            cursorOnScreen: cursorOnScreen,
+            useCellInvertedCursor: useCellInvertedCursor,
+            blockCursorCell: blockCursorCell
+        )
+    }
+
+    /// The per-frame rebuild decision produced by `planRowRebuild`: the fresh
+    /// `CacheKey` (recorded by `render` only AFTER a committed `buildInstances`,
+    /// per H7/S2-007) and the partial-row set (`nil` = full rebuild).
+    private struct RebuildPlan {
+        let cacheKey: CacheKey
+        let partialRows: Set<Int>?
+    }
+
+    /// Decide what this frame must rebuild: build the new `CacheKey`, test it
+    /// against the cached one (+ row-count + the dirty-rows kill switch), detect a
+    /// coalesced-snapshot gap, and resolve the damaged-row set via
+    /// `decideRebuildRows`. Pure: it READS skip-cache state but mutates nothing —
+    /// `render` records `lastCacheKey` / `lastRenderedSnapshotSeq` only after the
+    /// buildInstances commit, preserving the H7/S2-007 ordering.
+    private func planRowRebuild(
+        snap: BBSnapshot,
+        focused: Bool,
+        selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
+        blinkSkip: Bool,
+        geo: FrameGeometry
+    ) -> RebuildPlan {
+        // Decide whether to take the partial-rebuild path. The cache is
+        // "compatible" when every visible-state input to the row builder matches
+        // the prior frame (CacheKey equality). When it matches AND alacritty
+        // reports partial damage with a manageable count, we only rebuild the
+        // damaged rows — the rest are copied from rowInstanceCache unchanged.
+        //
+        // The row-count threshold (damage covering ≥ half the screen, applied in
+        // `decideRebuildRows`) guards against the case where damage covers most of
+        // the screen anyway: the per-row-skip overhead would exceed the savings.
+        // Above the threshold, just rebuild everything.
+        let newCacheKey = makeCacheKey(
+            snap: snap, focused: focused, selFields: selFields,
+            effectiveShape: geo.effectiveShape, blinkSkip: blinkSkip
+        )
+        let cacheCompatible = !debugToggles.dirtyRowsDisabled
+            && skipCache.lastCacheKey == newCacheKey
+            && skipCache.rowInstanceCache.count == snap.rows
+
+        // Detect coalesced snapshots: `TerminalSession.publishPendingSnapshot`
+        // coalesces rapid core snapshots into a single main-thread handoff,
+        // dropping intermediate damage info on the floor. `BBSnapshot.sequenceID`
+        // is a monotonic per-allocation counter incremented on every
+        // `bb_term_take_snapshot`, so a jump of >1 between the previous rendered
+        // snapshot and this one means ≥1 intermediate was skipped. The
+        // partial-rebuild path keys off `damagedRows`, which alacritty resets on
+        // each snapshot take — the skipped rows' damage is gone. Force a full
+        // rebuild in that case; the CacheKey stays valid, we just re-walk every
+        // row's cells once to catch the lost deltas. Fixes cmatrix / vim / nvim
+        // streaming artifacts.
+        let snapshotCoalesced: Bool =
+            skipCache.lastRenderedSnapshotSeq > 0
+            && snap.sequenceID > skipCache.lastRenderedSnapshotSeq + 1
+
+        let partialRows = decideRebuildRows(
+            snap: snap,
+            cacheCompatible: cacheCompatible,
+            snapshotCoalesced: snapshotCoalesced,
+            cursorMoved: geo.cursorMoved,
+            prevCursorRow: geo.prevCursorRow,
+            prevCursorCol: geo.prevCursorCol,
+            curRow: geo.curRow
+        )
+        return RebuildPlan(cacheKey: newCacheKey, partialRows: partialRows)
+    }
+
+    /// Decide the partial-rebuild row set for this frame, or nil to force a full
+    /// rebuild. nil when the row cache is incompatible (CacheKey mismatch /
+    /// disabled / row-count drift — passed in via `cacheCompatible`), when
+    /// alacritty reports full damage, when an intermediate snapshot was coalesced
+    /// away (its per-row damage is gone), or when damage is empty / covers ≥ half
+    /// the screen (per-row-skip overhead would exceed the savings). Otherwise the
+    /// damaged rows, plus the rows the cursor just left / moved to (metal-renderer
+    /// F3 — pure cursor motion doesn't always flag those, leaving a ghost inverted
+    /// cell). Pure given its arguments.
+    private func decideRebuildRows(
+        snap: BBSnapshot,
+        cacheCompatible: Bool,
+        snapshotCoalesced: Bool,
+        cursorMoved: Bool,
+        prevCursorRow: Int32,
+        prevCursorCol: Int32,
+        curRow: Int32
+    ) -> Set<Int>? {
+        guard cacheCompatible else { return nil }
+        guard !snap.damageIsFull else { return nil }
+        guard !snapshotCoalesced else { return nil }
+        let damaged = snap.damagedRows
+        if damaged.isEmpty || damaged.count >= (snap.rows + 1) / 2 {
+            return nil
+        }
+        var rows = Set(damaged)
+        if cursorMoved {
+            let prevScreenRow = Int(prevCursorRow) + Int(snap.displayOffset)
+            if prevScreenRow >= 0 && prevScreenRow < snap.rows {
+                rows.insert(prevScreenRow)
+            }
+            let newScreenRow = Int(curRow) + Int(snap.displayOffset)
+            if newScreenRow >= 0 && newScreenRow < snap.rows {
+                rows.insert(newScreenRow)
+            }
+            _ = prevCursorCol // silence unused warning; col-level precision not needed
+        }
+        return rows
+    }
+
+    /// Encode the cell-instance draw: bind the pipeline, the slot's instance
+    /// buffer, frame uniforms, the mono + colour atlases (colour bound
+    /// unconditionally so the `BB_ATTR_IS_COLOR_GLYPH` shader branch is
+    /// addressable), and draw `instanceCount` instanced quads.
+    private func encodeCells(
+        encoder: MTLRenderCommandEncoder,
+        slot: Int,
+        instanceCount: Int,
+        viewportPoints: SIMD2<Float>,
+        cellSizePoints: SIMD2<Float>
+    ) {
+        var uniforms = FrameUniforms(
+            viewportPx: viewportPoints,
+            cellSizePx: cellSizePoints,
+            accentColor: themeColors.accentColor
+        )
+        encoder.setRenderPipelineState(pipelines.pipelineState)
+        encoder.setVertexBuffer(ring.instanceBuffers[slot], offset: 0, index: 0)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.size, index: 1)
+        encoder.setFragmentTexture(atlas.texture, index: 0)
+        encoder.setFragmentTexture(atlas.colorTexture, index: 1)
+        encoder.drawPrimitives(
+            type: .triangle,
+            vertexStart: 0,
+            vertexCount: 6,
+            instanceCount: instanceCount
+        )
+    }
+
+    /// Encode the standalone cursor quad (bar / underline / unfocused outline —
+    /// the focused block cursor renders via cell inversion, not here). Filled
+    /// when focused, hollow when not.
+    private func encodeCursor(
+        encoder: MTLRenderCommandEncoder,
+        snap: BBSnapshot,
+        screenCursorRow: Int,
+        shape: UInt32,
+        viewportPoints: SIMD2<Float>,
+        cellSizePoints: SIMD2<Float>,
+        focused: Bool
+    ) {
+        var cu = CursorUniforms(
+            viewportPx: viewportPoints,
+            cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + insets.leftInsetPoints,
+                                      Float(screenCursorRow) * Float(metrics.cellHeight) + insets.topInsetPoints),
+            cellSizePx: cellSizePoints,
+            color: themeColors.cursorColor,
+            strokeWidthPx: 1.0,
+            filled: focused ? 1.0 : 0.0,
+            shape: shape,
+            _pad: 0
+        )
+        encoder.setRenderPipelineState(pipelines.cursorPipelineState)
+        encoder.setVertexBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
+        encoder.setFragmentBytes(&cu, length: MemoryLayout<CursorUniforms>.size, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
     }
 
     deinit {

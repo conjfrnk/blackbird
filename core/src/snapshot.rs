@@ -468,6 +468,121 @@ pub(crate) fn extract_mode_with_extras(bb: &BBTerm) -> u32 {
 /// caller-owned (one `bb_snap_release` per call). Pure logic over `&mut BBTerm`
 /// — no FFI handle — so it is directly unit-testable. (Extracted verbatim from
 /// the body of `bb_term_take_snapshot`; REFACTOR.md Part IV.)
+// OSC 8 hyperlink interning caps. Module-scope so `snapshot` and the two
+// phase helpers below share one definition.
+//   - per-URI bytes: 4 KiB (covers any realistic http URL).
+//   - total interned bytes ACROSS the persistent cache: 1 MiB. Over the
+//     ceiling, new URIs drop to no-link rather than evict — eviction would
+//     invalidate pointers held by still-live snapshots that `Arc::clone`d the
+//     existing CStr.
+const OSC8_URI_MAX: usize = 4096;
+const OSC8_TOTAL_INTERN_BYTES_CAP: usize = 1024 * 1024;
+
+/// Phase 1: resolve one cell's OSC 8 URI to a per-snapshot local link id
+/// (1-based; 0 = no link). Dedups against `phase1_uris` / `local_uri_to_id`
+/// (which share their `Arc<str>` allocation — audit L-7), and enforces the
+/// empty / oversize / bidi-invisible rejections (S4-001) and the u16 id ceiling
+/// (S2-014, sets `*exhausted`). Pure phase-1 policy: touches no `bb` state, so
+/// the caller's `&bb.term` grid borrow stays disjoint from the cache mutation.
+fn resolve_link_id(
+    uri: Option<&str>,
+    phase1_uris: &mut Vec<Arc<str>>,
+    local_uri_to_id: &mut std::collections::HashMap<Arc<str>, u16>,
+    exhausted: &mut bool,
+) -> u16 {
+    // alacritty's OSC 8 parser rejects empty URIs upstream, but we defensively
+    // treat an empty (or absent) uri as "no link".
+    let uri = match uri {
+        Some(u) if !u.is_empty() && u.len() <= OSC8_URI_MAX => u,
+        _ => return 0,
+    };
+    // Audit S4-001 / fix-#03: drop attribution for URIs carrying raw
+    // bidi-override / invisible scalars (parity with the OSC 7 + title scrub
+    // paths) so a display-side consumer can't be tricked into rendering a
+    // visually-flipped URL the user reads.
+    if contains_bidi_or_invisible(uri.as_bytes()) {
+        return 0;
+    }
+    if let Some(&id) = local_uri_to_id.get(uri) {
+        return id;
+    }
+    if phase1_uris.len() + 1 >= u16::MAX as usize {
+        // Out of per-snapshot ids (65 534 distinct URIs — well past any real
+        // TUI; implies a hostile remote emitting unique per-cell URIs). Latch
+        // the one-shot breadcrumb (deferred to after the grid borrow). S2-014.
+        *exhausted = true;
+        return 0;
+    }
+    let id = (phase1_uris.len() + 1) as u16; // 1-based; 0 = no link
+    let owned: Arc<str> = Arc::from(uri);
+    local_uri_to_id.insert(Arc::clone(&owned), id);
+    phase1_uris.push(owned);
+    id
+}
+
+/// Phase 2: intern the phase-1 URIs against the persistent `bb.uri_cstr_cache`
+/// (entries survive across snapshots — rust-core-3 F1; a repeat URI is one
+/// `Arc::clone`), build the `links` table (index 0 = "no link" sentinel), and
+/// translate every cell's local link id to its final id. Runs AFTER the
+/// `&bb.term` grid borrow has ended, so the `&mut bb` cache mutation is sound.
+/// New URIs drop to no-link once the global footprint crosses the 1 MiB cap
+/// (no eviction — live snapshots hold `Arc` clones).
+fn intern_osc8_links(
+    bb: &mut BBTerm,
+    phase1_uris: &[Arc<str>],
+    cells: &mut [BBCell],
+) -> Vec<Arc<std::ffi::CStr>> {
+    let mut links: Vec<Arc<std::ffi::CStr>> = Vec::new();
+    // `local_to_final[local_id]` = final id (or 0 if interning failed). Built in
+    // lockstep with `phase1_uris`; `local_to_final[0]` is unused (0 = no link).
+    let mut local_to_final: Vec<u16> = Vec::new();
+    if phase1_uris.is_empty() {
+        return links;
+    }
+    let sentinel: Arc<std::ffi::CStr> = std::ffi::CString::default().into();
+    links.push(sentinel);
+    local_to_final.push(0); // local 0 reserved for "no link"
+    for uri in phase1_uris {
+        let uri_str: &str = uri.as_ref();
+        let cstr_arc: Option<Arc<std::ffi::CStr>> = if let Some(existing) =
+            bb.uri_cstr_cache.get(uri_str).cloned()
+        {
+            Some(existing)
+        } else if bb.uri_cache_bytes.saturating_add(uri_str.len()) > OSC8_TOTAL_INTERN_BYTES_CAP {
+            None
+        } else {
+            match std::ffi::CString::new(uri_str) {
+                Ok(cs) => {
+                    let arc: Arc<std::ffi::CStr> = cs.into();
+                    bb.uri_cstr_cache
+                        .insert(uri_str.to_owned(), Arc::clone(&arc));
+                    bb.uri_cache_bytes += uri_str.len();
+                    Some(arc)
+                }
+                Err(_) => None,
+            }
+        };
+        match cstr_arc {
+            Some(arc) => {
+                let final_id = links.len() as u16;
+                links.push(arc);
+                local_to_final.push(final_id);
+            }
+            None => local_to_final.push(0),
+        }
+    }
+    // Translate every cell's local id to its final id. Local 0 stays 0 (no
+    // link); a URI that failed to intern (byte-cap exceeded, NUL in URI) also
+    // maps to 0 — "drop attribution silently".
+    for cell in cells.iter_mut() {
+        let local = cell.link_id as usize;
+        if local != 0 && local < local_to_final.len() {
+            cell.link_id = local_to_final[local];
+        }
+    }
+    links
+}
+
 pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
     // Drain the damage set BEFORE reading the grid. `Term::damage` takes
     // `&mut self`; the grid borrow below is immutable, so the two can't
@@ -520,8 +635,6 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
     // phase 1 actually collected URIs. The common case — ProMotion
     // frame re-render with no OSC 8 on screen — pays zero heap
     // allocations for the intern table.
-    const OSC8_URI_MAX: usize = 4096;
-    const OSC8_TOTAL_INTERN_BYTES_CAP: usize = 1024 * 1024;
     // Phase 1 state: dedup'd URIs in insertion order, plus a parallel
     // dedup map sharing the same allocation. Audit L-7 (2026-05-03):
     // wrap each unique URI in `Arc<str>` once and clone the Arc into
@@ -537,51 +650,15 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
     // `grid` borrows `bb.term`). Audit S2-014.
     let mut osc8_id_exhausted_this_snapshot = false;
     for indexed in grid.display_iter() {
-        let link_id: u16 = match indexed.cell.hyperlink() {
-            Some(h) => {
-                let uri = h.uri();
-                // alacritty's OSC 8 parser rejects empty URIs upstream, but
-                // we defensively treat an empty uri as "no link".
-                if uri.is_empty() || uri.len() > OSC8_URI_MAX {
-                    0
-                } else if contains_bidi_or_invisible(uri.as_bytes()) {
-                    // Audit S4-001 / fix-#03. Parity with the OSC 7 path
-                    // (lib.rs:1146) and the OSC 0/2 title scrubber
-                    // (scrub_title_controls): drop attribution for URIs
-                    // carrying raw bidi-override / invisible scalars.
-                    // Foundation's URL(string:) percent-encodes them on
-                    // the Swift side, slipping the URI past the
-                    // containsPercentEncodedControlBytes regex (which
-                    // matches %00-%1F and %7F only); QuickLook / future
-                    // chrome surfaces that render the raw stored bytes
-                    // would honour U+202E (RIGHT-TO-LEFT OVERRIDE) and
-                    // visually flip the URL the user reads. Rejecting
-                    // here matches the OSC 7 posture rather than relying
-                    // on every display-side consumer to scrub.
-                    0
-                } else if let Some(&id) = local_uri_to_id.get(uri) {
-                    id
-                } else if phase1_uris.len() + 1 >= u16::MAX as usize {
-                    // Out of per-snapshot ids — drop attribution.
-                    // 65 534 links per snapshot is already well past
-                    // any realistic TUI; reaching the cap implies a
-                    // hostile remote emitting unique per-cell URIs.
-                    // Latch a one-shot breadcrumb (deferred until
-                    // after the grid borrow ends) so support
-                    // engineers triaging "my OSC 8 links stopped
-                    // working" have a signal. Audit S2-014.
-                    osc8_id_exhausted_this_snapshot = true;
-                    0
-                } else {
-                    let id = (phase1_uris.len() + 1) as u16; // 1-based; 0 = no link
-                    let owned: Arc<str> = Arc::from(uri);
-                    local_uri_to_id.insert(Arc::clone(&owned), id);
-                    phase1_uris.push(owned);
-                    id
-                }
-            }
-            None => 0,
-        };
+        // OSC 8 link id (phase 1: dedup within this snapshot). The
+        // `Option<Hyperlink>` temporary lives to the end of this statement, so
+        // the borrowed `&str` handed to `resolve_link_id` is valid for the call.
+        let link_id = resolve_link_id(
+            indexed.cell.hyperlink().as_ref().map(|h| h.uri()),
+            &mut phase1_uris,
+            &mut local_uri_to_id,
+            &mut osc8_id_exhausted_this_snapshot,
+        );
         // Underline colour (CSI 58): alacritty stores as Option<Color>.
         // None → sentinel (shader falls back to fg). Some(c) → resolve
         // through the palette, same as fg/bg so indexed colours route
@@ -649,70 +726,12 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
         );
     }
 
-    // Phase 2: intern the URIs collected in phase 1 against the
-    // persistent cache. Entries survive across snapshots
-    // (rust-core-3 F1): the same URI appearing frame after frame is
-    // an `Arc::clone` (one atomic increment, zero allocation) on
-    // the second sighting. New URIs dropped silently once the
-    // global byte footprint crosses `OSC8_TOTAL_INTERN_BYTES_CAP`
-    // (1 MiB).
-    //
-    // `links` is empty when phase 1 collected zero URIs (the common
-    // case). When non-empty, `links[0]` is the "no link" sentinel
-    // so cell `link_id == 0` always means "no OSC 8 attribution"
-    // and subsequent URIs get 1-based final indices (matching the
-    // C ABI documented in `bb_snap_link_url`).
-    let mut links: Vec<Arc<std::ffi::CStr>> = Vec::new();
-    // `local_to_final[local_id]` = final id (or 0 if interning
-    // failed for this URI). Built in lockstep with `phase1_uris`,
-    // so `local_to_final[0]` is unused (local id 0 = no link).
-    let mut local_to_final: Vec<u16> = Vec::new();
-    if !phase1_uris.is_empty() {
-        let sentinel: Arc<std::ffi::CStr> = std::ffi::CString::default().into();
-        links.push(sentinel);
-        local_to_final.push(0); // local 0 reserved for "no link"
-        for uri in &phase1_uris {
-            let uri_str: &str = uri.as_ref();
-            let cstr_arc: Option<Arc<std::ffi::CStr>> = if let Some(existing) =
-                bb.uri_cstr_cache.get(uri_str).cloned()
-            {
-                Some(existing)
-            } else if bb.uri_cache_bytes.saturating_add(uri_str.len()) > OSC8_TOTAL_INTERN_BYTES_CAP
-            {
-                None
-            } else {
-                match std::ffi::CString::new(uri_str) {
-                    Ok(cs) => {
-                        let arc: Arc<std::ffi::CStr> = cs.into();
-                        bb.uri_cstr_cache
-                            .insert(uri_str.to_owned(), Arc::clone(&arc));
-                        bb.uri_cache_bytes += uri_str.len();
-                        Some(arc)
-                    }
-                    Err(_) => None,
-                }
-            };
-            match cstr_arc {
-                Some(arc) => {
-                    let final_id = links.len() as u16;
-                    links.push(arc);
-                    local_to_final.push(final_id);
-                }
-                None => local_to_final.push(0),
-            }
-        }
-        // Translate every cell's local id to its final id. Cells
-        // with local id 0 stay 0 (no link). Cells whose URI failed
-        // to intern (byte-cap exceeded, NUL in URI) get 0 too —
-        // matching the previous shape's "drop attribution silently"
-        // semantics.
-        for cell in cells.iter_mut() {
-            let local = cell.link_id as usize;
-            if local != 0 && local < local_to_final.len() {
-                cell.link_id = local_to_final[local];
-            }
-        }
-    }
+    // Phase 2 (after the grid borrow ends): intern the phase-1 URIs against the
+    // persistent cache and translate each cell's local link id to its final id.
+    // `links[0]` is the "no link" sentinel so `link_id == 0` always means "no
+    // OSC 8 attribution" (the C ABI documented in `bb_snap_link_url`). Empty
+    // when phase 1 collected zero URIs — the common ProMotion-reframe case.
+    let links = intern_osc8_links(bb, &phase1_uris, &mut cells);
     let term_mode = bb.term.mode();
     let mode = extract_mode_with_extras(bb);
     // DECTCEM (ESC [ ? 25 h/l) toggles SHOW_CURSOR. Previously we

@@ -271,12 +271,23 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     /// reports that replace is unsafe (alt-screen, mouse-reporting, or
     /// bracketed-paste active) the call is refused with a transient banner.
     public func triggerReplaceCurrent() {
+        requestReplace(.current)
+    }
+
+    /// The single TUI-gated replace emission. Every replace entry point — the
+    /// public `triggerReplaceCurrent()` and the `@objc` button actions — routes
+    /// here so the safety gate can't be bypassed by one path drifting from
+    /// another. If the delegate reports replace is unsafe (alt-screen, mouse-
+    /// reporting, or bracketed-paste active) the request is refused with the
+    /// transient banner and zero bytes are emitted; otherwise the current
+    /// replacement text is sent for `kind`.
+    private func requestReplace(_ kind: ReplaceKind) {
         guard let delegate else { return }
         guard delegate.findBarShouldAllowReplace(self) else {
             showTransientMessage(FindBar.tuiActiveMessage)
             return
         }
-        delegate.findBar(self, didRequestReplace: .current, with: replaceField.stringValue)
+        delegate.findBar(self, didRequestReplace: kind, with: replaceField.stringValue)
     }
 
     /// Banner shown when replace is refused because the terminal appears to be
@@ -345,21 +356,11 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     }
 
     @objc private func replaceCurrent() {
-        guard let delegate else { return }
-        guard delegate.findBarShouldAllowReplace(self) else {
-            showTransientMessage(FindBar.tuiActiveMessage)
-            return
-        }
-        delegate.findBar(self, didRequestReplace: .current, with: replaceField.stringValue)
+        requestReplace(.current)
     }
 
     @objc private func replaceAll() {
-        guard let delegate else { return }
-        guard delegate.findBarShouldAllowReplace(self) else {
-            showTransientMessage(FindBar.tuiActiveMessage)
-            return
-        }
-        delegate.findBar(self, didRequestReplace: .all, with: replaceField.stringValue)
+        requestReplace(.all)
     }
 
     // MARK: - NSTextFieldDelegate

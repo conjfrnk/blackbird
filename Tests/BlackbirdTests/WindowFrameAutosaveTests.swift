@@ -357,7 +357,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
     // MARK: - User-driven frame-change classification
 
     /// Full truth table for the pure classifier
-    /// `MainWindowController.isUserDrivenFrameChange(leftButtonDown:pointerInWindowFrame:inLiveResize:)`.
+    /// `WindowFramePersistence.isUserDrivenFrameChange(leftButtonDown:pointerInWindowFrame:inLiveResize:)`.
     ///
     /// CONTRACT: the function returns true iff the window frame change is
     /// user-driven (and may bypass the screen-reconfig settle
@@ -398,7 +398,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
         ]
 
         for (leftButtonDown, pointerInWindowFrame, inLiveResize, expected) in cases {
-            let actual = MainWindowController.isUserDrivenFrameChange(
+            let actual = WindowFramePersistence.isUserDrivenFrameChange(
                 leftButtonDown: leftButtonDown,
                 pointerInWindowFrame: pointerInWindowFrame,
                 inLiveResize: inLiveResize
@@ -419,7 +419,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
     /// leak is back".
     func test_isUserDrivenFrameChange_heldButtonOverOtherWindow_isNotUserDriven() {
         XCTAssertFalse(
-            MainWindowController.isUserDrivenFrameChange(
+            WindowFramePersistence.isUserDrivenFrameChange(
                 leftButtonDown: true,
                 pointerInWindowFrame: false,
                 inLiveResize: false
@@ -433,7 +433,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
     /// over the window) is user-driven.
     func test_isUserDrivenFrameChange_genuineDragOfThisWindow_isUserDriven() {
         XCTAssertTrue(
-            MainWindowController.isUserDrivenFrameChange(
+            WindowFramePersistence.isUserDrivenFrameChange(
                 leftButtonDown: true,
                 pointerInWindowFrame: true,
                 inLiveResize: false
@@ -448,7 +448,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
         for leftButtonDown in [false, true] {
             for pointerInWindowFrame in [false, true] {
                 XCTAssertTrue(
-                    MainWindowController.isUserDrivenFrameChange(
+                    WindowFramePersistence.isUserDrivenFrameChange(
                         leftButtonDown: leftButtonDown,
                         pointerInWindowFrame: pointerInWindowFrame,
                         inLiveResize: true

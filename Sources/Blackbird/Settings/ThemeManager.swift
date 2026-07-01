@@ -110,13 +110,19 @@ public final class ThemeManager {
         apply(session: sessionProvider(), view: viewProvider())
     }
 
+    /// Whether the app is currently rendering in a dark appearance. The ONE
+    /// resolution, shared by `resolvedPalette` and `currentPaletteInputs` so
+    /// the two can't disagree about light/dark.
+    private func systemIsDark() -> Bool {
+        let app = currentApp ?? NSApp
+        return app?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
     public var resolvedPalette: ThemePalette {
         let p = Preferences.shared
         let dark: Bool
         switch p.themeMode {
-        case .auto:
-            let app = currentApp ?? NSApp
-            dark = app?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        case .auto:  dark = systemIsDark()
         case .light: dark = false
         case .dark:  dark = true
         }
@@ -131,7 +137,7 @@ public final class ThemeManager {
         // Unconditional apply — first-show blur wiring needs this even when
         // the palette itself hasn't changed since the last apply (the window
         // number wasn't live last time). Bypass the equality gate.
-        applyToAll()
+        applyToAll(inputs: currentPaletteInputs())
     }
 
     /// Called from the Preferences-change sink and the effectiveAppearance
@@ -146,14 +152,15 @@ public final class ThemeManager {
             reapDeadRegistrations()
             return
         }
-        lastPaletteInputs = inputs
-        applyToAll()
+        // Hand the already-computed inputs straight to the apply so the cache
+        // is computed once and assigned once per change (not re-derived inside
+        // applyToAll). settings F1.
+        applyToAll(inputs: inputs)
     }
 
     private func currentPaletteInputs() -> PaletteInputs {
         let p = Preferences.shared
-        let app = currentApp ?? NSApp
-        let isDark = app?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let isDark = systemIsDark()
         return PaletteInputs(
             themeRaw: p.themeRaw,
             themeModeRaw: p.themeModeRaw,
@@ -170,13 +177,16 @@ public final class ThemeManager {
         }
     }
 
-    private func applyToAll() {
+    /// Push the resolved palette to every (live) registration and stamp the
+    /// dedup cache with `inputs` — the snapshot the caller already computed, so
+    /// the inputs are derived once per apply, not twice.
+    private func applyToAll(inputs: PaletteInputs) {
         // Reap registrations whose owner (MainWindowController) has been
         // deallocated. Weak-owner keying means dead windows self-evict
         // here — no explicit unregister call is required from the caller
         // side. (main-window F1)
         reapDeadRegistrations()
-        lastPaletteInputs = currentPaletteInputs()
+        lastPaletteInputs = inputs
         for reg in registrations.values {
             apply(session: reg.sessionProvider(), view: reg.viewProvider())
         }

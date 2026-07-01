@@ -83,10 +83,18 @@ final class CmdHoverHighlightTests: XCTestCase {
         keyName: String
     ) -> (bufferLine: Int32, startCol: Int32, endCol: Int32)? {
         let m = Mirror(reflecting: renderer)
+        // `lastFrameKey` / `lastCacheKey` now live inside the grouped
+        // `skipCache` value struct (Finding A field-clustering), so descend
+        // into that container first. A missing `skipCache` child is itself a
+        // regression.
+        guard let skipCacheChild = m.children.first(where: { $0.label == "skipCache" })?.value else {
+            return nil
+        }
+        let skipCacheMirror = Mirror(reflecting: skipCacheChild)
         // `lastFrameKey` / `lastCacheKey` are stored as Optionals. Walk
         // the child labelled keyName; `.value` is `Any` but the runtime
         // box is `Optional<FrameKey>` / `Optional<CacheKey>`.
-        guard let optionalChild = m.children.first(where: { $0.label == keyName })?.value else {
+        guard let optionalChild = skipCacheMirror.children.first(where: { $0.label == keyName })?.value else {
             return nil
         }
         let optionalMirror = Mirror(reflecting: optionalChild)
@@ -97,8 +105,15 @@ final class CmdHoverHighlightTests: XCTestCase {
             return nil
         }
         let keyMirror = Mirror(reflecting: wrapped)
+        // The cmd-hover fields now live in the shared `visual: VisualState`
+        // that both FrameKey and CacheKey embed (the M-20/H3 dedup), so reflect
+        // one level deeper. A missing `visual` child is itself a regression.
+        guard let visual = keyMirror.children.first(where: { $0.label == "visual" })?.value else {
+            return nil
+        }
+        let visualMirror = Mirror(reflecting: visual)
         func readInt32(_ label: String) -> Int32? {
-            guard let v = keyMirror.children.first(where: { $0.label == label })?.value else {
+            guard let v = visualMirror.children.first(where: { $0.label == label })?.value else {
                 return nil
             }
             return v as? Int32
@@ -402,17 +417,17 @@ final class CmdHoverHighlightTests: XCTestCase {
         // production path reaches this assignment via TerminalView+Hover's
         // `updateHover`; the test seam mirrors that without spinning up a
         // real NSEvent / tracking area.
-        view.lastHoverCell = (row: 2, col: 3)
-        view.cmdModifierHeld = true
+        view.hoverCoordinator.lastHoverCell = (row: 2, col: 3)
+        view.hoverCoordinator.cmdModifierHeld = true
 
         // First reevaluate primes `cachedURLMatchesSeq` with snap1's id.
         // The snapshot has no detected URLs, so reevaluate falls through
         // to `clearCmdHoverURLMatch()` after the cache scan. Crucially, it
         // does NOT clear `lastHoverCell` on this pass — same sequenceID,
         // no invalidation.
-        view.reevaluateCmdHoverHighlight()
+        view.hoverCoordinator.reevaluateCmdHoverHighlight()
         XCTAssertNotNil(
-            view.lastHoverCell,
+            view.hoverCoordinator.lastHoverCell,
             "no-op reevaluate against the same snapshot must not drop the hover cell"
         )
 
@@ -441,10 +456,10 @@ final class CmdHoverHighlightTests: XCTestCase {
         // snap1.sequenceID`, the fix clears `lastHoverCell` here. Pre-fix
         // code left it in place and the next render translated through a
         // stale screen row.
-        view.reevaluateCmdHoverHighlight()
+        view.hoverCoordinator.reevaluateCmdHoverHighlight()
 
         XCTAssertNil(
-            view.lastHoverCell,
+            view.hoverCoordinator.lastHoverCell,
             "snapshot identity change must clear the stale screen-space "
             + "lastHoverCell — its row was baked against the previous "
             + "displayOffset and would mistranslate against snap2"

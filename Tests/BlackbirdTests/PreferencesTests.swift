@@ -1175,27 +1175,44 @@ final class PreferencesTests: XCTestCase {
     // — and pins that the outer write produces no more than the
     // expected number of UserDefaults notifications.
 
-    /// M5 source-level pin: the re-entry guard fields must exist for
-    /// both clamped properties. A regression that drops them would
-    /// re-open the latent feedback-loop hazard.
-    func test_m5_clampingGuardFields_existInSource() throws {
+    /// M5 source-level pin: the reentry-suppression mechanism must exist.
+    /// The three former ad-hoc flags (`clampingFontSize` /
+    /// `clampingTranslucency` / `isProcessingDefaultsChange`) collapsed into
+    /// the single `withSelfWriteSuppressed` primitive (the "≤ 1 reentry-
+    /// suppression primitive" A-target). This pins both the primitive AND the
+    /// same-value guards that actually stop the recursion — a regression
+    /// dropping either would re-open the latent 982b719 feedback-loop hazard.
+    func test_m5_reentrySuppressionPrimitive_existsInSource() throws {
         let prefsURL = try Self.locatePreferencesSwift()
         let src = try String(contentsOf: prefsURL, encoding: .utf8)
         XCTAssertTrue(
-            src.contains("clampingFontSize"),
-            "M5: fontSize re-entry guard `clampingFontSize` must remain in Preferences.swift"
+            src.contains("withSelfWriteSuppressed"),
+            "M5: the unified reentry-suppression primitive `withSelfWriteSuppressed` must remain in Preferences.swift"
         )
         XCTAssertTrue(
-            src.contains("clampingTranslucency"),
-            "M5: translucency re-entry guard `clampingTranslucency` must remain in Preferences.swift"
+            src.contains("isSuppressingSelfWrite"),
+            "M5: the single reentry-suppression flag `isSuppressingSelfWrite` must remain"
         )
         XCTAssertTrue(
-            src.contains("guard !clampingFontSize else { return }"),
-            "M5: fontSize didSet must short-circuit when re-entered via the recursive clamp write"
+            src.contains("guard !isSuppressingSelfWrite else { return }"),
+            "M5: the primitive must short-circuit when a self-write is already in flight"
         )
         XCTAssertTrue(
-            src.contains("guard !clampingTranslucency else { return }"),
-            "M5: translucency didSet must short-circuit when re-entered via the recursive clamp write"
+            src.contains("guard clamped != fontSize else { return }"),
+            "M5: fontSize didSet must short-circuit when the clamped value already matches (the recursion stopper)"
+        )
+        XCTAssertTrue(
+            src.contains("guard clamped != translucency else { return }"),
+            "M5: translucency didSet must short-circuit when the clamped value already matches"
+        )
+        // Pin the consolidation: the three former ad-hoc flags must NOT
+        // reappear — re-introducing them would resurrect the copy-pasted
+        // reentry-guard duplication the A-target eliminated.
+        XCTAssertFalse(
+            src.contains("var clampingFontSize")
+                || src.contains("var clampingTranslucency")
+                || src.contains("var isProcessingDefaultsChange"),
+            "M5: the three former ad-hoc reentry flags must stay collapsed into the single withSelfWriteSuppressed primitive"
         )
     }
 

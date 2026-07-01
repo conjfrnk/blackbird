@@ -12,6 +12,17 @@ public struct ThemePalette: Equatable, Sendable {
 
     private static let themeLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "theme")
 
+    /// Cursor/background contrast floor. Below this the cursor snaps to the
+    /// foreground (Release) or trips a DEBUG assert — far looser than the WCAG
+    /// text bar; it only catches the degenerate "cursor == background" case.
+    private static let minCursorContrast: Double = 1.25
+    /// Foreground/background contrast DEBUG-assert floor — a 3:1 bar, looser
+    /// than WCAG AA's 4.5:1 since curated palettes dip at the margins.
+    private static let minForegroundContrast: Double = 3.0
+    /// Relative-luminance ceiling below which a background reads as "dark"
+    /// (WCAG 2.x midpoint) — drives titlebar/glass light-vs-dark chrome.
+    private static let darkLuminanceThreshold: Double = 0.18
+
     public init(background: UInt32, foreground: UInt32, cursor: UInt32, ansi: [UInt32]) {
         // fix-#14 philosophy: don't abort the process on a malformed theme.
         // A non-16-entry `ansi` array previously hit a `precondition` that
@@ -48,7 +59,7 @@ public struct ThemePalette: Equatable, Sendable {
         // the regression is visible in the unified log without breaking
         // the user's session.
         let cursorBg = Self.contrastRatio(fg: cursor, bg: background)
-        if cursorBg < 1.25 {
+        if cursorBg < Self.minCursorContrast {
             Self.themeLogger.warning(
                 "Theme palette cursor/background contrast \(cursorBg, format: .fixed(precision: 2)) < 1.25 — snapping cursor to foreground (was 0x\(String(cursor, radix: 16), privacy: .public), now 0x\(String(foreground, radix: 16), privacy: .public))"
             )
@@ -71,9 +82,9 @@ public struct ThemePalette: Equatable, Sendable {
         // fallback above instead of crashing — ThemePalette is value-type
         // and re-validated on every swap. (settings F6 + fix-#14)
         let fgBg = Self.contrastRatio(fg: foreground, bg: background)
-        assert(fgBg >= 3.0,
+        assert(fgBg >= Self.minForegroundContrast,
                "Theme palette foreground/background contrast \(fgBg) < 3:1")
-        assert(cursorBg >= 1.25,
+        assert(cursorBg >= Self.minCursorContrast,
                "Theme palette cursor/background contrast \(cursorBg) < 1.25:1 — cursor is invisible")
         #endif
     }
@@ -117,7 +128,7 @@ public struct ThemePalette: Equatable, Sendable {
     /// ≤ 0.18 is classified dark. Matches what TerminalView was computing
     /// inline.
     public var isDark: Bool {
-        Self.relativeLuminance(background) <= 0.18
+        Self.relativeLuminance(background) <= Self.darkLuminanceThreshold
     }
 
     /// Foreground-to-background contrast ratio of this palette. Call site

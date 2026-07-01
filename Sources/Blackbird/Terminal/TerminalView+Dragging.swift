@@ -105,23 +105,12 @@ extension TerminalView {
         // stay in sync.
         discardCompositionOnResignKey()
 
-        pasteText(Self.joinedDroppedPaths(paths))
+        pasteText(PasteSanitizer.joinedDroppedPaths(paths))
         return true
     }
 
     // MARK: - Pure helpers (unit-tested via DragDropTests)
 
-    /// Wrap a file path in single quotes using the POSIX `'\''` recipe to
-    /// escape any embedded single quote. Single-quoted strings in sh/zsh
-    /// suppress *all* metacharacter interpretation (spaces, `$`, backticks,
-    /// newlines, globs), so this is safe against arbitrary filesystem
-    /// paths including ones that contain quotes.
-    ///
-    /// Exposed as `static` + `internal` so the unit test can exercise the
-    /// pure transform without constructing an NSDraggingInfo fake.
-    static func shellQuote(_ path: String) -> String {
-        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
 
     /// Strip C0 control bytes (0x00–0x1F) and DEL (0x7F) from a dropped
     /// URL's path before passing it to `shellQuote`. CVE-class fix:
@@ -175,7 +164,7 @@ extension TerminalView {
             // command the shell can't resolve. fix-#16 added them on the
             // wrong assumption that "legitimate writers emit only
             // printable ASCII" — false for filenames. The diagnostics
-            // display-scrubber (`DiagnosticsView.stripControlCharacters`)
+            // display-scrubber (`DiagnosticFileLoader.stripControlCharacters`)
             // intentionally still strips VS: it scrubs an untrusted
             // crash-log file purely for safe display, where exact glyph
             // fidelity is not a goal — the opposite trade-off from this
@@ -194,15 +183,6 @@ extension TerminalView {
         })
     }
 
-    /// Join N dropped file paths into a single space-separated,
-    /// shell-quoted string. Matches Terminal.app / iTerm2 behaviour: no
-    /// trailing slash on directories, no trailing newline, no per-file
-    /// prompt. The caller feeds the result through `pasteText(_:)` so the
-    /// active shell sees a normal paste event (bracketed when the program
-    /// has opted in, raw otherwise).
-    static func joinedDroppedPaths(_ paths: [String]) -> String {
-        paths.map(shellQuote).joined(separator: " ")
-    }
 
     /// Cheap check used by `draggingEntered`/`draggingUpdated` so we don't
     /// light up the accent ring for a drag whose payload we'd reject anyway.

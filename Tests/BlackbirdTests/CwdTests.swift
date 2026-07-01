@@ -219,7 +219,7 @@ final class CwdTests: XCTestCase {
     /// `.local`. Pinned with the BFS-on-self check.
     func testClassifyProcessTreeOnSelfReturnsLocal() {
         let me = getpid()
-        let result = PTY.classifyProcessTree(rootPID: me)
+        let result = ForegroundProcessProbe.classify(rootPID: me)
         switch result {
         case .local:
             break  // expected
@@ -274,12 +274,12 @@ final class CwdTests: XCTestCase {
             probe, 0,
             "test setup: proc_pidpath against pid_t.max must signal failure (n <= 0); if your kernel allocates pid_t.max, pick a larger sentinel"
         )
-        let result = PTY.classifyProcessTree(rootPID: sentinelPID)
+        let result = ForegroundProcessProbe.classify(rootPID: sentinelPID)
         switch result {
         case .local:
-            XCTFail("classifyProcessTree on a syscall-failing pid must fail-CLOSED to .unknown, got .local — regression of audit fix-#01")
+            XCTFail("ForegroundProcessProbe.classify on a syscall-failing pid must fail-CLOSED to .unknown, got .local — regression of audit fix-#01")
         case .remote(let basename, _):
-            XCTFail("classifyProcessTree on a syscall-failing pid must not match remote; got .remote(\(basename))")
+            XCTFail("ForegroundProcessProbe.classify on a syscall-failing pid must not match remote; got .remote(\(basename))")
         case .unknown:
             break  // expected
         }
@@ -303,7 +303,7 @@ final class CwdTests: XCTestCase {
                         "docker", "podman", "nerdctl", "kubectl", "lima"]
         for binary in expected {
             XCTAssertTrue(
-                PTY.remoteShellBinaryBasenamesForTests.contains(binary),
+                ForegroundProcessProbe.remoteShellBinaryBasenamesForTests.contains(binary),
                 "remote-binary set must contain '\(binary)' — required for SSH-trust gate"
             )
         }
@@ -314,7 +314,7 @@ final class CwdTests: XCTestCase {
         // during routine local file ops.
         for binary in ["zsh", "bash", "scp", "rsync", "git"] {
             XCTAssertFalse(
-                PTY.remoteShellBinaryBasenamesForTests.contains(binary),
+                ForegroundProcessProbe.remoteShellBinaryBasenamesForTests.contains(binary),
                 "'\(binary)' must NOT be in the remote-binary set — would over-fire the gate"
             )
         }

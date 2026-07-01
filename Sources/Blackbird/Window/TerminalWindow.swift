@@ -15,40 +15,40 @@ final class TerminalWindow: NSWindow {
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "tabs")
 
+    /// Shared body of selectNextTab/selectPreviousTab. Two fall-throughs:
+    ///   1. No tabGroup → standalone window. Returns `true` so the caller
+    ///      defers to AppKit's no-op `super` (plain-NSWindow behaviour).
+    ///   2. Has a tabGroup but the coordinator can't find us in it →
+    ///      reconciliation race during a detach/merge. We must NOT call super
+    ///      here — super cycles against `tabGroup.windows` (arrival order),
+    ///      silently undermining the entire reason this subclass exists — so we
+    ///      log, abort the cycle, and return `false`. The next ⌘⇧] / ⌘⇧[ lands
+    ///      after reconciliation catches up.
+    /// `caller` defaults to the overriding method's name for an accurate log.
+    /// Returns `true` ⇔ the caller should invoke `super`.
+    private func cycle(
+        _ caller: StaticString = #function,
+        toNeighbor neighbor: (NSWindow, NSWindowTabGroup) -> NSWindow?
+    ) -> Bool {
+        guard let group = tabGroup else { return true }
+        guard let target = neighbor(self, group) else {
+            Self.logger.notice("\(caller): coordinator returned nil for a live tabGroup (likely mid-detach); skipping cycle")
+            return false
+        }
+        group.selectedWindow = target
+        target.makeKeyAndOrderFront(nil)
+        return false
+    }
+
     override func selectNextTab(_ sender: Any?) {
-        // Two separate fall-throughs:
-        //   1. No tabGroup → standalone window, defer to AppKit's no-op
-        //      `super.selectNextTab` so behaviour matches a plain
-        //      NSWindow.
-        //   2. Has a tabGroup but the coordinator can't find us in it →
-        //      reconciliation race during a detach/merge transition.
-        //      We must NOT call super in this case: super would cycle
-        //      against `tabGroup.windows` (arrival order), silently
-        //      undermining the entire reason this subclass exists.
-        //      Log and abort the cycle; the next ⌘⇧] press will land
-        //      after reconciliation has caught up.
-        guard let group = tabGroup else {
+        if cycle(toNeighbor: { TabOrderCoordinator.shared.nextWindow(after: $0, in: $1) }) {
             super.selectNextTab(sender)
-            return
         }
-        guard let next = TabOrderCoordinator.shared.nextWindow(after: self, in: group) else {
-            Self.logger.notice("selectNextTab: coordinator returned nil for a live tabGroup (likely mid-detach); skipping cycle")
-            return
-        }
-        group.selectedWindow = next
-        next.makeKeyAndOrderFront(nil)
     }
 
     override func selectPreviousTab(_ sender: Any?) {
-        guard let group = tabGroup else {
+        if cycle(toNeighbor: { TabOrderCoordinator.shared.previousWindow(before: $0, in: $1) }) {
             super.selectPreviousTab(sender)
-            return
         }
-        guard let prev = TabOrderCoordinator.shared.previousWindow(before: self, in: group) else {
-            Self.logger.notice("selectPreviousTab: coordinator returned nil for a live tabGroup (likely mid-detach); skipping cycle")
-            return
-        }
-        group.selectedWindow = prev
-        prev.makeKeyAndOrderFront(nil)
     }
 }

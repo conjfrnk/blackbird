@@ -36,7 +36,7 @@ extension TerminalView {
         // exposes the find bar (and every other subview) so VO can reach
         // them. When the bar is absent, keep the leaf behaviour so VO
         // focus lands on a single "Terminal" element.
-        findBar == nil
+        findController.findBar == nil
     }
 
     public override func accessibilityRole() -> NSAccessibility.Role? {
@@ -58,7 +58,7 @@ extension TerminalView {
         // AppKit ignores `accessibilityChildren()` on a leaf, but returning
         // the default (super) here keeps behaviour symmetric in case a
         // future tool inspects the value directly.
-        guard let bar = findBar else { return super.accessibilityChildren() }
+        guard let bar = findController.findBar else { return super.accessibilityChildren() }
         // Order matters for VO navigation: bar on top visually, every
         // other subview below. Covers drop-highlight / bell flash / scroll
         // indicator in case any of them ever grow accessibility affordances.
@@ -86,13 +86,17 @@ extension TerminalView {
         let computed = source.visibleRowsAsText()
             .map { $0.trimmingTrailingWhitespace() }
             .joined(separator: "\n")
-        a11yCache.snapshotIdentity = identity
-        a11yCache.value = computed
-        // The line-offset table is keyed on `value`; invalidate it whenever
-        // the value changes so the next line-related accessor rebuilds.
-        a11yCache.lineOffsets = nil
-        a11yCache.computations += 1
+        // One mutation point: stamps value + identity and clears the
+        // value-keyed `lineOffsets` (+ bumps the recompute counter) together.
+        a11yCache.store(value: computed, identity: identity)
         return computed
+    }
+
+    /// `accessibilityValue()` coalesced to a `String`. The
+    /// `(accessibilityValue() as? String) ?? ""` cast was repeated across every
+    /// line-math accessor below; one helper here.
+    private func currentA11yValue() -> String {
+        (accessibilityValue() as? String) ?? ""
     }
 
     // MARK: - .textArea accessors (F-S5-021)
@@ -101,7 +105,7 @@ extension TerminalView {
     /// count, since AppKit's a11y API is `NSRange`-based and VO reads
     /// indices in UTF-16 units). Same shape as NSTextView.
     public override func accessibilityNumberOfCharacters() -> Int {
-        let value = (accessibilityValue() as? String) ?? ""
+        let value = currentA11yValue()
         return value.utf16.count
     }
 
@@ -118,7 +122,7 @@ extension TerminalView {
     /// `compactMap { Unicode.Scalar($0) }` shape silently dropped UTF-16
     /// surrogates and corrupted any range crossing an emoji boundary.
     public override func accessibilityString(for range: NSRange) -> String? {
-        let value = (accessibilityValue() as? String) ?? ""
+        let value = currentA11yValue()
         let utf16 = value.utf16
         let count = utf16.count
         guard range.location >= 0, range.length >= 0,
@@ -150,7 +154,7 @@ extension TerminalView {
         // (or to the end of the value, for the last line). Strip the
         // newline from the reported range — VO line readers don't
         // include the separator.
-        let value = (accessibilityValue() as? String) ?? ""
+        let value = currentA11yValue()
         let utf16 = value.utf16
         let endExcludingNewline: Int
         if nextStart > start, nextStart <= utf16.count,
@@ -250,7 +254,7 @@ extension TerminalView {
     /// the cursor actually was.
     private func ensureLineOffsets() -> [Int] {
         if let cached = a11yCache.lineOffsets { return cached }
-        let value = (accessibilityValue() as? String) ?? ""
+        let value = currentA11yValue()
         let utf16 = value.utf16
         var offsets: [Int] = [0]
         var idx = 0
@@ -314,8 +318,7 @@ extension TerminalView {
     func installSnapshotForTests(rows: [String]) {
         a11ySnapshotOverride = A11yFakeSnapshot(rows: rows)
         // New identity ⇒ next accessibilityValue() must recompute.
-        a11yCache.snapshotIdentity = nil
-        a11yCache.lineOffsets = nil
+        a11yCache.invalidate()
     }
 
     /// Reset the one-shot selection-setter log latch so tests can

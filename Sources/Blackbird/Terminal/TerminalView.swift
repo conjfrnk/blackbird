@@ -5,7 +5,8 @@ import Combine
 import Metal
 import MetalKit
 // `os.Logger` is used by `securityLogger` (Release-visible, audit
-// channel) and by the DEBUG-only fpsLogger / keyLogger / hoverLogger.
+// channel) and by the DEBUG-only fpsLogger / keyLogger. (The hover
+// near-miss logger moved to `HoverCoordinator`.)
 // The audit-H1 fix moved security logging out of the DEBUG block, so
 // the import must follow.
 import os
@@ -58,9 +59,8 @@ public struct CellMetrics {
         //      Int can't hold them.
         // Clamp to a sane pixel count first; clamps apply per-axis
         // so a valid axis keeps its real measurement.
-        let sanePx: CGFloat = 1_000_000   // far larger than any real display
-        let w = size.width.isFinite ? min(max(0, size.width), sanePx) : 0
-        let h = size.height.isFinite ? min(max(0, size.height), sanePx) : 0
+        let w = size.width.sanitizedPixel   // see `CGFloat.sanitizedPixel`
+        let h = size.height.sanitizedPixel
         let cols = max(1, Int(w / cellWidth))
         let rows = max(1, Int(h / cellHeight))
         return (cols, rows)
@@ -126,37 +126,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // next `accessibilityValue()` call would build offsets
             // against the OLD value and cache them under whatever
             // identity gets stamped next.
-            a11yCache.snapshotIdentity = nil
-            a11yCache.lineOffsets = nil
-            // Find-match coordinates are relative to the buffer at the
-            // time performSearch ran. Any snapshot swap may have scrolled
-            // history, wrapped lines, or overwritten matched rows; rerun
-            // the search against the fresh grid so ⌘G cycles live hits
-            // instead of ghost rows. Debounce via the displaylink so a
-            // burst of snapshots collapses to one re-scan. Audit
-            // findbar-selection F11.
-            if findBar != nil, !findQuery.isEmpty {
-                scheduleFindRefresh()
-            }
+            a11yCache.invalidate()
+            // Find-match coordinates are relative to the buffer at the time
+            // performSearch ran. Any snapshot swap may have scrolled history,
+            // wrapped lines, or overwritten matched rows; the controller reruns
+            // the search against the fresh grid (debounced) so ⌘G cycles live
+            // hits instead of ghost rows. Audit findbar-selection F11.
+            findController.snapshotDidChange()
         }
     }
 
-    /// Track that a find-refresh is pending so concurrent snapshot bursts
-    /// collapse to one main-queue dispatch.
-    private var findRefreshPending: Bool = false
-
-    private func scheduleFindRefresh() {
-        guard !findRefreshPending else { return }
-        findRefreshPending = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.findRefreshPending = false
-            // Query could have been cleared by the time the dispatch fires
-            // (FindBar closed, user cleared the field). Early-return then.
-            guard !self.findQuery.isEmpty, self.findBar != nil else { return }
-            self.performSearch(query: self.findQuery)
-        }
-    }
     /// Optional test-only override that feeds the NSAccessibility value
     /// path without a real `BBTerm`. Production never sets this — the live
     /// render path uses `currentSnapshot`. Visibility relaxed from
@@ -182,60 +161,36 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// match what the click path actually dispatched.
     var urlOpener: URLOpener = DefaultURLOpener()
 
-    // MARK: - Hover state (OSC 8 dwell tooltip + hover underline)
+    // MARK: - Hover (OSC 8 dwell tooltip + ⌘-held URL highlight)
 
-    /// Buffer row under the cursor on the last `mouseMoved` delivery, used
-    /// to cancel the dwell timer as soon as the pointer leaves the current
-    /// cell. `nil` means the pointer is outside the grid.
-    var lastHoverCell: (row: Int, col: Int)?       // internal for TerminalView+Hover.swift
-    /// Link id under the pointer right now, or 0 when the hovered cell has
-    /// no OSC 8 attribution. The renderer reads this each frame to draw
-    /// the accent underline on every cell sharing the id.
-    var hoveredLinkID: UInt32 = 0                 // internal for TerminalView+Hover.swift
+    /// Owns all hover state + the OSC 8 / ⌘-regex highlighting engine (was the
+    /// `lastHoverCell` / `hoveredLinkID` / `cmdModifierHeld` / `cmdHoverURLMatch`
+    /// / `cachedURLMatches*` / `hoverTooltipItem` fields here + the logic in
+    /// `TerminalView+Hover.swift`). The NSResponder overrides in `+Hover`
+    /// forward to it; `+Services` (Look Up) and the draw path read
+    /// `hoverCoordinator.hoveredLinkID` across the file boundary. `lazy` because
+    /// it needs `self`; its back-reference to the view is `unowned` (no cycle).
+    lazy var hoverCoordinator = HoverCoordinator(view: self)
 
-    /// Latched ⌘-modifier state. Updated via `flagsChanged`, reconciled
-    /// against `NSEvent.modifierFlags` on every `mouseMoved` (so a key
-    /// release missed during a focus switch is caught on the next
-    /// mouse movement), and force-cleared on `didResignKeyNotification`
-    /// so a stale "⌘ held" can't survive a tab or window switch.
-    var cmdModifierHeld: Bool = false             // internal for TerminalView+Hover.swift
-
-    /// While ⌘ is held and the pointer rests on a regex-detected URL,
-    /// this holds the match so `clearHover`, the cursor updater, and
-    /// the renderer can coordinate without re-running the scan. Cleared
-    /// when ⌘ releases, the pointer leaves the match, or the view loses
-    /// focus.
-    var cmdHoverURLMatch: URLMatch?               // internal for TerminalView+Hover.swift
-
-    /// Lazily computed URL match list for the current snapshot. Rebuilt
-    /// only when `snapshot.sequenceID` changes so trackpad-cadence
-    /// `mouseMoved` with ⌘ held costs O(1) lookups, not an O(rows × cols)
-    /// scan per move. Audit cwd-hyperlink F7.
-    ///
-    /// `cachedURLMatchesSeq` is `Optional<UInt64>` rather than a `0`
-    /// sentinel: "never scanned" and "scanned at seq 0" would otherwise
-    /// compare equal and skip a legitimate scan. Sequence ids are
-    /// PER-SESSION since audit S6-003 (each BBTerm numbers its own
-    /// snapshots from 1), so this cache must be reset when the view is
-    /// bound to a session — two sessions' ids can legitimately collide.
-    var cachedURLMatches: [URLMatch] = []         // internal for TerminalView+Hover.swift
-    var cachedURLMatchesSeq: UInt64?              // internal for TerminalView+Hover.swift
     /// Trackpad pinch gesture accumulator. Magnification events deliver
     /// fractional deltas; we wait until the running sum crosses ±0.15
     /// before bumping `Preferences.shared.fontSize`. Without the accumulator
     /// a single flick would fire dozens of font-size changes and fly past
     /// the intended zoom level.
     private var pinchAccumulator: CGFloat = 0
-    /// Scheduled tooltip reveal. Cancelled on pointer movement, scroll,
-    /// keydown, or view teardown.
-    var hoverTooltipItem: DispatchWorkItem?       // internal for TerminalView+Hover.swift
-    /// Lightweight panel that shows the resolved URL after the 500 ms dwell.
-    /// Kept around between shows so repeated hovers don't thrash NSPanel
-    /// allocation; hidden when not in use.
-    var hoverTooltipPanel: NSPanel?               // internal for TerminalView+Hover.swift
-    var hoverTooltipLabel: NSTextField?           // internal for TerminalView+Hover.swift
+    /// Owns the lightweight URL-preview panel shown after the 500 ms dwell. The
+    /// panel + label live here (private); the hover coordinator scrubs the href
+    /// and hands the controller a safe string.
+    let tooltipController = TooltipController()
+    /// Scheduled tooltip reveal. Owned here (not on `hoverCoordinator`) because
+    /// the view's lifecycle teardown — `viewWillMove(toWindow:)` and `deinit` —
+    /// cancels it directly; reaching through the coordinator's `unowned view`
+    /// back-ref during the view's OWN deinit traps. The coordinator
+    /// schedules/cancels it via `view.hoverTooltipItem` during normal
+    /// (view-alive) operation.
+    var hoverTooltipItem: DispatchWorkItem?
     /// Tracking area that delivers `mouseMoved` / `mouseExited`. Rebuilt on
-    /// bounds changes via `updateTrackingAreas`.
+    /// bounds changes via `updateTrackingAreas` (which stays on the view).
     var hoverTrackingArea: NSTrackingArea?        // internal for TerminalView+Hover.swift
 
     /// Paired coordinate used by DEC 1003 any-event mouse tracking to
@@ -247,17 +202,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     struct BBXYPoint: Equatable { let col: Int; let row: Int }
     var lastReportedMotionCell: BBXYPoint?
 
-    /// ⌘ + right-drag resizes the window from the nearest corner. The
-    /// types + stored property live here (not on the mouse extension)
-    /// because Swift disallows stored properties on extensions. The
-    /// mouse extension references these by name only.
-    enum ResizeCorner { case topLeft, topRight, bottomLeft, bottomRight }
-    struct ResizeContext {
-        let corner: ResizeCorner
-        let startMouseGlobal: CGPoint
-        let startFrame: CGRect
-    }
-    var resizeContext: ResizeContext?
+    /// ⌘ + right-drag resizes the window from the nearest corner. The gesture
+    /// state + frame math live in their own `WindowResizeController` (the
+    /// corner context is `private` there, not an `internal` view field); the
+    /// mouse extension drives it.
+    let windowResizeController = WindowResizeController()
 
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
@@ -288,35 +237,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// snapshot. Lets `testFirstRectReturnsCursorCellRect` pin a specific
     /// (row, col) without feeding the full BBTerm state machine.
     var cursorOverrideForTests: (row: Int, col: Int)?
-    /// Optional byte-capture closure for the replace path. When set,
-    /// `sendReplacement` appends bytes here instead of calling `session.send`.
-    /// Lets integration tests assert the exact DEL×N + replacement byte
-    /// sequence without a real PTY.
-    var replaceByteCapture: ((Data) -> Void)?
     /// Optional capture closure for `pasteText(_:)`. Fires with the pre-
     /// encoding string the paste pipeline received, before CRLF /
     /// control / bracketed-paste sanitisation. Used by `DragDropTests`
     /// to assert that the drop integration produces the right shell-
     /// quoted command-line — the sanitisers have their own coverage.
+    /// (The replace-path test seams moved to `FindController`.)
     var pasteTextRecorderForTests: ((String) -> Void)?
-    /// Test-only snapshot override for the replace path. When set, replace
-    /// helpers read cursor position from this value instead of `currentSnapshot`.
-    var replaceSnapshotForTests: BBSnapshot?
-    /// Test-only find-matches override for the replace path.
-    var replaceFindMatchesForTests: [(line: Int32, startCol: Int, endCol: Int)]?
     #endif
 
-    private final class FlashView: NSView {
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-    private let bellFlashView: FlashView = {
-        let v = FlashView(frame: .zero)
-        v.wantsLayer = true
-        v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.25).cgColor
-        v.alphaValue = 0
-        return v
-    }()
-    private var lastBellCounter: UInt64 = 0
+    /// Owns the terminal bell — the visual flash overlay (driven by
+    /// `session.$bellCounter`) and the audible no-op beep. Self-contained;
+    /// `attach(to:)` installs its overlay from `init`.
+    let bellController = BellController()
 
     // Public read; writer is `internal` so the hover extension's
     // `expandSelectionUnderAnchor()` and the mouse-selection path on
@@ -330,72 +263,35 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             if oldValue != selection { setNeedsDisplay(bounds) }
         }
     }
-    var isDragging = false                        // internal for TerminalView+Mouse.swift
-    /// The fully-resolved word (start, end) selected by the initiating
-    /// double-click, captured ONCE in `mouseDown` for `.word` mode while
-    /// the anchor is guaranteed on-screen. Word-drag extension unions THIS
-    /// fixed range with the word under the live cursor. Capturing the
-    /// resolved range (rather than re-running `wordRange` on a stored point
-    /// every tick) is deliberate: an autoscroll drag can push the anchor
-    /// off the viewport, where `wordRange` returns nil — re-resolving there
-    /// would collapse the original word to a single cell. Storing the
-    /// resolved range makes that failure mode unrepresentable. Cleared /
-    /// re-captured on every fresh mouseDown. Internal for
-    /// TerminalView+Mouse.swift. Audit double-click-drag word-extend.
-    var wordDragAnchorWord: (BufferPoint, BufferPoint)?  // internal for TerminalView+Mouse.swift
 
-    /// Repeating timer that drives edge-autoscroll while the user is
-    /// dragging a selection past the top/bottom of the viewport. AppKit
-    /// only delivers `mouseDragged` on pointer motion, so a user who
-    /// holds the pointer stationary past the edge would otherwise see
-    /// the autoscroll stall (the selection can't grow into scrollback
-    /// rows that are off-screen). Fires at a modest ~60 Hz cadence so
-    /// short-duration holds don't feel jittery. Audit terminal-view-2
-    /// F2.
-    var selectionAutoscrollTimer: Timer?          // internal for TerminalView+Mouse.swift
-    /// Latest scroll direction the autoscroll timer is running with: +1
-    /// for "reveal older rows" (drag past the top), -1 for "reveal
-    /// newer rows" (drag past the bottom). Stored so the timer fires
-    /// can replay the same direction without recomputing on each tick.
-    var selectionAutoscrollDirection: Int32 = 0   // internal for TerminalView+Mouse.swift
+    /// Owns the mouse-driven selection gesture machine — the drag state
+    /// (`isDragging`, the `.word`-drag anchor) + the click/drag/word-line-extend
+    /// logic that was in `TerminalView+Mouse.swift`. The view's mouse overrides
+    /// forward their select branch here (`beginSelection`/`endDrag`/`handleDrag`)
+    /// AFTER the URL-open / window-drag / mouse-reporting early returns; the
+    /// snapshot-reconcile path reads/writes `selectionController.wordDragAnchorWord`.
+    /// The `selection` property stays on the view (public API, drawn, a render
+    /// parameter). `lazy` because it needs `self`; back-ref is `unowned`.
+    lazy var selectionController = SelectionController(view: self)
 
-    // `internal` (no modifier) so `TerminalView+Accessibility.swift`'s
-    // `isAccessibilityElement` / `accessibilityChildren` can test for
-    // its presence across the file boundary. Only `installFindBar()`
-    // and the FindBarDelegate close/open path mutate it.
-    var findBar: FindBar?
-    var findMatches: [(line: Int32, startCol: Int, endCol: Int)] = []   // internal for TerminalView+Find.swift
-    var findCurrentIndex: Int = 0                                       // internal for TerminalView+Find.swift
-    var findQuery: String = ""                                          // internal for TerminalView+Find.swift
-    /// `BBSnapshot.sequenceID` of the snapshot `findMatches` was scanned
-    /// against. `nil` when no scan has run yet (or the cache was just
-    /// cleared). Used by `advanceFind` / `highlightCurrentMatch` to
-    /// detect that output arrived between `performSearch` and the user
-    /// pressing ⌘G — in that case the stored (line, col) tuples may
-    /// reference cells that now hold different text, so we re-run
-    /// `performSearch` against the live snapshot before advancing.
-    /// Same `Optional<UInt64>` shape as `cachedURLMatchesSeq` (above) so
-    /// "never scanned" and "scanned at seq 0" don't collide. Audit
-    /// findbar-selection F11.
-    var findMatchesSeq: UInt64?                                         // internal for TerminalView+Find.swift
-    /// Monotonic ID assigned to each background regex scan. The latest
-    /// scan's ID is `activeRegexSearchID`; when a scan publishes
-    /// results, it sets `regexSearchCompletedID = mySearchID` so the
-    /// 250 ms timeout sibling task knows whether to fire its
-    /// "regex too complex" banner. All three fields are touched only
-    /// on the main thread (see TerminalView+Find.swift).
-    /// Audit findbar-selection F2.
-    var regexSearchIDCounter: UInt64 = 0
-    var activeRegexSearchID: UInt64 = 0
-    var regexSearchCompletedID: UInt64 = 0
-    /// Set when ⌘G / ⌘⇧G is pressed while a regex stale-rescan is in flight
-    /// (the rescan clears findMatches and repopulates asynchronously). The
-    /// scan's main-thread publish honours this instead of resetting to match
-    /// 1, so the cycle isn't swallowed and the user's position is preserved.
-    /// `anchor` is the (line, startCol) of the match the user was on before
-    /// the rescan, used to resume from the equivalent position. Audit
-    /// findbar-selection: regex ⌘G swallow + reset.
-    var pendingRegexAdvance: (direction: FindBar.Direction, anchor: (line: Int32, startCol: Int)?)?
+    /// Drives edge-autoscroll while the user drags a selection past the
+    /// top/bottom of the viewport. AppKit only delivers `mouseDragged` on
+    /// pointer motion, so a user holding the pointer stationary past the edge
+    /// would otherwise see the autoscroll stall (the selection can't grow into
+    /// off-screen scrollback rows). Owns the timer + direction so they're
+    /// mutated in one place rather than as two more `internal` view fields;
+    /// the +Mouse path drives it via `update(direction:tick:)`. Audit
+    /// terminal-view-2 F2.
+    let selectionAutoscroller = SelectionAutoscroller()
+
+    /// Owns all find-bar state (was the `find*` fields here) + the
+    /// search/cycle/regex engine (was `TerminalView+Find.swift`). The view
+    /// forwards ⌘F / ⌘G / the ⌘⌥C/⌘⌥R option toggles and its `FindBarDelegate`
+    /// conformance here; `TerminalView+Accessibility` / `+ContextMenu` and the
+    /// Replace helpers below read `findController.findBar` / `.findMatches`
+    /// across the file boundary. `lazy` because it needs `self`; the
+    /// controller's back-reference to the view is `unowned`, so no retain cycle.
+    lazy var findController = FindController(view: self)
 
     /// True while an active drag with file URLs is hovering the view. Drives
     /// the accent-coloured drop-target ring. Set by the NSDraggingDestination
@@ -445,12 +341,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// keeps the keystroke trail visible in Console.
     private static let keyLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                           category: "keyboard")
-    /// Diagnostic channel for the hover/cmd-URL-highlight path. Used only
-    /// to log near-misses (cache populated, match lookup returned nil) so
-    /// a column-mapping or wrap-join regression is discoverable via
-    /// `log stream --predicate 'category == "hover"'`. Off the hot path.
-    static let hoverLogger = Logger(subsystem: "dev.conjfrnk.blackbird",  // internal for TerminalView+Hover.swift
-                                                category: "hover")
     #endif
 
     /// Production-visible channel for security-relevant decisions —
@@ -574,9 +464,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // the bottom inset shared with the grid.
         addSubview(scrollIndicator)
 
-        bellFlashView.frame = bounds
-        bellFlashView.autoresizingMask = [.width, .height]
-        addSubview(bellFlashView)
+        bellController.attach(to: self)
 
         // Drop-target ring sits on top of the bell flash so a dropped file
         // feedback never gets visually swamped by a simultaneous ^G bell.
@@ -855,10 +743,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         guard cw > 0, ch > 0 else { return (0, 0) }
         // Mirror `Selection.bufferPoint(forView:…)`'s defensive clamp so a
         // stray Core Animation NaN or a misbehaving input device can't
-        // crash the app at `Int(NaN)` / `Int(±Inf)`. Same `sanePx` ceiling.
-        let sanePx: CGFloat = 1_000_000
-        let safeX = point.x.isFinite ? min(max(0, point.x), sanePx) : 0
-        let safeY = point.y.isFinite ? min(max(0, point.y), sanePx) : 0
+        // crash the app at `Int(NaN)` / `Int(±Inf)`. Same `CGFloat.sanePx`
+        // ceiling (see `CGFloat.sanitizedPixel`).
+        let safeX = point.x.sanitizedPixel
+        let safeY = point.y.sanitizedPixel
         let xInGrid = safeX - Self.horizontalContentInsetPoints
         let yInGrid = safeY - titlebarOnlyTopInset
         let rawCol = Int(max(0, xInGrid) / cw)
@@ -898,7 +786,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         )
         let grid = metrics.grid(forPixelSize: usable)
         guard grid.cols > 0, grid.rows > 0 else { return }
-        // `grid` is bounded by CellMetrics.sanePx (1M px / min cell size),
+        // `grid` is bounded by CGFloat.sanePx (1M px / min cell size),
         // so in theory cols/rows can exceed UInt16.max on a degenerate
         // combination (1×1 cell on a 1 Mpx viewport). `clamping:` avoids
         // the trap; TerminalSession.resize clamps again to ≤1000 so the
@@ -1048,76 +936,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         //    Picked "was-non-zero, now-zero" rather than "shrank" so a
         //    natural scrollback eviction (history wraps at the cap) — which
         //    keeps history positive — doesn't drop a live selection.
-        if selection != nil, let prev = currentSnapshot {
-            let colsChanged = prev.cols != snapshot.cols
-            let altScreenChanged = prev.termMode.contains(.altScreen)
-                != snapshot.termMode.contains(.altScreen)
-            let historyCollapsed = prev.historySize > 0 && snapshot.historySize == 0
-            if colsChanged || altScreenChanged || historyCollapsed {
-                selection = nil
-            } else if prev.rows == snapshot.rows,
-                      snapshot.linesScrolled > prev.linesScrolled, var sel = selection {
-                // rows-equal gate: vertical resize moves content through
-                // grow/shrink paths that ALSO bump linesScrolled (the
-                // counter's documented any-resize caveat) — rotating on
-                // that delta would shift a selection the row-only-resize
-                // contract (Bug #14) promises to preserve. Row-only
-                // resizes therefore keep the selection unrotated, same
-                // as before this fix; only genuine output flow (rows
-                // unchanged) rotates.
-                // Audit S5-005: keep the selection GLUED TO ITS CONTENT
-                // when output scrolls. Selection endpoints are
-                // grid-relative (line 0 = top of the live grid); every
-                // scrolled line moves the selected text one row up, and
-                // the vendored core rotates only its own internal
-                // selection — never this one. Without compensation the
-                // highlight visibly slid onto different text and ⌘C
-                // copied whatever now occupied the stale coordinates
-                // instead of what the user selected. Rotate both
-                // endpoints by the snapshot-to-snapshot lines-scrolled
-                // delta (the S5-004 counter — exact even after
-                // scrollback saturates); drop the selection once any
-                // endpoint scrolls past retention (its content is gone).
-                // Mid-drag this is still correct: the anchor tracks its
-                // content and the next mouseDragged recomputes the
-                // cursor endpoint from the pointer anyway.
-                let delta = Int64(snapshot.linesScrolled - prev.linesScrolled)
-                let anchorLine = Int64(sel.anchor.line) - delta
-                let cursorLine = Int64(sel.cursor.line) - delta
-                let retentionFloor = -Int64(snapshot.historySize)
-                if min(anchorLine, cursorLine) < retentionFloor {
-                    selection = nil
-                    // The drag's content scrolled out with the selection; drop
-                    // the stored .word drag anchor too so a resumed drag can't
-                    // re-pin to vacated coordinates.
-                    wordDragAnchorWord = nil
-                } else {
-                    sel.anchor.line = Int32(clamping: anchorLine)
-                    sel.cursor.line = Int32(clamping: cursorLine)
-                    selection = sel
-                    // Rotate the stored .word drag anchor by the SAME delta.
-                    // A double-click-drag selection unions this anchor word
-                    // (captured once at mouseDown, in buffer-line coordinates)
-                    // with the word under the live cursor. S5-005 rotated
-                    // sel.anchor/cursor but NOT this tuple, so after output
-                    // scrolled the next mouseDragged re-pinned sel.anchor to the
-                    // word's OLD line — detaching the highlight from the
-                    // double-clicked word and copying the wrong span. Keep them
-                    // in lockstep; drop if it scrolls past retention (the drag
-                    // path falls back to sel.anchor when this is nil).
-                    if var anchorWord = wordDragAnchorWord {
-                        let w0 = Int64(anchorWord.0.line) - delta
-                        let w1 = Int64(anchorWord.1.line) - delta
-                        if min(w0, w1) < retentionFloor {
-                            wordDragAnchorWord = nil
-                        } else {
-                            anchorWord.0.line = Int32(clamping: w0)
-                            anchorWord.1.line = Int32(clamping: w1)
-                            wordDragAnchorWord = anchorWord
-                        }
-                    }
-                }
-            }
+        // Bugs #14/#15/H-6/S5-005: reconcile the active selection (and its word-
+        // drag anchor) against the cells the new snapshot moved/deleted. Pure;
+        // exercised on snapshot pairs in SelectionReconciler. Gated on a prior
+        // snapshot so the first render (selection still nil) doesn't misfire.
+        if let sel = selection, let prev = currentSnapshot {
+            let result = SelectionReconciler.reconciled(
+                selection: sel,
+                wordDragAnchor: selectionController.wordDragAnchorWord,
+                prev: prev,
+                next: snapshot
+            )
+            // `selection`'s didSet has a same-value guard, so re-assigning an
+            // unchanged value is a no-op (no spurious setNeedsDisplay).
+            selection = result.selection
+            selectionController.wordDragAnchorWord = result.wordDragAnchor
         }
         self.currentSnapshot = snapshot
         // If ⌘ is held while the grid reshapes under the pointer (scrolling
@@ -1128,8 +961,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // painting the previous URL's range even though the URL itself
         // scrolled away. Gated on `cmdModifierHeld` so the scan cache
         // stays cold when the feature isn't engaged.
-        if cmdModifierHeld {
-            reevaluateCmdHoverHighlight()
+        if hoverCoordinator.cmdModifierHeld {
+            hoverCoordinator.reevaluateCmdHoverHighlight()
         }
         // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.
         // Scroll indicator consumes the same snapshot — keep it in lockstep
@@ -1193,18 +1026,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // panel is parented to the current window; leaving it up across a
         // reparent lands it at stale coordinates (and, if the old window
         // is being torn down, against a freed NSWindow). Audit
-        // terminal-view-2 F19.
+        // terminal-view-2 F19. Touch the view's own `hoverTooltipItem` +
+        // `tooltipController` directly (not via `hoverCoordinator`) — this is a
+        // view-lifecycle teardown and the panel dismiss must not depend on the
+        // coordinator's `unowned view` back-ref.
         hoverTooltipItem?.cancel()
         hoverTooltipItem = nil
-        hoverTooltipPanel?.orderOut(nil)
+        tooltipController.dismiss()
         // M-7 / RW-04: also kill the selection autoscroll timer. `deinit`
         // already invalidates it (terminal-view-2 F2), but tab tear-out
         // moves the view between windows WITHOUT calling deinit. Between
         // `viewWillMove` and `viewDidMoveToWindow` `self.window` is nil;
         // an active timer firing in that gap would call
         // `session?.scroll(delta:)` against stale window coordinates.
-        selectionAutoscrollTimer?.invalidate()
-        selectionAutoscrollTimer = nil
+        selectionAutoscroller.stop()
     }
 
     public override func viewDidMoveToWindow() {
@@ -1256,7 +1091,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // Re-evaluation itself is deferred to the next mouseMoved:
             // we don't know the pointer's current cell on the new tab
             // until it reports in.
-            self?.syncCmdModifierHeld(fromEventFlags: NSEvent.modifierFlags)
+            self?.hoverCoordinator.syncCmdModifierHeld(fromEventFlags: NSEvent.modifierFlags)
         })
         focusObservers.append(center.addObserver(
             forName: NSWindow.didResignKeyNotification,
@@ -1277,7 +1112,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // doesn't leave a stale ⌘-hover highlight painted into the
             // next focus cycle. mouseMoved will sync back as soon as the
             // pointer moves over the view again.
-            self?.resetModifierAndHoverState()
+            self?.hoverCoordinator.resetModifierAndHoverState()
         })
         #if DEBUG
         // Window-attach logging (above) fires once per view⇄window pairing,
@@ -1418,15 +1253,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         // Tear down any pending hover tooltip. The DispatchWorkItem
         // captures self weakly so it won't crash on late fire, but the
-        // panel would otherwise linger briefly after the view is gone.
+        // panel would otherwise linger briefly after the view is gone. Touch
+        // the view's own fields directly — `deinit` must not read the
+        // coordinator's `unowned view` back-ref (it traps mid-deinit).
         hoverTooltipItem?.cancel()
-        hoverTooltipPanel?.orderOut(nil)
-        // Selection-autoscroll timer, if the user torn the view down
-        // mid-drag (rare but possible on app quit). Invalidate directly
-        // rather than via the nil-checking helper so we don't swallow
-        // the intent in the unlikely case the property access races
-        // the deinit. Audit terminal-view-2 F2.
-        selectionAutoscrollTimer?.invalidate()
+        tooltipController.dismiss()
+        // Selection-autoscroll timer, if the user tore the view down
+        // mid-drag (rare but possible on app quit). `selectionAutoscroller`
+        // is a stored `let`, so reaching it in deinit can't race a property
+        // teardown. Audit terminal-view-2 F2.
+        selectionAutoscroller.stop()
         // Release our EnableSecureEventInput refcount if the window
         // closed while still key. Without this pair, secure-input mode
         // leaks system-wide until the next reboot.
@@ -1551,7 +1387,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // snapshot API returns u32 to leave room for future expansion —
         // truncation here is safe because the FFI only ever returns ids
         // that originated as u16.
-        renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoveredLinkID))
+        renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoverCoordinator.hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
         // Any frame after a keystroke counts as "the keystroke landed on
         // screen" for probe purposes. The renderer can short-circuit
@@ -1622,7 +1458,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // (counter=1) always flashes, even if a prior session's counter
         // had grown past 0. Only matters if the view ever reuses sessions;
         // still belt-and-braces.
-        lastBellCounter = 0
+        bellController.resetCounter()
         // Clear the stale snapshot + find-match state BEFORE returning on
         // a nil session — otherwise the previous session's grid lingers
         // on screen (rendered from `currentSnapshot`) after `view.session =
@@ -1630,17 +1466,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // terminal-view-1 F5.
         guard let session else {
             currentSnapshot = nil
-            findMatches.removeAll()
-            findMatchesSeq = nil
+            findController.findMatches.removeAll()
+            findController.findMatchesSeq = nil
             // Per-session sequence ids (audit S6-003) can collide across
             // sessions, so the URL-hover cache key must be cleared on any
             // rebind — global uniqueness no longer invalidates it for
             // free (F-S5-018 follow-up). `!=`-gated, so over-clearing is
             // harmless.
-            cachedURLMatches = []
-            cachedURLMatchesSeq = nil
-            findCurrentIndex = 0
-            findQuery = ""
+            hoverCoordinator.invalidateURLMatchCache()
+            findController.findCurrentIndex = 0
+            findController.findQuery = ""
             setNeedsDisplay(bounds)
             return
         }
@@ -1661,9 +1496,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // new session's numbering — clear the seq-keyed caches so a
         // stale URL-match set can't survive the swap (F-S5-018
         // follow-up). `!=`-gated consumers make over-clearing harmless.
-        cachedURLMatches = []
-        cachedURLMatchesSeq = nil
-        findMatchesSeq = nil
+        hoverCoordinator.invalidateURLMatchCache()
+        findController.findMatchesSeq = nil
 
         session.$snapshot
             .receive(on: DispatchQueue.main)
@@ -1673,7 +1507,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
             .store(in: &cancellables)
 
-        session.$title
+        session.titleState.$title
             .receive(on: DispatchQueue.main)
             .sink { [weak self] title in
                 guard let self else { return }
@@ -1691,54 +1525,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         session.$bellCounter
             .receive(on: DispatchQueue.main)
             .sink { [weak self] counter in
-                guard let self else { return }
-                guard counter > self.lastBellCounter else { return }
-                self.lastBellCounter = counter
-                self.flashBell()
+                self?.bellController.handleBellCounter(counter)
             }
             .store(in: &cancellables)
     }
 
-    private func flashBell() {
-        guard Preferences.shared.bell == .visual else { return }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.08
-            bellFlashView.animator().alphaValue = 1.0
-        } completionHandler: { [weak self] in
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.12
-                self?.bellFlashView.animator().alphaValue = 0
-            }
-        }
-    }
-
     // MARK: - Input
-
-    /// True when an Option+key event should bypass the IME and be encoded as a
-    /// Meta chord (ESC + base char) rather than composed as a dead-key / accent.
-    /// In "Use Option as Meta" mode, Option becomes the Meta modifier, so
-    /// Option+e must emit ESC 'e' rather than start a "´" dead-key composition
-    /// (and Option+a must emit ESC 'a' rather than insert "å"). Excludes
-    /// Ctrl/⌘ chords (Ctrl+Option is handled by the encoder's Meta-prefix path;
-    /// ⌘ is a menu/app shortcut). Native-Option mode (`optionIsMeta == false`)
-    /// always returns false so dead-key composition is preserved. Extracted as
-    /// a pure function so the decision is unit-testable without a live input
-    /// context (the `keyDown` IME path can't be driven headlessly).
-    static func isOptionMetaChord(
-        optionIsMeta: Bool,
-        modifierFlags: NSEvent.ModifierFlags
-    ) -> Bool {
-        optionIsMeta
-            && modifierFlags.contains(.option)
-            && !modifierFlags.contains(.control)
-            && !modifierFlags.contains(.command)
-    }
 
     public override func keyDown(with event: NSEvent) {
         // Typing dismisses any dwell-tooltip the pointer might be about
         // to reveal — otherwise a hovered URL tooltip would obscure the
         // user's own output as it scrolls past.
-        cancelHoverTooltip()
+        hoverCoordinator.cancelHoverTooltip()
         #if DEBUG
         let keyCode = event.keyCode
         let modBits = UInt(event.modifierFlags.rawValue)
@@ -1784,111 +1582,116 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             session.scrollToBottom()
         }
 
-        // Hand the event to the IME first. If macOS's input context is in
-        // the middle of a composition (Japanese kana → kanji, Korean
-        // combining jamo, Option-E dead key → ´) it'll call back into this
-        // view's NSTextInputClient methods (setMarkedText / insertText /
-        // unmarkText). Two outcomes we need to distinguish afterwards:
-        //
-        //   - Still composing (preedit visible): `hasMarkedText()` is true.
-        //     The keystroke has been absorbed; do NOT also encode it.
-        //
-        //   - Committed a grapheme during this event: `insertText` ran and
-        //     emitted bytes via `sendToSession`. `didInsertTextViaIME` is
-        //     the flag that records this. Falling through to the encoder
-        //     would double-write the character.
-        //
-        //   - IME did nothing: the flag stays false and `hasMarkedText`
-        //     stays false. Fall through to the existing encoder path.
+        // IME arbitration first; if the composition absorbed the keystroke
+        // (preedit visible or a grapheme committed via insertText) we're done.
+        if routeKeyDownThroughIME(event) { return }
+
+        // Control-byte fast path (Ctrl+letter → raw 0x01-0x1A); returns true
+        // when it wrote the byte directly, false to fall through to the encoder.
+        if sendControlFastPath(event, session: session) { return }
+
+        // Special-key / printable encoding + protocol framing.
+        encodeAndSendKey(event)
+    }
+
+    /// Hand the keystroke to macOS's input context FIRST. If the IME is mid-
+    /// composition (Japanese kana → kanji, Korean combining jamo, Option-E dead
+    /// key → ´) it calls back into our `NSTextInputClient` methods
+    /// (setMarkedText / insertText / unmarkText). Returns `true` when the
+    /// keystroke was ABSORBED — either still composing (`hasMarkedText()`) or a
+    /// grapheme committed during this event (`didInsertTextViaIME`, set by
+    /// `insertText`) — so `keyDown` must NOT also encode it (double-write).
+    /// Returns `false` when the IME did nothing; the caller falls through to the
+    /// encoder.
+    ///
+    /// "Use Option as Meta" means an Option+key chord is a Meta keystroke (ESC +
+    /// base char), NOT dead-key / accent composition. Bypass the IME for that
+    /// chord so Option+e sends ESC 'e' instead of starting a "´" dead-key
+    /// preedit, and Option+a sends ESC 'a' instead of inserting "å" — otherwise
+    /// handleEvent's setMarkedText/insertText consumes the event and the
+    /// encoder's Meta path is never reached, breaking M-e/M-i/M-u/M-n and every
+    /// other Option+letter in Meta mode. Matches Terminal.app / iTerm2. Ctrl/⌘
+    /// chords and non-Option input (CJK/Korean IME) keep the normal IME path.
+    private func routeKeyDownThroughIME(_ event: NSEvent) -> Bool {
         didInsertTextViaIME = false
-        // "Use Option as Meta" means an Option+key chord is a Meta keystroke
-        // (ESC + base char), NOT dead-key / accent composition. Bypass the
-        // IME for that chord so Option+e sends ESC 'e' instead of starting a
-        // "´" dead-key preedit, and Option+a sends ESC 'a' instead of
-        // inserting "å". Without this, handleEvent's setMarkedText/insertText
-        // consumes the event and the encoder's Meta path is never reached —
-        // breaking M-e/M-i/M-u/M-n and every other Option+letter in Meta mode.
-        // Matches Terminal.app / iTerm2, which disable Option composition when
-        // Option-as-Meta is on. Ctrl/⌘ chords and non-Option input (CJK/Korean
-        // IME) keep the normal IME path.
-        let optionMetaChord = Self.isOptionMetaChord(
+        let optionMetaChord = KeyEventClassifier.isOptionMetaChord(
             optionIsMeta: encoder.optionIsMeta,
             modifierFlags: event.modifierFlags
         )
         if !optionMetaChord {
             inputContext?.handleEvent(event)
         }
-        if hasMarkedText() || didInsertTextViaIME { return }
+        return hasMarkedText() || didInsertTextViaIME
+    }
 
-        // Fast path for control characters: macOS translates Ctrl+letter into
-        // the corresponding control byte (0x01-0x1A) in event.characters.
-        // Send that byte directly to the PTY without round-tripping through
-        // the encoder. This is the most reliable path for Ctrl+C (0x03),
-        // Ctrl+D (0x04), Ctrl+Z (0x1A), etc.
-        //
-        // When the TUI has enabled kitty's disambiguate-escape-codes flag, the
-        // four aliasing letters (Ctrl+i, Ctrl+m, Ctrl+[, Ctrl+h) must NOT take
-        // the fast path — they need to become `CSI <cp>;5u` sequences so the
-        // TUI can distinguish them from Tab / Enter / Esc / Backspace.
-        if event.modifierFlags.contains(.control) {
-            #if DEBUG
-            Self.keyLogger.debug("keyDown: Control modifier detected")
-            #endif
-            let termModeForCtrl = currentSnapshot?.termMode ?? []
-            let kittyActive = termModeForCtrl.contains(.disambiguateEscCodes)
-                || termModeForCtrl.contains(.reportAllKeysAsEsc)
-            let modifyOther = termModeForCtrl.contains(.modifyOtherKeys)
-            // Route Ctrl+letter through the encoder whenever a TUI opted
-            // into a protocol that expects CSI-u or CSI 27 shape for
-            // Ctrl-combinations: Kitty flag 1, Kitty flag 8, or xterm
-            // modifyOtherKeys (Emacs, tmux extended-keys, nvim auto-
-            // request). Without this, the fast path would send a bare
-            // 0x01 for Ctrl+A even though the TUI asked for the
-            // protocol-framed form (F-S3-002).
-            if kittyActive || modifyOther
-                || (encoder.optionIsMeta && event.modifierFlags.contains(.option)) {
-                // Fall through — encoder picks the right protocol and
-                // handles Ctrl + C0-aliasing letters too. The Option clause:
-                // Ctrl+Option+letter in Meta mode is an Emacs/readline M-C-*
-                // chord that must carry the ESC Meta prefix (the bare-C0 fast
-                // path below would drop it, degrading M-C-f to plain ^F).
-            } else if let chars = event.characters,
-               let scalar = chars.unicodeScalars.first,
-               scalar.value >= 1, scalar.value <= 0x1F {
-                // Synchronous write so there's no perceptible latency before
-                // the line discipline sees the byte. From here the kernel
-                // does exactly the right thing — without any kill() from us:
-                //
-                //   ISIG on  (shell prompt, `sleep 100`, cmatrix cbreak):
-                //     0x03 matches c_cc[VINTR] → echo `^C\n` (ECHOCTL) →
-                //     SIGINT to fg pgroup → shell/sleep handles, prints the
-                //     new prompt on the next line. Order is correct because
-                //     the echo and the signal come from the same code path
-                //     inside the tty layer.
-                //
-                //   ISIG off (nvim, tmux, htop — apps in raw mode):
-                //     byte passes through to the app's stdin untouched. The
-                //     app handles Ctrl+C internally (cancel op, close prompt)
-                //     instead of dying from a "deadly signal".
-                //
-                // Getting VINTR/VSUSP/VEOF/VERASE right required passing nil
-                // termios to forkpty (see PTY.swift) so the kernel's
-                // TTYDEF_* defaults apply. Without that, c_cc was all-zeros
-                // and Ctrl+C was just data.
-                session.sendImmediate(Data([UInt8(scalar.value)]))
-                return
-            }
-            // Fast path didn't match — fall through to encoder which also
-            // handles Ctrl via controlByte().
-            #if DEBUG
-            Self.keyLogger.debug("keyDown: fast path didn't match, trying encoder")
-            #endif
+    /// Fast path for control characters: macOS translates Ctrl+letter into the
+    /// corresponding control byte (0x01-0x1A) in `event.characters`. Send that
+    /// byte directly to the PTY without round-tripping through the encoder —
+    /// the most reliable path for Ctrl+C (0x03), Ctrl+D (0x04), Ctrl+Z (0x1A).
+    /// Returns `true` iff it wrote the byte; `false` (incl. non-control events)
+    /// to fall through to the encoder.
+    ///
+    /// When a TUI enabled a protocol that expects CSI-u / CSI 27 framing for
+    /// Ctrl-combinations (kitty disambiguate / report-all-as-esc, or xterm
+    /// modifyOtherKeys), the four aliasing letters (Ctrl+i/m/[/h) and indeed all
+    /// Ctrl-combos must route through the encoder instead so they become
+    /// `CSI <cp>;5u` and stay distinguishable from Tab / Enter / Esc / Backspace
+    /// (F-S3-002). The Option clause: Ctrl+Option+letter in Meta mode is an
+    /// Emacs/readline M-C-* chord that must carry the ESC Meta prefix (the bare-
+    /// C0 fast path would drop it, degrading M-C-f to plain ^F).
+    private func sendControlFastPath(_ event: NSEvent, session: TerminalSession) -> Bool {
+        guard event.modifierFlags.contains(.control) else { return false }
+        #if DEBUG
+        Self.keyLogger.debug("keyDown: Control modifier detected")
+        #endif
+        let termModeForCtrl = currentSnapshot?.termMode ?? []
+        let kittyActive = termModeForCtrl.contains(.disambiguateEscCodes)
+            || termModeForCtrl.contains(.reportAllKeysAsEsc)
+        let modifyOther = termModeForCtrl.contains(.modifyOtherKeys)
+        if kittyActive || modifyOther
+            || (encoder.optionIsMeta && event.modifierFlags.contains(.option)) {
+            // Route through the encoder (it picks the right protocol and
+            // handles Ctrl + C0-aliasing letters too).
+        } else if let chars = event.characters,
+           let scalar = chars.unicodeScalars.first,
+           scalar.value >= 1, scalar.value <= 0x1F {
+            // Synchronous write so there's no perceptible latency before the
+            // line discipline sees the byte. From here the kernel does exactly
+            // the right thing — without any kill() from us:
+            //
+            //   ISIG on  (shell prompt, `sleep 100`, cmatrix cbreak):
+            //     0x03 matches c_cc[VINTR] → echo `^C\n` (ECHOCTL) → SIGINT to
+            //     fg pgroup → shell/sleep handles, prints the new prompt on the
+            //     next line. Order is correct because the echo and the signal
+            //     come from the same code path inside the tty layer.
+            //
+            //   ISIG off (nvim, tmux, htop — apps in raw mode):
+            //     byte passes through to the app's stdin untouched.
+            //
+            // Getting VINTR/VSUSP/VEOF/VERASE right required passing nil termios
+            // to forkpty (see PTY.swift) so the kernel's TTYDEF_* defaults
+            // apply. Without that, c_cc was all-zeros and Ctrl+C was just data.
+            session.sendImmediate(Data([UInt8(scalar.value)]))
+            return true
         }
+        // Fast path didn't match — fall through to the encoder, which also
+        // handles Ctrl via controlByte().
+        #if DEBUG
+        Self.keyLogger.debug("keyDown: fast path didn't match, trying encoder")
+        #endif
+        return false
+    }
 
+    /// Final keyDown stage: encode the event into PTY bytes and send. Special
+    /// keys (arrows / function / keypad) route through `encodeSpecial`; every
+    /// other printable through `encode(chars:)`. An empty encoding (F13–F24,
+    /// Mac system keys like brightness / media / eject) forwards to `super` so
+    /// AppKit's responder chain still sees the system key (audit M3).
+    private func encodeAndSendKey(_ event: NSEvent) {
         let mods = KeyEncoder.Modifiers(event: event)
         let termMode = currentSnapshot?.termMode ?? []
 
-        if let special = Self.specialKey(for: event) {
+        if let special = KeyEventClassifier.specialKey(for: event) {
             let appCursor = termMode.contains(.appCursor)
             let appKeypad = termMode.contains(.appKeypad)
             let bytes = encoder.encodeSpecial(
@@ -1939,9 +1742,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // use scalar that doesn't map to a shell-meaningful sequence.
         // Without the super-forward, AppKit's responder chain never
         // sees the event: F15 brightness-up (and similar) is silently
-        // swallowed while Blackbird is key. Mirroring keyUp's
-        // empty-bytes fall-through (line ~1828) lets the menu chain
-        // and accelerator handlers process the system key.
+        // swallowed while Blackbird is key.
         super.keyDown(with: event)
     }
 
@@ -1967,7 +1768,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
         let mods = KeyEncoder.Modifiers(event: event)
-        if let special = Self.specialKey(for: event) {
+        if let special = KeyEventClassifier.specialKey(for: event) {
             // F-S3-005: arrows / nav / F-keys DO have flag-2 release events in
             // the Kitty spec — `CSI <n> ; <mod>:3 <final>`. encodeSpecial emits
             // that under reportEventTypes and returns empty otherwise (keypad
@@ -2023,83 +1824,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
-    private static func specialKey(for event: NSEvent) -> KeyEncoder.SpecialKey? {
-        let key = event.specialKey
-        switch key {
-        case NSEvent.SpecialKey.upArrow:    return .up
-        case NSEvent.SpecialKey.downArrow:  return .down
-        case NSEvent.SpecialKey.leftArrow:  return .left
-        case NSEvent.SpecialKey.rightArrow: return .right
-        case NSEvent.SpecialKey.home:       return .home
-        case NSEvent.SpecialKey.end:        return .end
-        case NSEvent.SpecialKey.pageUp:     return .pageUp
-        case NSEvent.SpecialKey.pageDown:   return .pageDown
-        // NSEvent.SpecialKey.delete is the Backspace key. We intentionally do
-        // NOT map it to SpecialKey.delete (CSI 3 ~) — Backspace must send the
-        // DEL byte (0x7F), which the char-based path produces naturally from
-        // event.charactersIgnoringModifiers. Only forward-delete maps here.
-        case NSEvent.SpecialKey.deleteForward: return .delete
-        case NSEvent.SpecialKey.f1:  return .f1
-        case NSEvent.SpecialKey.f2:  return .f2
-        case NSEvent.SpecialKey.f3:  return .f3
-        case NSEvent.SpecialKey.f4:  return .f4
-        case NSEvent.SpecialKey.f5:  return .f5
-        case NSEvent.SpecialKey.f6:  return .f6
-        case NSEvent.SpecialKey.f7:  return .f7
-        case NSEvent.SpecialKey.f8:  return .f8
-        case NSEvent.SpecialKey.f9:  return .f9
-        case NSEvent.SpecialKey.f10: return .f10
-        case NSEvent.SpecialKey.f11: return .f11
-        case NSEvent.SpecialKey.f12: return .f12
-        default:
-            // Keypad keys aren't exposed via NSEvent.specialKey.
-            // NSEvent.modifierFlags.numericPad fires for external
-            // numeric-keypad keys (and for the arrow-cluster on some
-            // layouts — hence the explicit keyCode check). Only detect
-            // the digit / operator keypad keys, never the arrows
-            // (arrows route through the existing specialKey mapping
-            // above via NSEvent.SpecialKey.*Arrow).
-            if event.modifierFlags.contains(.numericPad) {
-                return keypadKey(for: event)
-            }
-            return nil
-        }
-    }
-
-    /// Map a numeric-keypad NSEvent to the matching SpecialKey. Returns
-    /// nil for anything outside the explicit keypad scan-code set so
-    /// the caller's default path can handle arrows (which also carry
-    /// `.numericPad` on some keyboards).
-    private static func keypadKey(for event: NSEvent) -> KeyEncoder.SpecialKey? {
-        // Virtual key codes from Carbon/HIToolbox are stable across
-        // keyboard layouts. Hard-coded here rather than via
-        // kVK_ANSI_Keypad0 constants because those live in Carbon, and
-        // Blackbird doesn't otherwise link that umbrella.
-        switch event.keyCode {
-        case 82: return .kp0
-        case 83: return .kp1
-        case 84: return .kp2
-        case 85: return .kp3
-        case 86: return .kp4
-        case 87: return .kp5
-        case 88: return .kp6
-        case 89: return .kp7
-        case 91: return .kp8
-        case 92: return .kp9
-        case 76: return .kpEnter
-        case 69: return .kpPlus
-        case 78: return .kpMinus
-        case 67: return .kpMultiply
-        case 75: return .kpDivide
-        case 65: return .kpDecimal
-        case 81: return .kpEquals
-        default: return nil
-        }
-    }
-
     @objc public func copy(_ sender: Any?) {
         guard let sel = selection, let session, let snap = currentSnapshot else { return }
-        let (start, end) = Self.copyRange(for: sel, cols: snap.cols)
+        let (start, end) = sel.copyRange(cols: snap.cols)
         let raw = session.textRange(from: start, to: end, rectangular: sel.mode == .rectangular)
         guard !raw.isEmpty else { return }
         // Cap + scrub before writing. A compromised remote can spam the
@@ -2110,8 +1837,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // world" case. Same sanitizer as paste-inbound (symmetric).
         let copyMax = 16 * 1024 * 1024
         let data = Data(raw.utf8).prefix(copyMax)
-        let scrubbed = Self.stripBidiOverrides(
-            Self.sanitizePasteControls(Data(data))
+        let scrubbed = PasteSanitizer.stripBidiOverrides(
+            PasteSanitizer.sanitizePasteControls(Data(data))
         )
         let clean = String(decoding: scrubbed, as: UTF8.self)
         let pb = NSPasteboard.general
@@ -2129,143 +1856,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         pb.setString(clean, forType: .string)
     }
 
-    /// Compute the (start, end) buffer points to pass into
-    /// `TerminalSession.textRange` given a selection and the current grid
-    /// width. Pure so the mode-specific fixups can be unit-tested.
-    ///
-    /// `.line` mode highlights full rows on screen; mirror that in the copy
-    /// so triple-click + drag yields "every whole line between the anchor
-    /// and the pointer" instead of truncating the first/last line to the
-    /// pointer's column. All other modes copy the normalized pair as-is.
-    static func copyRange(for selection: Selection, cols: Int) -> (start: BufferPoint, end: BufferPoint) {
-        let (a, b) = selection.normalized
-        switch selection.mode {
-        case .line:
-            return (
-                BufferPoint(line: a.line, col: 0),
-                BufferPoint(line: b.line, col: max(0, cols - 1))
-            )
-        case .character, .word, .rectangular:
-            return (a, b)
-        }
-    }
-
-    /// Cheap pre-compile gate to catch the standard first-order ReDoS
-    /// shapes (nested quantifiers on a capture group, alternations of
-    /// overlapping branches) before handing the pattern to
-    /// NSRegularExpression. NSRegularExpression has no match timeout API,
-    /// so a pattern like `(a+)+$` on a long row can backtrack for
-    /// seconds on the main thread. These aren't exhaustive — a
-    /// determined adversary can sidestep the heuristic checks — but they
-    /// knock out the textbook cases without false-positive'ing on
-    /// ordinary find queries. The 250 ms background-execution timeout in
-    /// `performSearch` is the real backstop; this gate is the cheap
-    /// first line of defence. Length cap keeps the find field a
-    /// "substring with options" UI, not a regex playground.
-    /// Audit findbar-selection F2.
-    static func isReasonableRegexPattern(_ pattern: String) -> Bool {
-        if pattern.count > 256 { return false }
-        // Normalise non-capturing groups so `(?:a+)+` trips the same
-        // substring checks as `(a+)+`. Keep the original around for the
-        // alternation regex below — stripping the `?:` doesn't change
-        // the topology of `(...|...)`.
-        let normalised = pattern.replacingOccurrences(of: "(?:", with: "(")
-        let dangerous = [
-            "(.*)+", "(.+)+", "(.*)*", "(.+)*",
-            "(a+)+", "(a*)*", "(a+)*", "(a*)+",
-            "([^x]+)+", "([^x]*)*",
-            "(\\w+)+", "(\\w*)*", "(\\d+)+", "(\\d*)*",
-            "(\\s+)+", "(\\s*)*",
-            "(.+)+$", "(.*)+$",
-        ]
-        for shape in dangerous where normalised.contains(shape) {
-            return false
-        }
-        // Also strip one extra layer of grouping so `(((a+)))+` reduces
-        // to `((a+))+` → `(a+)+`. Iterate a few times: in practice nobody
-        // legitimately wraps a quantified atom in five layers of parens,
-        // and bounded iteration keeps this O(n).
-        var stripped = normalised
-        for _ in 0..<5 {
-            let next = stripped.replacingOccurrences(of: "((", with: "(")
-                .replacingOccurrences(of: "))", with: ")")
-            if next == stripped { break }
-            stripped = next
-        }
-        for shape in dangerous where stripped.contains(shape) {
-            return false
-        }
-        // Alternation inside a quantified group — `(a|aa)+`, `(x|xx)*`,
-        // `(a|aa|aaa)+` — is the second textbook ReDoS class (overlapping
-        // alternatives). The pattern matches `( <stuff> | <stuff> ) [+*]`
-        // with no nested parens. The earlier shape used `[^()|]*` for
-        // the branches, which required EXACTLY ONE `|` and silently let
-        // 3+ way alternations slip past the gate (audit S3-003). The
-        // body class is now `[^()]+` so the gate fires on any number of
-        // `|` separators while still permitting non-alternating groups
-        // (`(abc)+`, `(?:foo)+`) and rejecting nested parens.
-        if let altRe = try? NSRegularExpression(
-            pattern: #"\([^()]+\|[^()]+\)\s*[+*]"#,
-            options: []
-        ) {
-            let ns = pattern as NSString
-            if altRe.firstMatch(in: pattern, options: [], range: NSRange(location: 0, length: ns.length)) != nil {
-                return false
-            }
-        }
-        // Audit M4. Group whose body contains a quantifier (`+`, `*`,
-        // or a brace `{n,…}`) AND is followed by another quantifier
-        // is the same exponential-backtrack class as `(a+)+` —
-        // `(a{1,})+`, `(.+){2,5}`, `(\w*){1,3}` etc. all fall here.
-        // The substring list above only catches the bare-quantifier
-        // form; the brace form was the documented gap.
-        // Body restriction `[^()]*` keeps this O(n) without nested
-        // backtracking. Non-capturing groups `(?:…)` survive in the
-        // raw pattern (the substring scan above runs against the
-        // `(?:`→`(` normalisation, but this regex runs against the
-        // unnormalised pattern); a non-capturing form like
-        // `(?:a{1,})+` still matches because `?:a{1,}` is a valid
-        // body — the `?:` falls inside `[^()]*` and the `{` is the
-        // body quantifier the regex looks for.
-        if let braceRe = try? NSRegularExpression(
-            pattern: #"\([^()]*[+*{][^()]*\)\s*[+*{]"#,
-            options: []
-        ) {
-            let ns = pattern as NSString
-            if braceRe.firstMatch(in: pattern, options: [], range: NSRange(location: 0, length: ns.length)) != nil {
-                return false
-            }
-        }
-        // Defensive: more than 6 unbounded quantifiers (`+`, `*`,
-        // `{n,}`) in a single query is a strong "this isn't a real find
-        // query" signal. Counts apply to escaped metacharacters too —
-        // not perfect, but the cost of a false positive on a legitimate
-        // query with seven quantifiers is "user uses a different tool",
-        // versus the cost of a false negative which is a frozen UI.
-        //
-        // Audit fix-#10 (2026-05-11): also count nested optionals (`?`).
-        // The shape `a?a?a?…aaaa` (N optionals followed by N literals)
-        // produces 2^N backtracking branches in ICU's NFA engine —
-        // exponential blowup that the pre-fix gate let through because
-        // `?` wasn't in the quantCount tally. Treat `?` the same as
-        // `+`/`*`/`{`: 6 of them combined is the cap.
-        var quantCount = 0
-        var i = pattern.startIndex
-        while i < pattern.endIndex {
-            let c = pattern[i]
-            if c == "+" || c == "*" || c == "?" {
-                quantCount += 1
-            } else if c == "{" {
-                // Treat any `{` as a possible quantifier; we don't
-                // bother parsing `{n,m}` precisely.
-                quantCount += 1
-            }
-            i = pattern.index(after: i)
-        }
-        if quantCount > 6 { return false }
-        return true
-    }
-
     @objc public override func selectAll(_ sender: Any?) {
         guard let snap = currentSnapshot else { return }
         // Match Terminal.app: ⌘A selects the full retained buffer —
@@ -2281,24 +1871,24 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public func performFindPanelAction(_ sender: Any?) {
         // Cocoa's Edit > Find submenu maps ⌘F to this selector.
-        if findBar == nil { installFindBar() }
-        findBar?.focus()
+        if findController.findBar == nil { findController.installFindBar() }
+        findController.findBar?.focus()
     }
 
-    @objc public func performFindNextAction(_ sender: Any?)     { advanceFind(direction: .forward) }
-    @objc public func performFindPreviousAction(_ sender: Any?) { advanceFind(direction: .backward) }
+    @objc public func performFindNextAction(_ sender: Any?)     { findController.advanceFind(direction: .forward) }
+    @objc public func performFindPreviousAction(_ sender: Any?) { findController.advanceFind(direction: .backward) }
 
     /// ⌘⌥C: toggle case-sensitive find. Installs the find bar if
     /// needed so the menu item works even when the bar is closed.
     @objc public func toggleFindCaseSensitive(_ sender: Any?) {
-        if findBar == nil { installFindBar() }
-        findBar?.toggleCaseSensitive(sender)
+        if findController.findBar == nil { findController.installFindBar() }
+        findController.findBar?.toggleCaseSensitive(sender)
     }
 
     /// ⌘⌥R: toggle regex find.
     @objc public func toggleFindRegex(_ sender: Any?) {
-        if findBar == nil { installFindBar() }
-        findBar?.toggleRegexMode(sender)
+        if findController.findBar == nil { findController.installFindBar() }
+        findController.findBar?.toggleRegexMode(sender)
     }
 
     @objc public func clearBufferAndScrollback(_ sender: Any?) {
@@ -2324,21 +1914,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// `TEST_RUNNER_BB_SUPPRESS_BELL`) so an automated full-suite run doesn't
     /// emit a stream of system beeps. Read once; production and Xcode Cmd-U
     /// runs (env unset) ring normally.
-    private static let bellSuppressed =
-        ProcessInfo.processInfo.environment["BB_SUPPRESS_BELL"] == "1"
-
-    /// Ring the system "no-op feedback" bell, unless suppressed under test.
-    private func ringBell() {
-        guard !Self.bellSuppressed else { return }
-        NSSound.beep()
-    }
-
     /// AppKit rings NSBeep here for a key event that no responder handled.
     /// Under the test harness, swallow it so key-input tests that drive
     /// `keyDown(with:)` on an out-of-window view don't beep; real runs defer
     /// to `super` for the normal feedback.
     public override func noResponder(for eventSelector: Selector) {
-        guard !Self.bellSuppressed else { return }
+        guard !BellController.suppressed else { return }
         super.noResponder(for: eventSelector)
     }
 
@@ -2351,8 +1932,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // Ring empty (no shell integration, or no commands yet) OR
             // already at the oldest prompt. NSBeep is the standard macOS
             // "no-op" feedback — quiet, doesn't steal focus. Audit
-            // terminal-view-2 F25. Via ringBell() so the test harness mutes it.
-            ringBell()
+            // terminal-view-2 F25. Via bellController.ring() so the test
+            // harness mutes it.
+            bellController.ring()
         }
     }
 
@@ -2361,7 +1943,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// newest prompt is always live.
     @objc public func jumpToNextPrompt(_ sender: Any?) {
         if session?.jumpToNextPrompt() != true {
-            ringBell()
+            bellController.ring()
         }
     }
 
@@ -2525,6 +2107,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         /// O(N) read into O(N²) for grids with hundreds of lines.
         /// Invalidated alongside `value` on snapshot identity change.
         var lineOffsets: [Int]? = nil
+
+        /// Cache a freshly-computed `value` under `identity`, atomically
+        /// clearing the derived `lineOffsets` (keyed on `value`, so a stale
+        /// table would mis-map line ranges) and bumping the recompute counter
+        /// tests assert on. The ONE place value + identity + lineOffsets move
+        /// together — callers can't update one and forget the correlated others.
+        mutating func store(value: String, identity: UnsafeRawPointer?) {
+            self.value = value
+            self.snapshotIdentity = identity
+            self.lineOffsets = nil
+            self.computations += 1
+        }
+
+        /// Invalidate so the next `accessibilityValue()` recomputes: drop the
+        /// `identity` (forces a cache miss) and the `value`-keyed `lineOffsets`.
+        /// The stale `value` is left in place — it's gated behind the now-nil
+        /// identity, so it can never be returned without a recompute first.
+        mutating func invalidate() {
+            self.snapshotIdentity = nil
+            self.lineOffsets = nil
+        }
     }
 
     var a11yCache = A11yCache()
@@ -2608,50 +2211,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
     #endif
 
-    /// Pure encoder for xterm mouse reports — extracted so the branches that
-    /// matter for correctness (SGR 1006 vs X10 fallback, press/release,
-    /// wheel/motion) can be unit-tested without synthesizing NSEvents.
-    ///
-    /// - `sgr`: true when the app enabled SGR extended mouse reporting
-    ///   (mode 1006). The final byte `M`/`m` distinguishes press from
-    ///   release and the button number is carried verbatim.
-    /// - `button`: the xterm button number — 0/1/2 for left/middle/right,
-    ///   32 for motion-with-button, 64/65 for wheel up/down.
-    /// - `press`: false for release events. In the X10 fallback (modes
-    ///   1000/1002/1003), release always reports button bits = 3 regardless
-    ///   of which button was released.
-    ///
-    /// Returns `nil` when X10 can't represent the position (cols/rows
-    /// beyond 223). SGR has no such limit.
-    static func encodeMouseReport(
-        sgr: Bool,
-        button: Int,
-        press: Bool,
-        col: Int,
-        row: Int
-    ) -> Data? {
-        // Defensive guards — callers today pass 0…65 for button and
-        // clamp col/row to 10 000, but a future caller outside the
-        // TerminalView flow could exceed those bounds. X10's 6-byte
-        // encoding traps on `UInt8(cbButton + 32)` when `cbButton >
-        // 223`, and SGR's `\(button)` stringifies every value
-        // including pathological ones. Reject up-front so the trap
-        // surface stays bounded to this function, not the caller.
-        guard (0..<224).contains(button), col >= 0, row >= 0 else { return nil }
-        if sgr {
-            // SGR 1006: ESC [ < button ; col+1 ; row+1 M/m
-            let finalChar: Character = press ? "M" : "m"
-            let seq = "\u{1B}[<\(button);\(col + 1);\(row + 1)\(finalChar)"
-            return Data(seq.utf8)
-        }
-        // X10/normal: ESC [ M cb cx cy (6-byte, cx/cy capped at 223).
-        guard col < 223, row < 223 else { return nil }
-        let cbButton = press ? button : 3
-        let cb = UInt8(cbButton + 32)
-        let cx = UInt8(col + 33)
-        let cy = UInt8(row + 33)
-        return Data([0x1B, 0x5B, 0x4D, cb, cx, cy])
-    }
 }
 
 // MARK: - Modifier mapping
@@ -2774,29 +2333,29 @@ final class FakeHyperlinkSnapshot: HyperlinkResolver {
 
 extension TerminalView: FindBarDelegate {
     public func findBar(_ bar: FindBar, didChangeQuery query: String) {
-        performSearch(query: query)
+        findController.performSearch(query: query)
     }
 
     public func findBar(_ bar: FindBar, didAdvance direction: FindBar.Direction) {
-        advanceFind(direction: direction)
+        findController.advanceFind(direction: direction)
     }
 
     public func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options) {
         // Re-run the current query with the new options. Safe no-op
         // when the query is empty (performSearch short-circuits).
-        performSearch(query: findQuery)
+        findController.performSearch(query: findController.findQuery)
     }
 
     public func findBarDidClose(_ bar: FindBar) {
-        findBar?.removeFromSuperview()
-        findBar = nil
+        findController.findBar?.removeFromSuperview()
+        findController.findBar = nil
         // F10: wipe match state so ⌘G after close doesn't cycle stale
         // coordinates against a mutated buffer or a new (yet-unissued) query.
-        findMatches.removeAll()
-        findMatchesSeq = nil
-        findCurrentIndex = 0
-        findQuery = ""
-        pendingRegexAdvance = nil
+        findController.findMatches.removeAll()
+        findController.findMatchesSeq = nil
+        findController.findCurrentIndex = 0
+        findController.findQuery = ""
+        findController.pendingRegexAdvance = nil
         // F30: deliberately preserve `selection` so Esc-then-⌘C on a found
         // match still copies. The selection is wiped by the next mouse click
         // or shell-bound keystroke (see keyDown handler).
@@ -2805,396 +2364,34 @@ extension TerminalView: FindBarDelegate {
 
     public func findBar(_ bar: FindBar, didRequestReplace kind: FindBar.ReplaceKind, with replacement: String) {
         switch kind {
-        case .current: replaceCurrentMatch(with: replacement)
-        case .all:     replaceAllMatches(with: replacement)
+        case .current: findController.replaceCurrentMatch(with: replacement)
+        case .all:     findController.replaceAllMatches(with: replacement)
         }
     }
 
-    /// F3: TUI-guard. Refuses replace when the terminal mode indicates a
-    /// full-screen TUI is running (vim, less, htop) — alt-screen, any
-    /// mouse-reporting flag, or bracketed-paste active. In those modes the
-    /// DEL+UTF-8 byte stream emitted by `sendReplacement` would be
-    /// interpreted as key input by the TUI instead of readline-style erase.
+    /// F3 TUI-guard. The find+replace engine (incl. the TUI-mode check) lives in
+    /// `FindController`; the FindBarDelegate conformance forwards here.
     public func findBarShouldAllowReplace(_ bar: FindBar) -> Bool {
-        guard let mode = effectiveSnapshot()?.termMode else {
-            // No snapshot yet → nothing to replace anyway; err on "allow" so
-            // tests that don't stub a snapshot still exercise the old path.
-            return true
-        }
-        let tuiSignals: BBTermMode = [
-            .altScreen,
-            .mouseReportClick,
-            .mouseMotion,
-            .mouseDrag,
-            .sgrMouse,
-            .bracketedPaste,
-        ]
-        return mode.intersection(tuiSignals).isEmpty
+        findController.shouldAllowReplace()
     }
 }
 
-// MARK: - Replace helpers
+// MARK: - Replace responder action
 
 extension TerminalView {
-    /// Replace the current find match with `replacement`. Only works when the
-    /// match is on the live input line (cursor row). Otherwise a transient
-    /// warning is shown in the find bar.
-    func replaceCurrentMatch(with replacement: String) {
-        // Re-derive against the live snapshot before splicing — advanceFind and
-        // replaceAllMatches both do this (audit fix-#18); replaceCurrentMatch
-        // was missing it, so a buffer scroll since the last search could splice
-        // the stale (line, startCol) of a wide-char match against a different
-        // grid and corrupt the input line. Replace-safe variant: substring
-        // refreshes synchronously, regex keeps the already-scanned matches
-        // (its rescan is async and would empty the set).
-        refreshFindMatchesIfStaleForReplace()
-        let matches = effectiveFindMatches()
-        guard !matches.isEmpty, findCurrentIndex < matches.count else { return }
-        let m = matches[findCurrentIndex]
-        guard isOnLiveInputLine(m) else {
-            findBar?.showTransientMessage("Only input-line matches can be replaced")
-            return
-        }
-        spliceReplacements(matches: [m], replacement: replacement)
-        // The replacement edits the shell line; every recorded match on that
-        // line has now shifted or vanished. Drop the cache so find-next
-        // doesn't scroll to a stale coordinate.
-        findMatches.removeAll()
-        findMatchesSeq = nil
-        findCurrentIndex = 0
-        findBar?.setMatchCount(0, of: 0)
-        // F5: re-run the search after the byte stream has had a chance to
-        // land, so the label reads the live post-replace count (standard
-        // VS Code / TextEdit behaviour).
-        reRunSearchAfterReplace()
-    }
-
-    /// Re-run the current find query on the next runloop tick. Called after
-    /// a successful replace so the match label reflects the edited line
-    /// instead of stale "0/0". Scheduled async so the shell has a moment
-    /// to echo the DEL+replacement bytes back through the render pipeline;
-    /// the snapshot observer (see `currentSnapshot.didSet`) also schedules
-    /// a refresh, so this double-booking is harmless — `performSearch`
-    /// overwrites the match array atomically. Audit findbar-selection F5.
-    fileprivate func reRunSearchAfterReplace() {
-        #if DEBUG
-        // In tests there's no shell to echo bytes; skip the async hop so
-        // assertions against `findMatches` don't race the dispatch.
-        if replaceByteCapture != nil { return }
-        #endif
-        let query = findQuery
-        guard !query.isEmpty, findBar != nil else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.findQuery.isEmpty, self.findBar != nil else { return }
-            self.performSearch(query: query)
-        }
-    }
-
-    /// Replace all find matches with `replacement`, processing right-to-left so
-    /// earlier column indices stay valid as the shell receives each replacement.
-    /// Matches not on the live input line are skipped; if any were skipped a
-    /// warning is shown in the find bar.
-    ///
-    /// F4 (findbar-selection): when a match sits on the row immediately
-    /// above the cursor AND that row looks soft-wrap-filled (its last cell
-    /// is non-blank — shells fill right up to the wrap column before
-    /// wrapping), refuse with a warning. Without the wrap-flag FFI we
-    /// can't be certain; erring on the side of refusal avoids emitting
-    /// DEL bytes that overshoot into wrapped prior content. Rows with a
-    /// trailing blank are treated as unrelated scrollback and their
-    /// matches are silently skipped, preserving the documented behaviour
-    /// for non-wrapped off-line matches.
-    func replaceAllMatches(with replacement: String) {
-        // Audit fix-#18 (2026-05-11): re-derive findMatches against the
-        // current snapshot before iterating. A user who scrolls between
-        // ⌘F's performSearch and clicking Replace All can have col-real
-        // findMatches (cell-walked, in-viewport branch) paired with a
-        // snapshot whose cursor is now off-viewport — sendReplacement's
-        // nonSpacerCellCount fallback then col-spans a wide-char match
-        // and overcounts DELs by one per wide glyph. advanceFind already
-        // calls refreshFindMatchesIfStale (TerminalView+Find.swift:162);
-        // replaceAllMatches needs the same discipline. Use the replace-safe
-        // variant so a stale REGEX query doesn't async-clear findMatches and
-        // turn Replace All into a silent no-op.
-        refreshFindMatchesIfStaleForReplace()
-        let matches = effectiveFindMatches()
-        guard !matches.isEmpty else { return }
-        guard let snap = effectiveSnapshot() else { return }
-        let cursorLine = Int32(snap.cursorRow)
-        let inputLineMatches = matches.filter { $0.line == cursorLine }
-
-        let hadOffLine = inputLineMatches.count < matches.count
-        if inputLineMatches.isEmpty {
-            findBar?.showTransientMessage("No input-line matches to replace")
-            return
-        }
-        // Wrap-ambiguity guard: a match on the row immediately above the
-        // cursor *might* be a soft-wrap continuation of the input line.
-        // A shell that's soft-wrapped typically fills right up to the
-        // right edge (last cell non-blank); a scrollback row usually has
-        // trailing blanks. Refuse only when the prior row's last cell is
-        // non-blank AND contains a match — otherwise fall through to the
-        // scrollback-skip path. Audit findbar-selection F4.
-        //
-        // Audit fix-#08 (2026-05-11): the `row` parameter on
-        // BBSnapshot.character(at:row:) indexes the viewport cells array
-        // (0..rows-1), NOT the buffer-line coordinate space. cursorLine
-        // is live-grid-row-relative; the corresponding viewport-row when
-        // displayOffset > 0 is `cursorLine + displayOffset`. Without the
-        // offset addition, a scrolled-back user clicking Replace All
-        // would read a stray scrollback row's last cell instead of the
-        // line physically above the cursor, mis-firing the guard either
-        // way (false-negative leads to DEL bytes overshooting wrapped
-        // input — the very corruption the guard exists to prevent).
-        let priorRow = cursorLine - 1
-        let priorViewportRow = Int(priorRow) + snap.displayOffset
-        if matches.contains(where: { $0.line == priorRow }),
-           snap.cols > 0,
-           let priorLastCell = snap.character(at: snap.cols - 1, row: priorViewportRow),
-           !priorLastCell.isWhitespace {
-            findBar?.showTransientMessage("Refusing: matches span a possible wrapped input line")
-            return
-        }
-        // Process right-to-left as ONE splice: the cursor walks left
-        // match by match, so each match's gap is computed against the
-        // post-replacement position of the matches to its right
-        // (audit S5-003 — the old per-match sends assumed DELs landed
-        // at the match columns, which they never did).
-        spliceReplacements(
-            matches: inputLineMatches.sorted(by: { $0.startCol > $1.startCol }),
-            replacement: replacement
-        )
-        // All input-line matches have been spliced; invalidate the cache.
-        findMatches.removeAll()
-        findMatchesSeq = nil
-        findCurrentIndex = 0
-        findBar?.setMatchCount(0, of: 0)
-        if hadOffLine {
-            findBar?.showTransientMessage("Replaced input-line matches (scrollback skipped)")
-        } else {
-            // F5: re-run the search so the user sees fresh match counts
-            // against the newly-edited line. Without this, the label reads
-            // "No matches" even though the replacement string may itself
-            // match the query. `performSearch` short-circuits on an empty
-            // query; scheduling is deferred to the next runloop tick so
-            // the shell has time to echo the bytes back.
-            reRunSearchAfterReplace()
-        }
-    }
-
-    /// Splice replacements into the live input line (audit S5-003).
-    ///
-    /// DEL (0x7F) erases the character LEFT OF THE SHELL CURSOR — not at
-    /// the match's columns. The previous implementation emitted
-    /// DEL×matchLen + replacement with no cursor movement, so any match
-    /// not immediately left of the cursor erased the wrong characters:
-    /// replacing 'aaa' in `echo aaa bbb` (cursor at end) yielded
-    /// `echo aaa ZZZ` — the match untouched, the unrelated tail
-    /// destroyed. The right-to-left Replace All ordering comment ('so
-    /// earlier col indices stay valid') encoded exactly that false
-    /// assumption; the extensive audits on this path (H6, F4, fix-#08,
-    /// fix-#18) all tuned the DEL *count*, never the DEL *position*.
-    ///
-    /// This version repositions in character space: for each match
-    /// (right-to-left, all on the cursor row), emit left-arrows
-    /// (CSI D) from the tracked cursor position to the match end, then
-    /// DEL×len, then the replacement; finish with right-arrows (CSI C)
-    /// back to the (shifted) end of line. All counts are derived from
-    /// ONE snapshot in shell-character units via nonSpacerCellCount
-    /// (a wide CJK glyph is one character / one DEL / one arrow even
-    /// though it spans two columns — audit H6). Arrows are bound to
-    /// char movement in readline/ZLE emacs AND vi-insert modes, and the
-    /// replace path is already gated off TUI modes.
-    ///
-    /// Known residual (unchanged from before): a match inside the
-    /// PROMPT region — not the typed input — cannot be edited;
-    /// readline stops cursor movement at the input start, so such a
-    /// splice still misfires. The prompt boundary is not knowable
-    /// column-wise from the grid; OSC 133 B tracking would be the
-    /// future fix.
-    ///
-    /// All-or-nothing: validation failures (line break / tab /
-    /// multi-scalar grapheme in the replacement) refuse BEFORE any byte
-    /// is emitted, so the line is never left half-spliced. A cursor
-    /// INSIDE a match is handled, not refused: the splice walks to the
-    /// match end and the final reposition maps the original position to
-    /// just after that match's replacement.
-    private func spliceReplacements(
-        matches: [(line: Int32, startCol: Int, endCol: Int)],
-        replacement: String
-    ) {
-        guard !matches.isEmpty, let snap = effectiveSnapshot() else { return }
-        let line = matches[0].line
-        let screenRow = Int(line) + snap.displayOffset
-        // Character count helper over the ORIGINAL snapshot; the whole
-        // splice is computed against one consistent line state and sent
-        // as a single byte sequence (the shell echoes asynchronously,
-        // so re-reading the snapshot mid-splice would see stale cells).
-        func chars(_ startCol: Int, _ endCol: Int) -> Int {
-            guard startCol <= endCol else { return 0 }
-            return snap.nonSpacerCellCount(
-                row: screenRow, startCol: startCol, endCol: endCol
-            ) ?? (endCol - startCol + 1)
-        }
-        // Scrub the replacement bytes through the same pipeline paste
-        // uses. The find-bar Replace field accepts arbitrary user input
-        // — typed or pasted via NSTextField's own paste handler, which
-        // bypasses our paste sanitizer. A user pasting a Trojan-Source
-        // RLO into Replace would otherwise smuggle the bidi byte
-        // straight into the shell. Same C0/C1/bidi/ZWJ/tag-block list
-        // as the paste pipeline. Audit M10.
-        let cleanedReplacement = Self.stripBidiOverrides(
-            Self.sanitizePasteControls(Data(replacement.utf8))
-        )
-        // Shell-character length of the replacement, for cursor math.
-        let replacementChars = String(decoding: cleanedReplacement, as: UTF8.self).count
-        // Audit L20. sanitizePasteControls intentionally preserves LF
-        // (the paste path treats it as "user pressed Enter, run the
-        // line"). For find-replace at a non-bracketed-paste prompt
-        // the same posture is wrong — a replacement string typed or
-        // pasted into the Replace field with an embedded `\n` would
-        // execute the leading fragment as a separate command. The
-        // audit verdict was "local user input, no remote vector",
-        // but a Replace All across a buffer can amplify a single
-        // typo into many shell commands, and the find bar field
-        // doesn't visually represent the newline. Refuse with a
-        // transient message; the user re-types or re-pastes without
-        // the newline. A 0x0D in the cleaned bytes follows the same
-        // logic — pasteText's convertLoneCRToLF would just turn it
-        // into LF anyway.
-        //
-        // Audit S3-009: TAB (0x09) joins LF/CR in the refusal set.
-        // A Replace All emitting DEL × matchLen + replacement-with-TAB
-        // at a bare shell prompt fires readline / zsh tab-completion
-        // mid-stream, splicing completion text into the byte stream
-        // unpredictably. The TUI guard already prevents this under
-        // alt-screen / mouse-reporting / bracketed-paste, but a
-        // command-line prompt is the failing case.
-        if cleanedReplacement.contains(0x0A) || cleanedReplacement.contains(0x0D) {
-            findBar?.showTransientMessage("Refusing: replacement contains a line break")
-            return
-        }
-        if cleanedReplacement.contains(0x09) {
-            findBar?.showTransientMessage("Refusing: replacement contains a tab")
-            return
-        }
-        // Review follow-up: readline/ZLE move and delete per CODEPOINT,
-        // while the walk/DEL counts here are grapheme/cell units. A
-        // replacement carrying a multi-scalar grapheme (decomposed
-        // accent, ZWJ emoji) would under-count the arrows the shell
-        // actually needs, landing the NEXT span's DELs off-target in a
-        // Replace All. Refuse rather than corrupt; precomposed input is
-        // unaffected.
-        let cleanedString = String(decoding: cleanedReplacement, as: UTF8.self)
-        if cleanedString.count != cleanedString.unicodeScalars.count {
-            findBar?.showTransientMessage("Refusing: replacement contains a multi-codepoint character")
-            return
-        }
-
-        // Build the full splice against the tracked cursor position
-        // (char index = count of shell characters left of a column).
-        // Moves are BIDIRECTIONAL: the cursor may legitimately sit left
-        // of (or inside) a match — the user can arrow back through
-        // typed input before invoking Replace — so each hop emits
-        // CSI C (right) or CSI D (left) as needed.
-        let escLeft: [UInt8] = [0x1B, 0x5B, 0x44]   // CSI D
-        let escRight: [UInt8] = [0x1B, 0x5B, 0x43]  // CSI C
-        func appendMoves(_ delta: Int, to bytes: inout Data) {
-            if delta > 0 {
-                for _ in 0..<delta { bytes.append(contentsOf: escRight) }
-            } else if delta < 0 {
-                for _ in 0..<(-delta) { bytes.append(contentsOf: escLeft) }
-            }
-        }
-        // Pending-wrap correction (review follow-up): when the input
-        // line exactly fills the row, the grid cursor parks ON the last
-        // cell but the shell's logical position is one past it — without
-        // the +1 every move and DEL landed one character left of target
-        // on width-exact lines.
-        let p0 = chars(0, snap.cursorCol - 1) + (snap.cursorPendingWrap ? 1 : 0)
-        var p = p0
-        var bytes = Data()
-        // Original-space coordinates stay valid throughout because
-        // matches are processed right-to-left: edits never move content
-        // to the LEFT of the region being edited next.
-        var spliced: [(sChar: Int, eChar: Int, len: Int)] = []
-        for m in matches {
-            let sChar = chars(0, m.startCol - 1)
-            let len = chars(m.startCol, m.endCol)
-            guard len > 0 else { continue }
-            let eChar = sChar + len
-            appendMoves(eChar - p, to: &bytes)
-            bytes.append(Data(repeating: 0x7F, count: len))
-            bytes.append(cleanedReplacement)
-            p = sChar + replacementChars
-            spliced.append((sChar, eChar, len))
-        }
-        guard !bytes.isEmpty else { return }
-        // Land the cursor back where the user had it, mapped through
-        // the edits: positions right of a replaced span shift by
-        // (replacement − match) per span; a position INSIDE a span maps
-        // to just after its replacement.
-        var finalTarget = p0
-        var insideAdjusted = false
-        for r in spliced {
-            if r.eChar <= p0 {
-                finalTarget += replacementChars - r.len
-            } else if r.sChar < p0, p0 < r.eChar, !insideAdjusted {
-                // p0 inside this span: anchor to the replacement's end
-                // (shifts from spans further left still apply via the
-                // eChar <= p0 branch — spans are disjoint).
-                finalTarget += (r.sChar + replacementChars) - p0
-                insideAdjusted = true
-            }
-        }
-        appendMoves(finalTarget - p, to: &bytes)
-
-        #if DEBUG
-        if let capture = replaceByteCapture {
-            capture(bytes)
-            return
-        }
-        #endif
-        guard let session else { return }
-        session.send(bytes)
-    }
-
-    /// Returns true when the match's buffer line equals the cursor's buffer line,
-    /// i.e. the match is on the live shell input line.
-    private func isOnLiveInputLine(_ m: (line: Int32, startCol: Int, endCol: Int)) -> Bool {
-        guard let snap = effectiveSnapshot() else { return false }
-        return m.line == Int32(snap.cursorRow)
-    }
-
-    /// The snapshot to use for replace logic: test override when set, else the live one.
-    private func effectiveSnapshot() -> BBSnapshot? {
-        #if DEBUG
-        if let override = replaceSnapshotForTests { return override }
-        #endif
-        return currentSnapshot
-    }
-
-    /// The find-matches array to use for replace logic: test override when set, else live.
-    private func effectiveFindMatches() -> [(line: Int32, startCol: Int, endCol: Int)] {
-        #if DEBUG
-        if let override = replaceFindMatchesForTests { return override }
-        #endif
-        return findMatches
-    }
-
     /// Responder action for ⌘⌥E. Behaviour:
     ///   - Bar hidden  → install the bar, expand the replace row, focus find field.
     ///   - Bar visible, replace collapsed → expand the replace row.
     ///   - Bar visible, replace already expanded → trigger replace-current on
     ///     the active match (same effect as clicking the "Replace" button).
     @objc public func performReplaceCurrent(_ sender: Any?) {
-        if findBar == nil {
-            installFindBar()
-            findBar?.setReplaceVisible(true)
-            findBar?.focus()
+        if findController.findBar == nil {
+            findController.installFindBar()
+            findController.findBar?.setReplaceVisible(true)
+            findController.findBar?.focus()
             return
         }
-        guard let bar = findBar else { return }
+        guard let bar = findController.findBar else { return }
         if !bar.isReplaceVisible {
             bar.setReplaceVisible(true)
             return

@@ -1,6 +1,6 @@
 import Foundation
 import Combine
-import AppKit
+import QuartzCore
 import os
 
 /// Owns a PTY and a BBTerm. Wires PTY output into the VT parser, publishes
@@ -42,15 +42,15 @@ public final class TerminalSession: ObservableObject {
     /// Diagnostics for resize panic-fallbacks (M3) and OSC 7 dropped-on-
     /// `.unknown` classification (L3). Both are non-fatal events the
     /// support engineer needs visible in `log stream` without spamming
-    /// the unified log on each occurrence.
-    private static let sessionLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
-                                              category: "session")
-    /// One-shot latch for the OSC 7 `.unknown` drop log (L3). Per
-    /// session — a hot-reconfigure that flips classification back to
-    /// `.local` and then back to `.unknown` would otherwise miss the
-    /// breadcrumb on the second `.unknown`. We accept that miss; the
-    /// alternative (no latch at all) floods the log on every shell `cd`.
-    private var loggedUnknownNamespaceDrop = false
+    /// the unified log on each occurrence. Internal (not private) so the
+    /// `ResizeController` (M3 warning) and `CwdTracker` (L3 notice)
+    /// collaborators log through the one "session"-category logger — a single
+    /// source of truth for the category, byte-identical to the inline output.
+    static let sessionLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                      category: "session")
+    // `loggedUnknownNamespaceDrop` (the OSC 7 `.unknown` drop-log latch) moved
+    // to `CwdTracker` along with the cwd-change publishing + SSH-trust gate it
+    // guards. The `@Published lastKnownCwd` store stays here (below).
 
     /// Shorthand. Routed through `StartupTelemetry.isEnabled` at each
     /// call site so Release builds don't emit diagnostic chatter unless
@@ -63,21 +63,25 @@ public final class TerminalSession: ObservableObject {
     /// caller's thread and read from `feed(_:)` on coreQueue with
     /// no synchronization. Promote to `let` and pass through init
     /// — the value is fixed at construction so there's no race.
-    private let spawnedAt: CFTimeInterval
-    /// Set once when the first PTY byte arrives so the read path stops
-    /// re-logging on every chunk. Session-local: each new tab starts its
-    /// own clock.
-    private var loggedFirstByte = false
-    /// Set once the first snapshot lands on the main queue. Protected by
-    /// `publishLock` because `publishPendingSnapshot` is the only writer.
-    private var publishedFirstSnapshot = false
+    /// Internal (not private) so `SnapshotCoalescer` can read it for the
+    /// first-byte / first-snapshot telemetry timestamps.
+    let spawnedAt: CFTimeInterval
+    // `loggedFirstByte` (first-byte log latch) and `publishedFirstSnapshot`
+    // (first-snapshot-on-main latch) moved to `SnapshotCoalescer` along with
+    // the feed/publish paths that own them.
 
     @Published public private(set) var snapshot: BBSnapshot?
-    /// Effective, observable title for UI binding. Always equals `displayTitle`
-    /// — republished whenever the shell emits OSC 0/2 or the user changes
-    /// `titleOverride`, so Combine subscribers (e.g., `TerminalView` → `window.title`)
-    /// pick up both sources.
-    @Published public private(set) var title: String?
+
+    /// Single write site for the SwiftUI-observed snapshot. Called by
+    /// `SnapshotCoalescer` on the main thread (the `@Published` store stays
+    /// owned by the session; the coalescer publishes through this seam).
+    func publish(_ snap: BBSnapshot) {
+        self.snapshot = snap
+    }
+    /// Window / tab title state (OSC 0/2 + user override → one observable
+    /// title). Hoisted out of this class — UI binds to `session.titleState.$title`;
+    /// the rename flow sets `session.titleState.titleOverride`.
+    public let titleState = SessionTitleState()
     @Published public private(set) var bellCounter: UInt64 = 0
     /// Set once after the shell process has exited. The value is the child's
     /// exit code (-1 for abnormal termination). Observers (e.g. the window
@@ -104,161 +108,44 @@ public final class TerminalSession: ObservableObject {
     /// sessions don't grow unbounded.
     @Published public internal(set) var promptMarks: [PromptMark] = []
 
-    /// Current index inside `promptMarks` when cycling via
-    /// `jumpToPreviousPrompt` / `jumpToNextPrompt`. Nil means "not in
-    /// a jump cycle"; any new OSC 133 A resets to nil so the next Prev
-    /// jump starts from the newest mark again.
-    private var promptCursor: Int?
+    /// The prompt-mark navigation concern (the ring's cursor, the scroll-to-mark
+    /// math, the OSC 133 A record path, and the **two-token clear-epoch /
+    /// generation** machinery that defends against phantom marks across a clear
+    /// or reflow) lives in `PromptNavigator`. The `@Published` ring above and
+    /// `lastPromptMark` below stay here as the observable UI surface — the
+    /// navigator drives them through its `unowned session`, exactly as
+    /// `SnapshotCoalescer` drives `@Published snapshot` via `publish(_:)`.
+    /// IUO: needs `self` at init, assigned before `wire()` so no async path
+    /// observes it nil. `private(set)` so only this session assigns it.
+    private(set) var promptNavigator: PromptNavigator!
 
-    private static let promptMarkCap = 200
+    /// The `PromptMark` value type lives on the navigator; this alias keeps the
+    /// existing `TerminalSession.PromptMark` spelling (ScrollIndicator, tests)
+    /// binding unchanged.
+    public typealias PromptMark = PromptNavigator.PromptMark
 
-    /// Generation token for the prompt-mark ring (audit S5-008).
-    /// Main-owned, like the ring itself. Every path that wipes the ring
-    /// (⌘K clearAll, reflow invalidation) bumps it; recordPromptStart
-    /// captures the value at entry (on main, before its coreQueue hop)
-    /// and the main-hop append drops the mark when the generation moved
-    /// — closing the race where a pre-clear snapshot's append drained
-    /// AFTER resetPromptState wiped the ring and re-inserted a mark
-    /// anchored to deleted scrollback (a phantom ⌘[ entry).
-    private var promptMarkGeneration: UInt64 = 0
-
-    /// Clear-epoch pair (audit S5-008, second half — found by the blind
-    /// regression test for the first half). The generation token guards
-    /// the recordPromptStart→append window, but the race ALSO spans the
-    /// event hop: the OSC 133 A event fires on coreQueue during feed
-    /// BEFORE ⌘K's clear, while the main-side event switch (and its
-    /// recordPromptStart call) drains AFTER clearAll completed on main —
-    /// so the generation captured at recordPromptStart entry was already
-    /// post-bump and the phantom mark still landed. The epoch is
-    /// captured AT EVENT-FIRE TIME on coreQueue (`clearEpochCore`,
-    /// coreQueue-confined, bumped inside clearAll's coreQueue.sync) and
-    /// compared on main against `clearEpochMain` (main-owned, bumped in
-    /// resetPromptState): an event that predates the clear carries a
-    /// stale epoch and its append self-discards.
-    private var clearEpochCore: UInt64 = 0
-    private var clearEpochMain: UInt64 = 0
-
-    /// Position of a recorded prompt, anchored to the core's monotonic
-    /// lines-scrolled counter (audit S5-004). The previous
-    /// (historySize, gridRow) anchor broke the moment scrollback
-    /// saturated: history_size plateaus at the cap while content keeps
-    /// rotating out, so post-saturation marks all compared equal and
-    /// ⌘[ silently jumped to the live bottom; the fix-#22 eviction
-    /// guard ('elapsed > 100_000') was unsatisfiable dead code because
-    /// elapsed ≤ cap by construction. linesScrolled never plateaus, so
-    /// the anchor algebra — the marked row sits (now − linesScrolled)
-    /// rows above its recorded gridRow — survives eviction, and
-    /// eviction itself becomes exactly detectable (offset > history).
-    public struct PromptMark: Equatable, Hashable {
-        /// `BBSnapshot.linesScrolled` at the moment the prompt was
-        /// emitted (primary-screen monotonic counter).
-        public let linesScrolled: UInt64
-        /// Grid row (0 = top of the live grid) at the moment the prompt
-        /// was emitted.
-        public let gridRow: Int
-    }
-
-    // MARK: - Title state
-
-    /// Last title the shell emitted via OSC 0/2. Empty before any emit.
-    /// Mutated on main thread (see the `bbterm.onEvent` dispatch back to main).
-    private var oscTitle: String = ""
-
-    /// User-set manual override. When non-nil and non-empty, the UI shows
-    /// this instead of the shell's OSC title. Setting to nil or an empty
-    /// string reverts to auto (OSC) mode.
-    public var titleOverride: String? {
-        didSet {
-            // Treat empty string as "clear the override" — matches the
-            // Rename alert's empty-field behaviour (see MainWindowController.beginRenameActiveTab).
-            if titleOverride?.isEmpty == true {
-                // Guard against recursion: only reassign if not already nil.
-                if titleOverride != nil {
-                    titleOverride = nil
-                    return  // didSet will re-fire with nil and publish.
-                }
-            }
-            publishTitle()
-        }
-    }
-
-    /// The title to display in the window / tab bar. Override wins when set;
-    /// otherwise the shell-reported OSC title; otherwise `nil` so the
-    /// TerminalView sink keeps the current `window.title` (which the window
-    /// controller seeds with the shell basename at session start). Returning
-    /// a literal "Terminal" placeholder here used to overwrite the
-    /// shell-basename seed the moment a user cleared their rename override
-    /// in a session whose shell hadn't emitted OSC 0/2 yet — bare bash/zsh
-    /// without a precmd-titler is the common trigger.
-    public var displayTitle: String? {
-        if let override = titleOverride, !override.isEmpty { return override }
-        return oscTitle.isEmpty ? nil : oscTitle
-    }
-
-    /// Maximum grapheme-cluster length retained from an OSC 0/2 title.
-    /// A hostile remote that emits `\e]0;` + 2 KB of text + `\e\\` would
-    /// otherwise feed `TabStripView.truncatedString` a multi-thousand-
-    /// character search space on every titlebar redraw — even with the
-    /// binary-search truncation, per-frame `NSString.size(withAttributes:)`
-    /// scales with layout cost on the full string. 256 graphemes is well
-    /// past any legitimate shell-emitted title (`hostname:dir$` style
-    /// fits in 80) and keeps the per-frame cost bounded.
-    public static let oscTitleMaxGraphemes = 256
-
-    /// Called by the event router when the shell emits OSC 0/2. Keeps
-    /// `oscTitle` and the published `title` in sync. Harmless to call with
-    /// the same string twice — the `@Published` will still fire, which is
-    /// fine; downstream is idempotent.
-    public func applyOscTitle(_ newValue: String) {
-        oscTitle = Self.cappedOscTitle(newValue)
-        publishTitle()
-    }
-
-    /// Truncate at `oscTitleMaxGraphemes` so the per-frame pill layout
-    /// stays bounded regardless of payload size. Counted in graphemes so
-    /// combining marks aren't split across a truncation boundary.
-    static func cappedOscTitle(_ value: String) -> String {
-        if value.count <= oscTitleMaxGraphemes { return value }
-        let prefix = value.prefix(oscTitleMaxGraphemes)
-        return String(prefix) + "…"
-    }
-
-    /// Recompute `displayTitle` and republish on the `@Published title`
-    /// pipeline. UI observes via Combine (`TerminalView.$title.sink`);
-    /// there's no notification channel — Combine is canonical. Callers on
-    /// any thread hop to main if needed. A nil value means "no real title
-    /// to set" — the sink falls back to the current window.title (shell
-    /// basename) instead of overwriting it with a placeholder.
-    ///
-    /// Audit L6: when called off main, recompute `displayTitle` INSIDE
-    /// the main-async block rather than capturing a snapshot before the
-    /// hop. The two underlying fields (`oscTitle`, `titleOverride`) are
-    /// both written from main, so reading them off main is itself a
-    /// data race; reading them on main inside the delivery closure
-    /// also closes a small ordering window where two rapid title
-    /// writes (one from a feed event, one from a `titleOverride`
-    /// setter) could interleave their captured snapshots and deliver
-    /// the older value last.
-    private func publishTitle() {
-        if Thread.isMainThread {
-            self.title = displayTitle
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.title = self.displayTitle
-            }
-        }
-    }
-
-    private let bbterm: BBTerm
+    /// Internal (not private) so the `SnapshotCoalescer` / `PaletteApplier`
+    /// collaborators can reach the FFI handle. Part I §6 single-queue ownership
+    /// is preserved by discipline, not access control: those collaborators only
+    /// touch `bbterm` from `coreQueue` (feed + the deferred snapshot/palette
+    /// work items all run on `coreQueue`).
+    let bbterm: BBTerm
     /// Optional so tests can construct a title-only headless session without
     /// spawning a child process. Production paths always have a PTY.
-    private let pty: PTY?
+    /// Internal (not private) for the same reason as `bbterm`: the
+    /// `FocusEmitter` (writeImmediate) and `ResizeController` (resize)
+    /// collaborators forward to it. PTY owns its own read/write queue
+    /// serialization, so single-owner discipline is preserved exactly as before
+    /// — these collaborators only touch it from the same coreQueue contexts the
+    /// inline code did.
+    let pty: PTY?
     /// Marker installed on `coreQueue` so any sync-entry helper can detect
     /// it's already running on this session's coreQueue and avoid a
     /// `coreQueue.sync` self-deadlock (PS-01 / NEW-01).
     private let coreQueueToken: ObjectIdentifier
-    private let coreQueue: DispatchQueue
+    /// Internal (not private) so `SnapshotCoalescer` / `PaletteApplier` can
+    /// serialize their `bbterm` access through the same single owner queue.
+    let coreQueue: DispatchQueue
     /// Process-wide key used by `setSpecific`. Different sessions have
     /// distinct token VALUES on the same key, so `getSpecific(key:)` on a
     /// thread that's servicing session A's coreQueue returns A's token but
@@ -273,56 +160,52 @@ public final class TerminalSession: ObservableObject {
 
     // MARK: - Main-publish coalescer (audit F1)
     //
-    // F1 flagged that a runaway producer (`yes | cat`, `cat hugefile`) would
-    // queue unbounded `DispatchQueue.main.async { self.snapshot = snap }`
-    // work items from `feed(_:)` — every 128 KiB PTY chunk produced one main-
-    // queue write, each retaining a BBSnapshot, each waking TerminalView's
-    // Combine sink and scheduling a Metal draw. On a bursty producer this
-    // floods main and grows RSS linearly with the producer/consumer gap.
+    // The snapshot-publish machinery (the pending slot, the dispatch-scheduled
+    // flag, the burst scheduler, the snapshot/first-byte counters and the
+    // feed/publish paths) lives in `SnapshotCoalescer`. The session keeps two
+    // things here because they are SHARED with the terminate latch:
     //
-    // We picked the "coalesce on the main-publish side" approach from the
-    // audit's Alternative: snapshots are retained-reference objects, so
-    // dropping intermediates is safe — the renderer only needs the latest.
-    // We keep at most one pending main dispatch per session: feeds that
-    // arrive while a dispatch is in flight overwrite the pending slot
-    // instead of enqueueing a new work item. This caps main-queue snapshot
-    // traffic at a constant regardless of PTY throughput.
-    //
-    // We did not pursue the full read-side backpressure path (bytes-in-
-    // flight counter + semaphore-blocked PTY read loop) because the main-
-    // queue flood was the observable half of F1 (bounded by producer rate
-    // on coreQueue, but main is far more contention-sensitive) and the
-    // coalescer fixes it without reaching into PTY's read loop or adding
-    // a cross-queue blocking primitive — which would change the thread
-    // model documented at the top of this file and complicate teardown.
+    //   - `publishLock`: the coalescer locks THIS instance (no second lock), so
+    //     user-action publishes (publishImmediate), feed-driven publishes, and
+    //     `terminate()` all serialize on one lock exactly as before the split.
+    //   - `isTerminated`: the F1/F11 gate read by the coalescer (under the lock)
+    //     and by every other `coreQueue.async` path via `isTerminatedLocked()`.
     //
     // F11: queued feeds kept publishing snapshots after `onExit` / window
-    // close. `isTerminated` gates the feed path so post-termination feeds
-    // are dropped instead of still waking main.
-    private let publishLock = NSLock()
-    private var pendingSnapshot: BBSnapshot?
-    private var snapshotDispatchScheduled: Bool = false
-    private var isTerminated: Bool = false
+    // close. `isTerminated` gates the feed path so post-termination feeds are
+    // dropped instead of still waking main.
+    //
+    // Internal (not private): the coalescer shares this exact `NSLock`.
+    let publishLock = NSLock()
+    /// Terminate latch. `private(set)` so only `terminate()` flips it; the
+    /// coalescer reads it (under `publishLock`) but never writes it.
+    private(set) var isTerminated: Bool = false
 
-    /// True while a deferred feed-path snapshot work item is sitting in
-    /// `coreQueue` (see `scheduleSnapshotAfterBurst`). coreQueue-confined:
-    /// only touched from `feed(_:)` and the work item itself, both of
-    /// which run on `coreQueue` — no lock.
-    private var snapshotWorkQueued = false
+    /// The main-publish coalescer. Owns the F1/F11/H8 pending-slot machinery
+    /// and the feed/scheduleSnapshotAfterBurst/publish paths, sharing this
+    /// session's `publishLock` (IUO: needs `self` at init, assigned before
+    /// `wire()` so no async path observes it nil). `private(set)` internal so
+    /// `PaletteApplier` can route its post-apply snapshot through the same
+    /// single-slot coalescer; only this session assigns it.
+    private(set) var snapshotCoalescer: SnapshotCoalescer!
 
-    /// Count of feed-path snapshot generations. coreQueue-confined like
-    /// `snapshotWorkQueued` (incremented only inside the deferred work
-    /// item); read via `snapshotsTakenForTests`, which syncs onto
-    /// `coreQueue`. Deliberately NOT in the `publishLock` set — that lock's
-    /// contract is the F1/F11 publish-coalescer state only.
-    private var snapshotsTakenCount: Int = 0
+    /// Pushes resolved theme palettes into the core (Finding 1 peel). Stateless
+    /// collaborator; assigned alongside the coalescer.
+    private var paletteApplier: PaletteApplier!
 
-    /// Last focus state actually emitted to the TUI (`CSI I`/`CSI O`),
-    /// guarded by `coreQueue`. Dedups consecutive same-state focus
-    /// transitions so the single-owner emitter sends exactly one byte pair
-    /// per real focus change. `nil` = nothing emitted yet; left untouched
-    /// when mode 1004 is off so a later enable still reports current focus.
-    private var lastFocusEmitted: Bool?
+    /// OSC 7 cwd ingest + SSH-trust classification (Part I §18). Owns the L3
+    /// drop-log latch; drives the `@Published lastKnownCwd` store on this
+    /// session. Assigned before `wire()` so the async event handler it backs
+    /// never observes it nil.
+    private var cwdTracker: CwdTracker!
+
+    /// Window-focus escape emitter (DECSET 1004 gate + same-state dedup). Owns
+    /// the `lastFocusEmitted` coreQueue-confined latch.
+    private var focusEmitter: FocusEmitter!
+
+    /// Terminal resize (grid + PTY winsize lockstep + reflow invalidation).
+    /// Owns the `lastAppliedGridSize` coreQueue-confined reflow detector.
+    private var resizeController: ResizeController!
 
     public static func start(
         shell: String,
@@ -367,15 +250,24 @@ public final class TerminalSession: ObservableObject {
         q.setSpecific(key: Self.coreQueueKey, value: token)
         self.coreQueue = q
         self.coreQueueToken = token
+        // Assigned before `wire()` so the async feed/snapshot/palette closures
+        // it schedules never observe these IUO collaborators as nil.
+        self.snapshotCoalescer = SnapshotCoalescer(session: self)
+        self.paletteApplier = PaletteApplier(session: self)
+        self.promptNavigator = PromptNavigator(session: self)
+        self.cwdTracker = CwdTracker(session: self)
+        self.focusEmitter = FocusEmitter(session: self)
+        self.resizeController = ResizeController(session: self)
         wire()
     }
 
     #if DEBUG
     /// Headless factory for title-logic tests. Creates a BBTerm at a trivial
     /// size and skips the PTY spawn entirely — so no child process, no fd,
-    /// no background queues. Only `applyOscTitle`, `titleOverride`, and
-    /// `displayTitle` are useful on the returned instance; public methods
-    /// that touch the PTY are all no-ops via optional chaining.
+    /// no background queues. Only the `titleState` collaborator (its
+    /// `applyOscTitle` / `titleOverride` / `displayTitle`) is useful on the
+    /// returned instance; public methods that touch the PTY are all no-ops
+    /// via optional chaining.
     static func makeHeadlessForTests() -> TerminalSession {
         // BBTerm.init accepts anything ≥ 2; pick the minimum so we don't
         // waste allocation for unit-test purposes.
@@ -399,6 +291,12 @@ public final class TerminalSession: ObservableObject {
         q.setSpecific(key: Self.coreQueueKey, value: token)
         self.coreQueue = q
         self.coreQueueToken = token
+        self.snapshotCoalescer = SnapshotCoalescer(session: self)
+        self.paletteApplier = PaletteApplier(session: self)
+        self.promptNavigator = PromptNavigator(session: self)
+        self.cwdTracker = CwdTracker(session: self)
+        self.focusEmitter = FocusEmitter(session: self)
+        self.resizeController = ResizeController(session: self)
         // `wire()` is safe in headless mode: every PTY hookup uses optional
         // chaining, so with `pty == nil` only the bbterm.onEvent handler is
         // installed. That's exactly what the OSC 7 / cwd tests need — feed
@@ -417,7 +315,7 @@ public final class TerminalSession: ObservableObject {
     /// and proved flaky under CI contention.
     func feedBytesForTests(_ bytes: Data) {
         coreQueue.sync {
-            self.feed(bytes)
+            self.snapshotCoalescer.feed(bytes)
         }
     }
 
@@ -429,7 +327,7 @@ public final class TerminalSession: ObservableObject {
     /// the next chunk is enqueued.
     func enqueueBytesForTests(_ bytes: Data) {
         coreQueue.async { [weak self] in
-            self?.feed(bytes)
+            self?.snapshotCoalescer.feed(bytes)
         }
     }
 
@@ -441,7 +339,7 @@ public final class TerminalSession: ObservableObject {
     /// snapshot work they deferred have finished — regardless of how many
     /// levels deep a future change makes the deferral.
     func waitForFeedsForTests() {
-        while coreQueue.sync(execute: { snapshotWorkQueued }) {
+        while coreQueue.sync(execute: { snapshotCoalescer.snapshotWorkQueued }) {
             // Each pass queues behind whatever is currently in flight;
             // no spin in practice (≤2 iterations for a single burst).
         }
@@ -453,7 +351,7 @@ public final class TerminalSession: ObservableObject {
     /// coreQueue-confined storage; the sync read also gives the caller
     /// natural ordering behind any queued feeds.
     var snapshotsTakenForTests: Int {
-        coreQueue.sync { snapshotsTakenCount }
+        coreQueue.sync { snapshotCoalescer.snapshotsTakenCount }
     }
 
     /// Test-only synchronous snapshot accessor. Drives the same code path
@@ -469,11 +367,11 @@ public final class TerminalSession: ObservableObject {
         return coreQueue.sync { self.bbterm.snapshot() }
     }
 
-    /// Test hook: drive `focusEmissionBytes` on the core queue so unit tests
-    /// can pin the DECSET 1004 gate + same-state dedup without an NSWindow.
-    /// Mirrors `feedBytesForTests`.
+    /// Test hook: drive `FocusEmitter.emissionBytes` on the core queue so unit
+    /// tests can pin the DECSET 1004 gate + same-state dedup without an
+    /// NSWindow. Mirrors `feedBytesForTests`.
     func focusEmissionBytesForTests(focused: Bool) -> Data? {
-        return coreQueue.sync { self.focusEmissionBytes(focused: focused) }
+        return coreQueue.sync { self.focusEmitter.emissionBytes(focused: focused) }
     }
     #endif
 
@@ -536,7 +434,7 @@ public final class TerminalSession: ObservableObject {
     /// `.local` to preserve the historical "OSC 7 just lands in tests"
     /// ergonomics; tests that exercise the gate explicitly set
     /// `_testForegroundNamespaceOverride`.
-    public func classifyForegroundNamespace() -> PTY.ForegroundNamespace {
+    public func classifyForegroundNamespace() -> ForegroundNamespace {
         #if DEBUG
         if let override = _testForegroundNamespaceOverride {
             return override
@@ -555,7 +453,7 @@ public final class TerminalSession: ObservableObject {
     /// lets tests simulate `.local`, `.remote(...)`, or `.unknown(...)`
     /// without spawning a real foreground child. Cleared with `nil` to
     /// fall back to the real path. Mirrors `_testForegroundChildOverride`.
-    var _testForegroundNamespaceOverride: PTY.ForegroundNamespace?
+    var _testForegroundNamespaceOverride: ForegroundNamespace?
     #endif
 
     /// Send a POSIX signal directly to the terminal's foreground process group.
@@ -571,128 +469,21 @@ public final class TerminalSession: ObservableObject {
     /// hasn't requested focus events — Vim's `:checktime`, tmux's
     /// `focus-events on`, and similar features depend on this.
     ///
-    /// Runs on the core queue so the mode read + PTY write are serialized
-    /// with any in-flight `bb_term_input` call. Immediate rather than
-    /// queued because the byte must land before the next keystroke or
-    /// repaint to be causally correct with the focus change the user just
-    /// made.
+    /// The DECSET 1004 gate (read against the **live** core mode, not the
+    /// async-published snapshot), the same-state dedup, and the coreQueue hop +
+    /// `isTerminated` gate live in `FocusEmitter` (REFACTOR.md Part IV —
+    /// focus-emission peel). This is the thin public seam `TerminalView` /
+    /// `MainWindowController` bind unchanged.
     public func focusChanged(_ focused: Bool) {
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            // S2-010: gate on isTerminated so a focus-change dispatched
-            // before terminate() but processed after doesn't hand bytes
-            // to PTY.writeImmediate on a stopped session. PTY's own
-            // shouldKeepRunning() guard makes this a no-op today, but
-            // contracts that rely on a sibling subsystem's defensive
-            // check rot quietly when that sibling refactors. Mirrors
-            // the gate every other coreQueue.async path uses.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
-            guard let bytes = self.focusEmissionBytes(focused: focused) else { return }
-            self.pty?.writeImmediate(bytes)
-        }
-    }
-
-    /// Single source of truth for window-focus escape emission: applies the
-    /// DECSET 1004 gate (via the **live** core mode, not the async-published
-    /// snapshot) and dedups consecutive same-state transitions. Returns the
-    /// `CSI I` / `CSI O` bytes to write, or nil when nothing should be sent.
-    ///
-    /// MUST run on `coreQueue` — it reads the live core mode and mutates
-    /// `lastFocusEmitted`. This consolidation removed the former second
-    /// emitter in `TerminalView` (which gated on the stale snapshot mode and
-    /// could double-fire per transition, or — across the async window of a
-    /// 1004 toggle — send a stray `CSI I`/`CSI O` to a program that had just
-    /// disabled focus reporting).
-    private func focusEmissionBytes(focused: Bool) -> Data? {
-        dispatchPrecondition(condition: .onQueue(coreQueue))
-        guard let bytes = bbterm.focusChangeBytes(focused: focused) else {
-            // Mode 1004 off: emit nothing and CLEAR the dedup latch, so a
-            // later 1004 re-enable (vim `:e`, tmux re-attach, an alt-screen
-            // app re-initialising its terminal state) is treated as a fresh
-            // first emit. The TerminalView 1004-enable catch-up depends on
-            // this — if the latch stayed set it would swallow the focus-in
-            // the catch-up fires when the window never lost key across the
-            // off→on toggle. (Clearing to nil also keeps the never-enabled
-            // case correct: nil ≠ any focus state, so the first real emit
-            // still fires.)
-            lastFocusEmitted = nil
-            return nil
-        }
-        if lastFocusEmitted == focused { return nil }
-        lastFocusEmitted = focused
-        return bytes
+        focusEmitter.emit(focused)
     }
 
     // MARK: - Prompt navigation
-
-    /// Record the (history, grid row) position at which an OSC 133 A
-    /// fired. Called on main from the event switch; the snapshot read
-    /// is dispatched async to coreQueue so a heavy feed backlog can't
-    /// block main while we wait for `bbterm.snapshot()` to drain.
-    /// A new prompt resets `promptCursor` to nil so the next jump
-    /// starts from the newest mark.
-    private func recordPromptStart(eventClearEpoch: UInt64) {
-        // M-12: tripwire the same way scroll / scrollToBottom / clearAll do.
-        // `coreQueue.sync` self-deadlocks if invoked from coreQueue, and the
-        // bbterm event handler's pre-main fast-path for ptyWrite already
-        // demonstrates a precedent for handlers calling back into us off
-        // their queue. Fail loud if a future caller lands here on coreQueue.
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        // Audit S5-008: capture the ring generation NOW (we're on main,
-        // ahead of the coreQueue hop). If ⌘K's resetPromptState runs
-        // while our snapshot block is in flight, the generation moves
-        // and the append below self-discards instead of re-inserting a
-        // mark anchored to wiped scrollback. The eventClearEpoch guard
-        // covers the OTHER half of the window: an event that fired on
-        // coreQueue before the clear but drained on main after it
-        // arrives here with a stale epoch (blind-test finding on the
-        // first cut of this fix).
-        guard eventClearEpoch == clearEpochMain else { return }
-        let generation = promptMarkGeneration
-        // Audit L7. Was `coreQueue.sync(execute: bbterm.snapshot)` —
-        // under heavy streaming output the sync would block main
-        // until every queued feed ahead of us drained. The audit
-        // acknowledged "missing a line or two of drift is negligible";
-        // hand the snapshot off async, then hop back to main to
-        // mutate `promptMarks` / `promptCursor` (those fields are
-        // owned by main).
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            // Audit fix-#11 (2026-05-11): mirror the F11 / M-1 / L-1
-            // termination-gate pattern that feed / publishPendingSnapshot /
-            // applyPalette use. Without this, a coreQueue.async block
-            // already in flight when terminate() runs would still capture
-            // a snapshot and queue a main-hop append, mutating
-            // promptMarks on a session whose consumers are tearing down.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
-            guard let snap = self.bbterm.snapshot() else { return }
-            let mark = PromptMark(linesScrolled: snap.linesScrolled, gridRow: snap.cursorRow)
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                // Re-check on the main hop: terminate() could have run
-                // between the coreQueue body and main drain.
-                self.publishLock.lock()
-                let terminatedNow = self.isTerminated
-                self.publishLock.unlock()
-                if terminatedNow { return }
-                // Audit S5-008: a clear/reflow between capture and this
-                // drain invalidated the anchor — drop instead of
-                // re-inserting a phantom mark.
-                guard generation == self.promptMarkGeneration else { return }
-                self.promptMarks.append(mark)
-                if self.promptMarks.count > Self.promptMarkCap {
-                    self.promptMarks.removeFirst(self.promptMarks.count - Self.promptMarkCap)
-                }
-                self.promptCursor = nil
-            }
-        }
-    }
+    //
+    // The ring's cursor, the scroll-to-mark math, the OSC 133 A record path, and
+    // the two-token clear-epoch / generation machinery live in `PromptNavigator`
+    // (REFACTOR.md Part IV — prompt-nav peel). These are thin forwarders so menu
+    // actions / `AppDelegate` / `PromptJumpTests` bind unchanged.
 
     /// Scroll the viewport to the previous recorded prompt. First press
     /// from a resting state jumps to the newest mark; subsequent presses
@@ -701,16 +492,7 @@ public final class TerminalSession: ObservableObject {
     /// run yet).
     @discardableResult
     public func jumpToPreviousPrompt() -> Bool {
-        guard !promptMarks.isEmpty else { return false }
-        let next: Int = {
-            if let cur = promptCursor {
-                return max(0, cur - 1)
-            }
-            return promptMarks.count - 1
-        }()
-        promptCursor = next
-        scrollToMark(promptMarks[next])
-        return true
+        promptNavigator.jumpToPreviousPrompt()
     }
 
     /// Walk forward through the prompt ring toward the live view. No-op
@@ -719,37 +501,30 @@ public final class TerminalSession: ObservableObject {
     /// happened so the view can surface "no more prompts" feedback.
     @discardableResult
     public func jumpToNextPrompt() -> Bool {
-        guard let cur = promptCursor, !promptMarks.isEmpty else { return false }
-        let next = min(promptMarks.count - 1, cur + 1)
-        promptCursor = next
-        scrollToMark(promptMarks[next])
-        return true
+        promptNavigator.jumpToNextPrompt()
     }
 
     // MARK: - Test-only access
 
+    #if DEBUG
     /// Internal hook for `PromptJumpTests` — appends a mark with the FIFO
     /// cap applied, without needing a real shell to emit OSC 133. Not
     /// public because the ring lifecycle is otherwise owned entirely by
     /// the event switch.
     internal func _testAppendMark(_ mark: PromptMark) {
-        promptMarks.append(mark)
-        if promptMarks.count > Self.promptMarkCap {
-            promptMarks.removeFirst(promptMarks.count - Self.promptMarkCap)
-        }
-        promptCursor = nil
+        promptNavigator._testAppendMark(mark)
     }
 
     /// Internal accessor exposing the otherwise-private cycle index so
     /// tests can assert exact walk behaviour.
-    internal var _testPromptCursor: Int? { promptCursor }
+    internal var _testPromptCursor: Int? { promptNavigator._testPromptCursor }
 
     /// Audit L3: exposes the per-session one-shot latch so tests can
     /// assert "two `.unknown` OSC 7 events flip the latch exactly once".
     /// Setter is provided so a test can also reset between scenarios.
     internal var _testLoggedUnknownNamespaceDrop: Bool {
-        get { loggedUnknownNamespaceDrop }
-        set { loggedUnknownNamespaceDrop = newValue }
+        get { cwdTracker.loggedUnknownNamespaceDrop }
+        set { cwdTracker.loggedUnknownNamespaceDrop = newValue }
     }
 
     /// Exposes the Preferences Combine subscription so the
@@ -760,225 +535,23 @@ public final class TerminalSession: ObservableObject {
     internal var _testPreferencesSubscription: AnyCancellable? {
         preferencesSubscription
     }
+    #endif
 
-    /// Compute and apply the scroll delta that places a given mark near
-    /// the top of the current viewport.
-    ///
-    /// Math (audit S5-004): the mark was recorded at live-grid row
-    /// `gridRow` when the primary screen's monotonic counter read
-    /// `linesScrolled`. Every line scrolled since moves the marked row
-    /// one row further up, so the display offset that puts it at the
-    /// viewport top is `(counterNow − linesScrolled) − gridRow`. Unlike
-    /// the previous history_size anchor, the counter never plateaus at
-    /// the scrollback cap, so this stays exact after saturation — and
-    /// eviction is exactly `target > history` (the row scrolled past
-    /// retention), replacing the unsatisfiable fix-#22 threshold guard.
-    /// A negative target means the marked row is still at/below the
-    /// viewport top in the live grid (or a clear collapsed history);
-    /// clamp to 0 = live bottom.
-    private func scrollToMark(_ mark: PromptMark) {
-        // M-12: same tripwire rationale as recordPromptStart above. The
-        // public callers (jumpToPreviousPrompt / jumpToNextPrompt) run on
-        // main today, but a future event-driven path could land here from
-        // coreQueue and hit the sync self-deadlock invisibly.
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        guard let snap = coreQueue.sync(execute: { self.bbterm.snapshot() }) else {
-            return
-        }
-        // Monotonic by contract; the defensive branch guards a future
-        // regression rather than a reachable state.
-        let scrolledSince = snap.linesScrolled >= mark.linesScrolled
-            ? Int(clamping: snap.linesScrolled - mark.linesScrolled)
-            : 0
-        let target = scrolledSince - mark.gridRow
-        if target > snap.historySize {
-            // Evicted: the anchored row scrolled past retention. Drop
-            // the orphaned mark and let the cycle promotion re-enter on
-            // the next press (audit S5-004 — this check is exact, and
-            // unlike its dead predecessor it actually fires).
-            promptMarks.removeAll { $0 == mark }
-            if let cursor = promptCursor, cursor >= promptMarks.count {
-                promptCursor = promptMarks.isEmpty ? nil : promptMarks.count - 1
-            }
-            return
-        }
-        let clampedTarget = max(0, min(target, snap.historySize))
-        let delta = clampedTarget - snap.displayOffset
-        if delta != 0 {
-            scroll(delta: Int32(clamping: delta))
-        }
-    }
-
+    /// Resize the grid + PTY winsize in lockstep (drag path: synchronous so the
+    /// returned snapshot is already new-size when the next MTKView frame draws).
+    /// The Bug #3 / Bug #9 ordering, the M3 panic-fallback, the S1-007
+    /// termination gate, and the H8 publishImmediate routing live in
+    /// `ResizeController` (REFACTOR.md Part IV — resize peel). Thin public seam
+    /// `TerminalView` (window-drag) binds unchanged.
     public func resize(to size: Size) {
-        // M-12 sibling: same tripwire rationale as recordPromptStart /
-        // scrollToMark. `coreQueue.sync` self-deadlocks if invoked from
-        // coreQueue, and a future bbterm-event-driven path could land
-        // here on coreQueue and wedge the session invisibly. Public API
-        // surface — fail loud rather than silently hang.
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        // Synchronous on the caller's thread. coreQueue serializes PTY +
-        // BBTerm resize (same guarantee as before) but we block the caller
-        // (typically main during a window drag) so the returned snapshot is
-        // already new-size when the next MTKView frame draws. Async resize
-        // produced a one-frame lag that users saw as jitter — content at old
-        // grid size against new viewport for ~8ms, then catching up.
-        //
-        // Blocking cost under an idle coreQueue: a single bb_term_resize call
-        // plus snapshot, well under a millisecond. Under a coreQueue backlog
-        // (a chatty shell mid-burst) the caller waits for every queued
-        // `feed(_:)` to drain first — callers that don't need the drag-path
-        // jitter-free guarantee should use `resizeAsync` instead (font-change
-        // path, which otherwise beachballs Settings clicks when Claude /
-        // xcodebuild are streaming into the terminal).
-        //
-        // Clamp cols/rows to the same 2×2 floor and 1000×1000 ceiling the
-        // Rust core enforces, so the PTY's TIOCSWINSZ gets dimensions
-        // matching what alacritty will actually reflow into. Without
-        // this, a 1×1 request sizes the PTY to 1×1 but leaves the grid
-        // at 2×2; a UInt16.max request allocates hundreds of GB in the
-        // grid. Keeping PTY + grid in lockstep avoids off-by-one cursor
-        // / wrap bugs after the mismatch.
-        //
-        // Order matters (Bug #9): apply the grid resize FIRST and capture
-        // the actually-applied dims via `bb_term_resize2`, THEN call
-        // `pty.resize` with those post-clamp dims. Reversing the order
-        // opens a window where the shell can read its new winsize via
-        // `stty size` / `tput cols` and start emitting at the new width
-        // before the grid has reflowed — content past the old grid edge
-        // gets dropped. Doing pty AFTER bbterm closes that window: the
-        // SIGWINCH the shell reacts to lands on a grid that's already
-        // sized correctly. And feeding `pty.resize` the
-        // bbterm-actually-applied dims (Bug #3) prevents the shell from
-        // being told a width the renderer can't actually display, which
-        // would cause text past the clamp ceiling to wrap into oblivion.
-        let clamped = Self.clampResize(size)
-        var newSnap: BBSnapshot?
-        coreQueue.sync {
-            // Audit S1-007: gate on termination INSIDE the coreQueue
-            // block — terminate() sets the flag before nil'ing the
-            // handle via this same serial queue, so the read here is
-            // exact. Without it, a resize racing a tab close reached
-            // BBTerm.resize after the handle was nil'd, got nil back,
-            // and logged the 'Rust panic fallback' warning with no
-            // panic anywhere — a false alarm that would misdirect
-            // triage of REAL core panics (the only consumer of that
-            // message).
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
-            // Audit M3: when bb_term_resize2 panics, BBTerm.resize returns
-            // nil. Skip TIOCSWINSZ so the kernel winsize stays in lockstep
-            // with the grid (which kept its prior dims). Snapshot still
-            // publishes so the renderer doesn't stall.
-            if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
-                self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
-                // INSIDE the coreQueue block, matching resizeAsync —
-                // lastAppliedGridSize is coreQueue-confined, and calling
-                // from the caller's thread here raced a concurrent
-                // font-change resizeAsync (review finding on this
-                // batch). noteAppliedGridSize never re-enters coreQueue
-                // (its @Published mutations hop to main), so this is
-                // deadlock-free.
-                self.noteAppliedGridSize(Size(cols: applied.cols, rows: applied.rows))
-            } else {
-                Self.sessionLogger.warning(
-                    "BBTerm.resize returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
-                )
-            }
-            newSnap = self.bbterm.snapshot()
-        }
-        guard let newSnap else { return }
-        // Audit fix-#07 (2026-05-11): route through publishImmediate so the
-        // post-resize snapshot honours the H8 user-action-wins invariant.
-        // Previously this path wrote `self.snapshot = newSnap` directly,
-        // leaving `pendingSnapshot` alone — a feed-driven coalescer queued
-        // before the resize would fire AFTER our inline write and clobber
-        // the new-grid frame with pre-resize content. publishImmediate
-        // clears `pendingSnapshot=nil` under publishLock first, dropping
-        // any in-flight coalescer; it also already mirrors the M-1 / F11
-        // isTerminated re-check on the off-main hop, so the prior inline
-        // termination guard is subsumed.
-        publishImmediate(newSnap)
+        resizeController.resize(to: size)
     }
 
-    /// Async sibling of `resize(to:)` for non-drag callers. Trades the
-    /// in-hand post-resize snapshot (which `resize` returns with so a
-    /// window-drag frame never shows old-grid-at-new-viewport) for a
-    /// guaranteed non-blocking main thread. Used by the font-change path,
-    /// where the resize is a one-off (not a drag loop) and a coreQueue
-    /// backlog must not hold main hostage while shells stream output.
-    /// Ordering against in-flight feeds is preserved because coreQueue is
-    /// serial; the resulting snapshot is routed through the same coalescer
-    /// `feed(_:)` uses.
+    /// Async sibling of `resize(to:)` for non-drag callers (font-change path),
+    /// where a coreQueue backlog must not hold main hostage while shells stream
+    /// output. Logic lives in `ResizeController`; this is the thin public seam.
     public func resizeAsync(to size: Size) {
-        let clamped = Self.clampResize(size)
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            // Audit S1-007: same in-block termination gate as the sync
-            // path — a font-change resizeAsync queued behind terminate()
-            // used to reach a nil'd handle and emit the false
-            // 'Rust panic fallback' warning.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
-            // Same Bug #3/#9 ordering as the sync `resize(to:)`: bbterm
-            // first, then pty with the actually-applied (post-clamp) dims.
-            // Audit M3 sibling of the sync path: nil => Rust panic
-            // fallback, skip TIOCSWINSZ.
-            if let applied = self.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
-                self.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
-                self.noteAppliedGridSize(Size(cols: applied.cols, rows: applied.rows))
-            } else {
-                Self.sessionLogger.warning(
-                    "BBTerm.resize (async) returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
-                )
-            }
-            guard let snap = self.bbterm.snapshot() else { return }
-            self.publishPendingSnapshot(snap)
-        }
-    }
-
-    /// Last grid size BBTerm actually applied. Used to detect real
-    /// reflow (audit S5-004/S5-005 contract: ANY resize invalidates
-    /// lines-scrolled anchors — column reflow rewraps history and
-    /// row-count changes move content through uncounted paths). Reads
-    /// and writes ordered by `coreQueue` on the resize paths plus the
-    /// main hop below; a plain var with no lock is safe because every
-    /// mutation site is either inside a coreQueue block or behind one.
-    private var lastAppliedGridSize: Size?
-
-    /// Invalidate prompt-mark anchors when the applied grid size
-    /// actually changed. First application just records the baseline —
-    /// the window-setup resize precedes any shell prompt, so the ring
-    /// is empty then anyway.
-    private func noteAppliedGridSize(_ applied: Size) {
-        let changed: Bool
-        if let last = lastAppliedGridSize {
-            changed = last != applied
-        } else {
-            changed = false
-        }
-        lastAppliedGridSize = applied
-        guard changed else { return }
-        // Unconditionally async (review follow-up): this runs INSIDE a
-        // coreQueue block — for a main-thread caller of the sync
-        // resize, dispatch_sync executes here ON main while the current
-        // dispatch context is coreQueue, and a synchronous @Published
-        // reaction touching scroll/resize would trip their
-        // .notOnQueue(coreQueue) tripwires from inside the held queue.
-        // Async delivery is safe: the S5-008 generation token already
-        // makes a late ring wipe race-free against in-flight appends.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            // Bump the generation FIRST so any in-flight
-            // recordPromptStart append from the pre-reflow grid
-            // self-discards (audit S5-008's token doubles here).
-            self.promptMarkGeneration &+= 1
-            self.promptMarks = []
-            self.promptCursor = nil
-        }
+        resizeController.resizeAsync(to: size)
     }
 
     /// Documented floor 2, ceiling 1000 per axis. Visible to tests
@@ -1003,7 +576,7 @@ public final class TerminalSession: ObservableObject {
             bbterm.scroll(delta: delta)
             snap = bbterm.snapshot()
         }
-        if let snap { publishImmediate(snap) }
+        if let snap { snapshotCoalescer.publishImmediate(snap) }
     }
 
     /// Snap the viewport back to the live grid. Call from the input path
@@ -1016,7 +589,7 @@ public final class TerminalSession: ObservableObject {
             bbterm.scrollToBottom()
             snap = bbterm.snapshot()
         }
-        if let snap { publishImmediate(snap) }
+        if let snap { snapshotCoalescer.publishImmediate(snap) }
     }
 
     /// ⌘K target — clear viewport + scrollback while preserving palette /
@@ -1043,8 +616,9 @@ public final class TerminalSession: ObservableObject {
             bbterm.clearAll()
             // Audit S5-008: events fired on coreQueue BEFORE this point
             // carry the pre-bump epoch and their prompt-mark appends
-            // self-discard on the main side.
-            clearEpochCore &+= 1
+            // self-discard on the main side. coreQueue-confined bump —
+            // runs inside this `coreQueue.sync`, exactly as before.
+            promptNavigator.bumpClearEpochCore()
             s = bbterm.snapshot()
         }
         // H-6: drop prompt-state tied to the now-deleted scrollback. The
@@ -1062,29 +636,19 @@ public final class TerminalSession: ObservableObject {
         // guarantees: a future caller that hands `resetPromptState` to
         // e.g. `coreQueue.async(execute:)` would now fail to compile,
         // instead of trapping at runtime via `MainActor.assumeIsolated`.
+        //
+        // The body (S5-008: bump the ring generation so an in-flight
+        // recordPromptStart whose snapshot predates the clear drops its
+        // append instead of re-inserting a mark anchored to deleted
+        // scrollback — and the main-side clear epoch so events that FIRED
+        // before the clear but drain after self-discard too; then wipe the
+        // ring + last-mark + cursor) lives in `PromptNavigator.resetForClear`.
         let resetPromptState: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
-            // Audit S5-008: bump the ring generation so an in-flight
-            // recordPromptStart whose snapshot predates the clear drops
-            // its append instead of re-inserting a mark anchored to the
-            // scrollback we just deleted — and the main-side clear epoch
-            // so events that FIRED before the clear (but drain after)
-            // self-discard too.
-            self.promptMarkGeneration &+= 1
-            self.clearEpochMain &+= 1
-            self.promptMarks = []
-            self.promptCursor = nil
-            self.lastPromptMark = nil
+            self.promptNavigator.resetForClear()
         }
-        if Thread.isMainThread {
-            // We're on main but the function isn't `@MainActor`, so the
-            // wrapper is what the compiler accepts to call a
-            // `@MainActor` closure synchronously.
-            MainActor.assumeIsolated(resetPromptState)
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated(resetPromptState) }
-        }
-        if let s { publishImmediate(s) }
+        onMain(resetPromptState)
+        if let s { snapshotCoalescer.publishImmediate(s) }
         // L-24: re-apply the resolved theme palette so OSC 4 mutations
         // from the pre-clear shell don't survive into the post-clear
         // session. `applyPalette` is async on `coreQueue` so it orders
@@ -1101,140 +665,44 @@ public final class TerminalSession: ObservableObject {
             let palette = ThemeManager.shared.resolvedPalette
             self.applyPalette(palette)
         }
-        if Thread.isMainThread {
-            // We're on main but the function isn't `@MainActor`, so the
-            // wrapper is what the compiler accepts to call a
-            // `@MainActor` closure synchronously.
-            MainActor.assumeIsolated(applyResolved)
-        } else {
-            DispatchQueue.main.async { MainActor.assumeIsolated(applyResolved) }
-        }
+        onMain(applyResolved)
     }
 
-    /// Synchronous publish path used by user-input-driven snapshots
-    /// (scroll, scrollToBottom, clearAll). Combines two semantics that
-    /// pure inline writes and pure publishPendingSnapshot each fail to
-    /// give us in isolation:
-    ///
-    ///   - Synchronous visibility: `self.snapshot = snap` lands before
-    ///     the call returns (when invoked on main; otherwise hops to
-    ///     main but stays one runloop tick away). Tests that read
-    ///     `session.snapshot` immediately after `scroll()` get the
-    ///     scroll's snapshot, not the prior one.
-    ///   - Stale-pending invalidation: the coalescer's `pendingSnapshot`
-    ///     slot is cleared under publishLock BEFORE the inline write,
-    ///     so an already-queued main dispatch from a prior feed (which
-    ///     would otherwise clobber our fresh snapshot when it fires)
-    ///     reads `pendingSnapshot == nil` and bails. Audit H8.
-    ///
-    /// This is the right shape for the "user-action wins over chatty
-    /// background output" semantics: ⌘K on a flooding shell must
-    /// instantly show empty; scroll-into-history must instantly show
-    /// the new offset.
-    private func publishImmediate(_ snap: BBSnapshot) {
+    /// Reads the `terminate()` latch under `publishLock`. Every `coreQueue`
+    /// body and its main-hop re-check calls this to bail when the session tore
+    /// down between scheduling and execution — the lock pairs with the store
+    /// in `terminate()`, so reading the bare `Bool` would race that store. The
+    /// lock guards only the read; callers branch on the returned value outside
+    /// it, exactly as the inline `lock / read / unlock` dance this replaces did.
+    /// Internal (not private) so `SnapshotCoalescer` / `PaletteApplier` share
+    /// the one termination-gate read against this session's `publishLock`.
+    func isTerminatedLocked() -> Bool {
         publishLock.lock()
-        // Drop any queued stale snapshot — a feed-driven coalesced
-        // dispatch that fires AFTER our inline write would otherwise
-        // overwrite the user-action snapshot with pre-action content.
-        pendingSnapshot = nil
-        publishLock.unlock()
+        defer { publishLock.unlock() }
+        return isTerminated
+    }
+
+    /// Run `work` on the main actor: synchronously via `assumeIsolated` when
+    /// the caller is already on the main thread (no extra runloop turn — the
+    /// synchronous-visibility paths rely on landing this tick), otherwise
+    /// hopped via `main.async`. `work` is typed `@MainActor` so the compiler
+    /// enforces the isolation the runtime assumes — a caller that mis-routes it
+    /// onto a background queue fails to compile instead of trapping at runtime.
+    /// One definition for the possibly-off-main paths that mutate `@MainActor`
+    /// state (prompt-state reset, palette re-apply).
+    private func onMain(_ work: @escaping @MainActor () -> Void) {
         if Thread.isMainThread {
-            self.snapshot = snap
+            MainActor.assumeIsolated(work)
         } else {
-            // Mirror publishPendingSnapshot's shape: weak self + post-hop
-            // isTerminated re-check under publishLock. Without this the
-            // closure strongly retains the session across the main hop and
-            // can write `@Published` after terminate() had its chance to
-            // tear consumers down (sibling of M-1 / F11).
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.publishLock.lock()
-                let terminated = self.isTerminated
-                self.publishLock.unlock()
-                guard !terminated else { return }
-                self.snapshot = snap
-            }
+            DispatchQueue.main.async { MainActor.assumeIsolated(work) }
         }
     }
 
-    /// Push a full palette into the Rust term + publish a fresh snapshot so
-    /// cells re-color on the next draw. Serialized through `coreQueue` as
-    /// `async` — the previous `sync` flavour blocked main waiting for any
-    /// pending `feed(_:)` items to drain, which on a chatty shell
-    /// (`xcodebuild test`, tailing logs, Claude streaming) turns every
-    /// Settings click that changes the palette / cursor / translucency into
-    /// a visible beachball. Async preserves ordering against feeds because
-    /// `coreQueue` is serial, and the resulting snapshot is routed through
-    /// the same single-slot coalescer that `feed(_:)` publishes through
-    /// (see `publishPendingSnapshot`), so a palette change mid-burst can't
-    /// jump ahead of or duplicate the snapshot stream.
+    /// Push a resolved theme palette into the core + republish. The color-math
+    /// + OSC-slot mapping lives in `PaletteApplier` (REFACTOR.md Finding 1
+    /// peel); this is the thin public seam `ThemeManager` and `clearAll` call.
     public func applyPalette(_ palette: ThemePalette) {
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            // L-1: same termination gate as `feed` (F11). All other coreQueue.async
-            // paths bail when isTerminated is set; without the check here a
-            // theme apply that races terminate() can publish a snapshot through
-            // the coalescer for a session whose consumer is tearing down.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
-            for (i, c) in palette.ansi.enumerated() {
-                self.bbterm.setColor(slot: i, rgb: c)
-            }
-            // NamedColor layout in alacritty 0.26 (per vte-0.15.0/src/ansi.rs):
-            //   256 = Foreground, 257 = Background, 258 = Cursor
-            //   259..=266 = DimBlack..DimWhite
-            //   267 = BrightForeground, 268 = DimForeground
-            self.bbterm.setColor(slot: 256, rgb: palette.foreground)
-            self.bbterm.setColor(slot: 257, rgb: palette.background)
-            self.bbterm.setColor(slot: 258, rgb: palette.cursor)
-            // Audit fix-#24 (2026-05-11): without explicit writes for slots
-            // 267/268 the renderer falls through to named_color_rgb's
-            // hardcoded 0xEEEEEE for both BrightForeground and
-            // DimForeground (lib.rs:2513,2524). A TUI that emits bold
-            // default-fg (xterm bold-color path) or SGR 2 dim default-fg
-            // would render the xterm default regardless of theme — wrong
-            // under Solarized Dark / Catppuccin / Light variants where
-            // 0xEEEEEE clashes with the chosen palette. Derive from the
-            // theme's foreground: lighten 20% toward white for Bright,
-            // darken 30% toward black for Dim. Matches alacritty's own
-            // SGR-1 / SGR-2 expected behaviour reasonably well; users
-            // with explicit OSC 4/10 overrides for these slots still win
-            // because OSC writes land via the same setColor path.
-            let brightFg = Self.lightenRGB(palette.foreground, by: 0.20)
-            let dimFg = Self.darkenRGB(palette.foreground, by: 0.30)
-            self.bbterm.setColor(slot: 267, rgb: brightFg)
-            self.bbterm.setColor(slot: 268, rgb: dimFg)
-            guard let snap = self.bbterm.snapshot() else { return }
-            self.publishPendingSnapshot(snap)
-        }
-    }
-
-    /// Audit fix-#24 helper: blend a 0xRRGGBB color toward white by
-    /// `factor` in [0, 1]. factor=0 returns the input unchanged;
-    /// factor=1 returns 0xFFFFFF. Saturating at 255 per channel.
-    private static func lightenRGB(_ rgb: UInt32, by factor: Double) -> UInt32 {
-        let r = Double((rgb >> 16) & 0xFF)
-        let g = Double((rgb >> 8) & 0xFF)
-        let b = Double(rgb & 0xFF)
-        let nr = UInt32(min(255.0, r + (255.0 - r) * factor).rounded())
-        let ng = UInt32(min(255.0, g + (255.0 - g) * factor).rounded())
-        let nb = UInt32(min(255.0, b + (255.0 - b) * factor).rounded())
-        return (nr << 16) | (ng << 8) | nb
-    }
-
-    /// Audit fix-#24 helper: blend a 0xRRGGBB color toward black by
-    /// `factor` in [0, 1]. factor=0 returns the input unchanged;
-    /// factor=1 returns 0x000000.
-    private static func darkenRGB(_ rgb: UInt32, by factor: Double) -> UInt32 {
-        let r = Double((rgb >> 16) & 0xFF)
-        let g = Double((rgb >> 8) & 0xFF)
-        let b = Double(rgb & 0xFF)
-        let nr = UInt32(max(0.0, r * (1.0 - factor)).rounded())
-        let ng = UInt32(max(0.0, g * (1.0 - factor)).rounded())
-        let nb = UInt32(max(0.0, b * (1.0 - factor)).rounded())
-        return (nr << 16) | (ng << 8) | nb
+        paletteApplier.apply(palette)
     }
 
     /// Extract text between two buffer points. Serialized through the core
@@ -1269,7 +737,9 @@ public final class TerminalSession: ObservableObject {
         isTerminated = true
         // Drop any pending main dispatch's payload — the already-scheduled
         // work item will observe `isTerminated` and bail before assigning.
-        pendingSnapshot = nil
+        // Same `publishLock` critical section as before the coalescer split:
+        // the latch-set + slot-clear stay atomic under one lock acquisition.
+        snapshotCoalescer.dropPendingSnapshotLocked()
         publishLock.unlock()
         // Bug #24: tear down the Preferences sink. Without this, a session
         // that's been terminated (window closed, child reaped) keeps a
@@ -1313,10 +783,14 @@ public final class TerminalSession: ObservableObject {
         // tests. If you need eager PTY setup, gate it with `if let pty
         // { … }` and state why in a comment — don't drop the guard.
 
-        // Apply the current OSC 10/11/12 color-query preference to the
-        // core. Core default is off for security reasons; user opt-in
-        // flips it on here at session start. Changes to the pref at
-        // runtime propagate via the Preferences subscription below.
+        wireColorQueryPreference()
+        wireEventAndPTY()
+    }
+
+    /// Apply the OSC 10/11/12 color-query preference to the core now (default
+    /// off for security; user opt-in), and keep it in sync at runtime via a
+    /// `Preferences` subscription.
+    private func wireColorQueryPreference() {
         coreQueue.async { [bbterm] in
             bbterm.setColorQueryEnabled(Preferences.shared.colorQueryEnabled)
         }
@@ -1349,7 +823,15 @@ public final class TerminalSession: ObservableObject {
                     bbterm.setColorQueryEnabled(enabled)
                 }
             }
+    }
 
+    /// Wire the bbterm event handler + PTY byte/exit handlers, in the
+    /// fix-#06 order: `onEvent` and `setOnExit` MUST be installed before
+    /// `setOnBytes` / `startReading`, so the dispatch chain (read loop →
+    /// coreQueue → feed → bbterm.input → event trampoline) is fully wired
+    /// before any byte can arrive; then take the initial snapshot through the
+    /// coalescer so it orders deterministically against the first real feed.
+    private func wireEventAndPTY() {
         // Route PTY bytes -> core queue -> bbterm -> publish snapshot.
         // M-4 / PS-01: BOTH closures use [weak self]. The outer captures
         // weakly so a closing window can drop the session promptly; the
@@ -1408,8 +890,10 @@ public final class TerminalSession: ObservableObject {
             // bb_term_input on coreQueue), so this read is ordered
             // against clearAll's coreQueue.sync bump. Rides the hop so
             // the prompt-mark append can tell "event predates the
-            // clear" from "genuine post-clear prompt".
-            let clearEpochAtDispatch = self.clearEpochCore
+            // clear" from "genuine post-clear prompt". The epoch is
+            // coreQueue-confined inside the navigator; this read stays on
+            // coreQueue exactly as the field read did.
+            let clearEpochAtDispatch = self.promptNavigator.currentClearEpochCore
             // SFH-005 sibling: fire the OSC 52 oversize breadcrumb on
             // coreQueue, BEFORE the main hop, so a terminating session
             // can't suppress the security log. The post-hop `guard let
@@ -1436,153 +920,12 @@ public final class TerminalSession: ObservableObject {
             // coreQueue.async site for `feed`.
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                switch event {
-                case .title(let t):
-                    // Route through applyOscTitle so a user-set override
-                    // isn't trampled by a late shell OSC 0/2, and so the
-                    // .terminalSessionTitleDidChange notification fires.
-                    self.applyOscTitle(t)
-                case .bell:
-                    self.bellCounter &+= 1
-                case .ptyWrite:
-                    break  // handled above, before the main hop
-                case .osc52Clipboard(let text):
-                    // alacritty_terminal 0.26 already decodes the OSC 52
-                    // payload: ClipboardStore(target, plaintext). The
-                    // `target` char (c/p/q/s/0-7) isn't surfaced through
-                    // the C ABI — we always write to NSPasteboard.general,
-                    // which is the only clipboard macOS exposes anyway.
-                    //
-                    // The previous implementation assumed `text` was
-                    // "target;base64" and stripped the first ';' then
-                    // base64-decoded the tail. With the real payload that
-                    // silently dropped every write (no ';' in decoded
-                    // plaintext, or base64 decode failed on the text
-                    // after it), so OSC 52 never actually pasted.
-                    //
-                    // Treat an empty payload as a clipboard-clear (OSC 52
-                    // ; c ; ST). Silently drop when the pref is off —
-                    // a misbehaving remote shouldn't stuff arbitrary
-                    // bytes into the user's clipboard or crash the
-                    // session.
-                    //
-                    // L-14: read the captured `osc52EnabledAtDispatch`
-                    // (snapshotted on coreQueue before the hop), not
-                    // `Preferences.shared` directly. A user disabling
-                    // OSC 52 mid-hop must NOT have the now-disabled
-                    // payload still land — and a user enabling it
-                    // mid-hop must NOT see a payload they couldn't have
-                    // intercepted. Either direction, the captured value
-                    // is the one consistent with the event-handler
-                    // ordering and the user's intent at dispatch time.
-                    guard osc52EnabledAtDispatch else { break }
-                    // SFH-005: oversize check + forensic breadcrumb
-                    // already fired on coreQueue before the main hop
-                    // (see osc52OversizeAtDispatch). Honour the captured
-                    // decision here to skip the NSPasteboard write —
-                    // diagnostic is in the unified log even if this hop
-                    // landed on a terminating session.
-                    if osc52OversizeAtDispatch { break }
-                    // Scrub C0/C1 controls + bidi overrides before handing
-                    // the payload to NSPasteboard. A compromised remote
-                    // would otherwise push a Trojan Source blob or raw ESC
-                    // sequences into the user's system clipboard —
-                    // invisible to Blackbird's own paste scrubber because
-                    // that runs on *inbound* paste, not on the write side.
-                    // Symmetric treatment: anything dirty enough to strip
-                    // on paste-in is dirty enough to strip on paste-out.
-                    let data = Data(text.utf8)
-                    let scrubbed = TerminalView.stripBidiOverrides(
-                        TerminalView.sanitizePasteControls(data)
-                    )
-                    let clean = String(decoding: scrubbed, as: UTF8.self)
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    if !clean.isEmpty {
-                        pb.setString(clean, forType: .string)
-                    }
-                case .cursorShape:
-                    // Cursor shape is pinned by `Preferences.shared.cursorShape`
-                    // (Settings → Cursor) and resolved into the renderer via
-                    // `MetalRenderer.setCursorShapeOverride`. Shell-driven
-                    // DECSCUSR is intentionally ignored when an override is
-                    // active so the user's preference wins over a TUI's
-                    // assumptions about the host terminal.
-                    break
-                case .cwdChanged(let path):
-                    // Rust core already gates on scheme=file and validates
-                    // UTF-8; the payload is a ready-to-use filesystem path.
-                    // Store on the main thread so reads from ⌘T / ⌘N stay
-                    // trivially race-free (those actions also run on main).
-                    //
-                    // SSH-trust gate (audit synthesis #4 / KNOWN_ISSUES
-                    // "OSC 7 trust over SSH"): trust the shell-reported
-                    // cwd ONLY when the foreground process tree
-                    // classifies as `.local`. A `.remote` (ssh, mosh-
-                    // client, docker exec, kubectl exec, …) means the
-                    // path describes the remote fs; `.unknown` means we
-                    // failed to classify (PTY closing, syscall error,
-                    // BFS cap hit). Both cases drop the OSC 7 payload
-                    // — fail-closed posture, opposite of the advisory
-                    // `hasForegroundChild` / `foregroundWorkingDirectory`
-                    // helpers.
-                    //
-                    // Cost: one syscall to read fg pgroup + at most ~256
-                    // node BFS (capped). Per `cd` only; well under the
-                    // frame budget on main.
-                    let classification = self.classifyForegroundNamespace()
-                    switch classification {
-                    case .local:
-                        self.lastKnownCwd = path
-                        // Re-arm the L3 latch on each .local transition so
-                        // a subsequent .local → .unknown cycle logs again.
-                        // Without this, a real-world ssh-disconnect-then-
-                        // reconnect-then-disconnect-again leaves only the
-                        // first breadcrumb and support engineers see no
-                        // log for the second loss.
-                        self.loggedUnknownNamespaceDrop = false
-                    case .remote:
-                        break
-                    case .unknown(let reason):
-                        // Audit L3: drop OSC 7 silently on every emit
-                        // would leave a support engineer with no
-                        // breadcrumb when ⌘T inheritance "isn't picking
-                        // up the cwd". Surface the reason once per
-                        // .local→.unknown transition so unified-log
-                        // readers see why without flooding on every cd.
-                        if !self.loggedUnknownNamespaceDrop {
-                            self.loggedUnknownNamespaceDrop = true
-                            Self.sessionLogger.notice(
-                                "OSC 7 dropped: foreground namespace classified .unknown (\(reason, privacy: .public)); ⌘T cwd inheritance disabled until classification recovers"
-                            )
-                        }
-                    }
-                case .promptMark(let kind, let exitCode):
-                    // Shell integration: A = prompt start, B = command start,
-                    // C = output start, D = command end (with exit code).
-                    self.lastPromptMark = (kind, exitCode)
-                    // Record kind-A positions so the user can jump back to
-                    // previous prompts. A fresh snapshot pins (history, row)
-                    // at this instant — the main-queue hop means the core
-                    // queue may have advanced slightly, but missing a line
-                    // or two of drift is negligible next to a multi-screen
-                    // scrollback jump.
-                    if kind == .promptStart {
-                        self.recordPromptStart(eventClearEpoch: clearEpochAtDispatch)
-                    }
-                case .fatal(let msg):
-                    // Surface as a title prefix for visibility — the unified
-                    // log carries the full message via os.Logger, but a title
-                    // prefix is the only diagnostic surface most users
-                    // notice. Fatal must display regardless of any user-set
-                    // override AND must not let a stale override resurface
-                    // later. Clear the override and route through the state
-                    // machine so the oscTitle / titleOverride / displayTitle
-                    // invariant holds — single writer, no divergence between
-                    // `title` and `displayTitle`.
-                    self.titleOverride = nil
-                    self.applyOscTitle("[fatal] core panic: \(msg)")
-                }
+                self.handleCoreEventOnMain(
+                    event,
+                    osc52EnabledAtDispatch: osc52EnabledAtDispatch,
+                    osc52OversizeAtDispatch: osc52OversizeAtDispatch,
+                    clearEpochAtDispatch: clearEpochAtDispatch
+                )
             }
         }
 
@@ -1610,7 +953,7 @@ public final class TerminalSession: ObservableObject {
         pty?.setOnBytes { [weak self] data in
             guard let self else { return }
             self.coreQueue.async { [weak self] in
-                self?.feed(data)
+                self?.snapshotCoalescer.feed(data)
             }
         }
         pty?.startReading()
@@ -1629,119 +972,123 @@ public final class TerminalSession: ObservableObject {
             // single trailing snapshot from landing on the @Published
             // pipeline after consumers have torn down their sinks —
             // observable in tests that race construct/terminate.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
+            if self.isTerminatedLocked() { return }
             if let snap = self.bbterm.snapshot() {
-                self.publishPendingSnapshot(snap)
+                self.snapshotCoalescer.publishPendingSnapshot(snap)
             }
         }
     }
 
-    /// Called on `coreQueue`.
-    private func feed(_ data: Data) {
-        // F11: drop feeds that raced past `terminate()`. Reading under the
-        // lock pairs with the store in `terminate()`; the lock also covers
-        // the pending-snapshot slot updated below, so we can't end up with
-        // a scheduled dispatch for a session that has since terminated.
-        publishLock.lock()
-        if isTerminated {
-            publishLock.unlock()
-            return
-        }
-        publishLock.unlock()
-
-        // First-byte marker: the time from `spawnedAt` to this point is
-        // dominated by the user's shell startup (rc-file loading + prompt
-        // computation). Logged once per session so we can distinguish
-        // "our spawn path is slow" from "the shell is slow".
-        if !loggedFirstByte {
-            loggedFirstByte = true
-            if StartupTelemetry.isEnabled {
-                let dt = (CACurrentMediaTime() - spawnedAt) * 1000
-                Self.startupLogger.log(
-                    "first PTY byte \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn (bytes=\(data.count, privacy: .public))"
-                )
+    /// Apply a core event on the MAIN thread. Split out of `wire()`'s
+    /// `bbterm.onEvent` handler (REFACTOR.md Area 4). The dispatch-time gates
+    /// that MUST be read on coreQueue at event-fire time — the OSC 52
+    /// enabled/oversize decision (L-14 / SFH-005) and the clear epoch (S5-008)
+    /// — are captured before the main hop and threaded in here, so this method
+    /// never re-reads `Preferences.shared` or `clearEpochCore` (which could
+    /// have changed during the hop).
+    private func handleCoreEventOnMain(
+        _ event: BBTerm.Event,
+        osc52EnabledAtDispatch: Bool,
+        osc52OversizeAtDispatch: Bool,
+        clearEpochAtDispatch: UInt64
+    ) {
+        switch event {
+        case .title(let t):
+            // Route through applyOscTitle so a user-set override
+            // isn't trampled by a late shell OSC 0/2, and so the
+            // .terminalSessionTitleDidChange notification fires.
+            titleState.applyOscTitle(t)
+        case .bell:
+            self.bellCounter &+= 1
+        case .ptyWrite:
+            break  // handled above, before the main hop
+        case .osc52Clipboard(let text):
+            // alacritty_terminal 0.26 already decodes the OSC 52
+            // payload: ClipboardStore(target, plaintext). The
+            // `target` char (c/p/q/s/0-7) isn't surfaced through
+            // the C ABI — we always write to NSPasteboard.general,
+            // which is the only clipboard macOS exposes anyway.
+            //
+            // The previous implementation assumed `text` was
+            // "target;base64" and stripped the first ';' then
+            // base64-decoded the tail. With the real payload that
+            // silently dropped every write (no ';' in decoded
+            // plaintext, or base64 decode failed on the text
+            // after it), so OSC 52 never actually pasted.
+            //
+            // Treat an empty payload as a clipboard-clear (OSC 52
+            // ; c ; ST). Silently drop when the pref is off —
+            // a misbehaving remote shouldn't stuff arbitrary
+            // bytes into the user's clipboard or crash the
+            // session.
+            //
+            // L-14: read the captured `osc52EnabledAtDispatch`
+            // (snapshotted on coreQueue before the hop), not
+            // `Preferences.shared` directly. A user disabling
+            // OSC 52 mid-hop must NOT have the now-disabled
+            // payload still land — and a user enabling it
+            // mid-hop must NOT see a payload they couldn't have
+            // intercepted. Either direction, the captured value
+            // is the one consistent with the event-handler
+            // ordering and the user's intent at dispatch time.
+            guard osc52EnabledAtDispatch else { break }
+            // SFH-005: oversize check + forensic breadcrumb
+            // already fired on coreQueue before the main hop
+            // (see osc52OversizeAtDispatch). Honour the captured
+            // decision here to skip the NSPasteboard write —
+            // diagnostic is in the unified log even if this hop
+            // landed on a terminating session.
+            if osc52OversizeAtDispatch { break }
+            // Scrub + write goes through ClipboardWriter so the model
+            // doesn't touch NSPasteboard directly; the symmetric
+            // control/bidi scrub (dirty-enough-to-strip-on-paste-in is
+            // dirty-enough-on-paste-out) lives there.
+            ClipboardWriter.writeOSC52(text)
+        case .cursorShape:
+            // Cursor shape is pinned by `Preferences.shared.cursorShape`
+            // (Settings → Cursor) and resolved into the renderer via
+            // `MetalRenderer.setCursorShapeOverride`. Shell-driven
+            // DECSCUSR is intentionally ignored when an override is
+            // active so the user's preference wins over a TUI's
+            // assumptions about the host terminal.
+            break
+        case .cwdChanged(let path):
+            // OSC 7 ingest + fail-closed SSH-trust gate (Part I §18) +
+            // the L3 drop-log latch live in `CwdTracker`. We're on main
+            // (the `@Published lastKnownCwd` it drives is main-owned), so
+            // the trust classification + store run here exactly as the
+            // inline switch did.
+            cwdTracker.handleCwdChanged(path)
+        case .promptMark(let kind, let exitCode):
+            // Shell integration: A = prompt start, B = command start,
+            // C = output start, D = command end (with exit code).
+            self.lastPromptMark = (kind, exitCode)
+            // Record kind-A positions so the user can jump back to
+            // previous prompts. A fresh snapshot pins (history, row)
+            // at this instant — the main-queue hop means the core
+            // queue may have advanced slightly, but missing a line
+            // or two of drift is negligible next to a multi-screen
+            // scrollback jump.
+            if kind == .promptStart {
+                self.promptNavigator.recordPromptStart(eventClearEpoch: clearEpochAtDispatch)
             }
-        }
-
-        let bytes = [UInt8](data)
-        bbterm.input(bytes)
-        scheduleSnapshotAfterBurst()
-    }
-
-    /// Called on `coreQueue`. Defer snapshot generation to a single work
-    /// item at the TAIL of `coreQueue`: every chunk already enqueued
-    /// behind the current one is parsed before the item runs, so a burst
-    /// of N chunks costs one grid serialization instead of N.
-    ///
-    /// Why: `bbterm.snapshot()` is ~10 ms at a 200×50 grid while parsing
-    /// a 128 KiB chunk is ~2–4 ms. Taking a snapshot per chunk capped
-    /// sustained end-to-end throughput at ~8 MB/s (kitten __benchmark__,
-    /// 2026-06-09) even though the core parses at 25–90 MB/s — and the
-    /// publish coalescer (F1) was discarding almost all of those
-    /// snapshots anyway. Idle/interactive cadence is unchanged: with no
-    /// second chunk queued, the deferred item runs immediately after the
-    /// current one and publishes exactly as before.
-    private func scheduleSnapshotAfterBurst() {
-        dispatchPrecondition(condition: .onQueue(coreQueue))
-        if snapshotWorkQueued { return }
-        snapshotWorkQueued = true
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            self.snapshotWorkQueued = false
-            // F11/S1-007: skip generation entirely for a session that
-            // terminated while this item sat in the queue — same contract
-            // as the per-feed gate above.
-            self.publishLock.lock()
-            let terminated = self.isTerminated
-            self.publishLock.unlock()
-            if terminated { return }
-            guard let snap = self.bbterm.snapshot() else { return }
-            self.snapshotsTakenCount += 1
-            self.publishPendingSnapshot(snap)
+        case .fatal(let msg):
+            // Surface as a title prefix for visibility — the unified
+            // log carries the full message via os.Logger, but a title
+            // prefix is the only diagnostic surface most users
+            // notice. Fatal must display regardless of any user-set
+            // override AND must not let a stale override resurface
+            // later. Clear the override and route through the state
+            // machine so the oscTitle / titleOverride / displayTitle
+            // invariant holds — single writer, no divergence between
+            // `title` and `displayTitle`.
+            titleState.titleOverride = nil
+            titleState.applyOscTitle("[fatal] core panic: \(msg)")
         }
     }
 
-    /// Coalesce snapshot publishes to at most one in-flight main dispatch
-    /// (F1). The pending slot holds the latest snapshot; a second feed
-    /// that arrives before the dispatch fires overwrites the slot instead
-    /// of enqueueing another work item. The scheduled handler reads-and-
-    /// clears the slot on main and assigns `self.snapshot`, which is still
-    /// `@Published` so all existing Combine subscribers (TerminalView,
-    /// tests) see the latest value — just not every intermediate.
-    private func publishPendingSnapshot(_ snap: BBSnapshot) {
-        publishLock.lock()
-        pendingSnapshot = snap
-        if snapshotDispatchScheduled {
-            publishLock.unlock()
-            return
-        }
-        snapshotDispatchScheduled = true
-        publishLock.unlock()
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.publishLock.lock()
-            let latest = self.pendingSnapshot
-            self.pendingSnapshot = nil
-            self.snapshotDispatchScheduled = false
-            let terminated = self.isTerminated
-            let wasFirst = !self.publishedFirstSnapshot
-            if wasFirst, latest != nil { self.publishedFirstSnapshot = true }
-            self.publishLock.unlock()
-            // F11: if the session terminated between schedule and fire,
-            // don't write to `@Published` — the consumer may already be
-            // tearing down and we'd waste a downstream render cycle.
-            guard !terminated, let latest else { return }
-            self.snapshot = latest
-            if wasFirst, StartupTelemetry.isEnabled {
-                let dt = (CACurrentMediaTime() - self.spawnedAt) * 1000
-                Self.startupLogger.log(
-                    "first snapshot on main \(dt, format: .fixed(precision: 1), privacy: .public)ms after spawn"
-                )
-            }
-        }
-    }
+    // The feed / scheduleSnapshotAfterBurst / publishPendingSnapshot paths and
+    // their pending-slot state moved to `SnapshotCoalescer` (REFACTOR.md Part
+    // IV — Finding 2). The session reaches them via `snapshotCoalescer`; the
+    // shared `publishLock` keeps every critical section byte-faithful.
 }

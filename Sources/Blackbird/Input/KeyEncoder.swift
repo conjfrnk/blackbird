@@ -61,6 +61,25 @@ public final class KeyEncoder {
         self.optionIsMeta = optionIsMeta
     }
 
+    /// Apply the Native-Option (audit H7) rule to `mods`: when the Option key
+    /// is "Native" (`optionIsMeta == false`), Option is invisible to the shell
+    /// for printables — Option-e produces 'é', Option-Arrow emits plain ESC[A,
+    /// etc. — so it's stripped from the effective modifier set. EXCEPTION: when
+    /// `.control` is also held there's no dead-key / OS-printable to compete
+    /// with, and the user clearly wants the full chord (Emacs / readline
+    /// Meta+Ctrl); stripping Option there would silently degrade Ctrl+Opt+key
+    /// to bare Ctrl+key (modifyOtherKeys mod=5 instead of mod=7), losing the
+    /// meta bit. Returns `mods` unchanged when Option should stay visible
+    /// (`optionIsMeta`, or Control present), else `mods` minus `.option`.
+    ///
+    /// One definition shared by `encode` (over `nonCmdMods`) and
+    /// `encodeSpecial` (over `modifiers`).
+    private func applyNativeOptionRule(_ mods: Modifiers) -> Modifiers {
+        if optionIsMeta { return mods }
+        if mods.contains(.control) { return mods }
+        return mods.subtracting(.option)
+    }
+
     /// Encode a character sequence plus modifiers into bytes.
     ///
     /// - Parameter mode: terminal mode bits from the current snapshot.
@@ -105,82 +124,29 @@ public final class KeyEncoder {
         let associatedText = mode.contains(.reportAssociatedText)
         let nonCmdMods = modifiers.subtracting(.command)
         // In Native-Option mode the shell should not see Option for
-        // *printable* keystrokes — Option-e produces 'é', Option-Enter
-        // produces a plain CR, etc. Stripping `.option` keeps `hasMods`
-        // and the CSI u modifier param agreeing that Option is invisible.
-        //
-        // EXCEPTION: when `.control` is also held there is no dead-key /
-        // OS-printable to compete with — the user clearly wants the
-        // Option modifier (Emacs M-C-* bindings, terminal Meta+Ctrl).
-        // Stripping Option in that case silently degrades Ctrl+Opt+letter
-        // to bare Ctrl+letter, which means modifyOtherKeys reports
-        // mod=5 (Ctrl) instead of mod=7 (Ctrl+Alt) and Emacs can't see
-        // the meta bit. Preserve Option whenever Ctrl is present so the
-        // mod param surfaces the full chord. Audit H7.
-        let effectiveMods: Modifiers = {
-            if optionIsMeta { return nonCmdMods }
-            if nonCmdMods.contains(.control) { return nonCmdMods }
-            return nonCmdMods.subtracting(.option)
-        }()
+        // *printable* keystrokes; the H7 rule (with the Ctrl-held exception)
+        // lives in `applyNativeOptionRule`. Stripping `.option` keeps
+        // `hasMods` and the CSI u modifier param agreeing that Option is
+        // invisible.
+        let effectiveMods = applyNativeOptionRule(nonCmdMods)
         let hasMods = !effectiveMods.isEmpty
 
-        // Kitty disambiguation: Enter / Esc / Tab / Backspace with any
-        // effective modifier must emit `CSI <cp>;<mod>u` so the TUI can
-        // distinguish Shift+Enter from plain Enter, Option+Esc from plain
-        // Esc (which previously leaked as two raw ESCs), etc.
-        if kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) {
-            // Flag 16 adds the actual text the key would have produced
-            // as a `;<utf32>` trailing section. Disambiguation keys
-            // (Enter/Esc/Tab/Backspace) don't produce visible text on
-            // their own, so associatedText stays empty and the on-wire
-            // shape is unchanged. `.shift` on these keys also doesn't
-            // produce a distinct shifted codepoint — Shift+Enter is
-            // still Enter, just with the mod bit — so flag 4 similarly
-            // adds nothing on this path.
-            return csiU(
-                codepoint: cp,
-                modifiers: effectiveMods,
-                eventType: eventType,
-                associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
-            )
+        // Kitty disambiguation (Enter / Esc / Tab / Backspace + a modifier) →
+        // `CSI <cp>;<mod>u` so the TUI can tell Shift+Enter from Enter, etc.
+        if let bytes = tryKittyDisambiguation(
+            chars: chars, kitty: kitty, hasMods: hasMods,
+            effectiveMods: effectiveMods, eventType: eventType, associatedText: associatedText
+        ) {
+            return bytes
         }
 
-        // Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u
-        // including plain unmodified keys. Breaks the default shell
-        // contract by design — only TUIs that asked for it see it.
-        // Ctrl+letter still routes through the collider branch below so
-        // the colliders get lowercase-normalized codepoints.
-        // CSI u carries one base codepoint — IME-committed multi-scalar
-        // input (NFD `à`, keycaps, VS-16-paired emoji) falls back to plain
-        // UTF-8 to avoid silently dropping every scalar after the first.
-        if allKeys, chars.unicodeScalars.count > 1 {
-            return Data(chars.utf8)
-        }
-        if allKeys, let scalar = chars.unicodeScalars.first,
-           ctrlColliderCodepoint(for: scalar) == nil || !modifiers.contains(.control) {
-            // Kitty's "all keys as CSI u" uses the lowercase of a letter
-            // as the base codepoint; Shift is reported via the mod
-            // param. For non-letter scalars the scalar value is used
-            // directly.
-            let cp = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
-            // Flag 4: surface the shifted form (uppercase of the base
-            // letter) when the user is actually shifting. `alt=0` in
-            // the payload since macOS doesn't expose a true alternate
-            // layout per key.
-            let shifted: UInt32? = {
-                guard alternateKeys, modifiers.contains(.shift),
-                      let shiftedCp = shiftedCodepointForLetter(scalar) else {
-                    return nil
-                }
-                return shiftedCp
-            }()
-            return csiU(
-                codepoint: cp,
-                shiftedCodepoint: shifted,
-                modifiers: effectiveMods,
-                eventType: eventType,
-                associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
-            )
+        // Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u.
+        if let bytes = tryKittyAllKeys(
+            chars: chars, modifiers: modifiers, effectiveMods: effectiveMods,
+            allKeys: allKeys, alternateKeys: alternateKeys,
+            associatedText: associatedText, eventType: eventType
+        ) {
+            return bytes
         }
 
         // xterm `modifyOtherKeys` — `CSI 27 ; <mod> ; <cp> ~`.
@@ -211,56 +177,11 @@ public final class KeyEncoder {
         }
 
         // Ctrl+printable: only the first character is transformed.
-        if modifiers.contains(.control), let scalar = chars.unicodeScalars.first {
-            // Kitty disambiguation: Ctrl+{i,m,[,h,?} legacy-alias Tab/Enter/
-            // Esc/Backspace/DEL. Under flag 1 OR flag 8 (both contracted to
-            // "every key as CSI u"), any modifier combination including these
-            // collider letters emits CSI u so the TUI can tell them apart
-            // from the unmodified C0 byte they alias. The codepoint is
-            // normalized to the lowercase collider so Shift reports via the
-            // mod param instead of by changing the base key. Other Ctrl+letter
-            // combinations in the flag-1-only case stay as their C0 byte so
-            // shells' SIGINT / SIGQUIT / word-motion bindings keep working.
-            if (kitty || allKeys), let cp = ctrlColliderCodepoint(for: scalar) {
-                return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
-            }
-            // F-S3: under Kitty flag 1 / 8, a Ctrl+printable that has NO C0
-            // mapping (Ctrl+digit, Ctrl+. , Ctrl+/ , Ctrl+; , …) is LOSSY in
-            // legacy — the Ctrl bit can't be encoded, so the bare char goes out
-            // and the TUI never sees Ctrl. Emit CSI u so the modifier survives.
-            // Letters and @[\]^_ ? space keep their unambiguous C0 bytes
-            // (handled below). The CSI-u codepoint is the UNSHIFTED base (Shift
-            // reports via the mod param): map a US-layout shifted symbol back to
-            // its base (Ctrl+> = Ctrl+Shift+. → '.'), else the scalar already IS
-            // the base. (flag 8 alone already routes these through the
-            // reportAllKeys branch above; this closes the flag-1-only gap.)
-            // Non-US layouts miss the shifted-symbol base map — same
-            // UCKeyTranslate caveat as flag 4.
-            if (kitty || allKeys),
-               controlByte(for: scalar) == nil,
-               scalar.value >= 0x20, scalar.value != 0x7F {
-                let base = (modifiers.contains(.shift)
-                            ? Self.usLayoutUnshiftedSymbol(scalar) : nil) ?? scalar.value
-                return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
-            }
-            if eventType == .release {
-                return Data()
-            }
-            if let ctrlByte = controlByte(for: scalar) {
-                // Ctrl+Option+letter in Meta mode is the Emacs/readline M-C-*
-                // chord (forward-sexp, beginning-of-defun, …). The bare C0
-                // byte drops the Meta bit, silently degrading M-C-f to plain
-                // ^F. Prepend ESC so the shell sees ESC + C0 — matching how
-                // arrows already report mod=7 for Ctrl+Option (audit H7) and
-                // Terminal.app / iTerm2's Option-as-Meta behaviour. Only in
-                // Meta mode: Native-Option has no Meta bit to carry, and the
-                // kitty / modifyOtherKeys branches above already frame the
-                // chord with the full modifier param.
-                if optionIsMeta && modifiers.contains(.option) {
-                    return Data([0x1B, ctrlByte])
-                }
-                return Data([ctrlByte])
-            }
+        if let bytes = tryControlPrintable(
+            chars: chars, modifiers: modifiers, effectiveMods: effectiveMods,
+            kitty: kitty, allKeys: allKeys, eventType: eventType
+        ) {
+            return bytes
         }
 
         // Release events past here would end up emitting a legacy byte
@@ -286,6 +207,149 @@ public final class KeyEncoder {
         }
 
         return Data(chars.utf8)
+    }
+
+    /// Ctrl+printable encoding — only the first scalar is transformed. Returns
+    /// the bytes to emit, or `nil` to fall through to the legacy paths in
+    /// `encode`. Order is precedence (preserved from the inline chain it
+    /// replaces):
+    ///   1. Kitty flag 1/8 collider (Ctrl+{i,m,[,h,?} aliasing Tab/Enter/Esc/
+    ///      Backspace/DEL) → CSI u with the lowercase collider codepoint.
+    ///   2. Kitty flag 1/8 lossy gap (Ctrl+digit/`.`/`/`/`;`… with no C0
+    ///      mapping) → CSI u with the unshifted base (F-S3).
+    ///   3. release → empty (no paired release form in legacy).
+    ///   4. a real C0 byte → that byte, or ESC+byte in Option-as-Meta
+    ///      (Emacs/readline M-C-* chord, audit H7).
+    /// `nil` only when there's no `.control` modifier, or a Ctrl+printable with
+    /// no C0 mapping in a non-kitty mode (the caller's legacy fall-through).
+    private func tryControlPrintable(
+        chars: String,
+        modifiers: Modifiers,
+        effectiveMods: Modifiers,
+        kitty: Bool,
+        allKeys: Bool,
+        eventType: EventType
+    ) -> Data? {
+        guard modifiers.contains(.control), let scalar = chars.unicodeScalars.first else {
+            return nil
+        }
+        // Kitty disambiguation: Ctrl+{i,m,[,h,?} legacy-alias Tab/Enter/Esc/
+        // Backspace/DEL. Under flag 1 OR flag 8 any modifier combination
+        // including these collider letters emits CSI u so the TUI can tell them
+        // apart from the unmodified C0 byte they alias. The codepoint is
+        // normalized to the lowercase collider so Shift reports via the mod
+        // param. Other Ctrl+letter combos in the flag-1-only case stay as their
+        // C0 byte so shells' SIGINT / SIGQUIT / word-motion bindings keep working.
+        if (kitty || allKeys), let cp = ctrlColliderCodepoint(for: scalar) {
+            return csiU(codepoint: cp, modifiers: effectiveMods, eventType: eventType)
+        }
+        // F-S3: under Kitty flag 1 / 8, a Ctrl+printable with NO C0 mapping
+        // (Ctrl+digit, Ctrl+. , Ctrl+/ , Ctrl+; , …) is LOSSY in legacy — the
+        // Ctrl bit can't be encoded, so emit CSI u so the modifier survives.
+        // The codepoint is the UNSHIFTED base (Shift reports via the mod param):
+        // map a US-layout shifted symbol back to its base (Ctrl+> = Ctrl+Shift+.
+        // → '.'), else the scalar already IS the base. (flag 8 alone routes
+        // these through the reportAllKeys branch; this closes the flag-1-only
+        // gap.) Non-US layouts miss the shifted-symbol base map — same
+        // UCKeyTranslate caveat as flag 4.
+        if (kitty || allKeys),
+           controlByte(for: scalar) == nil,
+           scalar.value >= 0x20, scalar.value != 0x7F {
+            let base = (modifiers.contains(.shift)
+                        ? Self.usLayoutUnshiftedSymbol(scalar) : nil) ?? scalar.value
+            return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
+        }
+        if eventType == .release {
+            return Data()
+        }
+        if let ctrlByte = controlByte(for: scalar) {
+            // Ctrl+Option+letter in Meta mode is the Emacs/readline M-C-* chord
+            // (forward-sexp, beginning-of-defun, …). The bare C0 byte drops the
+            // Meta bit, silently degrading M-C-f to plain ^F. Prepend ESC so the
+            // shell sees ESC + C0 — matching how arrows report mod=7 for
+            // Ctrl+Option (audit H7) and Terminal.app / iTerm2's Option-as-Meta.
+            // Only in Meta mode: Native-Option has no Meta bit, and the kitty /
+            // modifyOtherKeys branches already frame the chord with the full
+            // modifier param.
+            if optionIsMeta && modifiers.contains(.option) {
+                return Data([0x1B, ctrlByte])
+            }
+            return Data([ctrlByte])
+        }
+        return nil
+    }
+
+    /// Kitty disambiguation: Enter / Esc / Tab / Backspace with any effective
+    /// modifier emit `CSI <cp>;<mod>u` so the TUI can distinguish Shift+Enter
+    /// from plain Enter, Option+Esc from plain Esc (which previously leaked as
+    /// two raw ESCs), etc. Returns nil when this isn't a kitty disambiguation
+    /// key (fall through). Flag 16's associated text stays empty for these keys
+    /// (they produce no visible text), and flag 4 adds nothing (Shift+Enter is
+    /// still Enter, just with the mod bit), so the on-wire shape is unchanged.
+    private func tryKittyDisambiguation(
+        chars: String,
+        kitty: Bool,
+        hasMods: Bool,
+        effectiveMods: Modifiers,
+        eventType: EventType,
+        associatedText: Bool
+    ) -> Data? {
+        guard kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) else {
+            return nil
+        }
+        return csiU(
+            codepoint: cp,
+            modifiers: effectiveMods,
+            eventType: eventType,
+            associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
+        )
+    }
+
+    /// Kitty flag 8 (reportAllKeysAsEsc): every printable emits CSI u including
+    /// plain unmodified keys — breaks the default shell contract by design, only
+    /// TUIs that asked for it see it. Returns nil when flag 8 is off, OR for a
+    /// single Ctrl+collider scalar (which the Ctrl+printable collider branch
+    /// handles instead, with lowercase-normalized codepoints) — both fall
+    /// through. Multi-scalar IME-committed input (NFD `à`, keycaps, VS-16-paired
+    /// emoji) falls back to plain UTF-8 so no scalar past the first is dropped.
+    private func tryKittyAllKeys(
+        chars: String,
+        modifiers: Modifiers,
+        effectiveMods: Modifiers,
+        allKeys: Bool,
+        alternateKeys: Bool,
+        associatedText: Bool,
+        eventType: EventType
+    ) -> Data? {
+        guard allKeys else { return nil }
+        if chars.unicodeScalars.count > 1 {
+            return Data(chars.utf8)
+        }
+        guard let scalar = chars.unicodeScalars.first,
+              ctrlColliderCodepoint(for: scalar) == nil || !modifiers.contains(.control) else {
+            return nil
+        }
+        // Kitty's "all keys as CSI u" uses the lowercase of a letter as the base
+        // codepoint; Shift is reported via the mod param. Non-letter scalars use
+        // the scalar value directly.
+        let cp = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
+        // Flag 4: surface the shifted form (uppercase of the base letter) when
+        // the user is actually shifting. `alt=0` since macOS doesn't expose a
+        // true alternate layout per key.
+        let shifted: UInt32? = {
+            guard alternateKeys, modifiers.contains(.shift),
+                  let shiftedCp = shiftedCodepointForLetter(scalar) else {
+                return nil
+            }
+            return shiftedCp
+        }()
+        return csiU(
+            codepoint: cp,
+            shiftedCodepoint: shifted,
+            modifiers: effectiveMods,
+            eventType: eventType,
+            associatedText: associatedText ? textCodepoints(chars, codepoint: cp) : []
+        )
     }
 
     /// Kitty progressive-enhancement maps one of four "ambiguous" keys to its
@@ -548,6 +612,44 @@ public final class KeyEncoder {
         }
     }
 
+    /// Press-event bytes for a CSI-parameter special key, derived from the
+    /// single `csiParamShape` `(lead, term)` table so press encoding can never
+    /// drift from the Kitty flag-2 release/repeat path. Replaces four nested
+    /// per-category switches that re-encoded the same bytes by hand (and
+    /// carried unreachable `default:` arms) — REFACTOR.md Part IV KeyEncoder
+    /// "duplicated SpecialKey→byte table".
+    ///
+    /// The modified form is uniform — `CSI <lead> ; <mod> <term>`. The
+    /// unmodified base differs by category: arrows/Home/End drop the lead and
+    /// honour DECCKM (`SS3 <term>` vs `CSI <term>`); F1–F4 always use SS3;
+    /// nav (PgUp/PgDn/Del/Ins) and F5–F12 keep the lead (`CSI <lead> <term>`).
+    private static func csiParamPress(
+        _ key: SpecialKey,
+        shape: (lead: String, term: UInt8),
+        modBits: Int,
+        hasMods: Bool,
+        applicationCursorKeys: Bool
+    ) -> Data {
+        if hasMods {
+            // CSI <lead> ; <mod> <term>
+            return Data([0x1B, 0x5B]) + Data(shape.lead.utf8) + Data([0x3B])
+                + Data(String(modBits).utf8) + Data([shape.term])
+        }
+        switch key {
+        case .up, .down, .right, .left, .home, .end:
+            // DECCKM: SS3 (ESC O <term>) under application-cursor-keys, else CSI.
+            return applicationCursorKeys
+                ? Data([0x1B, 0x4F, shape.term])
+                : Data([0x1B, 0x5B, shape.term])
+        case .f1, .f2, .f3, .f4:
+            // SS3 <term> (ESC O P/Q/R/S) — always, regardless of DECCKM.
+            return Data([0x1B, 0x4F, shape.term])
+        default:
+            // Nav + F5–F12 keep the numeric lead: CSI <lead> <term>.
+            return Data([0x1B, 0x5B]) + Data(shape.lead.utf8) + Data([shape.term])
+        }
+    }
+
     public func encodeSpecial(
         _ key: SpecialKey,
         modifiers: Modifiers,
@@ -560,21 +662,13 @@ public final class KeyEncoder {
         // Modern xterm convention: CSI 1;M <final> where M = 1 + bitmask.
         // Bitmask: shift=1, alt=2, ctrl=4, meta=8.
         //
-        // `optionIsMeta=false` means the user picked "Native" for the
-        // Option key: Option produces macOS-native glyphs for printables
-        // and is invisible to the shell otherwise — Option+Arrow emits
-        // plain ESC[A rather than alt-modified ESC[1;3A.
-        //
-        // EXCEPTION: when `.control` is also held there's no dead-key /
-        // OS-printable to compete with. The user clearly wants Option
-        // surfaced as the alt bit so Emacs / readline can see Meta+Ctrl
-        // chords. Stripping Option here would silently degrade
-        // Ctrl+Opt+Up to bare Ctrl+Up and lose the meta bit. Audit H7.
-        let effectiveMods: Modifiers = {
-            if optionIsMeta { return modifiers }
-            if modifiers.contains(.control) { return modifiers }
-            return modifiers.subtracting(.option)
-        }()
+        // `optionIsMeta=false` means the user picked "Native" for the Option
+        // key: Option produces macOS-native glyphs for printables and is
+        // invisible to the shell otherwise — Option+Arrow emits plain ESC[A
+        // rather than alt-modified ESC[1;3A. The H7 rule (with the Ctrl-held
+        // exception that keeps Meta+Ctrl chords intact) lives in
+        // `applyNativeOptionRule`.
+        let effectiveMods = applyNativeOptionRule(modifiers)
         let modBits = modifierParam(effectiveMods)
         let hasMods = modBits > 1
 
@@ -604,152 +698,92 @@ public final class KeyEncoder {
         }
 
         switch key {
-        case .up, .down, .right, .left, .home, .end:
-            let final: UInt8 = {
-                switch key {
-                case .up: return 0x41       // A
-                case .down: return 0x42     // B
-                case .right: return 0x43    // C
-                case .left: return 0x44     // D
-                case .home: return 0x48     // H
-                case .end: return 0x46      // F
-                default: return 0x41
-                }
-            }()
-            if hasMods {
-                // CSI 1 ; M <final>
-                return Data([0x1B, 0x5B, 0x31, 0x3B]) + Data(String(modBits).utf8) + Data([final])
-            }
-            if applicationCursorKeys {
-                // SS3 <final> — ESC O <final>
-                return Data([0x1B, 0x4F, final])
-            }
-            // CSI <final> — ESC [ <final>
-            return Data([0x1B, 0x5B, final])
-
-        case .pageUp, .pageDown, .delete, .insert:
-            let num: UInt8 = {
-                switch key {
-                case .pageUp: return 0x35   // "5"
-                case .pageDown: return 0x36 // "6"
-                case .delete: return 0x33   // "3"
-                case .insert: return 0x32   // "2"
-                default: return 0x35
-                }
-            }()
-            if hasMods {
-                // CSI <num> ; M ~
-                return Data([0x1B, 0x5B, num, 0x3B]) + Data(String(modBits).utf8) + Data([0x7E])
-            }
-            return Data([0x1B, 0x5B, num, 0x7E])
-
-        case .f1, .f2, .f3, .f4:
-            let final: UInt8 = {
-                switch key {
-                case .f1: return 0x50       // P
-                case .f2: return 0x51       // Q
-                case .f3: return 0x52       // R
-                case .f4: return 0x53       // S
-                default: return 0x50
-                }
-            }()
-            if hasMods {
-                // CSI 1 ; M <final>
-                return Data([0x1B, 0x5B, 0x31, 0x3B]) + Data(String(modBits).utf8) + Data([final])
-            }
-            // SS3 <final> — ESC O P
-            return Data([0x1B, 0x4F, final])
-
-        case .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12:
-            // CSI <code> ~    — codes per xterm:
-            // F5=15, F6=17, F7=18, F8=19, F9=20, F10=21, F11=23, F12=24.
-            let code: String = {
-                switch key {
-                case .f5: return "15"
-                case .f6: return "17"
-                case .f7: return "18"
-                case .f8: return "19"
-                case .f9: return "20"
-                case .f10: return "21"
-                case .f11: return "23"
-                case .f12: return "24"
-                default: return "15"
-                }
-            }()
-            if hasMods {
-                // CSI <code> ; M ~
-                return Data([0x1B, 0x5B]) + Data(code.utf8) + Data([0x3B]) + Data(String(modBits).utf8) + Data([0x7E])
-            }
-            return Data([0x1B, 0x5B]) + Data(code.utf8) + Data([0x7E])
+        case .up, .down, .right, .left, .home, .end,
+             .pageUp, .pageDown, .delete, .insert,
+             .f1, .f2, .f3, .f4,
+             .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12:
+            // Single source of truth: the `(lead, term)` bytes come from
+            // `csiParamShape` — the same table the flag-2 release/repeat path
+            // above uses — so press encoding can never drift from it. `shape`
+            // is non-nil for every key in this case list (only keypad keys map
+            // to nil, and they are the separate case below).
+            guard let shape = Self.csiParamShape(for: key) else { return Data() }
+            return Self.csiParamPress(
+                key, shape: shape, modBits: modBits,
+                hasMods: hasMods, applicationCursorKeys: applicationCursorKeys
+            )
 
         case .kp0, .kp1, .kp2, .kp3, .kp4, .kp5, .kp6, .kp7, .kp8, .kp9,
              .kpEnter, .kpPlus, .kpMinus, .kpMultiply, .kpDivide,
              .kpDecimal, .kpEquals:
-            // DECPAM (application keypad mode). Only active when the TUI
-            // has requested it via `ESC =`; otherwise the caller should
-            // pass the plain digit / operator through `encode(chars:)`
-            // instead of routing through here. xterm keypad mappings:
-            //   0…9  → ESC O p … ESC O y
-            //   +    → ESC O k       −    → ESC O m
-            //   *    → ESC O j       /    → ESC O o
-            //   .    → ESC O n       =    → ESC O X
-            //   Enter→ ESC O M
-            // See xterm's termcap `ka1..kc3` plus `kp*` entries.
-            let final: UInt8 = {
-                switch key {
-                case .kp0: return 0x70  // p
-                case .kp1: return 0x71  // q
-                case .kp2: return 0x72  // r
-                case .kp3: return 0x73  // s
-                case .kp4: return 0x74  // t
-                case .kp5: return 0x75  // u
-                case .kp6: return 0x76  // v
-                case .kp7: return 0x77  // w
-                case .kp8: return 0x78  // x
-                case .kp9: return 0x79  // y
-                case .kpEnter:    return 0x4D // M
-                case .kpPlus:     return 0x6B // k
-                case .kpMinus:    return 0x6D // m
-                case .kpMultiply: return 0x6A // j
-                case .kpDivide:   return 0x6F // o
-                case .kpDecimal:  return 0x6E // n
-                case .kpEquals:   return 0x58 // X
-                default: return 0x70
-                }
-            }()
-            if applicationKeypad {
-                // SS3 <final> — ESC O <final>
-                return Data([0x1B, 0x4F, final])
-            }
-            // DECPAM off: a keypad key is just its plain character, so route
-            // it through `encode(chars:)` — the same path a normal printable
-            // key takes — instead of emitting a bare byte that silently drops
-            // modifiers. This makes Option-as-Meta (ESC prefix), Kitty
-            // disambiguation / flag-8, and xterm modifyOtherKeys framing all
-            // apply to keypad keys exactly as they do to the top-row digits.
-            // Audit S3S-002. With no modifiers and no protocol mode the result
-            // is the same bare legacy byte as before (e.g. kp5 -> 0x35,
-            // kpEnter -> CR 0x0D), so the unmodified fast path is unchanged.
-            let legacyChar: String = {
-                switch key {
-                case .kp0: return "0";  case .kp1: return "1"
-                case .kp2: return "2";  case .kp3: return "3"
-                case .kp4: return "4";  case .kp5: return "5"
-                case .kp6: return "6";  case .kp7: return "7"
-                case .kp8: return "8";  case .kp9: return "9"
-                case .kpEnter:    return "\r"  // CR (0x0D)
-                case .kpPlus:     return "+"
-                case .kpMinus:    return "-"
-                case .kpMultiply: return "*"
-                case .kpDivide:   return "/"
-                case .kpDecimal:  return "."
-                case .kpEquals:   return "="
-                default: return ""
-                }
-            }()
-            guard !legacyChar.isEmpty else { return Data() }
-            return encode(chars: legacyChar, modifiers: modifiers, mode: mode)
+            return encodeKeypadKey(key, applicationKeypad: applicationKeypad,
+                                   modifiers: modifiers, mode: mode)
         }
+    }
+
+    /// Keypad (DECPAM) encoding. When `applicationKeypad` is on (the TUI sent
+    /// `ESC =`), emit `SS3 <final>` per xterm's keypad map:
+    ///   0…9 → ESC O p…y;  + → ESC O k;  − → ESC O m;  * → ESC O j;
+    ///   / → ESC O o;  . → ESC O n;  = → ESC O X;  Enter → ESC O M.
+    /// Otherwise (DECPAM off) a keypad key is just its plain character, so route
+    /// it through `encode(chars:)` — the same path a top-row digit takes —
+    /// instead of emitting a bare byte that silently drops modifiers. That makes
+    /// Option-as-Meta (ESC prefix), Kitty disambiguation / flag-8, and xterm
+    /// modifyOtherKeys framing all apply to keypad keys too (audit S3S-002).
+    /// With no modifiers and no protocol mode the result is the same bare legacy
+    /// byte as before (kp5 → 0x35, kpEnter → CR 0x0D), so the fast path is
+    /// unchanged.
+    private func encodeKeypadKey(
+        _ key: SpecialKey,
+        applicationKeypad: Bool,
+        modifiers: Modifiers,
+        mode: BBTermMode
+    ) -> Data {
+        let final: UInt8 = {
+            switch key {
+            case .kp0: return 0x70  // p
+            case .kp1: return 0x71  // q
+            case .kp2: return 0x72  // r
+            case .kp3: return 0x73  // s
+            case .kp4: return 0x74  // t
+            case .kp5: return 0x75  // u
+            case .kp6: return 0x76  // v
+            case .kp7: return 0x77  // w
+            case .kp8: return 0x78  // x
+            case .kp9: return 0x79  // y
+            case .kpEnter:    return 0x4D // M
+            case .kpPlus:     return 0x6B // k
+            case .kpMinus:    return 0x6D // m
+            case .kpMultiply: return 0x6A // j
+            case .kpDivide:   return 0x6F // o
+            case .kpDecimal:  return 0x6E // n
+            case .kpEquals:   return 0x58 // X
+            default: return 0x70
+            }
+        }()
+        if applicationKeypad {
+            // SS3 <final> — ESC O <final>
+            return Data([0x1B, 0x4F, final])
+        }
+        let legacyChar: String = {
+            switch key {
+            case .kp0: return "0";  case .kp1: return "1"
+            case .kp2: return "2";  case .kp3: return "3"
+            case .kp4: return "4";  case .kp5: return "5"
+            case .kp6: return "6";  case .kp7: return "7"
+            case .kp8: return "8";  case .kp9: return "9"
+            case .kpEnter:    return "\r"  // CR (0x0D)
+            case .kpPlus:     return "+"
+            case .kpMinus:    return "-"
+            case .kpMultiply: return "*"
+            case .kpDivide:   return "/"
+            case .kpDecimal:  return "."
+            case .kpEquals:   return "="
+            default: return ""
+            }
+        }()
+        guard !legacyChar.isEmpty else { return Data() }
+        return encode(chars: legacyChar, modifiers: modifiers, mode: mode)
     }
 
     /// xterm `modifyOtherKeys` emit — `CSI 27 ; <mod> ; <cp> ~`. Uses

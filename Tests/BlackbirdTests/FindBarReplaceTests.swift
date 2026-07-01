@@ -345,7 +345,7 @@ final class FindRegexGuardTests: XCTestCase {
             "suffix$",
         ] {
             XCTAssertTrue(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "legitimate pattern must pass: \(pattern)"
             )
         }
@@ -363,7 +363,7 @@ final class FindRegexGuardTests: XCTestCase {
             "(\\s*)*",
         ] {
             XCTAssertFalse(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "catastrophic-backtrack pattern must be rejected: \(pattern)"
             )
         }
@@ -375,7 +375,7 @@ final class FindRegexGuardTests: XCTestCase {
         // be accepted.
         let giant = String(repeating: "a", count: 512)
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern(giant),
+            RegexSafetyGate.isReasonable(giant),
             "over-length pattern must be rejected"
         )
     }
@@ -402,7 +402,7 @@ final class FindRegexGuardTests: XCTestCase {
             "(\\d{0,9})+",
         ] {
             XCTAssertFalse(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "brace-quantified nested-group ReDoS pattern must be rejected: \(pattern)"
             )
         }
@@ -421,7 +421,7 @@ final class FindRegexGuardTests: XCTestCase {
             "[a-z]{2,}",
         ] {
             XCTAssertTrue(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "legitimate brace-quantified pattern must be accepted: \(pattern)"
             )
         }
@@ -432,7 +432,7 @@ final class FindRegexGuardTests: XCTestCase {
         // check. The fix iterates redundant `((` / `))` collapses before
         // re-running the dangerous-shape match.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("(((a+)))+$"),
+            RegexSafetyGate.isReasonable("(((a+)))+$"),
             "extra-grouping wrappers around (a+)+ must be rejected"
         )
     }
@@ -442,7 +442,7 @@ final class FindRegexGuardTests: XCTestCase {
         // substring list. The fix normalises `(?:` → `(` before
         // checking.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("(?:a+)+"),
+            RegexSafetyGate.isReasonable("(?:a+)+"),
             "non-capturing group around (a+)+ must be rejected"
         )
     }
@@ -452,7 +452,7 @@ final class FindRegexGuardTests: XCTestCase {
         // group is the second textbook ReDoS shape. The fix detects
         // any `(...|...)` followed by `+` or `*`.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("(a|aa)+b"),
+            RegexSafetyGate.isReasonable("(a|aa)+b"),
             "alternation inside a quantified group must be rejected"
         )
     }
@@ -461,7 +461,7 @@ final class FindRegexGuardTests: XCTestCase {
         // Composition test: non-capturing group AND alternation in the
         // same pattern. Either rule is sufficient to reject.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("(?:a|aa)*"),
+            RegexSafetyGate.isReasonable("(?:a|aa)*"),
             "alternation inside a quantified non-capturing group must be rejected"
         )
     }
@@ -480,7 +480,7 @@ final class FindRegexGuardTests: XCTestCase {
             "(?:x|xx|xxx|xxxx)+",
         ] {
             XCTAssertFalse(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "multi-way alternation inside quantified group must be rejected: \(pattern)"
             )
         }
@@ -490,7 +490,7 @@ final class FindRegexGuardTests: XCTestCase {
         // Defensive cap: more than 6 quantifiers in one query is a
         // strong "this isn't a legitimate find" signal.
         XCTAssertFalse(
-            TerminalView.isReasonableRegexPattern("a*b*c*d*e*f*g*"),
+            RegexSafetyGate.isReasonable("a*b*c*d*e*f*g*"),
             "patterns with > 6 quantifiers must be rejected"
         )
     }
@@ -500,7 +500,7 @@ final class FindRegexGuardTests: XCTestCase {
         // alone is not dangerous, only alternation INSIDE a quantified
         // group (`(...|...)+`) overlaps catastrophically.
         XCTAssertTrue(
-            TerminalView.isReasonableRegexPattern("(cat|dog|fish)"),
+            RegexSafetyGate.isReasonable("(cat|dog|fish)"),
             "plain alternation without a trailing quantifier must pass"
         )
     }
@@ -514,7 +514,7 @@ final class FindRegexGuardTests: XCTestCase {
             "\\b\\w+@\\w+\\.\\w+\\b",
         ] {
             XCTAssertTrue(
-                TerminalView.isReasonableRegexPattern(pattern),
+                RegexSafetyGate.isReasonable(pattern),
                 "realistic query must pass: \(pattern)"
             )
         }
@@ -601,11 +601,11 @@ final class FindResolveResumeIndexTests: XCTestCase {
     func test_resolveResumeIndex_anchorFirstMatch_forwardAdvances_backwardWrapsToLast() throws {
         let view = try makeView()
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 0, startCol: 0),
+            view.findController.resolveResumeIndex(anchor: (line: 0, startCol: 0),
                                     direction: .forward, in: matches),
             1, "Forward from the first match must advance to index 1")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 0, startCol: 0),
+            view.findController.resolveResumeIndex(anchor: (line: 0, startCol: 0),
                                     direction: .backward, in: matches),
             2, "Backward from the first match must wrap to the last index")
     }
@@ -613,11 +613,11 @@ final class FindResolveResumeIndexTests: XCTestCase {
     func test_resolveResumeIndex_anchorMiddleMatch_forwardAndBackwardStepOne() throws {
         let view = try makeView()
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 0, startCol: 5),
+            view.findController.resolveResumeIndex(anchor: (line: 0, startCol: 5),
                                     direction: .forward, in: matches),
             2, "Forward from the middle match must advance to index 2")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 0, startCol: 5),
+            view.findController.resolveResumeIndex(anchor: (line: 0, startCol: 5),
                                     direction: .backward, in: matches),
             0, "Backward from the middle match must step to index 0")
     }
@@ -625,11 +625,11 @@ final class FindResolveResumeIndexTests: XCTestCase {
     func test_resolveResumeIndex_anchorLastMatch_forwardWrapsToZero_backwardStepsOne() throws {
         let view = try makeView()
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 2, startCol: 1),
+            view.findController.resolveResumeIndex(anchor: (line: 2, startCol: 1),
                                     direction: .forward, in: matches),
             0, "Forward from the last match must wrap to index 0")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 2, startCol: 1),
+            view.findController.resolveResumeIndex(anchor: (line: 2, startCol: 1),
                                     direction: .backward, in: matches),
             1, "Backward from the last match must step to index 1")
     }
@@ -639,10 +639,10 @@ final class FindResolveResumeIndexTests: XCTestCase {
     func test_resolveResumeIndex_nilAnchor_forwardReturnsFirst_backwardReturnsLast() throws {
         let view = try makeView()
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: nil, direction: .forward, in: matches),
+            view.findController.resolveResumeIndex(anchor: nil, direction: .forward, in: matches),
             0, "No anchor + forward must behave like a first cycle → first match")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: nil, direction: .backward, in: matches),
+            view.findController.resolveResumeIndex(anchor: nil, direction: .backward, in: matches),
             2, "No anchor + backward must behave like a first cycle → last match")
     }
 
@@ -652,11 +652,11 @@ final class FindResolveResumeIndexTests: XCTestCase {
         // (0,3) sits strictly between (0,0) and (0,5).
         let view = try makeView()
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 0, startCol: 3),
+            view.findController.resolveResumeIndex(anchor: (line: 0, startCol: 3),
                                     direction: .forward, in: matches),
             1, "Forward must land on the FIRST match strictly greater than the anchor → (0,5) at index 1")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 0, startCol: 3),
+            view.findController.resolveResumeIndex(anchor: (line: 0, startCol: 3),
                                     direction: .backward, in: matches),
             0, "Backward must land on the LAST match strictly less than the anchor → (0,0) at index 0")
     }
@@ -665,11 +665,11 @@ final class FindResolveResumeIndexTests: XCTestCase {
         // (9,9) is lexicographically after every match.
         let view = try makeView()
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 9, startCol: 9),
+            view.findController.resolveResumeIndex(anchor: (line: 9, startCol: 9),
                                     direction: .forward, in: matches),
             0, "Forward with no greater match must wrap to index 0")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 9, startCol: 9),
+            view.findController.resolveResumeIndex(anchor: (line: 9, startCol: 9),
                                     direction: .backward, in: matches),
             2, "Backward with the anchor past all matches must pick the last (index 2)")
     }
@@ -678,11 +678,11 @@ final class FindResolveResumeIndexTests: XCTestCase {
         // (-1,0) is lexicographically before every match.
         let view = try makeView()
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: -1, startCol: 0),
+            view.findController.resolveResumeIndex(anchor: (line: -1, startCol: 0),
                                     direction: .forward, in: matches),
             0, "Forward with the anchor before all matches must pick the first (index 0)")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: -1, startCol: 0),
+            view.findController.resolveResumeIndex(anchor: (line: -1, startCol: 0),
                                     direction: .backward, in: matches),
             2, "Backward with no lesser match must wrap to the last index (2)")
     }
@@ -693,15 +693,15 @@ final class FindResolveResumeIndexTests: XCTestCase {
         let view = try makeView()
         let empty: [(line: Int32, startCol: Int, endCol: Int)] = []
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 0, startCol: 0),
+            view.findController.resolveResumeIndex(anchor: (line: 0, startCol: 0),
                                     direction: .forward, in: empty),
             0, "Empty match list must return 0 regardless of anchor/direction")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: (line: 0, startCol: 0),
+            view.findController.resolveResumeIndex(anchor: (line: 0, startCol: 0),
                                     direction: .backward, in: empty),
             0, "Empty match list must return 0 in the backward direction too")
         XCTAssertEqual(
-            view.resolveResumeIndex(anchor: nil, direction: .forward, in: empty),
+            view.findController.resolveResumeIndex(anchor: nil, direction: .forward, in: empty),
             0, "Empty match list must return 0 even with no anchor")
     }
 }
@@ -763,23 +763,23 @@ final class FindReplaceStaleRefreshGuardTests: XCTestCase {
         let view = try makeView()
         let snap = try freshSnapshot()
 
-        view.findBar = regexFindBar()
-        view.findQuery = "al.ha"                       // non-empty regex query
+        view.findController.findBar = regexFindBar()
+        view.findController.findQuery = "al.ha"                       // non-empty regex query
         view.currentSnapshot = snap
-        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findController.findMatches = [(line: 0, startCol: 0, endCol: 4)]
         // Stamp the cache stale: a value that cannot equal the live
         // snapshot's sequenceID.
-        view.findMatchesSeq = snap.sequenceID &+ 1
+        view.findController.findMatchesSeq = snap.sequenceID &+ 1
 
-        view.refreshFindMatchesIfStaleForReplace()
+        view.findController.refreshFindMatchesIfStaleForReplace()
 
         XCTAssertEqual(
-            view.findMatches.count, 1,
+            view.findController.findMatches.count, 1,
             "Regex mode must skip the synchronous refresh and leave findMatches "
             + "intact — clearing it here makes Replace All/Current a silent "
             + "no-op (Bugs 5/6).")
         XCTAssertEqual(
-            view.findMatches.first?.startCol, 0,
+            view.findController.findMatches.first?.startCol, 0,
             "The exact cached match must survive the regex-skip guard")
     }
 
@@ -790,16 +790,16 @@ final class FindReplaceStaleRefreshGuardTests: XCTestCase {
         let view = try makeView()
         let snap = try freshSnapshot()
 
-        view.findBar = regexFindBar()
-        view.findQuery = "al.ha"
+        view.findController.findBar = regexFindBar()
+        view.findController.findQuery = "al.ha"
         view.currentSnapshot = snap
-        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
-        view.findMatchesSeq = snap.sequenceID          // in sync → fresh
+        view.findController.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findController.findMatchesSeq = snap.sequenceID          // in sync → fresh
 
-        view.refreshFindMatchesIfStaleForReplace()
+        view.findController.refreshFindMatchesIfStaleForReplace()
 
         XCTAssertEqual(
-            view.findMatches.count, 1,
+            view.findController.findMatches.count, 1,
             "Regex mode must never clear findMatches via the replace-refresh guard")
     }
 
@@ -812,16 +812,16 @@ final class FindReplaceStaleRefreshGuardTests: XCTestCase {
         let view = try makeView()
         let snap = try freshSnapshot()
 
-        view.findBar = substringFindBar()
-        view.findQuery = "alpha"                       // non-empty substring query
+        view.findController.findBar = substringFindBar()
+        view.findController.findQuery = "alpha"                       // non-empty substring query
         view.currentSnapshot = snap
-        view.findMatches = [(line: 0, startCol: 0, endCol: 4)]
-        view.findMatchesSeq = snap.sequenceID &+ 1     // stale
+        view.findController.findMatches = [(line: 0, startCol: 0, endCol: 4)]
+        view.findController.findMatchesSeq = snap.sequenceID &+ 1     // stale
 
-        view.refreshFindMatchesIfStaleForReplace()
+        view.findController.refreshFindMatchesIfStaleForReplace()
 
         XCTAssertTrue(
-            view.findMatches.isEmpty,
+            view.findController.findMatches.isEmpty,
             "Substring mode must synchronously rescan a stale cache; with no "
             + "session the rescan clears findMatches. (Counterpart to the "
             + "regex-skip guard — Bugs 5/6.)")
@@ -887,17 +887,17 @@ final class FindAdvanceRegexDeferralGuardTests: XCTestCase {
         let view = try makeView()
         let snap = try freshSnapshot()
 
-        view.findBar = regexFindBar()
-        view.findQuery = "((("                          // unbalanced parens — won't compile
+        view.findController.findBar = regexFindBar()
+        view.findController.findQuery = "((("                          // unbalanced parens — won't compile
         view.currentSnapshot = snap
-        view.findMatches = []
-        view.findMatchesSeq = snap.sequenceID &+ 1      // stale → would normally defer
-        view.pendingRegexAdvance = nil
+        view.findController.findMatches = []
+        view.findController.findMatchesSeq = snap.sequenceID &+ 1      // stale → would normally defer
+        view.findController.pendingRegexAdvance = nil
 
-        view.advanceFind(direction: .forward)
+        view.findController.advanceFind(direction: .forward)
 
         XCTAssertNil(
-            view.pendingRegexAdvance,
+            view.findController.pendingRegexAdvance,
             "invalid-regex ⌘G must not strand pendingRegexAdvance — no scan "
             + "was started, so a deferred press could never be consumed.")
     }
