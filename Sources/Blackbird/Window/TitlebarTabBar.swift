@@ -770,7 +770,15 @@ final class TabStripView: NSView {
 
         if commitEditOnOutsideClick(p) { return }
         if NSPointInRect(p, addButtonFrame) {
-            onAddTab?()
+            // Only fire on the FIRST click of a click sequence — a fast
+            // double-click on `+` used to fire `onAddTab` twice (opening
+            // two tabs from one gesture). Any click in the button's area is
+            // still swallowed here regardless of count, so a rapid second
+            // click doesn't fall through to pill hit-testing either (P2,
+            // RCA docs/rca-tab-behaviors-2026-07-01.md).
+            if event.clickCount == 1 {
+                onAddTab?()
+            }
             return
         }
         if beginRenameOnDoubleClick(p, event: event) { return }
@@ -845,7 +853,8 @@ final class TabStripView: NSView {
                 tabDragController.arm(
                     pillIndex: i,
                     startPoint: p,
-                    downOffsetX: p.x - rect.minX
+                    downOffsetX: p.x - rect.minX,
+                    mouseDownEvent: event
                 )
             } else {
                 onSelectWindow?(tabs[i])
@@ -941,6 +950,14 @@ final class TabStripView: NSView {
     /// dismisses, first responder ends up parked on the strip — so we
     /// yield in the same shape as `mouseDown`.
     override func rightMouseDown(with event: NSEvent) {
+        // A right-click while a reorder gesture is armed/active is a clean
+        // interruption — the context menu is the user's actual intent now.
+        // Without this, a stale `.armed`/`.dragging` phase survives the
+        // right-click and can misfire on a LATER left mouseUp unrelated to
+        // the abandoned gesture (P3, RCA
+        // docs/rca-tab-behaviors-2026-07-01.md — no cancel path existed for
+        // an in-flight reorder drag).
+        tabDragController.cancelInProgress()
         defer { yieldFirstResponderToTerminalIfParked() }
         super.rightMouseDown(with: event)
     }
@@ -1071,17 +1088,34 @@ final class TabStripView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        // Let interpretKeyEvents route arrow/Space/Return/Delete through
-        // the standard NSResponder selector dispatch so our
-        // `moveLeft:`/`moveRight:`/`insertNewline:`/`deleteBackward:`
-        // overrides below fire. Unrecognised selectors fall back to
-        // super (menu bar bindings, etc.).
+        // Let interpretKeyEvents route arrow/Space/Return/Delete/Escape
+        // through the standard NSResponder selector dispatch so our
+        // `moveLeft:`/`moveRight:`/`insertNewline:`/`deleteBackward:`/
+        // `cancelOperation:` overrides below fire. Unrecognised selectors
+        // fall back to super (menu bar bindings, etc.).
         self.interpretKeyEvents([event])
+    }
+
+    /// Escape — the standard NSResponder cancel selector, routed here via
+    /// `interpretKeyEvents`. Cancels an in-flight reorder gesture if one is
+    /// armed/active; otherwise defers to `super` (P3, RCA
+    /// docs/rca-tab-behaviors-2026-07-01.md — no cancel path existed for an
+    /// in-flight reorder drag).
+    override func cancelOperation(_ sender: Any?) {
+        guard tabDragController.armedPillIndex != nil || tabDragController.isDragging else {
+            super.cancelOperation(sender)
+            return
+        }
+        tabDragController.cancelInProgress()
     }
 
     override func moveLeft(_ sender: Any?) {
         guard !tabs.isEmpty else { return }
-        let current = focusedPill ?? 0
+        // Clamp the STARTING index first — `focusedPill` can be stale-high
+        // if the tab list shrank since it was last set (P6, RCA
+        // docs/rca-tab-behaviors-2026-07-01.md); `max(0, current - 1)`
+        // alone only protects the lower bound.
+        let current = min(focusedPill ?? 0, tabs.count - 1)
         focusedPill = max(0, current - 1)
         needsDisplay = true
     }
@@ -1385,6 +1419,13 @@ private final class TabDragController {
         /// the dragged pill stays anchored to where the user grabbed it
         /// rather than snapping its left edge to the cursor.
         let downOffsetX: CGFloat
+        /// The ORIGINAL mouseDown event. `NSWindow.performDrag(with:)`'s
+        /// documented contract expects the event `mouseDown` received, not
+        /// a later `mouseDragged` sample — threaded through so the
+        /// `.windowMove` hand-off in `mouseDragged` can honor that contract
+        /// instead of seeding `performDrag` with the wrong event (P4, RCA
+        /// docs/rca-tab-behaviors-2026-07-01.md).
+        let mouseDownEvent: NSEvent
     }
 
     /// Active drag — promoted from the `.armed` phase once the user
@@ -1455,10 +1496,11 @@ private final class TabDragController {
     /// Arm a potential reorder from a pill mousedown. Called by the strip's
     /// `handlePillClick` arm branch; selection stays DEFERRED to `mouseUp`
     /// so a drag — reorder OR window move — never switches tabs.
-    func arm(pillIndex: Int, startPoint: NSPoint, downOffsetX: CGFloat) {
+    func arm(pillIndex: Int, startPoint: NSPoint, downOffsetX: CGFloat, mouseDownEvent: NSEvent) {
         phase = .armed(PendingDrag(pillIndex: pillIndex,
                                    startPoint: startPoint,
-                                   downOffsetX: downOffsetX))
+                                   downOffsetX: downOffsetX,
+                                   mouseDownEvent: mouseDownEvent))
     }
 
     /// Hard-cancel an in-flight drag without committing. Used when the
@@ -1535,7 +1577,10 @@ private final class TabDragController {
                 view.hoveredAdd = false
                 phase = .idle
                 view.needsDisplay = true
-                view.requestWindowDrag(event)
+                // `performDrag(with:)`'s documented contract wants the
+                // ORIGINAL mouseDown event, not this mouseDragged sample
+                // (P4) — `pending.mouseDownEvent` is exactly that.
+                view.requestWindowDrag(pending.mouseDownEvent)
             }
         case .dragging(var state):
             // Bail out cleanly if the underlying tab list changed
