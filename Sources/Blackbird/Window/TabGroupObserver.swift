@@ -130,11 +130,16 @@ final class TabGroupObserver {
 
     func hideNativeTabStrip() {
         guard let window = controller.window else { return }
-        // Walk the theme frame and hide the AppKit-private native tab strip so
-        // it doesn't stack on top of our pill strip. The fragile private-class
-        // string match lives in `NativeTabStripHider`.
+        // Walk the theme frame and neutralize the AppKit-private native tab
+        // strip — both visually (isHidden) and for hit-testing (frame
+        // zeroed at its hosting ancestor; see NativeTabStripHider's doc
+        // comment for why isHidden alone stopped being sufficient on macOS
+        // 26 "Tahoe" — RCA docs/rca-tab-behaviors-2026-07-01.md Bug 1).
+        // Our OWN accessory view is excluded so this walk can never hide or
+        // collapse Blackbird's pill strip.
         if let themeFrame = window.contentView?.superview {
-            let matches = NativeTabStripHider.hide(in: themeFrame)
+            let excluding = [controller.titlebarTabBar?.view].compactMap { $0 }
+            let matches = NativeTabStripHider.hide(in: themeFrame, excluding: excluding)
             // Log when the walker finds zero TabBar-classed views in a
             // multi-tab context. That's the canary for a future macOS
             // that renamed its private view class — our strip-hiding

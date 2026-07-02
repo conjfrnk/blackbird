@@ -356,6 +356,129 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
         XCTAssertEqual(commits[0].1, "recovered")
     }
 
+    // MARK: - RCA Bug 1: invisible native tab bar hijacking clicks (macOS 26 Tahoe)
+
+    /// Pre-flight: builds TWO real headless `MainWindowController`s and
+    /// merges them into a tab group via `addTabbedWindow` — the real
+    /// production window/accessory/KVO path (no PTY/shell). Gated behind
+    /// `BB_RUN_WINDOW_LIFECYCLE_TESTS=1` like the sibling F-S6 tests in
+    /// this file (real window + Metal view creation destabilises the
+    /// cumulative xctest host — see `feedback_test_real_shell_controllers`
+    /// / the class doc comment). Memory: two headless controllers (~few MB
+    /// each); teardown closes both. Time: <1.5s (two 0.4-0.5s runloop
+    /// pumps to let the deferred tab-bar install + AppKit's tab-group
+    /// machinery settle).
+    ///
+    /// RCA docs/rca-tab-behaviors-2026-07-01.md Bug 1: on macOS 26 "Tahoe",
+    /// AppKit's private native `NSTabBar` — suppressed via `isHidden` in
+    /// `NativeTabStripHider` — stayed HIT-TESTABLE despite being hidden,
+    /// because its Liquid-Glass/SwiftUI-hosted internals don't honour the
+    /// hidden flag for `hitTest(_:)`. The terminal deliberately renders text
+    /// starting at the pure titlebar height (not the phantom 36pt tab-bar
+    /// band AppKit reserves), so the first ~2 rows of visible terminal text
+    /// in every multi-tab window sat over a live, invisible tab bar: a
+    /// click there silently switched tabs. The fix
+    /// (`NativeTabStripHider.hide(in:excluding:)`) additionally zeroes the
+    /// FRAME of the native tab bar's hosting ancestor, which blocks
+    /// AppKit's ordinary frame-containment hit-test recursion regardless of
+    /// what the private `NSTabBar` override itself does.
+    ///
+    /// Regression pin: synthesize a real `NSWindow.sendEvent` left-click at
+    /// the exact point the original bug hijacked (40pt below the window
+    /// top — inside the reserved-but-suppressed native tab-bar band, well
+    /// below the custom pill strip which occupies only the top 28pt) and
+    /// assert the tab selection does NOT change.
+    ///
+    /// KNOWN HANG-ON-REGRESSION HAZARD: empirically verified (temporarily
+    /// reverting the fix and re-running this exact test) that a synthetic
+    /// click landing on the invisible pre-fix native `NSTabBar` doesn't
+    /// just misroute — `NSWindow.sendEvent` can wedge AppKit's internal
+    /// tab-bar-click machinery in this headless xctest host, and the
+    /// process never returns from that synchronous call. The suite's own
+    /// `TestHostActivityMonitor` safety net (329s no-heartbeat) is what
+    /// eventually kills the wedged host and lets xctest report a failure —
+    /// there is no way to bound a hang inside a synchronous main-thread
+    /// AppKit call from Swift-level test code. So: if this test ever starts
+    /// failing again, expect a slow (~5 minute) CI/local run before the
+    /// failure surfaces, not an instant assertion message. That's expected
+    /// and is itself further evidence of how disruptive the underlying bug
+    /// was — a real user's click doesn't hang (it just silently switches
+    /// tabs), this is specific to AppKit's headless-host behavior.
+    func test_bandClick_doesNotHijackTabSelection() throws {
+        try XCTSkipIf(
+            ProcessInfo.processInfo.environment["BB_RUN_WINDOW_LIFECYCLE_TESTS"] != "1",
+            "set BB_RUN_WINDOW_LIFECYCLE_TESTS=1 to run real-window lifecycle tests in isolation"
+        )
+        Self.acquireControllerSlot()
+        defer { Self.releaseControllerSlot() }
+
+        guard let c1 = MainWindowController.makeForTesting(stubSession: .makeHeadlessForTests()) else {
+            throw XCTSkip("no Metal device (CI virtual display) — makeForTesting returned nil; skipping")
+        }
+        guard let c2 = MainWindowController.makeForTesting(stubSession: .makeHeadlessForTests()) else {
+            c1.terminateSessions(); c1.window?.close()
+            throw XCTSkip("no Metal device (CI virtual display) — makeForTesting returned nil; skipping")
+        }
+        defer {
+            c1.terminateSessions(); c1.window?.close()
+            c2.terminateSessions(); c2.window?.close()
+        }
+
+        let w1 = try XCTUnwrap(c1.window)
+        let w2 = try XCTUnwrap(c2.window)
+        w1.title = "BAND-CLICK-ONE"
+        w2.title = "BAND-CLICK-TWO"
+        w1.setFrame(NSRect(x: 200, y: 200, width: 800, height: 480), display: true)
+        c1.showWindow(nil)
+        w1.orderFront(nil)
+        w1.addTabbedWindow(w2, ordered: .above)
+        w2.makeKeyAndOrderFront(nil)
+
+        // Let the deferred hide/observe hooks and AppKit's tab-bar install
+        // settle before probing — matches the docs/probes harness this
+        // test is derived from.
+        let settle1 = expectation(description: "settle after merge")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { settle1.fulfill() }
+        wait(for: [settle1], timeout: 2.0)
+        c1.refreshTabBar()
+        c2.refreshTabBar()
+        let settle2 = expectation(description: "settle after refresh")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settle2.fulfill() }
+        wait(for: [settle2], timeout: 2.0)
+
+        guard let group = w1.tabGroup, group.windows.count == 2 else {
+            throw XCTSkip("headless host refused to form a tab group")
+        }
+
+        let selectedWindow = try XCTUnwrap(group.selectedWindow)
+        let selectedBeforeTitle = selectedWindow.title
+
+        // Click 40pt below the window top, well inside the reserved (but
+        // suppressed) native tab-bar band and below the 28pt-tall custom
+        // pill strip — exactly the point the original bug hijacked.
+        let h = selectedWindow.frame.height
+        let clickPoint = NSPoint(x: 200, y: h - 40)
+        for (type, count) in [(NSEvent.EventType.leftMouseDown, 1), (.leftMouseUp, 1)] {
+            if let ev = NSEvent.mouseEvent(
+                with: type, location: clickPoint, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: selectedWindow.windowNumber, context: nil,
+                eventNumber: 0, clickCount: count, pressure: 1
+            ) {
+                selectedWindow.sendEvent(ev)
+            }
+        }
+        let settle3 = expectation(description: "settle after synthetic click")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settle3.fulfill() }
+        wait(for: [settle3], timeout: 2.0)
+
+        XCTAssertEqual(
+            w1.tabGroup?.selectedWindow?.title, selectedBeforeTitle,
+            "a click 40pt below the window top (inside the suppressed native "
+                + "tab-bar band) must NOT switch tabs — RCA Bug 1"
+        )
+    }
+
     /// Pre-flight: NO real MainWindowController. Bare NSWindow stubs only.
     /// Memory: ~240 KB transient (6 stubs). Time: <50 ms.
     ///
