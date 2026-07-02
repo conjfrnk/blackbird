@@ -28,8 +28,47 @@ final class WindowFramePersistence {
     /// arrangement; those relocations must NOT be persisted (they'd clobber the
     /// user's saved multi-display frame). Suppress non-user-driven saves for a
     /// settle window after the last `didChangeScreenParameters`. Audit S5-006.
-    private static let screenReconfigSettleInterval: TimeInterval = 2.0
+    ///
+    /// 5.0s (not the original 2.0s): a slow wake-from-sleep display
+    /// renegotiation (external display / dock DDC handshake) can emit its
+    /// relocating `windowDidMove` well after a shorter window would have
+    /// expired (A4, RCA docs/rca-tab-behaviors-2026-07-01.md). Safe to widen
+    /// — `isUserDrivenFrameChange` already bypasses this suppression
+    /// entirely for a genuine user drag/resize, so a longer window only
+    /// defers AppKit's OWN non-user-driven relocations, never a real save.
+    /// Each `didChangeScreenParameters` re-arms the full interval, so a
+    /// multi-step renegotiation that keeps firing the notification is
+    /// already covered regardless of this constant; this only helps the
+    /// single-relocation-arrives-late case.
+    private static let screenReconfigSettleInterval: TimeInterval = 5.0
     private var suppressSavesUntil: Date = .distantPast
+
+    /// Suppressed from `windowWillEnterFullScreen` until the transition
+    /// resolves OR this deadline passes, whichever comes first.
+    /// `saveCurrentFrame`'s `styleMask.contains(.fullScreen)` check alone
+    /// isn't sufficient: that flag only lands once AppKit's enter animation
+    /// completes, but `windowDidResize` can fire mid-animation — with a
+    /// near-screen-sized frame — before the flag is set. Saving that frame
+    /// would have the next launch open screen-sized WITHOUT fullscreen,
+    /// burying the traffic lights under the menu bar (A3, RCA
+    /// docs/rca-tab-behaviors-2026-07-01.md). The symmetric EXIT animation
+    /// doesn't need the same guard: `.fullScreen` is still set in the
+    /// styleMask for the whole exit animation (it only clears once exit
+    /// completes), so the existing check already covers it.
+    ///
+    /// Time-bounded (a `Date` deadline, not a bare `Bool`) as a defensive
+    /// backstop: AppKit's documented contract guarantees
+    /// `windowDidEnterFullScreen` or `windowDidFailToEnterFullScreen` fires
+    /// after `windowWillEnterFullScreen`, but a bare boolean cleared ONLY by
+    /// that callback has no self-heal path if that contract were ever
+    /// violated (a hung/aborted transition, a future AppKit change) — every
+    /// subsequent frame save would silently stay suppressed for the rest of
+    /// the window's life with zero diagnostic signal. Mirrors
+    /// `suppressSavesUntil`'s existing time-bounded shape rather than
+    /// introducing a structurally different suppression mechanism
+    /// (type-design review).
+    private static let fullScreenEntrySuppressionTimeout: TimeInterval = 5.0
+    private var fullScreenEntrySuppressedUntil: Date = .distantPast
 
     /// Arm the screen-reconfig settle suppression. Called from the controller's
     /// `screenParametersDidChange` notification handler.
@@ -37,9 +76,23 @@ final class WindowFramePersistence {
         suppressSavesUntil = Date().addingTimeInterval(Self.screenReconfigSettleInterval)
     }
 
+    /// Called from the controller's `windowWillEnterFullScreen` delegate hook.
+    func armFullScreenEntrySuppression() {
+        fullScreenEntrySuppressedUntil = Date().addingTimeInterval(Self.fullScreenEntrySuppressionTimeout)
+    }
+
+    /// Called from the controller's `windowDidEnterFullScreen` /
+    /// `windowDidFailToEnterFullScreen` delegate hooks — the transition has
+    /// resolved one way or the other, so resume the ordinary styleMask-based
+    /// gate immediately rather than waiting out the defensive timeout.
+    func resolveFullScreenEntrySuppression() {
+        fullScreenEntrySuppressedUntil = .distantPast
+    }
+
     /// Persist the current window frame, unless suppressed: a show-window is in
     /// progress, a screen-reconfig settle window is active (and the change isn't
-    /// positively user-driven), or the window is full-screen.
+    /// positively user-driven), the window is full-screen, or a fullscreen-enter
+    /// transition is in flight.
     func saveCurrentFrame() {
         guard !controller.isPerformingShowWindow else { return }
         guard let win = controller.window else { return }
@@ -62,7 +115,7 @@ final class WindowFramePersistence {
             inLiveResize: win.inLiveResize
         )
         guard userDriven || Date() >= suppressSavesUntil else { return }
-        guard !win.styleMask.contains(.fullScreen) else { return }
+        guard !win.styleMask.contains(.fullScreen), Date() >= fullScreenEntrySuppressedUntil else { return }
         win.saveFrame(usingName: MainWindowController.frameAutosaveName)
     }
 

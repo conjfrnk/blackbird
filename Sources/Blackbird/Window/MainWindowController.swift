@@ -661,6 +661,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         framePersistence.saveCurrentFrame()
     }
 
+    /// Arms the fullscreen-entry save suppression (A3, RCA
+    /// docs/rca-tab-behaviors-2026-07-01.md) — see
+    /// `WindowFramePersistence.armFullScreenEntrySuppression`'s doc comment
+    /// for why the plain `.fullScreen` styleMask check in `saveCurrentFrame`
+    /// isn't sufficient on its own.
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        framePersistence.armFullScreenEntrySuppression()
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        framePersistence.resolveFullScreenEntrySuppression()
+    }
+
+    /// The transition can also fail outright (rare, but AppKit does define
+    /// this delegate hook) — resolve the suppression the same way so a
+    /// failed attempt doesn't leave saves suppressed for the rest of the
+    /// window's life.
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        framePersistence.resolveFullScreenEntrySuppression()
+    }
+
     // MARK: - Tab bar affordances
 
     /// Intercept AppKit's toggleTabBar responder action — the one fired by
