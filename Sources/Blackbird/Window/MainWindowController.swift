@@ -348,6 +348,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // apply happens during init (before super), so the blur call then
         // was a no-op. Re-run the palette push now that the window is
         // visible so the blur actually lights up on first show.
+        //
+        // `super.showWindow` above can SYNCHRONOUSLY fire
+        // `windowDidBecomeKey` (the ⌘N / first-window path), which already
+        // does this exact one-shot re-apply once `didReapplyThemeAfterOrderIn`
+        // is false — see that method. Only do it again here if that path
+        // didn't already run; otherwise every ⌘N doubles the apply (A5,
+        // RCA docs/rca-tab-behaviors-2026-07-01.md).
+        guard !didReapplyThemeAfterOrderIn else { return }
         didReapplyThemeAfterOrderIn = true
         DispatchQueue.main.async {
             ThemeManager.shared.refresh()
