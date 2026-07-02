@@ -128,6 +128,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// `rect` before `init` was decomposed; one constant keeps them in lockstep.
     private static let defaultContentRect = NSRect(x: 0, y: 0, width: 800, height: 480)
 
+    /// `os.Logger` for tab-bar-affordance diagnostics — currently just
+    /// `toggleTabBar`'s bypass canary. Same subsystem/category as
+    /// `TabGroupObserver`'s `tabsLogger` and `TerminalWindow`'s logger, so
+    /// `log stream --predicate 'category == "tabs"'` catches every
+    /// tab-related canary in one place.
+    private static let tabsLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "tabs")
+
     init(initialWorkingDirectory: String? = nil, autosaveFrame: Bool = true) {
         self.initialWorkingDirectory = initialWorkingDirectory
         // The setup below runs in a LOAD-BEARING order. `makeConfiguredWindow`
@@ -656,28 +663,53 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     // MARK: - Tab bar affordances
 
-    /// True when the current window is part of a multi-window tab group.
-    /// A single-window "group" is AppKit's default, and toggling the tab
-    /// bar in that state exposes a near-empty strip with only a `+` button
-    /// — visually jarring and functionally useless.
-    private var hasMultipleTabs: Bool {
-        (window?.tabbedWindows?.count ?? 1) >= 2
-    }
-
     /// Intercept AppKit's toggleTabBar responder action — the one fired by
     /// ⇧⌘T, the View menu's "Show Tab Bar", and the window titlebar's
-    /// right-click menu. Forward only when there are ≥2 tabs; otherwise
-    /// no-op so the user doesn't get the empty-strip state. The tab bar
-    /// still auto-appears the moment a second tab is created (AppKit's
-    /// default behaviour at `.preferred` tabbing mode).
+    /// right-click menu — and permanently no-op it.
+    ///
+    /// Deliberately NEVER forwards to `window.toggleTabBar(_:)`, for two
+    /// independent reasons:
+    ///   1. It's functionally pointless in Blackbird's architecture: the
+    ///      custom pill strip (`TitlebarTabBar.swift`) fully replaces the
+    ///      native tab bar's purpose and is always shown for ≥2 tabs — there
+    ///      is no "hide the tabs to reclaim space" affordance to offer, since
+    ///      the pills ARE the window chrome, not an optional convenience the
+    ///      way Terminal.app/iTerm2 treat their native strips.
+    ///   2. It's actively risky: `window.toggleTabBar(_:)` collapsing/
+    ///      restoring AppKit's native 36pt tab-bar band interacts with
+    ///      `NativeTabStripHider`'s aggressive suppression (which zeroes
+    ///      that band's hosting ancestor's frame — RCA
+    ///      docs/rca-tab-behaviors-2026-07-01.md Bug 1) in ways that were
+    ///      never exercised before that fix landed, and this exact
+    ///      `toggleTabBar` API already has a documented history of
+    ///      triggering beachball hangs in this codebase when touched inside
+    ///      related transactions (KNOWN_ISSUES "Tab-merge titlebar flash on
+    ///      ⌘T": two prior attempts to call `toggleTabBar` during the merge
+    ///      transaction were reverted after hanging). Never calling it at
+    ///      all is the safe, conservative choice — RCA finding A2 ("Hide Tab
+    ///      Bar desyncs band and pills").
     @objc func toggleTabBar(_ sender: Any?) {
-        guard hasMultipleTabs, let window else { return }
-        window.toggleTabBar(sender)
+        // `validateMenuItem` disables every documented invocation path
+        // (⇧⌘T, View menu, titlebar right-click), so reaching the ACTION
+        // BODY means something bypassed menu validation entirely — direct
+        // `NSApp.sendAction`, AppleScript's default Cocoa scripting, or a
+        // future caller. Matching the H-9 pattern elsewhere in this
+        // codebase (App.swift's `selectTab`/`closeWindow`, which log an
+        // "ignoring" notice on the same class of bypass): log rather than
+        // silently doing nothing, so a bypassed keystroke that "does
+        // nothing" has a diagnostic trail instead of looking like the app
+        // hung. NOT gated on `#if DEBUG` for the same Release-
+        // diagnosability reason as those siblings. (silent-failure review,
+        // RCA docs/rca-tab-behaviors-2026-07-01.md batch)
+        Self.tabsLogger.notice("toggleTabBar: reached the action body via a path that bypassed validateMenuItem (always disabled) — permanent no-op, ignoring")
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(toggleTabBar(_:)) {
-            return hasMultipleTabs
+            // Always disabled — see `toggleTabBar`'s doc comment. Grayed
+            // out rather than silently inert-when-clicked (this codebase
+            // avoids silent no-ops where a clear disabled state is cheap).
+            return false
         }
         if menuItem.action == #selector(renameActiveTab(_:)) {
             // Only enabled when there's a live session to rename.
