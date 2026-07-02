@@ -53,6 +53,55 @@ final class TabOrderCoordinator {
     /// map tracks only live groups.
     private var ordersByGroup: [ObjectIdentifier: [WeakWindow]] = [:]
 
+    /// One-shot "where did I used to sit" hints for windows that recently
+    /// dropped out of some group's visual order (closed, detached, or moved
+    /// to another window) — an ARRAY holding weak references, not a
+    /// `Dictionary` keyed by `ObjectIdentifier`, specifically so a departed
+    /// window's hint can be detected and purged the same way
+    /// `ordersByGroup`'s dead-group entries are (a dictionary keyed by a
+    /// stale identifier has no way to notice its key's referent is gone).
+    ///
+    /// Consulted — and removed — the next time that EXACT window shows up
+    /// as a newly-seen member of ANY group's `reconcile` (see the
+    /// newly-seen-arrival loop below), so a tab that briefly left a group
+    /// and came back (RCA docs/rca-tab-behaviors-2026-07-01.md Bug 4) slots
+    /// back in near its old neighbor instead of being blindly appended at
+    /// the end, matching how new tabs have always arrived. Safe by
+    /// construction for a genuinely unrelated later join: the remembered
+    /// neighbor must ALSO be present in the destination group's
+    /// currently-being-built order for the hint to apply — if it isn't
+    /// (the common case for an unrelated join, since the neighbor almost
+    /// certainly isn't a member of some other group), the window falls
+    /// through to the ordinary newly-seen-arrival append.
+    /// A weakly-held window, boxed so it can live inside an enum case
+    /// (Swift doesn't allow `weak` directly on an associated value).
+    private struct WeakWindowBox {
+        weak var value: NSWindow?
+    }
+
+    /// Where a returning window should reinsert, relative to its remembered
+    /// position. A closed enum instead of a `Bool` + `Optional` pair
+    /// (the previous shape) so "was at the front AND had a remembered
+    /// neighbor" — representable but never actually constructed — is
+    /// statically unrepresentable rather than merely undocumented
+    /// (type-design review).
+    private enum ReinsertAnchor {
+        /// `departed` was at index 0 of its stored order — no left
+        /// neighbor ever existed.
+        case front
+        /// `departed` had a left neighbor at departure time. Boxed/weak:
+        /// if that neighbor has since deallocated, or isn't a member of
+        /// the destination this window is rejoining, the hint falls
+        /// through to an ordinary append rather than inserting anywhere
+        /// specific — we no longer know where `departed` belonged.
+        case afterNeighbor(WeakWindowBox)
+    }
+    private struct DepartureHint {
+        weak var departed: NSWindow?
+        let anchor: ReinsertAnchor
+    }
+    private var departureHints: [DepartureHint] = []
+
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "tabOrder")
 
@@ -140,14 +189,65 @@ final class TabOrderCoordinator {
                             commitTo key: ObjectIdentifier?) -> [NSWindow] {
         var seen = Set<ObjectIdentifier>()
         var result: [NSWindow] = []
-        for entry in stored {
+        for (index, entry) in stored.enumerated() {
             guard let w = entry.value else { continue }
             if live.contains(where: { $0 === w }) {
                 result.append(w)
                 seen.insert(ObjectIdentifier(w))
+            } else {
+                // `w` just dropped out of this group's live membership.
+                // Remember its immediate left neighbor from the STORED
+                // order (not the partial `result` being built) so a later
+                // return — to this group or another — can restore its slot
+                // instead of appending at the end (Bug 4).
+                if index == 0 {
+                    departureHints.append(DepartureHint(departed: w, anchor: .front))
+                } else {
+                    // `stored[index - 1].value` may itself already be nil
+                    // (that predecessor also deallocated) — a nil box
+                    // value correctly falls through to an ordinary append
+                    // on return, since we no longer know where `w`
+                    // belonged relative to whatever survives.
+                    departureHints.append(DepartureHint(
+                        departed: w,
+                        anchor: .afterNeighbor(WeakWindowBox(value: stored[index - 1].value))))
+                }
             }
         }
         for w in live where !seen.contains(ObjectIdentifier(w)) {
+            if let hintIndex = departureHints.firstIndex(where: { $0.departed === w }) {
+                let hint = departureHints[hintIndex]
+                departureHints.remove(at: hintIndex) // one-shot
+                switch hint.anchor {
+                case .front:
+                    // Debug-level, not `.notice`: this is the EXPECTED,
+                    // successful case (a returning tab reclaiming its old
+                    // slot), not an anomaly — but the match is a flat,
+                    // unscoped-by-group identity lookup, and the only way
+                    // to distinguish "restored a genuinely departed tab"
+                    // from "coincidentally reunited with an unrelated
+                    // window that happens to share the same neighbor
+                    // reference" after the fact is a log line (silent-
+                    // failure review, RCA docs/rca-tab-behaviors-2026-07-01.md
+                    // batch).
+                    Self.logger.debug("reconcile: restored departed window to the front of its destination order (hint match)")
+                    result.insert(w, at: 0)
+                    continue
+                case .afterNeighbor(let box):
+                    if let neighbor = box.value,
+                       let neighborIndex = result.firstIndex(where: { $0 === neighbor }) {
+                        Self.logger.debug("reconcile: restored departed window after its remembered neighbor at index \(neighborIndex, privacy: .public) (hint match)")
+                        result.insert(w, at: neighborIndex + 1)
+                        continue
+                    }
+                    // Neighbor existed but isn't resolvable in this
+                    // destination's order (unrelated join, or the neighbor
+                    // itself never made it here) — fall through to the
+                    // ordinary newly-seen-arrival append below. Expected/
+                    // common case, not logged (matches the pre-fix
+                    // behavior exactly).
+                }
+            }
             result.append(w)
         }
         if let key {
@@ -158,8 +258,18 @@ final class TabOrderCoordinator {
             // live tab session — and the dead group's own key is never
             // read again, so nothing else would ever evict it.
             purgeDeadGroups()
+            purgeStaleDepartureHints()
         }
         return result
+    }
+
+    /// A departure hint is stale once the window it was tracking has
+    /// deallocated (closed for good, never coming back) — mirrors
+    /// `purgeDeadGroups()`'s cleanup for `ordersByGroup`. Called on every
+    /// reconcile commit so `departureHints` can't grow unbounded across a
+    /// long session's worth of tab churn.
+    private func purgeStaleDepartureHints() {
+        departureHints.removeAll { $0.departed == nil }
     }
 
     /// A stored entry is dead when every window it tracked has deallocated.
@@ -194,9 +304,21 @@ final class TabOrderCoordinator {
 
     /// Test hook — drop all stored orders so suites don't leak state
     /// into each other. Calls to `orderedTabs` after this rebuild from
-    /// `group.windows` alone.
+    /// `group.windows` alone. Also drops `departureHints` — a test driving
+    /// `reconcileForTesting` (which records hints unconditionally, not
+    /// gated on `commitTo`) must not leak a hint into an unrelated later
+    /// test.
     internal func resetForTesting() {
         ordersByGroup.removeAll()
+        departureHints.removeAll()
+    }
+
+    /// Test seam — number of live (non-deallocated) departure hints
+    /// currently held. Lets a test assert the one-shot-consume /
+    /// purge-on-commit contracts without reaching into the private
+    /// `DepartureHint` type.
+    internal func departureHintCountForTesting() -> Int {
+        departureHints.filter { $0.departed != nil }.count
     }
 
     // MARK: Dead-group purge seams

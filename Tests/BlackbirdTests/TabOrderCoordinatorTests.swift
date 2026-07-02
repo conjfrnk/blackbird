@@ -542,4 +542,285 @@ final class TabOrderCoordinatorTests: XCTestCase {
             nil,
             "closingIndex == count is out of range → nil")
     }
+
+    // MARK: - Bug 4: departure-hint slot restoration
+    //
+    // A NEW mechanism layered on top of the existing reconcile rules
+    // (drop-when-absent, tail-append-when-new, stored-order-preserved —
+    // all covered above and UNCHANGED). Contract under test:
+    //
+    //   - When `reconcile` processes a `stored` window that is NOT in
+    //     `live` (a "departure"), it records a one-shot "departure hint"
+    //     BEFORE dropping the window, capturing that window's immediate
+    //     LEFT NEIGHBOR *in the stored array* (`stored[index-1]`), or a
+    //     "no left neighbor" flag if it was at index 0.
+    //   - When `reconcile` later (same call or a wholly separate call,
+    //     possibly a different group) meets a `live` window that would
+    //     ordinarily tail-append (not in `stored`), it first checks for a
+    //     hint for that exact window:
+    //       * neighbor alive AND already in the result-so-far → insert
+    //         immediately AFTER the neighbor (reclaim old slot);
+    //       * "no left neighbor" → insert at the FRONT;
+    //       * neighbor unresolvable (deallocated, or simply not in this
+    //         destination's set) → ordinary tail-append.
+    //     In every hit case the hint is CONSUMED (one-shot).
+    //   - An unconsumed hint is weakly held: once the departed window
+    //     deallocates AND a commit-bearing reconcile runs, it is purged.
+    //
+    // Side effects (recording + consumption) happen regardless of
+    // `commitTo`, so the `commitTo: nil` `reconcileForTesting` seam is
+    // enough to drive most of these; only the weak-purge lifecycle needs
+    // a committing reconcile as the deterministic purge trigger.
+    //
+    // Memory/safety: same budget as the rest of the file — bare, never-
+    // shown NSWindows only. The two deallocation-dependent tests wrap the
+    // to-be-freed window in an `autoreleasepool` and `XCTSkipUnless` the
+    // weak sentinel actually went nil, since a headless xctest host does
+    // not always let an NSWindow deallocate deterministically.
+
+    func test_departureHint_createdWhenStoredWindowDeparts() {
+        let coord = TabOrderCoordinator.shared
+        XCTAssertEqual(coord.departureHintCountForTesting(), 0,
+            "precondition: clean hint store")
+        let a = makeWindow("a")
+        let b = makeWindow("b")
+
+        // stored [a, b], live [a] → b departs; a hint must be recorded
+        // (before b is dropped from the result as before).
+        let result = coord.reconcileForTesting(stored: [a, b], live: [a])
+        XCTAssertEqual(result.count, 1)
+        XCTAssertTrue(result[0] === a,
+            "departed window is still dropped from the result (unchanged behavior)")
+        XCTAssertEqual(coord.departureHintCountForTesting(), 1,
+            "a departing stored window must record exactly one departure hint")
+    }
+
+    func test_departureHint_returningWindowReclaimsSlotAfterNeighbor() {
+        let coord = TabOrderCoordinator.shared
+        let a = makeWindow("a")
+        let b = makeWindow("b")
+        let c = makeWindow("c")
+        let x = makeWindow("x")
+
+        // Call 1: b departs from [a, b, c]; hint records left neighbor a.
+        _ = coord.reconcileForTesting(stored: [a, b, c], live: [a, c])
+        // Call 2 (separate call, different stored/live): b reappears as a
+        // new arrival. Ordinary tail-append would give [a, x, b]; the hint
+        // must instead reinsert b immediately AFTER a → [a, b, x].
+        let result = coord.reconcileForTesting(stored: [a, x], live: [a, x, b])
+        XCTAssertEqual(result.count, 3)
+        XCTAssertTrue(result[0] === a)
+        XCTAssertTrue(result[1] === b,
+            "returning window must reclaim the slot immediately after its neighbor")
+        XCTAssertTrue(result[2] === x)
+    }
+
+    func test_departureHint_noLeftNeighbor_returningWindowLandsAtFront() {
+        let coord = TabOrderCoordinator.shared
+        let b = makeWindow("b")
+        let c = makeWindow("c")
+        let x = makeWindow("x")
+        let y = makeWindow("y")
+
+        // Call 1: b departs from index 0 of [b, c] → hint records NO left
+        // neighbor.
+        _ = coord.reconcileForTesting(stored: [b, c], live: [c])
+        // Call 2: b reappears. Ordinary tail would give [x, y, b]; the
+        // "no neighbor" hint must instead insert b at the FRONT → [b, x, y].
+        let result = coord.reconcileForTesting(stored: [x, y], live: [x, y, b])
+        XCTAssertEqual(result.count, 3)
+        XCTAssertTrue(result[0] === b,
+            "window that departed from index 0 must return to the front, not the tail")
+        XCTAssertTrue(result[1] === x)
+        XCTAssertTrue(result[2] === y)
+    }
+
+    func test_departureHint_neighborDeallocated_returningWindowFallsToTail() throws {
+        let coord = TabOrderCoordinator.shared
+        let w = makeWindow("W")
+        let p = makeWindow("P")
+        let q = makeWindow("Q")
+
+        weak var weakN: NSWindow?
+        autoreleasepool {
+            let n = makeWindow("N")
+            weakN = n
+            // stored [N, W], live [N] → W departs at index 1; the hint
+            // records neighbor N (alive at this moment). N is held only by
+            // this pool-local strong ref (and weakly by the hint).
+            _ = coord.reconcileForTesting(stored: [n, w], live: [n])
+        }
+        try XCTSkipUnless(weakN == nil,
+            "neighbor NSWindow did not deallocate in this host; cannot exercise "
+                + "the dead-neighbor path")
+
+        // W returns as a new arrival; its recorded neighbor N is gone. This
+        // is DISTINCT from the index-0 "no neighbor" case — a dead neighbor
+        // must NOT front-insert; it falls through to the ordinary tail.
+        let result = coord.reconcileForTesting(stored: [p, q], live: [p, q, w])
+        XCTAssertEqual(result.count, 3)
+        XCTAssertTrue(result[0] === p)
+        XCTAssertTrue(result[1] === q)
+        XCTAssertTrue(result[2] === w,
+            "returning window whose recorded neighbor has deallocated must fall "
+                + "to the ORDINARY TAIL, not the front")
+    }
+
+    func test_departureHint_neighborAbsentFromDestination_fallsToTailAndHintConsumed() {
+        let coord = TabOrderCoordinator.shared
+        let n = makeWindow("N")
+        let w = makeWindow("W")
+        let p = makeWindow("P")
+        let q = makeWindow("Q")
+        let r = makeWindow("R")
+
+        // Call 1: W departs from [N, W]; hint records neighbor N (which
+        // stays alive throughout this test).
+        _ = coord.reconcileForTesting(stored: [n, w], live: [n])
+        // Call 2: W joins a wholly unrelated destination — N is alive but is
+        // not a member here, so W must fall to the ordinary tail.
+        let joined = coord.reconcileForTesting(stored: [p, q], live: [p, q, w])
+        XCTAssertEqual(joined.count, 3)
+        XCTAssertTrue(joined[0] === p)
+        XCTAssertTrue(joined[1] === q)
+        XCTAssertTrue(joined[2] === w,
+            "returning to a group where the remembered neighbor is absent must tail-append")
+        // Call 3: prove the hint was CONSUMED by call 2 (one-shot) and did
+        // not linger — even though N is now present, W must NOT be reinserted
+        // next to it.
+        let rejoin = coord.reconcileForTesting(stored: [n, r], live: [n, r, w])
+        XCTAssertEqual(rejoin.count, 3)
+        XCTAssertTrue(rejoin[0] === n)
+        XCTAssertTrue(rejoin[1] === r)
+        XCTAssertTrue(rejoin[2] === w,
+            "a hint consumed on the previous (neighbor-absent) join must not "
+                + "resurrect to reinsert near N later")
+    }
+
+    func test_departureHint_isOneShot_secondDepartureRecordsFreshNeighbor() {
+        let coord = TabOrderCoordinator.shared
+        let a = makeWindow("a")
+        let b = makeWindow("b")
+        let z = makeWindow("z")
+        let k = makeWindow("k")
+
+        // Depart #1: b leaves [a, b]; hint neighbor = a.
+        _ = coord.reconcileForTesting(stored: [a, b], live: [a])
+        // Return #1: b reinserts after a → [a, b, z] (consumes the a-hint).
+        let ret1 = coord.reconcileForTesting(stored: [a, z], live: [a, z, b])
+        XCTAssertTrue(ret1[0] === a)
+        XCTAssertTrue(ret1[1] === b)
+        XCTAssertTrue(ret1[2] === z)
+
+        // Depart #2: b leaves [z, b]; a FRESH hint must be recorded with
+        // neighbor = z (its state at THIS later departure).
+        _ = coord.reconcileForTesting(stored: [z, b], live: [z])
+        // Return #2: b must reinsert after z (the NEW neighbor), not tail.
+        // If the original consumed a-hint were wrongly reused, a is absent
+        // here so b would tail-append → [z, k, b]; the fresh z-hint gives
+        // [z, b, k].
+        let ret2 = coord.reconcileForTesting(stored: [z, k], live: [z, k, b])
+        XCTAssertEqual(ret2.count, 3)
+        XCTAssertTrue(ret2[0] === z)
+        XCTAssertTrue(ret2[1] === b,
+            "second departure must record a fresh hint reflecting the later neighbor")
+        XCTAssertTrue(ret2[2] === k)
+    }
+
+    func test_departureHint_resetForTestingClearsHints() {
+        let coord = TabOrderCoordinator.shared
+        let a = makeWindow("a")
+        let b = makeWindow("b")
+        let z = makeWindow("z")
+
+        // Create a hint: b departs [a, b].
+        _ = coord.reconcileForTesting(stored: [a, b], live: [a])
+        XCTAssertEqual(coord.departureHintCountForTesting(), 1,
+            "sanity: hint recorded before reset")
+        coord.resetForTesting()
+        XCTAssertEqual(coord.departureHintCountForTesting(), 0,
+            "resetForTesting must clear departure hints too")
+        // b reappears after the reset: with no surviving hint it is a
+        // brand-new arrival and must tail-append, NOT reinsert after a.
+        let result = coord.reconcileForTesting(stored: [a, z], live: [a, z, b])
+        XCTAssertEqual(result.count, 3)
+        XCTAssertTrue(result[0] === a)
+        XCTAssertTrue(result[1] === z)
+        XCTAssertTrue(result[2] === b,
+            "after reset, a formerly-hinted window must be treated as genuinely "
+                + "new (tail append)")
+    }
+
+    func test_departureHint_leftNeighborTakenFromStoredNotLiveShape() {
+        let coord = TabOrderCoordinator.shared
+        let a = makeWindow("a")
+        let b = makeWindow("b")
+        let c = makeWindow("c")
+
+        // Call 1: b departs from stored [a, b, c] (live [a, c]). b's left
+        // neighbor in the STORED array is a (index 1's predecessor), even
+        // though live's shape ([a, c]) does not point at a directly.
+        _ = coord.reconcileForTesting(stored: [a, b, c], live: [a, c])
+        // Call 2: b returns. It must land immediately after a (its stored
+        // neighbor), NOT after c and NOT at the tail — tail/live-order would
+        // give [a, c, b].
+        let result = coord.reconcileForTesting(stored: [a, c], live: [a, c, b])
+        XCTAssertEqual(result.count, 3)
+        XCTAssertTrue(result[0] === a)
+        XCTAssertTrue(result[1] === b,
+            "neighbor must be the stored-array predecessor (a), not c or the tail")
+        XCTAssertTrue(result[2] === c)
+    }
+
+    func test_departureHint_leftNeighborIsStoredPredecessorNotLastReconciled() {
+        let coord = TabOrderCoordinator.shared
+        let a = makeWindow("a")
+        let x = makeWindow("x")
+        let b = makeWindow("b")
+        let p = makeWindow("p")
+
+        // Call 1: BOTH x and b depart from stored [a, x, b] (live [a]). The
+        // last window actually reconciled into the result before b's slot is
+        // a, but b's STORED predecessor is x. The hint must capture x — this
+        // distinguishes "stored[index-1]" from "last-appended-to-result".
+        _ = coord.reconcileForTesting(stored: [a, x, b], live: [a])
+        // Call 2: a and x are present again; b returns. If the neighbor were
+        // the "last reconciled" (a), b would land after a → [a, b, x, p].
+        // The correct stored-predecessor (x) gives [a, x, b, p].
+        let result = coord.reconcileForTesting(stored: [a, x, p], live: [a, x, p, b])
+        XCTAssertEqual(result.count, 4)
+        XCTAssertTrue(result[0] === a)
+        XCTAssertTrue(result[1] === x)
+        XCTAssertTrue(result[2] === b,
+            "hint neighbor must be b's stored-array predecessor (x), not the "
+                + "last-reconciled window (a)")
+        XCTAssertTrue(result[3] === p)
+    }
+
+    func test_departureHint_unconsumedHintPurgedAfterDeallocAndCommit() throws {
+        let coord = TabOrderCoordinator.shared
+        XCTAssertEqual(coord.departureHintCountForTesting(), 0,
+            "precondition: clean hint store")
+        let n = makeWindow("N")  // survivor / neighbor, stays alive
+
+        weak var weakD: NSWindow?
+        autoreleasepool {
+            let d = makeWindow("D")
+            weakD = d
+            // stored [N, D], live [N] → D departs (never rejoins). Hint held
+            // weakly on D; D's only strong ref is this pool-local var.
+            _ = coord.reconcileForTesting(stored: [n, d], live: [n])
+            XCTAssertEqual(coord.departureHintCountForTesting(), 1,
+                "a departure hint is created when D leaves the stored order")
+        }
+        try XCTSkipUnless(weakD == nil,
+            "departed NSWindow did not deallocate in this host; cannot verify weak purge")
+
+        // A commit-bearing reconcile is the deterministic purge trigger.
+        _ = coord.reconcileCommittingForTesting(
+            key: ObjectIdentifier(n), stored: [n], live: [n])
+        XCTAssertEqual(coord.departureHintCountForTesting(), 0,
+            "an unconsumed hint whose departed window has deallocated must be "
+                + "purged after a commit reconcile")
+    }
 }
