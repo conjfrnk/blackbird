@@ -340,6 +340,16 @@ final class TabGroupObserver {
 
     func refreshTabBar() {
         guard let window = controller.window else { return }
+        // Re-assert native-strip suppression on EVERY call, not just the
+        // handful of KVO/key-window paths that used to call it individually
+        // (Bug 5 — RCA docs/rca-tab-behaviors-2026-07-01.md). `refreshTabBar`
+        // is the one function guaranteed to run on every transition that
+        // matters (tab add/close, drag-reorder commit, ⌘T, the external
+        // merge/move-to-new-window hook), so re-hiding here closes every gap
+        // where a stale KVO token (bound to a now-dead group instance) would
+        // otherwise leave the native strip's suppression unrefreshed.
+        // Idempotent and cheap (a bounded view-tree walk).
+        hideNativeTabStrip()
         // Detect tab-group identity changes. A user dragging a tab out of a
         // window produces a fresh NSWindowTabGroup (or nil on the detached
         // side); dragging back in may join yet another group. KVO tokens in

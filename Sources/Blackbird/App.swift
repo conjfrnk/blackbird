@@ -38,6 +38,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let menuLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                            category: "menu")
 
+    /// Same subsystem, category "tabs" — matches `TabGroupObserver`'s
+    /// `tabsLogger` / `TerminalWindow`'s logger / `MainWindowController`'s
+    /// `tabsLogger`, so every tab-related canary groups under one
+    /// `log stream --predicate 'category == "tabs"'` query.
+    private static let tabsLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+                                           category: "tabs")
+
     /// Returns the current key window if it's owned by Blackbird (a
     /// `MainWindowController` we track), else nil. Single chokepoint
     /// shared by `validateMenuItem` (menu-driven dispatch) AND the
@@ -100,6 +107,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// drag-reorder doesn't get released the runloop tick after install.
     private var tabOrderObserver: NSObjectProtocol?
 
+    /// Lifetime-owns the `TerminalWindow.externalTabActionDidRun` observer
+    /// installed in `applicationDidFinishLaunching` (X1/X2 — see
+    /// `installExternalTabActionObserver`).
+    private var externalTabActionObserver: NSObjectProtocol?
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
@@ -156,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMainMenu()
         installAutoUpdateBridge()
         installTabOrderObserver()
+        installExternalTabActionObserver()
         openFirstWindow()
     }
 
@@ -313,6 +326,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `Task { @MainActor in }` hop that would otherwise defer the strip
             // repaint to a later runloop turn.
             MainActor.assumeIsolated {
+                self?.refreshAllTabBars()
+            }
+        }
+    }
+
+    /// Sweep `refreshTabBar()` across every controller after AppKit's own
+    /// `mergeAllWindows(_:)` / `moveTabToNewWindow(_:)` tab-group actions
+    /// run (see `TerminalWindow.externalTabActionDidRun`). Unlike
+    /// `installTabOrderObserver`, this has no "unrelated groups are no-ops"
+    /// shortcut available — the whole point is to reach windows that had NO
+    /// group (and thus no per-group refresh path) a moment ago, so every
+    /// controller is swept unconditionally. `refreshTabBar()` is cheap and
+    /// idempotent when nothing changed.
+    private func installExternalTabActionObserver() {
+        externalTabActionObserver = NotificationCenter.default.addObserver(
+            forName: TerminalWindow.externalTabActionDidRun,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                // Log a breadcrumb before sweeping: this is the ONLY
+                // refresh path for a window that just joined a group with
+                // NO prior tab-group KVO (the standalone-merge gap, X1/X2)
+                // — if that gap ever regresses, this line is what a future
+                // `log stream` session needs to confirm the sweep actually
+                // ran. Same Release-diagnosability rationale as the
+                // sibling tab canaries. (silent-failure review, RCA
+                // docs/rca-tab-behaviors-2026-07-01.md batch)
+                Self.tabsLogger.log("externalTabActionDidRun — sweeping refreshTabBar() across \(self?.controllers.count ?? 0, privacy: .public) controller(s)")
                 self?.refreshAllTabBars()
             }
         }
