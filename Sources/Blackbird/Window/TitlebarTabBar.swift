@@ -322,6 +322,11 @@ final class TabStripView: NSView {
         self.totalWidth = width
         self.frame = NSRect(x: 0, y: 0, width: width, height: Self.height)
         layoutPills()
+        // Pill frames just changed — re-arm hover from the CURRENT cursor
+        // position so a stationary-cursor relayout can't leave the close-×
+        // painted on a pill other than the one actually under the cursor.
+        // See `applyHoverAtCurrentCursorLocation`'s doc comment (P1).
+        applyHoverAtCurrentCursorLocation()
         // Post VoiceOver value-changed when a title changed but the list shape
         // didn't (a bare repaint lets VO re-read the pill via accessibilityLabel;
         // list-shape changes go through AppKit's container-children invalidation),
@@ -1148,7 +1153,15 @@ final class TabStripView: NSView {
         // on a sibling pill mid-drag would compete with it. `mouseDragged`
         // is the only event we care about while a drag is live.
         if tabDragController.isDragging { return }
-        let p = convert(event.locationInWindow, from: nil)
+        applyHover(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// Recompute hovered pill / close-hotspot / add-button for `p` (in the
+    /// strip's own coordinate space) and repaint if anything changed.
+    /// Shared by `mouseMoved` (the event's live location) and
+    /// `applyHoverAtCurrentCursorLocation` (the CURRENT cursor position,
+    /// queried rather than driven by an event — see that method).
+    private func applyHover(at p: NSPoint) {
         let prevPill = hoveredPill
         let prevClose = hoveredClose
         let prevAdd = hoveredAdd
@@ -1171,6 +1184,27 @@ final class TabStripView: NSView {
         if prevPill != hoveredPill || prevClose != hoveredClose || prevAdd != hoveredAdd {
             needsDisplay = true
         }
+    }
+
+    /// Recompute hover using the CURRENT cursor position (queried via
+    /// `NSEvent.mouseLocation`, not a stored/stale event) rather than
+    /// waiting for the next `mouseMoved`. `update(tabs:selected:width:)`
+    /// calls this after every relayout: `layoutPills()` recomputes
+    /// `pillFrames`/`addButtonFrame` but a plain `mouseMoved`-driven
+    /// `hoveredPill`/`hoveredClose` doesn't know geometry just shifted
+    /// under a STATIONARY cursor — which happens constantly (live resize
+    /// re-lays out at 120 Hz, tab add/close, reorder commit). Without this,
+    /// the close-`×` can visibly paint over one pill while a click there
+    /// lands on the NEW pill actually under the cursor — the click reads
+    /// as a tab switch instead of a close (P1, RCA
+    /// docs/rca-tab-behaviors-2026-07-01.md). No-op with no window yet, or
+    /// mid-drag (same freeze rule as `mouseMoved` — the dragged-pill
+    /// highlight is the focus point, a stale `×` on a sibling would compete
+    /// with it).
+    private func applyHoverAtCurrentCursorLocation() {
+        guard !tabDragController.isDragging, let window else { return }
+        let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        applyHover(at: convert(windowPoint, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
