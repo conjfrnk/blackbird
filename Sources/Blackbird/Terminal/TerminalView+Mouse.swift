@@ -195,10 +195,22 @@ extension TerminalView {
             let chrome = win.frame.height - (win.contentView?.bounds.height ?? win.frame.height)
             let minWidth  = max(minContent.width, 200)
             let minHeight = max(minContent.height + chrome, 120)
+            let mouse = NSEvent.mouseLocation
+            // Bound the dragged edges to the visibleFrame of the screen the
+            // MOUSE is on (falling back to the window's screen): the gesture
+            // applies a delta to the frame corner, so a grab far from the
+            // corner could push the dragged edge past the monitor border /
+            // menu bar / Dock — something native edge-drag can't do. Keying
+            // the bound off the mouse's screen keeps multi-monitor drags
+            // native too: carry the mouse onto the next display and the
+            // window grows there.
+            let bound = (NSScreen.screens.first { NSPointInRect(mouse, $0.frame) }
+                         ?? win.screen)?.visibleFrame
             if let frame = windowResizeController.frameForCurrentDrag(
-                currentMouseGlobal: NSEvent.mouseLocation,
+                currentMouseGlobal: mouse,
                 minWidth: minWidth,
-                minHeight: minHeight
+                minHeight: minHeight,
+                boundingFrame: bound
             ) {
                 win.setFrame(frame, display: true)
             }
