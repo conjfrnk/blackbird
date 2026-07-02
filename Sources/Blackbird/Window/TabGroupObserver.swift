@@ -47,15 +47,31 @@ final class TabGroupObserver {
     private static let trafficLightsTrailingPadding: CGFloat = 8
 
     private var tabGroupObservers: [NSKeyValueObservation] = []
-    /// Identity of the last tab group we subscribed to. When `window.tabGroup`
-    /// becomes a different object (drag-out creates a new standalone-window
-    /// group or nil; drag-back-in joins a different group), any KVO tokens
-    /// in `tabGroupObservers` are pointed at an instance that no longer
-    /// matters. Compare on every `refreshTabBar` and re-subscribe when the
-    /// identity changes.
-    private var lastObservedTabGroupID: ObjectIdentifier?
+    /// The last tab group we subscribed to — held WEAKLY, not by
+    /// `ObjectIdentifier`. When `window.tabGroup` becomes a different object
+    /// (drag-out creates a new standalone-window group or nil; drag-back-in
+    /// joins a different group), any KVO tokens in `tabGroupObservers` are
+    /// pointed at an instance that no longer matters. Compare on every
+    /// `refreshTabBar` and re-subscribe when the identity changes.
+    ///
+    /// MUST be `weak`, not an `ObjectIdentifier` snapshot (X3, RCA
+    /// docs/rca-tab-behaviors-2026-07-01.md): `NSKeyValueObservation` does
+    /// NOT retain the object it observes (verified empirically — the
+    /// observed object can deallocate while observation tokens for it are
+    /// still held), so a dead group's memory address can be reused by a
+    /// LATER, completely unrelated group while `tabGroupObservers` still
+    /// holds now-dangling tokens for the dead one. An `ObjectIdentifier`
+    /// snapshot would read that as "unchanged" (same address) and skip
+    /// resubscribing forever, leaving the window's tab-group KVO
+    /// permanently dead. A `weak` reference sidesteps this completely: ARC
+    /// zeroes it the instant the referenced group deallocates, so it can
+    /// NEVER alias a different, later object at a reused address — if the
+    /// group we were watching died, this reads nil until we explicitly
+    /// reassign it to something newly observed, regardless of what
+    /// `refreshTabBar` did or didn't run in between.
+    private weak var lastObservedTabGroup: NSWindowTabGroup?
     /// Tab count at the last `refreshTabBar` call. Combined with
-    /// `lastObservedTabGroupID` in `refreshTabBarIfStateChanged` so
+    /// `lastObservedTabGroup` in `refreshTabBarIfStateChanged` so
     /// a focus-only transition (⌘-Tab into/out of a single-tab Blackbird
     /// window) skips the full pill-strip rebuild when nothing actually
     /// changed. (main-window F3)
@@ -356,22 +372,36 @@ final class TabGroupObserver {
         // `tabGroupObservers` are bound to a single instance, so a change
         // silently stops selection / add / visibility events on this
         // controller. Clear-and-resubscribe keeps the strip in sync.
-        let currentGroupID = window.tabGroup.map(ObjectIdentifier.init)
-        if currentGroupID != lastObservedTabGroupID {
+        // `===` against the WEAKLY-held `lastObservedTabGroup` (not an
+        // `ObjectIdentifier` snapshot) — see that property's doc comment
+        // for why (X3: ABA-immune by construction).
+        let currentGroup = window.tabGroup
+        if currentGroup !== lastObservedTabGroup {
             tabGroupObservers.removeAll()
-            // Drop the title KVO + broadcast observer on detach so a
-            // window dragged out of its group stops re-firing work for
-            // its old peers. `observeTabGroup()` will re-install them
-            // if/when the window joins a new group. (main-window F2)
-            if currentGroupID == nil {
-                teardownTitleObservers()
-            }
-            lastObservedTabGroupID = currentGroupID
+            lastObservedTabGroup = currentGroup
             // Release builds also log this transition; tab-group identity
             // change in production is one of the seams where the native
             // strip can re-show silently. (audit M-4)
-            let kind = currentGroupID == nil ? "detached" : "new group"
+            let kind = currentGroup == nil ? "detached" : "new group"
             Self.tabsLogger.log("tab-group identity changed (\(kind, privacy: .public)) — resubscribing")
+        }
+        // Drop the title KVO + broadcast observer whenever standalone —
+        // checked UNCONDITIONALLY here, not nested inside the identity-
+        // change branch above (code review finding, RCA
+        // docs/rca-tab-behaviors-2026-07-01.md batch). `lastObservedTabGroup`
+        // is weak: if the old group deallocates before this method next
+        // runs, ARC has already zeroed it to nil on its own, independent of
+        // this comparison — so `currentGroup(nil) !== lastObservedTabGroup(nil)`
+        // can read false (no change "detected") even though this window
+        // genuinely just went standalone, silently skipping the teardown the
+        // OLD `ObjectIdentifier`-keyed comparison always caught. Checking
+        // `currentGroup == nil` directly and unconditionally closes that
+        // gap; `teardownTitleObservers()` is idempotent, so this is a no-op
+        // on every OTHER call where the window was already standalone.
+        // `observeTabGroup()` re-installs both if/when the window joins a
+        // new group. (main-window F2)
+        if currentGroup == nil {
+            teardownTitleObservers()
         }
         // The FIRST window's installTitlebarTabBar runs its async
         // observeTabGroup before any other window joins — so tabGroup is
@@ -429,9 +459,9 @@ final class TabGroupObserver {
     /// (main-window F3)
     func refreshTabBarIfStateChanged() {
         guard let window = controller.window else { return }
-        let currentGroupID = window.tabGroup.map(ObjectIdentifier.init)
-        let currentCount = window.tabGroup?.windows.count ?? 1
-        if currentGroupID == lastObservedTabGroupID,
+        let currentGroup = window.tabGroup
+        let currentCount = currentGroup?.windows.count ?? 1
+        if currentGroup === lastObservedTabGroup,
            currentCount == lastObservedTabCount {
             return
         }
