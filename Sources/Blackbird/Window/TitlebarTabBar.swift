@@ -2013,16 +2013,69 @@ private final class TabStripAccessibility {
     }
 }
 
+/// Shared base for the pill-strip's accessibility element proxies. Owns the
+/// frame-tracking state (`parentView` + the element's frame in the parent's
+/// local coordinate space) and the `accessibilityFrame()` override; concrete
+/// subclasses add only their distinct behavior (label text, press/custom
+/// actions). Hoisted out of `BBTabPillAccessibilityElement` /
+/// `BBAddTabAccessibilityElement`, which used to duplicate this state and
+/// override verbatim (type-design review, RCA
+/// docs/rca-tab-behaviors-2026-07-01.md batch).
+class BBFrameTrackingAccessibilityElement: NSAccessibilityElement {
+    private weak var parentView: NSView?
+    private let localFrame: NSRect
+
+    init(parent: NSView, frame: NSRect, role: NSAccessibility.Role) {
+        self.parentView = parent
+        self.localFrame = frame
+        super.init()
+        setAccessibilityParent(parent)
+        setAccessibilityRole(role)
+        // Defensive fallback for any AXAPI caller that reads
+        // frameInParentSpace directly instead of going through
+        // accessibilityFrame() — the override below is the one VoiceOver
+        // actually queries and is the one that's correct.
+        setAccessibilityFrameInParentSpace(frame)
+    }
+
+    /// Recompute the ABSOLUTE screen-space accessibility frame ourselves,
+    /// instead of trusting AppKit's `accessibilityFrameInParentSpace` →
+    /// `accessibilityFrame` resolution through the `accessibilityParent`
+    /// chain. Empirically verified (RCA docs/rca-tab-behaviors-2026-07-01.md
+    /// P5): with `TabStripView.isFlipped == true`, that resolution is off by
+    /// exactly the element's local y-offset — AppKit doesn't correctly
+    /// un-flip the parent-space frame when resolving it for VoiceOver's
+    /// screen-space query. Recomputing from `parentView` on every call (not
+    /// caching) keeps this correct across window moves/resizes without an
+    /// extra invalidation hook — `NSView.convert(_:to:)` and
+    /// `NSWindow.convertToScreen(_:)` always reflect current geometry.
+    override func accessibilityFrame() -> NSRect {
+        guard let parentView, let window = parentView.window else {
+            // `super.accessibilityFrame()` would fall back to the exact
+            // buggy `accessibilityFrameInParentSpace` resolution this
+            // override exists to bypass (P5) — a transient teardown race
+            // (parentView/window nil between VoiceOver's element cache and
+            // its query) would then silently resurrect the flipped-
+            // coordinate bug instead of degrading obviously. `.zero` is an
+            // unambiguous "no frame available" signal instead (silent-
+            // failure review, RCA docs/rca-tab-behaviors-2026-07-01.md batch).
+            return .zero
+        }
+        let windowFrame = parentView.convert(localFrame, to: nil)
+        return window.convertToScreen(windowFrame)
+    }
+
+    override func isAccessibilityEnabled() -> Bool { true }
+}
+
 /// Accessibility proxy for a single tab pill. Maps its `activate` to
 /// `onSelect` (equivalent to clicking the pill) and exposes a custom
-/// "Close Tab" action that routes to `onClose`. Frame in parent-view
-/// coordinates; NSAccessibility transforms to screen space for VO.
-final class BBTabPillAccessibilityElement: NSAccessibilityElement {
+/// "Close Tab" action that routes to `onClose`.
+final class BBTabPillAccessibilityElement: BBFrameTrackingAccessibilityElement {
     private let onSelect: () -> Void
     private let onClose: () -> Void
     private let _title: String
     private let _isSelected: Bool
-    private weak var parentView: NSView?
 
     init(parent: NSView, frame: NSRect, title: String, isSelected: Bool,
          onSelect: @escaping () -> Void, onClose: @escaping () -> Void) {
@@ -2030,18 +2083,12 @@ final class BBTabPillAccessibilityElement: NSAccessibilityElement {
         self._isSelected = isSelected
         self.onSelect = onSelect
         self.onClose = onClose
-        self.parentView = parent
-        super.init()
-        setAccessibilityParent(parent)
-        setAccessibilityRole(.button)
-        setAccessibilityFrameInParentSpace(frame)
+        super.init(parent: parent, frame: frame, role: .button)
     }
 
     override func accessibilityLabel() -> String? {
         _isSelected ? "Tab, \(_title), selected" : "Tab, \(_title)"
     }
-
-    override func isAccessibilityEnabled() -> Bool { true }
 
     override func accessibilityPerformPress() -> Bool {
         onSelect()
@@ -2058,20 +2105,15 @@ final class BBTabPillAccessibilityElement: NSAccessibilityElement {
 
 /// Accessibility proxy for the trailing `+` button. Role=.button with
 /// a single press action that fires `onAddTab`.
-final class BBAddTabAccessibilityElement: NSAccessibilityElement {
+final class BBAddTabAccessibilityElement: BBFrameTrackingAccessibilityElement {
     private let onAdd: () -> Void
 
     init(parent: NSView, frame: NSRect, onAdd: @escaping () -> Void) {
         self.onAdd = onAdd
-        super.init()
-        setAccessibilityParent(parent)
-        setAccessibilityRole(.button)
-        setAccessibilityFrameInParentSpace(frame)
+        super.init(parent: parent, frame: frame, role: .button)
     }
 
     override func accessibilityLabel() -> String? { "New Tab" }
-
-    override func isAccessibilityEnabled() -> Bool { true }
 
     override func accessibilityPerformPress() -> Bool {
         onAdd()

@@ -488,6 +488,103 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
         )
     }
 
+    // MARK: - RCA P5: pill accessibility frame must match the pill's real on-screen position
+
+    /// Pre-flight: two real headless `MainWindowController`s merged into a
+    /// tab group (no PTY/shell). Gated behind `BB_RUN_WINDOW_LIFECYCLE_TESTS=1`
+    /// like the sibling real-window tests in this file. Memory/time budget
+    /// matches `test_bandClick_doesNotHijackTabSelection` above.
+    ///
+    /// RCA docs/rca-tab-behaviors-2026-07-01.md P5: with
+    /// `TabStripView.isFlipped == true`, AppKit's
+    /// `accessibilityFrameInParentSpace` → `accessibilityFrame` resolution
+    /// (the value VoiceOver actually queries) was off by exactly the pill's
+    /// local y-offset (4pt) from its real on-screen position — empirically
+    /// measured before the fix. `BBTabPillAccessibilityElement` /
+    /// `BBAddTabAccessibilityElement` now override `accessibilityFrame()`
+    /// to compute the absolute screen frame themselves via
+    /// `NSView.convert(_:to:)` + `NSWindow.convertToScreen(_:)`, bypassing
+    /// that resolution.
+    ///
+    /// Regression pin: for both a pill and the `+` button, assert the
+    /// element's resolved `accessibilityFrame()` matches an INDEPENDENTLY
+    /// computed screen frame (the same conversion, driven directly off the
+    /// strip rather than through the accessibility API) to within 0.5pt.
+    func test_pillAccessibilityFrame_matchesActualScreenPosition() throws {
+        try XCTSkipIf(
+            ProcessInfo.processInfo.environment["BB_RUN_WINDOW_LIFECYCLE_TESTS"] != "1",
+            "set BB_RUN_WINDOW_LIFECYCLE_TESTS=1 to run real-window lifecycle tests in isolation"
+        )
+        Self.acquireControllerSlot()
+        defer { Self.releaseControllerSlot() }
+
+        guard let c1 = MainWindowController.makeForTesting(stubSession: .makeHeadlessForTests()) else {
+            throw XCTSkip("no Metal device (CI virtual display) — makeForTesting returned nil; skipping")
+        }
+        guard let c2 = MainWindowController.makeForTesting(stubSession: .makeHeadlessForTests()) else {
+            c1.terminateSessions(); c1.window?.close()
+            throw XCTSkip("no Metal device (CI virtual display) — makeForTesting returned nil; skipping")
+        }
+        defer {
+            c1.terminateSessions(); c1.window?.close()
+            c2.terminateSessions(); c2.window?.close()
+        }
+
+        let w1 = try XCTUnwrap(c1.window)
+        let w2 = try XCTUnwrap(c2.window)
+        w1.setFrame(NSRect(x: 200, y: 200, width: 800, height: 480), display: true)
+        c1.showWindow(nil)
+        w1.orderFront(nil)
+        w1.addTabbedWindow(w2, ordered: .above)
+        w2.makeKeyAndOrderFront(nil)
+        let settle = expectation(description: "settle after merge")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { settle.fulfill() }
+        wait(for: [settle], timeout: 2.0)
+        c1.refreshTabBar()
+        c2.refreshTabBar()
+        let settle2 = expectation(description: "settle after refresh")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settle2.fulfill() }
+        wait(for: [settle2], timeout: 2.0)
+
+        guard let group = w1.tabGroup, group.windows.count == 2 else {
+            throw XCTSkip("headless host refused to form a tab group")
+        }
+        let selectedWindow = try XCTUnwrap(group.selectedWindow)
+        let controller = selectedWindow.windowController as? MainWindowController
+        let strip = try XCTUnwrap(controller?.titlebarTabBar?.view as? TabStripView)
+        XCTAssertTrue(strip.isFlipped, "precondition: the bug only manifests when the strip is flipped")
+
+        let pillFrames = strip.pillFramesForTesting
+        try XCTSkipIf(pillFrames.isEmpty, "headless host produced no pill frames")
+        let children = try XCTUnwrap(strip.accessibilityChildren())
+        XCTAssertGreaterThanOrEqual(children.count, pillFrames.count + 1, "pills + the + button")
+
+        func expectedScreenFrame(for localFrame: NSRect) -> NSRect {
+            let windowFrame = strip.convert(localFrame, to: nil)
+            return selectedWindow.convertToScreen(windowFrame)
+        }
+
+        for (i, localFrame) in pillFrames.enumerated() {
+            let element = try XCTUnwrap(children[i] as? BBTabPillAccessibilityElement,
+                                        "child \(i) must be a pill accessibility element")
+            let expected = expectedScreenFrame(for: localFrame)
+            let actual = element.accessibilityFrame()
+            XCTAssertEqual(actual.origin.x, expected.origin.x, accuracy: 0.5, "pill \(i) x")
+            XCTAssertEqual(actual.origin.y, expected.origin.y, accuracy: 0.5, "pill \(i) y — P5 flip bug")
+            XCTAssertEqual(actual.width, expected.width, accuracy: 0.5, "pill \(i) width")
+            XCTAssertEqual(actual.height, expected.height, accuracy: 0.5, "pill \(i) height")
+        }
+
+        let addButtonFrame = strip.addButtonFrameForTesting
+        let addElement = try XCTUnwrap(
+            children[pillFrames.count] as? BBAddTabAccessibilityElement,
+            "final child must be the + button accessibility element")
+        let expectedAdd = expectedScreenFrame(for: addButtonFrame)
+        let actualAdd = addElement.accessibilityFrame()
+        XCTAssertEqual(actualAdd.origin.x, expectedAdd.origin.x, accuracy: 0.5, "+ button x")
+        XCTAssertEqual(actualAdd.origin.y, expectedAdd.origin.y, accuracy: 0.5, "+ button y — P5 flip bug")
+    }
+
     /// Pre-flight: NO real MainWindowController. Bare NSWindow stubs only.
     /// Memory: ~240 KB transient (6 stubs). Time: <50 ms.
     ///
