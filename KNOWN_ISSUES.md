@@ -2,6 +2,14 @@
 
 Small list of deliberately-deferred polish items. If you hit one of these, it's documented, not forgotten.
 
+## Move Tab to Window — minimized and fullscreen windows aren't offered
+
+**Symptom:** The tab-pill context menu's "Move Tab to Window ▸" submenu omits minimized (Dock) windows and fullscreen windows; with only one other window and it minimized, the submenu is absent entirely. The submenu is also absent while the *source* window is fullscreen.
+
+**Why (v1 scope decision, 2026-07-02):** A move into a minimized window would make the tab vanish into the Dock unseen; a splice into or out of a fullscreen group crosses Spaces on the sensitive fullscreen-reconfigure path (see the frame-save suppression in `c243128`). `TabMover.destinationEligible` enforces visible + non-fullscreen at menu build AND again at fire time. Windows on other Spaces are offered (they're `isVisible`); moving to one follows macOS's "switch to a Space with open windows" setting.
+
+**Possible upgrades:** deminiaturize-on-move, or listing excluded windows as disabled items. Also: each submenu entry weakly references one representative window of the destination group — if that exact tab closes while the menu is open, the move is dropped (logged under subsystem `dev.conjfrnk.blackbird`, category `tabMove`) even though the rest of its group survives.
+
 ## Tab-merge titlebar flash on ⌘T
 
 **Symptom:** Pressing ⌘T on a single-tab window briefly shows macOS's native `NSTabBar` before Blackbird's pill strip replaces it. The titlebar permanently grows from 32pt to 68pt for the lifetime of the multi-tab window group.

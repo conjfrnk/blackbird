@@ -42,10 +42,19 @@ final class TerminalWindow: NSWindow {
     /// which defers for the same class of tab-group mutation (tab add /
     /// close) so the group has fully settled before every controller
     /// re-reads it.
-    private func announceExternalTabAction() {
+    ///
+    /// Static so `TabMover`'s programmatic `addTabbedWindow` move — the
+    /// same class of external tab-group mutation as Merge All Windows —
+    /// can fire the identical sweep without owning a TerminalWindow
+    /// reference.
+    static func postExternalTabActionSweep() {
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: Self.externalTabActionDidRun, object: nil)
         }
+    }
+
+    private func announceExternalTabAction() {
+        Self.postExternalTabActionSweep()
     }
 
     override func mergeAllWindows(_ sender: Any?) {

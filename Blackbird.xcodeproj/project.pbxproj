@@ -80,6 +80,7 @@
 		6D6EBC162B5879A358F88431 /* CmdHoverHighlightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47D8320188E16491EEB26A58 /* CmdHoverHighlightTests.swift */; };
 		6E53CFFB550C8ABFD1B9EF83 /* TerminalSessionAdversarialTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9586BA1A204E2F0F10A05964 /* TerminalSessionAdversarialTests.swift */; };
 		6EF45785D6A1AAA933C589E1 /* osc133.bash in Resources */ = {isa = PBXBuildFile; fileRef = 2F96C43E82A34FB57CB37965 /* osc133.bash */; };
+		6F09DCCD4E07AC02B155E857 /* TabMover.swift in Sources */ = {isa = PBXBuildFile; fileRef = B25AD58FD2D39C0CF6E82596 /* TabMover.swift */; };
 		7386DF40D48E9E676E64A55E /* MultiTabConcurrentSoakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E79964F4FADD416B72D5FF32 /* MultiTabConcurrentSoakTests.swift */; };
 		7462C02E74143E52FD628DA5 /* PTY.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5995252272D652667DB2D2D9 /* PTY.swift */; };
 		75075F2B14649E7E03B39C05 /* SnapshotCoalescingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9C1078B5D0C0A032EC67282 /* SnapshotCoalescingTests.swift */; };
@@ -98,6 +99,7 @@
 		838612ABE0367B712E2888B7 /* CursorShapeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34BBC64F7AC3CB3CE971A1DF /* CursorShapeTests.swift */; };
 		839D0B792073C9A8B16DCF44 /* MainWindowControllerLifetimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBFA60B5BFD8E81CC6FAC4BE /* MainWindowControllerLifetimeTests.swift */; };
 		84E2B2AB3E81BD6EB1195FEF /* MouseReportEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 189F9BFCE6B0F46BED00E135 /* MouseReportEncoder.swift */; };
+		856D4AEB0B7996DEB2D9B54A /* TabMoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74AE73A6DBECDEB673A74FD5 /* TabMoverTests.swift */; };
 		85FF81EC8B3EDAE4FE6BD44A /* TerminalSessionBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 173C25905C5C1D2D008F3EEA /* TerminalSessionBoundaryTests.swift */; };
 		8743B171BF258DCAF8182762 /* IMETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CFAD8B88865C349CC141C65 /* IMETests.swift */; };
 		8ABE26FA9AECA5A0AF213670 /* StartupTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC563B552C1105D7EA9558F5 /* StartupTelemetry.swift */; };
@@ -316,6 +318,7 @@
 		71B97CA3B5FEE2E46183763E /* WindowResizeControllerBoundingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowResizeControllerBoundingTests.swift; sourceTree = "<group>"; };
 		720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderExtendedTests.swift; sourceTree = "<group>"; };
 		74275178A18334975662C89C /* WindowFramePersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowFramePersistence.swift; sourceTree = "<group>"; };
+		74AE73A6DBECDEB673A74FD5 /* TabMoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabMoverTests.swift; sourceTree = "<group>"; };
 		75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewTests.swift; sourceTree = "<group>"; };
 		75958A436602CA4AC201A620 /* PowerAwareRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerAwareRenderingTests.swift; sourceTree = "<group>"; };
 		75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlas.swift; sourceTree = "<group>"; };
@@ -370,6 +373,7 @@
 		AB953F6C152888DF02CD2AB3 /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
 		AFE45249095A785FB78B5877 /* DiagnosticReportStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticReportStore.swift; sourceTree = "<group>"; };
 		B07A32BEBADF4A5789EFDCC8 /* FirstResponderRestoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstResponderRestoreTests.swift; sourceTree = "<group>"; };
+		B25AD58FD2D39C0CF6E82596 /* TabMover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabMover.swift; sourceTree = "<group>"; };
 		B43FD3E696C6005A351C28AF /* SparkleResilienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SparkleResilienceTests.swift; sourceTree = "<group>"; };
 		B732AEAD58208C71939BC364 /* BellController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BellController.swift; sourceTree = "<group>"; };
 		B9C1078B5D0C0A032EC67282 /* SnapshotCoalescingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotCoalescingTests.swift; sourceTree = "<group>"; };
@@ -561,6 +565,7 @@
 				B43FD3E696C6005A351C28AF /* SparkleResilienceTests.swift */,
 				845E2991E45987A3A4CE6E9A /* StartupLatencyBenchTests.swift */,
 				BDAF66C9AB7E24C8E9869235 /* SwiftSessionRSSReturnsToBaselineTests.swift */,
+				74AE73A6DBECDEB673A74FD5 /* TabMoverTests.swift */,
 				C1038D22AC215585EB760B2B /* TabOrderCoordinatorPurgeTests.swift */,
 				355144D52D6A74BDCBCF87A0 /* TabOrderCoordinatorTests.swift */,
 				EA0F474A7AF422E5AD4E5502 /* TabRenameTests.swift */,
@@ -770,6 +775,7 @@
 				E73417627588C5D4CE426FA7 /* NativeTabStripHider.swift */,
 				DEDB57DA7466F484DEEE62C9 /* SessionLifecycle.swift */,
 				D2CA0E5EE17768207E98D8CA /* TabGroupObserver.swift */,
+				B25AD58FD2D39C0CF6E82596 /* TabMover.swift */,
 				82EFC0C140D3593E2905D923 /* TabOrderCoordinator.swift */,
 				9C9A88764B5EA6114CF35C8C /* TabStripLayout.swift */,
 				D727BC0719379E00E823F705 /* TerminalWindow.swift */,
@@ -968,6 +974,7 @@
 				F192D7BE67409EBB78C6B3F6 /* SparkleAlertOverride.swift in Sources */,
 				8ABE26FA9AECA5A0AF213670 /* StartupTelemetry.swift in Sources */,
 				1D985A8990BCAD8472EF6C54 /* TabGroupObserver.swift in Sources */,
+				6F09DCCD4E07AC02B155E857 /* TabMover.swift in Sources */,
 				5ECD3BBAADD2CBCA23CD599C /* TabOrderCoordinator.swift in Sources */,
 				DB72D29AB444929F85605A8B /* TabStripLayout.swift in Sources */,
 				B7DB0F3545C7837C281C722C /* TerminalSession.swift in Sources */,
@@ -1082,6 +1089,7 @@
 				F705B8450EA77535C377160B /* SparkleResilienceTests.swift in Sources */,
 				2073B0BF9DBB4D1A033A0BFF /* StartupLatencyBenchTests.swift in Sources */,
 				580317F6EA8ED27E02060F8D /* SwiftSessionRSSReturnsToBaselineTests.swift in Sources */,
+				856D4AEB0B7996DEB2D9B54A /* TabMoverTests.swift in Sources */,
 				ACDBBA4BF6284D53445C2060 /* TabOrderCoordinatorPurgeTests.swift in Sources */,
 				FE2DBB21AD9C81867C32FA25 /* TabOrderCoordinatorTests.swift in Sources */,
 				6D27ABAFB174297CCD622E1D /* TabRenameTests.swift in Sources */,

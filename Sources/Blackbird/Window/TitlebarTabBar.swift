@@ -633,7 +633,7 @@ final class TabStripView: NSView {
             width: area.width,
             height: rect.height
         )
-        let title = w.title.isEmpty ? "Untitled" : w.title
+        let title = Self.displayTitle(w.title)
         let truncated = truncatedString(title, fitting: titleArea.width)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: Self.titleFont,
@@ -1324,6 +1324,8 @@ final class TabStripView: NSView {
             menu.addItem(.separator())
         }
 
+        appendMoveItems(to: menu, for: targetWindow)
+
         // Close — dupes what the hover `×` does, but is useful on a
         // context menu for discoverability and for users who never hover.
         let close = NSMenuItem(
@@ -1337,6 +1339,94 @@ final class TabStripView: NSView {
         menu.addItem(close)
 
         return menu
+    }
+
+    /// The "Move Tab to New Window" / "Move Tab to Window ▸" section of the
+    /// pill context menu (RCA docs/rca-tab-behaviors-2026-07-01.md Bug 6 —
+    /// the menu-based move affordance). Appends a trailing separator when it
+    /// added anything, so "Close Tab" below always sits in its own section.
+    ///
+    /// Same build-time filtering rationale as the Rename/Reset items above
+    /// (audit L9): `menu(for:)` context menus never get `validateMenuItem`,
+    /// so an item that can't fire usefully is simply absent —
+    /// "Move Tab to New Window" needs a sibling to detach from, and the
+    /// destination submenu needs at least one other eligible window.
+    private func appendMoveItems(to menu: NSMenu, for targetWindow: NSWindow) {
+        var addedAny = false
+
+        // The strip only shows with ≥ 2 tabs, so this guard is
+        // defense-in-depth for a future caller, not a reachable state
+        // from the pill menu today.
+        if (targetWindow.tabGroup?.windows.count ?? 1) > 1 {
+            let detach = NSMenuItem(
+                title: "Move Tab to New Window",
+                action: #selector(TabMover.moveTabAction(_:)),
+                keyEquivalent: ""
+            )
+            detach.target = TabMover.shared
+            detach.representedObject = TabMoveRequest(tab: targetWindow, destination: .newWindow)
+            menu.addItem(detach)
+            addedAny = true
+        }
+
+        // Fullscreen SOURCE sits out cross-window moves, mirroring the
+        // destination-side rule in `destinationEligible` (the strip is
+        // reachable in native fullscreen via the revealed titlebar, and a
+        // cross-Space splice out of a fullscreen group is the same
+        // sensitive path as one into it). Absent, not disabled — audit L9.
+        // "Move Tab to New Window" stays available: it delegates to the
+        // native `moveTabToNewWindow(_:)`, which AppKit itself offers in
+        // fullscreen. `TabMover.moveTab` re-checks at fire time.
+        let sourceIsFullscreen = targetWindow.styleMask.contains(.fullScreen)
+        let destinations = sourceIsFullscreen
+            ? []
+            : TabMover.moveDestinations(for: targetWindow, among: NSApp.windows)
+        if !destinations.isEmpty {
+            let submenu = NSMenu(title: "Move Tab to Window")
+            for destination in destinations {
+                let item = NSMenuItem(
+                    title: Self.moveDestinationTitle(
+                        windowTitle: destination.title,
+                        groupTabCount: destination.tabGroup?.windows.count ?? 1
+                    ),
+                    action: #selector(TabMover.moveTabAction(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = TabMover.shared
+                item.representedObject = TabMoveRequest(
+                    tab: targetWindow,
+                    destination: .toWindow(TabMoveRequest.WeakWindow(destination))
+                )
+                submenu.addItem(item)
+            }
+            let parent = NSMenuItem(title: "Move Tab to Window", action: nil, keyEquivalent: "")
+            parent.submenu = submenu
+            menu.addItem(parent)
+            addedAny = true
+        }
+
+        if addedAny {
+            menu.addItem(.separator())
+        }
+    }
+
+    /// Menu label for one move destination: the window's title (matching
+    /// what its pill / titlebar shows), "Untitled" when empty — the same
+    /// fallback the pills draw — plus a tab-count suffix when the
+    /// destination is itself a multi-tab group. Pure + static so the
+    /// format is unit-testable.
+    static func moveDestinationTitle(windowTitle: String, groupTabCount: Int) -> String {
+        let base = displayTitle(windowTitle)
+        return groupTabCount >= 2 ? "\(base) (\(groupTabCount) tabs)" : base
+    }
+
+    /// The one "Untitled" fallback for an empty window title. Pills, the
+    /// inline-rename seed, VoiceOver labels, and the move-destination menu
+    /// all show the same string for a title-less window — hoisted so the
+    /// fallback can't diverge between them (it had been duplicated at four
+    /// sites; type-design review).
+    static func displayTitle(_ windowTitle: String) -> String {
+        windowTitle.isEmpty ? "Untitled" : windowTitle
     }
 }
 
@@ -1765,7 +1855,7 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         field.backgroundColor = NSColor.textBackgroundColor
         field.textColor = NSColor.labelColor
         field.focusRingType = .none
-        field.stringValue = view.tabs[pillIndex].title.isEmpty ? "Untitled" : view.tabs[pillIndex].title
+        field.stringValue = TabStripView.displayTitle(view.tabs[pillIndex].title)
         field.delegate = self
         // Enter fires the action; action selector + target here is a
         // defense-in-depth for environments where the field-editor
@@ -1995,7 +2085,7 @@ private final class TabStripAccessibility {
         let element = BBTabPillAccessibilityElement(
             parent: view,
             frame: frame,
-            title: window.title.isEmpty ? "Untitled" : window.title,
+            title: TabStripView.displayTitle(window.title),
             isSelected: window === view.selectedTab,
             onSelect: { [weak view] in view?.onSelectWindow?(window) },
             onClose: { [weak view] in view?.onCloseWindow?(window) }
