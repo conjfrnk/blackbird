@@ -843,6 +843,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         renderer.setCursorShapeOverride(Preferences.shared.cursorShape.rendererOverride)
         setWindowAppearance(opacity: opacity, themeBg: (bgR, bgG, bgB))
         window?.setBackgroundBlurRadius(blurRadius)
+        // Find bar chrome derives from the same palette (FindBarColorScheme);
+        // forwarding here keeps an open bar in sync on live theme switches
+        // and caches the palette for a bar opened later.
+        findController.applyTheme(palette)
         // If an IME composition is in flight when the theme changes, repaint
         // the preedit overlay so its fg/bg track the new palette. Without
         // this the overlay holds its pre-change colours until the next

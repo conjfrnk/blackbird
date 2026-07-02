@@ -84,6 +84,23 @@ final class FindController {
         findBar?.setMatchCount(0, of: 0)
     }
 
+    // MARK: - Theming
+
+    /// The palette most recently pushed through `applyTheme`. Cached so a
+    /// bar created AFTER the theme push (⌘F is user-initiated; palettes
+    /// are applied at registration + on preference changes) still comes up
+    /// themed instead of wearing the system-gray default until the next
+    /// theme change.
+    private(set) var lastAppliedPalette: ThemePalette?
+
+    /// Forwarded from `TerminalView.applyTheme` — the find bar rides the
+    /// same push path as the renderer, so a live bar restyles immediately
+    /// on theme / appearance switches.
+    func applyTheme(_ palette: ThemePalette) {
+        lastAppliedPalette = palette
+        findBar?.applyTheme(palette)
+    }
+
     // MARK: - Bar lifecycle
 
     func installFindBar() {
@@ -93,6 +110,9 @@ final class FindController {
         let bar = FindBar(frame: NSRect(x: 0, y: view.bounds.height - h - top, width: view.bounds.width, height: h))
         bar.autoresizingMask = [.width, .minYMargin]
         bar.delegate = view
+        if let palette = lastAppliedPalette {
+            bar.applyTheme(palette)
+        }
         view.addSubview(bar)
         findBar = bar
     }

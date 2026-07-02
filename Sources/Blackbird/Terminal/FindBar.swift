@@ -59,12 +59,12 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     @objc public func toggleCaseSensitive(_ sender: Any?) {
         options.caseSensitive.toggle()
-        field.placeholderString = placeholderString()
+        applyPlaceholders()
     }
 
     @objc public func toggleRegexMode(_ sender: Any?) {
         options.regex.toggle()
-        field.placeholderString = placeholderString()
+        applyPlaceholders()
     }
 
     private func placeholderString() -> String {
@@ -224,6 +224,127 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     public required init?(coder: NSCoder) { fatalError() }
 
+    // MARK: - Theming
+
+    /// Colors most recently applied via `applyTheme`, or `nil` while the
+    /// bar still wears its init-time system-color look (no palette has
+    /// been pushed yet — `TerminalView.applyTheme` forwards one on the
+    /// same path the renderer takes, so in production this is non-nil by
+    /// the time the bar is visible).
+    private var scheme: FindBarColorScheme?
+
+    /// Bottom hairline separating the bar from the terminal content below
+    /// it. Created on the first `applyTheme` — the pre-theme system look
+    /// never had one, so nothing changes visually until a palette arrives.
+    private var separatorView: NSView?
+
+    /// Restyle every control from the theme palette so the bar reads as
+    /// part of the themed surface instead of a system-gray panel floating
+    /// over it (the terminal body, titlebar, and window background all
+    /// paint exact theme RGB; the find bar was the one holdout).
+    public func applyTheme(_ palette: ThemePalette) {
+        let scheme = FindBarColorScheme(palette: palette)
+        self.scheme = scheme
+        layer?.backgroundColor = Self.nsColor(rgb: scheme.barBackground).cgColor
+        let text = Self.nsColor(rgb: scheme.text)
+        let fieldBg = Self.nsColor(rgb: scheme.fieldBackground)
+        styleThemedField(field, background: fieldBg, text: text)
+        styleThemedField(replaceField, background: fieldBg, text: text)
+        matchLabel.textColor = text.withAlphaComponent(0.65)
+        applyPlaceholders()
+        styleGlyphButtonTitles()
+        installOrRetintSeparator(Self.nsColor(rgb: scheme.separator))
+        // Replace / Replace All keep the system `.push` bezel on purpose:
+        // they're controls, not surfaces, and the window's appearance is
+        // pinned to the theme's lightness (`setWindowAppearance`), so the
+        // system bezel already resolves to the right light/dark variant.
+    }
+
+    /// Themed text-field style: the system bezel is a fixed macOS gray
+    /// that can't be tinted, so themed fields drop it for a flat fill
+    /// derived from the palette, with a soft rounded corner.
+    private func styleThemedField(_ f: NSTextField,
+                                  background: NSColor, text: NSColor) {
+        f.isBezeled = false
+        f.drawsBackground = true
+        f.backgroundColor = background
+        f.textColor = text
+        f.wantsLayer = true
+        f.layer?.cornerRadius = 4
+    }
+
+    /// Placeholders re-derive on every options toggle (`placeholderString()`
+    /// encodes the regex/Aa flags), so both the toggle paths and
+    /// `applyTheme` route through here: themed bars get an attributed
+    /// placeholder in muted foreground, pre-theme bars keep the plain
+    /// system placeholder.
+    private func applyPlaceholders() {
+        guard let scheme else {
+            field.placeholderString = placeholderString()
+            return
+        }
+        let muted = Self.nsColor(rgb: scheme.text).withAlphaComponent(0.5)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: muted,
+            .font: field.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
+        ]
+        field.placeholderAttributedString =
+            NSAttributedString(string: placeholderString(), attributes: attrs)
+        replaceField.placeholderAttributedString =
+            NSAttributedString(string: "Replace", attributes: attrs)
+    }
+
+    /// The caret (▸/▾) and close (✕) buttons are borderless text buttons —
+    /// their glyph color comes from the attributed title, so re-apply it
+    /// whenever the theme OR the caret's title changes (`setReplaceVisible`
+    /// swaps ▸/▾, which resets a plain-title button to system color).
+    /// No-op until a theme is applied.
+    private func styleGlyphButtonTitles() {
+        guard let scheme else { return }
+        let tint = Self.nsColor(rgb: scheme.text)
+        for button in [caretButton, closeButton] {
+            let font = button.font ?? NSFont.systemFont(ofSize: 11)
+            button.attributedTitle = NSAttributedString(
+                string: button.title,
+                attributes: [.foregroundColor: tint, .font: font]
+            )
+        }
+    }
+
+    /// 1 pt hairline pinned to the bar's bottom edge. Idempotent: first
+    /// call installs it, later calls just retint.
+    private func installOrRetintSeparator(_ color: NSColor) {
+        if let separatorView {
+            separatorView.layer?.backgroundColor = color.cgColor
+            return
+        }
+        let hairline = NSView()
+        hairline.wantsLayer = true
+        hairline.layer?.backgroundColor = color.cgColor
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hairline)
+        NSLayoutConstraint.activate([
+            hairline.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hairline.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hairline.bottomAnchor.constraint(equalTo: bottomAnchor),
+            hairline.heightAnchor.constraint(equalToConstant: 1),
+        ])
+        separatorView = hairline
+    }
+
+    /// Packed 0xRRGGBB → NSColor in sRGB — the palette hex values are
+    /// sRGB by convention (same unpacking as `TerminalView+IME`'s
+    /// `nsColor(fromRgb:)`; using `calibratedRed:` here would silently
+    /// shift every channel through the generic-RGB 1.8 gamma).
+    private static func nsColor(rgb: UInt32) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255.0,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255.0,
+            blue: CGFloat(rgb & 0xFF) / 255.0,
+            alpha: 1
+        )
+    }
+
     // MARK: - Focus
 
     public func focus() { window?.makeFirstResponder(field) }
@@ -337,6 +458,9 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             replaceAllButton.isHidden = true
             caretButton.title = "▸"
         }
+        // Assigning a plain `title` resets the button to system title
+        // color — re-tint from the theme so the ▸/▾ swap doesn't strip it.
+        styleGlyphButtonTitles()
         needsLayout = true
     }
 
@@ -433,6 +557,28 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     /// TUI-guard transient banner fired.
     public func _matchLabelStringForTests() -> String {
         matchLabel.stringValue
+    }
+
+    /// The scheme most recently applied via `applyTheme`, or nil while
+    /// the bar still wears its pre-theme system-color look.
+    public func _appliedSchemeForTests() -> FindBarColorScheme? {
+        scheme
+    }
+
+    /// The bar's current layer background, so tests can assert the themed
+    /// surface (or the pre-theme `windowBackgroundColor` default).
+    public func _barLayerBackgroundForTests() -> CGColor? {
+        layer?.backgroundColor
+    }
+
+    /// The match-counter label's text color.
+    public func _matchLabelTextColorForTests() -> NSColor? {
+        matchLabel.textColor
+    }
+
+    /// The find field's fill + text colors.
+    public func _findFieldColorsForTests() -> (background: NSColor?, text: NSColor?) {
+        (field.backgroundColor, field.textColor)
     }
     #endif
 }

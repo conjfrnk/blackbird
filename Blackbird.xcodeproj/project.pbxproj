@@ -73,6 +73,7 @@
 		66BDCBF186346C6913023FC5 /* DamageTrackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */; };
 		6733787F66C34604391376B8 /* AppDelegate+Menu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 652F3910146BA23469557490 /* AppDelegate+Menu.swift */; };
 		67E62A52456063618EA6931D /* DiagnosticReportStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D94AD8A655DA72C5D57ED5E /* DiagnosticReportStoreTests.swift */; };
+		69797374E601F579F67EF1A6 /* FindBarColorSchemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A8F455F7BA7A1A2C8D374A /* FindBarColorSchemeTests.swift */; };
 		6A4A848FAF8BE625DC512F81 /* FindReplaceIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */; };
 		6D090950F332DE15D1742137 /* CmdLetterInterceptMatrixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 439685790680BB952D8E7F2C /* CmdLetterInterceptMatrixTests.swift */; };
 		6D27ABAFB174297CCD622E1D /* TabRenameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA0F474A7AF422E5AD4E5502 /* TabRenameTests.swift */; };
@@ -172,6 +173,7 @@
 		CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */; };
 		D3A6C740DF8E3C7C91D4ED1F /* URLDetectorMultiRowWrapTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C31E953108A36157B8BE920 /* URLDetectorMultiRowWrapTests.swift */; };
 		D3FEE747D19D317F71EB45BD /* DiagnosticFileLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FEB5E2E24B725264B21AB43 /* DiagnosticFileLoader.swift */; };
+		D6237259ED506C0A59DF8077 /* FindBarThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2215352FADE00C2471C9175 /* FindBarThemeTests.swift */; };
 		D99C39D366CE2D06BF4082EB /* LatencyHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B99D2970157272D6841E2F5 /* LatencyHarnessTests.swift */; };
 		D99D052FA12920F1D87383C7 /* SlotAllocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F705FA59707185BB95178264 /* SlotAllocatorTests.swift */; };
 		DA92E08EEE11AD711420DDF2 /* MetalDeviceSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDBE067E31FBB9F8651F3C50 /* MetalDeviceSelectionTests.swift */; };
@@ -207,6 +209,7 @@
 		F977657E7B8C250F42E245CD /* KittyTerminfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF2E535DE7BB1D225E2F58E2 /* KittyTerminfo.swift */; };
 		FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */; };
 		FE2DBB21AD9C81867C32FA25 /* TabOrderCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 355144D52D6A74BDCBCF87A0 /* TabOrderCoordinatorTests.swift */; };
+		FEA16BDF7CD58350D52F2BCB /* FindBarColorScheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCD33AA5C840B431D3AB74BA /* FindBarColorScheme.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -226,6 +229,7 @@
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		02E1CC2E85E2EDF96561CF70 /* BBTermLifetimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermLifetimeTests.swift; sourceTree = "<group>"; };
 		0563A475F4CA673F4AF37A85 /* CellWidthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellWidthTests.swift; sourceTree = "<group>"; };
+		06A8F455F7BA7A1A2C8D374A /* FindBarColorSchemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarColorSchemeTests.swift; sourceTree = "<group>"; };
 		0AE9625B30620C23E398A2EB /* BBTerm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTerm.swift; sourceTree = "<group>"; };
 		0B018D13660AC5582DF7042E /* SparkleAlertOverride.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SparkleAlertOverride.swift; sourceTree = "<group>"; };
 		0B671ECA2BD417DF4532B282 /* BufferPointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferPointTests.swift; sourceTree = "<group>"; };
@@ -373,6 +377,7 @@
 		BDBE067E31FBB9F8651F3C50 /* MetalDeviceSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalDeviceSelectionTests.swift; sourceTree = "<group>"; };
 		C1038D22AC215585EB760B2B /* TabOrderCoordinatorPurgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabOrderCoordinatorPurgeTests.swift; sourceTree = "<group>"; };
 		C1F50B661E4AB6164DAC55FD /* FFIContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIContractTests.swift; sourceTree = "<group>"; };
+		C2215352FADE00C2471C9175 /* FindBarThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarThemeTests.swift; sourceTree = "<group>"; };
 		C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeResolutionTests.swift; sourceTree = "<group>"; };
 		C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
 		C4F09C8D4B7B5D585744F5FB /* WindowMultiDisplayNudgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowMultiDisplayNudgeTests.swift; sourceTree = "<group>"; };
@@ -381,6 +386,7 @@
 		C81B55889FCFFCA2A3AF0708 /* MainThreadWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainThreadWatchdogTests.swift; sourceTree = "<group>"; };
 		C9E38BAB38899CD10A229243 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		CA48BC361DD9FDF58015FED6 /* KeyEncoderAdversarialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderAdversarialTests.swift; sourceTree = "<group>"; };
+		CCD33AA5C840B431D3AB74BA /* FindBarColorScheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarColorScheme.swift; sourceTree = "<group>"; };
 		CD00933AEBA54394D0D9CE62 /* PaletteInputsEqualityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteInputsEqualityTests.swift; sourceTree = "<group>"; };
 		CD0C55696CF5A5B37F131A49 /* RealLatencyProbeWindowedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealLatencyProbeWindowedTests.swift; sourceTree = "<group>"; };
 		CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyKeyboardProtocolTests.swift; sourceTree = "<group>"; };
@@ -488,7 +494,9 @@
 				C1F50B661E4AB6164DAC55FD /* FFIContractTests.swift */,
 				68CAFA8323F8AFCE7D4C52C9 /* FindBarAdversarialTests.swift */,
 				952020A922B8A99F336257AD /* FindBarAltScreenTests.swift */,
+				06A8F455F7BA7A1A2C8D374A /* FindBarColorSchemeTests.swift */,
 				D5AF4F844A7BAA90FB92C475 /* FindBarReplaceTests.swift */,
+				C2215352FADE00C2471C9175 /* FindBarThemeTests.swift */,
 				12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */,
 				B07A32BEBADF4A5789EFDCC8 /* FirstResponderRestoreTests.swift */,
 				859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */,
@@ -640,6 +648,7 @@
 				22FC8419FC20E7B31D5ADB7D /* CwdResolver.swift */,
 				A3B21EB9F8E347FEDA4676CF /* CwdTracker.swift */,
 				F455C591EC38A7B3955CD5B8 /* FindBar.swift */,
+				CCD33AA5C840B431D3AB74BA /* FindBarColorScheme.swift */,
 				F898FCB057ABD93D67AD8855 /* FindController.swift */,
 				59661DD43C1B8E444AF8285C /* FocusEmitter.swift */,
 				844C117AA11DACEB21977650 /* ForegroundProcessProbe.swift */,
@@ -910,6 +919,7 @@
 				A24A1DDD3199147984379869 /* DiagnosticReportStore.swift in Sources */,
 				93C6141EA8E0FBB96A023E2C /* DiagnosticsView.swift in Sources */,
 				75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */,
+				FEA16BDF7CD58350D52F2BCB /* FindBarColorScheme.swift in Sources */,
 				634C2FC6047F0DC32157ED31 /* FindController.swift in Sources */,
 				B5D9DF7D07305D430E55083D /* FocusEmitter.swift in Sources */,
 				2CC28E520181F1837A34C300 /* ForegroundProcessProbe.swift in Sources */,
@@ -1004,7 +1014,9 @@
 				040EC525EB9390611B5CB0A4 /* FFIContractTests.swift in Sources */,
 				E2DA3A0049E566F9B9C133AA /* FindBarAdversarialTests.swift in Sources */,
 				A25683CF4210AC620DBBBB72 /* FindBarAltScreenTests.swift in Sources */,
+				69797374E601F579F67EF1A6 /* FindBarColorSchemeTests.swift in Sources */,
 				E5A9050474676254C3FB3554 /* FindBarReplaceTests.swift in Sources */,
+				D6237259ED506C0A59DF8077 /* FindBarThemeTests.swift in Sources */,
 				6A4A848FAF8BE625DC512F81 /* FindReplaceIntegrationTests.swift in Sources */,
 				2719DE75AF486E2E0B8E688E /* FirstResponderRestoreTests.swift in Sources */,
 				A25F8643DAD775E8251392EC /* FocusEventsTests.swift in Sources */,
