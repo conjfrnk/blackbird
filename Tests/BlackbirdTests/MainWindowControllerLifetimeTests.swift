@@ -262,6 +262,15 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
     /// L+R inset in its `contentMinSize` floor — otherwise the user can drag
     /// below `20·cellW + 16` and the grid loses cols below the usable
     /// minimum.
+    ///
+    /// The height term derives the titlebar reservation from the SAME
+    /// authoritative `titlebarOnlyTopInset` the implementation now uses
+    /// (RCA docs/rca-tab-behaviors-2026-07-01.md, `contentMinSize` finding)
+    /// rather than a hard-coded literal — a hard-coded `28` silently drifted
+    /// out of sync with reality on macOS 26 "Tahoe" (real titlebar 32pt),
+    /// under-reserving the 4-row minimum by 4pt. Pinning against the live
+    /// value instead of a magic number keeps this test meaningful across
+    /// macOS versions that change the titlebar's actual height.
     func test_contentMinSize_includesHorizontalInset() throws {
         Self.acquireControllerSlot()
         defer { Self.releaseControllerSlot() }
@@ -280,7 +289,7 @@ final class MainWindowControllerLifetimeTests: XCTestCase {
         let cw = view.metrics.cellWidth
         let ch = view.metrics.cellHeight
         let expectedW = cw * 20 + 2 * TerminalView.horizontalContentInsetPoints
-        let expectedH = ch * 4 + 28 + TerminalView.bottomContentInsetPoints
+        let expectedH = ch * 4 + view.titlebarOnlyTopInset + TerminalView.bottomContentInsetPoints
         XCTAssertEqual(win.contentMinSize.width, expectedW, accuracy: 0.001)
         XCTAssertEqual(win.contentMinSize.height, expectedH, accuracy: 0.001)
     }

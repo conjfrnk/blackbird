@@ -611,7 +611,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // end up with a window too small to read comfortably.
             window.contentMinSize = NSSize(
                 width: newMetrics.cellWidth * 20 + 2 * Self.horizontalContentInsetPoints,
-                height: newMetrics.cellHeight * 4 + 28 + Self.bottomContentInsetPoints
+                height: newMetrics.cellHeight * 4 + titlebarOnlyTopInset + Self.bottomContentInsetPoints
             )
         }
         // Force a grid recomputation on the next layout — propagateResize
@@ -1344,18 +1344,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // a separate strip below it, so the text grid should start
         // right below the titlebar regardless of tab count.
         //
-        // We can't use `titlebarOnlyTopInset` directly: when the native
-        // tab bar is suppressed via view-walk, AppKit still reserves
-        // its 36pt of layout in `safeAreaInsets` and `contentLayoutRect`
-        // even though the views are hidden and our custom pills occupy
-        // the titlebar itself — so titlebarOnlyTopInset jumps 32 → 68 on
-        // every 2-tab window and the prompt drops a row.
-        //
-        // Instead, compute the real titlebar height from the window's
-        // style: (window frame height) − (contentRect for the same style
-        // with NO tab-bar reservation). This gives us the stable titlebar
-        // content offset (~28 pt on standard windows), independent of
-        // AppKit's phantom tab-bar bookkeeping.
+        // `titlebarOnlyTopInset` IS used directly here — deliberately NOT
+        // `safeAreaInsets.top` / `contentLayoutRect`, which still reserve
+        // AppKit's phantom 36pt tab-bar band even after the native strip is
+        // suppressed via view-walk (our custom pills occupy the titlebar
+        // itself instead). `titlebarOnlyTopInset` derives the real titlebar
+        // height from the window's STYLE instead: (window frame height) −
+        // (contentRect for the same style with NO tab-bar reservation).
+        // That gives a stable content offset (~28-32pt depending on macOS
+        // version — see that property's own doc comment) independent of
+        // AppKit's phantom tab-bar bookkeeping, so it does NOT jump when
+        // tab count changes.
         let currentTop = Float(titlebarOnlyTopInset)
         renderer.setTopInsetPoints(currentTop)
         // Sibling of setTopInsetPoints — keep the two inset setters in

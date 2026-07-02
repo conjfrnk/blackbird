@@ -302,12 +302,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // 20 cols × 4 rows is plenty for interactive use; stops layout
         // degenerating into a single column where the shell becomes unusable.
         // With `.fullSizeContentView`, the content view includes the titlebar
-        // area — so reserve the standard 28pt titlebar + the bottom inset on
-        // top of the 4-row grid.
+        // area — so reserve the real titlebar height (NOT a hard-coded
+        // constant: `titlebarOnlyTopInset` is the same live, style-mask-
+        // derived value the renderer uses to place the grid, so this stays
+        // correct across macOS versions that change the titlebar's actual
+        // height — e.g. 32pt on macOS 26 "Tahoe" vs the 28pt this used to
+        // hard-code, which under-reserved the 4-row minimum by 4pt) + the
+        // bottom inset on top of the 4-row grid.
         let m = view.metrics
         window.contentMinSize = NSSize(
             width: m.cellWidth * 20 + 2 * TerminalView.horizontalContentInsetPoints,
-            height: m.cellHeight * 4 + 28 + TerminalView.bottomContentInsetPoints
+            height: m.cellHeight * 4 + view.titlebarOnlyTopInset + TerminalView.bottomContentInsetPoints
         )
         // Pixel-precise resize: no contentResizeIncrements here. The renderer's
         // viewport stretch (used during live resize) keeps the in-between
