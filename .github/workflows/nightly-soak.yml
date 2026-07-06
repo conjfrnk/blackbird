@@ -143,7 +143,7 @@ jobs:
     # ever times out, investigate the slowdown - don't bump the cap.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         # Same toolchain as ci.yml's `rust` and `rust-memory`
@@ -223,7 +223,7 @@ jobs:
     # headroom for runner-image churn on Xcode select / brew install.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         # Needed to build libblackbird_core.a for the Swift link
