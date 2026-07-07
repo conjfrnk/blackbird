@@ -1,19 +1,24 @@
 # Blackbird OSC 133 prompt-marks integration (bash).
 #
-# Usage: add this line to ~/.bashrc (or source it only in Blackbird):
+# bash is the one shell Blackbird does NOT auto-inject (a login bash
+# ignores --rcfile; see KNOWN_ISSUES "Shell integration auto-injection").
+# Usage: add these lines to ~/.bashrc:
 #
 #   [[ "$TERM_PROGRAM" == "Blackbird" ]] && \
-#     source /Applications/Blackbird.app/Contents/Resources/shell/osc133.bash
+#     source /Applications/Blackbird.app/Contents/Resources/osc133.bash && \
+#     source /Applications/Blackbird.app/Contents/Resources/ssh.bash
+#
+# (Resources are flat in the bundle — there is no shell/ subdirectory.)
 #
 # What it does: emits OSC 133 A/B/C/D sequences around your prompt + command
 # execution so Blackbird knows where prompts start, commands begin, commands
 # end, and what their exit codes were. No visible output — the sequences are
 # invisible to your terminal's renderer, which just tracks them as metadata.
 #
-# Shell integration is opt-in and entirely shell-side — Blackbird itself does
-# not inject anything into your shell. Consistent with "no config files" as
-# a Blackbird design principle: your shell's rc file is the config for your
-# shell.
+# Blackbird never edits your rc files. zsh and fish get this file injected
+# automatically at spawn via env-var redirection (ZDOTDIR / XDG_DATA_DIRS,
+# opt-out in Settings); sourcing it yourself as above remains supported and
+# is idempotent alongside the auto-injection.
 
 # Guard against double-sourcing (e.g. rc is reloaded). The PROMPT_COMMAND
 # edits below would otherwise stack and emit the sequences twice per prompt.

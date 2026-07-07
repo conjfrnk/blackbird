@@ -1,13 +1,20 @@
 # Blackbird OSC 133 prompt-marks integration (fish).
 #
-# Usage: add this line to ~/.config/fish/config.fish:
+# Auto-loaded since the issue-#23 fix: Blackbird prepends a vendor-conf.d
+# data dir to XDG_DATA_DIRS at spawn; fish sources the bundled bootstrap,
+# which loads this file (plus ssh.fish) at first prompt. Opt-out:
+# Settings → "Automatic shell integration". Blackbird never edits your
+# config files. Manual sourcing remains supported — add to
+# ~/.config/fish/config.fish:
 #
 #   test "$TERM_PROGRAM" = "Blackbird"; and source \
-#     /Applications/Blackbird.app/Contents/Resources/shell/osc133.fish
+#     /Applications/Blackbird.app/Contents/Resources/osc133.fish
+#
+# (Resources are flat in the bundle — there is no shell/ subdirectory.)
 #
 # Emits OSC 133 A/B/C/D sequences around the prompt + command lifecycle.
 # Invisible to the renderer; Blackbird tracks them as metadata for future
-# "jump to previous prompt" UX. Opt-in, shell-side only.
+# "jump to previous prompt" UX.
 
 # Guard against double-sourcing. `return` exits the sourced file and
 # yields control back to the caller; `exit` would terminate the entire

@@ -58,11 +58,24 @@ final class SessionLifecycle {
             return testFactory()
         }
         #endif
+        // Issue #23: hand the child the shell-integration env (zsh ZDOTDIR
+        // bootstrap / fish vendor conf.d). Pure computation over the
+        // prewarmed materialized root; [:] whenever the feature is off,
+        // the shell is unsupported (bash), or materialization failed —
+        // in every such case the spawn is byte-identical to pre-#23.
+        let integrationEnv = ShellIntegration.envOverrides(
+            shellPath: shell,
+            integrationDir: Bundle.main.resourcePath,
+            materializedRoot: ShellIntegration.currentRoot(),
+            parentEnv: ProcessInfo.processInfo.environment,
+            enabled: Preferences.shared.automaticShellIntegration
+        )
         return try TerminalSession.start(
             shell: shell,
             arguments: ["-il"],  // interactive login shell
             size: .init(cols: size.cols, rows: size.rows),
-            initialWorkingDirectory: controller.initialWorkingDirectory
+            initialWorkingDirectory: controller.initialWorkingDirectory,
+            envOverrides: integrationEnv
         )
     }
 

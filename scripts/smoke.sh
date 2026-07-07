@@ -30,15 +30,21 @@ fi
 if [[ "${BB_SKIP_RESIGN:-0}" == "1" ]]; then
     echo "==> BB_SKIP_RESIGN=1 — skipping re-sign (CI mode)"
 else
-    RESIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+    # Sign by SHA-1 hash, not by name: a keychain holding two valid copies
+    # of the same "Apple Development: …" cert makes the NAME ambiguous and
+    # codesign refuses it; the hash is always exact. (Hit on Connor's
+    # machine 2026-07-06 — duplicate valid identities, identical names.)
+    RESIGN_HASH="$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk '/Apple Development/ { print $2; exit }')"
+    RESIGN_NAME="$(security find-identity -v -p codesigning 2>/dev/null \
         | awk -F'"' '/Apple Development/ { print $2; exit }')"
-    if [[ -z "$RESIGN_IDENTITY" ]]; then
+    if [[ -z "$RESIGN_HASH" ]]; then
         echo "error: no 'Apple Development' identity in the codesigning keychain." >&2
         echo "error: set BB_SKIP_RESIGN=1 to skip (CI), or add an Apple Development cert." >&2
         exit 1
     fi
-    echo "==> Re-signing $APP_BUNDLE with: $RESIGN_IDENTITY"
-    codesign --force --sign "$RESIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
+    echo "==> Re-signing $APP_BUNDLE with: $RESIGN_NAME ($RESIGN_HASH)"
+    codesign --force --sign "$RESIGN_HASH" "$APP_BUNDLE" >/dev/null
 fi
 
 # Launch, give it 3 seconds, then TERM. Expect SIGTERM exit (128+15=143)

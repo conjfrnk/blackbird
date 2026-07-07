@@ -63,6 +63,16 @@ targets:
         buildPhase: resources
       - path: Sources/Blackbird/Resources/shell/osc133.zsh
         buildPhase: resources
+      - path: Sources/Blackbird/Resources/shell/ssh.bash
+        buildPhase: resources
+      - path: Sources/Blackbird/Resources/shell/ssh.fish
+        buildPhase: resources
+      - path: Sources/Blackbird/Resources/shell/ssh.zsh
+        buildPhase: resources
+      - path: Sources/Blackbird/Resources/shell/zshenv-bootstrap.zsh
+        buildPhase: resources
+      - path: Sources/Blackbird/Resources/shell/fish-vendor-conf.fish
+        buildPhase: resources
     preBuildScripts:
       - name: Build Rust core
         script: |

@@ -220,6 +220,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // prewarm()`'s `swift_once` rationale.
         KittyTerminfo.prewarm()
 
+        // Same treatment for shell-integration materialization (issue #23):
+        // two small file writes under ~/.local/share that the first
+        // `SessionLifecycle.makeSession` would otherwise pay for on the
+        // cold-launch path. Identical `swift_once` safety argument.
+        ShellIntegration.prewarm()
+
         // Replace Sparkle's verbose "up to date" alert before any updater
         // session can spin up (scheduled check, menu action, etc.).
         SparkleAlertOverride.install()
