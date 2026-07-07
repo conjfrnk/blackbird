@@ -265,6 +265,12 @@ final class SSHWrapperPortsTests: XCTestCase {
             "XDG_CONFIG_HOME": h.xdgConfig.path,
             "XDG_DATA_HOME": h.xdgData.path,
             "STUB_LOG": h.stubLog.path,
+            // v0.6.1: the terminfo-install machinery moved behind this
+            // opt-in (the DEFAULT is a plain TERM=xterm-256color
+            // downgrade — VS Code parity; the default-path tests override
+            // this with ""). Machinery tests exercise the opted-in
+            // behavior, unchanged from v0.6.0.
+            "BB_SSH_REMOTE_TERM": "kitty",
         ]
         for (k, v) in extra { e[k] = v }
         return e
@@ -519,6 +525,36 @@ final class SSHWrapperPortsTests: XCTestCase {
         XCTAssertEqual(termField(c), Self.downgradeTERM,
             "remote-command sessions downgrade TERM. line=\(c)")
         XCTAssertEqual(argsField(c), "host ls", "argv must be forwarded intact. line=\(c)")
+    }
+
+    // MARK: - bash: default path (v0.6.1) — plain downgrade, zero machinery
+
+    /// v0.6.1 default (no BB_SSH_REMOTE_TERM opt-in): one real connection,
+    /// TERM=xterm-256color, argv byte-identical, no -G/infocmp/tic/cache.
+    /// Measured rationale: remote xterm-kitty breaks string-sniffing
+    /// color-depth detection (codex composer, npm supports-color) since
+    /// COLORTERM doesn't survive ssh; xterm-256color is VS Code parity.
+    func test_bash_default_downgradesEveryShape_zeroMachinery() throws {
+        let ssh = try shellFile("ssh.bash")
+        for invoke in ["host", "-p 2222 host", "host ls -la"] {
+            let h = try makeHarness()
+            let run = try runBash(h, term: Self.kittyTERM,
+                                  extra: ["BB_SSH_REMOTE_TERM": ""],
+                                  driver: bashDriver(ssh, invoke: invoke))
+            XCTAssertTrue(ticLines(run.log).isEmpty && infocmpLines(run.log).isEmpty,
+                "`ssh \(invoke)` default path must never pre-flight. log=\(run.log)")
+            XCTAssertTrue(run.log.filter { $0.hasPrefix("G ") }.isEmpty,
+                "default path must not run ssh -G. log=\(run.log)")
+            let connects = connectLines(run.log)
+            XCTAssertEqual(connects.count, 1, "log=\(run.log)")
+            let c = try XCTUnwrap(connects.first)
+            XCTAssertEqual(termField(c), Self.downgradeTERM,
+                "default path always downgrades TERM. line=\(c)")
+            XCTAssertEqual(argsField(c), invoke,
+                "argv must be forwarded byte-identically. line=\(c)")
+            XCTAssertEqual(readCache(h), [],
+                "default path must not touch the cache")
+        }
     }
 
     // MARK: - bash: attached option args (panel finding #1 regression)

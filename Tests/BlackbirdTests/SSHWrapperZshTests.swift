@@ -244,6 +244,12 @@ final class SSHWrapperZshTests: XCTestCase {
             "HOME": homeDir.path,
             "STUB_LOG": logURL.path,
             "BB_SSH_SCRIPT": sshScriptURL.path,
+            // v0.6.1: the terminfo-install machinery moved behind this
+            // opt-in (the DEFAULT is a plain TERM=xterm-256color
+            // downgrade — VS Code parity; see the default-path tests,
+            // which override this with ""). The machinery tests below
+            // exercise the opted-in behavior, unchanged from v0.6.0.
+            "BB_SSH_REMOTE_TERM": "kitty",
         ]
         if setXDG { env["XDG_STATE_HOME"] = stateDir.path }
         for (k, v) in extra { env[k] = v }
@@ -675,6 +681,52 @@ final class SSHWrapperZshTests: XCTestCase {
             XCTAssertEqual(r.term(prefix: "CONNECT"), "xterm-256color",
                 "`ssh \(args.joined(separator: " "))` must connect with xterm-256color")
         }
+    }
+
+    // MARK: - Default path (v0.6.1): plain TERM downgrade, zero machinery
+
+    /// v0.6.1 default (no BB_SSH_REMOTE_TERM opt-in): every kitty-TERM
+    /// ssh gets exactly one real connection with TERM=xterm-256color and
+    /// byte-identical argv — no `ssh -G`, no infocmp/tic, no cache I/O.
+    /// Rationale (measured, 2026-07-07): remote TERM=xterm-kitty breaks
+    /// string-sniffing color-depth detection (codex composer bar,
+    /// npm supports-color) because COLORTERM doesn't survive ssh; VS Code
+    /// works because its remote TERM is xterm-256color. Parity restored.
+    ///
+    /// Cost: 3 drivers + 1 stub each, ~0.25 s total.
+    func test_default_kitty_downgradesEveryShape_zeroMachinery() throws {
+        let shapes: [[String]] = [
+            ["testhost"],
+            ["-p", "2222", "testhost"],
+            ["testhost", "ls", "-la"],
+        ]
+        for args in shapes {
+            let r = try run(term: "xterm-kitty", args: args,
+                            env: ["BB_SSH_REMOTE_TERM": ""])
+            XCTAssertEqual(r.count(prefix: "CONNECT"), 1,
+                "`ssh \(args.joined(separator: " "))` must connect exactly once. log=\(r.logLines)")
+            XCTAssertEqual(r.term(prefix: "CONNECT"), "xterm-256color",
+                "default path always downgrades TERM")
+            XCTAssertEqual(r.count(prefix: "G"), 0,
+                "default path must not canonicalize via ssh -G. log=\(r.logLines)")
+            XCTAssertEqual(r.count(prefix: "TIC"), 0,
+                "default path must never pre-flight. log=\(r.logLines)")
+            XCTAssertEqual(r.count(prefix: "INFOCMP"), 0,
+                "default path must never consult infocmp. log=\(r.logLines)")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: r.cacheURL.path),
+                "default path must not create the cache file")
+        }
+    }
+
+    /// Default-path argv fidelity + exit-code propagation in one shot.
+    func test_default_kitty_forwardsArgvAndExitCode() throws {
+        let r = try run(term: "xterm-kitty",
+                        args: ["-oStrictHostKeyChecking=no", "testhost", "deploy"],
+                        env: ["BB_SSH_REMOTE_TERM": "", "STUB_SSH_EXIT": "42"])
+        XCTAssertTrue(r.logLines.contains(
+            "CONNECT TERM=xterm-256color ARGS=-oStrictHostKeyChecking=no testhost deploy"),
+            "argv must be forwarded byte-identically. log=\(r.logLines)")
+        XCTAssertEqual(r.effectiveExit, 42, "the real ssh exit code must pass through")
     }
 
     /// Panel silent-failure finding #1 regression: `tic -x -` exits 0 on

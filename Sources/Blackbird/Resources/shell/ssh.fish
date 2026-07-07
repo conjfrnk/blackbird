@@ -3,11 +3,13 @@
 #
 # Auto-loaded by Blackbird's fish vendor conf.d bootstrap; manual
 # sourcing from ~/.config/fish/config.fish also works. Guarantees issue
-# #23 can't happen: every `ssh` from a Blackbird session either has the
-# xterm-kitty terminfo installed on the remote host (once, cached per
-# host) or runs that connection with TERM=xterm-256color. Port of
-# ssh.zsh — keep the three dialects in sync. No top-level `exit` in a
-# sourced fish file (audit S4-001) — the guard nests instead.
+# #23 can't happen: by DEFAULT every `ssh` from a Blackbird session runs
+# with TERM=xterm-256color (VS Code parity; rationale inside the ssh
+# function below). BB_SSH_REMOTE_TERM=kitty opts into the v0.6.0
+# behavior: install the xterm-kitty terminfo remotely (once, cached per
+# host) and keep the kitty TERM, falling back when the install can't
+# land. Port of ssh.zsh — keep the three dialects in sync. No top-level
+# `exit` in a sourced fish file (audit S4-001) — the guard nests instead.
 
 if not set -q __BB_SSH_WRAPPER_LOADED
     set -g __BB_SSH_WRAPPER_LOADED 1
@@ -93,6 +95,19 @@ if not set -q __BB_SSH_WRAPPER_LOADED
         function ssh
             if test "$TERM" != xterm-kitty
                 command ssh $argv
+                return $status
+            end
+            # DEFAULT: hand the remote TERM=xterm-256color — the one
+            # value every stack recognizes (VS Code parity). Keeping
+            # xterm-kitty remotely breaks string-sniffing color-depth
+            # detection (codex's composer bar, npm supports-color) since
+            # COLORTERM never survives ssh and those tools don't read
+            # terminfo. Kitty KEYBOARD protocol is unaffected (runtime
+            # CSI ?u negotiation, TERM-independent). Opt-in
+            # BB_SSH_REMOTE_TERM=kitty restores the v0.6.0
+            # install-terminfo-and-keep-kitty-TERM behavior.
+            if test "$BB_SSH_REMOTE_TERM" != kitty
+                TERM=xterm-256color command ssh $argv
                 return $status
             end
             set -l dest (__bb_ssh_dest $argv)

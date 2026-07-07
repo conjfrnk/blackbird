@@ -98,12 +98,17 @@
         <details>
           <summary>ssh says <code>'xterm-kitty': unknown terminal type.</code></summary>
           <p>
-            Blackbird advertises <code>TERM=xterm-kitty</code> so kitty-aware tools get the full
-            keyboard protocol, but older remote hosts don't ship that terminfo entry. Current
-            versions of Blackbird fix this automatically: on the first <code>ssh</code> to a host,
-            shell integration installs the entry remotely (cached per host), and if the remote
-            can't accept it, that connection quietly falls back to <code>TERM=xterm-256color</code>.
-            On older Blackbird versions, run
+            Blackbird advertises <code>TERM=xterm-kitty</code> locally so kitty-aware tools get
+            the full keyboard protocol, but remote hosts often don't know that terminfo entry —
+            and remote tools that sniff <code>TERM</code> strings for color support don't either.
+            Current versions of Blackbird fix this automatically: shell integration runs every
+            <code>ssh</code> with <code>TERM=xterm-256color</code>, the value every remote stack
+            recognizes (kitty's keyboard protocol still works remotely — apps negotiate it at
+            runtime, independent of TERM). Prefer the kitty TERM on your remotes? Export
+            <code>BB_SSH_REMOTE_TERM=kitty</code> and Blackbird instead installs the terminfo
+            entry on first connect (cached per host), falling back to
+            <code>xterm-256color</code> only if the install can't land. On older Blackbird
+            versions, run
             <code>infocmp&nbsp;-x&nbsp;xterm-kitty&nbsp;|&nbsp;ssh&nbsp;&lt;host&gt;&nbsp;'tic&nbsp;-x&nbsp;-'</code>
             once per host, or install <code>ncurses-term</code> on the remote. Automatic
             integration covers zsh and fish; bash users can source the bundled

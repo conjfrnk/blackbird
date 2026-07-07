@@ -2,10 +2,13 @@
 #
 # Auto-loaded by Blackbird's shell integration (see zshenv-bootstrap.zsh),
 # or source it manually from ~/.zshrc. Guarantees issue #23 can't happen:
-# every `ssh` from a Blackbird session either has the xterm-kitty
-# terminfo installed on the remote host (once, cached per host) or runs
-# that connection with TERM=xterm-256color. Reference dialect — keep
-# ssh.bash / ssh.fish in sync.
+# by DEFAULT every `ssh` from a Blackbird session runs with
+# TERM=xterm-256color (the value every remote stack recognizes — VS Code
+# parity; see the rationale comment inside ssh() below). Exporting
+# BB_SSH_REMOTE_TERM=kitty opts into the v0.6.0 behavior instead:
+# install the xterm-kitty terminfo remotely (once, cached per host) and
+# keep the kitty TERM, falling back to xterm-256color when the install
+# can't land. Reference dialect — keep ssh.bash / ssh.fish in sync.
 
 if (( ${+__BB_SSH_WRAPPER_LOADED} )); then return 0; fi
 typeset -g __BB_SSH_WRAPPER_LOADED=1
@@ -77,6 +80,19 @@ ssh() {
   emulate -L zsh
   if [[ "$TERM" != "xterm-kitty" ]]; then
     command ssh "$@"; return $?
+  fi
+  # DEFAULT: hand the remote TERM=xterm-256color — the one value every
+  # stack recognizes (VS Code parity). Keeping xterm-kitty remotely
+  # breaks the string-sniffing color-depth ecosystem (codex's composer
+  # bar, npm supports-color/chalk drop to 16 colors or none) because
+  # COLORTERM never survives ssh and those tools don't read terminfo.
+  # Kitty KEYBOARD protocol is unaffected: apps negotiate it at runtime
+  # via CSI ?u, which is TERM-independent and flows through ssh.
+  # Opt-in BB_SSH_REMOTE_TERM=kitty (export in ~/.zshrc) restores the
+  # v0.6.0 install-terminfo-and-keep-kitty-TERM behavior for
+  # terminfo-reading tools (nvim truecolor autodetect).
+  if [[ "${BB_SSH_REMOTE_TERM-}" != "kitty" ]]; then
+    TERM=xterm-256color command ssh "$@"; return $?
   fi
   local dest cache src
   if ! dest="$(__bb_ssh_dest "$@")"; then
