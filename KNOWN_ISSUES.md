@@ -32,12 +32,30 @@ never load — with no error. Frameworks (oh-my-zsh, powerlevel10k) use
 `add-zsh-hook` and are unaffected; hand-rolled dotfiles that assign the
 array should append instead, or source the integration manually.
 
-**Stale ssh-host cache after a remote wipe.** Successful remote terminfo
-installs are cached per host in
-`~/.local/state/blackbird/ssh-terminfo-hosts`. If a remote host's
-`~/.terminfo` is later deleted, the cached entry skips reinstall and ncurses
-apps there break again until you delete that host's line (or the file).
-Failures are never cached, so transient errors self-heal.
+**Remote TERM is xterm-256color by default (v0.6.1); kitty TERM remotely
+is opt-in.** v0.6.0 installed the kitty terminfo on remote hosts and kept
+`TERM=xterm-kitty` there. Measured fallout (2026-07-07): tools that sniff
+TERM strings for color depth instead of reading terminfo — Codex CLI's
+composer bar, the npm `supports-color`/chalk ecosystem — treat an
+unrecognized `xterm-kitty` without `COLORTERM` (which never survives ssh)
+as ≤16-color and drop styling entirely, while VS Code "worked" purely
+because its remote TERM is `xterm-256color`. The ssh wrapper therefore
+now defaults to `TERM=xterm-256color` for every connection (kitty
+KEYBOARD protocol still works remotely — apps negotiate it at runtime
+via `CSI ?u`, which is TERM-independent). Export `BB_SSH_REMOTE_TERM=kitty`
+to restore the v0.6.0 install-and-keep-kitty behavior (useful for
+terminfo-reading tools like nvim's truecolor autodetect); its per-host
+cache lives in `~/.local/state/blackbird/ssh-terminfo-hosts` — delete a
+host's line if you wipe the remote `~/.terminfo` (successes are cached,
+failures never are).
+
+**tmux is out of the wrapper's reach.** tmux substitutes its own
+`default-terminal` for every pane's TERM, so what a TUI inside tmux
+sees is decided entirely by the tmux config — local or remote, no ssh
+wrapper can touch it. If tmux falls back to bare `screen` (old tmux, or
+an unset `default-terminal`), string-sniffing TUIs drop styling inside
+tmux under EVERY outer terminal, Blackbird included. Remedy is one line
+of tmux config: `set -g default-terminal "tmux-256color"`.
 
 ## Move Tab to Window — minimized and fullscreen windows aren't offered
 
