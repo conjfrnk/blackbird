@@ -256,7 +256,7 @@ final class SSHWrapperPortsTests: XCTestCase {
 
     /// Hermetic environment: the stub bin dir shadows the real `ssh`/`infocmp`,
     /// HOME/XDG point at the temp tree so no user config or cache is touched.
-    private func env(_ h: Harness, term: String, extra: [String: String]) -> [String: String] {
+    private func env(_ h: Harness, term: String, extra: [String: String?]) -> [String: String] {
         var e: [String: String] = [
             "PATH": "\(h.binDir.path):/usr/bin:/bin",
             "HOME": h.home.path,
@@ -272,7 +272,11 @@ final class SSHWrapperPortsTests: XCTestCase {
             // behavior, unchanged from v0.6.0.
             "BB_SSH_REMOTE_TERM": "kitty",
         ]
-        for (k, v) in extra { e[k] = v }
+        // nil value = REMOVE the key entirely (truly-unset coverage; an
+        // empty-string override is not the same thing in shell).
+        for (k, v) in extra {
+            if let v { e[k] = v } else { e.removeValue(forKey: k) }
+        }
         return e
     }
 
@@ -325,7 +329,7 @@ final class SSHWrapperPortsTests: XCTestCase {
 
     @discardableResult
     private func runBash(
-        _ h: Harness, term: String, extra: [String: String] = [:], driver: String
+        _ h: Harness, term: String, extra: [String: String?] = [:], driver: String
     ) throws -> Run {
         let driverURL = h.root.appendingPathComponent("driver.sh")
         try driver.write(to: driverURL, atomically: true, encoding: .utf8)
@@ -339,7 +343,7 @@ final class SSHWrapperPortsTests: XCTestCase {
     @discardableResult
     private func runFish(
         _ h: Harness, fish: String, term: String,
-        extra: [String: String] = [:], body: String
+        extra: [String: String?] = [:], body: String
     ) throws -> Run {
         return try runShell(
             URL(fileURLWithPath: fish), ["-c", body],
@@ -543,7 +547,7 @@ final class SSHWrapperPortsTests: XCTestCase {
                                   driver: bashDriver(ssh, invoke: invoke))
             XCTAssertTrue(ticLines(run.log).isEmpty && infocmpLines(run.log).isEmpty,
                 "`ssh \(invoke)` default path must never pre-flight. log=\(run.log)")
-            XCTAssertTrue(run.log.filter { $0.hasPrefix("G ") }.isEmpty,
+            XCTAssertTrue(gLines(run.log).isEmpty,
                 "default path must not run ssh -G. log=\(run.log)")
             let connects = connectLines(run.log)
             XCTAssertEqual(connects.count, 1, "log=\(run.log)")
@@ -555,6 +559,25 @@ final class SSHWrapperPortsTests: XCTestCase {
             XCTAssertEqual(readCache(h), [],
                 "default path must not touch the cache")
         }
+    }
+
+    /// Panel blocker-B regression (bash): truly-UNSET BB_SSH_REMOTE_TERM —
+    /// the real-user state — must take the default downgrade with zero
+    /// machinery and preserved exit code.
+    func test_bash_default_trulyUnsetVariable_downgrades() throws {
+        let ssh = try shellFile("ssh.bash")
+        let h = try makeHarness()
+        let run = try runBash(h, term: Self.kittyTERM,
+                              extra: ["BB_SSH_REMOTE_TERM": nil,
+                                      "STUB_SSH_EXIT": "42"],
+                              driver: bashDriver(ssh, invoke: "host"))
+        XCTAssertTrue(gLines(run.log).isEmpty && ticLines(run.log).isEmpty
+                        && infocmpLines(run.log).isEmpty,
+            "unset variable must not activate machinery. log=\(run.log)")
+        let c = try XCTUnwrap(connectLines(run.log).first)
+        XCTAssertEqual(termField(c), Self.downgradeTERM, "line=\(c)")
+        XCTAssertEqual(run.exit, 42, "exit code must pass through")
+        XCTAssertEqual(readCache(h), [], "no cache activity")
     }
 
     // MARK: - bash: attached option args (panel finding #1 regression)
@@ -724,6 +747,55 @@ final class SSHWrapperPortsTests: XCTestCase {
         let c = try XCTUnwrap(connects.first)
         XCTAssertEqual(termField(c), Self.downgradeTERM, "line=\(c)")
         XCTAssertEqual(argsField(c), "host", "argv untouched. line=\(c)")
+    }
+
+    /// fish mirror of the v0.6.1 default-path test (panel note: fish has
+    /// the divergent unset-vs-empty comparison semantics AND no CI
+    /// coverage, so exercise the default gate wherever fish exists).
+    func test_fish_default_downgradesEveryShape_zeroMachinery() throws {
+        let fish = try requireFish()
+        let ssh = try shellFile("ssh.fish")
+        for invoke in ["host", "-p 2222 host", "host ls -la"] {
+            let h = try makeHarness()
+            let run = try runFish(h, fish: fish, term: Self.kittyTERM,
+                                  extra: ["BB_SSH_REMOTE_TERM": ""],
+                                  body: fishBody(ssh, invoke: invoke))
+            XCTAssertTrue(gLines(run.log).isEmpty,
+                "default path must not run ssh -G. log=\(run.log)")
+            XCTAssertTrue(ticLines(run.log).isEmpty && infocmpLines(run.log).isEmpty,
+                "default path must never pre-flight. log=\(run.log)")
+            let connects = connectLines(run.log)
+            XCTAssertEqual(connects.count, 1, "log=\(run.log)")
+            let c = try XCTUnwrap(connects.first)
+            XCTAssertEqual(termField(c), Self.downgradeTERM,
+                "default path always downgrades TERM. line=\(c)")
+            XCTAssertEqual(argsField(c), invoke,
+                "argv must be forwarded byte-identically. line=\(c)")
+            XCTAssertEqual(readCache(h), [],
+                "default path must not touch the cache")
+        }
+    }
+
+    /// Panel blocker-B regression (fish): truly-UNSET BB_SSH_REMOTE_TERM
+    /// must take the default downgrade — fish is the dialect where an
+    /// unquoted expansion of an undefined variable would break the guard
+    /// (`test != kitty` is a 2-arg error), so pin the unset path
+    /// explicitly, with exit-code passthrough.
+    func test_fish_default_trulyUnsetVariable_downgrades() throws {
+        let fish = try requireFish()
+        let ssh = try shellFile("ssh.fish")
+        let h = try makeHarness()
+        let run = try runFish(h, fish: fish, term: Self.kittyTERM,
+                              extra: ["BB_SSH_REMOTE_TERM": nil,
+                                      "STUB_SSH_EXIT": "42"],
+                              body: fishBody(ssh, invoke: "host"))
+        XCTAssertTrue(gLines(run.log).isEmpty && ticLines(run.log).isEmpty
+                        && infocmpLines(run.log).isEmpty,
+            "unset variable must not activate machinery. log=\(run.log)")
+        let c = try XCTUnwrap(connectLines(run.log).first)
+        XCTAssertEqual(termField(c), Self.downgradeTERM, "line=\(c)")
+        XCTAssertEqual(run.exit, 42, "exit code must pass through")
+        XCTAssertEqual(readCache(h), [], "no cache activity")
     }
 
     // MARK: - fish: cache hit

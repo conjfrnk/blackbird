@@ -219,7 +219,7 @@ final class SSHWrapperZshTests: XCTestCase {
                      args: [String] = [],
                      body: String? = nil,
                      setXDG: Bool = true,
-                     env extra: [String: String] = [:],
+                     env extra: [String: String?] = [:],
                      cacheLines: [String]? = nil) throws -> RunResult {
         // Fresh log per run for deterministic ordering assertions.
         try Data().write(to: logURL)
@@ -252,7 +252,12 @@ final class SSHWrapperZshTests: XCTestCase {
             "BB_SSH_REMOTE_TERM": "kitty",
         ]
         if setXDG { env["XDG_STATE_HOME"] = stateDir.path }
-        for (k, v) in extra { env[k] = v }
+        // nil value = REMOVE the key entirely (truly-unset coverage —
+        // the state ~100% of real users are in for BB_* knobs; an
+        // empty-string override is not the same thing in shell).
+        for (k, v) in extra {
+            if let v { env[k] = v } else { env.removeValue(forKey: k) }
+        }
 
         let (stdout, stderr, status) = try launch(
             driver: driverURL, args: args, env: env)
@@ -716,6 +721,24 @@ final class SSHWrapperZshTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: r.cacheURL.path),
                 "default path must not create the cache file")
         }
+    }
+
+    /// Panel blocker-B regression: the harness injects the opt-in for
+    /// machinery tests, so without this test a `${VAR-}` → `${VAR-kitty}`
+    /// typo (defaulting UNSET users into the machinery) would keep every
+    /// suite green while flipping behavior for ~100% of real users, who
+    /// have the variable truly UNSET — not set-to-empty.
+    func test_default_kitty_trulyUnsetVariable_downgradesZeroMachinery() throws {
+        let r = try run(term: "xterm-kitty", args: ["testhost"],
+                        env: ["BB_SSH_REMOTE_TERM": nil])
+        XCTAssertEqual(r.count(prefix: "CONNECT"), 1, "log=\(r.logLines)")
+        XCTAssertEqual(r.term(prefix: "CONNECT"), "xterm-256color",
+            "an UNSET BB_SSH_REMOTE_TERM must take the default downgrade")
+        XCTAssertEqual(r.count(prefix: "G"), 0, "log=\(r.logLines)")
+        XCTAssertEqual(r.count(prefix: "TIC"), 0, "log=\(r.logLines)")
+        XCTAssertEqual(r.count(prefix: "INFOCMP"), 0, "log=\(r.logLines)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: r.cacheURL.path),
+            "unset variable must not activate the cache machinery")
     }
 
     /// Default-path argv fidelity + exit-code propagation in one shot.
