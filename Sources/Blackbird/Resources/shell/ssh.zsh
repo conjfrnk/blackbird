@@ -27,13 +27,21 @@ __bb_ssh_dest() {
     END { if (h == "") exit 1; print u "@" h ":" p }'
 }
 
-# True (0) when argv contains an operand after the destination — i.e. a
-# remote command. Flags that consume a separate argument per ssh(1).
+# True (0) when the invocation must NOT pre-flight a terminfo install:
+# argv carries an operand after the destination (a remote command), or a
+# session mode with no interactive terminal (-N -f -W -O). Option
+# clusters are walked left-to-right: the FIRST arg-taking letter decides
+# — last char of the token ⇒ the arg is the NEXT token (consume it); not
+# last ⇒ the arg is ATTACHED inside this token (consume nothing). The
+# old last-char-only check misread attached forms like
+# `-oStrictHostKeyChecking=no` (value ends in an arg-taking letter) and
+# swallowed the destination — which made `ssh -oX=no host cmd` look
+# interactive and appended `tic -x -` to the user's remote command.
 __bb_ssh_has_remote_command() {
-  local opts_with_arg="BbcDEeFIiJLlmOoPpRSWw"
+  local opts_with_arg="BbcDEeFIiJLlmOoPpQRSWw"
   local -a args
   args=("$@")
-  local i=1 seen_dest=0 end_opts=0 a last
+  local i=1 seen_dest=0 end_opts=0 a c j
   while (( i <= ${#args} )); do
     a="${args[i]}"
     if (( seen_dest )); then return 0; fi
@@ -42,10 +50,18 @@ __bb_ssh_has_remote_command() {
     elif [[ "$a" == "--" ]]; then
       end_opts=1
     else
-      last="${a[-1]}"
-      if [[ "$opts_with_arg" == *"$last"* ]]; then
-        (( i += 1 ))
-      fi
+      for (( j = 2; j <= ${#a}; j++ )); do
+        c="${a[j]}"
+        if [[ "NfWO" == *"$c"* ]]; then
+          return 0
+        fi
+        if [[ "$opts_with_arg" == *"$c"* ]]; then
+          if (( j == ${#a} )); then
+            (( i += 1 ))
+          fi
+          break
+        fi
+      done
     fi
     (( i += 1 ))
   done

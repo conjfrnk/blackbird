@@ -605,6 +605,76 @@ final class SSHWrapperZshTests: XCTestCase {
         }
     }
 
+    /// Panel finding #1 regression (2026-07-06 review): ATTACHED-form
+    /// option arguments (`-oX=y`, `-i/path`, value inside the same token)
+    /// whose value ends in an arg-taking letter fooled the old last-char
+    /// parser into swallowing the destination — so `ssh -oX=no host cmd`
+    /// looked interactive and the pre-flight appended `tic -x -` to the
+    /// user's remote command (corrupting it, then running it twice).
+    /// Attached forms with a trailing remote command must downgrade;
+    /// attached forms without one must still pre-flight. Expected
+    /// classifications specified by the reviewing agent from ssh(1)
+    /// semantics, independent of the fix.
+    ///
+    /// Cost: 5 drivers + stubs, ~0.4 s total.
+    func test_kitty_attachedOptionArgs_classifyCorrectly() throws {
+        // Attached value + remote command → downgrade, never pre-flight.
+        let remoteCmd: [[String]] = [
+            ["-oStrictHostKeyChecking=no", "testhost", "ls"],
+            ["-oControlMaster=auto", "testhost", "run-backup"],
+            ["-i/tmp/keyfoo", "testhost", "deploy"],
+        ]
+        for args in remoteCmd {
+            try? FileManager.default.removeItem(
+                at: stateDir.appendingPathComponent("blackbird"))
+            let r = try run(term: "xterm-kitty", args: args)
+            XCTAssertEqual(r.count(prefix: "TIC"), 0,
+                "`ssh \(args.joined(separator: " "))` carries a remote command; "
+                + "must not pre-flight. log=\(r.logLines)")
+            XCTAssertEqual(r.term(prefix: "CONNECT"), "xterm-256color",
+                "`ssh \(args.joined(separator: " "))` must connect with xterm-256color")
+        }
+        // Attached value, NO remote command → still interactive: pre-flight.
+        let interactive: [[String]] = [
+            ["-oStrictHostKeyChecking=no", "testhost"],
+            ["-p2222", "testhost"],
+        ]
+        for args in interactive {
+            try? FileManager.default.removeItem(
+                at: stateDir.appendingPathComponent("blackbird"))
+            let r = try run(term: "xterm-kitty", args: args)
+            XCTAssertEqual(r.count(prefix: "TIC"), 1,
+                "`ssh \(args.joined(separator: " "))` is interactive and must pre-flight. "
+                + "log=\(r.logLines)")
+            XCTAssertEqual(r.term(prefix: "CONNECT"), "xterm-kitty",
+                "`ssh \(args.joined(separator: " "))` must connect with xterm-kitty")
+        }
+    }
+
+    /// Panel finding #4 regression: session modes with no interactive
+    /// terminal (-N port-forward, -f background, -W stdio-forward, -O
+    /// control ops) must never pre-flight an install over their
+    /// non-interactive channel — they take the quiet downgrade.
+    ///
+    /// Cost: 3 drivers + stubs, ~0.25 s total.
+    func test_kitty_nonInteractiveSessionModes_downgrade() throws {
+        let cases: [[String]] = [
+            ["-N", "testhost"],
+            ["-fN", "testhost"],
+            ["-W", "host:22", "testhost"],
+        ]
+        for args in cases {
+            try? FileManager.default.removeItem(
+                at: stateDir.appendingPathComponent("blackbird"))
+            let r = try run(term: "xterm-kitty", args: args)
+            XCTAssertEqual(r.count(prefix: "TIC"), 0,
+                "`ssh \(args.joined(separator: " "))` has no interactive terminal; "
+                + "must not pre-flight. log=\(r.logLines)")
+            XCTAssertEqual(r.term(prefix: "CONNECT"), "xterm-256color",
+                "`ssh \(args.joined(separator: " "))` must connect with xterm-256color")
+        }
+    }
+
     // MARK: - ssh -G failure
 
     /// If `ssh -G` itself fails (bad config, unknown host alias), the

@@ -23,6 +23,15 @@ and Ghostty make). The ssh wrapper is therefore absent in nested shells;
 entry reproduces #23. Manual sourcing from `.zshrc` covers this for anyone
 who nests routinely.
 
+**A `.zshrc` that ASSIGNS `precmd_functions=(…)` silently disables
+integration.** The zsh bootstrap defers loading to a one-shot entry in
+`$precmd_functions` registered before `.zshrc` runs; a dotfile that
+assigns the array wholesale (instead of appending or using
+`add-zsh-hook`) wipes the loader, and prompt marks + the ssh wrapper
+never load — with no error. Frameworks (oh-my-zsh, powerlevel10k) use
+`add-zsh-hook` and are unaffected; hand-rolled dotfiles that assign the
+array should append instead, or source the integration manually.
+
 **Stale ssh-host cache after a remote wipe.** Successful remote terminfo
 installs are cached per host in
 `~/.local/state/blackbird/ssh-terminfo-hosts`. If a remote host's

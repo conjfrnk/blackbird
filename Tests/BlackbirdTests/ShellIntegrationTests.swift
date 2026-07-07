@@ -230,6 +230,22 @@ final class ShellIntegrationTests: XCTestCase {
             "fish must prepend '<materializedRoot>:' to the existing XDG_DATA_DIRS so our vendor conf wins but the user's dirs are preserved")
     }
 
+    func test_envOverrides_fish_withEmptyParentXDG_usesDefault() {
+        // Panel finding #3 regression: the XDG spec treats an EMPTY
+        // XDG_DATA_DIRS the same as an absent one ("use the default").
+        // Prepending to the empty string would yield "<root>:" and hide
+        // every stock vendor dir from fish.
+        let result = ShellIntegration.envOverrides(
+            shellPath: "/opt/homebrew/bin/fish",
+            integrationDir: "/opt/bb/integration",
+            materializedRoot: root,
+            parentEnv: ["XDG_DATA_DIRS": ""],
+            enabled: true
+        )
+        XCTAssertEqual(result["XDG_DATA_DIRS"], root.path + ":/usr/local/share:/usr/share",
+            "an empty parent XDG_DATA_DIRS means 'default' per the XDG spec — the default tail must be used, not an empty one")
+    }
+
     func test_envOverrides_fish_doesNotLeakOrigZdotdir() {
         // The fish branch is a closed set of exactly two keys. A parent
         // ZDOTDIR (irrelevant to fish) must not bleed a BB_ORIG_ZDOTDIR in.

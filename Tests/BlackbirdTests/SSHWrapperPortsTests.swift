@@ -521,6 +521,55 @@ final class SSHWrapperPortsTests: XCTestCase {
         XCTAssertEqual(argsField(c), "host ls", "argv must be forwarded intact. line=\(c)")
     }
 
+    // MARK: - bash: attached option args (panel finding #1 regression)
+
+    /// ATTACHED-form option values ending in an arg-taking letter
+    /// (`-oX=no`, `-i/path/keyfoo`) fooled the old last-char parser into
+    /// swallowing the destination, so a trailing remote command was
+    /// misclassified as interactive and the pre-flight appended
+    /// `tic -x -` to the user's remote command. Attached + remote command
+    /// must downgrade; attached without one must still pre-flight.
+    /// Expected classifications from ssh(1) semantics per the reviewing
+    /// agent, independent of the fix.
+    func test_bash_attachedOptionArgs_classifyCorrectly() throws {
+        let ssh = try shellFile("ssh.bash")
+        for invoke in ["-oStrictHostKeyChecking=no host run-backup",
+                       "-i/tmp/keyfoo host deploy"] {
+            let h = try makeHarness()
+            let run = try runBash(h, term: Self.kittyTERM,
+                                  driver: bashDriver(ssh, invoke: invoke))
+            XCTAssertTrue(ticLines(run.log).isEmpty,
+                "`ssh \(invoke)` carries a remote command; must not pre-flight. log=\(run.log)")
+            let c = try XCTUnwrap(connectLines(run.log).first)
+            XCTAssertEqual(termField(c), Self.downgradeTERM,
+                "`ssh \(invoke)` must downgrade TERM. line=\(c)")
+        }
+        for invoke in ["-oStrictHostKeyChecking=no host", "-p2222 host"] {
+            let h = try makeHarness()
+            let run = try runBash(h, term: Self.kittyTERM,
+                                  driver: bashDriver(ssh, invoke: invoke))
+            XCTAssertFalse(ticLines(run.log).isEmpty,
+                "`ssh \(invoke)` is interactive and must pre-flight. log=\(run.log)")
+            let c = try XCTUnwrap(connectLines(run.log).first)
+            XCTAssertEqual(termField(c), Self.kittyTERM,
+                "`ssh \(invoke)` keeps the kitty TERM. line=\(c)")
+        }
+    }
+
+    /// Panel finding #4 regression: `-N` (no remote command, no terminal)
+    /// must take the quiet downgrade, not the install pre-flight.
+    func test_bash_nonInteractiveMode_dashN_downgrades() throws {
+        let ssh = try shellFile("ssh.bash")
+        let h = try makeHarness()
+        let run = try runBash(h, term: Self.kittyTERM,
+                              driver: bashDriver(ssh, invoke: "-N host"))
+        XCTAssertTrue(ticLines(run.log).isEmpty,
+            "`ssh -N host` has no interactive terminal; must not pre-flight. log=\(run.log)")
+        let c = try XCTUnwrap(connectLines(run.log).first)
+        XCTAssertEqual(termField(c), Self.downgradeTERM,
+            "`ssh -N host` must downgrade TERM. line=\(c)")
+    }
+
     // MARK: - bash: option args are still a plain destination
 
     /// `-p 2222 host` (and `-o X=y host`) carry no remote command, so the

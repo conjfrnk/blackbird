@@ -246,6 +246,11 @@ public final class Preferences: ObservableObject {
     /// `didChangeNotification`, no bridge re-entry. SwiftUI bindings
     /// (`$prefs.automaticShellIntegration`) work fine on a plain
     /// computed property via `ObservedObject`'s member subscript.
+    ///
+    /// Selection rule for future properties: `@AppStorage` remains right
+    /// for UI-only prefs whose writes always change the value; use this
+    /// manual guarded shape when a pref may be written programmatically
+    /// where a same-value write must be a true no-op.
     public var automaticShellIntegration: Bool {
         get {
             (UserDefaults.standard.object(forKey: Self.k("automaticShellIntegration")) as? Bool) ?? true

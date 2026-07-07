@@ -33,10 +33,19 @@ if not set -q __BB_SSH_WRAPPER_LOADED
                 END { if (h == "") exit 1; print u "@" h ":" p }'
         end
 
-        # True (0) when argv has an operand after the destination — a
-        # remote command. Flags that consume a separate argument per ssh(1).
+        # True (0) when the invocation must NOT pre-flight a terminfo
+        # install: argv carries an operand after the destination (a
+        # remote command), or a session mode with no interactive
+        # terminal (-N -f -W -O). Option clusters are walked
+        # left-to-right: the FIRST arg-taking letter decides — last
+        # char of the token ⇒ the arg is the NEXT token (consume it);
+        # not last ⇒ the arg is ATTACHED in this token (consume
+        # nothing). The old last-char-only check misread attached forms
+        # like `-oStrictHostKeyChecking=no` and swallowed the
+        # destination, appending `tic -x -` to the user's remote
+        # command. `contains` compares exactly — no glob hazards from
+        # attached values holding * or ?.
         function __bb_ssh_has_remote_command
-            set -l opts_with_arg "BbcDEeFIiJLlmOoPpRSWw"
             set -l seen_dest 0
             set -l end_opts 0
             set -l skip_next 0
@@ -60,9 +69,19 @@ if not set -q __BB_SSH_WRAPPER_LOADED
                     case '-'
                         set seen_dest 1
                     case '-*'
-                        set -l last (string sub -s -1 -- "$a")
-                        if string match -q -- "*$last*" "$opts_with_arg"
-                            set skip_next 1
+                        set -l chars (string split '' -- "$a")
+                        set -l len (count $chars)
+                        for j in (seq 2 $len)
+                            set -l c $chars[$j]
+                            if contains -- "$c" N f W O
+                                return 0
+                            end
+                            if contains -- "$c" B b c D E e F I i J L l m O o P p Q R S W w
+                                if test $j -eq $len
+                                    set skip_next 1
+                                end
+                                break
+                            end
                         end
                     case '*'
                         set seen_dest 1

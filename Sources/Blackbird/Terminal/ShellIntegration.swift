@@ -31,6 +31,12 @@ enum ShellIntegration {
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "pty")
 
+    /// The one directory-name contract shared by `materialize` (which
+    /// writes `<root>/zdotdir/.zshenv`) and `envOverrides` (which points
+    /// the child's `ZDOTDIR` at it). Single constant so a rename can't
+    /// silently break one side.
+    private static let zdotdirComponent = "zdotdir"
+
     /// Where the bootstrap files live for this process, or nil when
     /// materialization failed (missing bundle templates, unwritable
     /// home). nil disables injection — the shell spawns exactly as it
@@ -70,7 +76,7 @@ enum ShellIntegration {
     /// against temp roots and their own template files.
     static func materialize(into root: URL, zshenvTemplate: URL, fishTemplate: URL) -> URL? {
         let fm = FileManager.default
-        let zdotdir = root.appendingPathComponent("zdotdir", isDirectory: true)
+        let zdotdir = root.appendingPathComponent(zdotdirComponent, isDirectory: true)
         let vendorDir = root.appendingPathComponent("fish/vendor_conf.d", isDirectory: true)
         do {
             try fm.createDirectory(at: zdotdir, withIntermediateDirectories: true)
@@ -95,6 +101,14 @@ enum ShellIntegration {
     /// integration dir / materialized root). Dispatch is on the LAST
     /// path component of `shellPath` (`/bin/zsh` → `zsh`), never a
     /// substring match.
+    ///
+    /// Ordering dependency: the `BB_*` keys returned here survive only
+    /// because `PTY`'s child setup scrubs BB_-namespaced PARENT env
+    /// (audit fix-#13) BEFORE applying overrides. In a nested-Blackbird
+    /// spawn (Blackbird inside Blackbird — a daily-real scenario) a stale
+    /// parent `BB_SHELL_INTEGRATION_DIR` is scrubbed and then freshly
+    /// re-set from this dictionary. If PTY's scrub ever moves after the
+    /// override application, these keys silently die — keep that order.
     static func envOverrides(
         shellPath: String,
         integrationDir: String?,
@@ -108,7 +122,7 @@ enum ShellIntegration {
         switch (shellPath as NSString).lastPathComponent {
         case "zsh":
             var env = [
-                "ZDOTDIR": root.appendingPathComponent("zdotdir").path,
+                "ZDOTDIR": root.appendingPathComponent(zdotdirComponent).path,
                 "BB_SHELL_INTEGRATION_DIR": dir,
             ]
             // Key-presence, not non-empty: an (unusual) empty ZDOTDIR in
@@ -119,10 +133,12 @@ enum ShellIntegration {
             }
             return env
         case "fish":
-            // Prepend our data dir; when the parent had no XDG_DATA_DIRS
-            // the XDG-spec default tail keeps fish's stock vendor dirs
-            // reachable (setting a bare value would HIDE them).
-            let tail = parentEnv["XDG_DATA_DIRS"] ?? "/usr/local/share:/usr/share"
+            // Prepend our data dir; when the parent had no XDG_DATA_DIRS —
+            // or an EMPTY one, which the XDG spec says means "use the
+            // default" — the default tail keeps fish's stock vendor dirs
+            // reachable (a bare value would HIDE them).
+            let parentXDG = parentEnv["XDG_DATA_DIRS"].flatMap { $0.isEmpty ? nil : $0 }
+            let tail = parentXDG ?? "/usr/local/share:/usr/share"
             return [
                 "XDG_DATA_DIRS": root.path + ":" + tail,
                 "BB_SHELL_INTEGRATION_DIR": dir,
