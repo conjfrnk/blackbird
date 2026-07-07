@@ -154,10 +154,9 @@ final class ShellIntegrationTests: XCTestCase {
             parentEnv: ["ZDOTDIR": ""],
             enabled: true
         )
-        XCTAssertNotNil(result.index(forKey: "BB_ORIG_ZDOTDIR"),
-            "an empty-but-present parent ZDOTDIR must still produce a BB_ORIG_ZDOTDIR key")
         XCTAssertEqual(result["BB_ORIG_ZDOTDIR"], "",
-            "BB_ORIG_ZDOTDIR must carry the empty value the parent set")
+            "an empty-but-present parent ZDOTDIR must still produce a "
+                + "BB_ORIG_ZDOTDIR key carrying the empty value the parent set")
         XCTAssertEqual(Set(result.keys),
             ["ZDOTDIR", "BB_SHELL_INTEGRATION_DIR", "BB_ORIG_ZDOTDIR"])
     }
