@@ -1,17 +1,24 @@
 # Blackbird OSC 133 prompt-marks integration (zsh).
 #
-# Usage: add this line to ~/.zshrc (or source it only in Blackbird):
+# Auto-loaded since the issue-#23 fix: Blackbird points ZDOTDIR at a
+# bootstrap .zshenv at spawn, which restores your real ZDOTDIR, chains
+# your own .zshenv, and sources this file (plus ssh.zsh) at first prompt.
+# Opt-out: Settings → "Automatic shell integration". Blackbird never
+# edits your rc files.
+#
+# Manual sourcing remains supported (and covers nested `zsh` sessions,
+# which the auto-injection deliberately does not reach — see
+# KNOWN_ISSUES "Shell integration auto-injection"). Add to ~/.zshrc:
 #
 #   [[ "$TERM_PROGRAM" == "Blackbird" ]] && \
-#     source /Applications/Blackbird.app/Contents/Resources/shell/osc133.zsh
+#     source /Applications/Blackbird.app/Contents/Resources/osc133.zsh
+#
+# (Resources are flat in the bundle — there is no shell/ subdirectory.)
 #
 # What it does: emits OSC 133 A/B/C/D sequences around your prompt + command
 # lifecycle so Blackbird knows where prompts start, commands begin, commands
 # end, and what their exit codes were. Invisible to the renderer — tracked
 # as metadata only.
-#
-# Opt-in, shell-side only. Blackbird never injects anything into your rc
-# files — consistent with "no config files" as a product principle.
 
 # Guard against double-sourcing.
 if (( ${+__BB_OSC133_LOADED} )); then return 0; fi

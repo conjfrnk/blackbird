@@ -179,6 +179,39 @@ a.download:focus-visible {
 }
 .bench-line a:hover { border-bottom-color: #FABD2F; }
 
+.faq {
+  margin: 56px auto 0;
+  max-width: 760px;
+  text-align: left;
+}
+.faq h2 {
+  font-size: 1rem;
+  color: #A89984;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 12px;
+}
+.faq details {
+  border-top: 1px solid rgba(168, 153, 132, 0.25);
+  padding: 12px 0;
+}
+.faq summary {
+  cursor: pointer;
+  color: #EBDBB2;
+  font-size: 0.9375rem;
+}
+.faq p {
+  margin-top: 10px;
+  color: #A89984;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+.faq code {
+  color: #83A598;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.8125rem;
+}
+
 footer {
   margin: 64px auto 0;
   max-width: 760px;

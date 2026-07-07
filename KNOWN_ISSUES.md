@@ -2,6 +2,34 @@
 
 Small list of deliberately-deferred polish items. If you hit one of these, it's documented, not forgotten.
 
+## Shell integration auto-injection — bash, nested shells, stale ssh cache
+
+Since the issue-#23 fix, Blackbird injects shell integration (OSC 133 prompt
+marks + the ssh terminfo wrapper) automatically for **zsh** (`ZDOTDIR`
+redirect) and **fish** (`XDG_DATA_DIRS` vendor conf.d) — no rc-file edits,
+opt-out in Settings. Three deliberate gaps:
+
+**bash is manual.** A login bash (`-il`, what Blackbird spawns) ignores
+`--rcfile`, and kitty's `--posix`+`ENV` bootstrap workaround is the most
+fragile part of kitty's tree — rejected for now. Bash users source the
+bundled `osc133.bash` / `ssh.bash` from `~/.bashrc` (path in each file's
+header). Revisit if anyone asks.
+
+**Nested interactive shells lose integration.** The zsh bootstrap restores
+the user's real `ZDOTDIR` before their rc files run, so typing `zsh` inside
+a session starts a shell that never sees the bootstrap (same trade kitty
+and Ghostty make). The ssh wrapper is therefore absent in nested shells;
+`TERM` is still `xterm-kitty`, so a nested `ssh` to a host without the
+entry reproduces #23. Manual sourcing from `.zshrc` covers this for anyone
+who nests routinely.
+
+**Stale ssh-host cache after a remote wipe.** Successful remote terminfo
+installs are cached per host in
+`~/.local/state/blackbird/ssh-terminfo-hosts`. If a remote host's
+`~/.terminfo` is later deleted, the cached entry skips reinstall and ncurses
+apps there break again until you delete that host's line (or the file).
+Failures are never cached, so transient errors self-heal.
+
 ## Move Tab to Window — minimized and fullscreen windows aren't offered
 
 **Symptom:** The tab-pill context menu's "Move Tab to Window ▸" submenu omits minimized (Dock) windows and fullscreen windows; with only one other window and it minimized, the submenu is absent entirely. The submenu is also absent while the *source* window is fullscreen.

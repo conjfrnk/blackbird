@@ -48,7 +48,7 @@
         "license": "https://opensource.org/licenses/MIT"
       }
     </script>
-    <link rel="stylesheet" href="/styles.css?v=15" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
   </head>
   <body>
     <main>
@@ -91,6 +91,25 @@
 
       <div class="bench-line">
         Throughput is measured against Terminal.app, iTerm2, Ghostty, and Alacritty. <a href="https://github.com/conjfrnk/blackbird/blob/main/docs/benchmarks/vtebench-2026-04-20.md">See benchmarks →</a>
+      </div>
+
+      <div class="faq">
+        <h2>FAQ</h2>
+        <details>
+          <summary>ssh says <code>'xterm-kitty': unknown terminal type.</code></summary>
+          <p>
+            Blackbird advertises <code>TERM=xterm-kitty</code> so kitty-aware tools get the full
+            keyboard protocol, but older remote hosts don't ship that terminfo entry. Current
+            versions of Blackbird fix this automatically: on the first <code>ssh</code> to a host,
+            shell integration installs the entry remotely (cached per host), and if the remote
+            can't accept it, that connection quietly falls back to <code>TERM=xterm-256color</code>.
+            On older Blackbird versions, run
+            <code>infocmp&nbsp;-x&nbsp;xterm-kitty&nbsp;|&nbsp;ssh&nbsp;&lt;host&gt;&nbsp;'tic&nbsp;-x&nbsp;-'</code>
+            once per host, or install <code>ncurses-term</code> on the remote. Automatic
+            integration covers zsh and fish; bash users can source the bundled
+            <code>ssh.bash</code> from <code>.bashrc</code>.
+          </p>
+        </details>
       </div>
 
       <footer>
