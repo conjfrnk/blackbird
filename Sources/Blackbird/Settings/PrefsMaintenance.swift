@@ -75,6 +75,9 @@ enum PrefsSanitizer {
             // yes) is stripped before the registered default is applied,
             // matching sibling bool prefs.
             "confirmMultiLinePaste",
+            // Issue #23: manual computed property (not @AppStorage) but the
+            // same wrong-type CLI-write hazard applies to its raw key.
+            "automaticShellIntegration",
         ]
         // S5-009: read from the persistent domain only, mirroring the S5-001
         // migration fix. `defaults.object(forKey:)` walks the full search list

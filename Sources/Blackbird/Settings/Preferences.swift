@@ -232,6 +232,30 @@ public final class Preferences: ObservableObject {
     /// hardening option rather than a broken-by-default. See
     /// `terminal_replies.rs` security test.
     @AppStorage("bb.colorQueryEnabled") public var colorQueryEnabled: Bool = true
+    /// Automatic shell integration (issue #23): at spawn, inject OSC 133
+    /// prompt marks + the ssh terminfo wrapper for zsh (ZDOTDIR
+    /// redirect) and fish (XDG_DATA_DIRS vendor conf.d) without touching
+    /// rc files. Read at session start — toggling affects the NEXT
+    /// spawned shell, never live ones.
+    ///
+    /// Deliberately NOT `@AppStorage`: a same-value `@AppStorage` write
+    /// still writes UserDefaults, and EVERY UserDefaults write re-enters
+    /// `Preferences.objectWillChange` through SwiftUI's global bridge —
+    /// the Settings-beachball root cause (982b719). The same-value guard
+    /// below makes an unchanged write a true no-op: no store write, no
+    /// `didChangeNotification`, no bridge re-entry. SwiftUI bindings
+    /// (`$prefs.automaticShellIntegration`) work fine on a plain
+    /// computed property via `ObservedObject`'s member subscript.
+    public var automaticShellIntegration: Bool {
+        get {
+            (UserDefaults.standard.object(forKey: Self.k("automaticShellIntegration")) as? Bool) ?? true
+        }
+        set {
+            guard newValue != automaticShellIntegration else { return }
+            objectWillChange.send()
+            UserDefaults.standard.set(newValue, forKey: Self.k("automaticShellIntegration"))
+        }
+    }
     /// Combined transparency + blur intensity on a 1…10 scale. 1 = fully
     /// opaque, 10 = maximum transparency with heavy blur. 5 is the
     /// daily-driver default — the lift Connor ended up preferring after
@@ -386,6 +410,7 @@ public final class Preferences: ObservableObject {
             Preferences.k("autoUpdateChecks"):  false,
             Preferences.k("osc52Enabled"):      false,
             Preferences.k("colorQueryEnabled"): true,
+            Preferences.k("automaticShellIntegration"): true,
             Preferences.k("translucency"):      5.0,
             // Audit fix-#15: this default was declared above as
             // @AppStorage("bb.confirmMultiLinePaste") but never registered.

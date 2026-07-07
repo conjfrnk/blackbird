@@ -721,6 +721,22 @@ final class PreferencesTests: XCTestCase {
         }
     }
 
+    /// Issue #24: color-query replies (OSC 10/11/12) must default ON.
+    /// Codex CLI probes OSC 10/11 at startup for light/dark detection;
+    /// the old `false` default silently dropped the query and degraded
+    /// its palette. Guards against the default regressing to `false`
+    /// (the class-level snapshot in setUp/tearDown restores the user's
+    /// real value around the removeObject below).
+    func test_colorQueryEnabled_defaultsToTrue_issue24() {
+        let d = UserDefaults.standard
+        d.removeObject(forKey: "bb.colorQueryEnabled")
+        XCTAssertTrue(
+            Preferences.shared.colorQueryEnabled,
+            "colorQueryEnabled must default to true — a false default breaks "
+                + "OSC 10/11 theme detection in Codex CLI and friends (issue #24)."
+        )
+    }
+
     /// A wrong-type value for a numeric key gets scrubbed at init so
     /// `@AppStorage<Double>` reads don't trip the KVC bridge. Direct
     /// reproduction: write a string under `bb.fontSize`, then re-run
