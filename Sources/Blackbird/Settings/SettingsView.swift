@@ -206,7 +206,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Security")
             } footer: {
-                SettingsChrome.footer("OSC 10/11/12 lets TUIs like Neovim and tmux query your current foreground, background, and cursor colors. Off by default — the reply travels back through the PTY, where a misbehaving shell could attempt to interpret it as commands.")
+                SettingsChrome.footer("OSC 10/11/12 lets TUIs like Codex, Neovim, and tmux query your current foreground, background, and cursor colors for light/dark theme detection. On by default (replies are rate-capped); turn off as a hardening measure if you don't trust your shell's escape-handling — some TUIs will fall back to degraded colors.")
             }
         }
         .formStyle(.grouped)

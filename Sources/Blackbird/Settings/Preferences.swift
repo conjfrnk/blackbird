@@ -219,13 +219,19 @@ public final class Preferences: ObservableObject {
     /// command. iTerm2's "Confirm when pasting more than N lines"
     /// has the same shape; we keep it simple at one-line-or-more.
     @AppStorage("bb.confirmMultiLinePaste") public var confirmMultiLinePaste: Bool = false
-    /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. Off by default
-    /// because the reply (`\e]10;rgb:…\e\\`) is routed back into the PTY
-    /// where a misbehaving shell / zsh-vi-mode can interpret it as
-    /// commands. Turn on if you want nvim / tmux auto-theming and you
-    /// trust your shell's escape-handling. See `terminal_replies.rs`
-    /// security test.
-    @AppStorage("bb.colorQueryEnabled") public var colorQueryEnabled: Bool = false
+    /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. ON by default
+    /// since issue #24: modern TUIs (Codex CLI, nvim, delta, fzf) probe
+    /// OSC 10/11 at startup for light/dark theme detection, and a silent
+    /// drop degrades them to a colorless fallback after a reply-timeout
+    /// stall — Codex loses its composer background entirely. iTerm2,
+    /// kitty, alacritty, WezTerm and Ghostty all reply by default; the
+    /// hostile-spam reply rate cap (core Bug #17, `ColorRequestQueue`)
+    /// plus this opt-out toggle keep the original concern — the reply
+    /// (`\e]10;rgb:…\e\\`) travels back through the PTY where a
+    /// misbehaving shell / zsh-vi-mode could try to interpret it — as a
+    /// hardening option rather than a broken-by-default. See
+    /// `terminal_replies.rs` security test.
+    @AppStorage("bb.colorQueryEnabled") public var colorQueryEnabled: Bool = true
     /// Combined transparency + blur intensity on a 1…10 scale. 1 = fully
     /// opaque, 10 = maximum transparency with heavy blur. 5 is the
     /// daily-driver default — the lift Connor ended up preferring after
@@ -379,7 +385,7 @@ public final class Preferences: ObservableObject {
             Preferences.k("confirmClose"):      true,
             Preferences.k("autoUpdateChecks"):  false,
             Preferences.k("osc52Enabled"):      false,
-            Preferences.k("colorQueryEnabled"): false,
+            Preferences.k("colorQueryEnabled"): true,
             Preferences.k("translucency"):      5.0,
             // Audit fix-#15: this default was declared above as
             // @AppStorage("bb.confirmMultiLinePaste") but never registered.
