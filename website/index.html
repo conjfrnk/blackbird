@@ -112,7 +112,10 @@
             <code>infocmp&nbsp;-x&nbsp;xterm-kitty&nbsp;|&nbsp;ssh&nbsp;&lt;host&gt;&nbsp;'tic&nbsp;-x&nbsp;-'</code>
             once per host, or install <code>ncurses-term</code> on the remote. Automatic
             integration covers zsh and fish; bash users can source the bundled
-            <code>ssh.bash</code> from <code>.bashrc</code>.
+            <code>ssh.bash</code> from <code>.bashrc</code>. Inside tmux, panes see tmux's own
+            <code>default-terminal</code> instead — if colors look wrong there (in any terminal),
+            add <code>set&nbsp;-g&nbsp;default-terminal&nbsp;"tmux-256color"</code> to your tmux
+            config.
           </p>
         </details>
       </div>

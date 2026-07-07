@@ -49,6 +49,14 @@ cache lives in `~/.local/state/blackbird/ssh-terminfo-hosts` — delete a
 host's line if you wipe the remote `~/.terminfo` (successes are cached,
 failures never are).
 
+**tmux is out of the wrapper's reach.** tmux substitutes its own
+`default-terminal` for every pane's TERM, so what a TUI inside tmux
+sees is decided entirely by the tmux config — local or remote, no ssh
+wrapper can touch it. If tmux falls back to bare `screen` (old tmux, or
+an unset `default-terminal`), string-sniffing TUIs drop styling inside
+tmux under EVERY outer terminal, Blackbird included. Remedy is one line
+of tmux config: `set -g default-terminal "tmux-256color"`.
+
 ## Move Tab to Window — minimized and fullscreen windows aren't offered
 
 **Symptom:** The tab-pill context menu's "Move Tab to Window ▸" submenu omits minimized (Dock) windows and fullscreen windows; with only one other window and it minimized, the submenu is absent entirely. The submenu is also absent while the *source* window is fullscreen.
