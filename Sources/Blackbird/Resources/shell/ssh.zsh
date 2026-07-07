@@ -14,12 +14,14 @@ typeset -g __BB_SSH_WRAPPER_LOADED=1
 if (( ${+functions[ssh]} )) || (( ${+aliases[ssh]} )); then return 0; fi
 
 __bb_ssh_cache_file() {
+  emulate -L zsh
   print -r -- "${XDG_STATE_HOME:-$HOME/.local/state}/blackbird/ssh-terminfo-hosts"
 }
 
 # Canonical "user@hostname:port" via `ssh -G` (resolves aliases, Match
 # blocks, ProxyJump). Fails (non-zero) when ssh can't parse the argv.
 __bb_ssh_dest() {
+  emulate -L zsh
   command ssh -G "$@" 2>/dev/null | command awk '
     $1 == "user"     && u == "" { u = $2 }
     $1 == "hostname" && h == "" { h = $2 }
@@ -38,6 +40,9 @@ __bb_ssh_dest() {
 # swallowed the destination — which made `ssh -oX=no host cmd` look
 # interactive and appended `tic -x -` to the user's remote command.
 __bb_ssh_has_remote_command() {
+  # Local emulation: user setopt (ksh_arrays, sh_word_split) must not
+  # change ${a[j]} indexing semantics under this parser.
+  emulate -L zsh
   local opts_with_arg="BbcDEeFIiJLlmOoPpQRSWw"
   local -a args
   args=("$@")
@@ -69,10 +74,11 @@ __bb_ssh_has_remote_command() {
 }
 
 ssh() {
+  emulate -L zsh
   if [[ "$TERM" != "xterm-kitty" ]]; then
     command ssh "$@"; return $?
   fi
-  local dest cache
+  local dest cache src
   if ! dest="$(__bb_ssh_dest "$@")"; then
     TERM=xterm-256color command ssh "$@"; return $?
   fi
@@ -83,8 +89,17 @@ ssh() {
   if __bb_ssh_has_remote_command "$@"; then
     TERM=xterm-256color command ssh "$@"; return $?
   fi
+  # Capture the terminfo source BEFORE connecting: `tic -x -` exits 0 on
+  # EMPTY stdin, so piping a failed local infocmp straight into the
+  # remote would "succeed", cache the host, and permanently pin a broken
+  # kitty TERM there (panel finding). Empty source ⇒ downgrade, uncached.
+  src="$(command infocmp -x xterm-kitty 2>/dev/null)"
+  if [[ -z "$src" ]]; then
+    print -u2 -- "blackbird: local xterm-kitty terminfo source unavailable — using TERM=xterm-256color for this connection"
+    TERM=xterm-256color command ssh "$@"; return $?
+  fi
   print -u2 -- "blackbird: installing xterm-kitty terminfo on ${dest} (first connect — may authenticate twice)"
-  if command infocmp -x xterm-kitty 2>/dev/null | command ssh "$@" 'tic -x - 2>/dev/null'; then
+  if print -r -- "$src" | command ssh "$@" 'tic -x - 2>/dev/null'; then
     command mkdir -p -- "${cache:h}" 2>/dev/null
     if print -r -- "$dest" >> "$cache" 2>/dev/null; then
       command chmod 600 -- "$cache" 2>/dev/null

@@ -66,7 +66,7 @@ final class SessionLifecycle {
         let integrationEnv = ShellIntegration.envOverrides(
             shellPath: shell,
             integrationDir: Bundle.main.resourcePath,
-            materializedRoot: ShellIntegration.materializedRoot,
+            materializedRoot: ShellIntegration.currentRoot(),
             parentEnv: ProcessInfo.processInfo.environment,
             enabled: Preferences.shared.automaticShellIntegration
         )

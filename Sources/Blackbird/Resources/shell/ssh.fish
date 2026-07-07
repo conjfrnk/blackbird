@@ -109,8 +109,19 @@ if not set -q __BB_SSH_WRAPPER_LOADED
                 TERM=xterm-256color command ssh $argv
                 return $status
             end
+            # Capture the terminfo source BEFORE connecting: `tic -x -`
+            # exits 0 on EMPTY stdin, so piping a failed local infocmp
+            # straight into the remote would "succeed", cache the host,
+            # and permanently pin a broken kitty TERM there (panel
+            # finding). Empty source ⇒ downgrade, uncached.
+            set -l src (command infocmp -x xterm-kitty 2>/dev/null | string collect)
+            if test -z "$src"
+                printf 'blackbird: local xterm-kitty terminfo source unavailable — using TERM=xterm-256color for this connection\n' >&2
+                TERM=xterm-256color command ssh $argv
+                return $status
+            end
             printf 'blackbird: installing xterm-kitty terminfo on %s (first connect — may authenticate twice)\n' "$dest" >&2
-            if command infocmp -x xterm-kitty 2>/dev/null | command ssh $argv 'tic -x - 2>/dev/null'
+            if printf '%s\n' "$src" | command ssh $argv 'tic -x - 2>/dev/null'
                 command mkdir -p -- (dirname -- "$cache") 2>/dev/null
                 if printf '%s\n' "$dest" >> "$cache" 2>/dev/null
                     command chmod 600 -- "$cache" 2>/dev/null

@@ -82,7 +82,7 @@ ssh() {
   if [[ "$TERM" != "xterm-kitty" ]]; then
     command ssh "$@"; return $?
   fi
-  local dest cache
+  local dest cache src
   if ! dest="$(__bb_ssh_dest "$@")"; then
     TERM=xterm-256color command ssh "$@"; return $?
   fi
@@ -93,8 +93,17 @@ ssh() {
   if __bb_ssh_has_remote_command "$@"; then
     TERM=xterm-256color command ssh "$@"; return $?
   fi
+  # Capture the terminfo source BEFORE connecting: `tic -x -` exits 0 on
+  # EMPTY stdin, so piping a failed local infocmp straight into the
+  # remote would "succeed", cache the host, and permanently pin a broken
+  # kitty TERM there (panel finding). Empty source ⇒ downgrade, uncached.
+  src="$(command infocmp -x xterm-kitty 2>/dev/null)"
+  if [[ -z "$src" ]]; then
+    printf 'blackbird: local xterm-kitty terminfo source unavailable — using TERM=xterm-256color for this connection\n' >&2
+    TERM=xterm-256color command ssh "$@"; return $?
+  fi
   printf 'blackbird: installing xterm-kitty terminfo on %s (first connect — may authenticate twice)\n' "$dest" >&2
-  if command infocmp -x xterm-kitty 2>/dev/null | command ssh "$@" 'tic -x - 2>/dev/null'; then
+  if printf '%s\n' "$src" | command ssh "$@" 'tic -x - 2>/dev/null'; then
     command mkdir -p -- "${cache%/*}" 2>/dev/null
     if printf '%s\n' "$dest" >> "$cache" 2>/dev/null; then
       command chmod 600 -- "$cache" 2>/dev/null

@@ -171,7 +171,9 @@ final class SSHWrapperZshTests: XCTestCase {
         let infocmpStub = """
         #!/bin/sh
         printf 'INFOCMP ARGS=%s\\n' "$*" >> "$STUB_LOG"
-        printf 'blackbird-dummy-terminfo-source\\n'
+        if [ "${STUB_INFOCMP_SILENT:-0}" != "1" ]; then
+          printf 'blackbird-dummy-terminfo-source\\n'
+        fi
         exit "${STUB_INFOCMP_EXIT:-0}"
         """
         try write(sshStub, to: binDir.appendingPathComponent("ssh"))
@@ -673,6 +675,28 @@ final class SSHWrapperZshTests: XCTestCase {
             XCTAssertEqual(r.term(prefix: "CONNECT"), "xterm-256color",
                 "`ssh \(args.joined(separator: " "))` must connect with xterm-256color")
         }
+    }
+
+    /// Panel silent-failure finding #1 regression: `tic -x -` exits 0 on
+    /// EMPTY stdin, so a failing local infocmp piped straight into the
+    /// remote would "succeed", cache the host, and permanently pin a
+    /// broken kitty TERM there. The wrapper must capture the source
+    /// first: empty ⇒ downgrade this connection, cache NOTHING, never
+    /// run the remote tic.
+    ///
+    /// Cost: 1 driver + 2 stubs, ~80 ms.
+    func test_kitty_emptyInfocmpSource_downgradesUncached_neverRunsTic() throws {
+        let r = try run(term: "xterm-kitty", args: ["testhost"],
+                        env: ["STUB_INFOCMP_SILENT": "1", "STUB_INFOCMP_EXIT": "1"])
+        XCTAssertEqual(r.count(prefix: "INFOCMP"), 1,
+            "the wrapper must have consulted infocmp. log=\(r.logLines)")
+        XCTAssertEqual(r.count(prefix: "TIC"), 0,
+            "an empty terminfo source must never reach the remote tic — "
+            + "tic exits 0 on empty stdin and would poison the cache. log=\(r.logLines)")
+        XCTAssertEqual(r.term(prefix: "CONNECT"), "xterm-256color",
+            "empty local source downgrades this connection")
+        XCTAssertFalse(r.cacheLines.contains("testuser@testhost:22"),
+            "an empty-source failure must NOT be cached — the next connect retries")
     }
 
     // MARK: - ssh -G failure

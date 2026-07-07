@@ -44,6 +44,16 @@ enum ShellIntegration {
     /// Computed once per process (`swift_once`), same discipline as
     /// `KittyTerminfo.available`.
     static let materializedRoot: URL? = {
+        guard let (zshenv, fishConf) = bundleTemplates() else { return nil }
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/blackbird/shell", isDirectory: true)
+        return materialize(into: root, zshenvTemplate: zshenv, fishTemplate: fishConf)
+    }()
+
+    /// The two bundled bootstrap templates, or nil (logged) when the
+    /// bundle is broken — the one condition that permanently disables
+    /// auto-injection for the process.
+    private static func bundleTemplates() -> (zshenv: URL, fish: URL)? {
         guard
             let zshenv = Bundle.main.url(forResource: "zshenv-bootstrap", withExtension: "zsh"),
             let fishConf = Bundle.main.url(forResource: "fish-vendor-conf", withExtension: "fish")
@@ -51,10 +61,37 @@ enum ShellIntegration {
             logger.error("ShellIntegration: bundled bootstrap templates missing — auto-injection disabled")
             return nil
         }
-        let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/blackbird/shell", isDirectory: true)
-        return materialize(into: root, zshenvTemplate: zshenv, fishTemplate: fishConf)
-    }()
+        return (zshenv, fishConf)
+    }
+
+    /// The root to inject for THIS spawn — re-stats the zsh bootstrap
+    /// every time. `materializedRoot` resolves once per process, but the
+    /// tree under `~/.local/share` looks exactly like disposable app
+    /// data; if the user deletes it mid-session, handing the child a
+    /// ZDOTDIR whose `.zshenv` is gone makes zsh resolve ALL startup
+    /// files against the dead directory — silently stripping the user's
+    /// entire zsh config from every new tab (panel finding; fish fails
+    /// soft, zsh is the blast radius). Missing bootstrap ⇒
+    /// re-materialize; if that fails too ⇒ nil ⇒ no injection.
+    static func currentRoot() -> URL? {
+        guard let root = materializedRoot else { return nil }
+        guard let (zshenv, fishConf) = bundleTemplates() else { return nil }
+        return revalidatedRoot(root, zshenvTemplate: zshenv, fishTemplate: fishConf)
+    }
+
+    /// Testable core of `currentRoot`: return `root` when its zsh
+    /// bootstrap is present, else re-materialize (logged) and return the
+    /// result.
+    static func revalidatedRoot(_ root: URL, zshenvTemplate: URL, fishTemplate: URL) -> URL? {
+        let zshenv = root
+            .appendingPathComponent(zdotdirComponent, isDirectory: true)
+            .appendingPathComponent(".zshenv")
+        if FileManager.default.fileExists(atPath: zshenv.path) {
+            return root
+        }
+        logger.error("ShellIntegration: bootstrap tree missing at spawn (deleted mid-session?) — re-materializing")
+        return materialize(into: root, zshenvTemplate: zshenvTemplate, fishTemplate: fishTemplate)
+    }
 
     /// Kick the one-shot materialization onto a background thread so the
     /// first `PTY.spawn` on the cold-launch critical path never pays for

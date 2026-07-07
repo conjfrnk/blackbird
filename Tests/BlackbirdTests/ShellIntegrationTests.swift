@@ -346,6 +346,48 @@ final class ShellIntegrationTests: XCTestCase {
             "the materialized blackbird.fish must contain the fish template's bytes")
     }
 
+    /// Panel silent-failure finding #3 regression: `materializedRoot`
+    /// resolves once per process, but the tree under ~/.local/share looks
+    /// like disposable app data. If it's deleted mid-session, injecting a
+    /// ZDOTDIR whose .zshenv is gone makes zsh resolve ALL startup files
+    /// against the dead directory — silently stripping the user's entire
+    /// zsh config from every new tab. `revalidatedRoot` must re-stat the
+    /// bootstrap per spawn and re-materialize on a miss.
+    func test_revalidatedRoot_intactTree_returnsRootWithoutRewrite() throws {
+        let zTemplate = try writeTemplate("zshenv.tmpl", marker: "Z-\(UUID().uuidString)")
+        let fTemplate = try writeTemplate("fish.tmpl", marker: "F-\(UUID().uuidString)")
+        let root = tempBase.appendingPathComponent("revalid-intact")
+        _ = ShellIntegration.materialize(into: root, zshenvTemplate: zTemplate, fishTemplate: fTemplate)
+
+        // Hand-mark the materialized file; an intact tree must NOT be
+        // rewritten by revalidation (that's launch-time materialize's job).
+        let zDest = root.appendingPathComponent("zdotdir/.zshenv")
+        try "HAND-MARK".write(to: zDest, atomically: true, encoding: .utf8)
+
+        let returned = ShellIntegration.revalidatedRoot(
+            root, zshenvTemplate: zTemplate, fishTemplate: fTemplate)
+        XCTAssertEqual(returned, root, "an intact tree revalidates to itself")
+        XCTAssertEqual(try contents(of: zDest), "HAND-MARK",
+            "revalidation of an intact tree must be a pure stat — no rewrite")
+    }
+
+    func test_revalidatedRoot_deletedTree_rematerializes() throws {
+        let zMarker = "Z-REVIVED-\(UUID().uuidString)"
+        let zTemplate = try writeTemplate("zshenv.tmpl", marker: zMarker)
+        let fTemplate = try writeTemplate("fish.tmpl", marker: "F-\(UUID().uuidString)")
+        let root = tempBase.appendingPathComponent("revalid-deleted")
+        _ = ShellIntegration.materialize(into: root, zshenvTemplate: zTemplate, fishTemplate: fTemplate)
+        try FileManager.default.removeItem(at: root)   // "user cleans app data"
+
+        let returned = ShellIntegration.revalidatedRoot(
+            root, zshenvTemplate: zTemplate, fishTemplate: fTemplate)
+        XCTAssertEqual(returned, root,
+            "a deleted tree must be re-materialized, not injected dead")
+        XCTAssertEqual(
+            try contents(of: root.appendingPathComponent("zdotdir/.zshenv")), zMarker,
+            "the revived bootstrap must carry the template bytes")
+    }
+
     func test_materialize_overwritesTamperedDestinations() throws {
         let zMarker = "ZSHENV-AUTHORITATIVE-\(UUID().uuidString)"
         let fMarker = "FISH-AUTHORITATIVE-\(UUID().uuidString)"
