@@ -211,7 +211,8 @@ public final class TerminalSession: ObservableObject {
         shell: String,
         arguments: [String],
         size: Size,
-        initialWorkingDirectory: String? = nil
+        initialWorkingDirectory: String? = nil,
+        envOverrides: [String: String] = [:]
     ) throws -> TerminalSession {
         let t0 = CACurrentMediaTime()
         guard let bb = BBTerm(size: .init(cols: size.cols, rows: size.rows)) else {
@@ -221,7 +222,7 @@ public final class TerminalSession: ObservableObject {
         let pty = try PTY.spawn(
             executable: shell,
             arguments: arguments,
-            envOverrides: [:],
+            envOverrides: envOverrides,
             size: size,
             initialWorkingDirectory: initialWorkingDirectory
         )
