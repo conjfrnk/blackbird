@@ -42,7 +42,12 @@ __bb_osc133_prompt() {
 
 # Bash's PS0 is expanded just AFTER reading a command and just BEFORE executing
 # it — the exact window we want to emit C (command output starts here).
-PS0='$(__bb_osc133_c)'"${PS0:-}"
+# Literal bytes for the same reason as PS1's B below: a $(...) left in
+# PS0 needs `promptvars` (on by default, but off in hardened setups),
+# where it would print verbatim before every command's output. The
+# doubled trailing backslash survives PS0's prompt decode collapsing
+# `\\` → `\` when user PS0 content follows — don't "simplify" it.
+PS0="$(printf '\e]133;C\e\\\\')${PS0:-}"
 
 # Hook PROMPT_COMMAND so D+A fire at prompt time. Preserve the user's
 # existing PROMPT_COMMAND by chaining.
