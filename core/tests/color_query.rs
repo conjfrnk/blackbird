@@ -122,4 +122,11 @@ fn bel_terminator_also_works_for_query() {
     assert_eq!(writes.len(), 1);
     let s = std::str::from_utf8(&writes[0]).unwrap();
     assert!(s.starts_with("\x1b]11;rgb:"));
+    // xterm echoes the query's terminator: a BEL-terminated query gets a
+    // BEL-terminated reply (an always-ST regression would confuse the
+    // BEL-form clients that asked).
+    assert!(
+        s.ends_with("\x07"),
+        "BEL-terminated query must get a BEL-terminated reply, got {s:?}"
+    );
 }
