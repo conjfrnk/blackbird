@@ -751,12 +751,15 @@ final class ShellIntegrationScriptTests: XCTestCase {
         )
     }
 
-    /// Pin the fish wiring. fish doesn't use PS1; the snippet documents
-    /// that users append `__bb_osc133_b` to their `fish_prompt` function
-    /// manually. The function `__bb_osc133_b` MUST be defined post-
-    /// source — that's the precondition for any user-side wiring to
-    /// work. A regression that dropped the function definition (while
-    /// leaving the event handlers in place) would silently break B.
+    /// Pin the fish B wiring. fish doesn't use PS1; sourcing the snippet now
+    /// wraps the user's `fish_prompt` so the OSC 133;B mark fires
+    /// AUTOMATICALLY at the end of every rendered prompt — no manual user
+    /// wiring required (that behaviour is pinned by the
+    /// `..._autoEmitsBMark_*` tests below). `__bb_osc133_b` MUST still be
+    /// defined and callable post-source: it is what the wrapper invokes, and
+    /// it stays available for advanced/manual use. A regression that dropped
+    /// the function definition (while leaving the event handlers in place)
+    /// would silently break B.
     func test_osc133_fish_promptFunctionDefined() throws {
         let scriptURL = try locateScript(named: "osc133.fish")
         guard let fish = locateShell("fish") else {
@@ -776,9 +779,82 @@ final class ShellIntegrationScriptTests: XCTestCase {
         let out = try runShell(at: fish, scriptBody: body)
         XCTAssertTrue(
             out.contains("BB_FN_DEFINED"),
-            "fish: __bb_osc133_b must be defined after sourcing the snippet — users " +
-            "wire it into fish_prompt themselves; without the function, no wiring is " +
-            "possible. Got: \(debugHex(out))"
+            "fish: __bb_osc133_b must stay defined and callable after sourcing the " +
+            "snippet — B now fires automatically via the snippet's fish_prompt wrapper, " +
+            "which calls __bb_osc133_b; without the function, automatic B is impossible. " +
+            "Got: \(debugHex(out))"
+        )
+    }
+
+    // MARK: - fish automatic B mark (Contract A)
+
+    /// A.1 + A.3 — B fires automatically at the END of the prompt. The user
+    /// defines their own `fish_prompt`, THEN sources the snippet; afterwards,
+    /// calling `fish_prompt` must print the user's prompt text verbatim
+    /// IMMEDIATELY followed by the raw OSC 133;B bytes, with no manual wiring
+    /// (the user never touches `__bb_osc133_b`). This is the whole point of
+    /// the auto-integration: a stock fish user gets B for free.
+    func test_osc133_fish_autoEmitsBMark_afterUserPrompt() throws {
+        let scriptURL = try locateScript(named: "osc133.fish")
+        guard let fish = locateShell("fish") else {
+            throw XCTSkip("fish not installed (not a regression — fish is optional on macOS)")
+        }
+        // Define the prompt FIRST, then source: the snippet must wrap the
+        // user's existing fish_prompt at source time so the wrapped function
+        // emits B when called.
+        let body = """
+        function fish_prompt; printf 'XYZPROMPT> '; end
+        source '\(scriptURL.path)'
+        fish_prompt
+        """
+        let out = try runShell(at: fish, scriptBody: body)
+
+        XCTAssertTrue(
+            out.hasPrefix("XYZPROMPT> "),
+            "fish: the user's original prompt output must be preserved verbatim as the "
+            + "prefix. Got: \(debugHex(out))"
+        )
+        XCTAssertTrue(
+            out.contains(Self.oscCommandStart),
+            "fish: sourcing the snippet must make fish_prompt emit OSC 133;B "
+            + "automatically — with NO manual __bb_osc133_b wiring by the user. "
+            + "Got: \(debugHex(out))"
+        )
+        XCTAssertTrue(
+            out.contains("XYZPROMPT> " + Self.oscCommandStart),
+            "fish: the B mark must fire at the END of the prompt — immediately after the "
+            + "user's prompt text (B marks where the user begins typing, so it belongs at "
+            + "the end of the prompt, not the start). Got: \(debugHex(out))"
+        )
+    }
+
+    /// A.2 — double-source stays safe. Sourcing the snippet twice must not
+    /// stack the fish_prompt wrapper: exactly ONE OSC 133;B per fish_prompt
+    /// call (a count of 2 would mean every rendered prompt emits B twice).
+    func test_osc133_fish_autoEmitsBMark_doubleSourceEmitsSingleB() throws {
+        let scriptURL = try locateScript(named: "osc133.fish")
+        guard let fish = locateShell("fish") else {
+            throw XCTSkip("fish not installed (not a regression — fish is optional on macOS)")
+        }
+        let body = """
+        function fish_prompt; printf 'XYZPROMPT> '; end
+        source '\(scriptURL.path)'
+        source '\(scriptURL.path)'
+        fish_prompt
+        """
+        let out = try runShell(at: fish, scriptBody: body)
+
+        XCTAssertTrue(
+            out.hasPrefix("XYZPROMPT> "),
+            "fish: the prompt prefix must survive a double-source. Got: \(debugHex(out))"
+        )
+        let bCount = out.components(separatedBy: Self.oscCommandStart).count - 1
+        XCTAssertEqual(
+            bCount, 1,
+            "fish: after sourcing the snippet twice, a single fish_prompt call must emit "
+            + "exactly ONE OSC 133;B (got \(bCount)). More than one means the wrapper "
+            + "stacked on re-source and every prompt would emit B repeatedly. "
+            + "Got: \(debugHex(out))"
         )
     }
 

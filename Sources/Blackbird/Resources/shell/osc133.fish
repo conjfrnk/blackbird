@@ -43,13 +43,33 @@ function __bb_osc133_before_prompt --on-event fish_prompt
     __bb_osc133_a
 end
 
-# fish doesn't have a separate B hook — the prompt function emits it at
-# the very end. Define a wrapper that users can append to fish_prompt:
-#
-#   function fish_prompt
-#       ...your prompt contents...
-#       __bb_osc133_b
-#   end
-#
-# If the user already defines fish_prompt, they should add the
-# `__bb_osc133_b` call manually at the end.
+# fish has no separate B hook, so wrap fish_prompt to emit B after the
+# prompt text — where user-editable input begins — matching the zsh/bash
+# dialects (they append the literal bytes to PS1; kitty's fish
+# integration wraps the same way). This file loads at the first
+# fish_prompt event, so the user's (or their theme's) fish_prompt
+# already exists and is preserved via a copy. A later redefinition of
+# fish_prompt drops the mark — the same accepted trade as a PS1
+# reassignment in zsh/bash; such users can call `__bb_osc133_b` at the
+# end of their own fish_prompt.
+if functions -q fish_prompt
+    and not functions -q __bb_original_fish_prompt
+    # Never wrap a prompt that already emits B — a `funcsave fish_prompt`
+    # while wrapped persists the WRAPPER body, and copying that into
+    # __bb_original_fish_prompt next session would make it call itself
+    # (immediate-recursion error on every prompt; see KNOWN_ISSUES
+    # "funcsave fish_prompt").
+    and not string match -q '*__bb_osc133_b*' -- (functions fish_prompt | string collect)
+    and functions -c fish_prompt __bb_original_fish_prompt
+    # Wrapper defined only when the copy above succeeded — otherwise it
+    # would call a function that doesn't exist on every prompt. The
+    # in-wrapper existence check covers a persisted (funcsave'd) wrapper
+    # body running in a session where the copy was never made: degrade
+    # to a bare-but-working prompt instead of a per-prompt error.
+    function fish_prompt
+        if functions -q __bb_original_fish_prompt
+            __bb_original_fish_prompt
+        end
+        __bb_osc133_b
+    end
+end
