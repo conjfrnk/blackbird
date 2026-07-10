@@ -910,4 +910,56 @@ final class SSHWrapperPortsTests: XCTestCase {
         XCTAssertEqual(termField(try XCTUnwrap(connectLines(run.log).first)), Self.kittyTERM,
             "log=\(run.log)")
     }
+
+    // MARK: - fish: cache-file path derivation (empty vs set XDG_STATE_HOME)
+
+    /// Contract C.1 — XDG_STATE_HOME is SET but EMPTY. The XDG Base Directory
+    /// spec says an empty value must be treated as unset ("use the default").
+    /// The zsh/bash dialects already do this via `${XDG_STATE_HOME:-…}`; the
+    /// fish port must match. A naive equivalent (`set -q` treats empty as
+    /// "present", or plain concatenation) resolves the cache to a bare,
+    /// root-anchored `/blackbird/ssh-terminfo-hosts` — unwritable, so the
+    /// terminfo cache silently never persists. The correct fallback is
+    /// `$HOME/.local/state/blackbird/ssh-terminfo-hosts`.
+    ///
+    /// Observed behaviorally (the wrapper does not expose its cache path as a
+    /// source-time variable): drive a kitty cache-MISS install, then assert
+    /// the cache line lands under the HOME default — the true user-facing
+    /// effect of the path derivation.
+    func test_fish_emptyXdgStateHome_cachesUnderHomeDefault() throws {
+        let fish = try requireFish()
+        let ssh = try shellFile("ssh.fish")
+        let h = try makeHarness()  // no pre-seeded cache → miss → install path
+        let run = try runFish(h, fish: fish, term: Self.kittyTERM,
+                              extra: ["XDG_STATE_HOME": ""],
+                              body: fishBody(ssh, invoke: "host"))
+
+        // A successful install (kitty TERM kept) proves the cache dir was
+        // writable — i.e. the path resolved to the HOME default, not `/blackbird`.
+        let connects = connectLines(run.log)
+        XCTAssertEqual(connects.count, 1, "log=\(run.log) stderr=\(run.stderr)")
+        XCTAssertEqual(termField(try XCTUnwrap(connects.first)), Self.kittyTERM,
+            "an empty XDG_STATE_HOME must still resolve to a writable cache path so the "
+            + "install succeeds and keeps kitty TERM. log=\(run.log) stderr=\(run.stderr)")
+
+        // The cache line must land at $HOME/.local/state/blackbird/…, NOT at the
+        // harness's XDG dir (that key was overridden to "") and NOT at `/blackbird`.
+        let defaultCache = URL(fileURLWithPath: h.home.path)
+            .appendingPathComponent(".local/state/blackbird/ssh-terminfo-hosts")
+        let lines = (try? String(contentsOf: defaultCache, encoding: .utf8))?
+            .split(separator: "\n").map(String.init) ?? []
+        XCTAssertTrue(lines.contains(Self.expectedKey),
+            "with an empty-but-set XDG_STATE_HOME the cache must fall back to "
+            + "$HOME/.local/state/blackbird/ssh-terminfo-hosts (XDG spec: empty == unset). "
+            + "Expected \(Self.expectedKey) at \(defaultCache.path); found \(lines). "
+            + "stderr=\(run.stderr)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: "/blackbird/ssh-terminfo-hosts"),
+            "the wrapper must never resolve the cache to a root-anchored '/blackbird/…'")
+    }
+
+    // Contract C.2 — "a real XDG_STATE_HOME wins" is already covered by
+    // `test_fish_cacheMiss_installsTerminfoAndCachesHost`, which asserts the
+    // cache line lands at `h.cacheFile` (= $XDG_STATE_HOME/blackbird/
+    // ssh-terminfo-hosts) under the harness's real XDG_STATE_HOME. Not
+    // duplicated here.
 }

@@ -18,7 +18,9 @@ if not set -q __BB_SSH_WRAPPER_LOADED
     # (fish aliases ARE functions, so this covers both).
     if not functions -q ssh
         function __bb_ssh_cache_file
-            if set -q XDG_STATE_HOME
+            # Empty-but-set falls back like the zsh/bash dialects'
+            # ${XDG_STATE_HOME:-…} (XDG: empty means "use the default").
+            if set -q XDG_STATE_HOME; and test -n "$XDG_STATE_HOME"
                 printf '%s\n' "$XDG_STATE_HOME/blackbird/ssh-terminfo-hosts"
             else
                 printf '%s\n' "$HOME/.local/state/blackbird/ssh-terminfo-hosts"
