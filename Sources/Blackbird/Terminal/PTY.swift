@@ -435,8 +435,9 @@ public final class PTY {
         // strdup OOM the child's `execv(executable, …)` would receive NULL and
         // the surrounding `_exit(127)` swallows the cause. Now that strdup runs
         // in the parent (where logging is safe), make the OOM visible and abort
-        // early. Other strdups (env entries, home, initialCwd) tolerate NULL —
-        // the child path's `if let` guards skip them gracefully — so we abort
+        // early. Other strdups (env entries, term, version, home, initialCwd)
+        // tolerate NULL — the child path's `if let` guards skip them or fall
+        // back to static literals — so we abort
         // only on the strdups with no fallback: the executable (required by
         // execv) and any argv slot (a NULL there would crash the child with a
         // malformed argv). Free everything and surface ENOMEM.
@@ -448,6 +449,14 @@ public final class PTY {
             )
             ctx.freeAll()
             throw Error.forkFailed(errno: ENOMEM)
+        }
+        // The tolerated-NULL strdups degrade silently in the child (it
+        // can't log post-fork) — leave the breadcrumb here so a session
+        // whose TERM quietly downgraded to xterm-256color is diagnosable.
+        if ctx.term == nil || ctx.version == nil {
+            Self.logger.error(
+                "PTY.spawn: strdup returned NULL for TERM/version under memory pressure — child falls back to static defaults"
+            )
         }
         return ctx
     }
@@ -550,7 +559,17 @@ public final class PTY {
         // Standard env. String literals here are baked into the binary's text
         // segment; the `setenv` arg is `const char *` so passing a Swift
         // StaticString-backed pointer is fine — setenv copies the value.
-        setenv("TERM", term, 1)
+        // `term`'s strdup can be NULL under OOM (it's outside the parent's
+        // abort-on-NULL set) and Darwin setenv dereferences the value —
+        // fall back to a static literal like `version` below does. The
+        // fallback is deliberately NOT the parent's termValue (which may
+        // be xterm-kitty): degraded-but-safe is the point when the real
+        // value was lost to OOM.
+        if let t = term {
+            setenv("TERM", t, 1)
+        } else {
+            setenv("TERM", "xterm-256color", 1)
+        }
         setenv("COLORTERM", "truecolor", 1)   // tells modern TUIs (nvim, tmux, claude-code) 24-bit color is safe
         setenv("TERM_PROGRAM", "Blackbird", 1)
         if let v = version {
