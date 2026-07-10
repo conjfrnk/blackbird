@@ -173,11 +173,23 @@ enum ShellIntegration {
             // Prepend our data dir; when the parent had no XDG_DATA_DIRS —
             // or an EMPTY one, which the XDG spec says means "use the
             // default" — the default tail keeps fish's stock vendor dirs
-            // reachable (a bare value would HIDE them).
+            // reachable (a bare value would HIDE them). Unlike ZDOTDIR
+            // (restored by the zsh bootstrap), this entry stays in the
+            // session's env and is inherited by children — so a nested
+            // Blackbird spawn sees it in parentEnv and must NOT prepend a
+            // second copy per nesting level. Exact segment match suffices
+            // (no path normalization): the entry being deduped is always
+            // SELF-injected from the same canonical `root.path` expression
+            // used below, so the two agree by construction.
             let parentXDG = parentEnv["XDG_DATA_DIRS"].flatMap { $0.isEmpty ? nil : $0 }
-            let tail = parentXDG ?? "/usr/local/share:/usr/share"
+            let xdg: String
+            if let parentXDG, parentXDG.split(separator: ":").contains(Substring(root.path)) {
+                xdg = parentXDG
+            } else {
+                xdg = root.path + ":" + (parentXDG ?? "/usr/local/share:/usr/share")
+            }
             return [
-                "XDG_DATA_DIRS": root.path + ":" + tail,
+                "XDG_DATA_DIRS": xdg,
                 "BB_SHELL_INTEGRATION_DIR": dir,
             ]
         default:

@@ -261,6 +261,140 @@ final class ShellIntegrationTests: XCTestCase {
         XCTAssertEqual(Set(result.keys), ["XDG_DATA_DIRS", "BB_SHELL_INTEGRATION_DIR"])
     }
 
+    // MARK: fish branch — nested-spawn de-duplication (Contract B)
+    //
+    // A Blackbird tab spawned from inside another Blackbird tab inherits the
+    // parent's already-prepended XDG_DATA_DIRS. Blindly prepending
+    // "<root>:" on every level would stack a fresh copy of the materialized
+    // root per nesting level ("<root>:<root>:<root>:…"), unbounded. The fish
+    // branch must instead guarantee the root appears as a colon-separated
+    // segment EXACTLY ONCE regardless of how many times envOverrides has
+    // already run in the ancestry, while preserving every other entry.
+
+    /// Split on ':' WITHOUT collapsing empties, so a stray "" segment can't
+    /// hide a bug (e.g. a trailing colon that would read as the root).
+    private func xdgSegments(_ value: String?) -> [String] {
+        (value ?? "").split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+    }
+
+    /// Count colon-separated segments exactly equal to `segment`.
+    private func xdgCount(_ segment: String, in value: String?) -> Int {
+        xdgSegments(value).filter { $0 == segment }.count
+    }
+
+    /// B.1 — first-level spawn (parent has no XDG_DATA_DIRS): the value must
+    /// START with "<root>:" and END with the freedesktop default tail.
+    func test_envOverrides_fish_firstLevelSpawn_rootFirstThenDefaultTail() {
+        let result = ShellIntegration.envOverrides(
+            shellPath: "/opt/homebrew/bin/fish",
+            integrationDir: "/opt/bb/integration",
+            materializedRoot: root,
+            parentEnv: [:],
+            enabled: true
+        )
+        let xdg = result["XDG_DATA_DIRS"]
+        XCTAssertEqual(xdg, root.path + ":/usr/local/share:/usr/share",
+            "a first-level fish spawn must prepend '<root>:' to the stock default tail; got \(String(describing: xdg))")
+        XCTAssertTrue((xdg ?? "").hasPrefix(root.path + ":"),
+            "first-level XDG_DATA_DIRS must start with the materialized root followed by ':'")
+        XCTAssertTrue((xdg ?? "").hasSuffix("/usr/local/share:/usr/share"),
+            "first-level XDG_DATA_DIRS must end with the stock default tail '/usr/local/share:/usr/share'")
+        XCTAssertEqual(xdgCount(root.path, in: xdg), 1,
+            "the root must appear exactly once even at the first level")
+    }
+
+    /// B.2 — nested spawn: the parent env's XDG_DATA_DIRS is exactly what a
+    /// first-level call produced. Re-running envOverrides must NOT stack a
+    /// second copy of the root; the result must still carry the root exactly
+    /// once. (The root already leads here, so a correct de-dup is idempotent —
+    /// the value is unchanged — which lets us pin the exact string.)
+    func test_envOverrides_fish_nestedSpawn_doesNotStackRoot() {
+        let firstLevel = root.path + ":/usr/local/share:/usr/share"
+        let result = ShellIntegration.envOverrides(
+            shellPath: "/opt/homebrew/bin/fish",
+            integrationDir: "/opt/bb/integration",
+            materializedRoot: root,
+            parentEnv: ["XDG_DATA_DIRS": firstLevel],
+            enabled: true
+        )
+        let xdg = result["XDG_DATA_DIRS"]
+        XCTAssertEqual(xdgCount(root.path, in: xdg), 1,
+            "a nested spawn must not accumulate a second '<root>' segment per nesting level; got \(String(describing: xdg))")
+        XCTAssertEqual(xdg, firstLevel,
+            "when the inherited XDG_DATA_DIRS already begins with '<root>:', envOverrides must be idempotent (leave it unchanged), not re-prepend; got \(String(describing: xdg))")
+        XCTAssertTrue(xdgSegments(xdg).contains("/usr/local/share"),
+            "the stock '/usr/local/share' entry must survive the nested call")
+        XCTAssertTrue(xdgSegments(xdg).contains("/usr/share"),
+            "the stock '/usr/share' entry must survive the nested call")
+    }
+
+    /// B.3 — the root is already present but NOT first (a user re-arranged
+    /// their dirs). It must still resolve to exactly one root segment, and the
+    /// user's other entries must be preserved.
+    func test_envOverrides_fish_rootPresentNotFirst_stillExactlyOnce() {
+        let userDir = "/home/u/.local/share"
+        let parent = "\(userDir):\(root.path):/usr/share"
+        let result = ShellIntegration.envOverrides(
+            shellPath: "/opt/homebrew/bin/fish",
+            integrationDir: "/opt/bb/integration",
+            materializedRoot: root,
+            parentEnv: ["XDG_DATA_DIRS": parent],
+            enabled: true
+        )
+        let xdg = result["XDG_DATA_DIRS"]
+        XCTAssertEqual(xdgCount(root.path, in: xdg), 1,
+            "when the root is already present (mid-list), envOverrides must not add a duplicate; got \(String(describing: xdg))")
+        XCTAssertTrue(xdgSegments(xdg).contains(userDir),
+            "the user's own '\(userDir)' entry must be preserved; got \(String(describing: xdg))")
+        XCTAssertTrue(xdgSegments(xdg).contains("/usr/share"),
+            "the user's '/usr/share' entry must be preserved; got \(String(describing: xdg))")
+    }
+
+    /// B.4 — a parent XDG_DATA_DIRS that does NOT contain the root gets the
+    /// root prepended exactly once, with the parent value preserved as the
+    /// tail.
+    func test_envOverrides_fish_rootAbsent_prependsExactlyOncePreservingTail() {
+        let result = ShellIntegration.envOverrides(
+            shellPath: "/opt/homebrew/bin/fish",
+            integrationDir: "/opt/bb/integration",
+            materializedRoot: root,
+            parentEnv: ["XDG_DATA_DIRS": "/nix/share:/snap/share"],
+            enabled: true
+        )
+        let xdg = result["XDG_DATA_DIRS"]
+        XCTAssertEqual(xdg, root.path + ":/nix/share:/snap/share",
+            "when the parent has no root segment, the root must be prepended once with the parent kept as the tail; got \(String(describing: xdg))")
+        XCTAssertEqual(xdgCount(root.path, in: xdg), 1,
+            "the prepend must add exactly one root segment")
+    }
+
+    /// B.5 (review-panel addendum) — a parent entry equal to the root WITH a
+    /// trailing slash appended is a NEAR-MISS, not a match. De-dup is by
+    /// EXACT colon-separated segment, so "<root>/" != "<root>": the canonical
+    /// root must still be prepended exactly once, and the user's trailing-
+    /// slash entry is preserved as its own distinct segment. (A loose
+    /// prefix/substring match would wrongly skip the prepend and leave fish
+    /// without our vendor dir first.)
+    func test_envOverrides_fish_rootWithTrailingSlash_isNearMissNotMatch() {
+        let parent = root.path + "/:/usr/share"   // "<root>/" — trailing slash
+        let result = ShellIntegration.envOverrides(
+            shellPath: "/opt/homebrew/bin/fish",
+            integrationDir: "/opt/bb/integration",
+            materializedRoot: root,
+            parentEnv: ["XDG_DATA_DIRS": parent],
+            enabled: true
+        )
+        let xdg = result["XDG_DATA_DIRS"]
+        XCTAssertEqual(xdg, root.path + ":" + parent,
+            "a trailing-slash variant of the root is not an exact segment match; the "
+            + "canonical root must be prepended once with the parent kept intact; got \(String(describing: xdg))")
+        XCTAssertEqual(xdgCount(root.path, in: xdg), 1,
+            "only the prepended canonical '<root>' counts — the '<root>/' near-miss must "
+            + "not be treated as the root segment; got \(String(describing: xdg))")
+        XCTAssertTrue(xdgSegments(xdg).contains(root.path + "/"),
+            "the user's '<root>/' entry is a distinct segment and must be preserved; got \(String(describing: xdg))")
+    }
+
     // MARK: other shells
 
     func test_envOverrides_bash_returnsEmpty() {
