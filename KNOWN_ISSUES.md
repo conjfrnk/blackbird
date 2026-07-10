@@ -23,6 +23,15 @@ and Ghostty make). The ssh wrapper is therefore absent in nested shells;
 entry reproduces #23. Manual sourcing from `.zshrc` covers this for anyone
 who nests routinely.
 
+**A system `/etc/zshenv` that reassigns `ZDOTDIR` silently disables
+integration.** zsh sources `/etc/zshenv` BEFORE `$ZDOTDIR/.zshenv`, so a
+managed-fleet `/etc/zshenv` that sets its own `ZDOTDIR` redirects zsh away
+from Blackbird's bootstrap before it ever runs — no OSC 133, no ssh
+wrapper, no error (and the spawn-time `BB_ORIG_ZDOTDIR` is left in the
+session env unconsumed). Same trade every ZDOTDIR-based integration
+(kitty included) makes. Manual sourcing from `.zshrc` covers affected
+fleets.
+
 **A `.zshrc` that ASSIGNS `precmd_functions=(…)` silently disables
 integration.** The zsh bootstrap defers loading to a one-shot entry in
 `$precmd_functions` registered before `.zshrc` runs; a dotfile that
@@ -48,6 +57,30 @@ terminfo-reading tools like nvim's truecolor autodetect); its per-host
 cache lives in `~/.local/state/blackbird/ssh-terminfo-hosts` — delete a
 host's line if you wipe the remote `~/.terminfo` (successes are cached,
 failures never are).
+
+**fish ≥ 4.0 emits its own OSC 133 marks, so integrated fish sessions
+double every mark.** fish 4.0 added native shell integration (A/B/C/D,
+some with parameters like `A;click_events=1`, which the core accepts —
+the payload slot is only validated for D). With Blackbird's osc133.fish
+also loaded, the core receives each mark twice per prompt cycle;
+consumers tolerate it (B/C/D are last-wins on `lastPromptMark`), but the
+doubled A registers two prompt-ring entries per prompt, so ⌘[ visits
+each fish prompt twice. Pre-existing since v0.6.0 (the doubling predates
+the v0.6.2 B-wrap). Remedy sketch: early-return in osc133.fish when
+`$version` major ≥ 4 (native coverage wins; keep the file for fish 3.x)
+— deferred because it inverts the fish test expectations and the fish-3.x
+`functions -c` autoload path is unverified on the dev machine.
+
+**`funcsave fish_prompt` while integrated persists Blackbird's prompt
+wrapper, not your prompt.** The fish B-mark wrap copies your
+`fish_prompt` aside and shadows it; `funcsave fish_prompt` (the normal
+way fish users persist an edited prompt) saves the WRAPPER body. Next
+session the load guard detects the already-integrated body and skips
+re-wrapping (no recursion, no error spam — the wrapper degrades to a
+bare prompt that still emits B), but your prompt CONTENT is gone from
+the saved function. Recovery: `functions -e fish_prompt; funcsave
+fish_prompt` restores the autoloaded default (or re-`funced` your own).
+kitty's fish integration shares this hazard.
 
 **tmux is out of the wrapper's reach.** tmux substitutes its own
 `default-terminal` for every pane's TERM, so what a TUI inside tmux
