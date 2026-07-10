@@ -46,5 +46,9 @@ typeset -ag preexec_functions
 precmd_functions+=(__bb_osc133_before_prompt)
 preexec_functions+=(__bb_osc133_cmd_start)
 
-# PS1 emits B at the start of user-editable input.
-PS1='%{$(__bb_osc133_b)%}'"${PS1}"
+# PS1 carries B at the END of the prompt — where user-editable input
+# actually begins. The bytes are embedded LITERALLY at source time:
+# a $(...) substitution here would need PROMPT_SUBST, which stock zsh
+# leaves OFF, so auto-injected sessions would render the un-expanded
+# `$(...)` text in every prompt instead of emitting the mark.
+PS1="${PS1}%{"$'\e]133;B\e\\'"%}"

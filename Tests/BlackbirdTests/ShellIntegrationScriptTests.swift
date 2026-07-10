@@ -99,10 +99,15 @@ final class ShellIntegrationScriptTests: XCTestCase {
     /// invocation is a single shell sourcing one tiny snippet. A real
     /// hang means the snippet is stuck in an infinite loop, which is the
     /// kind of regression we explicitly want to fail rather than ignore.
-    private func runShell(at shellPath: URL, scriptBody: String) throws -> String {
+    ///
+    /// `leadingArgs` are inserted before `-c` — e.g. `["-f"]` to run zsh
+    /// with startup files skipped (stock options), which the PS1
+    /// prompt-expansion contract tests rely on. Defaults to empty so all
+    /// existing call sites keep their prior behaviour.
+    private func runShell(at shellPath: URL, leadingArgs: [String] = [], scriptBody: String) throws -> String {
         let process = Process()
         process.executableURL = shellPath
-        process.arguments = ["-c", scriptBody]
+        process.arguments = leadingArgs + ["-c", scriptBody]
         // Drop user's rc — we want a hermetic environment. Otherwise a
         // local ~/.zshrc that already sources the snippet would emit
         // sequences twice and confuse the assertions. `env -i` semantics.
@@ -430,68 +435,243 @@ final class ShellIntegrationScriptTests: XCTestCase {
         }
     }
 
-    // MARK: - PS1 integration probes
+    // MARK: - PS1 prompt-expansion contract
     //
     // The direct-call tests above prove the OSC 133 emit FUNCTIONS work:
     // given a call to `__bb_osc133_b`, the right bytes appear on stdout.
     // What they CANNOT catch is a regression that defines the function
-    // but un-wires it from the prompt — e.g. a refactor that drops the
-    // `PS1='%{$(__bb_osc133_b)%}'"${PS1}"` registration line in zsh, or
-    // the `\[$(__bb_osc133_b)\]` wrap in bash. Without that wiring,
-    // `__bb_osc133_b` is a defined function nobody calls; B never fires
-    // on real prompts but the direct-call tests stay green.
+    // but fails to wire it into the prompt so B actually fires when the
+    // shell renders PS1 — under the shell's STOCK configuration.
     //
-    // These PS1 integration tests pin the wiring contract: after
-    // sourcing the snippet, `$PS1` must contain a reference to
-    // `__bb_osc133_b` so the function fires on every prompt cycle the
-    // shell renders. Kept as separate tests (per audit guidance) so
-    // direct-call tests pin "function emits bytes" and these pin
-    // "function is wired" — orthogonal regressions, separate signals.
+    // The real contract is behavioral, not textual. Pinning "$PS1 contains
+    // the substring __bb_osc133_b" would pass even for a snippet that emits
+    // B via `$(__bb_osc133_b)` — which under stock zsh (no `prompt_subst`)
+    // does NOTHING useful: the command substitution never runs at prompt
+    // time, so B never fires AND the user sees raw `$(...)` text in their
+    // prompt. So these tests prompt-EXPAND the resulting PS1 the way the
+    // shell does every time it paints a prompt, and assert on the bytes:
+    //   1. the raw OSC 133;B sequence is present,
+    //   2. no un-expanded `$(` garbage is left behind,
+    //   3. B lands AFTER the prompt text (B = "user input begins"),
+    //   4. sourcing twice does not stack a second B.
 
-    /// Pin the zsh PS1 wiring: after sourcing the snippet, `$PS1` must
-    /// reference `__bb_osc133_b` so B fires on every prompt cycle.
-    func test_osc133_zsh_PS1_referencesPromptFunction() throws {
+    /// Contract 1 — B fires under STOCK zsh options. `zsh -f` skips all
+    /// startup files; `emulate -L zsh` restores default options; and we
+    /// explicitly `unsetopt prompt_subst` so the snippet cannot lean on
+    /// command substitution (which stock zsh does not perform in prompts).
+    /// Prompt-expanding PS1 must then emit the raw OSC 133;B bytes.
+    ///
+    /// (Replaces the former `test_osc133_zsh_PS1_referencesPromptFunction`,
+    /// which pinned the implementation detail `$PS1 contains __bb_osc133_b`
+    /// rather than the behavioral wiring contract.)
+    func test_osc133_zsh_PS1_expansion_emitsB_underStockOptions() throws {
         let scriptURL = try locateScript(named: "osc133.zsh")
         guard let zsh = locateShell("zsh") else {
-            throw XCTSkip("/bin/zsh not present — skipping zsh PS1 integration probe")
+            throw XCTSkip("/bin/zsh not present — skipping zsh PS1 expansion test")
         }
-        // Echo the post-source PS1 verbatim. We don't expand it —
-        // expansion fires the prompt-time substitution, which is a
-        // different concern (the direct-call test already pins that
-        // `__bb_osc133_b` emits the right bytes when invoked). We
-        // want to assert the registration shape stays in place.
         let body = """
         emulate -L zsh
         source '\(scriptURL.path)'
-        printf '%s' "$PS1"
+        unsetopt prompt_subst
+        print -rP -- "$PS1"
         """
-        let ps1 = try runShell(at: zsh, scriptBody: body)
+        let out = try runShell(at: zsh, leadingArgs: ["-f"], scriptBody: body)
         XCTAssertTrue(
-            ps1.contains("__bb_osc133_b"),
-            "zsh: PS1 must reference __bb_osc133_b so B fires on every prompt cycle. " +
-            "Without this wiring, the function is defined but never called — direct-call " +
-            "tests stay green while real prompts emit no B. Got PS1 = \(ps1)"
+            out.contains(Self.oscCommandStart),
+            "zsh: prompt-expanding PS1 under stock options (prompt_subst OFF) must "
+            + "emit the raw OSC 133;B bytes. A snippet that wires B via `$(...)` needs "
+            + "prompt_subst; under stock zsh that never expands, so B never fires. "
+            + "Got: \(debugHex(out))"
         )
     }
 
-    /// Pin the bash PS1 wiring: after sourcing the snippet, `$PS1` must
-    /// reference `__bb_osc133_b`. Mirrors the zsh probe.
-    func test_osc133_bash_PS1_referencesPromptFunction() throws {
-        let scriptURL = try locateScript(named: "osc133.bash")
-        guard let bash = locateShell("bash") else {
-            throw XCTSkip("bash not present — skipping bash PS1 integration probe")
+    /// Contract 2 — no visible garbage. Under stock zsh (prompt_subst OFF)
+    /// a `$(...)` embedded in the prompt is printed VERBATIM, so the user
+    /// would literally see `$(__bb_osc133_b)` in their prompt. The
+    /// prompt-expanded PS1 must contain no literal `$(`.
+    func test_osc133_zsh_PS1_expansion_noUnexpandedCommandSubstitution() throws {
+        let scriptURL = try locateScript(named: "osc133.zsh")
+        guard let zsh = locateShell("zsh") else {
+            throw XCTSkip("/bin/zsh not present — skipping zsh PS1 garbage test")
         }
         let body = """
+        emulate -L zsh
         source '\(scriptURL.path)'
-        printf '%s' "$PS1"
+        unsetopt prompt_subst
+        print -rP -- "$PS1"
         """
-        let ps1 = try runShell(at: bash, scriptBody: body)
-        XCTAssertTrue(
-            ps1.contains("__bb_osc133_b"),
-            "bash: PS1 must reference __bb_osc133_b so B fires on every prompt cycle. " +
-            "Without this wiring, the function is defined but never called — direct-call " +
-            "tests stay green while real prompts emit no B. Got PS1 = \(ps1)"
+        let out = try runShell(at: zsh, leadingArgs: ["-f"], scriptBody: body)
+        XCTAssertFalse(
+            out.contains("$("),
+            "zsh: prompt-expanded PS1 contains literal `$(` — under stock options the "
+            + "shell does not run command substitution in prompts, so the user sees raw "
+            + "`$(...)` text. The snippet must embed literal escape bytes, not a command "
+            + "substitution. Got: \(debugHex(out))"
         )
+    }
+
+    /// Contract 3 — B marks the START of user input, so it must land AFTER
+    /// the prompt text. With a known `PS1='XYZPROMPT%% '` (the `%%` expands
+    /// to a single `%`, proving -P expansion is live) the OSC 133;B bytes
+    /// must appear after the "XYZPROMPT" substring.
+    func test_osc133_zsh_PS1_expansion_bMarkComesAfterPromptText() throws {
+        let scriptURL = try locateScript(named: "osc133.zsh")
+        guard let zsh = locateShell("zsh") else {
+            throw XCTSkip("/bin/zsh not present — skipping zsh B-position test")
+        }
+        let body = """
+        emulate -L zsh
+        PS1='XYZPROMPT%% '
+        source '\(scriptURL.path)'
+        unsetopt prompt_subst
+        print -rP -- "$PS1"
+        """
+        let out = try runShell(at: zsh, leadingArgs: ["-f"], scriptBody: body)
+        let bRange = try XCTUnwrap(
+            out.range(of: Self.oscCommandStart),
+            "zsh: B bytes not found in expanded PS1; cannot check position. Got: \(debugHex(out))"
+        )
+        let pRange = try XCTUnwrap(
+            out.range(of: "XYZPROMPT"),
+            "zsh: prompt text 'XYZPROMPT' not found in expanded PS1. Got: \(debugHex(out))"
+        )
+        XCTAssertGreaterThanOrEqual(
+            bRange.lowerBound, pRange.upperBound,
+            "zsh: OSC 133;B must appear AFTER the prompt text — B marks where the user "
+            + "begins typing, so it belongs at the END of the prompt, not the start. "
+            + "Got: \(debugHex(out))"
+        )
+    }
+
+    /// Contract 4 — double-source stays safe. Sourcing the snippet twice
+    /// must not stack the PS1 wrap: the prompt-expanded PS1 must contain
+    /// exactly ONE OSC 133;B.
+    func test_osc133_zsh_PS1_expansion_doubleSourceEmitsSingleB() throws {
+        let scriptURL = try locateScript(named: "osc133.zsh")
+        guard let zsh = locateShell("zsh") else {
+            throw XCTSkip("/bin/zsh not present — skipping zsh double-source B test")
+        }
+        let body = """
+        emulate -L zsh
+        source '\(scriptURL.path)'
+        source '\(scriptURL.path)'
+        unsetopt prompt_subst
+        print -rP -- "$PS1"
+        """
+        let out = try runShell(at: zsh, leadingArgs: ["-f"], scriptBody: body)
+        let bCount = out.components(separatedBy: Self.oscCommandStart).count - 1
+        XCTAssertEqual(
+            bCount, 1,
+            "zsh: after sourcing the snippet twice, the prompt-expanded PS1 must contain "
+            + "exactly ONE OSC 133;B (got \(bCount)). More than one means the PS1 wrap "
+            + "stacked on re-source and every prompt would emit B repeatedly. "
+            + "Got: \(debugHex(out))"
+        )
+    }
+
+    /// bash counterpart of Contracts 1+2+3 — behavioral, via `${PS1@P}`
+    /// prompt expansion (bash 4.4+). bash's `promptvars` is ON by default,
+    /// so a `$(...)` in PS1 legitimately expands at prompt time; we test
+    /// under those DEFAULT settings (never turning promptvars off). The
+    /// expanded PS1 must contain the raw OSC 133;B bytes, with no literal
+    /// `$(` residue, positioned AFTER the prompt text.
+    ///
+    /// Skips when no bash >= 4.4 is available (macOS ships bash 3.2, which
+    /// lacks `@P`). `test_osc133_bash_emitsExpectedSequences` still pins
+    /// that B fires on every bash version, so the wiring can't silently
+    /// vanish on a bash-3.2-only host.
+    ///
+    /// (Replaces the former `test_osc133_bash_PS1_referencesPromptFunction`,
+    /// which pinned the implementation detail `$PS1 contains __bb_osc133_b`
+    /// rather than the behavioral wiring contract.)
+    func test_osc133_bash_PS1_expansion_emitsBAfterPromptText() throws {
+        let scriptURL = try locateScript(named: "osc133.bash")
+        guard let bash = locateModernBash() else {
+            throw XCTSkip("no bash >= 4.4 found (macOS stock bash is 3.2; `${PS1@P}` "
+                + "prompt expansion needs 4.4+) — behavioral PS1-expansion contract can't "
+                + "be exercised here. test_osc133_bash_emitsExpectedSequences still covers "
+                + "that B fires.")
+        }
+        // DEFAULT settings: do NOT touch `promptvars`. Set a known prompt
+        // BEFORE sourcing so we can assert B lands AFTER the prompt text.
+        let body = """
+        PS1='XYZPROMPT '
+        source '\(scriptURL.path)'
+        printf '%s' "${PS1@P}"
+        """
+        let out = try runShell(at: bash, scriptBody: body)
+        XCTAssertTrue(
+            out.contains(Self.oscCommandStart),
+            "bash: prompt-expanded PS1 (`${PS1@P}`) must contain the raw OSC 133;B "
+            + "bytes so B fires on every rendered prompt. Got: \(debugHex(out))"
+        )
+        XCTAssertFalse(
+            out.contains("$("),
+            "bash: prompt-expanded PS1 still contains literal `$(` — the command "
+            + "substitution that should emit B did not expand. Got: \(debugHex(out))"
+        )
+        let bRange = try XCTUnwrap(
+            out.range(of: Self.oscCommandStart),
+            "bash: B bytes not found in expanded PS1; cannot check position. Got: \(debugHex(out))"
+        )
+        let pRange = try XCTUnwrap(
+            out.range(of: "XYZPROMPT"),
+            "bash: prompt text 'XYZPROMPT' not found in expanded PS1. Got: \(debugHex(out))"
+        )
+        XCTAssertGreaterThanOrEqual(
+            bRange.lowerBound, pRange.upperBound,
+            "bash: OSC 133;B must appear AFTER the prompt text — B marks where the user "
+            + "begins typing, so it belongs at the END of the prompt, not the start. "
+            + "Got: \(debugHex(out))"
+        )
+        // Nothing PRINTABLE may follow the mark: the ST terminator ends in
+        // a literal backslash, and an embed that lets it collapse with
+        // `\]`'s backslash during prompt decode eats the non-print marker
+        // and leaks a visible `]` after every prompt (review-panel find).
+        // `${PS1@P}` keeps `\[`/`\]` as \001/\002, so the only legal
+        // follower is the \002 end-marker (or end-of-string).
+        let after = out[bRange.upperBound...]
+        XCTAssertTrue(
+            after.isEmpty || after.first == "\u{02}",
+            "bash: stray character(s) after the B mark — the `\\]` non-print marker "
+            + "was consumed during prompt decode (ST's trailing backslash must be "
+            + "doubled in the embed). Got: \(debugHex(out))"
+        )
+    }
+
+    /// Locate a bash whose version is >= 4.4 (the release that added
+    /// `${PARAM@P}` prompt expansion). Prefers the canonical `/bin/bash`
+    /// but falls back to Homebrew locations, because macOS ships bash 3.2
+    /// at `/bin/bash` and the `@P`-based behavioral contract can only be
+    /// exercised on a modern bash. Returns nil if none qualifies.
+    private func locateModernBash() -> URL? {
+        let candidates = [
+            "/bin/bash",
+            "/opt/homebrew/bin/bash",
+            "/usr/local/bin/bash",
+            "/usr/bin/bash",
+        ]
+        for path in candidates {
+            guard FileManager.default.isExecutableFile(atPath: path) else { continue }
+            let url = URL(fileURLWithPath: path)
+            guard let version = try? bashMajorMinor(at: url) else { continue }
+            if version.major > 4 || (version.major == 4 && version.minor >= 4) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    /// Probe a bash binary's major.minor version via `BASH_VERSINFO`.
+    private func bashMajorMinor(at bash: URL) throws -> (major: Int, minor: Int) {
+        let probe = try runShell(
+            at: bash,
+            scriptBody: #"printf '%s %s' "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}""#
+        )
+        let parts = probe.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        let major = parts.count > 0 ? (Int(parts[0]) ?? 0) : 0
+        let minor = parts.count > 1 ? (Int(parts[1]) ?? 0) : 0
+        return (major, minor)
     }
 
     /// Static-content check for fish's double-source guard — runs without

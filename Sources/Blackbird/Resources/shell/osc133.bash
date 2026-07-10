@@ -58,6 +58,16 @@ else
     fi
 fi
 
-# PS1 emits B at the start of user-editable input. Prepend so we don't
-# clobber the user's prompt formatting.
-PS1='\[$(__bb_osc133_b)\]'"${PS1}"
+# PS1 carries B at the END of the prompt — where user-editable input
+# actually begins. The bytes are embedded LITERALLY at source time (the
+# $(printf …) runs once, right here): a substitution left inside PS1
+# would silently stop firing under `shopt -u promptvars`, and the zsh
+# sibling can't use one at all (stock zsh has PROMPT_SUBST off) — keep
+# the dialects on the same shape.
+#
+# The ST terminator ends in a literal backslash, and bash's prompt
+# decoder would collapse it with `\]`'s backslash (`\\` → `\`), eating
+# the non-print marker and printing a stray `]` — so the embed emits a
+# DOUBLED trailing backslash that decodes back to a single one. Don't
+# "simplify" it away.
+PS1="${PS1}\[$(printf '\e]133;B\e\\\\')\]"
