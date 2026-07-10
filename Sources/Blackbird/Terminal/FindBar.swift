@@ -271,6 +271,10 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         f.textColor = text
         f.wantsLayer = true
         f.layer?.cornerRadius = 4
+        // The fill comes from the CELL's rectangular draw (drawsBackground),
+        // not layer.backgroundColor — without clipping, the radius above
+        // never shows.
+        f.layer?.masksToBounds = true
     }
 
     /// Placeholders re-derive on every options toggle (`placeholderString()`

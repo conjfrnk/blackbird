@@ -226,6 +226,80 @@ final class FindBarThemeTests: XCTestCase {
         assertLayerColor(bar._barLayerBackgroundForTests(), equalsHex: 0x363532,
                          "theming an already-expanded bar must colour the bar layer")
     }
+
+    // MARK: - Themed fields clip to their rounded corners (Contract D)
+
+    /// Recursively collect the editable text fields in the bar's view tree.
+    /// The find + replace inputs are plain `NSTextField()` (editable); the
+    /// match-counter is an `NSTextField(labelWithString:)` (not editable) and
+    /// the buttons are `NSButton`s — so this filter isolates exactly the
+    /// themed input fields.
+    private func editableTextFields(in view: NSView) -> [NSTextField] {
+        var found: [NSTextField] = []
+        for sub in view.subviews {
+            if let tf = sub as? NSTextField, tf.isEditable {
+                found.append(tf)
+            }
+            found.append(contentsOf: editableTextFields(in: sub))
+        }
+        return found
+    }
+
+    /// A themed input field paints a rounded `fieldBackground` fill via its
+    /// cell. Setting a layer `cornerRadius` alone is not enough: the cell's
+    /// rectangular background fill is drawn to the layer bounds and overruns
+    /// the rounded corner unless the layer also `masksToBounds`. So each
+    /// themed field's backing layer must carry BOTH cornerRadius 4 AND
+    /// masksToBounds == true, or the rounded corner never renders.
+    ///
+    /// The replace row is made visible first so both input fields are live
+    /// and themed; the assertion then holds for every editable field found.
+    func test_applyTheme_themedFields_clipToRoundedCorners() {
+        let bar = makeBar()
+        bar.setReplaceVisible(true)
+        bar.applyTheme(Theme.gruvboxDark)
+
+        let fields = editableTextFields(in: bar)
+        XCTAssertFalse(fields.isEmpty,
+            "expected at least the find input field in the themed bar — a vacuous pass "
+            + "would hide a regression that dropped the field entirely")
+
+        for (i, f) in fields.enumerated() {
+            guard let layer = f.layer else {
+                XCTFail("themed field #\(i) has no backing layer — a corner radius cannot "
+                    + "apply, so its rounded background can never render")
+                continue
+            }
+            XCTAssertEqual(layer.cornerRadius, 4, accuracy: 0.001,
+                "themed field #\(i) backing layer must have cornerRadius 4")
+            XCTAssertTrue(layer.masksToBounds,
+                "themed field #\(i) backing layer must set masksToBounds — without it the "
+                + "cell's rectangular background fill ignores the cornerRadius and the "
+                + "rounded corner is never visible")
+        }
+    }
+
+    /// Same clipping contract for the default (collapsed) bar: even before the
+    /// replace row is opened, the find field must clip. This pins the find
+    /// field independently of the replace-row plumbing.
+    func test_applyTheme_findFieldCollapsed_clipsToRoundedCorners() {
+        let bar = makeBar()
+        bar.applyTheme(Theme.solarizedLight)
+
+        let fields = editableTextFields(in: bar)
+        XCTAssertFalse(fields.isEmpty,
+            "the find input field must exist in a themed, collapsed bar")
+        for (i, f) in fields.enumerated() {
+            guard let layer = f.layer else {
+                XCTFail("themed field #\(i) has no backing layer — rounded background cannot render")
+                continue
+            }
+            XCTAssertEqual(layer.cornerRadius, 4, accuracy: 0.001,
+                "collapsed-bar themed field #\(i) must have cornerRadius 4")
+            XCTAssertTrue(layer.masksToBounds,
+                "collapsed-bar themed field #\(i) must set masksToBounds so the rounded fill clips")
+        }
+    }
 }
 
 /// Coverage for `FindController.applyTheme(_:)` — the layer that caches the
