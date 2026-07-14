@@ -47,7 +47,22 @@ final class TerminalWindow: NSWindow {
     /// same class of external tab-group mutation as Merge All Windows —
     /// can fire the identical sweep without owning a TerminalWindow
     /// reference.
+    #if DEBUG
+    /// Test-only: incremented synchronously each time a sweep is SCHEDULED
+    /// (the notification itself posts on a later main-queue turn). Lets the
+    /// TabMover no-op tests assert "this action scheduled no sweep" as a
+    /// race-free before/after counter comparison with no runloop spin in
+    /// between — the previous oracle (0.3 s inverted expectation on the
+    /// globally-posted, deliberately-deferred notification) was fulfilled on
+    /// slow CI hosts by a PRIOR test's nested-async sweep slipping past a
+    /// single main-queue drain (run 29308450697). Absent from release builds.
+    static var _sweepScheduleCountForTesting = 0
+    #endif
+
     static func postExternalTabActionSweep() {
+        #if DEBUG
+        _sweepScheduleCountForTesting += 1
+        #endif
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: Self.externalTabActionDidRun, object: nil)
         }

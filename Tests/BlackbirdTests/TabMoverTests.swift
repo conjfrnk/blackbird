@@ -208,13 +208,16 @@ final class TabMoverTests: XCTestCase {
         return strip
     }
 
-    /// Drain already-queued main-queue work before installing an inverted
-    /// notification expectation. `externalTabActionDidRun` is posted via
-    /// `DispatchQueue.main.async`, so a PRIOR test's deferred sweep (real move
-    /// / detach) can still be sitting on the main queue and would land inside a
-    /// 0.3 s inverted window as a false positive. Spinning the runloop briefly
-    /// flushes it. (This is the only place the suite spins the runloop — never
-    /// in teardown, and never with a visible window.)
+    /// Drain already-queued main-queue work before waiting on a POSITIVE
+    /// notification expectation, so a PRIOR test's deferred sweep (posted via
+    /// `DispatchQueue.main.async`) can't satisfy the wait in place of the
+    /// sweep this test's own action schedules. The former no-op tests used
+    /// this before their inverted expectations too — those now assert the
+    /// synchronous `TerminalWindow._sweepScheduleCountForTesting` counter
+    /// instead (drain + inverted window was CI-raceable: a nested-async sweep
+    /// slips one drain; run 29308450697). (This is the only place the suite
+    /// spins the runloop — never in teardown, and never with a visible
+    /// window.)
     private func drainMainQueue() {
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
     }
@@ -370,14 +373,18 @@ final class TabMoverTests: XCTestCase {
         let w = makeTerminalWindow("self", tabId: uniqueTabId("self"),
                                    allowTabbing: true)
 
-        drainMainQueue()
-        let noPost = expectation(
-            forNotification: TerminalWindow.externalTabActionDidRun,
-            object: nil, handler: nil)
-        noPost.isInverted = true
+        // Race-free no-sweep oracle: the sweep counter increments
+        // synchronously when an action SCHEDULES the announce, and no
+        // runloop spin happens between snapshot and assert — so a prior
+        // test's deferred/nested sweep can't leak in (the old 0.3 s
+        // inverted-notification window could be fulfilled by exactly that
+        // on a slow CI host; run 29308450697).
+        let sweepsBefore = TerminalWindow._sweepScheduleCountForTesting
 
         TabMover.shared.moveTab(w, toWindow: w)
-        wait(for: [noPost], timeout: 0.3)
+
+        XCTAssertEqual(TerminalWindow._sweepScheduleCountForTesting, sweepsBefore,
+            "a self-move is a no-op and must not schedule an external-tab-action sweep")
 
         // Membership oracle (robust to a lone materialized group): a self-move
         // must not add any sibling — at most a single-member group of itself.
@@ -392,14 +399,13 @@ final class TabMoverTests: XCTestCase {
         let (group, members) = try makeGroup(2, prefix: "SAME")
         let before = Set(group.windows.map(ObjectIdentifier.init))
 
-        drainMainQueue()
-        let noPost = expectation(
-            forNotification: TerminalWindow.externalTabActionDidRun,
-            object: nil, handler: nil)
-        noPost.isInverted = true
+        // Race-free no-sweep oracle — see test_moveTab_noOpWhenTabEqualsDestination.
+        let sweepsBefore = TerminalWindow._sweepScheduleCountForTesting
 
         TabMover.shared.moveTab(members[0], toWindow: members[1])
-        wait(for: [noPost], timeout: 0.3)
+
+        XCTAssertEqual(TerminalWindow._sweepScheduleCountForTesting, sweepsBefore,
+            "a same-group move is a no-op and must not schedule an external-tab-action sweep")
 
         let after = Set((members[0].tabGroup?.windows ?? []).map(ObjectIdentifier.init))
         XCTAssertEqual(before, after,
@@ -419,14 +425,13 @@ final class TabMoverTests: XCTestCase {
         // is fire-time ineligibility.
         TabMover._isVisibleForTesting = { $0 !== dest }
 
-        drainMainQueue()
-        let noPost = expectation(
-            forNotification: TerminalWindow.externalTabActionDidRun,
-            object: nil, handler: nil)
-        noPost.isInverted = true
+        // Race-free no-sweep oracle — see test_moveTab_noOpWhenTabEqualsDestination.
+        let sweepsBefore = TerminalWindow._sweepScheduleCountForTesting
 
         TabMover.shared.moveTab(tab, toWindow: dest)
-        wait(for: [noPost], timeout: 0.3)
+
+        XCTAssertEqual(TerminalWindow._sweepScheduleCountForTesting, sweepsBefore,
+            "an ineligible-destination move is a no-op and must not schedule an external-tab-action sweep")
 
         XCTAssertFalse(shareGroup(tab, dest),
             "an ineligible (probe-invisible) destination must not share a group with the tab")
@@ -444,14 +449,13 @@ final class TabMoverTests: XCTestCase {
         // Visible via the probe → the ONLY reason to refuse is not-a-TerminalWindow.
         TabMover._isVisibleForTesting = { _ in true }
 
-        drainMainQueue()
-        let noPost = expectation(
-            forNotification: TerminalWindow.externalTabActionDidRun,
-            object: nil, handler: nil)
-        noPost.isInverted = true
+        // Race-free no-sweep oracle — see test_moveTab_noOpWhenTabEqualsDestination.
+        let sweepsBefore = TerminalWindow._sweepScheduleCountForTesting
 
         TabMover.shared.moveTab(tab, toWindow: plain)
-        wait(for: [noPost], timeout: 0.3)
+
+        XCTAssertEqual(TerminalWindow._sweepScheduleCountForTesting, sweepsBefore,
+            "a non-TerminalWindow-destination move is a no-op and must not schedule an external-tab-action sweep")
 
         XCTAssertFalse(shareGroup(tab, plain),
             "a non-TerminalWindow destination must not share a group with the tab")
@@ -468,16 +472,15 @@ final class TabMoverTests: XCTestCase {
         XCTAssertNil(s.tabGroup,
             "precondition: a standalone (tabbing-disallowed) window has no tab group")
 
-        // Drain a prior detach/real-move sweep so it can't leak into this
-        // inverted window.
-        drainMainQueue()
-        let noPost = expectation(
-            forNotification: TerminalWindow.externalTabActionDidRun,
-            object: nil, handler: nil)
-        noPost.isInverted = true
+        // Race-free no-sweep oracle — see test_moveTab_noOpWhenTabEqualsDestination.
+        // (This exact test was the CI phantom: run 29308450697 saw the prior
+        // detach test's nested-async sweep land inside the inverted window.)
+        let sweepsBefore = TerminalWindow._sweepScheduleCountForTesting
 
         TabMover.shared.moveTabToNewWindow(s)  // must not crash
-        wait(for: [noPost], timeout: 0.3)
+
+        XCTAssertEqual(TerminalWindow._sweepScheduleCountForTesting, sweepsBefore,
+            "detaching a groupless window is a no-op and must not schedule an external-tab-action sweep")
 
         XCTAssertNil(s.tabGroup,
             "detaching a window with no group must be a no-op — it stays "
