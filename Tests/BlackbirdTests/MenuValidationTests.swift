@@ -36,6 +36,40 @@ final class MenuValidationTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// Staged key windows are parked UNTOUCHED for process lifetime — the
+    /// same discipline TabMoverTests uses for merged tab-group members,
+    /// and for the same root cause on a new trigger: `makeKeyAndOrderFront`
+    /// on this Tahoe host queues a deferred CoreAnimation transaction
+    /// holding a `_NSWindowTransformAnimation`; a later `close()` leaves
+    /// that transaction referencing dead window state, and whichever test
+    /// NEXT spins the runloop through XCTWaiter flushes it and SEGVs the
+    /// shared xctest host (`objc_release` inside
+    /// `-[_NSWindowTransformAnimation dealloc]`, crash
+    /// Blackbird-2026-07-13-214036.ips; bisected to exactly these two
+    /// staged-window tests + any later runloop-pumping suite — this is
+    /// also the long-mislabeled "cumulative ASan" CATransaction SEGV that
+    /// got a dozen RunLoop-pumping tests in PreferencesTests /
+    /// TerminalViewTests skipped). Parking keeps the window alive so the
+    /// deferred transaction never dangles; the ~50 KB stubs die at
+    /// process exit.
+    private static var parkedStagedWindows: [NSWindow] = []
+
+    /// Stage a bare non-Blackbird window as keyWindow and park it for
+    /// process lifetime (see `parkedStagedWindows`). Never close it.
+    private func stageParkedKeyWindow(title: String) -> NSWindow {
+        let w = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        w.isReleasedWhenClosed = false
+        w.title = title
+        w.makeKeyAndOrderFront(nil)
+        Self.parkedStagedWindows.append(w)
+        return w
+    }
+
     /// Bare stub windows (no shell). Each ~40 KB.
     private func makeStubWindows(_ count: Int, prefix: String = "mv") -> [NSWindow] {
         (0..<count).map { i in
@@ -268,15 +302,9 @@ final class MenuValidationTests: XCTestCase {
     /// won't honour makeKey), the test would be vacuous either way —
     /// XCTSkip rather than pretend.
     func test_selectTab_dispatch_noControllers_keyWindowUnchanged() throws {
-        let stagedWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        stagedWindow.title = "non-blackbird-staged"
-        stagedWindow.makeKeyAndOrderFront(nil)
-        defer { stagedWindow.close() }
+        // Parked, never closed — see `parkedStagedWindows` for the
+        // deferred-CA-transaction SEGV this avoids.
+        _ = stageParkedKeyWindow(title: "non-blackbird-staged")
 
         // Allow one runloop service tick for makeKey to actually take
         // effect before we read NSApp.keyWindow.
@@ -321,15 +349,9 @@ final class MenuValidationTests: XCTestCase {
     /// Staging a non-Blackbird key window before dispatch turns this from
     /// a vacuous `nil === nil` check into a real regression detector.
     func test_selectTab_dispatch_outOfRangeTags_keyWindowUnchanged() throws {
-        let stagedWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        stagedWindow.title = "non-blackbird-staged-oor"
-        stagedWindow.makeKeyAndOrderFront(nil)
-        defer { stagedWindow.close() }
+        // Parked, never closed — see `parkedStagedWindows` for the
+        // deferred-CA-transaction SEGV this avoids.
+        _ = stageParkedKeyWindow(title: "non-blackbird-staged-oor")
 
         let exp = expectation(description: "makeKey-settle")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { exp.fulfill() }
