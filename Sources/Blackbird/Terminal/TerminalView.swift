@@ -103,6 +103,19 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
     private var lastObservedPrefsKey: PrefsObservedKey?
 
+    /// Per-view text-size override (issue #28). `nil` → follow the global
+    /// `Preferences.shared.fontSize` (the Settings-slider default). Non-nil →
+    /// this tab/window was sized via ⌘+/⌘−/pinch and keeps its own size
+    /// until ⌘0 clears it. Session-lifetime only — deliberately not
+    /// persisted (design review 2026-07-13). Always inside
+    /// `Preferences.fontSizeRange` by construction: the only writer,
+    /// `adjustFontSizeOverride(by:)`, clamps before assigning.
+    public private(set) var fontSizeOverride: Double?
+
+    /// The size this view renders at: the per-view override when set,
+    /// otherwise the global default.
+    var effectiveFontSize: Double { fontSizeOverride ?? Preferences.shared.fontSize }
+
     /// Latest `BBSnapshot` published by the session. Read by the renderer
     /// path, the accessibility cache, and the IME extension (which needs
     /// the cursor coordinates for the candidate-window anchor). Internal
@@ -507,8 +520,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 if key == self.lastObservedPrefsKey {
                     return
                 }
-                self.lastObservedPrefsKey = key
-                self.syncFontFromPreferences()
+                // Stamp AFTER a successful apply, never before. The prior
+                // ordering stamped first, so a failed atlas rebuild inside
+                // the apply left this view at its old metrics while the key
+                // claimed the new state was seen — every later same-value
+                // emission then dedup'd and the view was stranded until the
+                // pref moved to a DIFFERENT value (issue #28 investigation).
+                // With the stamp gated on success, a transient reconfigure
+                // failure retries on the next emission instead.
+                if self.applyEffectiveFont() {
+                    self.lastObservedPrefsKey = key
+                }
                 self.syncEncoderFromPreferences()
             }
 
@@ -562,15 +584,22 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
     }
 
-    /// Rebuild metrics/atlas when Preferences.fontName or fontSize changes.
-    /// Called on every objectWillChange emission; compares against the
+    /// Re-apply the effective font (global fontName at `effectiveFontSize`)
+    /// to metrics + atlas. Single funnel for BOTH the Preferences sink
+    /// (global fontName/fontSize changes) and the per-view size actions
+    /// (⌘+/⌘−/⌘0 override changes, issue #28). Compares against the
     /// currently-applied font to avoid redundant atlas rebuilds.
-    private func syncFontFromPreferences() {
-        let p = Preferences.shared
-        let wantName = p.fontName
-        let wantSize = CGFloat(p.fontSize)
+    ///
+    /// Returns `true` when the view's metrics now match the target —
+    /// including the already-in-sync no-op — and `false` only when the
+    /// renderer failed to rebuild its atlas, in which case the caller must
+    /// NOT advance dedupe state so the next emission retries.
+    @discardableResult
+    func applyEffectiveFont() -> Bool {
+        let wantName = Preferences.shared.fontName
+        let wantSize = CGFloat(effectiveFontSize)
         if metrics.font.familyName == wantName && metrics.font.pointSize == wantSize {
-            return
+            return true
         }
         let newFont = Self.resolveFont(name: wantName, size: wantSize)
         let newMetrics = CellMetrics(font: newFont)
@@ -597,9 +626,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // 'category == "renderer"'` can correlate the moment with a
             // pref change.
             Self.rendererLogger.error(
-                "syncFontFromPreferences reconfigure failed — keeping cellW=\(self.metrics.cellWidth, privacy: .public) cellH=\(self.metrics.cellHeight, privacy: .public); requested cellW=\(newMetrics.cellWidth, privacy: .public) cellH=\(newMetrics.cellHeight, privacy: .public) scale=\(scale, privacy: .public)"
+                "applyEffectiveFont reconfigure failed — keeping cellW=\(self.metrics.cellWidth, privacy: .public) cellH=\(self.metrics.cellHeight, privacy: .public); requested cellW=\(newMetrics.cellWidth, privacy: .public) cellH=\(newMetrics.cellHeight, privacy: .public) scale=\(scale, privacy: .public)"
             )
-            return
+            return false
         }
         self.metrics = newMetrics
         if let window {
@@ -624,6 +653,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         propagateResize(async: true)
         // Re-layout the scroll indicator (its Y depends on cellHeight).
         needsLayout = true
+        return true
     }
 
     /// Top chrome height that excludes AppKit's phantom reservation for
@@ -1326,7 +1356,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let newScale = size.width / bounds.width
         guard newScale > 0 else { return }
         if abs(newScale - renderer.atlas.scale) > 0.01 {
-            // Check the return value the same way syncFontFromPreferences
+            // Check the return value the same way applyEffectiveFont
             // does — a failed reconfigure (e.g. MTLDevice couldn't
             // allocate a bigger atlas texture on a hot-unplugged
             // display) leaves the renderer in its previous state and
@@ -1898,18 +1928,51 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         session?.clearAll()
     }
 
-    @objc public func increaseFontSize(_ sender: Any?) {
-        let p = Preferences.shared
-        p.fontSize = min(32, p.fontSize + 1)
-    }
+    @objc public func increaseFontSize(_ sender: Any?) { adjustFontSizeOverride(by: +1) }
 
-    @objc public func decreaseFontSize(_ sender: Any?) {
-        let p = Preferences.shared
-        p.fontSize = max(9, p.fontSize - 1)
-    }
+    @objc public func decreaseFontSize(_ sender: Any?) { adjustFontSizeOverride(by: -1) }
 
+    /// ⌘0 "Actual Size": drop this view's override and re-follow the global
+    /// default. No-op when already following it — deliberately does NOT
+    /// touch `Preferences.shared.fontSize` (the Settings slider owns the
+    /// default; issue #28 design review 2026-07-13).
+    ///
+    /// Rolls back on a failed apply — see `adjustFontSizeOverride(by:)`.
     @objc public func resetFontSize(_ sender: Any?) {
-        Preferences.shared.fontSize = 13
+        guard let previous = fontSizeOverride else { return }
+        fontSizeOverride = nil
+        if !applyEffectiveFont() {
+            fontSizeOverride = previous
+        }
+    }
+
+    /// Step the per-view size (issue #28: size gestures are scoped to this
+    /// tab/window; the global default is only ever set by the Settings
+    /// slider). Clamped to the shared envelope — inputs are finite by
+    /// construction (the pref is clamped by its didSet, the override by
+    /// this function). An at-bound step that changes nothing must NOT
+    /// materialize an override — otherwise ⌘+ at max would silently pin
+    /// the tab to the current global value.
+    ///
+    /// The override only commits when the apply succeeded. Unlike the
+    /// global path — where the Preferences sink retries a failed apply on
+    /// the next emission because the dedupe key wasn't stamped — nothing
+    /// re-fires for a per-view override (the sink's key tracks GLOBAL
+    /// values only), so a committed-but-unapplied override would leave
+    /// `fontSizeOverride` permanently disagreeing with the rendered
+    /// metrics. Rolling back keeps the two consistent; the user's next
+    /// keypress simply retries.
+    private func adjustFontSizeOverride(by delta: Double) {
+        let target = min(
+            Preferences.fontSizeRange.upperBound,
+            max(Preferences.fontSizeRange.lowerBound, effectiveFontSize + delta)
+        )
+        guard target != effectiveFontSize else { return }
+        let previous = fontSizeOverride
+        fontSizeOverride = target
+        if !applyEffectiveFont() {
+            fontSizeOverride = previous
+        }
     }
 
     /// True when the audible bell should be swallowed: set by the test
