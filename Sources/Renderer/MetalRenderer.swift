@@ -724,6 +724,18 @@ public final class MetalRenderer {
         }
     }
 
+    #if DEBUG
+    /// Test-only failure injection: when > 0, the next `reconfigure` call
+    /// fails (returns false, renderer state untouched) and the counter
+    /// decrements. Lets tests exercise callers' failed-apply retry paths —
+    /// e.g. the TerminalView prefs sink must not advance its dedupe key past
+    /// a failed atlas rebuild — without needing a real GlyphAtlas allocation
+    /// failure (which would require exhausting GPU memory — not something a
+    /// unit test may attempt). Production never sets this; the member does
+    /// not exist in release builds.
+    public var reconfigureFailuresForTests: Int = 0
+    #endif
+
     /// Rebuild metrics + atlas for a new font size. Safe to call from the
     /// main thread — allocations happen synchronously, but the next draw
     /// picks up the new atlas immediately.
@@ -740,6 +752,12 @@ public final class MetalRenderer {
         // comments elsewhere in the file claim main-thread but nothing was
         // asserting it.
         dispatchPrecondition(condition: .onQueue(.main))
+        #if DEBUG
+        if reconfigureFailuresForTests > 0 {
+            reconfigureFailuresForTests -= 1
+            return false
+        }
+        #endif
         guard let a = GlyphAtlas(device: device, metrics: newMetrics, capacityGlyphs: Self.atlasCapacity, scale: scale) else {
             return false
         }
