@@ -187,7 +187,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     /// Trackpad pinch gesture accumulator. Magnification events deliver
     /// fractional deltas; we wait until the running sum crosses ±0.15
-    /// before bumping `Preferences.shared.fontSize`. Without the accumulator
+    /// before stepping THIS view's `fontSizeOverride` (issue #28 — pinch,
+    /// like ⌘+/⌘−, is scoped to the pinched tab/window and never writes
+    /// the global `Preferences.shared.fontSize`). Without the accumulator
     /// a single flick would fire dozens of font-size changes and fly past
     /// the intended zoom level.
     private var pinchAccumulator: CGFloat = 0

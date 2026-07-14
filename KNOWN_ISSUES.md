@@ -335,3 +335,37 @@ blockers); logged here so the triaged backlog stays honest.
   automatically rather than by manual audit. Deferred to its own PR
   (a network-fetching gate needs its own flake-proofing — not rushed into
   the release commit).
+
+## Per-tab text size — deliberately deferred residuals (2026-07-13, issue #28)
+
+The per-tab/per-window text-size batch was reviewed by a 30-agent pass
+(25 lenses → 3-way adversarial verification → 5-judge panel; verdict:
+unanimous approve, zero confirmed serious findings). These medium/low
+residuals were judged non-blocking and are logged so the backlog stays
+honest.
+
+- **Native tab-group members can carry inconsistent `contentMinSize`.**
+  `applyEffectiveFont` sets each window's `contentMinSize` from its own
+  view's cell metrics (the 20-col/4-row readability floor). With per-tab
+  sizes, a group can hold tab A at override 32 (large minimum) and tab B
+  at 9 (small minimum) while sharing one window frame: resizing the group
+  with B selected is constrained only by B's minimum, so selecting A can
+  present it below the floor its own apply just installed. Grid math is
+  safe (`propagateResize` guards cols/rows > 0 and UInt16-clamps); only
+  the readability guarantee is voided for large-override tabs in
+  mixed-size groups. Fix would compute a group-max minimum on selection;
+  deferred until someone actually hits it.
+- **Failed-apply window: per-view steps anchor to the model, not the
+  rendered size, and there is no retry backoff.** When an atlas rebuild
+  fails (GPU memory pressure — the only failure path), the view keeps its
+  old rendered size while `effectiveFontSize` reflects the target; the
+  Preferences sink retries on every later emission (by design — the
+  latch fix), including emissions from unrelated prefs, with no backoff.
+  During that rare window a ⌘+/⌘− step computes from the model value, so
+  the rendered size can jump more than one point (or, degenerately, ⌘−
+  can land larger than the stale rendered size), and ⌘0 with no override
+  is a no-op rather than a manual retry. All states remain internally
+  consistent (override ↔ metrics never disagree — rollback guarantees
+  it) and any later pref write self-heals. Hardening candidates if the
+  window ever proves reachable in practice: retry budget/backoff in the
+  sink, and an unconditional `applyEffectiveFont()` in `resetFontSize`.
