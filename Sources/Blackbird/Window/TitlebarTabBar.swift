@@ -806,6 +806,41 @@ final class TabStripView: NSView {
         pillFrames.firstIndex { NSPointInRect(p, $0) }
     }
 
+    /// The last `+`-button mousedown this strip actually received.
+    ///
+    /// Same `NSEvent.clickCount`-isn't-ours problem as `ClickSequenceMark`,
+    /// with the opposite failure mode. `+` fired only on `clickCount == 1`
+    /// so a fast double-click wouldn't open two tabs (RCA P2) — but when the
+    /// activating click is swallowed, the user's next click arrives as
+    /// `clickCount == 2` and is SUPPRESSED, so `+` reads as dead until they
+    /// click again slower than the double-click interval.
+    struct AddButtonClickMark: Equatable {
+        let clickCount: Int
+        let timestamp: TimeInterval
+    }
+
+    /// Most recent `+`-button mousedown delivered to this strip, or `nil`
+    /// when the last mousedown landed elsewhere (or none has arrived).
+    private var lastAddButtonClick: AddButtonClickMark?
+
+    /// Whether a `+` mousedown should open a tab: yes on the first click of
+    /// a sequence AS THIS VIEW SEES IT.
+    ///
+    /// Suppression is narrow by design — it applies only when this event
+    /// directly continues a `+` run this strip already handled (previous
+    /// count exactly one less, within the interval). That still collapses a
+    /// fast double-click to one tab, while letting through a click whose
+    /// predecessor AppKit never delivered here. Pure so the policy is
+    /// testable without an event stream.
+    static func shouldFireAddButton(previous: AddButtonClickMark?,
+                                    clickCount: Int,
+                                    timestamp: TimeInterval,
+                                    doubleClickInterval: TimeInterval) -> Bool {
+        guard let previous, previous.clickCount == clickCount - 1 else { return true }
+        let elapsed = timestamp - previous.timestamp
+        return !(elapsed >= 0 && elapsed <= doubleClickInterval)
+    }
+
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         // Record this mousedown as the strip's own click history BEFORE any
@@ -818,6 +853,13 @@ final class TabStripView: NSView {
                               clickCount: event.clickCount,
                               timestamp: event.timestamp)
         }
+        // Same bookkeeping for the `+` button. Recorded up here rather than
+        // in the button's branch so that every early return below — including
+        // `commitEditOnOutsideClick`'s — still ends a `+` run correctly.
+        let previousAddClick = lastAddButtonClick
+        lastAddButtonClick = NSPointInRect(p, addButtonFrame)
+            ? AddButtonClickMark(clickCount: event.clickCount, timestamp: event.timestamp)
+            : nil
         // Mouse interaction retires the keyboard focus-ring state — a
         // stale ring from a prior arrow-key session shouldn't linger on
         // a different pill after the user mouse-clicks. The next arrow
@@ -854,7 +896,16 @@ final class TabStripView: NSView {
             // still swallowed here regardless of count, so a rapid second
             // click doesn't fall through to pill hit-testing either (P2,
             // RCA docs/rca-tab-behaviors-2026-07-01.md).
-            if event.clickCount == 1 {
+            //
+            // "First click of a sequence" has to mean first click THIS VIEW
+            // SAW, not `clickCount == 1`: the raw count keeps rising across
+            // an activation click AppKit never delivered here, which made
+            // `+` inert on the click right after coming back to the app.
+            // See `AddButtonClickMark`.
+            if Self.shouldFireAddButton(previous: previousAddClick,
+                                        clickCount: event.clickCount,
+                                        timestamp: event.timestamp,
+                                        doubleClickInterval: NSEvent.doubleClickInterval) {
                 onAddTab?()
             }
             return

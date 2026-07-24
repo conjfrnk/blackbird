@@ -557,8 +557,12 @@ final class TabRenameClickSequenceTests: XCTestCase {
     /// would be a real hazard given the strip evaluates this on every
     /// mousedown).
     func test_predicateIsPure_repeatedCallsAgree() {
-        var trues = 0
-        var falses = 0
+        // Both counters count TRUE returns. `nilMarkTrues` is expected to
+        // stay 0 — naming it for what it counts (not for the verdict it
+        // expects) keeps a later "cleanup" from inverting the increment and
+        // silently turning the second assertion into a tautology.
+        var validTupleTrues = 0
+        var nilMarkTrues = 0
         for _ in 0..<8 {
             if TabStripView.isOwnDoubleClick(
                 previous: firstClickOnPill1,
@@ -566,7 +570,7 @@ final class TabRenameClickSequenceTests: XCTestCase {
                 clickCount: 2,
                 timestamp: base + 0.125,
                 doubleClickInterval: interval) {
-                trues += 1
+                validTupleTrues += 1
             }
             if TabStripView.isOwnDoubleClick(
                 previous: nil,
@@ -574,10 +578,10 @@ final class TabRenameClickSequenceTests: XCTestCase {
                 clickCount: 2,
                 timestamp: base + 0.125,
                 doubleClickInterval: interval) {
-                falses += 1
+                nilMarkTrues += 1
             }
         }
-        XCTAssertEqual(trues, 8, "the valid tuple must answer true on every call")
-        XCTAssertEqual(falses, 0, "the nil-mark tuple must answer false on every call")
+        XCTAssertEqual(validTupleTrues, 8, "the valid tuple must answer true on every call")
+        XCTAssertEqual(nilMarkTrues, 0, "the nil-mark tuple must answer false on every call")
     }
 }
