@@ -316,6 +316,12 @@ final class TabStripView: NSView {
         // `dragPhase = .idle` in `mouseUp` before the notification fired.
         if listShapeChanged {
             tabDragController.cancelForListShapeChange()
+            // The recorded first-click index refers to the OLD pill list; a
+            // reshuffle underneath a half-finished double-click would let the
+            // second click open rename on whatever tab inherited that slot.
+            // Drop the mark rather than remap it — worst case the user
+            // double-clicks again.
+            lastPillMouseDown = nil
         }
         self.tabs = tabs
         self.selectedTab = selected
@@ -441,6 +447,13 @@ final class TabStripView: NSView {
     @objc func commitEditForTesting() { tabRenameController.commitEdit() }
     /// Test hook — explicitly cancels the in-flight edit.
     @objc func cancelEditForTesting() { tabRenameController.cancelEdit() }
+    /// Test hook — `true` while a pill is in inline-rename mode. Lets the
+    /// click-sequence tests assert that a phantom `clickCount == 2` (one
+    /// whose first click this strip never saw) does NOT open the field.
+    @objc var isEditingForTesting: Bool { isEditing }
+    /// Test hook — the strip's own last-pill-mousedown mark, so a test can
+    /// assert the click history it records rather than only its effect.
+    var lastPillMouseDownForTesting: ClickSequenceMark? { lastPillMouseDown }
     /// Test hook — current pill count. Lets stress tests assert pill
     /// geometry tracks the tab list without exposing the internal
     /// `pillFrames` array publicly.
@@ -738,8 +751,73 @@ final class TabStripView: NSView {
 
     // MARK: - Hit testing & hover
 
+    /// One pill mousedown this strip actually received.
+    ///
+    /// `NSEvent.clickCount` counts the SYSTEM's click sequence, not this
+    /// view's. AppKit keeps counting across window- and app-activation
+    /// boundaries, and it counts clicks this view never received at all: when
+    /// Blackbird isn't frontmost — or another Blackbird window is key — the
+    /// activating click is swallowed (`acceptsFirstMouse` is false by
+    /// default), so the user's NEXT click arrives here already carrying
+    /// `clickCount == 2`. Entering rename on a bare `clickCount == 2`
+    /// therefore popped the rename field open when the user only meant to
+    /// come back to the app and pick a tab (user report 2026-07-24). The
+    /// tab-switch variant is the same shape: selecting a pill makes a
+    /// different window key, and the destination window's strip is a
+    /// different view instance that never saw the first click.
+    ///
+    /// Recording what THIS view saw lets `isOwnDoubleClick` demand the whole
+    /// gesture instead of trusting its tail.
+    struct ClickSequenceMark: Equatable {
+        let pillIndex: Int
+        let clickCount: Int
+        let timestamp: TimeInterval
+    }
+
+    /// Most recent mousedown delivered to this strip that landed on a pill,
+    /// or `nil` when the last one missed every pill (or none has arrived).
+    private var lastPillMouseDown: ClickSequenceMark?
+
+    /// Whether `clickCount`/`timestamp` name the second click of a
+    /// double-click this strip saw in full — the precondition for entering
+    /// inline rename. Pure so the policy is testable without an AppKit event
+    /// stream.
+    ///
+    /// A non-negative elapsed time is required as well as an in-interval one:
+    /// a mark from a synthesized or reordered event that post-dates the
+    /// incoming one isn't part of this gesture either.
+    static func isOwnDoubleClick(previous: ClickSequenceMark?,
+                                 pillIndex: Int,
+                                 clickCount: Int,
+                                 timestamp: TimeInterval,
+                                 doubleClickInterval: TimeInterval) -> Bool {
+        guard clickCount == 2,
+              let previous,
+              previous.clickCount == 1,
+              previous.pillIndex == pillIndex
+        else { return false }
+        let elapsed = timestamp - previous.timestamp
+        return elapsed >= 0 && elapsed <= doubleClickInterval
+    }
+
+    /// Index of the pill whose frame contains `p`, or `nil` for the `+`
+    /// button and the bare strip regions between pills.
+    private func pillIndex(at p: CGPoint) -> Int? {
+        pillFrames.firstIndex { NSPointInRect(p, $0) }
+    }
+
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        // Record this mousedown as the strip's own click history BEFORE any
+        // dispatch below can return early, and hand the prior mark to the
+        // rename gate so it can tell a real double-click from the tail of a
+        // sequence that started somewhere else.
+        let previousMouseDown = lastPillMouseDown
+        lastPillMouseDown = pillIndex(at: p).map {
+            ClickSequenceMark(pillIndex: $0,
+                              clickCount: event.clickCount,
+                              timestamp: event.timestamp)
+        }
         // Mouse interaction retires the keyboard focus-ring state — a
         // stale ring from a prior arrow-key session shouldn't linger on
         // a different pill after the user mouse-clicks. The next arrow
@@ -781,7 +859,7 @@ final class TabStripView: NSView {
             }
             return
         }
-        if beginRenameOnDoubleClick(p, event: event) { return }
+        if beginRenameOnDoubleClick(p, event: event, previous: previousMouseDown) { return }
         handlePillClick(p, event: event)
     }
 
@@ -811,16 +889,24 @@ final class TabStripView: NSView {
     /// menu trip. `beginEditing` makes the edit field first responder; the
     /// `defer` in `mouseDown` sees that and skips the terminal-focus restore so
     /// the rename field keeps focus. Returns `true` when rename began.
-    private func beginRenameOnDoubleClick(_ p: CGPoint, event: NSEvent) -> Bool {
-        guard event.clickCount == 2 else { return false }
-        for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
-            let closeRect = closeHotspot(in: rect)
-            if !NSPointInRect(p, closeRect), i < tabs.count {
-                beginEditing(pillIndex: i)
-                return true
-            }
-        }
-        return false
+    ///
+    /// `previous` is the mark for the last mousedown THIS strip received;
+    /// `isOwnDoubleClick` uses it to reject a `clickCount == 2` whose first
+    /// click AppKit never delivered here (window/app activation) or delivered
+    /// to a different window's strip (tab switch). See `ClickSequenceMark`.
+    private func beginRenameOnDoubleClick(_ p: CGPoint,
+                                          event: NSEvent,
+                                          previous: ClickSequenceMark?) -> Bool {
+        guard event.clickCount == 2, let i = pillIndex(at: p), i < tabs.count else { return false }
+        guard Self.isOwnDoubleClick(previous: previous,
+                                    pillIndex: i,
+                                    clickCount: event.clickCount,
+                                    timestamp: event.timestamp,
+                                    doubleClickInterval: NSEvent.doubleClickInterval)
+        else { return false }
+        guard !NSPointInRect(p, closeHotspot(in: pillFrames[i])) else { return false }
+        beginEditing(pillIndex: i)
+        return true
     }
 
     /// A single click that landed on a pill: close it (only when the × is
