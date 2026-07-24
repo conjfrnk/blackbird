@@ -45,14 +45,21 @@ final class SelectionController {
 
     /// `mouseDown`'s selection branch — reached only after the URL-open,
     /// window-drag, and mouse-reporting early-returns in the override.
-    func beginSelection(with event: NSEvent) {
+    ///
+    /// `clickCount` is the view's RENUMBERED count
+    /// (`TerminalView.effectiveClickCount`), not `event.clickCount`. The raw
+    /// system count keeps rising across an activation click AppKit never
+    /// delivered, which made a single delivered click select a word and a
+    /// genuine double-click select a whole line. Every branch below reads the
+    /// parameter; reaching for `event.clickCount` here reintroduces the bug.
+    func beginSelection(with event: NSEvent, clickCount: Int) {
         let point = view.bufferPointFromEvent(event)
         // Shift-click extends the current selection from its ANCHOR to the
         // click point — the standard macOS / iTerm2 gesture for precise
         // selection adjustment. Without it, shift-click would start a new
         // zero-width selection, discarding whatever the user just carefully
         // selected. Audit findbar-selection F17.
-        if event.clickCount == 1,
+        if clickCount == 1,
            event.modifierFlags.contains(.shift),
            let existing = view.selection {
             view.selection = Selection(anchor: existing.anchor, cursor: point, mode: existing.mode)
@@ -70,7 +77,7 @@ final class SelectionController {
             return
         }
         let mode: Selection.Mode
-        switch event.clickCount {
+        switch clickCount {
         case 3: mode = .line
         case 2: mode = .word
         default:

@@ -413,20 +413,40 @@ final class TerminalViewTests: XCTestCase {
                        "Plain drag should be prose-style character selection")
     }
 
+    /// AppKit delivers a double-click as TWO mousedowns — `clickCount` 1
+    /// then 2 — and word mode is decided by the second. This test used to
+    /// synthesize the `clickCount == 2` event ALONE, which only passed
+    /// because the classifier trusted the raw system counter. It no longer
+    /// does: `clickCount` describes the window server's click sequence, not
+    /// this view's, so a lone `clickCount == 2` is the phantom-activation-
+    /// click shape (the swallowed first click never reached the view) and
+    /// renumbers to an ordinary single click. Deliver the whole run so the
+    /// test asserts the same user-facing outcome through a realistic gesture.
+    ///
+    /// All synthesized events carry timestamp 0 (`mouseDownEvent`'s fixed
+    /// value), so the elapsed between the halves is 0 — inside any
+    /// double-click interval under the inclusive `0 <= elapsed <= interval`
+    /// bound. The timestamp-sensitive cases (stale run, sequence gap,
+    /// phantom-then-genuine) live in `TerminalActivationClickTests`.
     func test_mouseDown_doubleClick_triggersWordSelection() throws {
         let view = try makeViewForSelection()
         let point = cellCenterPoint(in: view, col: 10, row: 5)
-        let ev = try mouseDownEvent(at: point, modifiers: [], clickCount: 2)
-        view.mouseDown(with: ev)
+        view.mouseDown(with: try mouseDownEvent(at: point, modifiers: [], clickCount: 1))
+        view.mouseDown(with: try mouseDownEvent(at: point, modifiers: [], clickCount: 2))
         XCTAssertEqual(view.selection?.mode, .word,
                        "Double-click should start a word-mode selection")
     }
 
+    /// Triple-click is three delivered mousedowns — `clickCount` 1, 2, 3.
+    /// Same rewrite rationale as the double-click test above: the lone
+    /// `clickCount == 3` event this used to synthesize is a run the view
+    /// never saw the start of, and renumbers to a single click.
     func test_mouseDown_tripleClick_triggersLineSelection() throws {
         let view = try makeViewForSelection()
         let point = cellCenterPoint(in: view, col: 10, row: 5)
-        let ev = try mouseDownEvent(at: point, modifiers: [], clickCount: 3)
-        view.mouseDown(with: ev)
+        view.mouseDown(with: try mouseDownEvent(at: point, modifiers: [], clickCount: 1))
+        view.mouseDown(with: try mouseDownEvent(at: point, modifiers: [], clickCount: 2))
+        view.mouseDown(with: try mouseDownEvent(at: point, modifiers: [], clickCount: 3))
         XCTAssertEqual(view.selection?.mode, .line,
                        "Triple-click should start a line-mode selection")
     }

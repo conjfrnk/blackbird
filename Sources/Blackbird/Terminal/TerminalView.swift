@@ -289,6 +289,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// parameter). `lazy` because it needs `self`; back-ref is `unowned`.
     lazy var selectionController = SelectionController(view: self)
 
+    /// Last mousedown this view actually received, used by
+    /// `TerminalView.effectiveClickCount` to renumber `NSEvent.clickCount`
+    /// into the run of clicks THIS VIEW saw. See the doc comment on
+    /// `ClickSequenceMark` in `TerminalView+Mouse.swift` for why the raw
+    /// system count can't be trusted.
+    var lastMouseDownMark: ClickSequenceMark?
+
     /// Drives edge-autoscroll while the user drags a selection past the
     /// top/bottom of the viewport. AppKit only delivers `mouseDragged` on
     /// pointer motion, so a user holding the pointer stationary past the edge

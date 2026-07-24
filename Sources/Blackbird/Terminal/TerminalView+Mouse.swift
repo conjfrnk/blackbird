@@ -49,7 +49,61 @@ extension TerminalView {
         currentSnapshot?.termMode.contains(.sgrMouse) ?? false
     }
 
+    /// One mousedown this view actually received.
+    ///
+    /// `NSEvent.clickCount` counts the SYSTEM's click sequence, not this
+    /// view's. AppKit keeps counting across window- and app-activation
+    /// boundaries, and it counts clicks this view never received: nothing in
+    /// the app overrides `acceptsFirstMouse`, so the click that reactivates
+    /// Blackbird is consumed to activate and never reaches `mouseDown`.
+    /// Classifying the gesture off the raw count therefore turned a single
+    /// delivered click into a word selection, and — the case that bites
+    /// harder — turned a genuine double-click after a return-click into a
+    /// whole-LINE selection, because the two delivered events carried counts
+    /// 2 and 3. Same root cause as the tab strip's `ClickSequenceMark`
+    /// (Window/TitlebarTabBar.swift).
+    struct ClickSequenceMark: Equatable {
+        /// The raw `NSEvent.clickCount` of that mousedown.
+        let systemClickCount: Int
+        /// The count this view assigned it after renumbering.
+        let effectiveClickCount: Int
+        let timestamp: TimeInterval
+    }
+
+    /// The ordinal of this mousedown within the run of mousedowns THIS VIEW
+    /// received, rather than within the window server's sequence.
+    ///
+    /// Deliberately keyed on count and time only — NOT on the clicked cell.
+    /// The window server already enforces double-click slop distance; adding
+    /// a cell-equality test would demote a legitimate double-click whose two
+    /// halves straddled a cell boundary to character mode, breaking everyday
+    /// word-select.
+    static func effectiveClickCount(previous: ClickSequenceMark?,
+                                    clickCount: Int,
+                                    timestamp: TimeInterval,
+                                    doubleClickInterval: TimeInterval) -> Int {
+        // 1 is already the start of a gesture; 0 and negatives are
+        // synthesized values no caller should see rewritten.
+        guard clickCount > 1 else { return clickCount }
+        guard let previous, previous.systemClickCount == clickCount - 1 else { return 1 }
+        let elapsed = timestamp - previous.timestamp
+        guard elapsed >= 0, elapsed <= doubleClickInterval else { return 1 }
+        return previous.effectiveClickCount + 1
+    }
+
     public override func mouseDown(with event: NSEvent) {
+        // Renumber BEFORE any early return below, so a first click consumed
+        // by ⌘-URL-open, window-drag or mouse reporting still counts as a
+        // click this view saw — otherwise the following genuine double-click
+        // would be demoted.
+        let clicks = Self.effectiveClickCount(previous: lastMouseDownMark,
+                                              clickCount: event.clickCount,
+                                              timestamp: event.timestamp,
+                                              doubleClickInterval: NSEvent.doubleClickInterval)
+        lastMouseDownMark = ClickSequenceMark(systemClickCount: event.clickCount,
+                                             effectiveClickCount: clicks,
+                                             timestamp: event.timestamp)
+
         // ⌘-click on a URL → open it. Runs before mouse-reporting and
         // selection so TUIs can't swallow the gesture. Restricted to
         // non-mouse-reporting context (or ⌥-held inside a TUI) so that
@@ -106,7 +160,7 @@ extension TerminalView {
             return
         }
         // Not URL-open / window-drag / mouse-reporting → a selection gesture.
-        selectionController.beginSelection(with: event)
+        selectionController.beginSelection(with: event, clickCount: clicks)
     }
 
     public override func mouseUp(with event: NSEvent) {
