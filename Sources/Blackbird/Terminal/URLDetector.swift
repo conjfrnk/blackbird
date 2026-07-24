@@ -123,10 +123,16 @@ public enum URLDetector {
             utf16ToCol.reserveCapacity(snapshot.cols)
             for col in 0..<snapshot.cols {
                 let ch = snapshot.character(at: col, row: row) ?? " "
-                let before = line.utf16.count
+                // Take the width from the incoming grapheme rather than by
+                // differencing `line.utf16.count` before and after the
+                // append. That was correct but cost two O(n) UTF-16 counts
+                // over the string being built — quadratic across the row.
+                // Appending is additive in UTF-16 code units even when the
+                // grapheme merges with the previous one, so the count is
+                // identical.
+                let units = ch.utf16.count
                 line.append(ch)
-                let after = line.utf16.count
-                for _ in before..<after {
+                for _ in 0..<units {
                     utf16ToCol.append(col)
                 }
             }

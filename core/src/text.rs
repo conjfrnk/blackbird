@@ -71,10 +71,21 @@ pub(crate) fn extract_text_range(
         iter_end = iter_start.saturating_add((MAX_TEXT_RANGE_ROWS - 1) as i32);
     }
 
-    // Collect each line's emitted text plus whether the GRID row was
-    // soft-wrapped (its last cell carries WRAPLINE), then join at the
-    // end inserting '\n' only at hard line breaks.
-    let mut lines: Vec<(String, bool)> = Vec::new();
+    // Build straight into one accumulator, inserting '\n' only at hard
+    // line breaks. This used to stage every row in its own String, collect
+    // those into a Vec, then copy the lot into a second String — which the
+    // find bar pays once per scrollback row per keystroke (FindController
+    // falls through to `textRange` for every row outside the viewport, up
+    // to the 100k-line default scrollback, synchronously on the main
+    // thread). Two surplus allocations and a full redundant copy per row.
+    //
+    // The newline is DEFERRED rather than appended: `newline_pending`
+    // records that the previous emitted row ended without a soft wrap, and
+    // the '\n' is written just before the next row's text. That reproduces
+    // the old two-pass join exactly, including the "no trailing newline
+    // after the last row" property (the flag is simply never consumed).
+    let mut joined = String::new();
+    let mut newline_pending = false;
 
     let rectangular = rect != 0;
     // The per-row branches compare line_i against iter_start /
@@ -114,7 +125,15 @@ pub(crate) fn extract_text_range(
             (0usize, last_col, true)
         };
 
-        let mut text = String::with_capacity(col_hi.saturating_sub(col_lo) + 1);
+        if newline_pending {
+            joined.push('\n');
+        }
+        // Byte offset where THIS row's text starts, so the trailing-space
+        // trim below stays scoped to this row rather than eating the
+        // previous one's. Always a char boundary: only whole chars are
+        // pushed.
+        let row_start = joined.len();
+        joined.reserve(col_hi.saturating_sub(col_lo) + 1);
         let row = &grid[Line(line_i)];
         let mut c = col_lo;
         while c <= col_hi {
@@ -138,7 +157,7 @@ pub(crate) fn extract_text_range(
             // a plain space so callers can concatenate without seeing
             // embedded NULs in their UTF-8.
             let out = if ch == '\0' { ' ' } else { ch };
-            text.push(out);
+            joined.push(out);
             // Audit S5-001: width-0 scalars do NOT live in `cell.c` —
             // alacritty stores combining accents (U+0301 …), variation
             // selectors (VS16 U+FE0F), ZWJ, and every other zero-width
@@ -150,7 +169,7 @@ pub(crate) fn extract_text_range(
             // silent copy-fidelity loss on a core terminal operation.
             if let Some(zw) = cell.zerowidth() {
                 for &z in zw {
-                    text.push(z);
+                    joined.push(z);
                 }
             }
             c += 1;
@@ -174,20 +193,16 @@ pub(crate) fn extract_text_range(
         // in `line_length`). Only unwrapped rows carry '\0'-padding
         // that the trim is meant to drop.
         if trim && !wrapped {
-            let trimmed_len = text.trim_end_matches(' ').len();
-            text.truncate(trimmed_len);
+            let trimmed_len = joined[row_start..].trim_end_matches(' ').len();
+            joined.truncate(row_start + trimmed_len);
         }
 
-        lines.push((text, wrapped));
+        // A '\n' is owed before the NEXT row iff this one wasn't soft-
+        // wrapped. Never consumed after the final row, so the result has no
+        // trailing newline — matching the previous join.
+        newline_pending = !wrapped;
         line_i += 1;
     }
 
-    let mut joined = String::new();
-    for (i, (text, wrapped)) in lines.iter().enumerate() {
-        joined.push_str(text);
-        if i + 1 < lines.len() && !wrapped {
-            joined.push('\n');
-        }
-    }
     joined.into_bytes()
 }

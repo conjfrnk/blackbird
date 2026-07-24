@@ -102,12 +102,26 @@ struct CellInstanceBuilder {
         // already has >= cols capacity from the prior frame.
         out.reserveCapacity(cols)
 
+        // Both of these are row-invariant but were being re-read per cell.
+        // They resolve to loads through `handle.pointee` — Rust-owned memory
+        // the optimizer can't prove unchanged across `out.append` (may
+        // realloc), the `isSelected` closure call, or an atlas miss reaching
+        // CoreText — so they really were re-issued every iteration.
+        // `BBSnapshot` wraps an immutable retained snapshot, so hoisting is
+        // bit-identical.
+        let cellCount = snapshot.cellCount
+        // `Int32(clamping:)` per UR-2 — same defense-in-depth rationale as
+        // the `rowBufferLine` site above. Deliberately NOT reusing that
+        // value: it clamps the difference, this clamps each operand and then
+        // subtracts, and they diverge in overflow corners.
+        let bufferLine = Int32(clamping: row) - Int32(clamping: snapshot.displayOffset)
+
         for col in 0..<cols {
             let idx = row * cols + col
             // `cellsPtr` is a raw pointer; reading past `cellCount` would
             // be UB, not a trap. Same invariant alacritty guarantees but
             // re-checked here so a buggy snapshot can't cascade.
-            if idx >= snapshot.cellCount { break }
+            if idx >= cellCount { break }
             let cell = cellsPtr[idx]
 
             let attrs = Self.attributeBits(

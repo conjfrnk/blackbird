@@ -120,6 +120,17 @@ final class HoverCoordinator {
     }
 
     private func updateHover(screenRow: Int, col: Int, locationInWindow: NSPoint) {
+        // Same cell as last move → nothing to update, and the tooltip
+        // position is already correct. Bail FIRST: this fires on every
+        // mouse-move event, and the vast majority land in the cell the
+        // pointer was already in. The link-id resolution below is not free
+        // (a snapshot link-id lookup, a URL-table read, `URL(string:)`
+        // parsing and an `OSC8URLPolicy` scheme check) and its result was
+        // being thrown away by this very guard.
+        if let last = lastHoverCell, last.row == screenRow, last.col == col {
+            return
+        }
+
         // Resolve the OSC 8 link id for the cell under the pointer. A
         // test-supplied fake may override; otherwise consult the live snapshot.
         // `linkID` bounds-checks internally, so an out-of-grid coordinate just
@@ -148,11 +159,6 @@ final class HoverCoordinator {
             return id
         }()
 
-        // Same cell as last move → nothing to update except the tooltip
-        // position is already correct. Bail to avoid timer churn.
-        if let last = lastHoverCell, last.row == screenRow, last.col == col {
-            return
-        }
         lastHoverCell = (row: screenRow, col: col)
 
         if newLinkID != hoveredLinkID {
