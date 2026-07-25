@@ -2045,7 +2045,7 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
             commitEdit()
         }
         // If the field already exists for the same pill (e.g., user hit
-        // ⌥⌘R a second time on the same pill), just refocus it.
+        // ⌃⌘R a second time on the same pill), just refocus it.
         if editingPill == pillIndex, let existing = editField {
             view.window?.makeFirstResponder(existing)
             existing.currentEditor()?.selectAll(nil)

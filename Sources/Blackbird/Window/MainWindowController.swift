@@ -757,7 +757,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         beginRenameActiveTab()
     }
 
-    /// Entry point for ⌥⌘R and the `Rename…` context menu. Multi-tab
+    /// Entry point for ⌃⌘R and the `Rename…` context menu. Multi-tab
     /// windows open the inline pill editor (new — see Task 8); single-tab
     /// windows have no pill strip, so the legacy modal alert remains the
     /// only sensible surface there.
