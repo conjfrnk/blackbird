@@ -47,11 +47,21 @@ final class TabStripDragTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    override func setUp() {
+        super.setUp()
+        // `TabStripView.lastMouseDown` is PROCESS-WIDE static state (it is
+        // shared across every strip on purpose — see `ClickSequenceMark`), so
+        // a leftover mark from another test can renumber this test's first
+        // mousedown. Start every test from an empty run.
+        TabStripView.resetClickSequenceForTesting()
+    }
+
     override func tearDown() {
         // The drop branch invokes `TabOrderCoordinator.shared.move(...)`,
         // which mutates singleton state. Reset so the next test in this
         // suite — or any subsequent test class — starts clean.
         TabOrderCoordinator.shared.resetForTesting()
+        TabStripView.resetClickSequenceForTesting()
         super.tearDown()
     }
 
@@ -140,10 +150,53 @@ final class TabStripDragTests: XCTestCase {
             "armed-but-not-promoted state has dragState nil")
     }
 
-    func test_mouseDown_doubleClick_doesNotArmDrag() {
-        // Double-click is the inline-rename entry point and must NOT
-        // also arm a drag — otherwise releasing without moving would
-        // fire a no-op move and the rename could race with reorder.
+    func test_mouseDown_renumberedDoubleClick_doesNotArmDrag() {
+        // Double-click is the inline-rename entry point and must NOT also arm
+        // a drag — otherwise releasing without moving would fire a no-op move
+        // and the rename could race with reorder.
+        //
+        // "Double-click" means the RENUMBERED count reached 2 — i.e. the
+        // strips received both halves — not `NSEvent.clickCount == 2`, whose
+        // raw value keeps rising across an activating click no strip ever saw
+        // (that one renumbers back to 1 and takes the ordinary arm-a-drag
+        // path; `test_mouseDown_phantomDoubleClick_armsDrag` below).
+        //
+        // The two halves are delivered to two DIFFERENT strips on purpose:
+        // every tab is its own window with its own strip, so that is the
+        // real-world shape of a background-pill double-click — and it is also
+        // the only shape where the renaming click lands on a strip that isn't
+        // already armed from click 1.
+        //
+        // Both strips are built BEFORE any click: `update(tabs:)` clears the
+        // shared click mark on a list-shape change.
+        let (stripA, _) = makeStrip(tabCount: 3)
+        let (stripB, _) = makeStrip(tabCount: 3)
+        let framesA = stripA.pillFramesForTesting
+        let framesB = stripB.pillFramesForTesting
+
+        stripA.mouseDown(with: mouseEvent(.leftMouseDown,
+                                          at: pillCenter(framesA[0]),
+                                          clickCount: 1))
+        stripB.mouseDown(with: mouseEvent(.leftMouseDown,
+                                          at: pillCenter(framesB[0]),
+                                          clickCount: 2))
+
+        XCTAssertTrue(stripB.isEditingForTesting,
+            "precondition: the run's second click entered inline rename")
+        XCTAssertNil(stripB.pendingDragPillIndexForTesting,
+            "a renaming click must NOT arm pendingDrag")
+        XCTAssertNil(stripB.dragStateForTesting,
+            "…and must not promote to an active drag either")
+    }
+
+    func test_mouseDown_phantomDoubleClick_armsDrag() {
+        // The activating click was swallowed (`acceptsFirstMouse` is false),
+        // so the first mousedown any strip receives already carries
+        // `clickCount == 2`. It is renumbered to 1 — the opening click of the
+        // run as far as the strips are concerned — and must therefore take
+        // the ordinary path: arm a reorder drag, defer selection to mouseUp.
+        // Trusting the raw count here armed nothing, so the press could not
+        // be dragged at all right after coming back to the app.
         let (strip, _) = makeStrip(tabCount: 3)
         let frames = strip.pillFramesForTesting
 
@@ -151,8 +204,11 @@ final class TabStripDragTests: XCTestCase {
                                         at: pillCenter(frames[0]),
                                         clickCount: 2))
 
-        XCTAssertNil(strip.pendingDragPillIndexForTesting,
-            "double-click must NOT arm pendingDrag (enters rename path)")
+        XCTAssertEqual(strip.pendingDragPillIndexForTesting, 0,
+            "a clickCount==2 no strip saw the first half of renumbers to 1 "
+                + "and must arm a drag on the pill it landed on")
+        XCTAssertFalse(strip.isEditingForTesting,
+            "…and must not open inline rename")
     }
 
     func test_mouseDown_singleTabStrip_doesNotArmDrag() {

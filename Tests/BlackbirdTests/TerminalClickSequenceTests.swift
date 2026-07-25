@@ -379,7 +379,7 @@ final class TerminalClickSequenceTests: XCTestCase {
     }
 
     /// Worked sequence 8. The boundary is INCLUSIVE, matching
-    /// `TabStripView.isOwnDoubleClick`. `base` (100.0) and `interval` (0.5)
+    /// `TabStripView.effectiveClickCount`. `base` (100.0) and `interval` (0.5)
     /// are both exactly representable, so this really is the boundary.
     func test_worked8_elapsedExactlyAtInterval_continuesRun() {
         XCTAssertEqual(

@@ -143,9 +143,6 @@ struct CellInstanceBuilder {
             var fg = resolved.fg
             let hasBg = resolved.hasBg
 
-            // `Int32(clamping:)` per UR-2 — same defense-in-depth
-            // rationale as the `rowBufferLine` site above.
-            let bufferLine = Int32(clamping: row) - Int32(clamping: snapshot.displayOffset)
             let selected = isSelected(bufferLine, col)
             var effectiveBg = selected ? selectionTint : resolved.bg
             var effectiveHasBg = selected ? true : hasBg

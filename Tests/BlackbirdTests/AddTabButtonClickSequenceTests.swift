@@ -2,59 +2,45 @@ import XCTest
 import AppKit
 @testable import Blackbird
 
-/// Blind tests for the `+` (new tab) button's click-sequence gate:
-/// `TabStripView.shouldFireAddButton(previous:clickCount:timestamp:
-/// doubleClickInterval:)` and its integration through the real
-/// `TabStripView.mouseDown(with:)`.
+/// Integration tests for the `+` (new tab) button's click gate, driving the
+/// real `TabStripView.mouseDown(with:)` with synthesized `NSEvent`s.
 ///
-/// The bug being pinned (BUG-2): `NSEvent.clickCount` describes the
-/// SYSTEM's click sequence, not this view's. When Blackbird isn't
-/// frontmost — or a different Blackbird window is key — the activating
-/// click is swallowed (`acceptsFirstMouse` is false), so the strip never
-/// sees it. The user, seeing nothing happen, clicks `+` again and THAT
-/// mousedown arrives carrying `clickCount == 2`. A gate that only fires
-/// on `clickCount == 1` therefore drops the click on the floor: the `+`
-/// button is inert until the user clicks a third time slowly. The strip
-/// must fire on the first click of a sequence AS THIS VIEW SEES IT.
+/// The gate is one line — `if clicks == 1 { onAddTab?() }` — but `clicks` is
+/// the RENUMBERED count from the shared click-sequence primitive
+/// (`TabStripView.effectiveClickCount`, unit-tested in
+/// `TabRenameClickSequenceTests`), not `NSEvent.clickCount`. Everything below
+/// pins the behaviour that renumbering buys, through the only surface that
+/// matters to the user: how many tabs one gesture opens.
 ///
-/// What must NOT regress: RCA P2 — a fast double-click on `+` opens
-/// exactly ONE tab, not two. So a click is suppressed only when it
-/// *directly continues* a `+` sequence this view already handled: the
-/// previous mark is on `+`, its `clickCount` is exactly one less than
-/// this one, and the two are within the double-click interval. Any other
-/// shape (no mark, a gap in the counts, a stale mark, an out-of-order
-/// mark) is a click this view has not accounted for, and it fires.
+/// Two failure modes the gate sits between:
 ///
-/// Truth table the predicate must implement (`p` = previous mark,
-/// `n` = incoming clickCount, `Δ` = timestamp − p.timestamp,
-/// `I` = doubleClickInterval):
+///  - FIRE TWICE (RCA P2). A fast double-click on `+` must open ONE tab. The
+///    raw-count gate got this right on a single strip and wrong across
+///    strips: click 1 fires `onAddTab`, the new window becomes key, and
+///    click 2 is delivered to the NEW window's strip — a different instance,
+///    whose per-view mark was empty, so it fired again and opened a second
+///    tab. The shared mark is what closes that hole.
+///  - FIRE NEVER. When Blackbird isn't frontmost the activating click is
+///    swallowed (`acceptsFirstMouse` is false), so the first mousedown any
+///    strip receives already carries `clickCount == 2`. A literal
+///    `event.clickCount == 1` gate drops it on the floor and `+` is inert
+///    until the user clicks a third time.
 ///
-///     p == nil                            → fire
-///     p.clickCount != n − 1               → fire
-///     Δ < 0                               → fire   (stale / reordered)
-///     Δ > I                               → fire   (separate gesture)
-///     p.clickCount == n − 1 && 0 ≤ Δ ≤ I  → SUPPRESS
-///
-/// Oracles:
-///  - pure level ⇢ the predicate's `Bool` return.
-///  - integration ⇢ the count of `onAddTab` invocations over a
-///    synthesized mousedown stream. `onAddTab` is the strip's only
-///    new-tab escape hatch (`TitlebarTabBar` wires it to the
-///    controller's add-tab action), so the count is exact.
+/// Oracle: the count of `onAddTab` invocations. It is the strip's only
+/// new-tab escape hatch (`TitlebarTabBar` wires it to the controller's
+/// add-tab action), so the count is exact — and it is summed ACROSS strips
+/// wherever a gesture spans two windows.
 ///
 /// Memory + safety budget (`feedback_test_memory_safety`):
-///  - The predicate tests allocate nothing beyond a handful of 2-field
-///    value-type marks (< 1 KB total).
-///  - Integration tests build ≤ 1 strip + 2 stub `NSWindow`s (200×100,
-///    contentless, never shown → no backing store) each: < 100 KB per
-///    test, < 500 KB for the suite.
-///  - Stub windows and strips are PARKED for the process lifetime —
-///    never shown, never `close()`d, never `orderOut`n
-///    (`feedback_tabgroup_test_host_segv`). `tabbingMode = .disallowed`
-///    keeps them out of any stray `NSWindowTabGroup` a sibling suite
-///    created.
+///  - ≤ 2 strips and ≤ 5 stub `NSWindow`s (200×100, contentless) per test;
+///    never shown, so no backing store is ever allocated. < 300 KB per test.
+///  - Stub windows and strips are PARKED for the process lifetime — never
+///    shown, never `close()`d, never `orderOut`n
+///    (`feedback_tabgroup_test_host_segv`). `tabbingMode = .disallowed` keeps
+///    them out of any stray `NSWindowTabGroup` a sibling suite created.
 ///  - No `MainWindowController`, no PTYs, no real shells.
-///  - Wall time < 10 ms per test; nothing waits on the runloop.
+///  - Wall time < 10 ms per test, except the one test that deliberately waits
+///    out a double-click interval.
 final class AddTabButtonClickSequenceTests: XCTestCase {
 
     override class func setUp() {
@@ -62,243 +48,38 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
-    // MARK: - Fixtures
-
-    /// A representative system double-click interval. Passed explicitly
-    /// so the predicate tests never depend on the developer's or CI
-    /// runner's "Double-click speed" setting.
-    private let interval: TimeInterval = 0.5
-
-    /// Origin of every predicate scenario's click sequence.
-    private let t0: TimeInterval = 100.0
-
-    private func mark(clickCount: Int,
-                      at t: TimeInterval) -> TabStripView.AddButtonClickMark {
-        TabStripView.AddButtonClickMark(clickCount: clickCount, timestamp: t)
+    // `TabStripView.lastMouseDown` is PROCESS-WIDE static state — shared
+    // across every strip on purpose. Every test that drives `mouseDown` must
+    // start from a known-empty mark, or a leftover from the previous test
+    // decides this one's verdict and the suite passes or fails depending on
+    // run order. Clearing on both ends keeps sibling suites clean too.
+    override func setUp() {
+        super.setUp()
+        TabStripView.resetClickSequenceForTesting()
     }
 
-    /// Explicitly typed `nil` — `shouldFireAddButton(previous: nil, …)`
-    /// would otherwise be ambiguous at the call site.
-    private let noMark: TabStripView.AddButtonClickMark? = nil
-
-    private func shouldFire(previous: TabStripView.AddButtonClickMark?,
-                            clickCount: Int,
-                            timestamp: TimeInterval,
-                            doubleClickInterval: TimeInterval? = nil) -> Bool {
-        TabStripView.shouldFireAddButton(
-            previous: previous,
-            clickCount: clickCount,
-            timestamp: timestamp,
-            doubleClickInterval: doubleClickInterval ?? interval
-        )
+    override func tearDown() {
+        TabStripView.resetClickSequenceForTesting()
+        super.tearDown()
     }
 
-    // MARK: - No prior mark → always fires
-
-    /// The ordinary case: app is already frontmost, user clicks `+` once.
-    func test_noPreviousMark_clickCountOne_fires() {
-        XCTAssertTrue(
-            shouldFire(previous: noMark, clickCount: 1, timestamp: t0),
-            "the first click of a sequence with no prior `+` mark must open a tab"
-        )
-    }
-
-    /// THE BUG. The strip's very first event is a `clickCount == 2`
-    /// mousedown because AppKit consumed the `clickCount == 1` half
-    /// activating the app/window. This view never saw that click, so this
-    /// one is the first it has handled — the tab must still open.
-    func test_noPreviousMark_clickCountTwo_fires_activationClickBug() {
-        XCTAssertTrue(
-            shouldFire(previous: noMark, clickCount: 2, timestamp: t0),
-            "a clickCount==2 with no prior `+` mark is a click whose first "
-                + "half was swallowed by activation — it must still open a tab, "
-                + "not leave the `+` button inert"
-        )
-    }
-
-    /// Same reasoning taken to its limit: any count this view has not
-    /// already accounted for fires. A user hammering `+` on an unfocused
-    /// window can hand the strip an arbitrarily deep count as its first
-    /// event.
-    func test_noPreviousMark_clickCountFive_fires() {
-        XCTAssertTrue(
-            shouldFire(previous: noMark, clickCount: 5, timestamp: t0),
-            "any clickCount is a first click when this view holds no `+` mark"
-        )
-    }
-
-    // MARK: - Direct continuation → suppressed (RCA P2 preserved)
-
-    /// The behaviour the count gate existed for: a fast double-click on
-    /// `+` opens exactly ONE tab. The strip handled the `clickCount == 1`
-    /// half itself, so the `clickCount == 2` tail is the same gesture.
-    func test_directContinuation_secondClickWithinInterval_suppressed() {
-        XCTAssertFalse(
-            shouldFire(previous: mark(clickCount: 1, at: t0),
-                       clickCount: 2,
-                       timestamp: t0 + 0.1),
-            "a fast double-click on `+` must open exactly one tab (RCA P2): "
-                + "the clickCount==2 tail of a sequence this view already "
-                + "handled is suppressed"
-        )
-    }
-
-    /// Triple-click is the same gesture continued once more; still one tab.
-    func test_directContinuation_thirdClickWithinInterval_suppressed() {
-        XCTAssertFalse(
-            shouldFire(previous: mark(clickCount: 2, at: t0),
-                       clickCount: 3,
-                       timestamp: t0 + 0.1),
-            "a triple-click on `+` must still open exactly one tab"
-        )
-    }
-
-    /// Zero elapsed is the tightest possible continuation — the interval
-    /// test is `0 ≤ Δ`, not `0 < Δ`.
-    func test_directContinuation_zeroElapsed_suppressed() {
-        XCTAssertFalse(
-            shouldFire(previous: mark(clickCount: 1, at: t0),
-                       clickCount: 2,
-                       timestamp: t0),
-            "two events sharing a timestamp are one gesture → suppressed"
-        )
-    }
-
-    // MARK: - Boundary
-
-    /// Inclusive upper bound, matching `isOwnDoubleClick`'s boundary: a
-    /// second click landing exactly one interval later is still one
-    /// gesture. Pinned so the two gates can't drift apart on the edge.
-    func test_directContinuation_elapsedExactlyAtInterval_suppressed() {
-        XCTAssertFalse(
-            shouldFire(previous: mark(clickCount: 1, at: t0),
-                       clickCount: 2,
-                       timestamp: t0 + interval),
-            "elapsed exactly == doubleClickInterval is still one gesture "
-                + "(inclusive boundary, matching isOwnDoubleClick)"
-        )
-    }
-
-    // MARK: - Not a direct continuation → fires
-
-    /// Too slow to be one gesture. The user genuinely clicked twice and
-    /// wants two tabs — which is also what happens today, where a slow
-    /// second click arrives with `clickCount == 1` and fires.
-    func test_secondClickBeyondInterval_fires() {
-        XCTAssertTrue(
-            shouldFire(previous: mark(clickCount: 1, at: t0),
-                       clickCount: 2,
-                       timestamp: t0 + 0.9),
-            "0.9s after the first click with a 0.5s interval is a second "
-                + "deliberate click → a second tab"
-        )
-    }
-
-    /// A gap in the counts THIS view saw: it handled click 1, then the
-    /// next event it receives is click 3 (click 2 went somewhere else —
-    /// another window's strip, or was swallowed). Click 2 was never
-    /// accounted for here, so click 3 is not a direct continuation.
-    func test_countGapInSequence_fires() {
-        XCTAssertTrue(
-            shouldFire(previous: mark(clickCount: 1, at: t0),
-                       clickCount: 3,
-                       timestamp: t0 + 0.1),
-            "clickCount jumped 1 → 3: the intervening click was never handled "
-                + "by this view, so this is not a continuation it may swallow"
-        )
-    }
-
-    /// A stale / out-of-order mark (synthesized or reordered events) must
-    /// never suppress a real click: suppression requires a COHERENT
-    /// continuation, and a mark that post-dates the incoming event isn't
-    /// part of this gesture.
-    func test_negativeElapsed_fires() {
-        XCTAssertTrue(
-            shouldFire(previous: mark(clickCount: 1, at: t0),
-                       clickCount: 2,
-                       timestamp: t0 - 0.1),
-            "a mark that post-dates the incoming click is stale — it must not "
-                + "suppress a click the user really made"
-        )
-    }
-
-    /// A fresh `clickCount == 1` always fires: no mark can be one less
-    /// than 1, so the "direct continuation" test can never match it.
-    /// This is repeated slow clicking on `+` → one tab per click.
-    func test_freshClickCountOne_afterEarlierMark_fires() {
-        XCTAssertTrue(
-            shouldFire(previous: mark(clickCount: 1, at: t0),
-                       clickCount: 1,
-                       timestamp: t0 + 0.1),
-            "a clickCount==1 starts a new sequence and always opens a tab"
-        )
-    }
-
-    // MARK: - The interval parameter is actually consulted
-
-    /// Guards against an implementation that ignores the injected
-    /// interval and reads `NSEvent.doubleClickInterval` (or a hardcoded
-    /// constant) internally: identical marks and counts, only the
-    /// interval differs, and the verdict must flip.
-    func test_intervalParameterDecidesVerdict() {
-        let previous = mark(clickCount: 1, at: t0)
-        let clickAt = t0 + 0.5
-
-        XCTAssertFalse(
-            shouldFire(previous: previous, clickCount: 2,
-                       timestamp: clickAt, doubleClickInterval: 1.0),
-            "0.5s elapsed is inside a 1.0s interval → one gesture → suppressed"
-        )
-        XCTAssertTrue(
-            shouldFire(previous: previous, clickCount: 2,
-                       timestamp: clickAt, doubleClickInterval: 0.125),
-            "the same 0.5s elapsed is outside a 0.125s interval → two gestures "
-                + "→ fires"
-        )
-    }
-
-    /// A zero interval means only simultaneous events form one gesture.
-    func test_zeroInterval_suppressesOnlyZeroElapsed() {
-        XCTAssertFalse(
-            shouldFire(previous: mark(clickCount: 1, at: t0), clickCount: 2,
-                       timestamp: t0, doubleClickInterval: 0),
-            "zero elapsed is within a zero interval (inclusive) → suppressed"
-        )
-        XCTAssertTrue(
-            shouldFire(previous: mark(clickCount: 1, at: t0), clickCount: 2,
-                       timestamp: t0 + 0.001, doubleClickInterval: 0),
-            "any positive elapsed exceeds a zero interval → fires"
-        )
-    }
-
-    // MARK: - AddButtonClickMark value semantics
-
-    /// The mark is a pure `Equatable` value over exactly its two fields —
-    /// the strip stores and replaces it, never mutates it.
-    func test_addButtonClickMark_equality() {
-        let a = mark(clickCount: 2, at: t0)
-        XCTAssertEqual(a, mark(clickCount: 2, at: t0),
-                       "same clickCount + timestamp → equal")
-        XCTAssertNotEqual(a, mark(clickCount: 1, at: t0),
-                          "differing clickCount → not equal")
-        XCTAssertNotEqual(a, mark(clickCount: 2, at: t0 + 0.001),
-                          "differing timestamp → not equal")
-        XCTAssertEqual(a.clickCount, 2, "clickCount is stored verbatim")
-        XCTAssertEqual(a.timestamp, t0, "timestamp is stored verbatim")
-    }
-
-    // MARK: - Integration rig
+    // MARK: - Rig
 
     /// A windowless `TabStripView` over never-shown stub windows, with
     /// `onAddTab` counted.
+    ///
+    /// NOTE: constructing a rig calls `update(tabs:selected:width:)`, whose
+    /// list-shape-change branch CLEARS the shared mark. Every test must
+    /// therefore build ALL of its rigs before delivering any mousedown.
     private final class AddRig {
-        /// Parked for the process lifetime: never shown, never closed,
-        /// never ordered out (`feedback_tabgroup_test_host_segv`).
+        /// Parked for the process lifetime: never shown, never `close()`d,
+        /// never `orderOut`n (`feedback_tabgroup_test_host_segv`).
         private static var parked: [AnyObject] = []
 
         let strip: TabStripView
         let tabs: [NSWindow]
         private(set) var addCount = 0
+        private(set) var selections: [NSWindow] = []
 
         init(tabCount: Int = 2, prefix: String, width: CGFloat = 600) {
             let windows: [NSWindow] = (0..<tabCount).map { i in
@@ -309,10 +90,10 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
                     defer: true
                 )
                 w.title = "\(prefix)-\(i)"
-                // Bare NSWindows created in one test process share a
-                // derived tabbing identifier; `.disallowed` stops AppKit
-                // folding these stubs into a group a sibling suite left
-                // behind (see TabStripDragTests for the full writeup).
+                // Bare NSWindows created in one test process share a derived
+                // tabbing identifier; `.disallowed` stops AppKit folding these
+                // stubs into a group a sibling suite left behind (see
+                // TabStripDragTests for the full writeup).
                 w.tabbingMode = .disallowed
                 return w
             }
@@ -322,6 +103,7 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
             )
             strip.update(tabs: windows, selected: windows[0], width: width)
             strip.onAddTab = { [weak self] in self?.addCount += 1 }
+            strip.onSelectWindow = { [weak self] w in self?.selections.append(w) }
             AddRig.parked.append(contentsOf: windows as [AnyObject])
             AddRig.parked.append(strip)
         }
@@ -331,15 +113,28 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
             let f = strip.addButtonFrameForTesting
             return NSPoint(x: f.midX, y: f.midY)
         }
+
+        /// Centre of pill `i` in strip-local coordinates.
+        func pillCenter(_ i: Int) -> NSPoint {
+            let frames = strip.pillFramesForTesting
+            precondition(i < frames.count, "pill \(i) out of range")
+            return NSPoint(x: frames[i].midX, y: frames[i].midY)
+        }
     }
 
     private func mouseEvent(_ type: NSEvent.EventType,
                             at p: NSPoint,
                             clickCount: Int,
                             timestamp: TimeInterval) -> NSEvent {
-        NSEvent.mouseEvent(
+        // `p` is a VIEW coordinate (as reported by `addButtonFrameForTesting`),
+        // but `NSEvent.location` is a WINDOW coordinate and
+        // `TabStripView.mouseDown` converts it through an `isFlipped == true`
+        // view — which mirrors y about the strip's height. Pre-mirror so the
+        // point a test names is the point the strip actually hit-tests.
+        let windowPoint = NSPoint(x: p.x, y: TabStripView.height - p.y)
+        return NSEvent.mouseEvent(
             with: type,
-            location: p,
+            location: windowPoint,
             modifierFlags: [],
             timestamp: timestamp,
             windowNumber: 0,
@@ -350,7 +145,7 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
         )!
     }
 
-    /// Deliver one `+` mousedown to the strip.
+    /// Deliver one `+` mousedown to `rig`'s strip.
     private func addButtonMouseDown(_ rig: AddRig,
                                     clickCount: Int,
                                     timestamp: TimeInterval) {
@@ -358,6 +153,21 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
                                              at: rig.addButtonCenter,
                                              clickCount: clickCount,
                                              timestamp: timestamp))
+    }
+
+    /// Deliver one pill mousedown + mouseup to `rig`'s strip. Used only to
+    /// interpose a different click TARGET between two `+` clicks.
+    private func pillClick(_ rig: AddRig,
+                           pill i: Int,
+                           clickCount: Int,
+                           timestamp: TimeInterval) {
+        let p = rig.pillCenter(i)
+        rig.strip.mouseDown(with: mouseEvent(.leftMouseDown, at: p,
+                                             clickCount: clickCount,
+                                             timestamp: timestamp))
+        rig.strip.mouseUp(with: mouseEvent(.leftMouseUp, at: p,
+                                           clickCount: clickCount,
+                                           timestamp: timestamp))
     }
 
     private func assertAddButtonIsHittable(_ rig: AddRig,
@@ -370,8 +180,8 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
         XCTAssertGreaterThan(f.height, 0,
                              "precondition: the `+` button must have a real frame",
                              file: file, line: line)
-        // The hit point must belong to the `+` and to no pill, or the
-        // integration tests would be measuring pill clicks.
+        // The hit point must belong to the `+` and to no pill, or these tests
+        // would be measuring pill clicks.
         let p = rig.addButtonCenter
         XCTAssertFalse(
             rig.strip.pillFramesForTesting.contains { NSPointInRect(p, $0) },
@@ -379,89 +189,220 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
             file: file, line: line)
     }
 
-    // MARK: - Integration: real mouseDown → onAddTab count
+    /// A gap guaranteed to be INSIDE the live system double-click interval.
+    /// Read from `NSEvent.doubleClickInterval` because `mouseDown` reads it
+    /// too — a hardcoded 0.1 would be wrong on a machine set to "fast".
+    private var quickGap: TimeInterval { NSEvent.doubleClickInterval / 4 }
 
-    /// RCA P2, end to end: the full fast-double-click event stream on
-    /// `+` — down(1) then down(2), 0.1 s apart — opens exactly ONE tab.
-    func test_integration_fastDoubleClickOnAddButton_opensExactlyOneTab() {
-        let rig = AddRig(prefix: "fastdouble")
+    // MARK: - The ordinary click
+
+    /// Baseline: one click on `+` opens one tab, and does not select a pill.
+    func test_singleClickOnAddButton_opensExactlyOneTab() {
+        let rig = AddRig(prefix: "single")
         assertAddButtonIsHittable(rig)
         XCTAssertEqual(rig.addCount, 0, "precondition: no tab opened yet")
 
         addButtonMouseDown(rig, clickCount: 1, timestamp: 0)
-        addButtonMouseDown(rig, clickCount: 2, timestamp: 0.1)
 
-        XCTAssertEqual(
-            rig.addCount, 1,
-            "a fast double-click on `+` this strip saw in full must open one "
-                + "tab, not two"
-        )
+        XCTAssertEqual(rig.addCount, 1, "one click on `+` opens one tab")
+        XCTAssertEqual(rig.selections.count, 0,
+                       "a `+` click must never fall through to pill selection")
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.target, .addButton,
+                       "the click is recorded against the `+` target so the "
+                           + "next event can be recognised as its continuation")
     }
 
-    /// THE REGRESSION TEST. The strip's FIRST event is a lone
-    /// `clickCount == 2` mousedown: AppKit swallowed the first click
-    /// activating the app/window, so this view never saw it. Pre-fix the
-    /// gate (`clickCount == 1`) dropped this on the floor and the `+`
-    /// button did nothing — the user had to click a third time.
-    func test_integration_loneDoubleClickMouseDown_opensExactlyOneTab() {
+    // MARK: - RCA P2: one gesture, one tab
+
+    /// A fast double-click on `+` delivered entirely to ONE strip opens
+    /// exactly one tab. `clicks` renumbers to [1, 2] and only 1 fires.
+    func test_fastDoubleClickOnOneStrip_opensExactlyOneTab() {
+        let rig = AddRig(prefix: "fastdouble")
+        assertAddButtonIsHittable(rig)
+
+        addButtonMouseDown(rig, clickCount: 1, timestamp: 0)
+        addButtonMouseDown(rig, clickCount: 2, timestamp: quickGap)
+
+        XCTAssertEqual(rig.addCount, 1,
+                       "a fast double-click on `+` must open one tab, not two")
+    }
+
+    /// A triple-click is still one gesture.
+    func test_fastTripleClickOnOneStrip_opensExactlyOneTab() {
+        let rig = AddRig(prefix: "fasttriple")
+        assertAddButtonIsHittable(rig)
+
+        addButtonMouseDown(rig, clickCount: 1, timestamp: 0)
+        addButtonMouseDown(rig, clickCount: 2, timestamp: quickGap)
+        addButtonMouseDown(rig, clickCount: 3, timestamp: quickGap * 2)
+
+        XCTAssertEqual(rig.addCount, 1,
+                       "a triple-click on `+` must still open exactly one tab")
+    }
+
+    /// THE DOUBLE-FIRE CASE — the regression the shared mark exists to fix.
+    ///
+    /// Click 1 lands on the CURRENT window's strip (A) and opens a tab. That
+    /// new window becomes key, so click 2 of the same physical double-click
+    /// is delivered to the NEW window's strip (B) — a different instance, at
+    /// the same screen point, that has never seen a mousedown of its own.
+    /// With a per-view mark B saw an empty mark and fired again: one gesture,
+    /// two tabs. With the shared mark B sees that a strip already handled
+    /// click 1 on `+` within the interval, renumbers to 2, and stays quiet.
+    func test_crossStrip_fastDoubleClick_opensExactlyOneTabInTotal() {
+        // Both rigs are constructed FIRST: `update(tabs:)` clears the shared
+        // mark on a list-shape change, so building B after A's click would
+        // wipe the very mark under test.
+        let rigA = AddRig(tabCount: 2, prefix: "winA")
+        // The destination window's strip already shows the tab that click 1
+        // opened, so its `+` sits at a different x — a per-view design cannot
+        // use geometry to tell these apart, only the shared run can.
+        let rigB = AddRig(tabCount: 3, prefix: "winB")
+        assertAddButtonIsHittable(rigA)
+        assertAddButtonIsHittable(rigB)
+
+        addButtonMouseDown(rigA, clickCount: 1, timestamp: 0)
+        XCTAssertEqual(rigA.addCount, 1,
+                       "precondition: click 1 opened a tab on strip A")
+
+        addButtonMouseDown(rigB, clickCount: 2, timestamp: quickGap)
+
+        XCTAssertEqual(rigB.addCount, 0,
+                       "strip B must NOT fire: click 2 continues the `+` run a "
+                           + "sibling strip already handled")
+        XCTAssertEqual(rigA.addCount + rigB.addCount, 1,
+                       "one physical double-click on `+` opens exactly one tab, "
+                           + "however many strips the events were split across")
+    }
+
+    // MARK: - The phantom activation click: `+` must stay live
+
+    /// The strip's first event is a lone `clickCount == 2` with the shared
+    /// mark cleared: the activating click was swallowed and NO strip saw it.
+    /// It renumbers to 1 and must open a tab — a literal `clickCount == 1`
+    /// gate left `+` inert on the click right after coming back to the app.
+    func test_loneDoubleClickMouseDown_opensExactlyOneTab() {
         let rig = AddRig(prefix: "phantom")
         assertAddButtonIsHittable(rig)
-        XCTAssertEqual(rig.addCount, 0, "precondition: no tab opened yet")
+        XCTAssertNil(TabStripView.lastMouseDownForTesting,
+                     "precondition: the shared mark starts cleared")
 
         addButtonMouseDown(rig, clickCount: 2, timestamp: 0)
 
-        XCTAssertEqual(
-            rig.addCount, 1,
-            "a clickCount==2 mousedown that is this strip's first event is a "
-                + "post-activation click — it must open exactly one tab "
-                + "(pre-fix it opened zero)"
-        )
+        XCTAssertEqual(rig.addCount, 1,
+                       "a clickCount==2 whose first half no strip received is "
+                           + "the run's first click — it must open one tab")
     }
 
-    /// The two halves of the fix must compose: an activation click fires
-    /// (count 2, no mark), and the genuine second click of the user's
-    /// double-click (count 3, a direct continuation of the mark the
-    /// activation click left behind) is suppressed. One gesture, one tab.
-    func test_integration_activationClickThenItsDoubleClickTail_opensOneTab() {
+    /// Both halves of the fix compose: the activation click fires (system
+    /// count 2, no mark), and the genuine second click of the user's
+    /// double-click (system count 3, a direct continuation of the mark the
+    /// activation click left behind) is suppressed. Delivered run [2, 3]
+    /// renumbers to [1, 2] → one gesture, one tab.
+    func test_activationClickThenItsDoubleClickTail_opensExactlyOneTab() {
         let rig = AddRig(prefix: "phantomdouble")
         assertAddButtonIsHittable(rig)
 
-        // The click that reached the strip after activation swallowed the
-        // first one.
         addButtonMouseDown(rig, clickCount: 2, timestamp: 0)
         XCTAssertEqual(rig.addCount, 1,
                        "precondition: the post-activation click opened a tab")
 
-        // The user was actually double-clicking; the tail arrives here too.
-        addButtonMouseDown(rig, clickCount: 3, timestamp: 0.1)
+        addButtonMouseDown(rig, clickCount: 3, timestamp: quickGap)
 
-        XCTAssertEqual(
-            rig.addCount, 1,
-            "the clickCount==3 tail directly continues the clickCount==2 click "
-                + "this strip just handled → one gesture, one tab"
-        )
+        XCTAssertEqual(rig.addCount, 1,
+                       "the clickCount==3 tail continues the click this strip "
+                           + "just handled → one gesture, one tab")
     }
 
-    /// Two deliberate, separated clicks on `+` open two tabs. Guards the
-    /// opposite failure: a fix that suppressed too eagerly (e.g. "never
-    /// fire twice in a row") would make `+` feel broken for normal use.
-    func test_integration_twoSeparatedClicks_openTwoTabs() {
+    /// The same phantom-then-tail stream split across two strips: click 1 is
+    /// swallowed by activation, click 2 opens a tab on strip A, click 3 is
+    /// delivered to the new window's strip B. Still one tab.
+    func test_crossStrip_activationClickThenTail_opensExactlyOneTabInTotal() {
+        let rigA = AddRig(tabCount: 2, prefix: "xphantomA")
+        let rigB = AddRig(tabCount: 3, prefix: "xphantomB")
+        assertAddButtonIsHittable(rigA)
+        assertAddButtonIsHittable(rigB)
+
+        addButtonMouseDown(rigA, clickCount: 2, timestamp: 0)
+        XCTAssertEqual(rigA.addCount, 1,
+                       "precondition: the post-activation click opened a tab")
+
+        addButtonMouseDown(rigB, clickCount: 3, timestamp: quickGap)
+
+        XCTAssertEqual(rigA.addCount + rigB.addCount, 1,
+                       "the tail lands on the new window's strip and must not "
+                           + "open a second tab")
+    }
+
+    // MARK: - Separate gestures still open separate tabs
+
+    /// Two deliberate, unrelated clicks open two tabs. Guards the opposite
+    /// failure: a gate that suppressed too eagerly ("never fire twice in a
+    /// row") would make `+` feel broken for ordinary use. AppKit reports
+    /// `clickCount == 1` for a click too slow to continue the previous one,
+    /// and 1 is never renumbered.
+    func test_twoDeliberateClicks_openTwoTabs() {
         let rig = AddRig(prefix: "twoclicks")
         assertAddButtonIsHittable(rig)
 
-        // Two starts-of-sequence: AppKit reports `clickCount == 1` for a
-        // click that is too slow to continue the previous one. Neither can
-        // ever be a direct continuation (no mark's count is one less than
-        // 1), so both fire — under either an event-timestamp or a
-        // wall-clock reading of the mark.
         addButtonMouseDown(rig, clickCount: 1, timestamp: 0)
-        XCTAssertEqual(rig.addCount, 1, "precondition: the first click opened a tab")
+        XCTAssertEqual(rig.addCount, 1, "precondition: the first click fired")
         addButtonMouseDown(rig, clickCount: 1, timestamp: 1.0)
 
-        XCTAssertEqual(
-            rig.addCount, 2,
-            "two deliberate clicks separated by more than one double-click "
-                + "interval must open two tabs"
-        )
+        XCTAssertEqual(rig.addCount, 2,
+                       "two clicks that each start their own run open two tabs")
+    }
+
+    /// The interval itself is load-bearing, not just the system count: a
+    /// second click that arrives with a RISING system count but more than one
+    /// double-click interval later is a separate gesture and opens a second
+    /// tab.
+    ///
+    /// The gap is made real in BOTH clocks — the events carry timestamps past
+    /// the interval AND the test waits it out on the runloop — so the test
+    /// holds whether the strip reads `NSEvent.timestamp` or a wall clock.
+    func test_secondClickBeyondInterval_opensASecondTab() throws {
+        let interval = NSEvent.doubleClickInterval
+        try XCTSkipIf(interval > 1.5,
+                      "double-click interval configured absurdly long "
+                          + "(\(interval)s); the wait would dominate the suite")
+
+        let rig = AddRig(prefix: "slowpair")
+        assertAddButtonIsHittable(rig)
+
+        addButtonMouseDown(rig, clickCount: 1, timestamp: 0)
+        XCTAssertEqual(rig.addCount, 1, "precondition: the first click fired")
+
+        let gap = interval + 0.1
+        RunLoop.current.run(until: Date().addingTimeInterval(gap))
+        addButtonMouseDown(rig, clickCount: 2, timestamp: gap)
+
+        XCTAssertEqual(rig.addCount, 2,
+                       "a click more than one double-click interval later is a "
+                           + "new gesture and opens a second tab, even though "
+                           + "the system's count kept rising")
+    }
+
+    /// A different click TARGET breaks the `+` run: click `+`, click a pill,
+    /// then click `+` again quickly. The third click cannot be a continuation
+    /// of the first (the pill click is in between), so it opens a tab. A gate
+    /// that keyed only on counts and timing — ignoring the target — would
+    /// swallow it and make `+` inert right after a tab switch.
+    func test_pillClickBetweenAddClicks_breaksTheRun_secondAddFires() {
+        let rig = AddRig(tabCount: 2, prefix: "targetbreak")
+        assertAddButtonIsHittable(rig)
+
+        addButtonMouseDown(rig, clickCount: 1, timestamp: 0)
+        XCTAssertEqual(rig.addCount, 1, "precondition: the first `+` click fired")
+
+        pillClick(rig, pill: 0, clickCount: 2, timestamp: quickGap)
+        XCTAssertEqual(rig.selections, [rig.tabs[0]],
+                       "precondition: the interposed pill click selected pill 0")
+
+        addButtonMouseDown(rig, clickCount: 3, timestamp: quickGap * 2)
+
+        XCTAssertEqual(rig.addCount, 2,
+                       "the `+` click after a pill click starts a new run and "
+                           + "must open a tab")
     }
 }

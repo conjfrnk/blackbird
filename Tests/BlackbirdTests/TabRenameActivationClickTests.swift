@@ -20,12 +20,17 @@ import AppKit
 ///  2. The user clicks pill B in window A's strip (window B becomes key),
 ///     then clicks again quickly. Window B's strip is a DIFFERENT view
 ///     instance that never saw a first click, yet the event still carries
-///     `clickCount == 2`.
+///     `clickCount == 2`. That one IS a genuine double-click on pill B —
+///     one gesture whose two halves AppKit split across two views — so it
+///     must rename. Telling it apart from case 1 is exactly why the click
+///     mark is SHARED across every strip in the process instead of being
+///     per-view: for case 2 some strip saw click 1, for case 1 none did.
 ///
-/// Contract under test at this level: rename opens only for a
-/// double-click THIS strip saw in full (it received the `clickCount == 1`
-/// mousedown on the same pill, within the system double-click interval).
-/// Anything else is an ordinary click — it selects the tab.
+/// Contract under test at this level: rename opens only for a double-click
+/// SOME strip saw in full — the run of mousedowns the strips received
+/// (renumbered by `TabStripView.effectiveClickCount`) reached 2 on this pill
+/// index, within the system double-click interval. Anything else is an
+/// ordinary click: it arms a reorder drag and selects on release.
 ///
 /// Oracles (existing surfaces only, no new production hooks):
 ///  - "is renaming" ⇢ the inline-rename `NSTextField` is installed as a
@@ -56,6 +61,21 @@ final class TabRenameActivationClickTests: XCTestCase {
     override class func setUp() {
         super.setUp()
         TestHostTermination.shared.register()
+    }
+
+    // The click mark (`TabStripView.lastMouseDown`) is PROCESS-WIDE static
+    // state — shared across every strip on purpose. Every test that drives
+    // `mouseDown` must therefore start from a known-empty mark, or a leftover
+    // from the previous test (or a sibling suite) decides this one's verdict
+    // and the results depend on run order.
+    override func setUp() {
+        super.setUp()
+        TabStripView.resetClickSequenceForTesting()
+    }
+
+    override func tearDown() {
+        TabStripView.resetClickSequenceForTesting()
+        super.tearDown()
     }
 
     // MARK: - Rig
@@ -126,9 +146,19 @@ final class TabRenameActivationClickTests: XCTestCase {
                             at p: NSPoint,
                             clickCount: Int,
                             timestamp: TimeInterval = 0) -> NSEvent {
-        NSEvent.mouseEvent(
+        // `p` is given in VIEW coordinates (that is what `pillFramesForTesting`
+        // and `addButtonFrameForTesting` report), but `NSEvent.location` is a
+        // WINDOW coordinate and `TabStripView.mouseDown` runs it through
+        // `convert(_:from: nil)`. The strip is `isFlipped == true`, so that
+        // conversion mirrors y about the strip's height. Pre-mirror here so a
+        // test that says "y = 1" really does click view-y 1. Without this every
+        // point silently lands at `height - y`, which happens to stay inside
+        // the pill band for pill-centre clicks — so the mistake hides until a
+        // test depends on y, e.g. one aiming at the bare strip below the pills.
+        let windowPoint = NSPoint(x: p.x, y: TabStripView.height - p.y)
+        return NSEvent.mouseEvent(
             with: type,
-            location: p,
+            location: windowPoint,
             modifierFlags: [],
             timestamp: timestamp,
             windowNumber: 0,
@@ -317,37 +347,56 @@ final class TabRenameActivationClickTests: XCTestCase {
 
     // MARK: - Consequence 2: cross-window sequence
 
-    /// Two windows, two strips. The user clicks a pill in strip A (which
-    /// switches windows), then clicks strip B right away. AppKit hands
-    /// strip B a `clickCount == 2` mousedown as the very first event that
-    /// view instance has ever seen. Strip B must not rename.
-    func test_freshStrip_receivingDoubleClickAsItsFirstEvent_doesNotRename() {
+    /// Two windows, two strips, ONE gesture. The user double-clicks a
+    /// BACKGROUND pill to rename it: click 1 lands in window A's strip and
+    /// selects that tab, which makes window B key — so click 2 is delivered
+    /// to window B's strip, a different view instance that has never seen a
+    /// mousedown of its own, carrying the system's continued count.
+    ///
+    /// The strips DID see this gesture in full, just across two views, so
+    /// rename must open on strip B. (This test previously asserted the
+    /// opposite: under the old per-view mark, strip B refused, and
+    /// double-clicking a background tab to rename it silently stopped
+    /// working. The shared mark restores it, and is also what keeps the
+    /// phantom activation click above rejected — there, NO strip saw click 1.)
+    func test_crossStripDoubleClick_secondHalfOnFreshStrip_entersRename() {
+        // Both rigs are constructed FIRST: `update(tabs:)` clears the shared
+        // mark on a list-shape change, so building B after A's click would
+        // wipe the very mark under test.
         let rigA = StripRig(tabCount: 3, prefix: "winA")
         let rigB = StripRig(tabCount: 3, prefix: "winB")
 
-        // Full click in window A's strip — the system's click sequence
-        // now stands at 1.
+        // Full click in window A's strip — the system's click sequence now
+        // stands at 1, and so does the strips' own run.
         click(rigA, pill: 1, clickCount: 1)
-        XCTAssertEqual(rigA.selections.count, 1,
-                       "precondition: strip A handled an ordinary click")
+        XCTAssertEqual(rigA.selections, [rigA.tabs[1]],
+                       "precondition: strip A's click selected the background tab")
 
-        // The follow-up click lands in window B's strip, carrying the
-        // system's continued count.
-        click(rigB, pill: 1, clickCount: 2)
+        // The follow-up click lands in window B's strip, at the same pill
+        // index, carrying the system's continued count.
+        rigB.strip.mouseDown(with: mouseEvent(.leftMouseDown,
+                                              at: rigB.pillCenter(1),
+                                              clickCount: 2))
 
-        assertNotRenaming(
-            rigB,
-            "a strip that never received the first mousedown of the sequence "
-                + "must not treat clickCount==2 as its own double-click"
+        XCTAssertTrue(
+            rigB.isRenaming,
+            "the second half of a double-click, delivered to the destination "
+                + "window's fresh strip, must open rename — some strip saw "
+                + "click 1 on this pill within the interval"
         )
+        rigB.strip.commitEditIfNeeded()
+        XCTAssertEqual(rigB.renameCommits.count, 1,
+                       "the in-flight edit on strip B is real")
+        XCTAssertEqual(rigB.renameCommits.first?.window, rigB.tabs[1],
+                       "rename targets the pill the user double-clicked")
+        XCTAssertEqual(rigB.renameCommits.first?.title, "winB-1",
+                       "the field is pre-filled with that pill's title")
+        XCTAssertEqual(rigB.selections.count, 0,
+                       "the renaming click must not ALSO select a tab")
         assertNotRenaming(
             rigA,
-            "strip A saw only a single click and must not be renaming either"
+            "strip A saw only a single click and must not be renaming"
         )
-        XCTAssertEqual(rigB.selections.count, 1,
-                       "strip B's click must act as one ordinary click")
-        XCTAssertEqual(rigB.selections.first, rigB.tabs[1],
-                       "…selecting the pill the user clicked in window B")
     }
 
     /// A phantom activation click must not poison the strip's bookkeeping:

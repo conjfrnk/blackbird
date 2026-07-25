@@ -316,12 +316,12 @@ final class TabStripView: NSView {
         // `dragPhase = .idle` in `mouseUp` before the notification fired.
         if listShapeChanged {
             tabDragController.cancelForListShapeChange()
-            // The recorded first-click index refers to the OLD pill list; a
-            // reshuffle underneath a half-finished double-click would let the
-            // second click open rename on whatever tab inherited that slot.
-            // Drop the mark rather than remap it — worst case the user
-            // double-clicks again.
-            lastPillMouseDown = nil
+            // The recorded target refers to the OLD pill list; a reshuffle
+            // underneath a half-finished double-click would let the second
+            // click open rename on whatever tab inherited that slot. Drop the
+            // mark rather than remap it — worst case the user double-clicks
+            // again.
+            Self.lastMouseDown = nil
         }
         self.tabs = tabs
         self.selectedTab = selected
@@ -451,9 +451,7 @@ final class TabStripView: NSView {
     /// click-sequence tests assert that a phantom `clickCount == 2` (one
     /// whose first click this strip never saw) does NOT open the field.
     @objc var isEditingForTesting: Bool { isEditing }
-    /// Test hook — the strip's own last-pill-mousedown mark, so a test can
-    /// assert the click history it records rather than only its effect.
-    var lastPillMouseDownForTesting: ClickSequenceMark? { lastPillMouseDown }
+
     /// Test hook — current pill count. Lets stress tests assert pill
     /// geometry tracks the tab list without exposing the internal
     /// `pillFrames` array publicly.
@@ -751,54 +749,84 @@ final class TabStripView: NSView {
 
     // MARK: - Hit testing & hover
 
-    /// One pill mousedown this strip actually received.
+    /// What a strip mousedown landed on. Continuation of a click run
+    /// requires the same target — two clicks on different pills are two
+    /// gestures, not a double-click.
+    enum ClickTarget: Equatable {
+        case pill(Int)
+        case addButton
+    }
+
+    /// One mousedown delivered to SOME strip in this process.
     ///
-    /// `NSEvent.clickCount` counts the SYSTEM's click sequence, not this
+    /// `NSEvent.clickCount` counts the SYSTEM's click sequence, not any one
     /// view's. AppKit keeps counting across window- and app-activation
-    /// boundaries, and it counts clicks this view never received at all: when
-    /// Blackbird isn't frontmost — or another Blackbird window is key — the
-    /// activating click is swallowed (`acceptsFirstMouse` is false by
-    /// default), so the user's NEXT click arrives here already carrying
-    /// `clickCount == 2`. Entering rename on a bare `clickCount == 2`
-    /// therefore popped the rename field open when the user only meant to
-    /// come back to the app and pick a tab (user report 2026-07-24). The
-    /// tab-switch variant is the same shape: selecting a pill makes a
-    /// different window key, and the destination window's strip is a
-    /// different view instance that never saw the first click.
-    ///
-    /// Recording what THIS view saw lets `isOwnDoubleClick` demand the whole
-    /// gesture instead of trusting its tail.
+    /// boundaries, and it counts clicks no strip ever received: when
+    /// Blackbird isn't frontmost the activating click is swallowed
+    /// (`acceptsFirstMouse` is false by default), so the user's NEXT click
+    /// arrives already carrying `clickCount == 2`. Trusting that raw count
+    /// popped the rename field open when the user only meant to come back to
+    /// the app and pick a tab (user report 2026-07-24).
     struct ClickSequenceMark: Equatable {
-        let pillIndex: Int
-        let clickCount: Int
+        let target: ClickTarget
+        /// The raw `NSEvent.clickCount` of that mousedown.
+        let systemClickCount: Int
+        /// The count the strip assigned it after renumbering.
+        let effectiveClickCount: Int
         let timestamp: TimeInterval
     }
 
-    /// Most recent mousedown delivered to this strip that landed on a pill,
-    /// or `nil` when the last one missed every pill (or none has arrived).
-    private var lastPillMouseDown: ClickSequenceMark?
-
-    /// Whether `clickCount`/`timestamp` name the second click of a
-    /// double-click this strip saw in full — the precondition for entering
-    /// inline rename. Pure so the policy is testable without an AppKit event
-    /// stream.
+    /// The last mousedown any strip handled — deliberately SHARED across
+    /// every `TabStripView` in the process, not per-instance.
     ///
-    /// A non-negative elapsed time is required as well as an in-interval one:
-    /// a mark from a synthesized or reordered event that post-dates the
-    /// incoming one isn't part of this gesture either.
-    static func isOwnDoubleClick(previous: ClickSequenceMark?,
-                                 pillIndex: Int,
-                                 clickCount: Int,
-                                 timestamp: TimeInterval,
-                                 doubleClickInterval: TimeInterval) -> Bool {
-        guard clickCount == 2,
-              let previous,
-              previous.clickCount == 1,
-              previous.pillIndex == pillIndex
-        else { return false }
+    /// Each tab is its own `NSWindow` with its own strip, and both selecting
+    /// a pill and opening a tab make a DIFFERENT window key. So the two
+    /// halves of a single user gesture are routinely delivered to two
+    /// different strip instances, at the same screen point. A per-view mark
+    /// cannot see the first half, which broke two gestures at once: a fast
+    /// double-click on `+` re-fired on the new window's strip and opened two
+    /// tabs (undoing RCA P2), and double-clicking a BACKGROUND pill to
+    /// rename it was refused, because click 1 selected that tab and click 2
+    /// landed on the destination window's fresh strip.
+    ///
+    /// Sharing is what distinguishes the two look-alike streams: for a
+    /// genuine background-pill double-click SOME strip saw the first click,
+    /// whereas for the phantom activation click NO strip did.
+    ///
+    /// AppKit delivers all of this on the main thread, so a plain `static`
+    /// needs no synchronization.
+    private(set) static var lastMouseDown: ClickSequenceMark?
+
+    /// The ordinal of this mousedown within the run of mousedowns the STRIPS
+    /// received, rather than within the window server's sequence.
+    ///
+    /// Mirrors `TerminalView.effectiveClickCount`; the extra `target` is what
+    /// the terminal deliberately omits (it has a single click surface, the
+    /// strip has pills plus `+`).
+    static func effectiveClickCount(previous: ClickSequenceMark?,
+                                    target: ClickTarget,
+                                    clickCount: Int,
+                                    timestamp: TimeInterval,
+                                    doubleClickInterval: TimeInterval) -> Int {
+        // 1 already starts a gesture; 0 and negatives are synthesized values
+        // no caller should see rewritten.
+        guard clickCount > 1 else { return clickCount }
+        guard let previous,
+              previous.target == target,
+              previous.systemClickCount == clickCount - 1
+        else { return 1 }
         let elapsed = timestamp - previous.timestamp
-        return elapsed >= 0 && elapsed <= doubleClickInterval
+        guard elapsed >= 0, elapsed <= doubleClickInterval else { return 1 }
+        return previous.effectiveClickCount + 1
     }
+
+    #if DEBUG
+    /// Test hook — the shared mark is process-wide state, so a test that
+    /// drives `mouseDown` must clear it or it leaks into the next test.
+    static func resetClickSequenceForTesting() { lastMouseDown = nil }
+    /// Test hook — read the shared mark.
+    static var lastMouseDownForTesting: ClickSequenceMark? { lastMouseDown }
+    #endif
 
     /// Index of the pill whose frame contains `p`, or `nil` for the `+`
     /// button and the bare strip regions between pills.
@@ -806,60 +834,32 @@ final class TabStripView: NSView {
         pillFrames.firstIndex { NSPointInRect(p, $0) }
     }
 
-    /// The last `+`-button mousedown this strip actually received.
-    ///
-    /// Same `NSEvent.clickCount`-isn't-ours problem as `ClickSequenceMark`,
-    /// with the opposite failure mode. `+` fired only on `clickCount == 1`
-    /// so a fast double-click wouldn't open two tabs (RCA P2) — but when the
-    /// activating click is swallowed, the user's next click arrives as
-    /// `clickCount == 2` and is SUPPRESSED, so `+` reads as dead until they
-    /// click again slower than the double-click interval.
-    struct AddButtonClickMark: Equatable {
-        let clickCount: Int
-        let timestamp: TimeInterval
-    }
-
-    /// Most recent `+`-button mousedown delivered to this strip, or `nil`
-    /// when the last mousedown landed elsewhere (or none has arrived).
-    private var lastAddButtonClick: AddButtonClickMark?
-
-    /// Whether a `+` mousedown should open a tab: yes on the first click of
-    /// a sequence AS THIS VIEW SEES IT.
-    ///
-    /// Suppression is narrow by design — it applies only when this event
-    /// directly continues a `+` run this strip already handled (previous
-    /// count exactly one less, within the interval). That still collapses a
-    /// fast double-click to one tab, while letting through a click whose
-    /// predecessor AppKit never delivered here. Pure so the policy is
-    /// testable without an event stream.
-    static func shouldFireAddButton(previous: AddButtonClickMark?,
-                                    clickCount: Int,
-                                    timestamp: TimeInterval,
-                                    doubleClickInterval: TimeInterval) -> Bool {
-        guard let previous, previous.clickCount == clickCount - 1 else { return true }
-        let elapsed = timestamp - previous.timestamp
-        return !(elapsed >= 0 && elapsed <= doubleClickInterval)
-    }
-
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        // Record this mousedown as the strip's own click history BEFORE any
-        // dispatch below can return early, and hand the prior mark to the
-        // rename gate so it can tell a real double-click from the tail of a
-        // sequence that started somewhere else.
-        let previousMouseDown = lastPillMouseDown
-        lastPillMouseDown = pillIndex(at: p).map {
-            ClickSequenceMark(pillIndex: $0,
-                              clickCount: event.clickCount,
-                              timestamp: event.timestamp)
+        // Renumber into the run of clicks the STRIPS have seen, and record
+        // this one, BEFORE any dispatch below can return early. `clicks == 1`
+        // means "first click of a gesture as far as the strips are
+        // concerned", which is what every gate below actually wants — the raw
+        // system count keeps rising across an activating click no strip ever
+        // received. See `ClickSequenceMark`.
+        let target: ClickTarget? = pillIndex(at: p).map { .pill($0) }
+            ?? (NSPointInRect(p, addButtonFrame) ? .addButton : nil)
+        let clicks: Int
+        if let target {
+            clicks = Self.effectiveClickCount(previous: Self.lastMouseDown,
+                                              target: target,
+                                              clickCount: event.clickCount,
+                                              timestamp: event.timestamp,
+                                              doubleClickInterval: NSEvent.doubleClickInterval)
+            Self.lastMouseDown = ClickSequenceMark(target: target,
+                                                   systemClickCount: event.clickCount,
+                                                   effectiveClickCount: clicks,
+                                                   timestamp: event.timestamp)
+        } else {
+            // Landed on bare strip; nothing can continue from here.
+            clicks = event.clickCount
+            Self.lastMouseDown = nil
         }
-        // Same bookkeeping for the `+` button. Recorded up here rather than
-        // in the button's branch so that every early return below — including
-        // `commitEditOnOutsideClick`'s — still ends a `+` run correctly.
-        let previousAddClick = lastAddButtonClick
-        lastAddButtonClick = NSPointInRect(p, addButtonFrame)
-            ? AddButtonClickMark(clickCount: event.clickCount, timestamp: event.timestamp)
-            : nil
         // Mouse interaction retires the keyboard focus-ring state — a
         // stale ring from a prior arrow-key session shouldn't linger on
         // a different pill after the user mouse-clicks. The next arrow
@@ -902,16 +902,13 @@ final class TabStripView: NSView {
             // an activation click AppKit never delivered here, which made
             // `+` inert on the click right after coming back to the app.
             // See `AddButtonClickMark`.
-            if Self.shouldFireAddButton(previous: previousAddClick,
-                                        clickCount: event.clickCount,
-                                        timestamp: event.timestamp,
-                                        doubleClickInterval: NSEvent.doubleClickInterval) {
+            if clicks == 1 {
                 onAddTab?()
             }
             return
         }
-        if beginRenameOnDoubleClick(p, event: event, previous: previousMouseDown) { return }
-        handlePillClick(p, event: event)
+        if beginRenameOnDoubleClick(p, clicks: clicks) { return }
+        handlePillClick(p, event: event, clicks: clicks)
     }
 
     /// While a pill is being renamed, a click inside the edit field belongs to
@@ -941,20 +938,14 @@ final class TabStripView: NSView {
     /// `defer` in `mouseDown` sees that and skips the terminal-focus restore so
     /// the rename field keeps focus. Returns `true` when rename began.
     ///
-    /// `previous` is the mark for the last mousedown THIS strip received;
-    /// `isOwnDoubleClick` uses it to reject a `clickCount == 2` whose first
-    /// click AppKit never delivered here (window/app activation) or delivered
-    /// to a different window's strip (tab switch). See `ClickSequenceMark`.
-    private func beginRenameOnDoubleClick(_ p: CGPoint,
-                                          event: NSEvent,
-                                          previous: ClickSequenceMark?) -> Bool {
-        guard event.clickCount == 2, let i = pillIndex(at: p), i < tabs.count else { return false }
-        guard Self.isOwnDoubleClick(previous: previous,
-                                    pillIndex: i,
-                                    clickCount: event.clickCount,
-                                    timestamp: event.timestamp,
-                                    doubleClickInterval: NSEvent.doubleClickInterval)
-        else { return false }
+    /// `clicks` is the RENUMBERED count (`effectiveClickCount`), not
+    /// `event.clickCount`. 2 means "the strips saw both halves of this
+    /// gesture on this pill", which admits a genuine double-click on a
+    /// BACKGROUND pill — where click 1 lands on the source window's strip and
+    /// click 2 on the destination's — while still rejecting the phantom
+    /// activation click whose first half no strip ever received.
+    private func beginRenameOnDoubleClick(_ p: CGPoint, clicks: Int) -> Bool {
+        guard clicks == 2, let i = pillIndex(at: p), i < tabs.count else { return false }
         guard !NSPointInRect(p, closeHotspot(in: pillFrames[i])) else { return false }
         beginEditing(pillIndex: i)
         return true
@@ -972,7 +963,7 @@ final class TabStripView: NSView {
     /// against), a click that also begins rename (clickCount ≥ 2), and any
     /// pill being renamed elsewhere — there we select now to keep the
     /// click-to-switch contract.
-    private func handlePillClick(_ p: CGPoint, event: NSEvent) {
+    private func handlePillClick(_ p: CGPoint, event: NSEvent, clicks: Int) {
         for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
             guard i < tabs.count else { return }
             // Only honour a close click when the user is actually hovered on
@@ -983,8 +974,13 @@ final class TabStripView: NSView {
                 onCloseWindow?(tabs[i])
                 return
             }
+            // `clicks`, not `event.clickCount`: after an activating click no
+            // strip received, the raw count is already 2 and this used to
+            // skip arming entirely — so the press eagerly selected on
+            // mouseDown and the drag reordered nothing, which is verbatim the
+            // 2026-06-07 report the deferred-selection arm exists to prevent.
             let canReorder = tabs.count > 1
-                && event.clickCount == 1
+                && clicks == 1
                 && !isEditing
             if canReorder {
                 tabDragController.arm(
