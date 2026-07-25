@@ -316,12 +316,24 @@ final class TabStripView: NSView {
         // `dragPhase = .idle` in `mouseUp` before the notification fired.
         if listShapeChanged {
             tabDragController.cancelForListShapeChange()
-            // The recorded target refers to the OLD pill list; a reshuffle
+            // A PILL-targeted mark refers to the OLD pill list; a reshuffle
             // underneath a half-finished double-click would let the second
-            // click open rename on whatever tab inherited that slot. Drop the
-            // mark rather than remap it — worst case the user double-clicks
-            // again.
-            Self.lastMouseDown = nil
+            // click open rename on whatever tab inherited that slot. Drop it
+            // rather than remap — worst case the user double-clicks again.
+            //
+            // A `+`-targeted mark is NOT dropped, and the distinction is
+            // load-bearing rather than a nicety. `+` has no index that can go
+            // stale: it is the same button before and after. And clicking it
+            // ALWAYS causes a list-shape change — the new tab — which reaches
+            // every strip in the group, including the freshly-created one
+            // whose very first `update(tabs:)` goes from [] to the full list.
+            // Clearing unconditionally would therefore wipe the mark between
+            // the two halves of every `+` double-click, so the second click
+            // would renumber to 1 and open a SECOND tab: exactly the RCA P2
+            // regression this shared mark exists to prevent.
+            if case .pill = Self.lastMouseDown?.target {
+                Self.lastMouseDown = nil
+            }
         }
         self.tabs = tabs
         self.selectedTab = selected

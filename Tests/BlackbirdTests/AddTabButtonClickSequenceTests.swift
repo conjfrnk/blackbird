@@ -108,6 +108,22 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
             AddRig.parked.append(strip)
         }
 
+        /// The rig's tab list plus one more window — what a strip is handed
+        /// after the `+` click opens a tab. Parked like the rest; built once
+        /// and cached so repeated reads stay list-shape stable.
+        lazy var grownTabs: [NSWindow] = {
+            let extra = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                styleMask: [.titled],
+                backing: .buffered,
+                defer: true
+            )
+            extra.title = "grown"
+            extra.tabbingMode = .disallowed
+            AddRig.parked.append(extra)
+            return tabs + [extra]
+        }()
+
         /// Centre of the trailing `+` button in strip-local coordinates.
         var addButtonCenter: NSPoint {
             let f = strip.addButtonFrameForTesting
@@ -194,6 +210,10 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
     /// too — a hardcoded 0.1 would be wrong on a machine set to "fast".
     private var quickGap: TimeInterval { NSEvent.doubleClickInterval / 4 }
 
+    /// Comfortably past the system double-click interval, so a mousedown at
+    /// this remove starts a brand-new run rather than continuing one.
+    private var slowGap: TimeInterval { NSEvent.doubleClickInterval * 2 + 0.1 }
+
     // MARK: - The ordinary click
 
     /// Baseline: one click on `+` opens one tab, and does not select a pill.
@@ -249,6 +269,51 @@ final class AddTabButtonClickSequenceTests: XCTestCase {
     /// With a per-view mark B saw an empty mark and fired again: one gesture,
     /// two tabs. With the shared mark B sees that a strip already handled
     /// click 1 on `+` within the interval, renumbers to 2, and stays quiet.
+    /// The production sequence, with the refresh click 1 ITSELF causes.
+    ///
+    /// The sibling test above deliberately builds both rigs before click 1, to
+    /// isolate the cross-strip mark hand-off. That skips a step the app always
+    /// performs: opening a tab grows the group, which drives `update(tabs:)`
+    /// on every strip — including the brand-new window's, whose very first
+    /// update goes from an empty list to the full one. That IS a list-shape
+    /// change, and clearing the shared mark on it wiped the mark between the
+    /// two halves of the gesture, so click 2 renumbered to 1 and opened a
+    /// second tab. RCA P2 reproduced in a world the isolated test never
+    /// reaches.
+    ///
+    /// A `+`-targeted mark therefore survives a list-shape change: the button
+    /// has no index that can go stale. (A pill-targeted one still does not —
+    /// see `test_integration_listShapeChange_clearsSharedMark`.)
+    func test_crossStrip_fastDoubleClick_survivesTheRefreshClickOneCauses() {
+        let rigA = AddRig(tabCount: 2, prefix: "refreshA")
+        let rigB = AddRig(tabCount: 2, prefix: "refreshB")
+        assertAddButtonIsHittable(rigA)
+
+        addButtonMouseDown(rigA, clickCount: 1, timestamp: 0)
+        XCTAssertEqual(rigA.addCount, 1,
+                       "precondition: click 1 opened a tab on strip A")
+
+        // What the new tab does to every strip in the group: the list grows.
+        // Drive it on BOTH so neither can be the reason the mark survives.
+        rigA.strip.update(tabs: rigA.grownTabs, selected: rigA.grownTabs[0], width: 600)
+        rigB.strip.update(tabs: rigB.grownTabs, selected: rigB.grownTabs[0], width: 600)
+        assertAddButtonIsHittable(rigB)
+
+        addButtonMouseDown(rigB, clickCount: 2, timestamp: quickGap)
+
+        XCTAssertEqual(rigB.addCount, 0,
+                       "the `+` run must survive the very refresh that opening "
+                           + "a tab triggers — otherwise one double-click opens two tabs")
+        XCTAssertEqual(rigA.addCount + rigB.addCount, 1,
+                       "exactly one tab from one gesture, across both strips")
+
+        // …and B's `+` is genuinely live, not merely inert: a later click
+        // beyond the interval starts a fresh run and does fire.
+        addButtonMouseDown(rigB, clickCount: 1, timestamp: quickGap + slowGap)
+        XCTAssertEqual(rigB.addCount, 1,
+                       "strip B's `+` still works once the run has ended")
+    }
+
     func test_crossStrip_fastDoubleClick_opensExactlyOneTabInTotal() {
         // Both rigs are constructed FIRST: `update(tabs:)` clears the shared
         // mark on a list-shape change, so building B after A's click would
