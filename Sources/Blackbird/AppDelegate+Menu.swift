@@ -281,17 +281,25 @@ extension AppDelegate {
         menu.addItem(.separator())
 
         // Rename Tab… — routes via the responder chain to the key window's
-        // MainWindowController. Uses ⌥⌘R because ⌘R is commonly a
-        // refresh/reload shortcut in other apps, and we want to leave it
-        // free for shells that bind it (zsh's history-incremental-search-
-        // backward, for instance, is sometimes mapped to Ctrl-R — but
-        // ⌘-R would still reach us first).
+        // MainWindowController. Not ⌘R: that's commonly refresh/reload, and we
+        // leave it free for shells that bind it (zsh's
+        // history-incremental-search-backward is sometimes mapped to Ctrl-R —
+        // ⌘R would still reach us first).
+        //
+        // ⌃⌘R, not ⌥⌘R. This item shipped on ⌥⌘R, but the Edit ▸ Find ▸
+        // "Regular Expression" toggle above claims the same chord, and Edit is
+        // installed before View, so AppKit's depth-first key-equivalent search
+        // always found the find toggle first. The advertised shortcut here was
+        // therefore dead — and worse, pressing it slid the find bar in and
+        // flipped regex mode, silently changing the semantics of the user's
+        // next search. Ctrl-R alone still reaches the shell untouched; only
+        // the ⌘-carrying chord is claimed here.
         let rename = NSMenuItem(
             title: "Rename Tab…",
             action: #selector(MainWindowController.renameActiveTab(_:)),
             keyEquivalent: "r"
         )
-        rename.keyEquivalentModifierMask = [.command, .option]
+        rename.keyEquivalentModifierMask = [.command, .control]
         menu.addItem(rename)
         return menu
     }
