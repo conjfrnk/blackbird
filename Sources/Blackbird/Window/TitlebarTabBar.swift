@@ -902,6 +902,12 @@ final class TabStripView: NSView {
         let target: ClickTarget? = pillIndex(at: p).map { .pill($0) }
             ?? (NSPointInRect(p, addButtonFrame) ? .addButton : nil)
         let clicks: Int
+        // Hoisted out of the branch so the rename gate below reads THIS
+        // click's value directly, rather than fishing it back out of
+        // `Self.lastMouseDown` after that has already been overwritten. The
+        // read-back happened to be correct, but only by accident of statement
+        // order — a hazard not worth leaving in a gate this load-bearing.
+        let wasSelected: Bool
         if let target {
             let groupID = window?.tabGroup.map(ObjectIdentifier.init)
             clicks = Self.effectiveClickCount(previous: Self.lastMouseDown,
@@ -915,7 +921,6 @@ final class TabStripView: NSView {
             // rather than re-read it (by now the first click has selected the
             // tab, which would make every background double-click look
             // eligible again).
-            let wasSelected: Bool
             if clicks > 1, let previous = Self.lastMouseDown {
                 wasSelected = previous.targetWasSelected
             } else if case .pill(let i) = target, i < tabs.count {
@@ -932,6 +937,7 @@ final class TabStripView: NSView {
         } else {
             // Landed on bare strip; nothing can continue from here.
             clicks = event.clickCount
+            wasSelected = false
             Self.lastMouseDown = nil
         }
         // Mouse interaction retires the keyboard focus-ring state — a
@@ -981,8 +987,7 @@ final class TabStripView: NSView {
             }
             return
         }
-        if beginRenameOnDoubleClick(p, clicks: clicks,
-                                    wasSelected: Self.lastMouseDown?.targetWasSelected ?? false) { return }
+        if beginRenameOnDoubleClick(p, clicks: clicks, wasSelected: wasSelected) { return }
         handlePillClick(p, event: event, clicks: clicks)
     }
 
