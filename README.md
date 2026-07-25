@@ -42,7 +42,7 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 | ⌘⇧[ / ⌘⇧]         | Previous / next tab              |
 | ⌃⇥ / ⌃⇧⇥          | Cycle next / previous tab        |
 | ⌘,                | Settings                         |
-| ⌥⌘R               | Rename active tab                |
+| ⌃⌘R               | Rename active tab                |
 | ⌘C / ⌘V / ⌘A      | Copy / paste / select all (incl. scrollback) |
 | ⌘K                | Clear viewport + scrollback      |
 | ⌘F / ⌘G / ⌘⇧G     | Find / next / previous           |
