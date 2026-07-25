@@ -224,6 +224,54 @@ final class TabRenameClickSequenceTests: XCTestCase {
 
     /// Two clicks on two different pills are two gestures, however fast. The
     /// second must restart at 1 (it selects pill 1; it does not rename it).
+    /// A run may not cross tab GROUPS. The mark is shared across strips on
+    /// purpose, but `ClickTarget.pill` compares a bare index — so without a
+    /// group gate, a click on pill 1 of one window group would license a
+    /// "double-click" on pill 1 of an entirely unrelated group, popping the
+    /// rename field open on a tab the user only meant to switch to. Windows
+    /// tabbed together share one `NSWindowTabGroup` instance (including a tab
+    /// `addTabbedWindow` just created), so gating on its identity keeps every
+    /// intra-group hand-off working.
+    func test_differentTabGroup_breaksTheRun() {
+        // Two distinct identities standing in for two NSWindowTabGroups.
+        // The objects must be held in locals for the whole test: an
+        // `ObjectIdentifier(NSObject())` built from a temporary is derived
+        // from an address that is freed immediately, so the second allocation
+        // can reuse it and the two identifiers compare EQUAL. That made this
+        // test pass in isolation and fail in the full suite.
+        let objectA = NSObject()
+        let objectB = NSObject()
+        let groupA = ObjectIdentifier(objectA)
+        let groupB = ObjectIdentifier(objectB)
+        XCTAssertNotEqual(groupA, groupB, "precondition: the two stand-in groups are distinct")
+        let mark = TabStripView.ClickSequenceMark(
+            target: .pill(1), groupID: groupA,
+            systemClickCount: 1, effectiveClickCount: 1, timestamp: 0)
+
+        XCTAssertEqual(
+            TabStripView.effectiveClickCount(previous: mark, target: .pill(1), groupID: groupB,
+                                             clickCount: 2, timestamp: quickGap,
+                                             doubleClickInterval: NSEvent.doubleClickInterval),
+            1,
+            "a run must not continue into a different tab group, even on the same pill index")
+
+        XCTAssertEqual(
+            TabStripView.effectiveClickCount(previous: mark, target: .pill(1), groupID: groupA,
+                                             clickCount: 2, timestamp: quickGap,
+                                             doubleClickInterval: NSEvent.doubleClickInterval),
+            2,
+            "control: the same group continues the run — the cross-strip "
+                + "hand-off inside one group must keep working")
+
+        // A grouped mark must not be continued by an ungrouped strip either.
+        XCTAssertEqual(
+            TabStripView.effectiveClickCount(previous: mark, target: .pill(1), groupID: nil,
+                                             clickCount: 2, timestamp: quickGap,
+                                             doubleClickInterval: NSEvent.doubleClickInterval),
+            1,
+            "a strip with no tab group cannot continue a grouped run")
+    }
+
     func test_differentPillTarget_breaksTheRun() {
         XCTAssertEqual(
             renumber(previous: mark(.pill(0), sys: 1, effective: 1, at: base),

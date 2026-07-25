@@ -781,11 +781,37 @@ final class TabStripView: NSView {
     /// the app and pick a tab (user report 2026-07-24).
     struct ClickSequenceMark: Equatable {
         let target: ClickTarget
+        /// Identity of the tab group whose strip recorded this mousedown.
+        ///
+        /// Sharing the mark across strips is deliberate, but it must not be
+        /// shared across UNRELATED window groups: `ClickTarget.pill` compares
+        /// a bare index, so without this a click on pill 1 of one group could
+        /// license a "double-click" on pill 1 of another. Two windows tabbed
+        /// together share one `NSWindowTabGroup` instance — including a tab
+        /// `addTabbedWindow` has just created — so gating on its identity
+        /// keeps every intra-group hand-off working while cutting the
+        /// cross-group leak. `nil` for a strip with no group (and in headless
+        /// tests, where all marks compare equal).
+        let groupID: ObjectIdentifier?
         /// The raw `NSEvent.clickCount` of that mousedown.
         let systemClickCount: Int
         /// The count the strip assigned it after renumbering.
         let effectiveClickCount: Int
         let timestamp: TimeInterval
+
+        /// `groupID` is defaulted so callers that don't model grouping (the
+        /// predicate's unit tests) stay concise.
+        init(target: ClickTarget,
+             groupID: ObjectIdentifier? = nil,
+             systemClickCount: Int,
+             effectiveClickCount: Int,
+             timestamp: TimeInterval) {
+            self.target = target
+            self.groupID = groupID
+            self.systemClickCount = systemClickCount
+            self.effectiveClickCount = effectiveClickCount
+            self.timestamp = timestamp
+        }
     }
 
     /// The last mousedown any strip handled — deliberately SHARED across
@@ -817,6 +843,7 @@ final class TabStripView: NSView {
     /// strip has pills plus `+`).
     static func effectiveClickCount(previous: ClickSequenceMark?,
                                     target: ClickTarget,
+                                    groupID: ObjectIdentifier? = nil,
                                     clickCount: Int,
                                     timestamp: TimeInterval,
                                     doubleClickInterval: TimeInterval) -> Int {
@@ -825,6 +852,7 @@ final class TabStripView: NSView {
         guard clickCount > 1 else { return clickCount }
         guard let previous,
               previous.target == target,
+              previous.groupID == groupID,
               previous.systemClickCount == clickCount - 1
         else { return 1 }
         let elapsed = timestamp - previous.timestamp
@@ -858,12 +886,15 @@ final class TabStripView: NSView {
             ?? (NSPointInRect(p, addButtonFrame) ? .addButton : nil)
         let clicks: Int
         if let target {
+            let groupID = window?.tabGroup.map(ObjectIdentifier.init)
             clicks = Self.effectiveClickCount(previous: Self.lastMouseDown,
                                               target: target,
+                                              groupID: groupID,
                                               clickCount: event.clickCount,
                                               timestamp: event.timestamp,
                                               doubleClickInterval: NSEvent.doubleClickInterval)
             Self.lastMouseDown = ClickSequenceMark(target: target,
+                                                   groupID: groupID,
                                                    systemClickCount: event.clickCount,
                                                    effectiveClickCount: clicks,
                                                    timestamp: event.timestamp)
