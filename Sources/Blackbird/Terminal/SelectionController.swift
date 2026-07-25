@@ -41,6 +41,25 @@ final class SelectionController {
     /// snapshot path reads/writes it as `selectionController.wordDragAnchorWord`).
     var wordDragAnchorWord: (BufferPoint, BufferPoint)?
 
+    /// True when the mousedown's `.word`/`.line` expansion actually RESOLVED a
+    /// unit under the anchor.
+    ///
+    /// `endDrag`'s zero-width clear can't otherwise tell a genuine one-cell
+    /// word from a click that resolved nothing: `wordRange` returns `(p, p)`
+    /// for a single-cell word, which is a real selection, and `nil` for a
+    /// blank cell, which leaves the caller's zero-width range in place. Both
+    /// arrive at `endDrag` as `anchor == cursor`, so double-clicking a
+    /// one-character word (the `a` in `ls -l a b c`) selected nothing.
+    /// Recording whether the expansion succeeded separates the two.
+    private(set) var anchorResolvedToUnit = false
+
+    #if DEBUG
+    /// Test hook — lets the single-char-word tests assert the flag directly
+    /// between a mousedown and its mouseup, rather than only inferring it
+    /// from whether the selection survived.
+    var anchorResolvedToUnitForTesting: Bool { anchorResolvedToUnit }
+    #endif
+
     // MARK: - Entry points (called by the view's mouse overrides)
 
     /// `mouseDown`'s selection branch — reached only after the URL-open,
@@ -74,6 +93,7 @@ final class SelectionController {
                 wordDragAnchorWord = nil
             }
             isDragging = true
+            anchorResolvedToUnit = false
             return
         }
         let mode: Selection.Mode
@@ -91,8 +111,12 @@ final class SelectionController {
         }
         view.selection = Selection(anchor: point, cursor: point, mode: mode)
         isDragging = true
+        // Reset unconditionally so the flag can never survive into a later
+        // gesture — a stale `true` would let every subsequent stray click
+        // leave a phantom zero-width selection behind.
+        anchorResolvedToUnit = false
         if mode == .word || mode == .line {
-            expandSelectionUnderAnchor()
+            anchorResolvedToUnit = expandSelectionUnderAnchor()
         }
         // Capture the resolved anchor word ONCE, now, while the anchor is
         // on-screen — `expandSelectionUnderAnchor` just set the selection's
@@ -123,7 +147,13 @@ final class SelectionController {
         // non-word cells also leave anchor == cursor (expandSelectionUnderAnchor
         // is a no-op there); .rectangular clicks start at anchor == cursor and
         // only grow during the drag.
-        if let s = view.selection, s.anchor == s.cursor {
+        //
+        // EXCEPT when the mousedown's word/line expansion actually resolved a
+        // unit: `wordRange` returns `(p, p)` for a word occupying one cell,
+        // which IS content. Without `anchorResolvedToUnit` this clear
+        // discarded it, so double-clicking a one-character word selected
+        // nothing at all.
+        if let s = view.selection, s.anchor == s.cursor, !anchorResolvedToUnit {
             view.selection = nil
         }
         return true
@@ -218,21 +248,28 @@ final class SelectionController {
     /// double/triple-click gesture. `.word` uses the shared `wordRange` helper;
     /// `.line` selects the entire grid line. Drag/autoscroll use
     /// `extendSelectionToCursor` instead, so this is only the mouseDown entry.
-    private func expandSelectionUnderAnchor() {
-        guard var sel = view.selection, let snap = view.currentSnapshot else { return }
+    /// Returns whether a unit was actually resolved under the anchor. `false`
+    /// means the click landed somewhere with nothing to expand (a blank cell,
+    /// no snapshot) and the caller's zero-width range still stands — see
+    /// `anchorResolvedToUnit`.
+    @discardableResult
+    private func expandSelectionUnderAnchor() -> Bool {
+        guard var sel = view.selection, let snap = view.currentSnapshot else { return false }
         switch sel.mode {
         case .word:
-            if let (a, b) = wordRange(around: sel.anchor, in: snap, displayOffset: snap.displayOffset) {
-                sel.anchor = a
-                sel.cursor = b
-                view.selection = sel
-            }
+            guard let (a, b) = wordRange(around: sel.anchor, in: snap, displayOffset: snap.displayOffset)
+            else { return false }
+            sel.anchor = a
+            sel.cursor = b
+            view.selection = sel
+            return true
         case .line:
             sel.anchor = BufferPoint(line: sel.anchor.line, col: 0)
             sel.cursor = BufferPoint(line: sel.cursor.line, col: snap.cols - 1)
             view.selection = sel
+            return true
         default:
-            break
+            return false
         }
     }
 
