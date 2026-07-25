@@ -54,6 +54,14 @@ enum KeyEventClassifier {
         case NSEvent.SpecialKey.f10: return .f10
         case NSEvent.SpecialKey.f11: return .f11
         case NSEvent.SpecialKey.f12: return .f12
+        case NSEvent.SpecialKey.f13: return .f13
+        case NSEvent.SpecialKey.f14: return .f14
+        case NSEvent.SpecialKey.f15: return .f15
+        case NSEvent.SpecialKey.f16: return .f16
+        case NSEvent.SpecialKey.f17: return .f17
+        case NSEvent.SpecialKey.f18: return .f18
+        case NSEvent.SpecialKey.f19: return .f19
+        case NSEvent.SpecialKey.f20: return .f20
         default:
             // Keypad keys aren't exposed via NSEvent.specialKey.
             // NSEvent.modifierFlags.numericPad fires for external
@@ -66,6 +74,28 @@ enum KeyEventClassifier {
                 return keypadKey(for: event)
             }
             return nil
+        }
+    }
+
+    /// True when every scalar in `s` sits in a Unicode Private Use Area.
+    ///
+    /// AppKit encodes function and editing keys that have no printable form
+    /// as PUA scalars (the U+F700 block). Such a string must never reach the
+    /// PTY: `KeyEncoder.encode(chars:)` ends in a `Data(chars.utf8)` fallback,
+    /// so an unmapped special key used to type its raw PUA bytes into the
+    /// shell as mojibake. Suppressing here restores the intent of the audit-M3
+    /// `super.keyDown` forward — with no bytes produced, the event continues
+    /// down the responder chain so system keys (brightness, media) still work.
+    ///
+    /// Mixed content is NOT suppressed; only wholly-private-use strings are.
+    /// An empty string is not private-use — there is nothing to suppress.
+    static func isPrivateUseOnly(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        return s.unicodeScalars.allSatisfy { scalar in
+            let v = scalar.value
+            return (v >= 0xE000 && v <= 0xF8FF)          // BMP PUA
+                || (v >= 0xF0000 && v <= 0xFFFFD)        // Plane 15
+                || (v >= 0x100000 && v <= 0x10FFFD)      // Plane 16
         }
     }
 

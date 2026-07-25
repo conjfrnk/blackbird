@@ -1761,6 +1761,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // mode still wants the un-Option'd base letter so that Option+E
         // encodes to ESC "e" rather than ESC "´".
         let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
+        // A key with no SpecialKey mapping whose characters are wholly
+        // private-use is a function / editing / system key AppKit had no
+        // printable form for. `encoder.encode(chars:)` would fall through to
+        // its `Data(chars.utf8)` fallback and type the raw PUA bytes at the
+        // prompt. Suppress so the audit-M3 `super.keyDown` forward below runs
+        // and the responder chain still sees the event.
+        guard !KeyEventClassifier.isPrivateUseOnly(chars) else {
+            super.keyDown(with: event)
+            return
+        }
         let bytes = encoder.encode(chars: chars, modifiers: mods, mode: termMode)
         #if DEBUG
         if !bytes.isEmpty {

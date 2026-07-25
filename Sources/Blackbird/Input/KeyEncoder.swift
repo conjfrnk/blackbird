@@ -31,6 +31,11 @@ public final class KeyEncoder {
         case home, end, pageUp, pageDown
         case delete, insert
         case f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
+        // F13-F20 exist on full-size and many third-party keyboards. AppKit
+        // reports them as Unicode private-use scalars, so without an explicit
+        // mapping they fell through to `encode(chars:)` and its
+        // `Data(chars.utf8)` fallback typed the raw PUA bytes into the shell.
+        case f13, f14, f15, f16, f17, f18, f19, f20
         // Keypad keys — only routed through encodeSpecial when the TUI
         // has enabled application-keypad mode (DECPAM, `appKeypad`).
         // Without the mode bit the legacy bytes (plain digits, plain
@@ -608,6 +613,17 @@ public final class KeyEncoder {
         case .f10:      return ("21", 0x7E)
         case .f11:      return ("23", 0x7E)
         case .f12:      return ("24", 0x7E)
+        // VT220 / xterm numbering. The gaps at 27 and 30 are real, not typos:
+        // those parameter values belong to other DEC keys. kitty and iTerm2
+        // use the same table.
+        case .f13:      return ("25", 0x7E)
+        case .f14:      return ("26", 0x7E)
+        case .f15:      return ("28", 0x7E)
+        case .f16:      return ("29", 0x7E)
+        case .f17:      return ("31", 0x7E)
+        case .f18:      return ("32", 0x7E)
+        case .f19:      return ("33", 0x7E)
+        case .f20:      return ("34", 0x7E)
         default:        return nil           // keypad (DECPAM/SS3) — no mod/event field
         }
     }
@@ -701,7 +717,8 @@ public final class KeyEncoder {
         case .up, .down, .right, .left, .home, .end,
              .pageUp, .pageDown, .delete, .insert,
              .f1, .f2, .f3, .f4,
-             .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12:
+             .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12,
+             .f13, .f14, .f15, .f16, .f17, .f18, .f19, .f20:
             // Single source of truth: the `(lead, term)` bytes come from
             // `csiParamShape` — the same table the flag-2 release/repeat path
             // above uses — so press encoding can never drift from it. `shape`
