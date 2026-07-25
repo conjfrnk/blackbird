@@ -797,19 +797,36 @@ final class TabStripView: NSView {
         let systemClickCount: Int
         /// The count the strip assigned it after renumbering.
         let effectiveClickCount: Int
+        /// Whether the clicked pill was ALREADY the selected tab when this run
+        /// STARTED — carried forward unchanged through every click of the run.
+        ///
+        /// Inline rename requires it. Without it, clicking a background pill
+        /// to switch and then clicking it again opened the rename field, which
+        /// is what the 2026-07-24 report was about. That gesture is
+        /// indistinguishable at the event level from deliberately
+        /// double-clicking a background tab to rename it, so the two cannot be
+        /// separated by click bookkeeping alone — only by asking whether the
+        /// user had already been on that tab. Renaming a background tab is
+        /// therefore click, pause, double-click.
+        ///
+        /// Carried forward rather than re-read because by the second click the
+        /// tab IS selected: the first click selected it.
+        let targetWasSelected: Bool
         let timestamp: TimeInterval
 
-        /// `groupID` is defaulted so callers that don't model grouping (the
-        /// predicate's unit tests) stay concise.
+        /// `groupID` and `targetWasSelected` are defaulted so callers that
+        /// don't model them (the predicate's unit tests) stay concise.
         init(target: ClickTarget,
              groupID: ObjectIdentifier? = nil,
              systemClickCount: Int,
              effectiveClickCount: Int,
+             targetWasSelected: Bool = false,
              timestamp: TimeInterval) {
             self.target = target
             self.groupID = groupID
             self.systemClickCount = systemClickCount
             self.effectiveClickCount = effectiveClickCount
+            self.targetWasSelected = targetWasSelected
             self.timestamp = timestamp
         }
     }
@@ -893,10 +910,24 @@ final class TabStripView: NSView {
                                               clickCount: event.clickCount,
                                               timestamp: event.timestamp,
                                               doubleClickInterval: NSEvent.doubleClickInterval)
+            // `clicks > 1` happens only when the run continued, so it is
+            // exactly the signal to inherit the run's original selectedness
+            // rather than re-read it (by now the first click has selected the
+            // tab, which would make every background double-click look
+            // eligible again).
+            let wasSelected: Bool
+            if clicks > 1, let previous = Self.lastMouseDown {
+                wasSelected = previous.targetWasSelected
+            } else if case .pill(let i) = target, i < tabs.count {
+                wasSelected = tabs[i] === selectedTab
+            } else {
+                wasSelected = false
+            }
             Self.lastMouseDown = ClickSequenceMark(target: target,
                                                    groupID: groupID,
                                                    systemClickCount: event.clickCount,
                                                    effectiveClickCount: clicks,
+                                                   targetWasSelected: wasSelected,
                                                    timestamp: event.timestamp)
         } else {
             // Landed on bare strip; nothing can continue from here.
@@ -950,7 +981,8 @@ final class TabStripView: NSView {
             }
             return
         }
-        if beginRenameOnDoubleClick(p, clicks: clicks) { return }
+        if beginRenameOnDoubleClick(p, clicks: clicks,
+                                    wasSelected: Self.lastMouseDown?.targetWasSelected ?? false) { return }
         handlePillClick(p, event: event, clicks: clicks)
     }
 
@@ -987,8 +1019,13 @@ final class TabStripView: NSView {
     /// BACKGROUND pill — where click 1 lands on the source window's strip and
     /// click 2 on the destination's — while still rejecting the phantom
     /// activation click whose first half no strip ever received.
-    private func beginRenameOnDoubleClick(_ p: CGPoint, clicks: Int) -> Bool {
-        guard clicks == 2, let i = pillIndex(at: p), i < tabs.count else { return false }
+    ///
+    /// `wasSelected` is the run's ORIGINAL selectedness: rename is for the tab
+    /// you are already on. Double-clicking a background pill switches to it and
+    /// stops there, which is what keeps "click a tab, click it again" from
+    /// popping the rename field open.
+    private func beginRenameOnDoubleClick(_ p: CGPoint, clicks: Int, wasSelected: Bool) -> Bool {
+        guard clicks == 2, wasSelected, let i = pillIndex(at: p), i < tabs.count else { return false }
         guard !NSPointInRect(p, closeHotspot(in: pillFrames[i])) else { return false }
         beginEditing(pillIndex: i)
         return true

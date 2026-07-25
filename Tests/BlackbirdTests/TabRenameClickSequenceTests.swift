@@ -35,6 +35,25 @@ import AppKit
 ///        && 0 <= Δ <= I                           → p.effectiveClickCount + 1
 ///     otherwise                                   → 1
 ///
+/// The SELECTION gate on top of it (maintainer decision, 2026-07-25). Reaching
+/// `clicks == 2` is necessary for rename but no longer sufficient: the pill
+/// must ALSO have been the selected tab when the run STARTED
+/// (`ClickSequenceMark.targetWasSelected`). "Click a background pill to switch
+/// to it, click it again" and "deliberately double-click a background pill to
+/// rename it" are the same event stream — nothing in the click bookkeeping can
+/// separate them — so the tie is broken by asking whether the user was already
+/// on that tab:
+///
+///  - double-click the SELECTED pill      → rename
+///  - double-click a BACKGROUND pill      → switch to it, and stop
+///  - rename a background tab             → click, pause past the interval,
+///                                          then double-click
+///
+/// `targetWasSelected` is INHERITED through a continuing run, never re-read: by
+/// click 2 the first click has already selected the tab, so a fresh read would
+/// wave every background double-click straight through again. The renumbering
+/// primitive itself is untouched — it still knows nothing about selection.
+///
 /// Oracles:
 ///  - pure level ⇢ the `Int` the primitive returns, folded over a run of
 ///    mousedowns exactly the way `mouseDown` folds it (renumber, then record
@@ -93,10 +112,12 @@ final class TabRenameClickSequenceTests: XCTestCase {
     private func mark(_ target: TabStripView.ClickTarget,
                       sys: Int,
                       effective: Int,
+                      wasSelected: Bool = false,
                       at t: TimeInterval) -> TabStripView.ClickSequenceMark {
         TabStripView.ClickSequenceMark(target: target,
                                        systemClickCount: sys,
                                        effectiveClickCount: effective,
+                                       targetWasSelected: wasSelected,
                                        timestamp: t)
     }
 
@@ -512,6 +533,29 @@ final class TabRenameClickSequenceTests: XCTestCase {
                        "the nil-mark tuple answers 1 on every call")
     }
 
+    /// The renumbering primitive must stay ignorant of selection. The rename
+    /// gate reads `targetWasSelected` off the MARK; the count is decided purely
+    /// by target / contiguity / timing. An implementation that folded the new
+    /// gate into the primitive would break `+` (which is never "selected") and
+    /// the drag-arming path (which keys on `clicks == 1`), so pin the two
+    /// concerns apart: flipping the flag on the previous mark may not move the
+    /// count by even one.
+    func test_primitiveIgnoresTargetWasSelected() {
+        for target in [TabStripView.ClickTarget.pill(1), .addButton] {
+            let unselected = mark(target, sys: 1, effective: 1, wasSelected: false, at: base)
+            let selected = mark(target, sys: 1, effective: 1, wasSelected: true, at: base)
+            XCTAssertEqual(
+                renumber(previous: unselected, target, sys: 2, at: base + 0.125),
+                2,
+                "\(target): a run continues regardless of selectedness")
+            XCTAssertEqual(
+                renumber(previous: selected, target, sys: 2, at: base + 0.125),
+                renumber(previous: unselected, target, sys: 2, at: base + 0.125),
+                "\(target): the two marks differ only in targetWasSelected, so "
+                    + "the renumbered count must be identical")
+        }
+    }
+
     // MARK: - Pure: value semantics
 
     /// `ClickTarget` equality is part of the contract — it is what decides
@@ -531,9 +575,11 @@ final class TabRenameClickSequenceTests: XCTestCase {
                        "`+` equals `+`")
     }
 
-    /// The mark is a value over exactly its four fields, and it stores what it
-    /// was handed — the two counts are deliberately distinct, so a struct that
-    /// collapsed them would break the phantom-run arithmetic above.
+    /// The mark is a value over exactly its fields, and it stores what it was
+    /// handed — the two counts are deliberately distinct, so a struct that
+    /// collapsed them would break the phantom-run arithmetic above, and
+    /// `targetWasSelected` is a full member (a run that inherits it must
+    /// inherit a value that actually round-trips).
     func test_clickSequenceMark_equalsFieldWise() {
         let a = mark(.pill(1), sys: 2, effective: 1, at: base)
         XCTAssertEqual(a, mark(.pill(1), sys: 2, effective: 1, at: base),
@@ -544,19 +590,36 @@ final class TabRenameClickSequenceTests: XCTestCase {
                           "a different systemClickCount compares unequal")
         XCTAssertNotEqual(a, mark(.pill(1), sys: 2, effective: 2, at: base),
                           "a different effectiveClickCount compares unequal")
+        XCTAssertNotEqual(a, mark(.pill(1), sys: 2, effective: 1,
+                                  wasSelected: true, at: base),
+                          "a different targetWasSelected compares unequal")
         XCTAssertNotEqual(a, mark(.pill(1), sys: 2, effective: 1, at: base + 0.25),
                           "a different timestamp compares unequal")
 
         XCTAssertEqual(a.target, .pill(1))
         XCTAssertEqual(a.systemClickCount, 2)
         XCTAssertEqual(a.effectiveClickCount, 1)
+        XCTAssertFalse(a.targetWasSelected,
+                       "targetWasSelected defaults to false — a mark that says "
+                           + "nothing about selection must not license a rename")
         XCTAssertEqual(a.timestamp, base, accuracy: 0)
+
+        let selected = mark(.pill(1), sys: 2, effective: 1, wasSelected: true, at: base)
+        XCTAssertTrue(selected.targetWasSelected,
+                      "the mark stores the selectedness it was handed")
     }
 
     // MARK: - Integration rig
 
     /// A windowless `TabStripView` over `tabCount` never-shown stub windows,
     /// with the strip's callbacks recorded.
+    ///
+    /// `selected` is which pill the strip believes is the CURRENT tab — the
+    /// rename gate reads it, so every rename test has to say which tab the user
+    /// was on. The rig does not move it on its own: `onSelectWindow` is only
+    /// recorded, exactly like production, where the switch travels through the
+    /// window controller and comes back as a refresh. Tests that need that
+    /// round trip call `selectTab(_:)`.
     ///
     /// NOTE: constructing a rig calls `update(tabs:selected:width:)`, whose
     /// list-shape-change branch CLEARS the shared mark. Every test must
@@ -568,17 +631,20 @@ final class TabRenameClickSequenceTests: XCTestCase {
 
         let strip: TabStripView
         let tabs: [NSWindow]
+        private let width: CGFloat
         private(set) var selections: [NSWindow] = []
         private(set) var closes: [NSWindow] = []
         private(set) var renameCommits: [(window: NSWindow, title: String)] = []
 
-        init(tabCount: Int, prefix: String, width: CGFloat = 600) {
+        init(tabCount: Int, prefix: String, selected: Int = 0, width: CGFloat = 600) {
+            precondition(selected < tabCount, "selected pill \(selected) out of range")
             let windows = StripRig.makeStubWindows(tabCount, prefix: prefix)
             self.tabs = windows
+            self.width = width
             self.strip = TabStripView(
                 frame: NSRect(x: 0, y: 0, width: width, height: TabStripView.height)
             )
-            strip.update(tabs: windows, selected: windows[0], width: width)
+            strip.update(tabs: windows, selected: windows[selected], width: width)
             strip.onSelectWindow = { [weak self] w in self?.selections.append(w) }
             strip.onCloseWindow = { [weak self] w in self?.closes.append(w) }
             strip.onCommitRename = { [weak self] w, t in
@@ -590,6 +656,17 @@ final class TabRenameClickSequenceTests: XCTestCase {
 
         /// Pill index armed for a potential reorder drag, or `nil`.
         var pendingDragIndex: Int? { strip.pendingDragPillIndexForTesting }
+
+        /// What the app does after a click switches tabs: the controller pushes
+        /// the new selection back into every strip of the group. Same tab list,
+        /// so it is NOT a list-shape change and the shared click mark survives
+        /// — which is precisely the window in which the second half of a
+        /// double-click lands, and precisely why the rename gate must inherit
+        /// the run's ORIGINAL selectedness instead of re-reading it here.
+        func selectTab(_ i: Int) {
+            precondition(i < tabs.count, "pill \(i) out of range")
+            strip.update(tabs: tabs, selected: tabs[i], width: width)
+        }
 
         /// Extra stub windows for list-shape-change tests. Also parked.
         static func makeStubWindows(_ count: Int, prefix: String) -> [NSWindow] {
@@ -614,6 +691,14 @@ final class TabRenameClickSequenceTests: XCTestCase {
 
         /// `true` while a pill is in inline-rename mode.
         var isRenaming: Bool { strip.isEditingForTesting }
+
+        /// The installed inline-rename field, if any. `beginEditing` is the
+        /// only `addSubview` call site in `TitlebarTabBar.swift`, so this is an
+        /// oracle INDEPENDENT of `isEditingForTesting`: a "no rename" verdict
+        /// that only consulted the flag would miss a field left on screen.
+        var editFieldSubview: NSTextField? {
+            strip.subviews.compactMap { $0 as? NSTextField }.first
+        }
 
         /// Centre of pill `i` in strip-local coordinates. Horizontally centred,
         /// so it is nowhere near the leading close hotspot (whose centre sits
@@ -684,13 +769,17 @@ final class TabRenameClickSequenceTests: XCTestCase {
                                            timestamp: timestamp))
     }
 
-    /// Assert the strip is NOT renaming, via both oracles: the edit-mode flag
-    /// and `commitEditIfNeeded()` publishing nothing.
+    /// Assert the strip is NOT renaming, via all three oracles: the edit-mode
+    /// flag, no rename field installed as a subview, and `commitEditIfNeeded()`
+    /// publishing nothing.
     private func assertNotRenaming(_ rig: StripRig,
                                    _ message: String,
                                    file: StaticString = #filePath,
                                    line: UInt = #line) {
         XCTAssertFalse(rig.isRenaming, message, file: file, line: line)
+        XCTAssertNil(rig.editFieldSubview,
+                     message + " (no rename field may be installed)",
+                     file: file, line: line)
         let before = rig.renameCommits.count
         rig.strip.commitEditIfNeeded()
         XCTAssertEqual(rig.renameCommits.count, before,
@@ -703,13 +792,21 @@ final class TabRenameClickSequenceTests: XCTestCase {
     /// too — a hardcoded 0.1 would be wrong on a machine set to "fast".
     private var quickGap: TimeInterval { NSEvent.doubleClickInterval / 4 }
 
+    /// Comfortably PAST the live interval, so a mousedown at this remove opens
+    /// a brand-new run rather than continuing one. Expressed in event
+    /// timestamps only — `mouseDown` renumbers off `NSEvent.timestamp`, so no
+    /// test here has to burn real wall time to let a run lapse.
+    private var lapsedGap: TimeInterval { NSEvent.doubleClickInterval * 2 + 0.1 }
+
     // MARK: - Integration: rename on a run one strip saw in full
 
-    /// The gesture AppKit delivers for a double-click on a pill of the key
-    /// window: down(1), up(1), down(2). One strip saw the whole run, so rename
-    /// must open — the redesign must not cost the feature.
-    func test_integration_genuineDoubleClickOnOneStrip_entersRename() {
-        let rig = StripRig(tabCount: 3, prefix: "genuine")
+    /// THE LOAD-BEARING POSITIVE. The gesture AppKit delivers for a
+    /// double-click on the pill of the CURRENT tab: down(1), up(1), down(2).
+    /// One strip saw the whole run and the user was already on that tab, so
+    /// rename must open — if this breaks, the feature is gone.
+    func test_integration_doubleClickOnSelectedPill_entersRename() {
+        // The user is already on tab 1 — that is what the selection gate wants.
+        let rig = StripRig(tabCount: 3, prefix: "genuine", selected: 1)
         XCTAssertFalse(rig.isRenaming, "precondition: not renaming yet")
 
         pillMouseDown(rig, pill: 1, clickCount: 1, timestamp: 0)
@@ -717,8 +814,10 @@ final class TabRenameClickSequenceTests: XCTestCase {
         pillMouseDown(rig, pill: 1, clickCount: 2, timestamp: quickGap)
 
         XCTAssertTrue(rig.isRenaming,
-                      "a double-click delivered in full must open the rename field")
-        // The first click of the run still switches tabs (on mouseup).
+                      "a double-click delivered in full, on the tab the user is "
+                          + "already on, must open the rename field")
+        // The first click of the run still re-selects that pill (on mouseup);
+        // in production that is the no-op self-select of the current tab.
         XCTAssertEqual(rig.selections, [rig.tabs[1]],
                        "the opening click of the run selects that pill, once")
 
@@ -732,19 +831,144 @@ final class TabRenameClickSequenceTests: XCTestCase {
                        "the field is pre-filled with that pill's title")
     }
 
+    // MARK: - Integration: a background pill switches and stops
+
+    /// THE REPORTED BUG (2026-07-24). The user clicks a background pill to
+    /// switch to it, then clicks it again — and the rename field used to pop
+    /// open. At the event level that stream is identical to deliberately
+    /// double-clicking a background tab to rename it, so the maintainer's call
+    /// is: a background double-click switches and stops.
+    ///
+    /// The app's selection round trip is modelled faithfully — click 1 selects
+    /// tab 1, the controller pushes that back into the strip — because that is
+    /// exactly the state a re-reading implementation would consult to wrongly
+    /// license the rename.
+    func test_integration_doubleClickOnBackgroundPill_selectsAndDoesNotRename() {
+        let rig = StripRig(tabCount: 3, prefix: "background", selected: 0)
+
+        pillMouseDown(rig, pill: 1, clickCount: 1, timestamp: 0)
+        pillMouseUp(rig, pill: 1, clickCount: 1, timestamp: 0)
+        XCTAssertEqual(rig.selections, [rig.tabs[1]],
+                       "precondition: click 1 switched to the background tab")
+        // The switch comes back as a same-shape refresh — pill 1 is the
+        // current tab from here on, and the mark survives it.
+        rig.selectTab(1)
+
+        pillMouseDown(rig, pill: 1, clickCount: 2, timestamp: quickGap)
+        pillMouseUp(rig, pill: 1, clickCount: 2, timestamp: quickGap)
+
+        assertNotRenaming(
+            rig,
+            "a double-click that STARTED on a background pill must switch to "
+                + "that tab and stop — rename is only for the tab you are on")
+        // Click 2 is refused a rename, so it falls through to the ordinary
+        // pill-click path and selects (a no-op switch in production, since
+        // click 1 already moved there). Arming is suppressed at clicks > 1, so
+        // this selection lands on mousedown rather than on release.
+        XCTAssertEqual(rig.selections, [rig.tabs[1], rig.tabs[1]],
+                       "both halves act on the pill the user aimed at, and "
+                           + "neither of them renames it")
+        XCTAssertEqual(rig.closes.count, 0,
+                       "clicking a pill centre must never close it")
+    }
+
+    /// The documented way to rename a background tab: click it, let the run
+    /// lapse past the double-click interval, then double-click the pill that is
+    /// NOW selected. If this doesn't work, background tabs cannot be renamed at
+    /// all and the policy is a regression rather than a tradeoff.
+    func test_integration_backgroundPill_clickPauseDoubleClick_entersRename() {
+        let rig = StripRig(tabCount: 3, prefix: "pause", selected: 0)
+
+        // Click once to switch. AppKit's own count for this click is 1.
+        pillMouseDown(rig, pill: 1, clickCount: 1, timestamp: 0)
+        pillMouseUp(rig, pill: 1, clickCount: 1, timestamp: 0)
+        rig.selectTab(1)
+        assertNotRenaming(rig, "precondition: one click never renames")
+
+        // …pause. A click this late reaches the strip as a fresh sequence
+        // (clickCount back to 1), and its own mark is computed fresh — the pill
+        // is selected NOW, so this run is rename-eligible.
+        pillMouseDown(rig, pill: 1, clickCount: 1, timestamp: lapsedGap)
+        pillMouseUp(rig, pill: 1, clickCount: 1, timestamp: lapsedGap)
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.targetWasSelected, true,
+                       "the lapsed run starts on a pill that IS selected now")
+        assertNotRenaming(rig, "the first click of the new run still doesn't rename")
+
+        pillMouseDown(rig, pill: 1, clickCount: 2, timestamp: lapsedGap + quickGap)
+
+        XCTAssertTrue(rig.isRenaming,
+                      "click, pause, double-click is the documented way to "
+                          + "rename a background tab and must work")
+        rig.strip.commitEditIfNeeded()
+        XCTAssertEqual(rig.renameCommits.count, 1,
+                       "the edit is real")
+        XCTAssertEqual(rig.renameCommits.first?.window, rig.tabs[1],
+                       "rename targets the pill the user double-clicked")
+        XCTAssertEqual(rig.renameCommits.first?.title, "pause-1",
+                       "the field is pre-filled from that pill's title")
+    }
+
+    /// THE MECHANISM, pinned directly. `targetWasSelected` is INHERITED through
+    /// a continuing run, never re-read — this is the single most likely place
+    /// for a wrong-but-plausible implementation to slip through, because by
+    /// click 2 the tab IS selected and a fresh read would answer `true`.
+    ///
+    /// The control at the end proves the fresh read really would say `true` at
+    /// that moment, so the `false` above can only have come from inheritance.
+    func test_integration_targetWasSelected_isInheritedNotRereadMidRun() {
+        let rig = StripRig(tabCount: 3, prefix: "inherit", selected: 0)
+
+        pillMouseDown(rig, pill: 1, clickCount: 1, timestamp: 0)
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.effectiveClickCount, 1,
+                       "precondition: click 1 opened the run")
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.targetWasSelected, false,
+                       "precondition: the run STARTED on a background pill")
+        pillMouseUp(rig, pill: 1, clickCount: 1, timestamp: 0)
+
+        // The tab really does become the selected one between the two halves.
+        rig.selectTab(1)
+
+        pillMouseDown(rig, pill: 1, clickCount: 2, timestamp: quickGap)
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.effectiveClickCount, 2,
+                       "the run continued — the click count is not the reason "
+                           + "this doesn't rename")
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.targetWasSelected, false,
+                       "click 2 must carry the run's ORIGINAL selectedness, not "
+                           + "a fresh read of a tab click 1 just selected")
+        assertNotRenaming(rig, "an inherited false must refuse the rename")
+
+        // Control: a run that STARTS now, on the same pill, reads true — so the
+        // false above is inheritance and not a strip that simply never sees a
+        // selected pill.
+        pillMouseDown(rig, pill: 1, clickCount: 1, timestamp: lapsedGap)
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.targetWasSelected, true,
+                       "a FRESH run on the now-selected pill reads true — the "
+                           + "inherited false was a real inheritance")
+    }
+
     // MARK: - Integration: the phantom activation click
 
     /// The strip's first event is a lone `clickCount == 2` with the shared
     /// mark cleared: the activating click was swallowed and NO strip saw it.
     /// It must NOT rename — it is an ordinary click and selects that tab.
-    func test_integration_loneDoubleClick_doesNotRename_andSelectsOnce() {
-        let rig = StripRig(tabCount: 3, prefix: "phantom")
+    ///
+    /// Aimed at the SELECTED pill on purpose: the selection gate would wave
+    /// this one through, so the refusal can only come from the click-count
+    /// renumbering. Pointed at a background pill the test would pass for two
+    /// reasons at once and stop pinning the return-to-app case.
+    func test_integration_loneDoubleClickOnSelectedPill_doesNotRename_andSelectsOnce() {
+        let rig = StripRig(tabCount: 3, prefix: "phantom", selected: 1)
         XCTAssertNil(TabStripView.lastMouseDownForTesting,
                      "precondition: the shared mark starts cleared")
 
         pillMouseDown(rig, pill: 1, clickCount: 2, timestamp: 0)
         pillMouseUp(rig, pill: 1, clickCount: 2, timestamp: 0)
 
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.targetWasSelected, true,
+                       "precondition: the selection gate is satisfied here — "
+                           + "only the renumbered count can refuse this rename")
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.effectiveClickCount, 1,
+                       "…and it does: the lone clickCount==2 renumbers to 1")
         assertNotRenaming(
             rig,
             "a clickCount==2 whose first half no strip received is an "
@@ -784,38 +1008,39 @@ final class TabRenameClickSequenceTests: XCTestCase {
 
     // MARK: - Integration: the cross-strip gesture (the reason for the rewrite)
 
-    /// THE CROSS-STRIP RENAME. Every tab is its own window with its own strip.
-    /// The user double-clicks a BACKGROUND pill: click 1 lands on the CURRENT
-    /// window's strip (A) and selects that tab, which makes the destination
-    /// window key — so click 2 is delivered to the DESTINATION window's strip
-    /// (B), a different instance that has never seen a mousedown.
+    /// THE CROSS-STRIP RENAME, kept positive. Every tab is its own window with
+    /// its own strip, and AppKit routinely splits the two halves of ONE gesture
+    /// across two instances — a key-window change between the halves is enough.
+    /// The shared mark is what carries the run (and now its selectedness)
+    /// across that boundary: strip B sees that A handled click 1 on the same
+    /// pill index within the interval, renumbers to 2, inherits
+    /// `targetWasSelected` and renames.
     ///
-    /// With a per-view mark, B refused to rename and background-pill rename
-    /// was simply broken. With the shared mark, B sees that A handled click 1
-    /// on the same pill index within the interval and renumbers to 2 → rename.
+    /// Both rigs stand for the SAME tab group with tab 1 current, which is the
+    /// only shape that renames under the new policy.
     func test_integration_crossStrip_secondClickOnFreshStrip_entersRename() {
         // Both rigs are constructed FIRST: `update(tabs:)` clears the shared
         // mark on a list-shape change, so building B after A's click would
         // wipe the very mark under test.
-        let rigA = StripRig(tabCount: 3, prefix: "winA")
-        let rigB = StripRig(tabCount: 3, prefix: "winB")
+        let rigA = StripRig(tabCount: 3, prefix: "winA", selected: 1)
+        let rigB = StripRig(tabCount: 3, prefix: "winB", selected: 1)
 
         // Click 1 → window A's strip. It arms, and selects on release.
         pillMouseDown(rigA, pill: 1, clickCount: 1, timestamp: 0)
         pillMouseUp(rigA, pill: 1, clickCount: 1, timestamp: 0)
         XCTAssertEqual(rigA.selections, [rigA.tabs[1]],
-                       "precondition: click 1 selected the background tab")
+                       "precondition: click 1 acted on the current tab")
         XCTAssertFalse(rigA.isRenaming,
                        "precondition: one click never renames")
 
-        // Click 2 → the destination window's strip, at the same pill index and
+        // Click 2 → the other window's strip, at the same pill index and
         // within the double-click interval.
         pillMouseDown(rigB, pill: 1, clickCount: 2, timestamp: quickGap)
 
         XCTAssertTrue(
             rigB.isRenaming,
-            "the second half of a double-click delivered to the destination "
-                + "window's strip must open rename — SOME strip saw click 1")
+            "the second half of a double-click delivered to another strip must "
+                + "open rename — SOME strip saw click 1, on a selected pill")
         rigB.strip.commitEditIfNeeded()
         XCTAssertEqual(rigB.renameCommits.count, 1,
                        "the edit on strip B is real")
@@ -829,12 +1054,51 @@ final class TabRenameClickSequenceTests: XCTestCase {
                        "strip A saw only one click and must not be renaming")
     }
 
+    /// …and the cross-strip machinery must not smuggle the background case back
+    /// in. This is the reported bug in its native shape: click 1 lands on the
+    /// CURRENT window's strip (A) and switches to the background tab, which
+    /// makes the destination window key — so click 2 is delivered to strip B,
+    /// where that pill is ALREADY the selected one. A strip B that re-read
+    /// selectedness instead of inheriting it would rename here, and the whole
+    /// policy would be dead on the most common physical gesture.
+    func test_integration_crossStrip_runStartedOnBackgroundPill_doesNotRename() {
+        // Strip A: the window the user is on, showing tab 0. Strip B: the
+        // destination window, where the clicked pill is the current tab —
+        // exactly the state a fresh read would consult.
+        let rigA = StripRig(tabCount: 3, prefix: "bgA", selected: 0)
+        let rigB = StripRig(tabCount: 3, prefix: "bgB", selected: 1)
+
+        pillMouseDown(rigA, pill: 1, clickCount: 1, timestamp: 0)
+        pillMouseUp(rigA, pill: 1, clickCount: 1, timestamp: 0)
+        XCTAssertEqual(rigA.selections, [rigA.tabs[1]],
+                       "precondition: click 1 switched to the background tab")
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.targetWasSelected, false,
+                       "precondition: the run started on a pill that was NOT "
+                           + "the selected tab")
+
+        pillMouseDown(rigB, pill: 1, clickCount: 2, timestamp: quickGap)
+        pillMouseUp(rigB, pill: 1, clickCount: 2, timestamp: quickGap)
+
+        XCTAssertEqual(TabStripView.lastMouseDownForTesting?.effectiveClickCount, 2,
+                       "the run DID continue across the strips — the refusal "
+                           + "below is the selection gate, not the count")
+        assertNotRenaming(
+            rigB,
+            "a run that began on a background pill must not rename, however "
+                + "many strips its halves were split across")
+        XCTAssertEqual(rigB.selections, [rigB.tabs[1]],
+                       "strip B's click is an ordinary click on pill 1")
+        assertNotRenaming(rigA, "strip A saw only one click and must not rename")
+    }
+
     /// The cross-strip continuation is still bounded by the TARGET: click 1 on
     /// pill 0 in strip A, click 2 on pill 2 in strip B is not a double-click
-    /// on any one tab. Strip B must select, not rename.
+    /// on any one tab. Strip B must select, not rename — and pill 2 is strip
+    /// B's SELECTED tab here, so the selection gate would happily allow it: the
+    /// target break is the only thing refusing.
     func test_integration_crossStrip_differentPillIndex_doesNotRename() {
-        let rigA = StripRig(tabCount: 3, prefix: "xa")
-        let rigB = StripRig(tabCount: 3, prefix: "xb")
+        let rigA = StripRig(tabCount: 3, prefix: "xa", selected: 0)
+        let rigB = StripRig(tabCount: 3, prefix: "xb", selected: 2)
 
         pillMouseDown(rigA, pill: 0, clickCount: 1, timestamp: 0)
         pillMouseUp(rigA, pill: 0, clickCount: 1, timestamp: 0)
@@ -852,12 +1116,14 @@ final class TabRenameClickSequenceTests: XCTestCase {
 
     // MARK: - Integration: the close hotspot is not a rename target
 
-    /// `clicks == 2` opens rename only on the pill BODY. The leading × hotspot
-    /// belongs to the close affordance, so a double-click there must fall
-    /// through to the ordinary pill-click path instead of opening the field
-    /// under the user's cursor.
+    /// A rename-eligible double-click (run of 2, on the SELECTED pill) opens
+    /// rename only on the pill BODY. The leading × hotspot belongs to the close
+    /// affordance, so a double-click there must fall through to the ordinary
+    /// pill-click path instead of opening the field under the user's cursor.
+    /// The pill is deliberately the selected one: every other gate is satisfied
+    /// here, so only the hotspot can be what refuses.
     func test_integration_doubleClickOnCloseHotspot_doesNotRename() {
-        let rig = StripRig(tabCount: 3, prefix: "hotspot")
+        let rig = StripRig(tabCount: 3, prefix: "hotspot", selected: 1)
         let hotspot = rig.pillCloseHotspot(1)
 
         rig.strip.mouseDown(with: mouseEvent(.leftMouseDown, at: hotspot,
@@ -880,9 +1146,11 @@ final class TabRenameClickSequenceTests: XCTestCase {
 
     /// A mousedown on bare strip (between pills, below the pill row) is not a
     /// click target at all: it CLEARS the shared mark, so the next
-    /// `clickCount == 2` cannot continue a run through it.
+    /// `clickCount == 2` cannot continue a run through it. Aimed at the
+    /// SELECTED pill so the cleared mark is the only thing standing between
+    /// this gesture and a rename.
     func test_integration_bareStripMouseDown_clearsSharedMark() {
-        let rig = StripRig(tabCount: 3, prefix: "bare")
+        let rig = StripRig(tabCount: 3, prefix: "bare", selected: 1)
 
         pillMouseDown(rig, pill: 1, clickCount: 1, timestamp: 0)
         XCTAssertEqual(TabStripView.lastMouseDownForTesting?.target, .pill(1),
@@ -928,11 +1196,11 @@ final class TabRenameClickSequenceTests: XCTestCase {
     }
 
     /// The converse, and it matters: a width-only refresh (same windows, same
-    /// order) must NOT clear the mark. Selecting a background tab triggers a
-    /// tab-bar refresh on the destination window, and if that refresh wiped
-    /// the mark the cross-strip rename above would be broken again.
+    /// order) must NOT clear the mark. Selecting a tab triggers a tab-bar
+    /// refresh on the destination window, and if that refresh wiped the mark
+    /// the cross-strip rename above would be broken again.
     func test_integration_widthOnlyUpdate_preservesSharedMark() {
-        let rig = StripRig(tabCount: 3, prefix: "widthonly")
+        let rig = StripRig(tabCount: 3, prefix: "widthonly", selected: 1)
 
         pillMouseDown(rig, pill: 1, clickCount: 1, timestamp: 0)
         let before = TabStripView.lastMouseDownForTesting
