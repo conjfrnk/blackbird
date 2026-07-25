@@ -59,7 +59,7 @@ mod text;
 use callback::*;
 pub use event::{BBEvent, BBEventCb, BBEventKind};
 use guard::{ffi_reentry_blocked, guard_no_term, guard_with_term};
-use input::process_input;
+use input::{flush_sync_update, process_input, sync_status};
 use rate_limit::*;
 pub use snapshot::{bb_mode, cell_flags, BBCell, BBSnap};
 use snapshot::{extract_mode_with_extras, snapshot, BBSnapOwned};
@@ -524,6 +524,51 @@ pub struct BBResizeResult {
     pub _pad: [u8; 3],
 }
 
+/// State of the parser's DEC mode 2026 (synchronized output) buffer.
+///
+/// Between BSU (`CSI ?2026h`) and ESU (`CSI ?2026l`) vte buffers every byte
+/// instead of mutating the grid, and arms a private abort deadline. vte does
+/// NOT self-abort: `Processor::advance` only consults that deadline when MORE
+/// bytes arrive, so the EMBEDDER must notice expiry and call `stop_sync`.
+/// This struct is how Swift learns that a deadline exists and when it lands.
+///
+/// Layout note (same discipline as `BBResizeResult`): the two `u64`s lead so
+/// `repr(C)` introduces no implicit padding — 24 bytes, align 8, explicit
+/// `_pad` tail.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BBSyncStatus {
+    /// Nanoseconds until the core's own abort deadline. `0` when
+    /// `pending == 0` or when the deadline has already elapsed.
+    pub remaining_ns: u64,
+    /// Bytes currently held in the parser's sync buffer (`0 ..= 2 MiB`).
+    pub buffered_bytes: u64,
+    /// Non-zero while a synchronized update is open (BSU seen, ESU not yet).
+    pub pending: u8,
+    /// Non-zero when `pending != 0` AND the core's deadline has elapsed —
+    /// i.e. it is now legal to abort. THIS IS THE ONLY EXPIRY VERDICT ANY
+    /// CALLER MAY USE; do not recompute it from a host-side clock, and do not
+    /// hardcode vte's timeout (it is a private const in the vendored crate
+    /// and can change on a bump).
+    pub expired: u8,
+    pub _pad: [u8; 6],
+}
+
+impl BBSyncStatus {
+    /// The "nothing pending" value, also the fail-safe fallback for a null
+    /// handle or a caught panic: it preserves the status quo rather than
+    /// licensing a flush we can't reason about.
+    pub(crate) const fn idle() -> Self {
+        Self {
+            remaining_ns: 0,
+            buffered_bytes: 0,
+            pending: 0,
+            expired: 0,
+            _pad: [0; 6],
+        }
+    }
+}
+
 /// Resize the terminal grid and report the actually-applied dimensions.
 ///
 /// Dimensions are clamped to `[2, 1000]` on each axis to avoid the reflow
@@ -806,6 +851,72 @@ pub unsafe extern "C" fn bb_term_current_mode(term: *mut BBTerm) -> u32 {
     })
 }
 
+/// Read the parser's DEC 2026 synchronized-update state. O(1), pure read —
+/// no grid mutation, no snapshot allocation, no events fired.
+///
+/// Use it to decide whether a stalled synchronized update needs aborting (see
+/// `bb_term_flush_sync_update`) and how long to wait before re-checking.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null returns an all-zero
+/// `BBSyncStatus` ("nothing pending").
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// an all-zero `BBSyncStatus` as the fallback value.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_sync_status(term: *mut BBTerm) -> BBSyncStatus {
+    guard_with_term(term, BBSyncStatus::idle(), || {
+        if term.is_null() {
+            return BBSyncStatus::idle();
+        }
+        if ffi_reentry_blocked("bb_term_sync_status") {
+            return BBSyncStatus::idle();
+        }
+        sync_status(&*term)
+    })
+}
+
+/// Terminate a pending DEC 2026 synchronized update, replaying the parser's
+/// buffered bytes into the grid.
+///
+/// Returns `1` iff an update was open, was terminated, and its buffered bytes
+/// were replayed. Returns `0` for: null term, re-entrant call, panic caught,
+/// no update open, or `force == 0` with the core's deadline not yet elapsed.
+/// Idempotent — an immediate second call returns `0`.
+///
+/// `force == 0` is the only value non-test callers should pass: the core
+/// re-checks its own deadline, so the call physically cannot tear a frame a
+/// TUI legitimately asked for. `force == 1` aborts unconditionally and exists
+/// for `core/tests` (so flush mechanics can be pinned without a 150 ms sleep)
+/// and for callers that must guarantee the grid is reachable right now —
+/// `bb_term_clear_all` uses the internal equivalent for exactly that reason.
+///
+/// This is NOT a thin passthrough: the replay drives alacritty's `Term` and
+/// can synchronously fire Title / Bell / Osc52 / PtyWrite events through the
+/// registered callback, and it resolves deferred OSC 10/11/12 replies and a
+/// rate-suppressed title exactly as `bb_term_input` does. Treat a call to it
+/// as an input-processing event.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null is a no-op returning `0`.
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// `0` as the fallback value.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_flush_sync_update(term: *mut BBTerm, force: u8) -> u8 {
+    guard_with_term(term, 0u8, || {
+        if term.is_null() {
+            return 0;
+        }
+        if ffi_reentry_blocked("bb_term_flush_sync_update") {
+            return 0;
+        }
+        u8::from(flush_sync_update(&mut *term, force != 0))
+    })
+}
+
 /// Report whether the snapshot's damage set is "full" (all rows need a
 /// redraw — scroll, insert-mode, viewport scrollback change). When true,
 /// the renderer must treat every row as damaged regardless of
@@ -962,6 +1073,22 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
             return;
         }
         let bb = &mut *term;
+        // A pending DEC 2026 synchronized update swallows THESE bytes too:
+        // `Processor::advance` routes into `advance_sync` while a timeout is
+        // pending, so the clear sequence below would land in the sync buffer
+        // and ⌘K — the user's only manual escape from a tab wedged by an
+        // unterminated BSU — would silently do nothing. Worse, up to 2 MiB of
+        // adversary-controlled bytes would survive the wipe, exactly the
+        // retained-state class audit H-3 enumerates below.
+        //
+        // Abort unconditionally FIRST (before the advance, or the clear
+        // itself gets buffered and this fixes nothing). Replay-then-clear
+        // rather than discard is deliberate: the buffered bytes may carry
+        // mode changes (?1049h, DECSTBM, SGR) the running program's later
+        // output depends on, and vte exposes no public buffer-discard. The
+        // 2J/3J immediately below erases whatever the replay drew. No-op when
+        // nothing is pending, so every existing clear_all test is unaffected.
+        let _ = flush_sync_update(bb, true);
         // H = cursor home, 2J = erase display, 3J = erase scrollback.
         bb.processor.advance(&mut bb.term, b"\x1b[H\x1b[2J\x1b[3J");
         // Audit RC-02 + P2-02 — also reset our parallel-parser state and

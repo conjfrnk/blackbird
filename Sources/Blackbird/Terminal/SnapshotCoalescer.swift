@@ -145,6 +145,15 @@ final class SnapshotCoalescer {
             // terminated while this item sat in the queue — same contract
             // as the per-feed gate above.
             if session.isTerminatedLocked() { return }
+            // This item is the TAIL of a parse burst — every chunk queued
+            // behind the one that scheduled it has been fed. Exactly the right
+            // place to ask "did the burst leave a synchronized update open?":
+            // once per burst rather than once per chunk, and against settled
+            // state. Takes no lock and touches no publishLock-guarded state,
+            // so this class's F1/F11/H8 locking discipline is unchanged.
+            // Placed BEFORE the snapshot guard so a nil snapshot can't skip
+            // the arm.
+            session.syncUpdateWatchdog.armIfNeeded()
             guard let snap = session.bbterm.snapshot() else { return }
             self.snapshotsTakenCount += 1
             self.publishPendingSnapshot(snap)

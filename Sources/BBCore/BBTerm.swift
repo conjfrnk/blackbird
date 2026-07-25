@@ -329,6 +329,48 @@ public final class BBTerm {
         return BBTermMode(rawValue: bb_term_current_mode(h))
     }
 
+    /// Live DEC 2026 (synchronized output) state read from the core. See
+    /// `bb_term_sync_status`.
+    public struct SyncUpdateStatus: Equatable {
+        /// A synchronized update is open (BSU seen, ESU not yet).
+        public let isPending: Bool
+        /// The CORE's verdict that the update may now be aborted. Never
+        /// recompute this from a Swift clock and never hardcode vte's
+        /// timeout — it's a private constant in the vendored crate.
+        public let isExpired: Bool
+        public let remainingNanos: UInt64
+        public let bufferedBytes: UInt64
+
+        static let notPending = SyncUpdateStatus(
+            isPending: false, isExpired: false, remainingNanos: 0, bufferedBytes: 0)
+    }
+
+    /// Whether the parser is mid-synchronized-update, and how long the core
+    /// will wait before an abort becomes legal. O(1) — no snapshot, no events.
+    public var syncUpdateStatus: SyncUpdateStatus {
+        guard let h = handle else { return .notPending }
+        let s = bb_term_sync_status(h)
+        return SyncUpdateStatus(isPending: s.pending != 0,
+                                isExpired: s.expired != 0,
+                                remainingNanos: s.remaining_ns,
+                                bufferedBytes: s.buffered_bytes)
+    }
+
+    /// Abort a stalled DEC 2026 synchronized update, replaying its buffered
+    /// bytes into the grid. Returns `true` iff an update was open and has now
+    /// been closed.
+    ///
+    /// `force == false` (the production value) makes the CORE re-check its own
+    /// deadline and decline while the update is still live, so this can never
+    /// tear a frame a TUI legitimately asked for. A `false` return therefore
+    /// means either "nothing was pending" or "not expired yet" — read
+    /// `syncUpdateStatus` in the same queue block to tell them apart.
+    @discardableResult
+    public func flushSyncUpdate(force: Bool = false) -> Bool {
+        guard let h = handle else { return false }
+        return bb_term_flush_sync_update(h, force ? 1 : 0) != 0
+    }
+
     /// Compute the focus-event escape for the given focus state, gated on
     /// mode 1004 being active. Returns `nil` when the TUI hasn't requested
     /// focus events — sending those bytes unconditionally would be

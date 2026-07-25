@@ -1,13 +1,21 @@
 //! Pins DEC mode 2026 synchronized-output handling. vte 0.15 implements
 //! sync natively: between `\x1b[?2026h` (BSU) and `\x1b[?2026l` (ESU), the
-//! parser buffers bytes up to 2 MiB / 150 ms and replays them in one burst
-//! when ESU arrives (or the timeout / cap fires).
+//! parser buffers bytes up to 2 MiB and replays them in one burst when ESU
+//! arrives (or the 2 MiB cap fires).
 //!
-//! Blackbird just needs to pin that the final post-ESU grid is correct and
-//! that the sync mechanism survives fragmented `bb_term_input` calls. We
-//! don't expose sync state through the FFI — the renderer always sees a
-//! consistent snapshot because snapshots are taken outside the parser's
-//! mutation calls.
+//! This file pins that the final post-ESU grid is correct and that the sync
+//! mechanism survives fragmented `bb_term_input` calls. Deliberately scoped
+//! to the happy path: it drives only `bb_term_input` + `bb_term_take_snapshot`,
+//! both of which are byte-identical to their pre-watchdog behaviour, so these
+//! tests stay immune even on a CI box that stalls past the 150 ms deadline
+//! between a feed and its snapshot.
+//!
+//! The 150 ms deadline is NOT self-enforcing — vte only consults it when more
+//! bytes arrive, so an unterminated BSU used to freeze the tab outright. The
+//! FFI now DOES expose sync state (`bb_term_sync_status` /
+//! `bb_term_flush_sync_update`) so the session can abort a stalled update;
+//! that surface and its expiry semantics are pinned in
+//! `core/tests/sync_update_timeout.rs`.
 
 use blackbird_core::*;
 

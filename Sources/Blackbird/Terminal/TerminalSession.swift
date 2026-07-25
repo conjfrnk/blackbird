@@ -207,6 +207,12 @@ public final class TerminalSession: ObservableObject {
     /// Owns the `lastAppliedGridSize` coreQueue-confined reflow detector.
     private var resizeController: ResizeController!
 
+    /// DEC 2026 stalled-synchronized-update watchdog. Owns the
+    /// coreQueue-confined `armed` latch. Assigned before `wire()` so no async
+    /// path observes it nil. `private(set)` internal so `SnapshotCoalescer`
+    /// can arm it from the burst tail; only this session assigns it.
+    private(set) var syncUpdateWatchdog: SyncUpdateWatchdog!
+
     public static func start(
         shell: String,
         arguments: [String],
@@ -259,6 +265,7 @@ public final class TerminalSession: ObservableObject {
         self.cwdTracker = CwdTracker(session: self)
         self.focusEmitter = FocusEmitter(session: self)
         self.resizeController = ResizeController(session: self)
+        self.syncUpdateWatchdog = SyncUpdateWatchdog(session: self)
         wire()
     }
 
@@ -298,6 +305,7 @@ public final class TerminalSession: ObservableObject {
         self.cwdTracker = CwdTracker(session: self)
         self.focusEmitter = FocusEmitter(session: self)
         self.resizeController = ResizeController(session: self)
+        self.syncUpdateWatchdog = SyncUpdateWatchdog(session: self)
         // `wire()` is safe in headless mode: every PTY hookup uses optional
         // chaining, so with `pty == nil` only the bbterm.onEvent handler is
         // installed. That's exactly what the OSC 7 / cwd tests need — feed
@@ -353,6 +361,25 @@ public final class TerminalSession: ObservableObject {
     /// natural ordering behind any queued feeds.
     var snapshotsTakenForTests: Int {
         coreQueue.sync { snapshotCoalescer.snapshotsTakenCount }
+    }
+
+    /// Test hook: number of stalled synchronized updates the watchdog has
+    /// aborted. coreQueue-confined storage; the sync read also orders the
+    /// caller behind any queued feeds and behind the watchdog's own block.
+    var syncAbortsForTests: Int {
+        coreQueue.sync { syncUpdateWatchdog.abortCount }
+    }
+
+    /// Test hook: whether the watchdog currently has a re-check scheduled.
+    ///
+    /// Deterministic without any wall-clock wait: the burst-tail work item
+    /// that arms the watchdog is a `coreQueue.async`, so this `coreQueue.sync`
+    /// necessarily runs after it. Lets a test pin that a burst leaving a
+    /// synchronized update open really does arm the watchdog — the one link
+    /// in the chain that the pure policy tests and the core FFI tests both
+    /// leave uncovered.
+    var syncWatchdogArmedForTests: Bool {
+        coreQueue.sync { syncUpdateWatchdog.isArmedForTesting }
     }
 
     /// Test-only synchronous snapshot accessor. Drives the same code path

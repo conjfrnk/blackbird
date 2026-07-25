@@ -408,6 +408,44 @@ struct BBSnap {
 };
 
 /**
+ * State of the parser's DEC mode 2026 (synchronized output) buffer.
+ *
+ * Between BSU (`CSI ?2026h`) and ESU (`CSI ?2026l`) vte buffers every byte
+ * instead of mutating the grid, and arms a private abort deadline. vte does
+ * NOT self-abort: `Processor::advance` only consults that deadline when MORE
+ * bytes arrive, so the EMBEDDER must notice expiry and call `stop_sync`.
+ * This struct is how Swift learns that a deadline exists and when it lands.
+ *
+ * Layout note (same discipline as `BBResizeResult`): the two `u64`s lead so
+ * `repr(C)` introduces no implicit padding — 24 bytes, align 8, explicit
+ * `_pad` tail.
+ */
+struct BBSyncStatus {
+  /**
+   * Nanoseconds until the core's own abort deadline. `0` when
+   * `pending == 0` or when the deadline has already elapsed.
+   */
+  uint64_t remaining_ns;
+  /**
+   * Bytes currently held in the parser's sync buffer (`0 ..= 2 MiB`).
+   */
+  uint64_t buffered_bytes;
+  /**
+   * Non-zero while a synchronized update is open (BSU seen, ESU not yet).
+   */
+  uint8_t pending;
+  /**
+   * Non-zero when `pending != 0` AND the core's deadline has elapsed —
+   * i.e. it is now legal to abort. THIS IS THE ONLY EXPIRY VERDICT ANY
+   * CALLER MAY USE; do not recompute it from a host-side clock, and do not
+   * hardcode vte's timeout (it is a private const in the vendored crate
+   * and can change on a bump).
+   */
+  uint8_t expired;
+  uint8_t _pad[6];
+};
+
+/**
  * Owned UTF-8 byte buffer returned from text-extraction FFIs.
  *
  * `bytes`/`len` describe a read-only view into the heap buffer whose raw
@@ -694,6 +732,54 @@ void bb_term_set_color_query_enabled(struct BBTerm *term, uint8_t enabled);
  * 0 as the fallback value.
  */
 uint32_t bb_term_current_mode(struct BBTerm *term);
+
+/**
+ * Read the parser's DEC 2026 synchronized-update state. O(1), pure read —
+ * no grid mutation, no snapshot allocation, no events fired.
+ *
+ * Use it to decide whether a stalled synchronized update needs aborting (see
+ * `bb_term_flush_sync_update`) and how long to wait before re-checking.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null returns an all-zero
+ * `BBSyncStatus` ("nothing pending").
+ *
+ * Panics inside this function are caught by `catch_unwind` and delivered as a
+ * `BBEventKind::Fatal` event to the registered callback. The function returns
+ * an all-zero `BBSyncStatus` as the fallback value.
+ */
+struct BBSyncStatus bb_term_sync_status(struct BBTerm *term);
+
+/**
+ * Terminate a pending DEC 2026 synchronized update, replaying the parser's
+ * buffered bytes into the grid.
+ *
+ * Returns `1` iff an update was open, was terminated, and its buffered bytes
+ * were replayed. Returns `0` for: null term, re-entrant call, panic caught,
+ * no update open, or `force == 0` with the core's deadline not yet elapsed.
+ * Idempotent — an immediate second call returns `0`.
+ *
+ * `force == 0` is the only value non-test callers should pass: the core
+ * re-checks its own deadline, so the call physically cannot tear a frame a
+ * TUI legitimately asked for. `force == 1` aborts unconditionally and exists
+ * for `core/tests` (so flush mechanics can be pinned without a 150 ms sleep)
+ * and for callers that must guarantee the grid is reachable right now —
+ * `bb_term_clear_all` uses the internal equivalent for exactly that reason.
+ *
+ * This is NOT a thin passthrough: the replay drives alacritty's `Term` and
+ * can synchronously fire Title / Bell / Osc52 / PtyWrite events through the
+ * registered callback, and it resolves deferred OSC 10/11/12 replies and a
+ * rate-suppressed title exactly as `bb_term_input` does. Treat a call to it
+ * as an input-processing event.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null is a no-op returning `0`.
+ *
+ * Panics inside this function are caught by `catch_unwind` and delivered as a
+ * `BBEventKind::Fatal` event to the registered callback. The function returns
+ * `0` as the fallback value.
+ */
+uint8_t bb_term_flush_sync_update(struct BBTerm *term, uint8_t force);
 
 /**
  * Report whether the snapshot's damage set is "full" (all rows need a
