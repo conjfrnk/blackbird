@@ -1360,7 +1360,16 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Pushing `{mode:?}` keyboard mode into the stack");
 
         if self.keyboard_mode_stack.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH {
-            let removed = self.title_stack.remove(0);
+            // Blackbird fix: this trimmed `title_stack` upstream — the wrong
+            // stack. Two consequences. The cap never bounded
+            // `keyboard_mode_stack` at all, so it grew without limit; and
+            // `Vec::remove(0)` panics on an empty Vec, so the 4097th
+            // `CSI > u` push panicked the VT whenever no title had been
+            // saved (the usual case). The panic is caught by the FFI's
+            // catch_unwind, but the rest of that input chunk is discarded and
+            // the session is left mid-parse. Compare the title-stack cap
+            // below, which correctly trims its own stack.
+            let removed = self.keyboard_mode_stack.remove(0);
             trace!(
                 "Removing '{removed:?}' from bottom of keyboard mode stack that exceeds its \
                  maximum depth"
