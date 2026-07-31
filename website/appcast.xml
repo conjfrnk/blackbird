@@ -10,14 +10,14 @@
     <description>Release feed for Blackbird.</description>
     <language>en</language>
     <item>
-      <title>Version 0.7.0</title>
-      <pubDate>Tue, 14 Jul 2026 06:00:15 +0000</pubDate>
-      <sparkle:version>47</sparkle:version>
-      <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
+      <title>Version 0.7.1</title>
+      <pubDate>Fri, 31 Jul 2026 19:20:51 +0000</pubDate>
+      <sparkle:version>48</sparkle:version>
+      <sparkle:shortVersionString>0.7.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <enclosure url="https://github.com/conjfrnk/blackbird/releases/download/v0.7.0/Blackbird-0.7.0.dmg"
+      <enclosure url="https://github.com/conjfrnk/blackbird/releases/download/v0.7.1/Blackbird-0.7.1.dmg"
                  type="application/x-apple-diskimage"
-                 sparkle:edSignature="AGgF6NGo4Bf0Y8z5aYcpIuXnrI7TH01gZ/GFFLgSWZeaWrYKrnfjBq9xPqcq9mnT3OS+svKuh4U/M8y8LKuiCQ==" length="10224581" />
+                 sparkle:edSignature="kt8f+mYts8y0nCHoeOrPocEhcKS3LS0b1rRf0iXZvTksjJTSOsbi/GwGbzul64cO3cay/wi48+p8WuJYzf9tAw==" length="10233591" />
     </item>
   </channel>
 </rss>
