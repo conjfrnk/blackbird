@@ -449,6 +449,24 @@ final class TabGroupObserver {
         }
     }
 
+    /// Width-only pill relayout: the single part of `refreshTabBar()` that can
+    /// actually change during a live window drag.
+    ///
+    /// `refreshTabBar()` additionally re-asserts native-strip suppression (a
+    /// recursive, class-name-matching view-tree walk), re-checks tab-group
+    /// identity, and re-installs KVO — none of which can change between two
+    /// frames of a resize drag, and all of which were running on every tick.
+    /// The full refresh still runs at `windowDidEndLiveResize`, so the Bug 5
+    /// "refreshTabBar is the every-transition funnel" contract is preserved:
+    /// this only skips *within* one gesture.
+    func relayoutTabStripForWidth() {
+        guard let window = controller.window,
+              lastObservedTabCount > 1,
+              let bar = controller.titlebarTabBar else { return }
+        let available = max(200, window.frame.width - trafficLightsReservation())
+        bar.refresh(availableWidth: available)
+    }
+
     /// Like `refreshTabBar()`, but only runs when the tab-group identity
     /// or tab count has changed since the last refresh on this controller.
     /// The common ⌘-Tab path (focus just returns to an existing single

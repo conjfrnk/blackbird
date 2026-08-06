@@ -89,6 +89,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     // can gate on it across the file boundary.
     var isPerformingShowWindow = false
 
+    /// True while THIS controller's window frame is being set by the tab-group
+    /// frame fan-out (`applyTabGroupFrame`). Its `windowDidResize` is then our
+    /// own programmatic echo and must not be treated as a user resize:
+    ///
+    ///   - it must not reach the shared frame autosave. `WindowFramePersistence
+    ///     .isUserDrivenFrameChange` classifies a sibling's echo as user-driven
+    ///     (siblings share the front window's rect, so the pointer is inside
+    ///     it), and a sibling never armed `fullScreenEntrySuppressedUntil` —
+    ///     so an unguarded fan-out during a fullscreen transition would have
+    ///     N-1 siblings persist the fullscreen frame to the single shared
+    ///     `"BlackbirdMainWindow"` key. That is exactly RCA finding A3.
+    ///   - it must not rebuild the tab strip N times per fan-out (O(N²) work
+    ///     for a strip nobody is looking at; every member already refreshes on
+    ///     selection change).
+    ///   - it must not fan out again from the receiving side.
+    private var isApplyingTabGroupFrame = false
+
+    /// Trailing-edge debounce for the sibling frame push on the resize paths
+    /// that never fire `windowDidEndLiveResize`: the modifier-right-drag resize
+    /// gesture (which drives `setFrame` directly with `inLiveResize == false`)
+    /// and the fullscreen enter/exit animation (many frame changes across many
+    /// runloop turns). Without it, those would fan out per animation frame.
+    private var pendingSiblingFrameSync: DispatchWorkItem?
+
     /// Persists the window frame on user-driven move/resize (the explicit-save
     /// driver AppKit's implicit autosave doesn't fire for this tabbing config),
     /// with the S5-006 screen-reconfig settle suppression. The move/resize
@@ -321,11 +345,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             width: m.cellWidth * 20 + 2 * TerminalView.horizontalContentInsetPoints,
             height: m.cellHeight * 4 + view.titlebarOnlyTopInset + TerminalView.bottomContentInsetPoints
         )
-        // Pixel-precise resize: no contentResizeIncrements here. The renderer's
-        // viewport stretch (used during live resize) keeps the in-between
-        // frames smooth, and propagateResize's lastPropagatedSize dedup means
-        // SIGWINCH fires once per cell-boundary cross. Sub-cell leftover at
-        // the right is absorbed by the new horizontalContentInsetPoints inset.
+        // Pixel-precise resize: no contentResizeIncrements here. In-between
+        // frames stay smooth because the renderer draws text at absolute
+        // point positions against the LIVE viewport (there is no "viewport
+        // stretch" — an older comment here claimed one that the code never
+        // had), and propagateResize's lastPropagatedSize dedup means SIGWINCH
+        // fires once per cell-boundary cross. Sub-cell leftover at the right
+        // is absorbed by the horizontalContentInsetPoints inset.
         return view
     }
 
@@ -649,15 +675,92 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     func windowDidResize(_ notification: Notification) {
+        // Our own fan-out echo — not a user resize. See
+        // `isApplyingTabGroupFrame` for the two things this guard prevents.
+        guard !isApplyingTabGroupFrame else { return }
         // Pills divide the available titlebar width equally, so resize
-        // needs to re-lay them out.
-        tabObserver.refreshTabBar()
+        // needs to re-lay them out. Mid-drag only the width can have changed,
+        // so take the cheap path and leave the full refresh (native-strip
+        // re-hide, group-identity re-check, KVO re-install) to the settle.
+        if window?.inLiveResize ?? false {
+            tabObserver.relayoutTabStripForWidth()
+        } else {
+            tabObserver.refreshTabBar()
+        }
         // AppKit's implicit autosave-on-resize isn't firing for this
         // window's tabbing config (see init for the full diagnosis), so
-        // drive the save ourselves on every resize. Idempotent. ALL
-        // windows save — the saved frame on disk tracks the user's most
-        // recent resize regardless of which window owned it.
+        // drive the save ourselves. Idempotent. ALL windows save — the saved
+        // frame on disk tracks the user's most recent resize regardless of
+        // which window owned it.
+        //
+        // Skipped during a live drag: `saveFrame(usingName:)` is a synchronous
+        // `UserDefaults` write, and every write fans out through SwiftUI's
+        // global `UserDefaults` bridge into `Preferences.objectWillChange`.
+        // Paying that per drag frame bought nothing — `windowDidEndLiveResize`
+        // saves the frame the user actually chose, and `windowDidMove` still
+        // covers title-bar drags.
+        if !(window?.inLiveResize ?? false) {
+            framePersistence.saveCurrentFrame()
+        }
+        scheduleSiblingFrameSync()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        // The user let go: persist the final frame, run the full tab-strip
+        // refresh the live-resize ticks skipped, and push the frame to the
+        // group's background tabs immediately (no debounce — this IS the
+        // settle point).
+        tabObserver.refreshTabBar()
         framePersistence.saveCurrentFrame()
+        pendingSiblingFrameSync?.cancel()
+        pendingSiblingFrameSync = nil
+        syncFrameToSiblingTabs()
+    }
+
+    // MARK: - Tab-group frame fan-out (issue #29)
+
+    /// Schedule a trailing sibling-frame push for resize paths that don't end
+    /// in `windowDidEndLiveResize`. Skipped outright during a live drag: that
+    /// path settles through `windowDidEndLiveResize`, and a background tab is
+    /// invisible, so fanning out mid-drag would buy nothing visually while
+    /// costing N `setFrame`s (and N drawable reallocations) per pause.
+    private func scheduleSiblingFrameSync() {
+        guard !(window?.inLiveResize ?? false) else { return }
+        pendingSiblingFrameSync?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingSiblingFrameSync = nil
+            self?.syncFrameToSiblingTabs()
+        }
+        pendingSiblingFrameSync = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    /// Push this window's frame onto the other tabs in its group so their
+    /// terminals reflow (and their shells get `SIGWINCH`) now, instead of when
+    /// the user next cycles to them.
+    private func syncFrameToSiblingTabs() {
+        guard !isApplyingTabGroupFrame,
+              let window,
+              let group = window.tabGroup else { return }
+        let frame = window.frame
+        for sibling in TabFrameSync.targets(front: window, frame: frame, groupWindows: group.windows) {
+            (sibling.windowController as? MainWindowController)?.applyTabGroupFrame(frame)
+        }
+    }
+
+    /// Receiver side of the fan-out. `setFrame(_:display:false)` on a merged,
+    /// ordered-out tab member is accepted, does **not** order the window in,
+    /// and is self-healing: if the pushed frame were ever wrong, AppKit
+    /// re-asserts the group's canonical frame at selection time (all three
+    /// verified with standalone AppKit probes).
+    ///
+    /// Internal rather than private: the sender is a *different* instance of
+    /// this class.
+    func applyTabGroupFrame(_ frame: NSRect) {
+        guard let window, window.frame != frame else { return }
+        isApplyingTabGroupFrame = true
+        defer { isApplyingTabGroupFrame = false }
+        window.setFrame(frame, display: false)
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -680,6 +783,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     func windowDidEnterFullScreen(_ notification: Notification) {
         framePersistence.resolveFullScreenEntrySuppression()
+        // Fullscreen animates the frame across many runloop turns with
+        // `inLiveResize == false`, so `scheduleSiblingFrameSync` skipped none
+        // of them but also never saw a settle point. This is it.
+        syncFrameToSiblingTabs()
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        syncFrameToSiblingTabs()
     }
 
     /// The transition can also fail outright (rare, but AppKit does define
