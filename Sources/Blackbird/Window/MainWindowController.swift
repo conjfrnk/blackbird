@@ -106,11 +106,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     ///   - it must not fan out again from the receiving side.
     private var isApplyingTabGroupFrame = false
 
-    /// The last frame the fan-out pushed onto THIS window. Paired with the
-    /// boolean above so an echo is recognised by VALUE as well as by timing —
-    /// see `isTabGroupFrameEcho()`.
-    private var lastAppliedTabGroupFrame: NSRect?
-
     /// Trailing-edge debounce for the sibling frame push on the resize paths
     /// that never fire `windowDidEndLiveResize`: the modifier-right-drag resize
     /// gesture (which drives `setFrame` directly with `inLiveResize == false`)
@@ -781,7 +776,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // member set with `display: false` is the configuration least likely to
         // be on the synchronous path) is still recognised as our own echo
         // rather than a user resize. Getting that wrong re-opens RCA A3.
-        lastAppliedTabGroupFrame = frame
         defer { isApplyingTabGroupFrame = false }
         // A background tab draws nothing, so it needs none of the synchronous
         // resize path's "never a frame at the old grid size" guarantee — and
@@ -803,13 +797,29 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// live drag?" decision has to consider both, or the app's own resize
     /// gesture pays the settle-time costs on every pointer sample.
     private var isResizingInteractively: Bool {
-        (window?.inLiveResize ?? false) || (terminalView?.windowResizeController.isResizing ?? false)
+        if window?.inLiveResize ?? false { return true }
+        // The custom gesture's own flag is cleared by `rightMouseUp`. If that
+        // event is ever lost (a modal steals it, the app deactivates
+        // mid-drag), a latched flag would silently disable frame persistence,
+        // the tab-strip refresh and the fan-out for the rest of the window's
+        // life. Cross-check that the right button is genuinely still down.
+        guard terminalView?.windowResizeController.isResizing ?? false else { return false }
+        return (NSEvent.pressedMouseButtons & 0b10) != 0
     }
 
     /// True when a frame-change callback on this window is the echo of a
     /// fan-out push rather than a user (or AppKit) resize.
+    ///
+    /// Timing-based, on purpose. A value-based backstop ("is the frame equal to
+    /// the last one we pushed?") was tried and removed: `NSWindow.setFrame`
+    /// posts its notifications synchronously — verified with standalone AppKit
+    /// probes against a merged, ordered-out tab member, the least likely
+    /// configuration to be on that path — so the flag alone is exact, whereas
+    /// the value check silently swallowed real user resizes that happened to
+    /// reproduce a previously-pushed rect. Window-tiling utilities and
+    /// fullscreen exit reproduce exact rects constantly.
     private func isTabGroupFrameEcho() -> Bool {
-        isApplyingTabGroupFrame || (window.map { $0.frame == lastAppliedTabGroupFrame } ?? false)
+        isApplyingTabGroupFrame
     }
 
     func windowDidMove(_ notification: Notification) {

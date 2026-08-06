@@ -40,15 +40,17 @@ final class ResizeController {
     private let coalescedLock = NSLock()
     private var pendingCoalescedSize: TerminalSession.Size?
     private var coalescedWorkQueued = false
-    /// True from the moment a coalesced resize is enqueued until the block that
-    /// drains it has finished. Distinct from `coalescedWorkQueued`, which the
-    /// block clears at ENTRY so a size arriving mid-reflow can still be picked
-    /// up by a fresh block (latest-wins). Without this second flag the
-    /// "is a reflow outstanding?" question read false for the entire 10–37 ms
-    /// the reflow actually runs — and since drag samples arrive every ~8 ms,
-    /// the very next row-only sample of a diagonal drag would take the
-    /// synchronous path straight into `coreQueue.sync` behind it.
-    private var coalescedInFlight = false
+    /// Number of drain blocks enqueued and not yet finished.
+    ///
+    /// A COUNT, not a flag. `coalescedWorkQueued` is cleared at block ENTRY so
+    /// a size arriving mid-reflow can still be picked up by a fresh block
+    /// (latest-wins) — which means at any moment two blocks can be outstanding,
+    /// and a boolean would be cleared by whichever finished FIRST while the
+    /// second was still queued behind it. That is exactly the window
+    /// `hasPendingCoalescedResize` exists to report: drag samples arrive every
+    /// ~8 ms and a reflow takes 10–37 ms, so mis-reporting it sends the next
+    /// row-only sample into `coreQueue.sync` behind the reflow.
+    private var outstandingCoalescedBlocks = 0
 
     /// Last grid size BBTerm actually applied. Used to detect real reflow
     /// (audit S5-004/S5-005 contract: ANY resize invalidates lines-scrolled
@@ -238,7 +240,7 @@ final class ResizeController {
         pendingCoalescedSize = clamped
         let alreadyQueued = coalescedWorkQueued
         coalescedWorkQueued = true
-        coalescedInFlight = true
+        if !alreadyQueued { outstandingCoalescedBlocks += 1 }
         coalescedLock.unlock()
         guard !alreadyQueued else { return }
         session.coreQueue.async { [weak self, weak session = self.session] in
@@ -253,7 +255,7 @@ final class ResizeController {
             // the coalesced path forever.
             defer {
                 self.coalescedLock.lock()
-                self.coalescedInFlight = false
+                self.outstandingCoalescedBlocks -= 1
                 self.coalescedLock.unlock()
             }
             guard let target else { return }
@@ -289,7 +291,7 @@ final class ResizeController {
     var hasPendingCoalescedResize: Bool {
         coalescedLock.lock()
         defer { coalescedLock.unlock() }
-        return coalescedWorkQueued || coalescedInFlight
+        return coalescedWorkQueued || outstandingCoalescedBlocks > 0
     }
 
     /// Invalidate prompt-mark anchors when the applied grid size

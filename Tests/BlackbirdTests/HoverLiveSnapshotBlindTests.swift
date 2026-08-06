@@ -179,8 +179,6 @@ final class HoverLiveSnapshotBlindTests: XCTestCase {
         let point = hoverPoint(view, row: row, col: col, file: file, line: line)
         view.hoverCoordinator.handleMouseMoved(
             flags: flags,
-            screenRow: row,
-            col: col,
             locationInWindow: point
         )
     }

@@ -48,8 +48,6 @@ extension TerminalView {
         let col = point.col
         hoverCoordinator.handleMouseMoved(
             flags: event.modifierFlags,
-            screenRow: screenRow,
-            col: col,
             locationInWindow: event.locationInWindow
         )
         // DEC mode 1003 any-event motion report. A mouse-reporting

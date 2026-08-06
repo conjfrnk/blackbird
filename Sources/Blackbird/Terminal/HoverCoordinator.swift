@@ -130,10 +130,6 @@ final class HoverCoordinator {
     /// apart at a caller that clears one and forgets the other.
     private(set) var cachedURLMatches: [URLMatch] = []
     private(set) var cachedURLMatchesSeq: UInt64?
-    /// The screen row whose "unchanged since the scan" property the damage-gated
-    /// skip in `refreshURLMatchCacheIfNeeded` has been maintaining. Moving the
-    /// pointer to a different row invalidates the induction, so the scan re-runs.
-    private var damageVerifiedRow: Int?
 
     /// Drop the URL-match cache (both fields together) so the next ⌘-hover scan
     /// repopulates. Used by the session-rebind paths (per-session sequence ids
@@ -141,7 +137,6 @@ final class HoverCoordinator {
     func invalidateURLMatchCache() {
         cachedURLMatches = []
         cachedURLMatchesSeq = nil
-        damageVerifiedRow = nil
     }
     // The scheduled tooltip reveal (`hoverTooltipItem`) lives on the VIEW, not
     // here: the view's `deinit` / `viewWillMove` cancel it, and reaching through
@@ -172,17 +167,24 @@ final class HoverCoordinator {
 
     /// The hover half of the view's `mouseMoved` override (the view also drives
     /// `reportPointerMotionIfNeeded`, a separate mouse-reporting concern).
-    func handleMouseMoved(flags: NSEvent.ModifierFlags, screenRow: Int, col: Int, locationInWindow: NSPoint) {
+    func handleMouseMoved(flags: NSEvent.ModifierFlags, locationInWindow: NSPoint) {
         // Reconcile ⌘-held state with the live event flags. `flagsChanged`
         // doesn't fire when a key release happens while another window is key
         // (Cmd-Tab release case), so a ⌘-up missed during focus loss would
         // otherwise leave us painting the highlight forever.
         let cmdChanged = syncCmdModifierHeld(fromEventFlags: flags)
-        // Store the pixel position; the caller already mapped this same event
-        // to (screenRow, col), so reuse that mapping now and re-derive from the
-        // point later (snapshot publishes, which carry no event).
         lastHoverPointInView = view.convert(locationInWindow, from: nil)
-        updateHover(screenRow: screenRow, col: col, tooltipAnchor: locationInWindow)
+        // Derive the cell the SAME way every other reader does, rather than
+        // taking the caller's mapping of this event. The two can disagree —
+        // `lastHoverCell` reads AppKit's live pointer position, which is ahead
+        // of an event that has been sitting in the queue — and then the OSC 8
+        // half of the hover would resolve against one cell while the ⌘-regex
+        // half resolved against another.
+        guard let cell = lastHoverCell else {
+            clearHoverDerivedState()
+            return
+        }
+        updateHover(screenRow: cell.row, col: cell.col, tooltipAnchor: locationInWindow)
         // Run the ⌘-hover pass when either the modifier flipped OR the hover
         // cell moved.
         if cmdChanged || cmdModifierHeld {
@@ -366,15 +368,6 @@ final class HoverCoordinator {
         cmdHoverURLMatch = nil
         view.renderer.setCmdHoverRange(bufferLine: 0, startCol: -1, endCol: -1)
         if wasSet { view.needsDisplay = true }
-        // The damage-gated scan skip is an induction over CONSECUTIVE
-        // `reevaluateCmdHoverHighlight` calls: "row R was undamaged at every
-        // publish since the scan". Every path that reaches this method is a
-        // break in that chain (⌘ released, pointer left the grid, the cell
-        // turned out to carry an OSC 8 link, no match) — publishes keep
-        // arriving but nobody is checking damage, so the next check would be
-        // reasoning about a row that may have been rewritten meanwhile. Drop
-        // the verification and let the next ⌘-hover rescan.
-        damageVerifiedRow = nil
         // `cmdHoverURLMatch` is the OTHER disjunct of `wantsPointingHandCursor`.
         // Refreshing the cursor cache only from the OSC 8 side let it latch
         // `true` here and then suppress the invalidation for a subsequent real
@@ -387,40 +380,26 @@ final class HoverCoordinator {
     /// sequence id. Called only on the ⌘-hover fast path so the O(rows × cols)
     /// scan runs at most once per snapshot instead of once per `mouseMoved`
     /// delivery. Audit cwd-hyperlink F7.
-    private func refreshURLMatchCacheIfNeeded(hoveredRow: Int) {
+    private func refreshURLMatchCacheIfNeeded() {
         guard let snap = view.currentSnapshot else {
             invalidateURLMatchCache()
             return
         }
         guard cachedURLMatchesSeq != snap.sequenceID else { return }
-        // Damage-gated skip. The scan is O(rows × cols) — a String build plus
-        // two NSRegularExpression passes per visible row — and this now runs on
-        // every publish while ⌘ is held (it used to be short-circuited by the
-        // hover cell being nil'd, which was itself the bug). Against a screen
-        // repainting at display cadence that is a full-grid regex sweep per
-        // frame on the main thread.
-        //
-        // The only thing the ⌘-hover path reads out of the cache is the match
-        // under the hovered cell, so the cache is still usable when that ROW
-        // provably hasn't changed since the scan: alacritty's per-snapshot
-        // damage says so, and because this runs on every publish the "unchanged
-        // since the scan" property holds by induction — as long as the pointer
-        // is still on the row we have been checking (`damageVerifiedRow`);
-        // moving to a different row forces a rescan.
-        //
-        // Deliberately does NOT stamp `cachedURLMatchesSeq` on the skip path:
-        // the click path (`TerminalView.cachedRegexMatches(for:)`) only reuses
-        // the cache when the seq matches the live snapshot exactly, so a
-        // partially-verified cache is invisible to it and a ⌘-click re-scans.
-        if cachedURLMatchesSeq != nil,
-           damageVerifiedRow == hoveredRow,
-           !snap.damageIsFull,
-           !snap.damagedRows.contains(hoveredRow) {
-            return
-        }
+        // No damage-based skip here, deliberately. It is tempting — this now
+        // runs on every publish while ⌘ is held, and the scan is
+        // O(rows × cols) — but any such skip has to reason about "row R is
+        // unchanged since the scan", and the publish path legitimately DROPS
+        // snapshots (`SnapshotCoalescer`'s latest-wins slot). Damage is drained
+        // per snapshot taken, not per snapshot published, so the damage a
+        // dropped snapshot carried is simply gone and the induction has holes
+        // exactly where a repainting TUI is busiest. A stale cache there would
+        // paint the ⌘-hover underline for a URL that is no longer under the
+        // pointer — the same "affordance the click won't honour" defect class
+        // as issue #30 itself. The scan is ~0.3–1 ms at a typical grid and only
+        // runs while the user is physically holding ⌘.
         cachedURLMatches = URLDetector.scan(snapshot: snap)
         cachedURLMatchesSeq = snap.sequenceID
-        damageVerifiedRow = hoveredRow
         // No hover state is dropped here any more. The old shape nil'd
         // `lastHoverCell` on every snapshot replacement because the cell was a
         // screen-space row baked at mouseMoved time against the *previous*
@@ -455,7 +434,7 @@ final class HoverCoordinator {
             clearCmdHoverURLMatch()
             return
         }
-        refreshURLMatchCacheIfNeeded(hoveredRow: last.row)
+        refreshURLMatchCacheIfNeeded()
         let bufferLine = Int32(last.row - snap.displayOffset)
         let point = BufferPoint(line: bufferLine, col: last.col)
         guard let match = URLDetector.match(at: point, in: cachedURLMatches) else {

@@ -109,6 +109,9 @@ extension TerminalView {
         // that stole the mouseUp).
         pendingLinkClick = nil
         didReportMouseDown = false
+        // A fresh gesture reports its first drag even if it lands on the cell
+        // the previous drag ended in.
+        lastReportedDragCell = nil
 
         // ⌘-click on a URL → open it. Runs before mouse-reporting, window-drag
         // and selection so a TUI can't swallow the gesture.
@@ -526,7 +529,12 @@ extension TerminalView {
         // refresh rate), and a TUI that repaints per report — Claude Code
         // repaints its whole UI — turns that into a self-inflicted flood.
         // ⌥ escapes reporting here exactly as it does for press/release.
-        guard !event.modifierFlags.contains(.option),
+        // `didReportMouseDown`: motion-with-button-held only makes sense to a
+        // TUI that saw the press. It may not have — the X10 fallback encoder
+        // refuses coordinates past column 223 — and reporting the drag anyway
+        // hands it motion for a button it never saw go down.
+        guard didReportMouseDown,
+              !event.modifierFlags.contains(.option),
               let mode = currentSnapshot?.termMode,
               mode.contains(.mouseMotion) || mode.contains(.mouseDrag),
               session != nil
