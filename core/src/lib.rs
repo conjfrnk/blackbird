@@ -225,6 +225,16 @@ pub struct BBTerm {
     /// have no breadcrumb. Latch keeps the log one-shot per session to
     /// avoid eprintln spam on a streaming hostile payload. Audit S2-014.
     pub(crate) osc8_id_exhaustion_logged: bool,
+    /// One-shot latch for the sibling of `osc8_id_exhaustion_logged`: the
+    /// `OSC8_TOTAL_INTERN_BYTES_CAP` (1 MiB) budget on `uri_cstr_cache`. Past
+    /// it, every NEW URI drops to `link_id = 0` — same user-visible symptom
+    /// ("links stopped working"), but this is the reachable one: ~16 400
+    /// distinct 64-byte URIs, and the cache never shrinks except on
+    /// `bb_term_clear_all` (⌘K). Neither RIS nor an alt-screen switch clears
+    /// it. That path had no breadcrumb at all, which would make a real report
+    /// unresolvable; the id-exhaustion path it sits next to has had one since
+    /// audit S2-014.
+    pub(crate) osc8_intern_cap_logged: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +388,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             uri_cstr_cache: std::collections::HashMap::new(),
             uri_cache_bytes: 0,
             osc8_id_exhaustion_logged: false,
+            osc8_intern_cap_logged: false,
             modify_other_keys: 0,
             prompt_mark_rate: PromptMarkRateState::new(),
             osc7_rate: Osc7RateState::new(),

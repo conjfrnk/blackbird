@@ -549,6 +549,22 @@ fn intern_osc8_links(
         {
             Some(existing)
         } else if bb.uri_cache_bytes.saturating_add(uri_str.len()) > OSC8_TOTAL_INTERN_BYTES_CAP {
+            // Budget exhausted: this URI (and every later new one) silently
+            // loses its attribution. Leave a one-shot breadcrumb — the symptom
+            // is indistinguishable from "the terminal broke", and unlike the
+            // u16 id ceiling next door, this cap is actually reachable in a
+            // long session (~16 400 distinct 64-byte URIs) and only
+            // `bb_term_clear_all` clears the cache.
+            if !bb.osc8_intern_cap_logged {
+                bb.osc8_intern_cap_logged = true;
+                eprintln!(
+                    "[blackbird_core] OSC 8 URI intern budget ({} bytes) exhausted — \
+                     attribution silently dropped for every NEW hyperlink from now on. \
+                     Symptom: 'links stopped working'. Cleared by ⌘K (bb_term_clear_all). \
+                     One-shot per session.",
+                    OSC8_TOTAL_INTERN_BYTES_CAP
+                );
+            }
             None
         } else {
             match std::ffi::CString::new(uri_str) {
