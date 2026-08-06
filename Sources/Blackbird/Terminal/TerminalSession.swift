@@ -252,7 +252,13 @@ public final class TerminalSession: ObservableObject {
         self.bbterm = bbterm
         self.pty = pty
         self.spawnedAt = spawnedAt
-        let q = DispatchQueue(label: "blackbird.core")
+        // `.userInitiated` matches `PTY.readQueue`. It used to be implicit:
+        // every resize reached the queue via `coreQueue.sync` from main, which
+        // priority-boosts the target queue for the duration. `resizeCoalesced`
+        // deliberately removes that sync — so without an explicit QoS the
+        // reflow would run at whatever priority the PTY read queue happened to
+        // enqueue at, and a drag would feel worse rather than better.
+        let q = DispatchQueue(label: "blackbird.core", qos: .userInitiated)
         let token = ObjectIdentifier(bbterm)
         q.setSpecific(key: Self.coreQueueKey, value: token)
         self.coreQueue = q
@@ -294,7 +300,13 @@ public final class TerminalSession: ObservableObject {
         self.pty = nil
         // Headless test sessions never log spawn-relative timing.
         self.spawnedAt = CACurrentMediaTime()
-        let q = DispatchQueue(label: "blackbird.core")
+        // `.userInitiated` matches `PTY.readQueue`. It used to be implicit:
+        // every resize reached the queue via `coreQueue.sync` from main, which
+        // priority-boosts the target queue for the duration. `resizeCoalesced`
+        // deliberately removes that sync — so without an explicit QoS the
+        // reflow would run at whatever priority the PTY read queue happened to
+        // enqueue at, and a drag would feel worse rather than better.
+        let q = DispatchQueue(label: "blackbird.core", qos: .userInitiated)
         let token = ObjectIdentifier(bb)
         q.setSpecific(key: Self.coreQueueKey, value: token)
         self.coreQueue = q
@@ -580,6 +592,14 @@ public final class TerminalSession: ObservableObject {
     /// output. Logic lives in `ResizeController`; this is the thin public seam.
     public func resizeAsync(to size: Size) {
         resizeController.resizeAsync(to: size)
+    }
+
+    /// Latest-wins, off-main resize for the live-drag path — a column change
+    /// reflows the whole scrollback (tens of milliseconds at a real history
+    /// depth) and must never run on the main thread once per cell crossing.
+    /// Logic lives in `ResizeController`; this is the thin public seam.
+    public func resizeCoalesced(to size: Size) {
+        resizeController.resizeCoalesced(to: size)
     }
 
     /// Documented floor 2, ceiling 1000 per axis. Visible to tests

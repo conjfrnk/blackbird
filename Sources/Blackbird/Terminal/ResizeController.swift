@@ -34,6 +34,13 @@ final class ResizeController {
     /// `[weak session]` instead — never this `unowned` reference.
     private unowned let session: TerminalSession
 
+    /// Latest-wins slot for `resizeCoalesced(to:)`. Guarded by
+    /// `coalescedLock` because the producer is main (a live window drag) and
+    /// the consumer is `coreQueue`.
+    private let coalescedLock = NSLock()
+    private var pendingCoalescedSize: TerminalSession.Size?
+    private var coalescedWorkQueued = false
+
     /// Last grid size BBTerm actually applied. Used to detect real reflow
     /// (audit S5-004/S5-005 contract: ANY resize invalidates lines-scrolled
     /// anchors — column reflow rewraps history and row-count changes move
@@ -56,18 +63,28 @@ final class ResizeController {
         dispatchPrecondition(condition: .notOnQueue(session.coreQueue))
         // Synchronous on the caller's thread. coreQueue serializes PTY +
         // BBTerm resize (same guarantee as before) but we block the caller
-        // (typically main during a window drag) so the returned snapshot is
-        // already new-size when the next MTKView frame draws. Async resize
-        // produced a one-frame lag that users saw as jitter — content at old
-        // grid size against new viewport for ~8ms, then catching up.
+        // (typically main) so the returned snapshot is already new-size when
+        // the next MTKView frame draws. Async resize produced a one-frame lag
+        // that users saw as jitter — content at old grid size against new
+        // viewport for ~8ms, then catching up.
         //
-        // Blocking cost under an idle coreQueue: a single bb_term_resize call
-        // plus snapshot, well under a millisecond. Under a coreQueue backlog
-        // (a chatty shell mid-burst) the caller waits for every queued
-        // `feed(_:)` to drain first — callers that don't need the drag-path
-        // jitter-free guarantee should use `resizeAsync` instead (font-change
-        // path, which otherwise beachballs Settings clicks when Claude /
-        // xcodebuild are streaming into the terminal).
+        // Blocking cost: a ROW-only resize is a ring rotation — measured
+        // 0.000 ms even at 100 000 lines of history — plus one snapshot
+        // (0.06 ms at 200×50). A COLUMN change is a different animal: it
+        // reflows every populated scrollback row, measured 10.1 ms at 20 000
+        // lines / 24.9 ms at 50 000 / 36.6 ms at 100 000, independent of how
+        // many columns moved. (An earlier version of this comment claimed
+        // "well under a millisecond" for both; that number was the snapshot
+        // cost, and it is why a horizontal drag on a session with real
+        // scrollback used to make the window itself lag the pointer.)
+        //
+        // So: `propagateResize` sends row-only changes and the first-ever
+        // resize here, column changes to `resizeCoalesced` (off-main,
+        // latest-wins), and the font-change path to `resizeAsync` (which
+        // otherwise beachballs Settings clicks when a shell is streaming).
+        // Under a coreQueue backlog this path still waits for every queued
+        // `feed(_:)` to drain first — bounded now that the expensive case
+        // doesn't come through here.
         //
         // Clamp cols/rows to the same 2×2 floor and 1000×1000 ceiling the
         // Rust core enforces, so the PTY's TIOCSWINSZ gets dimensions
@@ -169,6 +186,65 @@ final class ResizeController {
             }
             guard let snap = session.bbterm.snapshot() else { return }
             session.snapshotCoalescer.publishPendingSnapshot(snap)
+        }
+    }
+
+    /// Latest-wins, off-main sibling of `resize(to:)` for the live-drag path.
+    ///
+    /// **Why this exists.** `resize(to:)` blocks main on `coreQueue.sync`, and
+    /// a *column* change reflows the entire populated scrollback: measured
+    /// 10.1 ms at 20 000 lines, 24.9 ms at 50 000, 36.6 ms at 100 000 (the cost
+    /// is O(populated rows) and independent of how many columns moved). A
+    /// horizontal drag crosses a column boundary roughly every 8 points, so at
+    /// a normal drag speed the main thread was asked for well over a second of
+    /// reflow per second of dragging — the window itself visibly lagged the
+    /// pointer. (The old doc comment on `resize(to:)` claimed "well under a
+    /// millisecond"; that was measured against snapshot cost, not reflow.)
+    ///
+    /// Latest-wins rather than throttled-by-interval: at most one resize is
+    /// ever queued, the rate self-tunes to what the machine can actually do,
+    /// and the final size always converges without depending on
+    /// `viewDidEndLiveResize` (which never fires for the modifier-right-drag
+    /// resize gesture). Coalescing N steps into 1 is a linear win — 30 steps
+    /// of 1 column cost 30× a single 30-column step.
+    ///
+    /// Publishes through `publishImmediate`, like the synchronous path and
+    /// unlike `resizeAsync`: this is a user action, so the H8 "user-action
+    /// wins" invariant applies — a feed snapshot queued before the resize must
+    /// not clobber the new-grid frame (audit fix-#07).
+    func resizeCoalesced(to size: TerminalSession.Size) {
+        let clamped = TerminalSession.clampResize(size)
+        coalescedLock.lock()
+        pendingCoalescedSize = clamped
+        let alreadyQueued = coalescedWorkQueued
+        coalescedWorkQueued = true
+        coalescedLock.unlock()
+        guard !alreadyQueued else { return }
+        session.coreQueue.async { [weak self, weak session = self.session] in
+            guard let self, let session else { return }
+            self.coalescedLock.lock()
+            let target = self.pendingCoalescedSize
+            self.pendingCoalescedSize = nil
+            self.coalescedWorkQueued = false
+            self.coalescedLock.unlock()
+            guard let target else { return }
+            // Audit S1-007: termination gate read INSIDE the coreQueue block,
+            // exactly as the sync and async paths do.
+            if session.isTerminatedLocked() { return }
+            // Bug #9 / Bug #3 / audit M3 ordering, identical to the sync path:
+            // grid first, then TIOCSWINSZ with the dims the grid actually
+            // applied; a nil return means the core panicked, so leave the
+            // kernel winsize alone rather than desyncing it from the grid.
+            if let applied = session.bbterm.resize(to: .init(cols: target.cols, rows: target.rows)) {
+                session.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
+                self.noteAppliedGridSize(TerminalSession.Size(cols: applied.cols, rows: applied.rows))
+            } else {
+                TerminalSession.sessionLogger.warning(
+                    "BBTerm.resize (coalesced) returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
+                )
+            }
+            guard let snap = session.bbterm.snapshot() else { return }
+            session.snapshotCoalescer.publishImmediate(snap)
         }
     }
 

@@ -756,10 +756,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
-        // Drag ended — commit the real grid size now. The renderer's stretched
-        // viewport (used during drag) flips back to the bounds-based viewport
-        // on the next frame, and the shell gets a single SIGWINCH to the
-        // final dimensions.
+        // Drag ended — make sure the session lands on the final grid size.
+        // In practice a no-op: `setFrameSize` fires for the final size too, so
+        // the `lastPropagatedSize` dedup swallows this call. Kept as a cheap
+        // belt-and-braces for any AppKit path that ends a live resize without
+        // a final `setFrameSize`. (Convergence of the coalesced column path
+        // does NOT depend on this — latest-wins guarantees the last requested
+        // size is the one applied, which is exactly why that design was chosen
+        // over an `inLiveResize`-gated throttle.)
+        // (The renderer never had a "stretched viewport" to flip back from,
+        // whatever the comment that used to live here claimed: text is drawn
+        // at absolute point positions against the live viewport.)
         propagateResize()
     }
 
@@ -870,29 +877,68 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             cols: UInt16(clamping: grid.cols),
             rows: UInt16(clamping: grid.rows)
         )
-        guard size != lastPropagatedSize else { return }
+        let previous = lastPropagatedSize
+        guard size != previous else { return }
         lastPropagatedSize = size
+        // How this resize was delivered. Three paths, chosen by cost:
+        //
+        //   .async     — font change and other non-drag callers. Never blocks
+        //                main on a coreQueue backlog (clicking "Size: 14" in
+        //                Settings while a shell streams used to beachball).
+        //   .sync      — the first resize a view ever propagates (startup
+        //                ordering: the session must be at the real grid size
+        //                before the shell's first output), and any resize that
+        //                changes ONLY the row count. Row changes are ring
+        //                rotations — measured 0.000 ms even at 100 000 lines of
+        //                history — so the "no frame at the old grid size"
+        //                guarantee is free there.
+        //   .coalesced — a column change. Reflows the entire populated
+        //                scrollback (10 ms at 20 000 lines, 37 ms at 100 000),
+        //                so it must not run on main once per cell crossing of a
+        //                live drag; latest-wins queuing also collapses a drag's
+        //                worth of steps into a handful of reflows and, with
+        //                them, the SIGWINCH storm that made every TUI repaint
+        //                its whole screen per crossing.
+        let delivery: ResizeDelivery
+        if asyncResize {
+            delivery = .async
+        } else if previous == nil || size.cols == previous?.cols {
+            delivery = .sync
+        } else {
+            delivery = .coalesced
+        }
+        #if DEBUG
+        lastResizeDeliveryForTesting = delivery
+        #endif
         // Without an attached session there's nothing to forward to. The
         // size is still recorded above so resize-math tests can assert
         // against it without spinning up a real PTY.
         guard let session else { return }
-        // Drag path uses sync `resize` so each frame renders at the right
-        // grid size (avoids one-frame-at-old-grid jitter). Font-change path
-        // (and any other non-drag caller) uses `resizeAsync` to keep the
-        // main thread from blocking on coreQueue when a chatty shell has a
-        // feed backlog — otherwise clicking "Size: 14" in Settings while
-        // something's streaming output beachballs for hundreds of ms.
-        if asyncResize {
-            session.resizeAsync(to: size)
-        } else {
-            session.resize(to: size)
+        switch delivery {
+        case .async:     session.resizeAsync(to: size)
+        case .sync:      session.resize(to: size)
+        case .coalesced: session.resizeCoalesced(to: size)
         }
+    }
+
+    /// Which `TerminalSession` resize entry point `propagateResize` used.
+    /// Named rather than inferred so the choice is reviewable and testable —
+    /// see the decision table in `propagateResize`.
+    enum ResizeDelivery: Equatable {
+        case sync
+        case async
+        case coalesced
     }
 
     #if DEBUG
     /// DEBUG-only accessor so unit tests can assert what the most recent
     /// `propagateResize` call computed for the grid.
     public func lastPropagatedSizeForTesting() -> PTY.Size? { lastPropagatedSize }
+
+    /// How the most recent `propagateResize` delivered its resize. Recorded
+    /// even when no session is attached, so the delivery policy is assertable
+    /// without a PTY (same trick `lastPropagatedSize` already uses).
+    var lastResizeDeliveryForTesting: ResizeDelivery?
     #endif
 
     // MARK: - Rendering

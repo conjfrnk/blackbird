@@ -126,11 +126,15 @@ final class SnapshotCoalescer {
     /// behind the current one is parsed before the item runs, so a burst of
     /// N chunks costs one grid serialization instead of N.
     ///
-    /// Why: `bbterm.snapshot()` is ~10 ms at a 200×50 grid while parsing a
-    /// 128 KiB chunk is ~2–4 ms. Taking a snapshot per chunk capped sustained
-    /// end-to-end throughput at ~8 MB/s (kitten benchmark, 2026-06-09) even
-    /// though the core parses at 25–90 MB/s — and the publish coalescer (F1)
-    /// was discarding almost all of those snapshots anyway. Idle/interactive
+    /// Why: taking a snapshot per chunk capped sustained end-to-end throughput
+    /// at ~8 MB/s (kitten benchmark, 2026-06-09) even though the core parses at
+    /// 25–90 MB/s. (An earlier version of this comment put `bbterm.snapshot()`
+    /// at "~10 ms at a 200×50 grid" — measured in release it is 0.06 ms at
+    /// 200×50 and 0.24 ms at 400×100, so the snapshot itself is NOT a
+    /// millisecond-scale cost; the win here is coalescing N publishes into one,
+    /// not avoiding an expensive serialization.) Parsing a 128 KiB chunk is
+    /// ~2–4 ms, and the publish coalescer (F1) was discarding almost all of
+    /// those per-chunk snapshots anyway. Idle/interactive
     /// cadence is unchanged: with no second chunk queued, the deferred item
     /// runs immediately after the current one and publishes exactly as before.
     func scheduleSnapshotAfterBurst() {

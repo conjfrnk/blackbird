@@ -339,6 +339,23 @@ public final class MetalRenderer {
         let snapshotSeq: UInt64
         let cursorRow: Int32
         let cursorCol: Int32
+        /// The view's bounds, in points, at encode time. `computeFrameGeometry`
+        /// feeds this straight into the uniform the shader divides by, so it is
+        /// a genuine input to the encoded image — leaving it out of the key was
+        /// a cache-correctness bug, not just a smoothness one. During a live
+        /// window resize the vast majority of frames change bounds by a
+        /// sub-cell amount and nothing else; the key matched, we skipped the
+        /// encode entirely, and CoreAnimation stretched the last presented
+        /// drawable over the new layer size — text visibly wobbling between
+        /// cell-boundary crossings. Issue #29 ("make stuff smoother overall").
+        ///
+        /// FrameKey ONLY — deliberately not in `VisualState`, which is shared
+        /// with `CacheKey`: cell instances store positions in points
+        /// (`CellInstance.cellPosPx`) and the shader divides by `u.viewportPx`,
+        /// so the per-row instance cache is viewport-independent and must not
+        /// be invalidated by a resize.
+        let viewportWidth: Float
+        let viewportHeight: Float
         let visual: VisualState
     }
     /// Frame-skip + per-row rebuild cache (Finding A cluster). The mutable
@@ -1065,7 +1082,8 @@ public final class MetalRenderer {
         snapshot: BBSnapshot?,
         focused: Bool,
         selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
-        blinkSkip: Bool
+        blinkSkip: Bool,
+        viewportPoints: CGSize
     ) -> FrameKey {
         return FrameKey(
             snapshotSeq: snapshot?.sequenceID ?? 0,
@@ -1075,6 +1093,11 @@ public final class MetalRenderer {
             // Audit UR-2 (2026-04-29).
             cursorRow: Int32(clamping: snapshot?.cursorRow ?? -1),
             cursorCol: Int32(clamping: snapshot?.cursorCol ?? -1),
+            // Non-finite / absurd bounds can't reach the GPU path anyway, but
+            // pin them here so a NaN can never make the key compare unequal to
+            // itself and defeat frame-skip entirely (NaN != NaN).
+            viewportWidth: Float(viewportPoints.width.sanitizedPixel),
+            viewportHeight: Float(viewportPoints.height.sanitizedPixel),
             visual: VisualState(
                 hoveredLinkID: hoveredLinkID,
                 selMode: selFields.mode,
@@ -1247,7 +1270,8 @@ public final class MetalRenderer {
         let blinkSkipNow = computeBlinkSkip(snapshot: snapshot, focused: focused)
         let selFields = Self.selectionFields(selection)
         let frameKey = makeFrameKey(
-            snapshot: snapshot, focused: focused, selFields: selFields, blinkSkip: blinkSkipNow
+            snapshot: snapshot, focused: focused, selFields: selFields, blinkSkip: blinkSkipNow,
+            viewportPoints: view.bounds.size
         )
         if !debugToggles.frameSkipDisabled, frameKey == skipCache.lastFrameKey {
             // Nothing that affects pixels has changed since the last
@@ -1458,8 +1482,13 @@ public final class MetalRenderer {
         // point positions by the point viewport, giving a scale-independent result
         // that the hardware rasterizes to the drawable's pixel space. Text stays at
         // its absolute cell-sized position as the window grows/shrinks, with empty
-        // space on the right/bottom when the grid hasn't caught up yet (which
-        // synchronous session.resize now eliminates).
+        // theme-background space on the right/bottom for as long as the grid
+        // hasn't caught up. That gap is real and expected on a fast horizontal
+        // drag — a column change reflows the whole scrollback, so
+        // `propagateResize` hands those to `resizeCoalesced` rather than
+        // blocking the drag on them. `FrameKey` carries this viewport, so each
+        // in-between frame is genuinely re-encoded at the new size instead of
+        // being skipped and scaled by the compositor.
         let viewportPoints = SIMD2<Float>(
             Float(view.bounds.size.width),
             Float(view.bounds.size.height)
