@@ -40,15 +40,60 @@ final class HoverCoordinator {
 
     // MARK: - State
 
-    /// Cell under the pointer on the last `mouseMoved`, used to cancel the
-    /// dwell timer as soon as the pointer leaves the current cell. `nil` means
-    /// the pointer is outside the grid.
-    var lastHoverCell: (row: Int, col: Int)?
+    /// Where the pointer last was, in VIEW-LOCAL coordinates.
+    ///
+    /// The hovered *cell* is derived from this on demand (`lastHoverCell`)
+    /// rather than baked at `mouseMoved` time. A baked screen-space cell goes
+    /// stale in two ways the old design had no answer for: the grid can scroll
+    /// under a stationary pointer (so the baked row's buffer line moves), and a
+    /// TUI can repaint the cell's contents entirely. The pointer's *pixel*
+    /// position is the only thing that genuinely doesn't change until the mouse
+    /// moves, so it is what we store. Audit issue #30 / R30-4, R30-5.
+    private(set) var lastHoverPointInView: CGPoint?
+
+    /// Cell under the pointer, re-derived against the CURRENT snapshot every
+    /// time it is read. `nil` when the pointer is outside the view or there is
+    /// no snapshot to resolve against.
+    var lastHoverCell: (row: Int, col: Int)? {
+        guard let point = lastHoverPointInView,
+              let snap = view.currentSnapshot else { return nil }
+        let bufferPoint = view.bufferPointFromLocalPoint(point)
+        return (row: Int(bufferPoint.line) + snap.displayOffset, col: bufferPoint.col)
+    }
+
+    /// The cell the current `hoveredLinkID` / tooltip state was resolved for.
+    /// Distinct from `lastHoverCell`: that one moves with the grid, this one
+    /// records what we last *resolved*, so a pointer that stays in the same
+    /// cell doesn't re-arm the dwell tooltip on every repaint.
+    private var resolvedHoverCell: (row: Int, col: Int)?
+
     /// Link id under the pointer now, or 0 when the hovered cell has no OSC 8
     /// attribution. The renderer (draw path) and `+Services` (Look Up) READ it;
     /// only this controller writes it (next to the `renderer.setHoveredLinkID`
     /// mirror), hence `private(set)`.
+    ///
+    /// **Only ever valid for `view.currentSnapshot`.** The Rust core assigns
+    /// link ids per snapshot, in grid-scan order over the distinct URIs on
+    /// screen (`core/src/snapshot.rs`), so the same numeric id can mean a
+    /// different URL one frame later. `handleSnapshotPublished()` re-resolves
+    /// it on every publish for exactly that reason.
     private(set) var hoveredLinkID: UInt32 = 0
+
+    /// The href the current `hoveredLinkID` resolves to, after the
+    /// `OSC8URLPolicy` gate. Kept alongside the id so re-resolution can tell
+    /// "same link, renumbered" (no UI churn) from "different link" (repaint,
+    /// re-arm affordances), and so `TerminalView+Services`' Look Up / Quick
+    /// Look surface reads a policy-checked URL instead of re-resolving a
+    /// possibly-stale id against a newer snapshot.
+    private(set) var hoveredLinkURLString: String?
+
+    /// Last value pushed to AppKit's cursor machinery, so we only invalidate
+    /// cursor rects when the answer actually flips. AppKit dispatches
+    /// `cursorUpdate(with:)` on tracking-area entry/exit — not on every move
+    /// inside the area — so without an explicit invalidation the pointing hand
+    /// never appears when a link slides under a resting pointer, and sticks
+    /// after the pointer leaves one.
+    private var lastWantsPointingHandCursor = false
     /// Latched ⌘-modifier state. Updated via `flagsChanged`, reconciled against
     /// `NSEvent.modifierFlags` on every `mouseMoved`, force-cleared on
     /// `didResignKeyNotification`. Read on the snapshot-update path; the test
@@ -83,6 +128,13 @@ final class HoverCoordinator {
     /// Near-miss diagnostics for the ⌘-hover column mapping. Off the hot path.
     private static let hoverLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                             category: "hover")
+
+    /// Place the pointer at a view-local point without synthesizing an
+    /// `NSEvent` / tracking area. Mirrors exactly what `handleMouseMoved`
+    /// stores, so tests exercise the same derivation production does.
+    func setHoverPointForTests(_ point: CGPoint?) {
+        lastHoverPointInView = point
+    }
     #endif
 
     /// True when the pointer is over something clickable (OSC 8 link always, or
@@ -102,10 +154,41 @@ final class HoverCoordinator {
         // (Cmd-Tab release case), so a ⌘-up missed during focus loss would
         // otherwise leave us painting the highlight forever.
         let cmdChanged = syncCmdModifierHeld(fromEventFlags: flags)
-        updateHover(screenRow: screenRow, col: col, locationInWindow: locationInWindow)
+        // Store the pixel position; the caller already mapped this same event
+        // to (screenRow, col), so reuse that mapping now and re-derive from the
+        // point later (snapshot publishes, which carry no event).
+        lastHoverPointInView = view.convert(locationInWindow, from: nil)
+        updateHover(screenRow: screenRow, col: col, tooltipAnchor: locationInWindow)
         // Run the ⌘-hover pass when either the modifier flipped OR the hover
-        // cell moved. `updateHover` already updates `lastHoverCell`.
+        // cell moved.
         if cmdChanged || cmdModifierHeld {
+            reevaluateCmdHoverHighlight()
+        }
+    }
+
+    /// Called from `TerminalView.render(snapshot:)` after `currentSnapshot` has
+    /// been swapped. Re-resolves every piece of hover state against the new
+    /// grid without needing a pointer movement:
+    ///
+    ///   - the OSC 8 link under the pointer (its id renumbers per snapshot, and
+    ///     a repainting TUI or scrolling output changes what's under a
+    ///     stationary pointer);
+    ///   - the ⌘-held regex-URL highlight.
+    ///
+    /// Deliberately does NOT re-arm the dwell tooltip: content moving under a
+    /// still pointer shouldn't pop a tooltip the user didn't aim for, and a
+    /// TUI repainting at frame rate would make it flicker. A tooltip already on
+    /// screen for a link that changed is dismissed.
+    func handleSnapshotPublished() {
+        guard let cell = lastHoverCell else {
+            // Pointer is outside the grid (or there's no snapshot): drop any
+            // affordance still painted for the old one.
+            clearHoveredLink()
+            if cmdModifierHeld { reevaluateCmdHoverHighlight() }
+            return
+        }
+        updateHover(screenRow: cell.row, col: cell.col, tooltipAnchor: nil)
+        if cmdModifierHeld {
             reevaluateCmdHoverHighlight()
         }
     }
@@ -119,19 +202,25 @@ final class HoverCoordinator {
         view.window?.invalidateCursorRects(for: view)
     }
 
-    private func updateHover(screenRow: Int, col: Int, locationInWindow: NSPoint) {
-        // Same cell as last move → nothing to update, and the tooltip
-        // position is already correct. Bail FIRST: this fires on every
-        // mouse-move event, and the vast majority land in the cell the
-        // pointer was already in. The link-id resolution below is not free
-        // (a snapshot link-id lookup, a URL-table read, `URL(string:)`
-        // parsing and an `OSC8URLPolicy` scheme check) and its result was
-        // being thrown away by this very guard.
-        if let last = lastHoverCell, last.row == screenRow, last.col == col {
-            return
-        }
-
-        // Resolve the OSC 8 link id for the cell under the pointer. A
+    /// Resolve the OSC 8 link under `(screenRow, col)` against the LIVE
+    /// snapshot and reconcile every affordance that depends on it: the accent
+    /// underline (via `hoveredLinkID`), the pointing-hand cursor, and the dwell
+    /// tooltip.
+    ///
+    /// `tooltipAnchor` is the window-space point to hang a *new* dwell tooltip
+    /// from — non-nil only when a real pointer movement drove this call. A
+    /// content-driven refresh (`handleSnapshotPublished`) passes nil: it may
+    /// dismiss a tooltip whose link went away, but never pops one the user
+    /// didn't aim at.
+    ///
+    /// Unlike the old shape, this does NOT early-return when the cell is
+    /// unchanged. Re-resolving on an unchanged cell is the entire point on the
+    /// snapshot path — the id renumbers per snapshot and the cell's contents
+    /// can change under a stationary pointer. The unchanged-cell case is
+    /// instead kept cheap by comparing the resolved *href* and doing nothing
+    /// when it matches.
+    private func updateHover(screenRow: Int, col: Int, tooltipAnchor: NSPoint?) {
+        // Resolve the OSC 8 link id + href for the cell under the pointer. A
         // test-supplied fake may override; otherwise consult the live snapshot.
         // `linkID` bounds-checks internally, so an out-of-grid coordinate just
         // returns 0 (which clears the hover).
@@ -140,67 +229,84 @@ final class HoverCoordinator {
         // allowlist (javascript:, data:, custom handlers) don't paint a hover
         // underline or fire a tooltip. The click path is already blocked
         // upstream — showing an affordance for a no-op click would mislead.
-        let newLinkID: UInt32 = {
+        let resolved: (id: UInt32, urlString: String?) = {
             #if DEBUG
             if let override = view.hyperlinkResolverOverride {
                 // Fakes answer via osc8URL — collapse URL presence into a
                 // stable non-zero id so the renderer underline path still
                 // fires without a real link-id table in tests.
-                return override.osc8URL(row: screenRow, col: col) != nil ? UInt32(bitPattern: Int32(-1)) : 0
+                guard let url = override.osc8URL(row: screenRow, col: col) else { return (0, nil) }
+                return (UInt32(bitPattern: Int32(-1)), url.absoluteString)
             }
             #endif
-            guard let snap = view.currentSnapshot else { return 0 }
+            guard let snap = view.currentSnapshot else { return (0, nil) }
             let id = snap.linkID(row: screenRow, col: col)
             guard id != 0,
                   let raw = snap.linkURL(id: id),
                   let url = URL(string: raw),
                   OSC8URLPolicy.isAllowed(url)
-            else { return 0 }
-            return id
+            else { return (0, nil) }
+            return (id, raw)
         }()
 
-        lastHoverCell = (row: screenRow, col: col)
+        let cellChanged = resolvedHoverCell.map { $0.row != screenRow || $0.col != col } ?? true
+        let hrefChanged = resolved.urlString != hoveredLinkURLString
+        resolvedHoverCell = (row: screenRow, col: col)
 
-        if newLinkID != hoveredLinkID {
-            hoveredLinkID = newLinkID
-            // Redraw so the accent underline picks up / drops off the cells
-            // sharing the new hovered id.
+        if resolved.id != hoveredLinkID {
+            hoveredLinkID = resolved.id
+            // Push straight to the renderer as well as marking the view dirty:
+            // the draw path mirrors this every frame, but a cleared id must
+            // drop the underline even if no frame is scheduled in between.
+            view.renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: resolved.id))
             view.needsDisplay = true
         }
+        hoveredLinkURLString = resolved.urlString
+        refreshPointingHandCursorIfNeeded()
 
-        // Reset any pending tooltip when the pointer moves to a different cell.
-        // Production matches VS Code / iTerm2 feel: tooltip appears only after
-        // a steady dwell.
+        // Nothing about the link changed and the pointer is in the same cell →
+        // leave any in-flight dwell alone. This is the hot path on a repainting
+        // TUI: it must not cancel and re-arm the tooltip 120 times a second.
+        guard cellChanged || hrefChanged else { return }
+
+        // The link under the pointer changed (or the pointer moved): any
+        // pending or visible tooltip now describes the wrong thing.
         view.hoverTooltipItem?.cancel()
         view.hoverTooltipItem = nil
         dismissHoverTooltip()
 
-        guard newLinkID != 0 else { return }
-
-        // Resolve the URL so the tooltip shows the href, not just "there is a
-        // link here". For the test fake this goes through osc8URL; for
-        // production it's the snapshot's link table.
-        let resolvedURLString: String? = {
-            #if DEBUG
-            if let override = view.hyperlinkResolverOverride {
-                return override.osc8URL(row: screenRow, col: col)?.absoluteString
-            }
-            #endif
-            return view.currentSnapshot?.linkURL(id: newLinkID)
-        }()
-        guard let urlString = resolvedURLString else { return }
+        // Arm a fresh dwell only for real pointer movement. Production matches
+        // VS Code / iTerm2 feel: the tooltip appears after a steady dwell on a
+        // link the user pointed at.
+        guard let anchor = tooltipAnchor, let urlString = resolved.urlString else { return }
 
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.showHoverTooltip(urlString: urlString, anchor: locationInWindow)
+            self.showHoverTooltip(urlString: urlString, anchor: anchor)
         }
         view.hoverTooltipItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
+    /// Invalidate AppKit's cursor rects when — and only when — the answer to
+    /// "is the pointer over something clickable" flips. AppKit dispatches
+    /// `cursorUpdate(with:)` on tracking-area entry/exit, so without this the
+    /// pointing hand never appears for a link that slid under a resting pointer
+    /// (and sticks after the pointer leaves one).
+    private func refreshPointingHandCursorIfNeeded() {
+        let wants = wantsPointingHandCursor
+        guard wants != lastWantsPointingHandCursor else { return }
+        lastWantsPointingHandCursor = wants
+        view.window?.invalidateCursorRects(for: view)
+    }
+
     /// The view's `mouseExited` override forwards here.
     func clearHover() {
-        lastHoverCell = nil
+        lastHoverPointInView = nil
+        resolvedHoverCell = nil
+        // The pointer left the grid: the next entry must re-report its cell to
+        // a DEC 1003 TUI even if it re-enters at the same cell it left.
+        view.lastReportedMotionCell = nil
         cancelHoverTooltip()
         clearHoveredLink()
         clearCmdHoverURLMatch()
@@ -232,34 +338,20 @@ final class HoverCoordinator {
     private func refreshURLMatchCacheIfNeeded() {
         guard let snap = view.currentSnapshot else {
             invalidateURLMatchCache()
-            // Snapshot disappeared — drop the hover cell too. Its row was
-            // computed against the now-vanished snapshot's displayOffset and
-            // would mis-translate against any successor.
-            lastHoverCell = nil
             return
         }
-        if cachedURLMatchesSeq != snap.sequenceID {
-            // Only a *replacement* invalidates the previously-baked hover row,
-            // not the initial population on a fresh view (where mouseMoved may
-            // have already primed lastHoverCell against this very snapshot
-            // before any cmd-hover refresh ran).
-            let cacheWasPopulated = (cachedURLMatchesSeq != nil)
-            cachedURLMatches = URLDetector.scan(snapshot: snap)
-            cachedURLMatchesSeq = snap.sequenceID
-            if cacheWasPopulated {
-                // `lastHoverCell.row` is screen-space — it was baked against
-                // the PREVIOUS snapshot's displayOffset at mouseMoved time.
-                // When the snapshot identity changes, that baked offset goes
-                // stale: any successor whose displayOffset shifted makes
-                // `last.row - snap.displayOffset` resolve to a buffer line one
-                // or more rows off, and the cmd-hover underline lands on the
-                // wrong row. The next real mouseMoved repopulates this against
-                // the live snapshot; dropping it here is the safe fallback for
-                // the in-between reevaluate calls (flagsChanged, snapshot
-                // updates) that don't pass a fresh event.
-                lastHoverCell = nil
-            }
-        }
+        guard cachedURLMatchesSeq != snap.sequenceID else { return }
+        cachedURLMatches = URLDetector.scan(snapshot: snap)
+        cachedURLMatchesSeq = snap.sequenceID
+        // No hover state is dropped here any more. The old shape nil'd
+        // `lastHoverCell` on every snapshot replacement because the cell was a
+        // screen-space row baked at mouseMoved time against the *previous*
+        // snapshot's displayOffset. `lastHoverCell` is now derived from the
+        // pointer's pixel position against the CURRENT snapshot on every read,
+        // so the staleness that motivated the nil-ing cannot occur — and the
+        // nil-ing itself was a bug: under a screen that repaints continuously
+        // (a TUI, `tail -f`, a build log) the ⌘-hover underline was cleared on
+        // the next publish and never came back until the pointer moved.
     }
 
     /// Resolve the regex URL under the current hover cell (if any) and push its
@@ -347,7 +439,8 @@ final class HoverCoordinator {
     /// focus regain re-resolves from scratch.
     func resetModifierAndHoverState() {
         cmdModifierHeld = false
-        lastHoverCell = nil
+        lastHoverPointInView = nil
+        resolvedHoverCell = nil
         invalidateURLMatchCache()
         clearCmdHoverURLMatch()
         clearHoveredLink()
@@ -370,12 +463,29 @@ final class HoverCoordinator {
     /// view's `deinit`. Decoupled from the tooltip so keyDown can dismiss the
     /// tooltip alone without disturbing the underline.
     func clearHoveredLink() {
+        hoveredLinkURLString = nil
+        defer { refreshPointingHandCursorIfNeeded() }
         guard hoveredLinkID != 0 else { return }
         hoveredLinkID = 0
         // Push the cleared id straight to the renderer so the next frame drops
         // the underline even before the usual draw-path plumbing runs.
         view.renderer.setHoveredLinkID(0)
         view.needsDisplay = true
+    }
+
+    /// The href under the pointer, policy-checked and resolved against the
+    /// snapshot that is on screen right now — the only safe input for any
+    /// surface that displays or dispatches it (`TerminalView+Services`' Look Up
+    /// / Quick Look preview). Reading `hoveredLinkID` and re-resolving it
+    /// against `currentSnapshot` is NOT equivalent: link ids are per-snapshot,
+    /// so a stale id can name a different URL — one that never passed
+    /// `OSC8URLPolicy`.
+    func hoveredLinkURL() -> URL? {
+        guard let urlString = hoveredLinkURLString,
+              let url = URL(string: urlString),
+              OSC8URLPolicy.isAllowed(url)
+        else { return nil }
+        return url
     }
 
     private func showHoverTooltip(urlString: String, anchor: NSPoint) {

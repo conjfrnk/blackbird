@@ -48,6 +48,15 @@ extension TerminalView {
         return true
     }
 
+    /// The hovered OSC 8 href that a preview surface may display: resolved
+    /// against the snapshot on screen and gated by `OSC8URLPolicy`. Nil when
+    /// nothing clickable is under the pointer or the href fails policy.
+    /// Single entry point so no preview path can re-derive it from the
+    /// per-snapshot `hoveredLinkID` and skip the gate.
+    func hoveredLinkURLForPreview() -> URL? {
+        hoverCoordinator.hoveredLinkURL()
+    }
+
     /// Three-finger tap / Force Touch on the trackpad triggers
     /// `quickLook(with:)` on the responder chain. Preview the current
     /// selection (or the hovered OSC-8 link URL when no selection) in an
@@ -63,9 +72,18 @@ extension TerminalView {
             if let sel = selectedStringForServices(), !sel.isEmpty {
                 return sel
             }
-            if let snap = currentSnapshot, hoverCoordinator.hoveredLinkID != 0,
-               let url = snap.linkURL(id: hoverCoordinator.hoveredLinkID) {
-                return url
+            // The hovered href, already policy-checked and resolved against the
+            // snapshot that is on screen. Previously this re-resolved
+            // `hoveredLinkID` against `currentSnapshot` — but link ids are
+            // assigned per snapshot, so a stale id could name a *different*
+            // URL, and that URL reached `NSTextField` having passed neither
+            // `OSC8URLPolicy` nor the credential-redaction / control-character
+            // scrub the dwell tooltip applies. Both holes close by asking the
+            // coordinator for the href it actually resolved.
+            if let url = hoveredLinkURLForPreview() {
+                let redacted = OSC8URLPolicy.redactCredentialsForDisplay(url.absoluteString)
+                let scrubbed = PasteSanitizer.scrubURLForDisplay(redacted)
+                return scrubbed.count > 512 ? String(scrubbed.prefix(512)) + "…" : scrubbed
             }
             return nil
         }()

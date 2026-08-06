@@ -373,70 +373,68 @@ final class CmdHoverHighlightTests: XCTestCase {
         }
     }
 
-    // MARK: - (4) Stale hover-cell guard on snapshot transition
+    // MARK: - (4) Hover cell re-derives against the live snapshot
 
-    /// Pins the fix for the screen-space `lastHoverCell` going stale across
-    /// a snapshot identity bump.
+    /// Pins the replacement for the old "nil the hover cell on snapshot
+    /// change" guard.
     ///
-    /// The bug:
-    ///   - `mouseMoved` stores `lastHoverCell` in SCREEN space (buffer line +
-    ///     `displayOffset` at move time, see TerminalView+Hover.swift ~L76).
-    ///   - `reevaluateCmdHoverHighlight` later subtracts the CURRENT
-    ///     snapshot's `displayOffset` to translate back into buffer space
-    ///     (~L253).
-    ///   - When output / scroll / alt-screen toggle bumps `sequenceID` AND
-    ///     shifts `displayOffset` between the move and the reevaluate,
-    ///     `last.row - snap.displayOffset` resolves to the wrong buffer
-    ///     line. The cmd-hover URL underline lands one or more rows off.
+    /// The original bug: `mouseMoved` baked `lastHoverCell` in SCREEN space
+    /// (buffer line + `displayOffset` at move time) and
+    /// `reevaluateCmdHoverHighlight` later subtracted the CURRENT snapshot's
+    /// `displayOffset` to get back to buffer space. When output or a scroll
+    /// shifted `displayOffset` between the two, the translation was off by the
+    /// delta and the ⌘-hover underline landed on the wrong row. The first fix
+    /// nil'd the cell on every snapshot identity bump — correct for the
+    /// displayOffset case, but it also meant that under a screen repainting
+    /// continuously (a TUI, `tail -f`, a build log) the underline was cleared
+    /// on the very next publish and never came back until the pointer moved.
     ///
-    /// The fix nils `lastHoverCell` inside the cache-invalidation branch of
-    /// `refreshURLMatchCacheIfNeeded`, so the next real `mouseMoved` against
-    /// the live snapshot rebakes a fresh screen-space row before any
-    /// reevaluate can mistranslate. This test exercises that branch by
-    /// driving two snapshots whose `sequenceID`s differ (every
-    /// `BBTerm.snapshot()` call allocates a new monotonic id) and asserts
-    /// that the second `reevaluateCmdHoverHighlight` clears `lastHoverCell`.
+    /// The cell is now DERIVED from the pointer's pixel position against the
+    /// current snapshot on every read, so both properties hold at once: the
+    /// hover survives arbitrarily many snapshots, and its buffer line tracks
+    /// the live `displayOffset`. This test asserts both.
     ///
     /// Memory pre-flight: a single 40×6 BBTerm (≈ 4 KB of cells) and one
     /// TerminalView. No PTY, no real session, no GPU submission. <50 ms.
-    func test_snapshotChange_clearsStaleHoverCell() throws {
+    func test_snapshotChange_reDerivesHoverCellAgainstLiveDisplayOffset() throws {
         let device = try requireMetalDevice()
         let view = TerminalView(
             frame: NSRect(x: 0, y: 0, width: 320, height: 192),
             device: device
         )
 
-        // Snapshot 1: empty grid, displayOffset = 0. Establish the "we've
-        // already scanned this snapshot" cache state.
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 40, rows: 6)))
         let snap1 = try XCTUnwrap(term.snapshot())
         view.currentSnapshot = snap1
 
-        // Stand in for a mouseMoved at row=2,col=3 (screen-space because
-        // snap1.displayOffset == 0; the math is identity here). The
-        // production path reaches this assignment via TerminalView+Hover's
-        // `updateHover`; the test seam mirrors that without spinning up a
-        // real NSEvent / tracking area.
-        view.hoverCoordinator.lastHoverCell = (row: 2, col: 3)
+        // Put the pointer in the middle of screen row 2, col 3 — the same
+        // storage `handleMouseMoved` writes, without synthesizing an NSEvent.
+        let origin = view.cellOriginPx(row: 2, col: 3)
+        let pointInView = CGPoint(
+            x: origin.x + view.metrics.cellWidth / 2,
+            y: view.bounds.height - (origin.y + view.metrics.cellHeight / 2)
+        )
+        view.hoverCoordinator.setHoverPointForTests(pointInView)
         view.hoverCoordinator.cmdModifierHeld = true
 
-        // First reevaluate primes `cachedURLMatchesSeq` with snap1's id.
-        // The snapshot has no detected URLs, so reevaluate falls through
-        // to `clearCmdHoverURLMatch()` after the cache scan. Crucially, it
-        // does NOT clear `lastHoverCell` on this pass — same sequenceID,
-        // no invalidation.
+        let cell1 = try XCTUnwrap(
+            view.hoverCoordinator.lastHoverCell,
+            "a pointer inside the grid must resolve to a cell"
+        )
+        XCTAssertEqual(cell1.row, 2, "fixture geometry: pointer is on screen row 2")
+        XCTAssertEqual(cell1.col, 3, "fixture geometry: pointer is on column 3")
+
+        // First reevaluate primes `cachedURLMatchesSeq` with snap1's id. The
+        // snapshot has no detected URLs, so it falls through to
+        // `clearCmdHoverURLMatch()` after the scan.
         view.hoverCoordinator.reevaluateCmdHoverHighlight()
         XCTAssertNotNil(
             view.hoverCoordinator.lastHoverCell,
-            "no-op reevaluate against the same snapshot must not drop the hover cell"
+            "a no-op reevaluate against the same snapshot must not drop the hover cell"
         )
 
-        // Snapshot 2: bump the snapshot identity. `BBTerm.snapshot()`
-        // allocates a fresh monotonic `sequenceID` on every call, which is
-        // the trigger condition the fix keys off of. Drive a real
-        // `displayOffset` shift on top so the test reflects the production
-        // failure mode, not just the seq-only path: feed enough rows to
-        // build scrollback, then scroll up by one line.
+        // Bump snapshot identity AND shift displayOffset: feed rows to build
+        // scrollback, then scroll up one line.
         for _ in 0..<10 { term.input("\n") }
         term.scroll(delta: 1)
         let snap2 = try XCTUnwrap(term.snapshot())
@@ -446,23 +444,37 @@ final class CmdHoverHighlightTests: XCTestCase {
         )
         XCTAssertGreaterThan(
             snap2.displayOffset, 0,
-            "scroll-up must produce a non-zero displayOffset; without that "
-            + "shift the buggy translation would happen to land on the right "
-            + "row by accident"
+            "scroll-up must produce a non-zero displayOffset; without that shift "
+            + "a stale-translation bug would land on the right row by accident"
         )
         view.currentSnapshot = snap2
 
-        // Drive the cache invalidation. Because `snap2.sequenceID !=
-        // snap1.sequenceID`, the fix clears `lastHoverCell` here. Pre-fix
-        // code left it in place and the next render translated through a
-        // stale screen row.
         view.hoverCoordinator.reevaluateCmdHoverHighlight()
 
-        XCTAssertNil(
+        // (a) The hover SURVIVES the snapshot change — this is the half the
+        //     old nil-ing broke, and the reason ⌘-hover was unusable inside a
+        //     continuously repainting TUI.
+        let cell2 = try XCTUnwrap(
             view.hoverCoordinator.lastHoverCell,
-            "snapshot identity change must clear the stale screen-space "
-            + "lastHoverCell — its row was baked against the previous "
-            + "displayOffset and would mistranslate against snap2"
+            "a snapshot identity change must NOT drop the hover cell — the "
+            + "pointer hasn't moved, so there is still a cell under it"
+        )
+
+        // (b) …and it still names the cell physically under the pointer. The
+        //     pointer is at fixed pixels, so the SCREEN row is unchanged; what
+        //     moved is the buffer line it maps to, which now tracks snap2's
+        //     displayOffset. That is precisely the mistranslation the original
+        //     guard existed to prevent, fixed at the source instead.
+        XCTAssertEqual(
+            cell2.row, 2,
+            "the pointer did not move, so it is still over screen row 2"
+        )
+        XCTAssertEqual(cell2.col, 3, "…and still over column 3")
+        XCTAssertEqual(
+            cell2.row - snap2.displayOffset,
+            2 - snap2.displayOffset,
+            "the buffer line under the pointer is re-derived from the LIVE "
+            + "displayOffset, not from one baked at mouseMoved time"
         )
     }
 }

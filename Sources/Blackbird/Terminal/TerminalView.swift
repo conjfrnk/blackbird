@@ -1032,17 +1032,21 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             selectionController.wordDragAnchorWord = result.wordDragAnchor
         }
         self.currentSnapshot = snapshot
-        // If ⌘ is held while the grid reshapes under the pointer (scrolling
-        // output, screen clear), re-resolve the regex URL at the current
-        // hover cell. `mouseMoved` wouldn't fire — the pointer didn't
-        // physically move — but the row/col under the pointer now maps to
-        // a different buffer line. Without this call the renderer keeps
-        // painting the previous URL's range even though the URL itself
-        // scrolled away. Gated on `cmdModifierHeld` so the scan cache
-        // stays cold when the feature isn't engaged.
-        if hoverCoordinator.cmdModifierHeld {
-            hoverCoordinator.reevaluateCmdHoverHighlight()
-        }
+        // The grid just changed under a pointer that didn't move: re-resolve
+        // every hover affordance against the new snapshot. Both halves need it.
+        //
+        //   - OSC 8: link ids are assigned PER SNAPSHOT by the core, so the id
+        //     we're holding may now name a different URL (or none). A link that
+        //     scrolled under the pointer must acquire its underline; one that
+        //     scrolled away must lose it.
+        //   - ⌘-held regex URLs: the row/col under the pointer now maps to a
+        //     different buffer line, so the painted range must be recomputed.
+        //
+        // Unconditional (the coordinator internally short-circuits when the
+        // pointer is outside the grid, and only runs the O(rows × cols) regex
+        // scan on the ⌘-held path) — gating the whole thing on `cmdModifierHeld`
+        // was why an OSC 8 link never updated under a repainting TUI.
+        hoverCoordinator.handleSnapshotPublished()
         // MTKView redraws on CADisplayLink cadence; no needsDisplay needed.
         // Scroll indicator consumes the same snapshot — keep it in lockstep
         // with the grid so a sudden `clear` or big output reshapes the thumb
