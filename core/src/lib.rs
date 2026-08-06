@@ -1172,6 +1172,10 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         // reason — clear() always drops references, regardless of
         // whether external owners exist.
         bb.uri_cstr_cache.clear();
+        // …and re-arm the intern-cap breadcrumb. Its message tells the user
+        // ⌘K is the recovery, so a session that exhausts the budget a second
+        // time after clearing must be able to say so.
+        bb.osc8_intern_cap_logged = false;
         bb.uri_cache_bytes = 0;
     })
 }

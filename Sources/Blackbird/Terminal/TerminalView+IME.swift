@@ -437,10 +437,11 @@ extension TerminalView: NSTextInputClient {
     #endif
 
     /// IME-commit wrapper around `session.send(bytes)` — used ONLY by the
-    /// NSTextInputClient commit path and the main `keyDown` encoder
-    /// fall-through. Does NOT intercept paste, mouse reporting, focus
-    /// events, or the Ctrl-letter fast path: those remain on `session.send`
-    /// / `session.sendImmediate` directly. Gated on DEBUG so the IME tests
+    /// NSTextInputClient commit path, the main `keyDown` encoder
+    /// fall-through, and (since the issue-#30 batch) every xterm mouse report,
+    /// so the mouse-reporting layer is observable in tests. Does NOT intercept
+    /// paste, focus events, or the Ctrl-letter fast path: those remain on
+    /// `session.send` / `session.sendImmediate` directly. Gated on DEBUG so the IME tests
     /// can capture commit bytes via `ptyRecorderForTests` without a real
     /// forkpty; release builds collapse to a plain `session?.send`.
     func sendToSession(_ bytes: Data) {

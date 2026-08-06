@@ -602,6 +602,12 @@ public final class TerminalSession: ObservableObject {
         resizeController.resizeCoalesced(to: size)
     }
 
+    /// True while a coalesced resize is queued but not yet applied — the view's
+    /// delivery decision must not take the blocking `resize` path behind it.
+    var hasPendingCoalescedResize: Bool {
+        resizeController.hasPendingCoalescedResize
+    }
+
     /// Documented floor 2, ceiling 1000 per axis. Visible to tests
     /// (`@testable internal`) so a Swift-mutation-pass boundary test
     /// can exercise the clamp directly without standing up a full

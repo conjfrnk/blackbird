@@ -55,8 +55,27 @@ final class HoverCoordinator {
     /// time it is read. `nil` when the pointer is outside the view or there is
     /// no snapshot to resolve against.
     var lastHoverCell: (row: Int, col: Int)? {
-        guard let point = lastHoverPointInView,
-              let snap = view.currentSnapshot else { return nil }
+        guard lastHoverPointInView != nil, let snap = view.currentSnapshot else { return nil }
+        // Prefer AppKit's LIVE pointer position over the point we stored at the
+        // last `mouseMoved`. The pointer's view-local position changes with no
+        // mouse event whenever the view itself moves or resizes underneath it —
+        // which this codebase now does routinely (the tab-group frame fan-out,
+        // fullscreen transitions, the ⌘-right-drag resize gesture, which
+        // delivers `rightMouseDragged` and never `mouseMoved`). The stored
+        // point remains the "is the pointer inside at all" marker and the
+        // fallback for a windowless view (tests).
+        let point: CGPoint = {
+            guard let window = view.window else { return lastHoverPointInView! }
+            return view.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        }()
+        // `bufferPointFromLocalPoint` CLAMPS out-of-range points into the grid,
+        // so without an explicit bounds test a pointer parked in the titlebar
+        // band would resolve to row 0 forever — and now re-resolve on every
+        // snapshot publish, painting an underline and a tooltip for a cell the
+        // click path (`inTextArea`) explicitly refuses to open. An affordance
+        // the click gate won't honour is the same defect class as issue #30.
+        guard view.bounds.contains(point),
+              point.y < view.bounds.height - view.titlebarOnlyTopInset else { return nil }
         let bufferPoint = view.bufferPointFromLocalPoint(point)
         return (row: Int(bufferPoint.line) + snap.displayOffset, col: bufferPoint.col)
     }
@@ -111,6 +130,10 @@ final class HoverCoordinator {
     /// apart at a caller that clears one and forgets the other.
     private(set) var cachedURLMatches: [URLMatch] = []
     private(set) var cachedURLMatchesSeq: UInt64?
+    /// The screen row whose "unchanged since the scan" property the damage-gated
+    /// skip in `refreshURLMatchCacheIfNeeded` has been maintaining. Moving the
+    /// pointer to a different row invalidates the induction, so the scan re-runs.
+    private var damageVerifiedRow: Int?
 
     /// Drop the URL-match cache (both fields together) so the next ⌘-hover scan
     /// repopulates. Used by the session-rebind paths (per-session sequence ids
@@ -118,6 +141,7 @@ final class HoverCoordinator {
     func invalidateURLMatchCache() {
         cachedURLMatches = []
         cachedURLMatchesSeq = nil
+        damageVerifiedRow = nil
     }
     // The scheduled tooltip reveal (`hoverTooltipItem`) lives on the VIEW, not
     // here: the view's `deinit` / `viewWillMove` cancel it, and reaching through
@@ -300,13 +324,26 @@ final class HoverCoordinator {
         view.window?.invalidateCursorRects(for: view)
     }
 
-    /// The view's `mouseExited` override forwards here.
+    /// The view's `mouseExited` override forwards here: the pointer is gone,
+    /// so everything goes, including its position.
     func clearHover() {
         lastHoverPointInView = nil
+        clearHoverDerivedState()
+    }
+
+    /// Drop everything DERIVED from the pointer position while keeping the
+    /// position itself. This is what a scroll wants: the grid moved under a
+    /// pointer that is still there, so the affordances for the old content are
+    /// wrong, but the next snapshot publish must be able to re-resolve what is
+    /// under the pointer now. Nil-ing the position here instead (as the scroll
+    /// path used to, via `clearHover()`) left `lastHoverCell` permanently nil —
+    /// AppKit delivers no `mouseMoved` for a scroll — so one wheel notch
+    /// switched the whole hover subsystem off until the user physically moved
+    /// the mouse. In Claude Code the wheel is forwarded to the TUI and repaints
+    /// the screen, which makes that the single most common way content changes
+    /// under a resting pointer.
+    func clearHoverDerivedState() {
         resolvedHoverCell = nil
-        // The pointer left the grid: the next entry must re-report its cell to
-        // a DEC 1003 TUI even if it re-enters at the same cell it left.
-        view.lastReportedMotionCell = nil
         cancelHoverTooltip()
         clearHoveredLink()
         clearCmdHoverURLMatch()
@@ -329,20 +366,61 @@ final class HoverCoordinator {
         cmdHoverURLMatch = nil
         view.renderer.setCmdHoverRange(bufferLine: 0, startCol: -1, endCol: -1)
         if wasSet { view.needsDisplay = true }
+        // The damage-gated scan skip is an induction over CONSECUTIVE
+        // `reevaluateCmdHoverHighlight` calls: "row R was undamaged at every
+        // publish since the scan". Every path that reaches this method is a
+        // break in that chain (⌘ released, pointer left the grid, the cell
+        // turned out to carry an OSC 8 link, no match) — publishes keep
+        // arriving but nobody is checking damage, so the next check would be
+        // reasoning about a row that may have been rewritten meanwhile. Drop
+        // the verification and let the next ⌘-hover rescan.
+        damageVerifiedRow = nil
+        // `cmdHoverURLMatch` is the OTHER disjunct of `wantsPointingHandCursor`.
+        // Refreshing the cursor cache only from the OSC 8 side let it latch
+        // `true` here and then suppress the invalidation for a subsequent real
+        // OSC 8 hover — leaving an I-beam over a live, underlined link, which
+        // is the exact affordance bug this cache exists to fix.
+        refreshPointingHandCursorIfNeeded()
     }
 
     /// Refresh the regex-URL match cache when the current snapshot has a new
     /// sequence id. Called only on the ⌘-hover fast path so the O(rows × cols)
     /// scan runs at most once per snapshot instead of once per `mouseMoved`
     /// delivery. Audit cwd-hyperlink F7.
-    private func refreshURLMatchCacheIfNeeded() {
+    private func refreshURLMatchCacheIfNeeded(hoveredRow: Int) {
         guard let snap = view.currentSnapshot else {
             invalidateURLMatchCache()
             return
         }
         guard cachedURLMatchesSeq != snap.sequenceID else { return }
+        // Damage-gated skip. The scan is O(rows × cols) — a String build plus
+        // two NSRegularExpression passes per visible row — and this now runs on
+        // every publish while ⌘ is held (it used to be short-circuited by the
+        // hover cell being nil'd, which was itself the bug). Against a screen
+        // repainting at display cadence that is a full-grid regex sweep per
+        // frame on the main thread.
+        //
+        // The only thing the ⌘-hover path reads out of the cache is the match
+        // under the hovered cell, so the cache is still usable when that ROW
+        // provably hasn't changed since the scan: alacritty's per-snapshot
+        // damage says so, and because this runs on every publish the "unchanged
+        // since the scan" property holds by induction — as long as the pointer
+        // is still on the row we have been checking (`damageVerifiedRow`);
+        // moving to a different row forces a rescan.
+        //
+        // Deliberately does NOT stamp `cachedURLMatchesSeq` on the skip path:
+        // the click path (`TerminalView.cachedRegexMatches(for:)`) only reuses
+        // the cache when the seq matches the live snapshot exactly, so a
+        // partially-verified cache is invisible to it and a ⌘-click re-scans.
+        if cachedURLMatchesSeq != nil,
+           damageVerifiedRow == hoveredRow,
+           !snap.damageIsFull,
+           !snap.damagedRows.contains(hoveredRow) {
+            return
+        }
         cachedURLMatches = URLDetector.scan(snapshot: snap)
         cachedURLMatchesSeq = snap.sequenceID
+        damageVerifiedRow = hoveredRow
         // No hover state is dropped here any more. The old shape nil'd
         // `lastHoverCell` on every snapshot replacement because the cell was a
         // screen-space row baked at mouseMoved time against the *previous*
@@ -377,7 +455,7 @@ final class HoverCoordinator {
             clearCmdHoverURLMatch()
             return
         }
-        refreshURLMatchCacheIfNeeded()
+        refreshURLMatchCacheIfNeeded(hoveredRow: last.row)
         let bufferLine = Int32(last.row - snap.displayOffset)
         let point = BufferPoint(line: bufferLine, col: last.col)
         guard let match = URLDetector.match(at: point, in: cachedURLMatches) else {
@@ -418,6 +496,7 @@ final class HoverCoordinator {
             endCol: Int32(match.endCol)
         )
         view.needsDisplay = true
+        refreshPointingHandCursorIfNeeded()
     }
 
     /// Sync `cmdModifierHeld` with the latest modifier state. Called from
@@ -488,8 +567,11 @@ final class HoverCoordinator {
         return url
     }
 
-    private func showHoverTooltip(urlString: String, anchor: NSPoint) {
-        guard let window = view.window else { return }
+    /// The one place a hostile-supplied href is turned into something safe to
+    /// put on screen: credential redaction, then the C0/bidi scrub, then a
+    /// length clamp. Shared by the dwell tooltip and the Force-Touch preview so
+    /// a change to the policy can't reach one surface and miss the other.
+    static func displayString(forHref urlString: String) -> String {
         // Scrub before truncation. A hostile remote can stuff a U+202E into the
         // OSC 8 href; `URL(string:)` percent-encodes it so the click target
         // stays the literal hostile host, but raw rendering in NSTextField
@@ -497,9 +579,9 @@ final class HoverCoordinator {
         // verify". Same scrub policy as paste, plus dropping TAB/LF/CR.
         // H3: redact `user:pass@` credentials BEFORE the C0/bidi scrub. Even
         // though `OSC8URLPolicy.isAllowed` rejects credential URLs at the click
-        // gate, the tooltip surfaces the href on dwell; this is defence-in-
-        // depth so embedded credentials never leak to the AX API / screen
-        // capture if any future path surfaces a tooltip without the gate.
+        // gate, this is defence-in-depth so embedded credentials never leak to
+        // the AX API / screen capture if any future path surfaces a href
+        // without the gate.
         let redacted = OSC8URLPolicy.redactCredentialsForDisplay(urlString)
         let scrubbed = PasteSanitizer.scrubURLForDisplay(redacted)
         // Clamp the displayed URL. A misbehaving remote could stuff megabytes
@@ -507,9 +589,14 @@ final class HoverCoordinator {
         // would hang the UI. 512 chars covers every realistic URL; truncating
         // AFTER scrub means a bidi byte can't hide past the ellipsis.
         let maxDisplay = 512
-        let display = scrubbed.count > maxDisplay
+        return scrubbed.count > maxDisplay
             ? String(scrubbed.prefix(maxDisplay)) + "…"
             : scrubbed
+    }
+
+    private func showHoverTooltip(urlString: String, anchor: NSPoint) {
+        guard let window = view.window else { return }
+        let display = Self.displayString(forHref: urlString)
         // Convert the view-local anchor to screen space; the controller anchors
         // the panel just below-right of it.
         let screenPoint = window.convertPoint(toScreen: anchor)

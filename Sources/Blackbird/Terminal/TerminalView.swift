@@ -216,6 +216,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// fires the report from `mouseMoved`) share it.
     struct BBXYPoint: Equatable { let col: Int; let row: Int }
     var lastReportedMotionCell: BBXYPoint?
+    /// Sibling of `lastReportedMotionCell` for button-32 drag reports. Kept
+    /// separate because a TUI consumes drag-motion and hover-motion as
+    /// different events — sharing one cell let the last cell of a drag suppress
+    /// the first hover report for that same cell.
+    var lastReportedDragCell: BBXYPoint?
 
     /// ⌘ + right-drag resizes the window from the nearest corner. The gesture
     /// state + frame math live in their own `WindowResizeController` (the
@@ -312,17 +317,37 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// the TUI nothing it could have acted on.
     struct PendingLinkClick {
         let url: URL
-        /// Window-space location of the mousedown, for the drag threshold.
-        let downLocationInWindow: NSPoint
+        /// The mousedown itself. Kept so a gesture that turns out NOT to be a
+        /// click can still be handed to whichever path would have owned it —
+        /// `performDrag` needs an event, and the selection path needs the
+        /// ORIGINAL down location as its anchor.
+        let downEvent: NSEvent
+        /// This mousedown's renumbered click count (see `effectiveClickCount`),
+        /// so a deferred selection is still classified as char/word/line.
+        let clickCount: Int
+        /// Set once the pointer travels past the slop: the gesture is no longer
+        /// a click, but it is still CONSUMED — the press was never reported, so
+        /// neither the drags nor the release may be. Kept as state on the
+        /// pending click rather than clearing it, because clearing it handed the
+        /// rest of the gesture back to the mouse-report path, which then emitted
+        /// drag reports (and no release) for a press the TUI never saw.
+        var cancelled = false
+
+        /// How far (points, window space) the pointer may travel between the
+        /// ⌘-mousedown and its mouseUp and still count as a click. 3 pt matches
+        /// the slop AppKit itself allows before promoting a click to a drag.
+        static let dragSlopPoints: CGFloat = 3
+
+        /// Whether a pointer now at `location` still counts as a click on this
+        /// link. The one definition of the threshold test — `mouseDragged` and
+        /// `mouseUp` must agree exactly, and they sit ~300 lines apart.
+        func isStillAClick(at location: NSPoint) -> Bool {
+            let dx = location.x - downEvent.locationInWindow.x
+            let dy = location.y - downEvent.locationInWindow.y
+            return abs(dx) <= Self.dragSlopPoints && abs(dy) <= Self.dragSlopPoints
+        }
     }
     var pendingLinkClick: PendingLinkClick?
-
-    /// How far (points, window space) the pointer may travel between a
-    /// ⌘-mousedown on a link and its mouseUp and still count as a click.
-    /// Beyond it the gesture is a window drag and the pending link is dropped.
-    /// 3 pt matches the slop AppKit itself allows before promoting a click to
-    /// a drag.
-    static let linkClickDragSlopPoints: CGFloat = 3
 
     /// Whether `mouseDown` actually emitted a press report to the TUI.
     /// `mouseUp` mirrors what mousedown DID rather than re-evaluating the
@@ -781,7 +806,35 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     private var lastPropagatedSize: PTY.Size?
+    /// Whether this view has EVER propagated a grid size. Distinct from
+    /// `lastPropagatedSize != nil`, which two paths deliberately reset to force
+    /// a re-grid (a font change, and a titlebar-inset change from the draw
+    /// path). Those resets must not make the follow-up resize look like the
+    /// first one: startup earns the synchronous path because the shell must be
+    /// at the real grid size before its first output, but a fullscreen
+    /// transition — which changes the inset *and* fans out to sibling tabs —
+    /// would otherwise drop a full 80→200-column scrollback reflow onto main.
+    private var hasPropagatedOnce = false
+    /// Set while the tab-group fan-out is pushing a frame onto THIS view's
+    /// window. See the delivery table in `propagateResize`.
+    private var forceNonBlockingResizeDelivery = false
     private var lastSafeAreaTop: Float = -1
+
+    /// Run `body` with resize delivery forced off the main thread. Used by the
+    /// tab-group frame fan-out: `window.setFrame` calls `setFrameSize`
+    /// synchronously, so the scope is exact.
+    ///
+    /// Scoped rather than inferred, deliberately. At AppKit's own select-time
+    /// frame apply a background tab still reports `isVisible == false` and its
+    /// group's `selectedWindow` is still the OUTGOING tab, so any "am I the
+    /// foreground tab?" heuristic here would silently reclassify the ordinary
+    /// tab-switch resize too.
+    func withNonBlockingResizeDelivery(_ body: () -> Void) {
+        let previous = forceNonBlockingResizeDelivery
+        forceNonBlockingResizeDelivery = true
+        defer { forceNonBlockingResizeDelivery = previous }
+        body()
+    }
 
     /// Space reserved at the bottom of the view so the last grid row never
     /// runs into the window's rounded corner. macOS window corner radius is
@@ -899,14 +952,36 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         //                worth of steps into a handful of reflows and, with
         //                them, the SIGWINCH storm that made every TUI repaint
         //                its whole screen per crossing.
+        //
+        // Two guards keep `.sync` honest, because "cheap" is only true when the
+        // core is actually idle:
+        //
+        //   - `forceNonBlockingResizeDelivery` — set while a resize is being
+        //     pushed onto a BACKGROUND tab by the tab-group fan-out. That tab
+        //     draws nothing, so it gains nothing from the synchronous path, and
+        //     `coreQueue.sync` there would make main wait out that session's
+        //     entire queued `feed(_:)` backlog: N background tabs streaming
+        //     build output would turn one mouse-up into N serialized drains on
+        //     main.
+        //   - `hasPendingCoalescedResize` — "the columns didn't change" is
+        //     relative to the last size REQUESTED, and a coalesced resize may
+        //     not have reached the core yet. A corner drag alternates column
+        //     and row crossings, so without this the row frames would take
+        //     `coreQueue.sync` straight behind the reflow the previous frame
+        //     queued.
         let delivery: ResizeDelivery
         if asyncResize {
             delivery = .async
-        } else if previous == nil || size.cols == previous?.cols {
+        } else if forceNonBlockingResizeDelivery {
+            delivery = .coalesced
+        } else if session?.hasPendingCoalescedResize == true {
+            delivery = .coalesced
+        } else if !hasPropagatedOnce || size.cols == previous?.cols {
             delivery = .sync
         } else {
             delivery = .coalesced
         }
+        hasPropagatedOnce = true
         #if DEBUG
         lastResizeDeliveryForTesting = delivery
         #endif
@@ -1890,7 +1965,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// post-keystroke traffic we synthesise ourselves. Audit key-encoder F1
     /// (partial — flag 2 of the four progressive-enhancement flags).
     public override func keyUp(with event: NSEvent) {
-        guard let session else {
+        // `session != nil` rather than a binding: the release bytes go out
+        // through `sendToSession`, so nothing here needs the session itself —
+        // this is purely "is there anywhere to send".
+        guard session != nil else {
             super.keyUp(with: event)
             return
         }

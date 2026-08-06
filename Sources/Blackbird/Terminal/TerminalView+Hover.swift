@@ -61,6 +61,13 @@ extension TerminalView {
     public override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         hoverCoordinator.clearHover()
+        // Mouse-reporting concern, kept next to the hover clear because they
+        // share the trigger: the pointer left the grid, so the next entry must
+        // re-report its cell to a DEC 1003 TUI even if it re-enters on the same
+        // cell it left. Lives here rather than inside the hover coordinator —
+        // that type has no business writing the reporting subsystem's dedupe.
+        lastReportedMotionCell = nil
+        lastReportedDragCell = nil
     }
 
     public override func flagsChanged(with event: NSEvent) {

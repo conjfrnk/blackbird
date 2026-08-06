@@ -1489,9 +1489,12 @@ public final class MetalRenderer {
         // blocking the drag on them. `FrameKey` carries this viewport, so each
         // in-between frame is genuinely re-encoded at the new size instead of
         // being skipped and scaled by the compositor.
+        // Same sanitisation the FrameKey applies, so the key is literally a
+        // function of the value that reaches the shader (a non-finite or
+        // absurd bounds would otherwise key one way and render another).
         let viewportPoints = SIMD2<Float>(
-            Float(view.bounds.size.width),
-            Float(view.bounds.size.height)
+            Float(view.bounds.size.width.sanitizedPixel),
+            Float(view.bounds.size.height.sanitizedPixel)
         )
         let cellSizePoints = SIMD2<Float>(
             Float(metrics.cellWidth),

@@ -93,7 +93,17 @@ final class WindowFramePersistence {
     /// progress, a screen-reconfig settle window is active (and the change isn't
     /// positively user-driven), the window is full-screen, or a fullscreen-enter
     /// transition is in flight.
-    func saveCurrentFrame() {
+    /// - Parameter knownUserDriven: pass `true` from a callback that is itself
+    ///   positive proof of a user gesture, when the usual live signals have
+    ///   already gone. `windowDidEndLiveResize` is exactly that case: AppKit
+    ///   clears `inLiveResize` *before* posting it, and it is driven by the
+    ///   mouse-UP so no button is down — so both disjuncts of
+    ///   `isUserDrivenFrameChange` read false and the S5-006 settle window
+    ///   would silently drop the only save of the whole drag. (Before the
+    ///   end-of-drag save existed, every mid-drag `windowDidResize` bypassed
+    ///   the gate on `inLiveResize`, so the suppression never had a chance to
+    ///   eat the user's resize; it does now.)
+    func saveCurrentFrame(knownUserDriven: Bool = false) {
         guard !controller.isPerformingShowWindow else { return }
         guard let win = controller.window else { return }
         // Audit S5-006 (gate 3): a display reconfiguration is in progress or just
@@ -109,7 +119,7 @@ final class WindowFramePersistence {
         // button signal to this window: a real title-bar drag keeps the pointer
         // over the window as it moves, so require the pointer within this
         // window's frame. inLiveResize is already per-window.
-        let userDriven = Self.isUserDrivenFrameChange(
+        let userDriven = knownUserDriven || Self.isUserDrivenFrameChange(
             leftButtonDown: (NSEvent.pressedMouseButtons & 1) != 0,
             pointerInWindowFrame: win.frame.contains(NSEvent.mouseLocation),
             inLiveResize: win.inLiveResize

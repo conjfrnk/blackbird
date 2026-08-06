@@ -152,7 +152,8 @@ extension TerminalView {
                 if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
                     pendingLinkClick = PendingLinkClick(
                         url: url,
-                        downLocationInWindow: event.locationInWindow
+                        downEvent: event,
+                        clickCount: clicks
                     )
                     return
                 }
@@ -169,8 +170,13 @@ extension TerminalView {
         }
         let optionHeld = event.modifierFlags.contains(.option)
         if mouseReportingEnabled() && !optionHeld, session != nil {
-            didReportMouseDown = true
-            sendMouseEvent(event, button: 0, press: true)
+            // Record what was actually EMITTED, not what we intended: the X10
+            // fallback encoder refuses coordinates past column/row 223, so a
+            // press in a wide window under DEC 1000 without SGR 1006 sends
+            // nothing — and a release that DID encode would then reach the TUI
+            // with no matching press, which is the very asymmetry this flag
+            // exists to prevent.
+            didReportMouseDown = sendMouseEvent(event, button: 0, press: true)
             return
         }
         // Not URL-open / window-drag / mouse-reporting → a selection gesture.
@@ -185,12 +191,11 @@ extension TerminalView {
         // what keeps ⌘-drag-to-move-window usable over link-dense output.
         if let pending = pendingLinkClick {
             pendingLinkClick = nil
-            let dx = event.locationInWindow.x - pending.downLocationInWindow.x
-            let dy = event.locationInWindow.y - pending.downLocationInWindow.y
-            let slop = TerminalView.linkClickDragSlopPoints
-            if abs(dx) <= slop, abs(dy) <= slop {
+            if !pending.cancelled, pending.isStillAClick(at: event.locationInWindow) {
                 urlOpener.open(pending.url)
             }
+            // A cancelled gesture may have handed itself to the selection path.
+            _ = selectionController.endDrag()
             // Either way the press was never reported, so the release must not
             // be either — see `didReportMouseDown`.
             return
@@ -312,6 +317,12 @@ extension TerminalView {
 
     public override func rightMouseUp(with event: NSEvent) {
         if windowResizeController.end() {
+            // This gesture drives `setFrame` directly, so AppKit never marks
+            // the window `inLiveResize` and never posts
+            // `windowDidEndLiveResize`. Drive the settle explicitly or the
+            // frame save, the full tab-strip refresh and the sibling fan-out
+            // — all of which the per-sample path skips — would never run.
+            (window?.windowController as? MainWindowController)?.settleAfterResizeGesture()
             return
         }
         let optionHeld = event.modifierFlags.contains(.option)
@@ -405,12 +416,11 @@ extension TerminalView {
         // reveal and the accent underline; the next mouseMoved delivery
         // will repaint them against the fresh cell if appropriate.
         // Cancel the pending tooltip + the accent underline + the ⌘-hover
-        // range, and drop the cached hover cell: the renderer's range is keyed
-        // on buffer line but the *pointer* is at a fixed (row, col) whose buffer
-        // line flipped with the scroll, and the stale cell would make the next
-        // mouseMoved early-return on the same (row, col) and leave the link id
-        // at zero. This is exactly `clearHover()`.
-        hoverCoordinator.clearHover()
+        // range. NOT the pointer position: the pointer hasn't moved, and AppKit
+        // delivers no `mouseMoved` for a scroll, so dropping it would leave the
+        // hover subsystem dark until the user jiggled the mouse. The next
+        // snapshot publish re-resolves what is under the (unchanged) pointer.
+        hoverCoordinator.clearHoverDerivedState()
         guard let session else { super.scrollWheel(with: event); return }
         // ⌥-scroll bypasses mouse reporting so the user can always reach
         // scrollback locally, even inside a TUI that captured the wheel.
@@ -477,16 +487,35 @@ extension TerminalView {
         // drag, not a click: drop the pending open and hand the gesture to
         // `performDrag`. Below the slop it stays pending so a shaky click
         // still opens the link on mouseUp.
-        if let pending = pendingLinkClick {
-            let dx = event.locationInWindow.x - pending.downLocationInWindow.x
-            let dy = event.locationInWindow.y - pending.downLocationInWindow.y
-            let slop = TerminalView.linkClickDragSlopPoints
-            guard abs(dx) > slop || abs(dy) > slop else { return }
-            pendingLinkClick = nil
-            let windowDragMask = Preferences.shared.windowDragModifier.modifierMask
-            if !windowDragMask.isEmpty, event.modifierFlags.contains(windowDragMask) {
-                window?.performDrag(with: event)
+        if var pending = pendingLinkClick {
+            if !pending.cancelled {
+                guard !pending.isStillAClick(at: event.locationInWindow) else { return }
+                pending.cancelled = true
+                pendingLinkClick = pending
+                let windowDragMask = Preferences.shared.windowDragModifier.modifierMask
+                if !windowDragMask.isEmpty, event.modifierFlags.contains(windowDragMask) {
+                    // Pass the ORIGINAL mousedown: `-[NSWindow performDrag:]`
+                    // documents "pass the original mouseDown event", and the
+                    // gesture's anchor is that press, not this sample.
+                    window?.performDrag(with: pending.downEvent)
+                    return
+                }
+                // The drag modifier isn't held (⌘ released mid-gesture, or the
+                // user configured window-drag onto ⌥⌘), so this gesture is not
+                // a window move. Hand it to the selection path with the
+                // ORIGINAL mousedown as the anchor — the same thing the
+                // identical drag one column to the left would have done.
+                // Without this the whole gesture died silently: no link, no
+                // drag, no selection, no report.
+                selectionController.beginSelection(with: pending.downEvent,
+                                                   clickCount: pending.clickCount)
             }
+            // Consumed for the rest of the gesture. The press was never
+            // reported, so a drag report here would reach the TUI as motion
+            // belonging to a button-press it never saw (and no release would
+            // ever follow). A selection, if one was started above, still
+            // tracks normally.
+            _ = selectionController.handleDrag(with: event)
             return
         }
         if selectionController.handleDrag(with: event) { return }
@@ -505,8 +534,24 @@ extension TerminalView {
         let p = bufferPointFromEvent(event)
         let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
         let cell = BBXYPoint(col: p.col, row: screenRow)
-        guard lastReportedMotionCell != cell else { return }
-        lastReportedMotionCell = cell
+        // Past-the-edge drags must keep reporting even though the cell stops
+        // changing: `bufferPointFromEvent` clamps to the edge cell, and a TUI
+        // in copy/visual mode relies on the continuing stream to autoscroll
+        // (Blackbird's own selection has `SelectionAutoscroller` for exactly
+        // this; the TUI path has only these reports). Dedupe only while the
+        // pointer is genuinely inside the grid.
+        let local = convert(event.locationInWindow, from: nil)
+        let insideGrid = bounds.contains(local)
+            && local.y < bounds.height - titlebarOnlyTopInset
+        if insideGrid {
+            // Separate from `lastReportedMotionCell`: a TUI tracks button-32
+            // drag motion and button-35 hover motion independently (Claude Code
+            // updates its hover cell only from the latter), so sharing one
+            // dedupe cell let a drag suppress the next hover report for the
+            // cell it ended on.
+            guard lastReportedDragCell != cell else { return }
+        }
+        lastReportedDragCell = cell
         sendMouseEvent(event, button: 32, press: true)
     }
 
@@ -524,13 +569,14 @@ extension TerminalView {
     /// because the DEC 1003 any-event path in
     /// `TerminalView+Hover.swift`'s `mouseMoved` reuses it for the
     /// no-button motion case.
-    func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool) {
+    @discardableResult
+    func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool) -> Bool {
         let loc = convert(event.locationInWindow, from: nil)
         // Paranoia. `event.locationInWindow` is a CGFloat; a misbehaving
         // input device or a bridged NaN / Infinity can slip through, and
         // `Int(NaN)` / `Int(±Inf)` trap. Guard before the cast rather
         // than after — the scrollWheel path already uses this pattern.
-        guard loc.x.isFinite, loc.y.isFinite else { return }
+        guard loc.x.isFinite, loc.y.isFinite else { return false }
         // Audit fix-#19 (2026-05-11): clamp magnitude to `CGFloat.sanePx`
         // BEFORE the Int() cast. `Int(Double)` traps when the magnitude
         // exceeds Int.max (~9.2e18 on 64-bit) — `loc.y` is finite but bounded
@@ -564,7 +610,7 @@ extension TerminalView {
             press: press,
             col: col,
             row: row
-        ) else { return }
+        ) else { return false }
         // Route through the shared `sendToSession` seam rather than
         // `session.send` directly so the DEBUG `ptyRecorderForTests` recorder
         // captures mouse reports too. Before this, the whole mouse-reporting
@@ -574,6 +620,7 @@ extension TerminalView {
         // session, so callers keep their own `session != nil` guard purely as
         // the "is there anything to report to" precondition.
         sendToSession(bytes)
+        return true
     }
 
 }

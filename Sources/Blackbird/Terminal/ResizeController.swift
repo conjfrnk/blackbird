@@ -40,6 +40,15 @@ final class ResizeController {
     private let coalescedLock = NSLock()
     private var pendingCoalescedSize: TerminalSession.Size?
     private var coalescedWorkQueued = false
+    /// True from the moment a coalesced resize is enqueued until the block that
+    /// drains it has finished. Distinct from `coalescedWorkQueued`, which the
+    /// block clears at ENTRY so a size arriving mid-reflow can still be picked
+    /// up by a fresh block (latest-wins). Without this second flag the
+    /// "is a reflow outstanding?" question read false for the entire 10–37 ms
+    /// the reflow actually runs — and since drag samples arrive every ~8 ms,
+    /// the very next row-only sample of a diagonal drag would take the
+    /// synchronous path straight into `coreQueue.sync` behind it.
+    private var coalescedInFlight = false
 
     /// Last grid size BBTerm actually applied. Used to detect real reflow
     /// (audit S5-004/S5-005 contract: ANY resize invalidates lines-scrolled
@@ -208,16 +217,28 @@ final class ResizeController {
     /// resize gesture). Coalescing N steps into 1 is a linear win — 30 steps
     /// of 1 column cost 30× a single 30-column step.
     ///
-    /// Publishes through `publishImmediate`, like the synchronous path and
-    /// unlike `resizeAsync`: this is a user action, so the H8 "user-action
-    /// wins" invariant applies — a feed snapshot queued before the resize must
-    /// not clobber the new-grid frame (audit fix-#07).
+    /// Publishes through `publishPendingSnapshot`, like `resizeAsync` and
+    /// UNLIKE the synchronous path. The sync path publishes immediately
+    /// because it runs on the caller's thread (main), so `publishImmediate`
+    /// writes inline and the H8 "user-action wins" ordering is exact. This
+    /// path runs on `coreQueue`, where `publishImmediate` would instead
+    /// enqueue an *uncancellable* main hop with the snapshot captured in the
+    /// closure — a second publish route that the pending slot can no longer
+    /// neutralise. A main-thread action that publishes inline while that hop
+    /// is queued (a wheel scroll's `coreQueue.sync`, ⌘K) would then be
+    /// overwritten by the older snapshot when the hop finally drained: the
+    /// user's scroll silently snapping back to the bottom. The pending slot is
+    /// latest-wins and is filled in `coreQueue` order, so ordering here is
+    /// correct by construction, and `publishImmediate` from main still clears
+    /// the slot — which is exactly the H8 invariant (audit fix-#07) doing its
+    /// job rather than being bypassed.
     func resizeCoalesced(to size: TerminalSession.Size) {
         let clamped = TerminalSession.clampResize(size)
         coalescedLock.lock()
         pendingCoalescedSize = clamped
         let alreadyQueued = coalescedWorkQueued
         coalescedWorkQueued = true
+        coalescedInFlight = true
         coalescedLock.unlock()
         guard !alreadyQueued else { return }
         session.coreQueue.async { [weak self, weak session = self.session] in
@@ -227,6 +248,14 @@ final class ResizeController {
             self.pendingCoalescedSize = nil
             self.coalescedWorkQueued = false
             self.coalescedLock.unlock()
+            // Clear the in-flight flag on EVERY exit, including the early
+            // returns below — a stuck flag would pin every later resize onto
+            // the coalesced path forever.
+            defer {
+                self.coalescedLock.lock()
+                self.coalescedInFlight = false
+                self.coalescedLock.unlock()
+            }
             guard let target else { return }
             // Audit S1-007: termination gate read INSIDE the coreQueue block,
             // exactly as the sync and async paths do.
@@ -244,8 +273,23 @@ final class ResizeController {
                 )
             }
             guard let snap = session.bbterm.snapshot() else { return }
-            session.snapshotCoalescer.publishImmediate(snap)
+            session.snapshotCoalescer.publishPendingSnapshot(snap)
         }
+    }
+
+    /// True while a coalesced resize is queued but not yet applied.
+    ///
+    /// `propagateResize` consults this before choosing the cheap synchronous
+    /// path: "the columns didn't change" is only true relative to the last
+    /// *requested* size, and a coalesced resize may not have reached the core
+    /// yet. Without this, a corner drag — which alternates column and row
+    /// crossings — would classify the row-only frames as `.sync` and block
+    /// main inside `coreQueue.sync` behind the 10–37 ms reflow the previous
+    /// frame just queued, reintroducing the stall this whole path removes.
+    var hasPendingCoalescedResize: Bool {
+        coalescedLock.lock()
+        defer { coalescedLock.unlock() }
+        return coalescedWorkQueued || coalescedInFlight
     }
 
     /// Invalidate prompt-mark anchors when the applied grid size

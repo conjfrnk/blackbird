@@ -81,9 +81,7 @@ extension TerminalView {
             // scrub the dwell tooltip applies. Both holes close by asking the
             // coordinator for the href it actually resolved.
             if let url = hoveredLinkURLForPreview() {
-                let redacted = OSC8URLPolicy.redactCredentialsForDisplay(url.absoluteString)
-                let scrubbed = PasteSanitizer.scrubURLForDisplay(redacted)
-                return scrubbed.count > 512 ? String(scrubbed.prefix(512)) + "…" : scrubbed
+                return HoverCoordinator.displayString(forHref: url.absoluteString)
             }
             return nil
         }()

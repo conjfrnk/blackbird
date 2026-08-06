@@ -106,6 +106,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     ///   - it must not fan out again from the receiving side.
     private var isApplyingTabGroupFrame = false
 
+    /// The last frame the fan-out pushed onto THIS window. Paired with the
+    /// boolean above so an echo is recognised by VALUE as well as by timing —
+    /// see `isTabGroupFrameEcho()`.
+    private var lastAppliedTabGroupFrame: NSRect?
+
     /// Trailing-edge debounce for the sibling frame push on the resize paths
     /// that never fire `windowDidEndLiveResize`: the modifier-right-drag resize
     /// gesture (which drives `setFrame` directly with `inLiveResize == false`)
@@ -677,12 +682,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func windowDidResize(_ notification: Notification) {
         // Our own fan-out echo — not a user resize. See
         // `isApplyingTabGroupFrame` for the two things this guard prevents.
-        guard !isApplyingTabGroupFrame else { return }
+        guard !isTabGroupFrameEcho() else { return }
         // Pills divide the available titlebar width equally, so resize
         // needs to re-lay them out. Mid-drag only the width can have changed,
         // so take the cheap path and leave the full refresh (native-strip
         // re-hide, group-identity re-check, KVO re-install) to the settle.
-        if window?.inLiveResize ?? false {
+        if isResizingInteractively {
             tabObserver.relayoutTabStripForWidth()
         } else {
             tabObserver.refreshTabBar()
@@ -699,19 +704,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // Paying that per drag frame bought nothing — `windowDidEndLiveResize`
         // saves the frame the user actually chose, and `windowDidMove` still
         // covers title-bar drags.
-        if !(window?.inLiveResize ?? false) {
+        if !isResizingInteractively {
             framePersistence.saveCurrentFrame()
         }
         scheduleSiblingFrameSync()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
-        // The user let go: persist the final frame, run the full tab-strip
-        // refresh the live-resize ticks skipped, and push the frame to the
-        // group's background tabs immediately (no debounce — this IS the
-        // settle point).
+        settleAfterResizeGesture()
+    }
+
+    /// End of a resize gesture, from either driver: AppKit's edge/corner drag
+    /// (`windowDidEndLiveResize`) or Blackbird's own modifier-right-drag, which
+    /// never fires that callback because it sets the frame directly.
+    ///
+    /// Everything the per-frame path deliberately skipped happens here, once:
+    /// the full tab-strip refresh, the frame save, and the push to the group's
+    /// background tabs (no debounce — this IS the settle point).
+    func settleAfterResizeGesture() {
         tabObserver.refreshTabBar()
-        framePersistence.saveCurrentFrame()
+        // `knownUserDriven`: the callback IS the proof. AppKit clears
+        // `inLiveResize` before posting it and the button is already up, so the
+        // usual live signals both read false and the S5-006 screen-reconfig
+        // settle window would otherwise drop the only save of the entire drag.
+        framePersistence.saveCurrentFrame(knownUserDriven: true)
         pendingSiblingFrameSync?.cancel()
         pendingSiblingFrameSync = nil
         syncFrameToSiblingTabs()
@@ -725,7 +741,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// invisible, so fanning out mid-drag would buy nothing visually while
     /// costing N `setFrame`s (and N drawable reallocations) per pause.
     private func scheduleSiblingFrameSync() {
-        guard !(window?.inLiveResize ?? false) else { return }
+        guard !isResizingInteractively else { return }
         pendingSiblingFrameSync?.cancel()
         let work = DispatchWorkItem { [weak self] in
             self?.pendingSiblingFrameSync = nil
@@ -759,11 +775,58 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func applyTabGroupFrame(_ frame: NSRect) {
         guard let window, window.frame != frame else { return }
         isApplyingTabGroupFrame = true
+        // Value-based backstop for the boolean above: `windowDidResize` /
+        // `windowDidMove` also compare against this, so a delegate callback
+        // that AppKit ever delivers asynchronously (an ordered-out, merged tab
+        // member set with `display: false` is the configuration least likely to
+        // be on the synchronous path) is still recognised as our own echo
+        // rather than a user resize. Getting that wrong re-opens RCA A3.
+        lastAppliedTabGroupFrame = frame
         defer { isApplyingTabGroupFrame = false }
-        window.setFrame(frame, display: false)
+        // A background tab draws nothing, so it needs none of the synchronous
+        // resize path's "never a frame at the old grid size" guarantee — and
+        // `coreQueue.sync` there would make main wait out that session's whole
+        // parse backlog, once per tab, at the instant of mouse-up.
+        guard let view = terminalView else {
+            window.setFrame(frame, display: false)
+            return
+        }
+        view.withNonBlockingResizeDelivery {
+            window.setFrame(frame, display: false)
+        }
+    }
+
+    /// True while the user is dragging this window's size — either through
+    /// AppKit's own edge/corner handles (`inLiveResize`) or through Blackbird's
+    /// modifier-right-drag gesture, which drives `setFrame` directly and so
+    /// leaves `inLiveResize` FALSE for the entire gesture. Every "is this a
+    /// live drag?" decision has to consider both, or the app's own resize
+    /// gesture pays the settle-time costs on every pointer sample.
+    private var isResizingInteractively: Bool {
+        (window?.inLiveResize ?? false) || (terminalView?.windowResizeController.isResizing ?? false)
+    }
+
+    /// True when a frame-change callback on this window is the echo of a
+    /// fan-out push rather than a user (or AppKit) resize.
+    private func isTabGroupFrameEcho() -> Bool {
+        isApplyingTabGroupFrame || (window.map { $0.frame == lastAppliedTabGroupFrame } ?? false)
     }
 
     func windowDidMove(_ notification: Notification) {
+        // The fan-out pushes a full NSRect, so a push whose ORIGIN differs
+        // posts a move notification too — and this callback saves the frame
+        // with none of `windowDidResize`'s guards. Unguarded, a fullscreen
+        // fan-out would have every sibling persist the fullscreen origin to
+        // the single shared autosave key: RCA finding A3, arriving through the
+        // move door instead of the resize one.
+        guard !isTabGroupFrameEcho() else { return }
+        // A macOS window is bottom-left anchored, so dragging the bottom, left
+        // or either bottom corner changes the ORIGIN on every frame of a
+        // resize — meaning this callback, not just `windowDidResize`, is on the
+        // per-frame path. Skip the save for the same reason: one settle-time
+        // save (from `windowDidEndLiveResize` / the resize gesture's end)
+        // instead of a synchronous `UserDefaults` write per pointer sample.
+        guard !isResizingInteractively else { return }
         // Same rationale as `windowDidResize`: AppKit's implicit
         // save-on-move hook is silent for this config, so drive it
         // explicitly. Without this, the user's "drag the window to a

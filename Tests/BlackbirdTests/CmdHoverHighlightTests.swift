@@ -470,11 +470,21 @@ final class CmdHoverHighlightTests: XCTestCase {
             "the pointer did not move, so it is still over screen row 2"
         )
         XCTAssertEqual(cell2.col, 3, "…and still over column 3")
+        // The point of the fix: the BUFFER line under the pointer moved with
+        // the scroll even though the SCREEN row didn't. Asserting that against
+        // snap1's offset (0) makes the difference load-bearing — the old
+        // baked-row design would have kept resolving to buffer line 2.
+        XCTAssertNotEqual(
+            snap1.displayOffset, snap2.displayOffset,
+            "premise: the scroll must actually have moved displayOffset, or "
+            + "there is no stale-translation to catch"
+        )
         XCTAssertEqual(
             cell2.row - snap2.displayOffset,
             2 - snap2.displayOffset,
             "the buffer line under the pointer is re-derived from the LIVE "
-            + "displayOffset, not from one baked at mouseMoved time"
+            + "displayOffset (\(snap2.displayOffset)), not from the one in "
+            + "effect at mouseMoved time (\(snap1.displayOffset))"
         )
     }
 }

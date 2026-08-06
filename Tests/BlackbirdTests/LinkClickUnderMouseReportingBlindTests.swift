@@ -675,6 +675,359 @@ final class LinkClickUnderMouseReportingBlindTests: XCTestCase {
         )
     }
 
+    // MARK: - (9) A consumed ⌘-gesture stays consumed for its WHOLE life
+    //
+    // `test_cancelledCmdDrag_writesNoMouseReportBytes` above sends exactly ONE
+    // `mouseDragged`, so it only pins the first drag of the gesture. A
+    // per-event fall-through — "the pending link click is cancelled, therefore
+    // from now on the TUI owns this drag again" — sails straight through it:
+    // the single dragged event is the one that performs the cancel, and the
+    // leak starts on the event after. The two tests here send a RUN of drags,
+    // each landing in a DIFFERENT grid cell so a same-cell dedupe cannot mask
+    // the leak either, and cover both ways a ⌘-gesture stops being a click:
+    // a window drag (the configured drag modifier matches) and a text
+    // selection (it does not).
+    //
+    // Why any leak here is worse than a cosmetic stray byte: the press was
+    // swallowed, so the TUI never saw a button go down. A motion report
+    // (`ESC [ < 32 ; col ; row M`) then arrives describing movement of a
+    // button the application never saw pressed — and because the matching
+    // mouseup is swallowed too, no release ever follows. A TUI that starts a
+    // selection on that motion has no event that can ever end it.
+
+    /// Contract 9, window-drag flavour. The configured window-drag modifier is
+    /// Command (the default), so a ⌘-mousedown on a link that then travels
+    /// becomes a window move. Every event of that gesture — the swallowed
+    /// mousedown, all three drags, and the mouseup — must write nothing toward
+    /// the PTY, and the gesture must open no URL.
+    ///
+    /// **What this catches that the single-drag test cannot.** An
+    /// implementation that clears its "this gesture is mine" state as part of
+    /// cancelling the pending click passes the one-drag test (the cancelling
+    /// event is still handled) and fails here on drag #2. The drags are in
+    /// three distinct cells, so a cell-dedupe cannot be the reason drags 2 and
+    /// 3 are silent.
+    func test_consumedCmdGesture_staysConsumed_acrossEveryDraggedEvent() throws {
+        // Pinned rather than assumed: this is the "drag modifier MATCHES" half
+        // and the mirror below is the "does not match" half, so the pref must
+        // not depend on what an earlier test in the host process left behind.
+        // Restored in `defer` (the singleton is shared process-wide).
+        let saved = Preferences.shared.windowDragModifierRaw
+        Preferences.shared.windowDragModifierRaw = "Command"
+        defer { Preferences.shared.windowDragModifierRaw = saved }
+        XCTAssertEqual(
+            Preferences.shared.windowDragModifier, .command,
+            "precondition: this test is the drag-modifier-MATCHES half, so the configured "
+            + "window-drag modifier must be Command"
+        )
+
+        let rig = try makeRig(feeding: atLinkRow(osc8(href, anchor)))
+        try assertFixtureHasOSC8Link(rig)
+
+        let down = point(row: linkRow, col: linkCol, in: rig.view)
+        // Three drags, each in a different cell and each further from the
+        // mousedown than the last. Built from (row, col) rather than raw point
+        // offsets so "different cell" is true by construction whatever the
+        // font metrics are.
+        let drags = [
+            point(row: linkRow,     col: linkCol +  6, in: rig.view),
+            point(row: linkRow + 1, col: linkCol + 14, in: rig.view),
+            point(row: linkRow + 3, col: linkCol + 22, in: rig.view),
+        ]
+        XCTAssertGreaterThan(
+            hypot(drags[0].x - down.x, drags[0].y - down.y), 3,
+            "precondition: even the FIRST drag must clear the 3-point click tolerance — if it "
+            + "did not, this gesture would still be a pending click and would prove nothing "
+            + "about the cancelled path"
+        )
+
+        rig.view.mouseDown(
+            with: try mouseEvent(.leftMouseDown, at: down, modifiers: [.command], timestamp: 1.0)
+        )
+        XCTAssertEqual(
+            pty(rig.recorder), "",
+            "the ⌘-mousedown is swallowed for link arming, so no SGR press may reach the TUI"
+        )
+
+        for (i, p) in drags.enumerated() {
+            rig.view.mouseDragged(
+                with: try mouseEvent(
+                    .leftMouseDragged, at: p, modifiers: [.command],
+                    timestamp: 1.01 + 0.01 * Double(i)
+                )
+            )
+            XCTAssertEqual(
+                pty(rig.recorder), "",
+                "drag #\(i + 1) of a consumed ⌘-gesture leaked mouse-report bytes. The press "
+                + "was never reported, so a motion report here (\(sgrReport(button: 32, row: linkRow, col: linkCol, press: true)) "
+                + "and friends) reaches the TUI as movement of a button it never saw pressed — "
+                + "and the swallowed mouseup means no release will ever terminate it"
+            )
+        }
+
+        rig.view.mouseUp(
+            with: try mouseEvent(
+                .leftMouseUp, at: drags[drags.count - 1], modifiers: [.command], timestamp: 1.05
+            )
+        )
+        XCTAssertEqual(
+            pty(rig.recorder), "",
+            "and the mouseup that ends the window drag must not emit the orphan release either"
+        )
+        XCTAssertEqual(
+            rig.opener.opened, [],
+            "a gesture that travelled 20+ cells is a drag, not a click — it must open nothing"
+        )
+    }
+
+    /// Contract 9, text-selection flavour — the same gesture with the
+    /// configured window-drag modifier deliberately NOT matching.
+    ///
+    /// With `windowDragModifier` set to Option-Command, a Command-only drag is
+    /// not a window move; it falls through to the terminal's own drag handling
+    /// (a text selection). That is a different branch from the test above, and
+    /// it is the branch most likely to hand the drag back to the mouse-report
+    /// encoder — "no modifier gesture claimed this, so the TUI must own it" —
+    /// even though the mousedown that started it was swallowed. The contract is
+    /// identical: zero PTY bytes for the whole gesture, and no URL opened.
+    ///
+    /// `windowDragModifierRaw` is restored in `defer`; the singleton is shared
+    /// with every other test in the host process (see `PreferencesTests` for
+    /// the same save/set/restore shape).
+    func test_consumedCmdGesture_staysConsumed_whenDragModifierDoesNotMatch() throws {
+        let saved = Preferences.shared.windowDragModifierRaw
+        Preferences.shared.windowDragModifierRaw = "Option-Command"
+        defer { Preferences.shared.windowDragModifierRaw = saved }
+        XCTAssertEqual(
+            Preferences.shared.windowDragModifier, .optionCommand,
+            "precondition: the configured window-drag modifier must be Option-Command, so the "
+            + "Command-only gesture below is NOT a window drag"
+        )
+
+        let rig = try makeRig(feeding: atLinkRow(osc8(href, anchor)))
+        try assertFixtureHasOSC8Link(rig)
+
+        let down = point(row: linkRow, col: linkCol, in: rig.view)
+        let drags = [
+            point(row: linkRow,     col: linkCol +  6, in: rig.view),
+            point(row: linkRow + 1, col: linkCol + 14, in: rig.view),
+            point(row: linkRow + 3, col: linkCol + 22, in: rig.view),
+        ]
+        XCTAssertGreaterThan(
+            hypot(drags[0].x - down.x, drags[0].y - down.y), 3,
+            "precondition: the first drag must clear the 3-point click tolerance"
+        )
+
+        rig.view.mouseDown(
+            with: try mouseEvent(.leftMouseDown, at: down, modifiers: [.command], timestamp: 1.0)
+        )
+        XCTAssertEqual(
+            pty(rig.recorder), "",
+            "⌘ still arms a link click regardless of what the window-drag modifier is set to, "
+            + "so the mousedown is still swallowed and must still report nothing"
+        )
+
+        for (i, p) in drags.enumerated() {
+            rig.view.mouseDragged(
+                with: try mouseEvent(
+                    .leftMouseDragged, at: p, modifiers: [.command],
+                    timestamp: 1.01 + 0.01 * Double(i)
+                )
+            )
+            XCTAssertEqual(
+                pty(rig.recorder), "",
+                "drag #\(i + 1) leaked mouse-report bytes. With the drag modifier set to "
+                + "Option-Command this gesture is a text selection, and a selection drag must "
+                + "not re-route into the mouse-report encoder — the press it would belong to "
+                + "was swallowed and no release will ever follow"
+            )
+        }
+
+        rig.view.mouseUp(
+            with: try mouseEvent(
+                .leftMouseUp, at: drags[drags.count - 1], modifiers: [.command], timestamp: 1.05
+            )
+        )
+        XCTAssertEqual(
+            pty(rig.recorder), "",
+            "the mouseup ending the selection drag must not emit the orphan release either"
+        )
+        XCTAssertEqual(
+            rig.opener.opened, [],
+            "and a gesture that became a selection must open nothing"
+        )
+    }
+
+    // MARK: - (10) A drag past the viewport edge must keep reporting
+    //
+    // The mirror image of contract 9. When the TUI genuinely owns the drag (no
+    // modifier held) the motion stream must not stop just because the pointer
+    // left the grid: the coordinate is clamped to the edge cell, so every
+    // report past the edge carries the SAME cell, and a "only report when the
+    // cell changed" dedupe silently swallows all but the first. A TUI in
+    // copy/visual mode autoscrolls off that continuing stream, so a swallowed
+    // stream means the selection freezes at the edge and the user cannot drag
+    // past the bottom of the screen.
+    //
+    // The two tests are a matched pair and must be read together: outside the
+    // grid every event reports, inside the grid a repeat of the same cell
+    // reports once. Only one of the two can be satisfied by "always dedupe" and
+    // only the other by "never dedupe", so neither can pass by accident.
+
+    /// Contract 10, outside-the-grid half. Three drags progressively further
+    /// BELOW the view (increasing negative y, constant x) must each add exactly
+    /// one motion report.
+    ///
+    /// They share an x, so they clamp to the same column, and they are all past
+    /// the bottom edge, so they clamp to the same row: the three reports are
+    /// byte-identical, which is asserted explicitly. That is what makes this a
+    /// real test of the edge case — a cell-dedupe would emit the first and
+    /// swallow the second and third, and the assertion names exactly that.
+    ///
+    /// The exact clamped cell is deliberately NOT asserted (it depends on
+    /// whether the clamp targets the snapshot's rows or the view's), only that
+    /// it is a motion report (`ESC [ < 32 ; …`) and that it does not change.
+    ///
+    /// The gesture is closed with a mouseup so nothing is left armed when the
+    /// test returns.
+    func test_dragOutsideViewport_underMouseReporting_reportsEveryEvent() throws {
+        let rig = try makeRig(feeding: atLinkRow("plain text with no url"))
+
+        let down = point(row: linkRow, col: linkCol, in: rig.view)
+        rig.view.mouseDown(
+            with: try mouseEvent(.leftMouseDown, at: down, modifiers: [], timestamp: 1.0)
+        )
+        XCTAssertEqual(
+            pty(rig.recorder),
+            sgrReport(row: linkRow, col: linkCol, press: true),
+            "precondition: an unmodified mousedown under mouse reporting emits one SGR press — "
+            + "if this fails the rig is not reporting at all and the drags below prove nothing"
+        )
+
+        // Same x (so the clamped COLUMN cannot change), progressively further
+        // below the view's bottom edge (so the clamped ROW cannot change
+        // either, once clamped).
+        let outside = [
+            NSPoint(x: down.x, y: -12),
+            NSPoint(x: down.x, y: -60),
+            NSPoint(x: down.x, y: -130),
+        ]
+        for p in outside {
+            XCTAssertFalse(
+                rig.view.bounds.contains(p),
+                "precondition: \(p) must be OUTSIDE the view's bounds \(rig.view.bounds) — "
+                + "this test is about the clamped-to-edge path"
+            )
+        }
+
+        var mark = rig.recorder.sent.count
+        var deltas: [String] = []
+        for (i, p) in outside.enumerated() {
+            rig.view.mouseDragged(
+                with: try mouseEvent(
+                    .leftMouseDragged, at: p, modifiers: [],
+                    timestamp: 1.01 + 0.01 * Double(i)
+                )
+            )
+            let delta = ptyDelta(rig.recorder, since: mark)
+            mark = rig.recorder.sent.count
+            deltas.append(delta)
+
+            XCTAssertEqual(
+                motionReportCount(in: delta), 1,
+                "drag #\(i + 1) past the bottom edge must add exactly one motion report, got "
+                + "\"\(delta)\". A TUI in copy/visual mode autoscrolls off this stream; if it "
+                + "stops when the clamped cell stops changing, the selection freezes at the edge"
+            )
+        }
+
+        XCTAssertEqual(
+            deltas, Array(repeating: deltas.first ?? "", count: outside.count),
+            "the three reports must be byte-identical (same clamped edge cell). That they are "
+            + "identical is the point: a \"report only when the cell changed\" dedupe would "
+            + "have emitted the first and swallowed the other two"
+        )
+        XCTAssertEqual(
+            motionReportCount(in: pty(rig.recorder)), outside.count,
+            "across the whole gesture there must be one motion report per dragged event"
+        )
+
+        // Close the gesture so no drag state or autoscroll survives the test.
+        rig.view.mouseUp(
+            with: try mouseEvent(.leftMouseUp, at: outside[outside.count - 1], modifiers: [], timestamp: 1.05)
+        )
+    }
+
+    /// Contract 10, inside-the-grid half — the control that stops the test
+    /// above from being satisfied by "never dedupe, report on every event".
+    ///
+    /// Two consecutive `mouseDragged` events at the EXACT same point inside the
+    /// grid describe no movement between cells, and xterm-style motion
+    /// reporting emits on cell changes: the second must add nothing. Without
+    /// this, a drag that jitters within one cell floods the TUI with duplicate
+    /// motion reports — the ?1003h any-event stream is already the highest-rate
+    /// thing a terminal writes.
+    ///
+    /// The first drag lands in a different cell from the mousedown, so the
+    /// assertion cannot pass by the view emitting nothing at all: the expected
+    /// stream is press(2,2) + motion(2,10), and it must still be exactly that
+    /// after the repeat.
+    func test_repeatedDragInSameCell_underMouseReporting_reportsMotionOnce() throws {
+        let rig = try makeRig(feeding: atLinkRow("plain text with no url"))
+        let dragCol = linkCol + 8   // a different cell from the mousedown
+
+        let down = point(row: linkRow, col: linkCol, in: rig.view)
+        let dragged = point(row: linkRow, col: dragCol, in: rig.view)
+
+        rig.view.mouseDown(
+            with: try mouseEvent(.leftMouseDown, at: down, modifiers: [], timestamp: 1.0)
+        )
+        rig.view.mouseDragged(
+            with: try mouseEvent(.leftMouseDragged, at: dragged, modifiers: [], timestamp: 1.01)
+        )
+
+        let afterFirstDrag = sgrReport(row: linkRow, col: linkCol, press: true)
+            + sgrReport(button: 32, row: linkRow, col: dragCol, press: true)
+        XCTAssertEqual(
+            pty(rig.recorder), afterFirstDrag,
+            "a drag into a NEW cell must add exactly one motion report for that cell — this "
+            + "also proves the repeat assertion below is not passing because nothing reports"
+        )
+
+        rig.view.mouseDragged(
+            with: try mouseEvent(.leftMouseDragged, at: dragged, modifiers: [], timestamp: 1.02)
+        )
+        XCTAssertEqual(
+            pty(rig.recorder), afterFirstDrag,
+            "a second dragged event at the SAME point inside the grid describes no cell change "
+            + "and must add nothing. Contrast "
+            + "`test_dragOutsideViewport_underMouseReporting_reportsEveryEvent`: dedupe applies "
+            + "to a stationary pointer inside the grid, not to a pointer held past the edge"
+        )
+
+        rig.view.mouseUp(
+            with: try mouseEvent(.leftMouseUp, at: dragged, modifiers: [], timestamp: 1.03)
+        )
+    }
+
+    // MARK: - PTY-byte oracle: deltas and motion counting
+
+    /// The `<ESC>`-rendered bytes written toward the PTY *since* `mark`, a byte
+    /// count captured earlier from `recorder.sent.count`. Lets a test attribute
+    /// each report to the single event that produced it instead of diffing
+    /// cumulative strings by eye.
+    private func ptyDelta(_ recorder: RecordingPTY, since mark: Int) -> String {
+        String(decoding: recorder.sent.dropFirst(mark), as: UTF8.self)
+            .replacingOccurrences(of: "\u{1B}", with: "<ESC>")
+    }
+
+    /// How many SGR motion-with-button reports (`ESC [ < 32 ; col ; row M`)
+    /// `rendered` contains. Takes an already-`<ESC>`-rendered string so it works
+    /// on both `pty(_:)` output and `ptyDelta(_:since:)` output.
+    private func motionReportCount(in rendered: String) -> Int {
+        rendered.components(separatedBy: "<ESC>[<32;").count - 1
+    }
+
     // MARK: - Shared fixture precondition
 
     /// Assert the OSC 8 fixture really attributed the clicked cell with the

@@ -159,6 +159,16 @@ correction documents (see "Remote TERM" above); the real fix is upstream
 allowlist entries. Over SSH the remote `TERM` is `xterm-256color` for the
 same reason, so a remote Claude Code loses hyperlinks too.
 
+**A URL that an application hard-wrapped itself opens truncated.**
+`URLDetector`'s wrap-join needs the match to end at the last column AND the
+next row to begin with a URL-safe character. An app that does its own
+wrapping — Claude Code writes each row independently with `CR` + cursor
+motion, and indents continuation rows — satisfies neither, so a plain-text
+URL split across rows resolves to its first-row fragment and ⌘-click
+navigates somewhere shorter than intended. Does NOT affect Claude Code's
+own linkified URLs: those carry OSC 8, and OSC 8 attribution wins over the
+regex detector, with the full href on every row-span.
+
 **The anchor/href divergence gate can over-block a wrapped bare URL.**
 When Claude Code auto-linkifies a bare URL whose text is the href, and
 its own hard wrap splits the URL *inside the host*, the row-local anchor
