@@ -766,6 +766,82 @@ final class TabResizeFanoutBlindTests: XCTestCase {
         }
     }
 
+    // MARK: - C6/D4. The two seams that let a delivery regression escape twice
+
+    /// A resize taken inside the tab-group fan-out scope must NEVER be
+    /// delivered synchronously, whatever the delivery table would otherwise
+    /// pick.
+    ///
+    /// A background tab draws nothing, so it gains none of the synchronous
+    /// path's "no frame at the old grid size" guarantee — and `coreQueue.sync`
+    /// there makes main wait out that session's entire queued `feed(_:)`
+    /// backlog. With N background tabs streaming build output, one mouse-up
+    /// becomes N serialized drains on the main thread. A height-only window
+    /// resize is row-only for every sibling, which is precisely the case the
+    /// table classifies `.sync`, so this is the common shape rather than a
+    /// corner.
+    func test_resizeInsideFanoutScope_isNeverDeliveredSynchronously() throws {
+        let view = try makePrimedView(width: 600, height: 400)
+        let primed = try XCTUnwrap(view.lastPropagatedSizeForTesting())
+
+        // Control: the same row-only change OUTSIDE the scope is `.sync` — so
+        // this test cannot pass merely because nothing is ever `.sync`.
+        view.setFrameSize(NSSize(width: 600, height: 300))
+        let control = try XCTUnwrap(view.lastPropagatedSizeForTesting())
+        XCTAssertEqual(Int(control.cols), Int(primed.cols),
+                       "premise: width unchanged, so this is a row-only change")
+        XCTAssertEqual(view.lastResizeDeliveryForTesting, .sync,
+                       "premise: a row-only change outside the scope is synchronous")
+
+        view.withNonBlockingResizeDelivery {
+            view.setFrameSize(NSSize(width: 600, height: 220))
+        }
+        XCTAssertEqual(
+            view.lastResizeDeliveryForTesting, .coalesced,
+            "a resize pushed onto a background tab must never block main on its "
+            + "core queue — the fan-out happens at mouse-up, when every other tab's "
+            + "parse backlog would be paid serially on the main thread"
+        )
+    }
+
+    /// `hasPendingCoalescedResize` must stay true for the WHOLE life of a
+    /// coalesced resize — while it is queued and while it is applying — because
+    /// `propagateResize` uses it to refuse the synchronous path.
+    ///
+    /// The regression it guards: the answer was once derived from a flag the
+    /// drain block cleared at ENTRY, so it read false for the entire 10–37 ms
+    /// reflow. Drag samples arrive every ~8 ms, so a diagonal drag's row-only
+    /// frames would then take `coreQueue.sync` straight in behind the reflow —
+    /// the stall the coalescing exists to remove, back again and intermittent.
+    func test_hasPendingCoalescedResize_isTrueUntilTheResizeHasBeenApplied() throws {
+        let session = TerminalSession.makeHeadlessForTests()
+        liveSessions.append(session)
+
+        XCTAssertFalse(session.hasPendingCoalescedResize,
+                       "premise: an idle session has nothing outstanding")
+
+        session.resizeCoalesced(to: .init(cols: 44, rows: 14))
+        XCTAssertTrue(
+            session.hasPendingCoalescedResize,
+            "a coalesced resize must report as outstanding the instant it is "
+            + "requested — the very next drag sample asks this question"
+        )
+
+        waitForSessionGrid(session, cols: 44, rows: 14)
+        // Applied. Poll briefly for the block to unwind (the flag is cleared in
+        // the drain's `defer`, just after the grid is updated).
+        let deadline = Date().addingTimeInterval(2)
+        while session.hasPendingCoalescedResize, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertFalse(
+            session.hasPendingCoalescedResize,
+            "once the resize has been applied and its block has unwound, the "
+            + "synchronous path must become available again — a flag stuck true "
+            + "would pin every later resize onto the coalesced path forever"
+        )
+    }
+
     // MARK: - E. Renderer frame-skip must key on the viewport
 
     /// The frame-skip cache short-circuits `render(in:)` when nothing that

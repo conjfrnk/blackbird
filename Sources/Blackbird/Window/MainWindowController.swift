@@ -770,12 +770,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func applyTabGroupFrame(_ frame: NSRect) {
         guard let window, window.frame != frame else { return }
         isApplyingTabGroupFrame = true
-        // Value-based backstop for the boolean above: `windowDidResize` /
-        // `windowDidMove` also compare against this, so a delegate callback
-        // that AppKit ever delivers asynchronously (an ordered-out, merged tab
-        // member set with `display: false` is the configuration least likely to
-        // be on the synchronous path) is still recognised as our own echo
-        // rather than a user resize. Getting that wrong re-opens RCA A3.
         defer { isApplyingTabGroupFrame = false }
         // A background tab draws nothing, so it needs none of the synchronous
         // resize path's "never a frame at the old grid size" guarantee — and

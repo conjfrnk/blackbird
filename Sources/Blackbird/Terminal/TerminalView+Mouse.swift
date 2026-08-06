@@ -266,6 +266,7 @@ extension TerminalView {
         // pinned.
         let windowResizeMask = Preferences.shared.windowResizeModifier.modifierMask
         if !windowResizeMask.isEmpty, event.modifierFlags.contains(windowResizeMask), let win = window {
+            windowResizeControllerStartFrame = win.frame
             windowResizeController.begin(
                 localPoint: convert(event.locationInWindow, from: nil),
                 in: bounds,
@@ -319,13 +320,24 @@ extension TerminalView {
     }
 
     public override func rightMouseUp(with event: NSEvent) {
+        // Capture before `end()` clears the gesture state.
+        let resizeMovedTheFrame = windowResizeController.isResizing
+            && window?.frame != windowResizeControllerStartFrame
         if windowResizeController.end() {
             // This gesture drives `setFrame` directly, so AppKit never marks
             // the window `inLiveResize` and never posts
             // `windowDidEndLiveResize`. Drive the settle explicitly or the
             // frame save, the full tab-strip refresh and the sibling fan-out
             // — all of which the per-sample path skips — would never run.
-            (window?.windowController as? MainWindowController)?.settleAfterResizeGesture()
+            //
+            // Only when the frame actually moved, though: ⌘-right-CLICK with no
+            // drag also opens (and immediately ends) a resize context, and
+            // settling there would persist a frame nobody changed — through the
+            // `knownUserDriven` bypass, which exists to defeat the
+            // screen-reconfiguration suppression.
+            if resizeMovedTheFrame {
+                (window?.windowController as? MainWindowController)?.settleAfterResizeGesture()
+            }
             return
         }
         let optionHeld = event.modifierFlags.contains(.option)

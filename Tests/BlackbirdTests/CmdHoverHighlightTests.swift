@@ -479,12 +479,18 @@ final class CmdHoverHighlightTests: XCTestCase {
             "premise: the scroll must actually have moved displayOffset, or "
             + "there is no stale-translation to catch"
         )
-        XCTAssertEqual(
-            cell2.row - snap2.displayOffset,
-            2 - snap2.displayOffset,
-            "the buffer line under the pointer is re-derived from the LIVE "
-            + "displayOffset (\(snap2.displayOffset)), not from the one in "
-            + "effect at mouseMoved time (\(snap1.displayOffset))"
+        // The buffer line under the pointer is what moved. Compare against the
+        // line the OLD offset would have produced — that is the difference the
+        // fix is about, and it is a real comparison rather than the same
+        // expression on both sides.
+        let bufferLineNow = cell2.row - snap2.displayOffset
+        let bufferLineUnderOldOffset = cell2.row - snap1.displayOffset
+        XCTAssertNotEqual(
+            bufferLineNow, bufferLineUnderOldOffset,
+            "the pointer's buffer line must be re-derived from the LIVE "
+            + "displayOffset (\(snap2.displayOffset)); resolving it against the "
+            + "offset in effect at mouseMoved time (\(snap1.displayOffset)) is "
+            + "exactly the mistranslation this test exists to catch"
         )
     }
 }

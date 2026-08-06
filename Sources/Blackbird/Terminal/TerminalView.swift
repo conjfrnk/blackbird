@@ -228,6 +228,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// mouse extension drives it.
     let windowResizeController = WindowResizeController()
 
+    /// Window frame when the modifier-right-drag resize gesture began, so
+    /// `rightMouseUp` can tell a real resize from a bare ⌘-right-click (which
+    /// also opens a context) and only settle for the former.
+    var windowResizeControllerStartFrame: NSRect?
+
     private var cancellables: [AnyCancellable] = []
     private let scrollIndicator = ScrollIndicator(frame: .zero)
 
