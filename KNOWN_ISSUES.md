@@ -133,6 +133,44 @@ Not supported: ZWJ sequences like 👨‍👩‍👧 (family) still render as th
 
 **xterm `modifyOtherKeys` — shipped 2026-04-24.** `CSI > 4 ; N m` toggles the mode (level 1 or 2 both light the bit); `CSI 27 ; <mod> ; <cp> ~` emission kicks in for modified printables when no Kitty flag is active. Precedence: Kitty > modifyOtherKeys > legacy. Emacs, tmux `extended-keys on`, neovim auto-request all covered.
 
+## Claude Code hyperlinks — the residuals after issue #30
+
+⌘-click now opens links through a TUI's mouse grab (issue #30, v0.7.2).
+Three related things are deliberately NOT fixed:
+
+**`file://` links from Claude Code stay inert.** Claude Code hyperlinks
+every file path it prints (`ESC]8;;file://<path>`). Those cells carry OSC 8
+attribution, but `OSC8URLPolicy` rejects the scheme, so there is no
+underline, no tooltip, and no click — by design, see the section below.
+kitty / iTerm2 / WezTerm open them; Blackbird won't hand a
+terminal-supplied path to `NSWorkspace.open`.
+
+**OSC 8 emission depends on `TERM` containing `kitty`.** Claude Code's
+hyperlink gate is `supports-hyperlinks` plus an allowlist of
+`TERM_PROGRAM` values (ghostty / Hyper / kitty / alacritty / iTerm.app /
+iTerm2) and one `TERM.includes("kitty")` check. `TERM_PROGRAM=Blackbird`
+is on nobody's list, so the kitty `TERM` is the only thing that makes it
+emit OSC 8 at all. If the bundled kitty terminfo can't install, `TERM`
+falls back to `xterm-256color` and Claude Code **drops link targets
+entirely** — it prints the label with no href, so no terminal-side fix
+can recover them. Spoofing `TERM_PROGRAM` would get us on the allowlist
+and is exactly the identity lie whose blast radius the v0.6.1 same-day
+correction documents (see "Remote TERM" above); the real fix is upstream
+allowlist entries. Over SSH the remote `TERM` is `xterm-256color` for the
+same reason, so a remote Claude Code loses hyperlinks too.
+
+**The anchor/href divergence gate can over-block a wrapped bare URL.**
+When Claude Code auto-linkifies a bare URL whose text is the href, and
+its own hard wrap splits the URL *inside the host*, the row-local anchor
+walk sees a truncated host (`https://gith`) and the anti-phishing gate
+blocks the click with only a log line. Reachability is low (the wrapper
+moves an over-long token to a fresh line before breaking it, so the break
+lands deep in the path unless the content width is under ~20 columns) and
+the safe fix is not cheap: prefix tolerance is unsound — an anchor of
+`https://apple.com` IS a prefix of `https://apple.com.evil.tld/x`, which
+is precisely the phishing shape the gate exists to catch. Revisit with a
+multi-row anchor reconstruction if anyone hits it.
+
 ## `file://` URLs are intentionally not clickable
 
 The scrollback URL detector matches `http(s)://` and `ftp://` only. `mailto:` is clickable too (detected from bare email-shaped strings and from OSC 8 hyperlinks). `file://` is deliberately excluded — we don't want to give a terminal-pasted string the ability to open a local path just by being clickable.

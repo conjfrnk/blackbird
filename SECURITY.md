@@ -67,7 +67,12 @@ isn't writing to my clipboard" report, the answer is: by design.
 
 OSC 8 hyperlinks and regex-detected URLs are filtered through
 `OSC8URLPolicy.isAllowed` before `NSWorkspace.open`. Allowlist:
-`http`, `https`, `ftp`, `mailto`. Notable omissions:
+`http`, `https`, `mailto`. Notable omissions:
+
+- `ftp://` rejected (audit S4-022) — macOS 14+ ships no default FTP
+  client, so the click falls to whatever the user installed, and FTP
+  URLs routinely carry plaintext credentials in the authority
+  component.
 
 - `file://` rejected — `NSWorkspace.open` on `.command` / `.app` /
   `.pkg` / `.workflow` / `.terminal` / `.scpt` executes the payload.

@@ -22,7 +22,8 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 - **Tabs.** Native `NSWindow` tab groups, per-tab shell session, confirmation before closing multi-tab windows.
 - **Input.** Full IME support for CJK, dead keys, trackpad pinch-to-zoom.
 - **Find.** ⌘F regex search across scrollback; ⌘⌥E for replace.
-- **URLs.** ⌘-click opens `http`/`https`/`ftp`/`mailto`. `file://` and other schemes are intentionally blocked — terminal output shouldn't be one click away from executing a local path. OSC 8 hyperlinks supported.
+- **URLs.** ⌘-click opens `http`/`https`/`mailto` — including inside full-screen TUIs that have grabbed the mouse (Claude Code, vim, htop), since ⌘ isn't representable in the xterm mouse protocol and can safely stay terminal-local. `ftp`, `file://` and other schemes are intentionally blocked — terminal output shouldn't be one click away from executing a local path. OSC 8 hyperlinks supported.
+- **Escaping a TUI's mouse grab.** Hold ⌥ to take any mouse gesture back from an application that enabled mouse reporting: ⌥-drag selects text, ⌥-scroll reaches Blackbird's own scrollback, ⌥-right-click opens the context menu.
 - **Clipboard.** ⌘C/⌘V with paste and copy scrubbing (strips C0 controls and Unicode bidi overrides). OSC 52 remote-clipboard writes are disabled by default; the Swift gate (size cap + scrub) is defense-in-depth if ever flipped on.
 - **Drag-and-drop.** File paths dropped onto the terminal are shell-quoted and forwarded to the foreground child. C0 / DEL / bidi-override bytes are stripped before send.
 - **Accessibility.** VoiceOver navigates the terminal by character, word, and line. `.textArea` contract pinned by tests.
