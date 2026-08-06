@@ -104,22 +104,32 @@ extension TerminalView {
                                              effectiveClickCount: clicks,
                                              timestamp: event.timestamp)
 
-        // ⌘-click on a URL → open it. Runs before mouse-reporting and
-        // selection so TUIs can't swallow the gesture. Restricted to
-        // non-mouse-reporting context (or ⌥-held inside a TUI) so that
-        // vim's own <C-click> binding still works when the TUI asks for
-        // the click.
+        // Every mousedown starts a fresh gesture: drop any stale consumed-click
+        // state from a release we never saw (drag out of the window, a modal
+        // that stole the mouseUp).
+        pendingLinkClick = nil
+        didReportMouseDown = false
+
+        // ⌘-click on a URL → open it. Runs before mouse-reporting, window-drag
+        // and selection so a TUI can't swallow the gesture.
         //
-        // If no URL is under the click, ⌘-drag acts like a titlebar drag
-        // and moves the window (matches iTerm2 "⌘-drag to move"). Any view
-        // can initiate window drag by calling `performDrag(with:)`; the
-        // call blocks until the mouse is released, so this returns cleanly
-        // without triggering the selection path below.
-        // ⌘-click on a URL → open it. URL-open stays bound to ⌘ (the
-        // universal link-open convention) regardless of the configurable
-        // window-drag modifier handled just below.
+        // This is deliberately NOT gated on `mouseReportingEnabled()`. ⌘ has no
+        // representation in the xterm mouse protocol (modifier bits are
+        // shift=4, meta=8, ctrl=16 — no super bit) and `MouseReportEncoder`
+        // never encodes modifier bits at all, so a TUI receives a ⌘-click as an
+        // ordinary click and can never have acted on the ⌘. Gating on mouse
+        // reporting therefore bought nothing and cost everything: Claude Code
+        // holds DEC 1000/1002/1003/1006 for its entire REPL session, so every
+        // ⌘-click on a link fell through to the window-drag branch below and
+        // moved the window while the hover underline promised a link (issue
+        // #30). The old comment justified the gate with vim's <C-click> — Ctrl,
+        // which macOS routes to `rightMouseDown` anyway, not ⌘.
+        //
+        // The URL is opened from `mouseUp` (see `pendingLinkClick`), so a
+        // ⌘-drag that merely *starts* on a link still moves the window.
+        // URL-open stays bound to ⌘ — the universal link-open convention —
+        // regardless of the configurable window-drag modifier handled below.
         if event.modifierFlags.contains(.command) {
-            let underlyingOption = event.modifierFlags.contains(.option)
             // Suppress URL resolution when the click landed in the
             // titlebar inset region (above the text grid). The
             // `bufferPointFromEvent` Y-clamp snaps titlebar clicks to
@@ -131,7 +141,7 @@ extension TerminalView {
             let local = convert(event.locationInWindow, from: nil)
             let textAreaTop = bounds.height - titlebarOnlyTopInset
             let inTextArea = local.y < textAreaTop
-            if inTextArea, !mouseReportingEnabled() || underlyingOption {
+            if inTextArea {
                 let p = bufferPointFromEvent(event)
                 // Buffer-relative line → screen row. OSC 8 attribution is
                 // keyed on screen-space cells since the snapshot only carries
@@ -140,7 +150,10 @@ extension TerminalView {
                 // (URLDetector output uses buffer lines).
                 let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
                 if let url = resolveClickURL(screenRow: screenRow, col: p.col) {
-                    urlOpener.open(url)
+                    pendingLinkClick = PendingLinkClick(
+                        url: url,
+                        downLocationInWindow: event.locationInWindow
+                    )
                     return
                 }
             }
@@ -155,8 +168,9 @@ extension TerminalView {
             return
         }
         let optionHeld = event.modifierFlags.contains(.option)
-        if mouseReportingEnabled() && !optionHeld, let session {
-            sendMouseEvent(event, button: 0, press: true, session: session)
+        if mouseReportingEnabled() && !optionHeld, session != nil {
+            didReportMouseDown = true
+            sendMouseEvent(event, button: 0, press: true)
             return
         }
         // Not URL-open / window-drag / mouse-reporting → a selection gesture.
@@ -164,11 +178,34 @@ extension TerminalView {
     }
 
     public override func mouseUp(with event: NSEvent) {
-        if selectionController.endDrag() { return }
-        let optionHeld = event.modifierFlags.contains(.option)
-        if mouseReportingEnabled() && !optionHeld, let session {
-            sendMouseEvent(event, button: 0, press: false, session: session)
+        // A ⌘-mousedown that resolved to a URL: open it now, provided the
+        // pointer stayed put (a real drag already dropped the pending click in
+        // `mouseDragged` and handed the gesture to the window-drag path).
+        // Consuming the release here — rather than opening on mousedown — is
+        // what keeps ⌘-drag-to-move-window usable over link-dense output.
+        if let pending = pendingLinkClick {
+            pendingLinkClick = nil
+            let dx = event.locationInWindow.x - pending.downLocationInWindow.x
+            let dy = event.locationInWindow.y - pending.downLocationInWindow.y
+            let slop = TerminalView.linkClickDragSlopPoints
+            if abs(dx) <= slop, abs(dy) <= slop {
+                urlOpener.open(pending.url)
+            }
+            // Either way the press was never reported, so the release must not
+            // be either — see `didReportMouseDown`.
+            return
         }
+        if selectionController.endDrag() {
+            didReportMouseDown = false
+            return
+        }
+        // Mirror what mousedown DID. Re-deriving `mouseReportingEnabled()`
+        // here would emit an orphan release when the press was consumed
+        // locally (⌘-URL-open, window-drag) or when the TUI flipped mouse mode
+        // between the two events.
+        guard didReportMouseDown else { return }
+        didReportMouseDown = false
+        sendMouseEvent(event, button: 0, press: false)
     }
 
     /// The single view-local → buffer mapping: nil-snap guard (M-17),
@@ -233,11 +270,11 @@ extension TerminalView {
         // and ⌥+scroll do elsewhere. Without this, vim / tmux / htop eat
         // every right-click and the Copy/Paste context menu is unreachable.
         let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, let session else {
+        guard mouseReportingEnabled() && !optionHeld, session != nil else {
             super.rightMouseDown(with: event)
             return
         }
-        sendMouseEvent(event, button: 2, press: true, session: session)
+        sendMouseEvent(event, button: 2, press: true)
     }
 
     public override func rightMouseDragged(with event: NSEvent) {
@@ -278,11 +315,11 @@ extension TerminalView {
             return
         }
         let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, let session else {
+        guard mouseReportingEnabled() && !optionHeld, session != nil else {
             super.rightMouseUp(with: event)
             return
         }
-        sendMouseEvent(event, button: 2, press: false, session: session)
+        sendMouseEvent(event, button: 2, press: false)
     }
 
     // MARK: - Middle-mouse button reporting
@@ -295,31 +332,31 @@ extension TerminalView {
 
     public override func otherMouseDown(with event: NSEvent) {
         let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, let session else {
+        guard mouseReportingEnabled() && !optionHeld, session != nil else {
             super.otherMouseDown(with: event)
             return
         }
-        sendMouseEvent(event, button: 1, press: true, session: session)
+        sendMouseEvent(event, button: 1, press: true)
     }
 
     public override func otherMouseDragged(with event: NSEvent) {
         let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, let session,
+        guard mouseReportingEnabled() && !optionHeld, session != nil,
               anyEventMouseEnabled() || dragReportingEnabled() else {
             super.otherMouseDragged(with: event)
             return
         }
         // xterm motion reporting: button + 32 for drag-with-button-held.
-        sendMouseEvent(event, button: 1 + 32, press: true, session: session)
+        sendMouseEvent(event, button: 1 + 32, press: true)
     }
 
     public override func otherMouseUp(with event: NSEvent) {
         let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, let session else {
+        guard mouseReportingEnabled() && !optionHeld, session != nil else {
             super.otherMouseUp(with: event)
             return
         }
-        sendMouseEvent(event, button: 1, press: false, session: session)
+        sendMouseEvent(event, button: 1, press: false)
     }
 
     /// True when the TUI enabled DEC mode 1003 (any-event tracking —
@@ -342,13 +379,13 @@ extension TerminalView {
     /// emission is a mouse-reporting concern so it lives here. Audit
     /// terminal-view-2 F14.
     func reportPointerMotionIfNeeded(for event: NSEvent, screenRow: Int, col: Int) {
-        guard let session, mouseReportingEnabled(), anyEventMouseEnabled(),
+        guard session != nil, mouseReportingEnabled(), anyEventMouseEnabled(),
               !event.modifierFlags.contains(.option),
               lastReportedMotionCell != BBXYPoint(col: col, row: screenRow) else {
             return
         }
         lastReportedMotionCell = BBXYPoint(col: col, row: screenRow)
-        sendMouseEvent(event, button: 35, press: true, session: session)
+        sendMouseEvent(event, button: 35, press: true)
     }
 
     private func dragReportingEnabled() -> Bool {
@@ -399,9 +436,9 @@ extension TerminalView {
             // thinking but was backwards for Natural OFF — `less` /
             // `tmux` scrolled in the wrong direction. Audit M7.
             if event.scrollingDeltaY > 0 {
-                sendMouseEvent(event, button: 65, press: true, session: session)
+                sendMouseEvent(event, button: 65, press: true)
             } else if event.scrollingDeltaY < 0 {
-                sendMouseEvent(event, button: 64, press: true, session: session)
+                sendMouseEvent(event, button: 64, press: true)
             }
         } else {
             // Normal mode: scroll the display through scrollback history.
@@ -436,14 +473,41 @@ extension TerminalView {
     }
 
     public override func mouseDragged(with event: NSEvent) {
+        // A ⌘-mousedown on a link that turns into a real drag is a window
+        // drag, not a click: drop the pending open and hand the gesture to
+        // `performDrag`. Below the slop it stays pending so a shaky click
+        // still opens the link on mouseUp.
+        if let pending = pendingLinkClick {
+            let dx = event.locationInWindow.x - pending.downLocationInWindow.x
+            let dy = event.locationInWindow.y - pending.downLocationInWindow.y
+            let slop = TerminalView.linkClickDragSlopPoints
+            guard abs(dx) > slop || abs(dy) > slop else { return }
+            pendingLinkClick = nil
+            let windowDragMask = Preferences.shared.windowDragModifier.modifierMask
+            if !windowDragMask.isEmpty, event.modifierFlags.contains(windowDragMask) {
+                window?.performDrag(with: event)
+            }
+            return
+        }
         if selectionController.handleDrag(with: event) { return }
         // No selection in progress — forward to PTY if the app asked for
-        // motion/drag reporting.
-        if let mode = currentSnapshot?.termMode,
-           (mode.contains(.mouseMotion) || mode.contains(.mouseDrag)),
-           let session {
-            sendMouseEvent(event, button: 32, press: true, session: session)
-        }
+        // motion/drag reporting. Deduped on the cell, like the DEC 1003
+        // no-button motion path (`reportPointerMotionIfNeeded`): AppKit
+        // delivers a dragged event per pointer sample (up to the display's
+        // refresh rate), and a TUI that repaints per report — Claude Code
+        // repaints its whole UI — turns that into a self-inflicted flood.
+        // ⌥ escapes reporting here exactly as it does for press/release.
+        guard !event.modifierFlags.contains(.option),
+              let mode = currentSnapshot?.termMode,
+              mode.contains(.mouseMotion) || mode.contains(.mouseDrag),
+              session != nil
+        else { return }
+        let p = bufferPointFromEvent(event)
+        let screenRow = Int(p.line) + (currentSnapshot?.displayOffset ?? 0)
+        let cell = BBXYPoint(col: p.col, row: screenRow)
+        guard lastReportedMotionCell != cell else { return }
+        lastReportedMotionCell = cell
+        sendMouseEvent(event, button: 32, press: true)
     }
 
     func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {
@@ -460,7 +524,7 @@ extension TerminalView {
     /// because the DEC 1003 any-event path in
     /// `TerminalView+Hover.swift`'s `mouseMoved` reuses it for the
     /// no-button motion case.
-    func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool, session: TerminalSession) {
+    func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool) {
         let loc = convert(event.locationInWindow, from: nil)
         // Paranoia. `event.locationInWindow` is a CGFloat; a misbehaving
         // input device or a bridged NaN / Infinity can slip through, and
@@ -501,7 +565,15 @@ extension TerminalView {
             col: col,
             row: row
         ) else { return }
-        session.send(bytes)
+        // Route through the shared `sendToSession` seam rather than
+        // `session.send` directly so the DEBUG `ptyRecorderForTests` recorder
+        // captures mouse reports too. Before this, the whole mouse-reporting
+        // layer was structurally untestable (audit swift-tests-view: "Untested:
+        // mouseReportingEnabled() gating; Option-held escape …"), which is how
+        // issue #30's gate survived. `sendToSession` no-ops when there is no
+        // session, so callers keep their own `session != nil` guard purely as
+        // the "is there anything to report to" precondition.
+        sendToSession(bytes)
     }
 
 }

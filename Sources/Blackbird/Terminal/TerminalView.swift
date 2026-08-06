@@ -296,6 +296,42 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// system count can't be trusted.
     var lastMouseDownMark: ClickSequenceMark?
 
+    /// A ⌘-mousedown that landed on a resolvable URL. The URL is opened on
+    /// mouse**Up**, not mousedown, and only when the pointer never left the
+    /// down cell's neighbourhood — so ⌘-drag-to-move-window still works when
+    /// the drag happens to start on a link (Claude Code's transcript is dense
+    /// with hyperlinks, so "⌘-drag from anywhere" would otherwise become
+    /// "⌘-drag from anywhere except a link, which opens a browser tab").
+    ///
+    /// While this is non-nil the gesture is CONSUMED: no xterm mouse report is
+    /// emitted for the press, the drag, or the release, and no selection
+    /// starts. ⌘ has no representation in the xterm mouse protocol (the
+    /// modifier bits are shift=4, meta=8, ctrl=16 — there is no super bit) and
+    /// `MouseReportEncoder` never sets modifier bits at all, so a TUI could
+    /// never have distinguished this from a plain click: swallowing it costs
+    /// the TUI nothing it could have acted on.
+    struct PendingLinkClick {
+        let url: URL
+        /// Window-space location of the mousedown, for the drag threshold.
+        let downLocationInWindow: NSPoint
+    }
+    var pendingLinkClick: PendingLinkClick?
+
+    /// How far (points, window space) the pointer may travel between a
+    /// ⌘-mousedown on a link and its mouseUp and still count as a click.
+    /// Beyond it the gesture is a window drag and the pending link is dropped.
+    /// 3 pt matches the slop AppKit itself allows before promoting a click to
+    /// a drag.
+    static let linkClickDragSlopPoints: CGFloat = 3
+
+    /// Whether `mouseDown` actually emitted a press report to the TUI.
+    /// `mouseUp` mirrors what mousedown DID rather than re-evaluating the
+    /// predicate: the TUI can flip mouse mode between the two events, and the
+    /// ⌘-URL-open / window-drag branches consume the press locally. Without
+    /// this the TUI sees a release (`CSI < 0 ; c ; r m`) with no matching
+    /// press — the same asymmetry the ⌥-bypass family fixed for right-click.
+    var didReportMouseDown = false
+
     /// Drives edge-autoscroll while the user drags a selection past the
     /// top/bottom of the viewport. AppKit only delivers `mouseDragged` on
     /// pointer motion, so a user holding the pointer stationary past the edge
@@ -2121,11 +2157,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         #endif
         guard let snap = currentSnapshot else { return nil }
-        let resolver = SnapshotHyperlinkResolver(snapshot: snap)
+        let resolver = SnapshotHyperlinkResolver(
+            snapshot: snap,
+            regexMatches: cachedRegexMatches(for: snap)
+        )
         if let raw = resolver.osc8URL(row: screenRow, col: col) {
             return acceptOSC8(resolver, raw)
         }
         return allow(resolver.regexURL(row: screenRow, col: col))
+    }
+
+    /// The hover path's URL-match scan when it is current for `snap`, so the
+    /// click path reuses it instead of re-running the O(rows × cols) regex
+    /// sweep. `SnapshotHyperlinkResolver`'s own doc has always promised this;
+    /// no production call site actually passed the slice until now — which
+    /// mattered more once ⌘-mousedown began resolving on every ⌘-click,
+    /// including the ones that go on to become window drags.
+    private func cachedRegexMatches(for snap: BBSnapshot) -> [URLMatch]? {
+        guard hoverCoordinator.cachedURLMatchesSeq == snap.sequenceID else { return nil }
+        return hoverCoordinator.cachedURLMatches
     }
 
     /// The real OSC 8 href under a click ONLY when `resolveClickURL` is
@@ -2150,7 +2200,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         #endif
         guard let snap = currentSnapshot else { return nil }
-        return resolveDivergent(SnapshotHyperlinkResolver(snapshot: snap))
+        return resolveDivergent(SnapshotHyperlinkResolver(
+            snapshot: snap,
+            regexMatches: cachedRegexMatches(for: snap)
+        ))
     }
 
     // MARK: - NSAccessibility -------------------------------------------
