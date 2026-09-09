@@ -46,7 +46,7 @@ with open(sys.argv[2], encoding="utf-8") as f:
     src = f.read().splitlines()
 
 def inline(text: str) -> str:
-    text = html.escape(text, quote=False)
+    text = html.escape(text, quote=True)
     # `code` first so markup inside code spans is left alone.
     parts = re.split(r"(`[^`]*`)", text)
     for i, p in enumerate(parts):

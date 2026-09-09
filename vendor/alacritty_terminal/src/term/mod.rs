@@ -1342,7 +1342,11 @@ impl<T: EventListener> Handler for Term<T> {
         match intermediate {
             None => {
                 trace!("Reporting primary device attributes");
-                let text = String::from("\x1b[?6c");
+                // Blackbird addition (re-apply on bump): advertise VT220 +
+                // ANSI colour (`?62;22c`) like kitty/foot/Ghostty instead of
+                // bare VT102 (`?6c`), which some tools (mc, sixel probes)
+                // gate features on.
+                let text = String::from("\x1b[?62;22c");
                 self.event_proxy.send_event(Event::PtyWrite(text));
             },
             Some('>') => {

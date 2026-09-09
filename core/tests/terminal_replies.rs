@@ -89,10 +89,10 @@ fn da1_primary_device_attributes() {
     // VT102 (`ESC[?6c`) — inherit that. If this assertion ever changes, a
     // shell somewhere is likely to start behaving differently.
     let writes = run(b"\x1b[c");
-    assert_eq!(writes, vec![b"\x1b[?6c".to_vec()]);
+    assert_eq!(writes, vec![b"\x1b[?62;22c".to_vec()]);
 
     let writes = run(b"\x1b[0c");
-    assert_eq!(writes, vec![b"\x1b[?6c".to_vec()]);
+    assert_eq!(writes, vec![b"\x1b[?62;22c".to_vec()]);
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn multiple_queries_reply_in_order() {
     assert_eq!(
         writes,
         vec![
-            b"\x1b[?6c".to_vec(),
+            b"\x1b[?62;22c".to_vec(),
             b"\x1b[0n".to_vec(),
             b"\x1b[1;1R".to_vec(),
         ]

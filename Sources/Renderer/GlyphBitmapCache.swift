@@ -96,7 +96,15 @@ enum GlyphBitmapCache {
     /// cache is correct from any thread — `GlyphAtlas` is main-confined in
     /// production but tests construct atlases on the XCTest thread. macOS 14+
     /// (the deployment floor); mirrors the project's existing lock idiom.
-    private static let storage = OSAllocatedUnfairLock<[Key: Bitmap]>(initialState: [:])
+    /// All cache state under ONE lock so the group/dict invariant (every
+    /// group in `order` has entries in `dict`, and vice versa) lives in a
+    /// single critical section.
+    private struct State {
+        var dict: [Key: Bitmap] = [:]
+        var order: [Group] = []
+        var evictions = 0
+    }
+    private static let storage = OSAllocatedUnfairLock<State>(initialState: State())
 
     /// A (font, size, scale) set — the unit of eviction. When the cache is
     /// full, the least-recently-INSERTED group other than the incoming
@@ -109,11 +117,7 @@ enum GlyphBitmapCache {
         let scaleQ: Int
         init(_ k: Key) { fontName = k.fontName; sizeQ = k.sizeQ; scaleQ = k.scaleQ }
     }
-    /// Groups in first-insertion order (oldest first). Only ever touched
-    /// from inside `storage.withLock`, so the outer lock orders it.
-    private static let groupOrder = OSAllocatedUnfairLock<[Group]>(initialState: [])
-    private static let evictions = OSAllocatedUnfairLock<Int>(initialState: 0)
-    static var evictionCount: Int { evictions.withLock { $0 } }
+    static var evictionCount: Int { storage.withLock { $0.evictions } }
 
     /// One-shot "cache saturated" breadcrumb. Only ever written inside
     /// `storage.withLock`, so the lock that guards `storage` also serialises
@@ -137,7 +141,7 @@ enum GlyphBitmapCache {
     static func quantize(_ value: CGFloat) -> Int { Int((value * 100).rounded()) }
 
     static func get(_ key: Key) -> Bitmap? {
-        storage.withLock { $0[key] }
+        storage.withLock { $0.dict[key] }
     }
 
     /// Insert `bitmap` for `key`. No-op once the cache is full and `key` is
@@ -145,15 +149,12 @@ enum GlyphBitmapCache {
     /// declined insert logs once (see `saturationLogged`).
     static func put(_ key: Key, _ bitmap: Bitmap) {
         let group = Group(key)
-        storage.withLock { dict in
-            if dict[key] == nil && dict.count >= maxEntries {
+        storage.withLock { state in
+            if state.dict[key] == nil && state.dict.count >= maxEntries {
                 // Evict the oldest OTHER group. If the incoming group is the
                 // only one (a single font set really has > maxEntries
                 // distinct glyphs), refuse as before.
-                let victim: Group? = groupOrder.withLock { order in
-                    order.first { $0 != group }
-                }
-                guard let victim else {
+                guard let victim = state.order.first(where: { $0 != group }) else {
                     if !saturationLogged {
                         saturationLogged = true
                         logger.notice(
@@ -162,17 +163,15 @@ enum GlyphBitmapCache {
                     }
                     return
                 }
-                dict = dict.filter { Group($0.key) != victim }
-                groupOrder.withLock { order in order.removeAll { $0 == victim } }
-                evictions.withLock { $0 &+= 1 }
+                state.dict = state.dict.filter { Group($0.key) != victim }
+                state.order.removeAll { $0 == victim }
+                state.evictions &+= 1
                 logger.log("GlyphBitmapCache evicted font set \(victim.fontName, privacy: .public)@\(victim.sizeQ, privacy: .public)/\(victim.scaleQ, privacy: .public) to admit new glyphs")
             }
-            if dict[key] == nil {
-                groupOrder.withLock { order in
-                    if !order.contains(group) { order.append(group) }
-                }
+            if state.dict[key] == nil, !state.order.contains(group) {
+                state.order.append(group)
             }
-            dict[key] = bitmap
+            state.dict[key] = bitmap
         }
     }
 
@@ -180,12 +179,10 @@ enum GlyphBitmapCache {
     /// Test seam: current entry count. Lets a microbenchmark / unit test
     /// observe a cache hit (count unchanged across a second identical
     /// rasterisation) without exposing the storage.
-    static var _countForTests: Int { storage.withLock { $0.count } }
+    static var _countForTests: Int { storage.withLock { $0.dict.count } }
     /// Test seam: drop all entries so a test starts from a known-cold cache.
     static func _resetForTests() {
-        storage.withLock { $0.removeAll(keepingCapacity: false) }
-        groupOrder.withLock { $0.removeAll() }
-        evictions.withLock { $0 = 0 }
+        storage.withLock { $0 = State() }
     }
     #endif
 }

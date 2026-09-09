@@ -245,6 +245,18 @@ public final class Preferences: ObservableObject {
     /// Show a macOS notification for OSC 9 / 777 / 99 from programs when
     /// this tab is not the one the user is looking at.
     @AppStorage("bb.programNotifications") public var programNotifications: Bool = true
+    /// Scrollback lines per session, applied to NEW sessions. Stored as a
+    /// Double like the other numeric prefs; clamped to
+    /// `scrollbackLinesRange` on read (the core caps at 200k).
+    @AppStorage("bb.scrollbackLines") public var scrollbackLines: Double = 100_000
+    public static let scrollbackLinesRange: ClosedRange<Double> = 1_000...200_000
+    public var scrollbackLinesClamped: UInt32 {
+        let v = scrollbackLines.isFinite ? scrollbackLines : 100_000
+        return UInt32(min(Self.scrollbackLinesRange.upperBound, max(Self.scrollbackLinesRange.lowerBound, v)))
+    }
+    /// Copy the selection to the clipboard as soon as a drag ends (iTerm2 /
+    /// kitty / Ghostty option). Off by default; ⌘C is unaffected.
+    @AppStorage("bb.copyOnSelect") public var copyOnSelect: Bool = false
     /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. ON by default
     /// since issue #24: modern TUIs (Codex CLI, nvim, delta, fzf) probe
     /// OSC 10/11 at startup for light/dark theme detection, and a silent
@@ -462,6 +474,8 @@ public final class Preferences: ObservableObject {
             Preferences.k("shellPath"):         "",
             Preferences.k("hangDetection"):     true,
             Preferences.k("programNotifications"): true,
+            Preferences.k("scrollbackLines"):   100_000.0,
+            Preferences.k("copyOnSelect"):      false,
         ])
 
         // Type-guard pass. `@AppStorage<Double>` trusts the KVC getter — a

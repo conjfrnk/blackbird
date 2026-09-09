@@ -191,6 +191,9 @@ public final class TerminalSession: ObservableObject {
     /// poisoned itself after a caught panic; feeding more bytes would only
     /// produce a Fatal per chunk against a grid in an unknown state.
     private(set) var coreFailed: Bool = false
+    /// The panic message once the core has failed; the window controller
+    /// presents it with a "Close Tab" sheet. Main thread.
+    @Published public private(set) var coreFailureMessage: String?
 
     /// The main-publish coalescer. Owns the F1/F11/H8 pending-slot machinery
     /// and the feed/scheduleSnapshotAfterBurst/publish paths, sharing this
@@ -232,7 +235,10 @@ public final class TerminalSession: ObservableObject {
         envOverrides: [String: String] = [:]
     ) throws -> TerminalSession {
         let t0 = CACurrentMediaTime()
-        guard let bb = BBTerm(size: .init(cols: size.cols, rows: size.rows)) else {
+        guard let bb = BBTerm(
+            size: .init(cols: size.cols, rows: size.rows),
+            scrollback: Preferences.shared.scrollbackLinesClamped
+        ) else {
             throw SessionError.coreInitFailed
         }
         let tCore = CACurrentMediaTime()
@@ -873,9 +879,11 @@ public final class TerminalSession: ObservableObject {
         let osc52 = Preferences.shared.osc52Enabled
         lastSentColorQueryEnabled = colorQuery
         lastSentOsc52WriteEnabled = osc52
+        let version = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? ""
         coreQueue.async { [bbterm] in
             bbterm.setColorQueryEnabled(colorQuery)
             bbterm.setOsc52WriteEnabled(osc52)
+            bbterm.setTerminalVersion(version)
         }
         // ⚠ FEEDBACK-LOOP HAZARD — DO NOT WRITE USERDEFAULTS HERE. Any write
         // to UserDefaults from this closure fires NSUserDefaultsDidChange-
@@ -1184,8 +1192,18 @@ public final class TerminalSession: ObservableObject {
             titleState.titleOverride = nil
             titleState.applyOscTitle("[fatal] core panic — close this tab: \(msg)")
             publishLock.lock()
+            let firstFailure = !coreFailed
             coreFailed = true
             publishLock.unlock()
+            // The grid is in an unknown state and every core entry is now
+            // a no-op, so keeping the PTY alive would only let keystrokes
+            // reach a child whose output nobody can see. Tear the session
+            // down (which ends the child) and let the controller show a
+            // sheet; the tab closes from there.
+            if firstFailure {
+                coreFailureMessage = msg
+                terminate()
+            }
         }
     }
 

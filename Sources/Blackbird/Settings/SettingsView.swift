@@ -160,6 +160,21 @@ public struct SettingsView: View {
         .scrollContentBackground(.hidden)
     }
 
+    /// Live validation for the Shell field: nil when empty (login shell) or
+    /// an executable absolute path; otherwise the reason the value will be
+    /// ignored. A typo here used to fall back to zsh with only a log line.
+    static func shellPathProblem(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty { return nil }
+        if !value.hasPrefix("/") {
+            return "Enter an absolute path (for example /opt/homebrew/bin/fish). \"\(value)\" will be ignored and the login shell used."
+        }
+        if !ShellResolver.isExecutableFile(value) {
+            return "\(value) is not an executable file; the login shell will be used."
+        }
+        return nil
+    }
+
     // MARK: - Behavior
 
     private var behaviorTab: some View {
@@ -189,13 +204,25 @@ public struct SettingsView: View {
                 Toggle("Show notifications from programs", isOn: $prefs.programNotifications)
                 Toggle("Automatic shell integration", isOn: $prefs.automaticShellIntegration)
                 Toggle("Set locale environment variables (LANG)", isOn: $prefs.setLocaleEnvironment)
-                TextField("Shell", text: $prefs.shellPath, prompt: Text("Login shell"))
+                Toggle("Copy selected text automatically", isOn: $prefs.copyOnSelect)
+                Picker("Scrollback lines", selection: $prefs.scrollbackLines) {
+                    Text("10,000").tag(10_000.0)
+                    Text("50,000").tag(50_000.0)
+                    Text("100,000").tag(100_000.0)
+                    Text("200,000").tag(200_000.0)
+                }
+                TextField("Shell", text: $prefs.shellPath, prompt: Text("Login shell (or an absolute path)"))
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
+                if let problem = Self.shellPathProblem(prefs.shellPath) {
+                    Text(problem)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
             } header: {
                 Text("Terminal")
             } footer: {
-                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs. Shell integration adds prompt marks and the ssh terminfo fix for zsh and fish without touching your rc files. Shell: leave empty to run your account's login shell, or give the absolute path of another program. Notifications: programs that emit OSC 9, OSC 777 or kitty OSC 99 (and a bell while you're in another tab or app) reach Notification Center and dot the tab. Changes apply to new sessions.")
+                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs. Shell integration adds prompt marks and the ssh terminfo fix for zsh and fish without touching your rc files. Shell: leave empty to run your account's login shell, or give the absolute path of another program. Scrollback applies to new sessions (the core caps at 200,000). Notifications: programs that emit OSC 9, OSC 777 or kitty OSC 99 (and a bell while you're in another tab or app) reach Notification Center and dot the tab. Changes apply to new sessions.")
             }
 
             Section {

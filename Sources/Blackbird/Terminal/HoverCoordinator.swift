@@ -436,6 +436,19 @@ final class HoverCoordinator {
                 let rescan = Self.incrementalRescanRows(damaged: damaged, rows: snap.rows)
                 let offset = snap.displayOffset
                 let rescanLines = Set(rescan.map { Int32($0 - offset) })
+                // A cached URL that runs to the last column of the row just
+                // ABOVE the rescan set may wrap into it; its cached extent
+                // would go stale and the rescanned continuation row would be
+                // matched on its own. Rare, so take the full scan then.
+                let lastCol = snap.cols - 1
+                let wrapRisk = cachedURLMatches.contains { m in
+                    m.endCol >= lastCol && rescan.contains(Int(m.line) + offset + 1) && !rescanLines.contains(m.line)
+                }
+                if wrapRisk {
+                    cachedURLMatches = URLDetector.scan(snapshot: snap)
+                    cachedURLMatchesSeq = snap.sequenceID
+                    return
+                }
                 let kept = cachedURLMatches.filter { !rescanLines.contains($0.line) }
                 cachedURLMatches = kept + URLDetector.scan(snapshot: snap, rows: rescan)
                 cachedURLMatchesSeq = snap.sequenceID

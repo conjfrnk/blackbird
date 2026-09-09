@@ -194,8 +194,28 @@ final class FindController {
                 to:   BufferPoint(line: b, col: max(0, cols - 1)),
                 rectangular: true
             )
+            let pieces = joined.split(separator: "\n", omittingEmptySubsequences: false)
+            // History can shrink between computing `topLine` and this call
+            // (RIS, ⌘K, a reflowing resize); the core then clamps the range
+            // and returns fewer rows, and assigning them from `a` would shift
+            // every match in the chunk. Fall back to per-row capture, which
+            // can't misattribute.
+            if pieces.count != Int(b - a + 1) {
+                var ln = a
+                while ln <= b {
+                    let hay = Self.trimmingTrailingSpaces(session.textRange(
+                        from: BufferPoint(line: ln, col: 0),
+                        to:   BufferPoint(line: ln, col: max(0, cols - 1)),
+                        rectangular: true
+                    ))
+                    if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil)) }
+                    if ln == Int32.max { break }
+                    ln += 1
+                }
+                return
+            }
             var ln = a
-            for piece in joined.split(separator: "\n", omittingEmptySubsequences: false) {
+            for piece in pieces {
                 if ln > b { break }
                 // Rectangular extraction pads to the full width; drop the
                 // trailing run of spaces so a " " query can't hit padding.
@@ -212,7 +232,21 @@ final class FindController {
             if inViewport(ln) {
                 if let a = chunkStart { flushChunk(a, ln - 1); chunkStart = nil }
                 let screenRow = Int(ln) + offset
-                if let mapped = snap?.rowTextWithUTF16ToColMap(row: screenRow) {
+                guard let mapped = snap?.rowTextWithUTF16ToColMap(row: screenRow) else {
+                    // Snapshot had no cell text for a viewport row (should not
+                    // happen; the pre-v0.8.1 loop had this fallback too): take
+                    // the core's text rather than dropping the row.
+                    let hay = Self.trimmingTrailingSpaces(session.textRange(
+                        from: BufferPoint(line: ln, col: 0),
+                        to:   BufferPoint(line: ln, col: max(0, cols - 1)),
+                        rectangular: true
+                    ))
+                    if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil)) }
+                    if ln == Int32.max { break }
+                    ln += 1
+                    continue
+                }
+                do {
                     // The cell walker pads to the grid width; trim the trailing
                     // run of spaces (a prefix cut keeps `utf16ToCol` valid for
                     // every remaining index) and skip all-blank rows, matching

@@ -23,6 +23,10 @@ enum HangReportStore {
     /// survives reboots so post-hoc investigation works, and doesn't
     /// race with `/tmp` cleaners on very long sessions.
     static func captureHangReport(age: Double) {
+        // Keep the count cap honest between launches too: a session with
+        // periodic stalls would otherwise grow the directory until the next
+        // start.
+        defer { pruneExcessReports(keep: 20) }
         // Audit fix-#21 (2026-05-11): the previous filename used 1-second
         // granularity (`Int(timeIntervalSince1970)`). Two hangs that recover
         // and re-stall within the same wall-clock second produce identical
@@ -176,8 +180,14 @@ enum HangReportStore {
         var dated: [(name: String, mtime: Date)] = []
         for name in entries where name.hasPrefix("hang-") && name.hasSuffix(".txt") {
             let path = "\(directory)/\(name)"
-            guard let attrs = try? fm.attributesOfItem(atPath: path),
-                  let mtime = attrs[.modificationDate] as? Date else { continue }
+            let attrs: [FileAttributeKey: Any]
+            do {
+                attrs = try fm.attributesOfItem(atPath: path)
+            } catch {
+                logger.error("pruneExcessReports stat \(path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                continue
+            }
+            guard let mtime = attrs[.modificationDate] as? Date else { continue }
             dated.append((name, mtime))
         }
         guard dated.count > keep else { return }

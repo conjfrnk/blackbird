@@ -37,9 +37,9 @@ awk -v v="$VERSION" '
         if (found) exit
         if (index($0, "## [" v "]") == 1) found = 1
     }
-    found { print }
-    END { exit found ? 0 : 1 }
+    found { print; if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^##/) body = 1 }
+    END { exit (found && body) ? 0 : 1 }
 ' "$FILE" || {
-    echo "!! CHANGELOG.md has no '## [$VERSION]' section" >&2
+    echo "!! CHANGELOG.md has no '## [$VERSION]' section with at least one line of notes" >&2
     exit 1
 }

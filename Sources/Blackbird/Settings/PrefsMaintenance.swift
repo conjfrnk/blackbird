@@ -74,7 +74,7 @@ enum PrefsSanitizer {
     /// v0.1.5 with a corrupted legacy key still gets cleaned up before the
     /// migration copies it forward. (settings F7)
     static func sanitizeStoredTypes(in defaults: UserDefaults, domain: String) {
-        let numericDoubleKeys = ["fontSize", "translucency"]
+        let numericDoubleKeys = ["fontSize", "translucency", "scrollbackLines"]
         let boolKeys = [
             "cursorBlink", "confirmClose", "autoUpdateChecks",
             "osc52Enabled", "colorQueryEnabled",
@@ -83,7 +83,7 @@ enum PrefsSanitizer {
             // yes) is stripped before the registered default is applied,
             // matching sibling bool prefs.
             "confirmMultiLinePaste",
-            "setLocaleEnvironment", "hangDetection", "programNotifications",
+            "setLocaleEnvironment", "hangDetection", "programNotifications", "copyOnSelect",
             // Issue #23: manual computed property (not @AppStorage) but the
             // same wrong-type CLI-write hazard applies to its raw key.
             "automaticShellIntegration",

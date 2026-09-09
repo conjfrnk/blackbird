@@ -99,12 +99,12 @@ fn dcs_followed_by_real_input_still_processes_real_input() {
     let input = b"\x1bPqignore\x1b\\hello";
     let _ = feed(input);
     // The reliable check: a subsequent DA1 query after the DCS returns
-    // the standard reply (\x1b[?6c), which means the state machine is
+    // the standard reply (\x1b[?62;22c), which means the state machine is
     // no longer stuck inside DCS.
     let probe = b"\x1bPqgarbage\x1b\\\x1b[c";
     let (_events, writes) = feed(probe);
     assert!(
-        writes.iter().any(|w| w == b"\x1b[?6c"),
+        writes.iter().any(|w| w == b"\x1b[?62;22c"),
         "after DCS+ST the parser must return to ground and reply to DA1, got writes: {:?}",
         writes
     );

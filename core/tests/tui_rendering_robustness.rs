@@ -517,7 +517,7 @@ fn unknown_dcs_with_st_split_does_not_corrupt_state() {
     let chunks: &[&[u8]] = &[b"\x1bPzunknown_payload\x1b", b"\\\x1b[c"];
     unsafe {
         let cap = drive_chunks(chunks);
-        let any_da1 = cap.pty_writes.iter().any(|w| w == b"\x1b[?6c");
+        let any_da1 = cap.pty_writes.iter().any(|w| w == b"\x1b[?62;22c");
         assert!(
             any_da1,
             "DA1 reply must arrive after fragmented unknown DCS; got writes {:?}",

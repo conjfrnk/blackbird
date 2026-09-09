@@ -133,7 +133,7 @@ extension TerminalView {
     /// and any bidi overrides won't reach Safari/Mail via this path (it
     /// goes through an NSPasteboard the service owns, then a UI chosen
     /// by the user — we never copy onto the general pasteboard here).
-    private func selectedStringForServices() -> String? {
+    func selectedStringForServices() -> String? {
         guard let sel = selection, let session, let snap = currentSnapshot else {
             return nil
         }

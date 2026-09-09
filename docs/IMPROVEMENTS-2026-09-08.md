@@ -194,3 +194,48 @@ programs. Sizes: S hours, M days, L week+, XL multi-week.
 5. Program 3 (bounded ingress) — the one that changes the app's worst-case behaviour under load.
 6. 0.5 (notifications + bell) and the Claude Code positioning items, with the upstream PR in parallel.
 7. Programs 5 → 6 → 7 as renderer/core quarters.
+
+---
+
+## Status (2026-09-09)
+
+Implemented on `main` after the sweep, in the order the dossier suggested
+(see CHANGELOG `[Unreleased]` for user-facing wording and the commit
+messages for mechanism):
+
+- **Tier 0:** all seven — runner/Xcode migration (0.1, 0.2), Intel texture
+  storage (0.3), alternate scroll (0.4), Claude Code notifications + bell
+  attention (0.5), ex-group window leak (0.6), find scrollback capture
+  (0.7), PTY→parser backpressure (0.8).
+- **Tier 1:** all except 1.12 (grapheme-keyed atlas / combining marks) and
+  1.23 (click-run model keyed on window identity); both are Program 6 / 4
+  work and remain open.
+- **Tier 2:** perf (empty-damage path, snapshot hop, hover incremental
+  rescan, idle display link, wheel pacing, find coalescing, pref-sink
+  dedupe, watchdog cadence, bitmap-cache eviction); rendering (UV inset,
+  synthetic bold/italic, theme selection colour, font-metric decorations);
+  core (alt-screen ⌘K, OSC 7 `;`, OSC 133 D reject, DA1, XTVERSION,
+  DECRQSS, poison choke point); terminal (copy cap, prompt-jump beep,
+  Ctrl+digit chords, reconfigure log, stale docs, wheel reset on mode
+  change); tabs (context-menu selection, departure hints, typed `+`
+  selector, cgPath duplicate); settings (confirm-quit label, persistent-
+  domain reads, theme default constant, Sparkle floor + pre-extraction
+  verify, scrollback size, copy-on-select, shell + LANG + notification +
+  hang-detection prefs); product (OSC 52 writes, open at folder, Dock
+  menu, ⌘E, export scrollback); CI/scripts (fish + shellcheck, release-
+  script failure cases, SwiftPM flake, dependabot, smoke DerivedData,
+  bench defaults, tracked dossiers).
+- **Tests:** twenty blind-authored suites plus retargeted pins.
+
+Still open (deliberately, or sized beyond this pass): Program 4
+(`TabGroupModel` / weak strip references), Program 6 (grapheme-keyed
+atlas: combining marks, ZWJ, keycaps, ligatures), Program 7 (fold the OSC
+tap into alacritty's parser; `vendor/PATCHES.md` + offline drift script),
+`eprintln!` → structured core log events, selection out of `CacheKey`,
+per-cell hash table, mouse-report/selection mapping unification,
+`file://` reveal, quick-terminal window, session restore, custom palette
+import, mode 2031, kitty flag 4/16 non-US layouts, prompt-mark gutter
+markers, website docs pages/screenshots, PR-CI PTY job, pixel-level
+shader tests, fixture dedupe, the Option-Meta / translucency defaults
+(product calls left as they were), and the `+` double-click policy (RCA
+decision kept).

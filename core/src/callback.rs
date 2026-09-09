@@ -82,6 +82,7 @@ pub(crate) struct CallbackCell {
     /// One-shot breadcrumb latch for the first suppressed title
     /// (mirrors `osc133_rate_limited_logged`'s stance).
     title_suppressed_logged: UnsafeCell<bool>,
+    notification_suppressed_logged: UnsafeCell<bool>,
     #[cfg(debug_assertions)]
     busy: std::sync::atomic::AtomicBool,
 }
@@ -156,6 +157,7 @@ impl CallbackCell {
             )),
             suppressed_title: UnsafeCell::new(None),
             title_suppressed_logged: UnsafeCell::new(false),
+            notification_suppressed_logged: UnsafeCell::new(false),
             #[cfg(debug_assertions)]
             busy: std::sync::atomic::AtomicBool::new(false),
         }
@@ -311,6 +313,12 @@ impl CallbackCell {
         if matches!(event.kind, BBEventKind::Notification)
             && !(*self.notification_rate.get()).allow()
         {
+            if !*self.notification_suppressed_logged.get() {
+                *self.notification_suppressed_logged.get() = true;
+                eprintln!(
+                    "[blackbird_core] notification rate cap ({NOTIFICATION_EVENT_PER_SECOND}/s) hit; further notifications this second dropped (logged once)"
+                );
+            }
             return;
         }
         // Audit M-9 follow-up (2026-04-29): set the

@@ -30,7 +30,26 @@ public struct ThemePalette: Equatable, Sendable {
     /// legible over a translucent window.
     public var selection: UInt32 {
         let blue = ansi.count > 12 ? ansi[12] : 0x4080FF
-        return Self.mix(blue, background, towardSecond: 0.45)
+        let candidate = Self.mix(blue, background, towardSecond: 0.45)
+        // Visibility floor, like the cursor's: a theme whose bright blue sits
+        // near its background (blue-background themes, a future importer)
+        // would otherwise get an invisible highlight. Fall back to the
+        // foreground blended toward the background.
+        if Self.contrastRatio(candidate, background) < 1.3 {
+            return Self.mix(foreground, background, towardSecond: 0.6)
+        }
+        return candidate
+    }
+
+    /// WCAG contrast ratio between two 0xRRGGBB colours.
+    static func contrastRatio(_ a: UInt32, _ b: UInt32) -> Double {
+        func lum(_ c: UInt32) -> Double {
+            func lin(_ v: Double) -> Double { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+            let r = lin(Double((c >> 16) & 0xFF) / 255), g = lin(Double((c >> 8) & 0xFF) / 255), bl = lin(Double(c & 0xFF) / 255)
+            return 0.2126 * r + 0.7152 * g + 0.0722 * bl
+        }
+        let la = lum(a), lb = lum(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
     }
 
     /// Foreground to draw selected text in when the cell's own foreground

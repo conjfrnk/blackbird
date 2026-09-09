@@ -741,6 +741,17 @@ const char *bb_snap_link_url(const struct BBSnap *snap, uint32_t link_id);
 void bb_term_set_color_query_enabled(struct BBTerm *term, uint8_t enabled);
 
 /**
+ * Set the version string XTVERSION replies carry (`DCS > | Blackbird <v> ST`).
+ * ASCII printable only; anything else is rejected and the reply stays
+ * name-only. Capped at 32 bytes.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`; `version` must be a valid NUL-
+ * terminated C string or null (null clears it).
+ */
+void bb_term_set_terminal_version(struct BBTerm *term, const char *version);
+
+/**
  * Allow (`enabled != 0`) or refuse OSC 52 clipboard WRITES (the `c;<base64>`
  * store form). Reads (`?`) are never answered regardless. Off at
  * `bb_term_new`; the Swift preference `bb.osc52Enabled` drives it. When

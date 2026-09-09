@@ -293,12 +293,20 @@ fi
 # is the only step that knows both the version and the verified sha, so
 # it owns the bump. Idempotent: re-running rewrites the same values.
 CASK=packaging/homebrew/blackbird.rb
-if [[ -f "$CASK" ]]; then
+# BB_NO_CASK=1 is the explicit opt-out (a fork without the cask); a
+# silently missing file would otherwise strand cask installs again.
+if [[ "${BB_NO_CASK:-0}" != "1" ]]; then
+    if [[ ! -f "$CASK" ]]; then
+        echo "!! $CASK is missing — appcast NOT published. Restore the cask or set BB_NO_CASK=1." >&2
+        git checkout -- website/appcast.xml
+        exit 1
+    fi
     echo "==> Bumping $CASK to ${VERSION} (sha256 ${DMG_SHA:0:12}…)"
     sed -i '' -E "s|^(  version )\"[^\"]+\"|\1\"${VERSION}\"|" "$CASK"
     sed -i '' -E "s|^(  sha256 )\"[0-9a-f]+\"|\1\"${DMG_SHA}\"|" "$CASK"
     if ! grep -q "^  version \"${VERSION}\"" "$CASK" || ! grep -q "^  sha256 \"${DMG_SHA}\"" "$CASK"; then
-        echo "!! $CASK did not pick up version/sha256 — check its 'version'/'sha256' lines." >&2
+        echo "!! $CASK did not pick up version/sha256 — check its 'version'/'sha256' lines. Appcast NOT published." >&2
+        git checkout -- website/appcast.xml "$CASK"
         exit 1
     fi
 fi
@@ -356,7 +364,7 @@ fi
 # "nothing to commit" and we fall through to re-deploying S3 on retry.
 echo "==> Committing appcast.xml + index.html + release notes + cask"
 git add website/appcast.xml website/index.html "website/releases/v${VERSION}.html"
-if [[ -f "$CASK" ]]; then git add "$CASK"; fi
+if [[ "${BB_NO_CASK:-0}" != "1" ]]; then git add "$CASK"; fi
 if git diff --cached --quiet; then
     echo "==> nothing to commit — skipping (assuming retry after S3 failure)"
 else

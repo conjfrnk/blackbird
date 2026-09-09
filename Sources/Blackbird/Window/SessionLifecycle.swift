@@ -85,7 +85,7 @@ final class SessionLifecycle {
         )
         return try TerminalSession.start(
             shell: shell,
-            arguments: ["-il"],  // interactive login shell
+            arguments: ShellResolver.launchArguments(for: shell),  // -il for shells only
             size: .init(cols: size.cols, rows: size.rows),
             initialWorkingDirectory: controller.initialWorkingDirectory,
             envOverrides: env

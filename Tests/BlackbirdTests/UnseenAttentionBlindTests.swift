@@ -107,6 +107,8 @@ final class UnseenAttentionBlindTests: XCTestCase {
         becomeKey(controller)
         XCTAssertFalse(controller.hasUnseenAttention, "precondition: cleared")
 
+        tick()  // drain posts deferred by the preceding becomeKey/mark
+
         let counter = TitleChangeCounter(window: controller.window)
         controller.markUnseenAttention()
         tick()
@@ -128,6 +130,8 @@ final class UnseenAttentionBlindTests: XCTestCase {
         controller.markUnseenAttention()
         tick()
         XCTAssertTrue(controller.hasUnseenAttention, "precondition: set")
+
+        tick()  // drain posts deferred by the preceding becomeKey/mark
 
         let counter = TitleChangeCounter(window: controller.window)
         controller.markUnseenAttention()
@@ -165,11 +169,17 @@ final class UnseenAttentionBlindTests: XCTestCase {
         // path posts main-async) so the counter attributes only the mark.
         tick()
 
+        tick()  // drain posts deferred by the preceding becomeKey/mark
+
         let counter = TitleChangeCounter(window: controller.window)
         controller.markUnseenAttention()
         tick()
         XCTAssertTrue(controller.hasUnseenAttention)
-        XCTAssertEqual(counter.matching, 1, "a mark after a clear must post again")
+        // At least one: the clear's own refresh can leave title-KVO posts
+        // landing in this window under load (they carry the same object),
+        // so this pins "posts again", while the second-mark test pins
+        // "does not post twice for a redundant mark".
+        XCTAssertGreaterThanOrEqual(counter.matching, 1, "a mark after a clear must post again")
 
         becomeKey(controller)
     }

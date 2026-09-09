@@ -39,6 +39,10 @@ macro_rules! osc_scanner {
             osc133_d_nondigit_logged: &mut $bb.osc133_d_nondigit_logged,
             osc133_abc_tainted_logged: &mut $bb.osc133_abc_tainted_logged,
             osc133_rate_limited_logged: &mut $bb.osc133_rate_limited_logged,
+            in_decrqss: &mut $bb.in_decrqss,
+            decrqss_buf: &mut $bb.decrqss_buf,
+            terminal_version: &$bb.terminal_version,
+            osc99_pending: &mut $bb.osc99_pending,
         }
     };
 }
@@ -106,6 +110,21 @@ pub(crate) struct OscScanner<'a> {
     /// breadcrumb; per-drop logging would amplify the flood the cap
     /// defends against.
     pub(crate) osc133_rate_limited_logged: &'a mut bool,
+    /// DECRQSS (`DCS $ q <Pt> ST`) parser state, same shape as XTGETTCAP.
+    pub(crate) in_decrqss: &'a mut bool,
+    pub(crate) decrqss_buf: &'a mut Vec<u8>,
+    /// App version string for XTVERSION replies (`bb_term_set_terminal_version`).
+    pub(crate) terminal_version: &'a str,
+    /// In-flight kitty OSC 99 (`d=0` chunks) awaiting its final chunk.
+    pub(crate) osc99_pending: &'a mut Option<Osc99Pending>,
+}
+
+/// Accumulator for a chunked kitty OSC 99 notification.
+#[derive(Debug, Default)]
+pub(crate) struct Osc99Pending {
+    pub(crate) id: Vec<u8>,
+    pub(crate) title: Vec<u8>,
+    pub(crate) body: Vec<u8>,
 }
 
 /// Maximum byte length of a single OSC 7 URL accepted for percent-decode
@@ -150,6 +169,33 @@ impl Perform for OscScanner<'_> {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // XTVERSION: `CSI > q` / `CSI > 0 q` → `DCS > | Blackbird <ver> ST`.
+        // tmux 3.4+ and nvim 0.10+ send it to identify the terminal; with
+        // no reply they timed out and recorded "unknown".
+        if action == 'q' && intermediates == [b'>'] {
+            let first = params
+                .iter()
+                .next()
+                .and_then(|p| p.first().copied())
+                .unwrap_or(0);
+            if first == 0 {
+                let mut reply = b"\x1bP>|Blackbird".to_vec();
+                if !self.terminal_version.is_empty() {
+                    reply.push(b' ');
+                    reply.extend_from_slice(self.terminal_version.as_bytes());
+                }
+                reply.extend_from_slice(b"\x1b\\");
+                unsafe {
+                    self.cell.fire(BBEvent {
+                        kind: BBEventKind::PtyWrite,
+                        payload: reply.as_ptr(),
+                        len: reply.len(),
+                        i32_arg: 0,
+                    });
+                }
+            }
+            return;
+        }
         // xterm `modifyOtherKeys`: `CSI > 4 ; N m`. `>` is the only
         // intermediate; first param == 4; second param == 0 (off), 1
         // (level 1), or 2 (level 2). We also accept `CSI > 4 m` (no
@@ -199,41 +245,54 @@ impl Perform for OscScanner<'_> {
     }
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        // XTGETTCAP opens as `ESC P + q` — intermediates == [b'+'],
-        // final byte == 'q'. Any other DCS (sixel, sync output, iTerm2
-        // conductor, etc.) stays inert: `dcs_rejection` tests pin that.
         if intermediates == b"+" && action == 'q' {
             *self.in_xtgettcap = true;
             self.xtgettcap_buf.clear();
+        } else if intermediates == b"$" && action == 'q' {
+            // DECRQSS: `DCS $ q <Pt> ST`. vim probes `$qm` (SGR) at startup.
+            *self.in_decrqss = true;
+            self.decrqss_buf.clear();
         }
     }
 
     fn put(&mut self, byte: u8) {
-        // Only collect while inside a recognized XTGETTCAP sequence. Cap
-        // at 4 KiB as a DoS backstop: a legitimate query is at most a
-        // few hundred bytes; truncation of an oversized query produces
-        // a short reply rather than a crash or unbounded allocation.
         if *self.in_xtgettcap && self.xtgettcap_buf.len() < 4096 {
             self.xtgettcap_buf.push(byte);
+        } else if *self.in_decrqss && self.decrqss_buf.len() < 16 {
+            self.decrqss_buf.push(byte);
         }
     }
 
     fn unhook(&mut self) {
+        if *self.in_decrqss {
+            *self.in_decrqss = false;
+            let buf = std::mem::take(self.decrqss_buf);
+            // Valid (`1$r`) only for the requests whose current value the
+            // tap can state without reaching into the grid: SGR reports the
+            // reset state (what every other terminal answers), cursor style
+            // reports the default block. Everything else is `0$r`, the
+            // spec's "invalid request", which vim/tmux treat as "not
+            // supported" instead of waiting for a timeout.
+            let reply: &[u8] = match buf.as_slice() {
+                b"m" => b"\x1bP1$r0m\x1b\\",
+                b" q" => b"\x1bP1$r0 q\x1b\\",
+                _ => b"\x1bP0$r\x1b\\",
+            };
+            unsafe {
+                self.cell.fire(BBEvent {
+                    kind: BBEventKind::PtyWrite,
+                    payload: reply.as_ptr(),
+                    len: reply.len(),
+                    i32_arg: 0,
+                });
+            }
+            return;
+        }
         if !*self.in_xtgettcap {
             return;
         }
         *self.in_xtgettcap = false;
-        // `std::mem::take` moves the buffer's bytes+allocation out into
-        // `buf` for the reply-building step; the field becomes
-        // `Vec::new()` (capacity 0). The next DCS will re-alloc on its
-        // first `put()`. XTGETTCAP is human-rate so this churn is
-        // invisible; simpler code wins over a micro-optimization.
         let buf = std::mem::take(self.xtgettcap_buf);
-        // SAFETY: our parallel `vte::Parser` is driven from
-        // `bb_term_input` OUTSIDE alacritty's `&mut Term` borrow, so
-        // firing synchronously here is safe — we are not re-entering
-        // alacritty. No deferred queue needed (unlike OSC 10/11/12,
-        // which must defer because they hit the palette mid-borrow).
         unsafe { dispatch_xtgettcap(self.cell, &buf) };
     }
 }
@@ -424,6 +483,9 @@ impl OscScanner<'_> {
     /// drops C0/C1/bidi/invisible scalars.
     fn notification_field(bytes: &[u8], max_chars: usize) -> String {
         let s = String::from_utf8_lossy(bytes);
+        // The scrub drops every C0 scalar, newline included, which glued a
+        // multi-line body's lines together; a space keeps the words apart.
+        let s = s.replace(['\r', '\n'], " ");
         let scrubbed = crate::scrub::scrub_title_controls(&s);
         scrubbed
             .chars()
@@ -439,6 +501,9 @@ impl OscScanner<'_> {
         if title.is_empty() && body.is_empty() {
             return;
         }
+        // The separator is unambiguous only because `scrub_title_controls`
+        // strips every C0 scalar from both halves; pin that here.
+        debug_assert!(!title.contains('\u{1F}') && !body.contains('\u{1F}'));
         let mut payload = title.into_bytes();
         payload.push(0x1F);
         payload.extend_from_slice(body.as_bytes());
@@ -460,7 +525,9 @@ impl OscScanner<'_> {
         if params.len() < 2 {
             return;
         }
-        if params.len() >= 3 && params[1] == b"4" {
+        // `9;4;…` is the ConEmu / Windows Terminal progress bar and `9;9;…`
+        // ConEmu's cwd report — neither is a notification.
+        if params.len() >= 3 && (params[1] == b"4" || params[1] == b"9") {
             return;
         }
         let body = Self::join_params(params, 1);
@@ -483,17 +550,55 @@ impl OscScanner<'_> {
     /// `d=0` (a partial chunk; more follow) is delivered as-is rather
     /// than reassembled — kitty's multi-chunk protocol is rare in the
     /// wild and reassembly would need per-id state.
+    /// kitty OSC 99. kitty's own example is two chunks: `i=1:d=0;<title>`
+    /// then `i=1:p=body;<body>` (`kitten notify "Title" "Body"` produces
+    /// the same). `d=0` means "more chunks follow"; chunks accumulate in
+    /// the scanner's pending slot (keyed by `i=`) and one notification is
+    /// emitted on the final chunk (`d=1` or no `d`). `p=` values other than
+    /// title/body (icon, buttons, alive, …) are ignored; `e=1` (base64
+    /// payload) is dropped rather than shown raw.
     fn handle_osc99(&mut self, params: &[&[u8]]) {
         if params.len() < 3 {
             return;
         }
         let metadata = params[1];
         let payload = Self::join_params(params, 2);
-        let is_title = metadata.split(|&b| b == b':').any(|kv| kv == b"p=title");
-        if is_title {
-            self.emit_notification(&payload, b"");
+        let mut id: Vec<u8> = Vec::new();
+        let mut part = b"body".as_slice();
+        let mut more = false;
+        let mut encoded = false;
+        for kv in metadata.split(|&b| b == b':') {
+            match kv {
+                b"d=0" => more = true,
+                b"e=1" => encoded = true,
+                _ if kv.starts_with(b"i=") => id = kv[2..].to_vec(),
+                _ if kv.starts_with(b"p=") => part = &kv[2..],
+                _ => {}
+            }
+        }
+        if encoded {
+            return;
+        }
+        // A chunk for a different notification id flushes the pending one.
+        if self.osc99_pending.is_some() && self.osc99_pending.as_ref().map(|p| &p.id) != Some(&id) {
+            if let Some(p) = self.osc99_pending.take() {
+                self.emit_notification(&p.title, &p.body);
+            }
+        }
+        let mut pending = self.osc99_pending.take().unwrap_or(Osc99Pending {
+            id: id.clone(),
+            title: Vec::new(),
+            body: Vec::new(),
+        });
+        match part {
+            b"title" => pending.title.extend_from_slice(&payload),
+            b"body" => pending.body.extend_from_slice(&payload),
+            _ => {}
+        }
+        if more {
+            *self.osc99_pending = Some(pending);
         } else {
-            self.emit_notification(b"", &payload);
+            self.emit_notification(&pending.title, &pending.body);
         }
     }
 

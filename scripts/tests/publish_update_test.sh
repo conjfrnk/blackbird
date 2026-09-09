@@ -225,7 +225,20 @@ STUB
     # Track the pre-existing appcast (and the fixture project.yml the
     # sparkle:version reconciliation reads via `git show <tag>:…`) so
     # the tag below carries both.
-    (cd "$root" && git add website/appcast.xml project.yml \
+    # publish-update.sh refuses to run without the Homebrew cask (a silently
+    # missing cask stranded installs for twelve releases); seed a minimal
+    # one so the happy paths exercise the bump.
+    mkdir -p "$root/packaging/homebrew"
+    if [[ ! -f "$root/packaging/homebrew/blackbird.rb" ]]; then
+        cat >"$root/packaging/homebrew/blackbird.rb" <<'RB'
+cask "blackbird" do
+  version "0.1.0"
+  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  app "Blackbird.app"
+end
+RB
+    fi
+    (cd "$root" && git add website/appcast.xml project.yml packaging/homebrew/blackbird.rb \
         && git -c commit.gpgsign=false commit -q -m "seed appcast")
     # Tag the seed commit as v0.2.0 — the version every test case in
     # this file passes to publish-update.sh. The script's deterministic

@@ -200,6 +200,11 @@ KEY_LINE="$(awk '/CFBundleExecutable/{exit} /SUPublicEDKey:/{print substr($0, in
 # Strip trailing comment / whitespace artefacts.
 FEED_URL="$(printf '%s' "$FEED_LINE" | awk '{print $1}')"
 if [[ -z "$FEED_URL" || "$FEED_URL" == *example.com* ]]; then
+  # A blanked feed in THIS repository silently stops updates for every
+  # user; only a fork may pass here (BB_ALLOW_BLANK_FEED=1).
+  if [[ "${BB_ALLOW_BLANK_FEED:-0}" != "1" ]] && git -C "$(dirname "$0")/.." remote get-url origin 2>/dev/null | grep -q 'conjfrnk/blackbird'; then
+    fail "SUFeedURL is unset/placeholder in the production repository — updates would silently stop (set BB_ALLOW_BLANK_FEED=1 for a fork)"
+  fi
   pass "SUFeedURL is unset or example.com — Sparkle is gated off (fork / local build)"
 else
   if [[ -z "$KEY_LINE" || "$KEY_LINE" == '""' || "$KEY_LINE" == "''" ]]; then

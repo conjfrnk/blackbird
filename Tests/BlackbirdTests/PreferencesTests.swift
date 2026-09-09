@@ -29,6 +29,8 @@ final class PreferencesTests: XCTestCase {
     private var savedShellPath: String = ""
     private var savedHangDetection: Bool = true
     private var savedProgramNotifications: Bool = true
+    private var savedScrollbackLines: Double = 100_000
+    private var savedCopyOnSelect: Bool = false
     private var savedWindowDragModifierRaw: String = ""
     private var savedWindowResizeModifierRaw: String = ""
 
@@ -77,6 +79,8 @@ final class PreferencesTests: XCTestCase {
         savedShellPath         = p.shellPath
         savedHangDetection     = p.hangDetection
         savedProgramNotifications = p.programNotifications
+        savedScrollbackLines = p.scrollbackLines
+        savedCopyOnSelect = p.copyOnSelect
         savedTranslucency      = p.translucency
         savedWindowDragModifierRaw   = p.windowDragModifierRaw
         savedWindowResizeModifierRaw = p.windowResizeModifierRaw
@@ -101,6 +105,8 @@ final class PreferencesTests: XCTestCase {
         p.shellPath         = savedShellPath
         p.hangDetection     = savedHangDetection
         p.programNotifications = savedProgramNotifications
+        p.scrollbackLines = savedScrollbackLines
+        p.copyOnSelect = savedCopyOnSelect
         p.translucency      = savedTranslucency
         p.windowDragModifierRaw   = savedWindowDragModifierRaw
         p.windowResizeModifierRaw = savedWindowResizeModifierRaw
@@ -160,7 +166,7 @@ final class PreferencesTests: XCTestCase {
             "bb.translucency",
             "bb.windowDragModifier", "bb.windowResizeModifier",
             "bb.setLocaleEnvironment", "bb.shellPath", "bb.hangDetection",
-            "bb.programNotifications",
+            "bb.programNotifications", "bb.scrollbackLines", "bb.copyOnSelect",
         ]
         let missing = Set(declared).subtracting(tracked)
         XCTAssertTrue(

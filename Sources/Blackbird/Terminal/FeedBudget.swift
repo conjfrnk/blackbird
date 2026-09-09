@@ -27,7 +27,12 @@ final class FeedBudget {
     private var inFlightBytes = 0
     private var cancelled = false
     /// Number of times `acquire` had to wait. Diagnostics only.
-    private(set) var stallCount = 0
+    private var stallCountStorage = 0
+    var stallCount: Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return stallCountStorage
+    }
 
     /// 4 MiB in flight ≈ 150 ms of parsing at the dense-cell floor: enough
     /// to keep the parser busy across scheduler hiccups, small enough that
@@ -53,7 +58,7 @@ final class FeedBudget {
         condition.lock()
         defer { condition.unlock() }
         if !cancelled && inFlightBytes >= highWater {
-            stallCount &+= 1
+            stallCountStorage &+= 1
             while !cancelled && inFlightBytes > lowWater {
                 condition.wait()
             }
@@ -69,13 +74,10 @@ final class FeedBudget {
         guard n > 0 else { return }
         condition.lock()
         inFlightBytes = max(0, inFlightBytes - n)
-        let wake = inFlightBytes <= lowWater
-        condition.unlock()
-        if wake {
-            condition.lock()
+        if inFlightBytes <= lowWater {
             condition.broadcast()
-            condition.unlock()
         }
+        condition.unlock()
     }
 
     /// Wake any blocked reader and make every future `acquire` a no-op.

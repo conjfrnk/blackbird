@@ -273,10 +273,10 @@ fn csi_garbage_followed_by_real_da1_still_replies() {
     // pre-flight: ~80 KiB, ~1 ms.
     // Defensive: a malformed CSI must not corrupt the parser's
     // ground state. After a junk CSI, a real DA1 query (`\x1b[c`)
-    // must still produce the standard reply (`\x1b[?6c`).
+    // must still produce the standard reply (`\x1b[?62;22c`).
     let payload = b"\x1b[!@#$%XX\x1b[c";
     let (_evs, writes) = drive(payload);
-    let any_da1 = writes.iter().any(|w| w == b"\x1b[?6c");
+    let any_da1 = writes.iter().any(|w| w == b"\x1b[?62;22c");
     assert!(
         any_da1,
         "DA1 reply must follow garbage CSI; saw writes {writes:?}"
@@ -292,7 +292,7 @@ fn osc_with_embedded_can_aborts_cleanly() {
     // and a follow-up DA1 query must still reply normally.
     let payload = b"\x1b]7;file:///never\x18reach\x1b\\\x1b[c";
     let (_evs, writes) = drive(payload);
-    let any_da1 = writes.iter().any(|w| w == b"\x1b[?6c");
+    let any_da1 = writes.iter().any(|w| w == b"\x1b[?62;22c");
     assert!(
         any_da1,
         "DA1 must reply after CAN-aborted OSC; got writes {writes:?}"
@@ -305,7 +305,7 @@ fn osc_with_embedded_sub_aborts_cleanly() {
     // SUB (0x1A) is the secondary abort byte. Same contract as CAN.
     let payload = b"\x1b]7;file:///never\x1areach\x1b\\\x1b[c";
     let (_evs, writes) = drive(payload);
-    let any_da1 = writes.iter().any(|w| w == b"\x1b[?6c");
+    let any_da1 = writes.iter().any(|w| w == b"\x1b[?62;22c");
     assert!(
         any_da1,
         "DA1 must reply after SUB-aborted OSC; got writes {writes:?}"
@@ -328,7 +328,7 @@ fn truncated_osc_without_st_does_not_swallow_input() {
     // Whether DA1 fires depends on whether vte's OSC bail kicks in.
     // The minimum we pin: NO PANIC. If it does fire, that's a stronger
     // success.
-    if writes.iter().any(|w| w == b"\x1b[?6c") {
+    if writes.iter().any(|w| w == b"\x1b[?62;22c") {
         // Stronger property held — we made it back to ground.
     }
     // Otherwise: no crash, which is what this whole test wraps.
@@ -344,7 +344,7 @@ fn osc8_followed_by_csi_2j_does_not_corrupt_state() {
     // empty (modulo cursor row) and a follow-up DA1 must still reply.
     let payload = b"\x1b]8;;url\x1b[2J\x1b\\\x1b[c";
     let (_evs, writes) = drive(payload);
-    let any_da1 = writes.iter().any(|w| w == b"\x1b[?6c");
+    let any_da1 = writes.iter().any(|w| w == b"\x1b[?62;22c");
     assert!(
         any_da1,
         "DA1 must reply after OSC 8 / CSI 2J interleave; got writes {writes:?}"

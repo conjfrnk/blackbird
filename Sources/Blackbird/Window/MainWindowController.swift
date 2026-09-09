@@ -275,11 +275,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // 800×480. Seeding from the saved size closes that path and
             // removes the "⌘N windows are tiny" complaint with it.
             if window.setFrameUsingName(Self.frameAutosaveName) {
-                let saved = window.frame
-                window.setFrame(
-                    NSRect(origin: window.frame.origin, size: saved.size),
-                    display: false
-                )
+                // Same reachability + size clamp as the restore branch: a
+                // frame saved on a 5K display must not open a ⌘N window
+                // larger than a laptop screen (the v0.3.2 bug class).
+                // `showWindow`'s cascade then places the origin.
+                let nudged = nudgeFrameOntoVisibleScreen(window.frame, against: NSScreen.screens)
+                if nudged != window.frame {
+                    window.setFrame(nudged, display: false)
+                }
             } else {
                 window.setContentSize(rect.size)
             }
@@ -625,6 +628,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guard hasUnseenAttention else { return }
         hasUnseenAttention = false
         broadcastAttentionChange()
+    }
+
+    /// The core panicked: the session has already been torn down (its
+    /// child ended). Say so and offer Close Tab — before v0.8.1 the only
+    /// signal was a title prefix the pill truncated to "[fatal] core pa…"
+    /// while keystrokes kept reaching a child nobody could see.
+    func presentCoreFailure(_ message: String) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "The terminal engine stopped"
+        alert.informativeText = "This tab's terminal core hit an internal error and its session was ended. The details are in the unified log (category \"core\").\n\n\(message)"
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Close Tab")
+        alert.addButton(withTitle: "Keep Open")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let window = self?.window else { return }
+            Self.bypassCloseConfirm = true
+            defer { Self.bypassCloseConfirm = false }
+            window.performClose(nil)
+        }
     }
 
     /// Sibling strips refresh through `.blackbirdTabTitleChanged` (the

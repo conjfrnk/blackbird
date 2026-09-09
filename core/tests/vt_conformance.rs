@@ -1353,15 +1353,15 @@ fn conformance_dsr_6_cursor_position_report() {
 
 #[test]
 fn conformance_da1_primary_attributes() {
-    // DA1 (`\x1b[c`): reply identifies as VT102 → '\x1b[?6c'.
+    // DA1 (`\x1b[c`): reply identifies as VT102 → '\x1b[?62;22c'.
     unsafe {
         let (term, cap, cap_ptr) = setup_term_with_capture();
         feed(term, b"\x1b[c");
         let writes = cap.lock().unwrap().pty_writes.clone();
         assert_eq!(
             writes,
-            vec![b"\x1b[?6c".to_vec()],
-            "DA1 must reply '\\x1b[?6c'; got {:?}",
+            vec![b"\x1b[?62;22c".to_vec()],
+            "DA1 must reply '\\x1b[?62;22c'; got {:?}",
             writes
         );
         teardown_term_with_capture(term, cap_ptr);

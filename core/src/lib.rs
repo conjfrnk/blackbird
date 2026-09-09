@@ -1,6 +1,6 @@
 //! blackbird_core — C ABI around `alacritty_terminal`.
 
-use std::os::raw::c_void;
+use std::os::raw::{c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 
@@ -156,6 +156,14 @@ pub struct BBTerm {
     /// across PTY reads resolves to a single reply. See `OscScanner`'s
     /// `hook`/`put`/`unhook` and `core/tests/xtgettcap.rs`.
     pub(crate) in_xtgettcap: bool,
+    /// DECRQSS parser state (see `OscScanner::hook`).
+    pub(crate) in_decrqss: bool,
+    pub(crate) decrqss_buf: Vec<u8>,
+    /// App version advertised by XTVERSION; empty until
+    /// `bb_term_set_terminal_version` is called.
+    pub(crate) terminal_version: String,
+    /// Chunked kitty OSC 99 awaiting its final chunk (see `OscScanner`).
+    pub(crate) osc99_pending: Option<crate::osc::Osc99Pending>,
     pub(crate) xtgettcap_buf: Vec<u8>,
     /// xterm `modifyOtherKeys` current level. `0` = off, `1` = level 1
     /// (encode colliders + "unmapped" Ctrl combos), `2` = level 2
@@ -392,6 +400,10 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc_possibly_pending: false,
             poisoned: std::cell::Cell::new(false),
             in_xtgettcap: false,
+            in_decrqss: false,
+            decrqss_buf: Vec::with_capacity(16),
+            terminal_version: String::new(),
+            osc99_pending: None,
             xtgettcap_buf: Vec::with_capacity(64),
             callback,
             uri_cstr_cache: std::collections::HashMap::new(),
@@ -487,8 +499,7 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // purpose. Audit H-5 extended the same gate to every other
         // entry point that reborrows `&mut *term` / `&*term`; the
         // helper centralises the latch read and one-shot log.
-        // Poisoned after a caught panic (see `BBTerm::poisoned`): no-op.
-        if (*term).poisoned.get() {
+        if poison_blocked(term) {
             return;
         }
         if ffi_reentry_blocked("bb_term_input") {
@@ -621,6 +632,9 @@ pub unsafe extern "C" fn bb_term_resize2(
     };
     guard_with_term(term, fallback, || {
         if term.is_null() || cols == 0 || rows == 0 {
+            return fallback;
+        }
+        if poison_blocked(term) {
             return fallback;
         }
         if ffi_reentry_blocked("bb_term_resize2") {
@@ -840,10 +854,45 @@ pub unsafe extern "C" fn bb_term_set_color_query_enabled(term: *mut BBTerm, enab
         if term.is_null() {
             return;
         }
+        if poison_blocked(term) {
+            return;
+        }
         if ffi_reentry_blocked("bb_term_set_color_query_enabled") {
             return;
         }
         (*term).color_query_enabled = enabled != 0;
+    })
+}
+
+/// Set the version string XTVERSION replies carry (`DCS > | Blackbird <v> ST`).
+/// ASCII printable only; anything else is rejected and the reply stays
+/// name-only. Capped at 32 bytes.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`; `version` must be a valid NUL-
+/// terminated C string or null (null clears it).
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_set_terminal_version(term: *mut BBTerm, version: *const c_char) {
+    guard_with_term(term, (), || {
+        if term.is_null() {
+            return;
+        }
+        if poison_blocked(term) {
+            return;
+        }
+        if ffi_reentry_blocked("bb_term_set_terminal_version") {
+            return;
+        }
+        let bb = &mut *term;
+        if version.is_null() {
+            bb.terminal_version.clear();
+            return;
+        }
+        let bytes = std::ffi::CStr::from_ptr(version).to_bytes();
+        if bytes.len() > 32 || !bytes.iter().all(|b| b.is_ascii_graphic()) {
+            return;
+        }
+        bb.terminal_version = String::from_utf8_lossy(bytes).into_owned();
     })
 }
 
@@ -861,6 +910,9 @@ pub unsafe extern "C" fn bb_term_set_color_query_enabled(term: *mut BBTerm, enab
 pub unsafe extern "C" fn bb_term_set_osc52_write_enabled(term: *mut BBTerm, enabled: u8) {
     guard_with_term(term, (), || {
         if term.is_null() {
+            return;
+        }
+        if poison_blocked(term) {
             return;
         }
         if ffi_reentry_blocked("bb_term_set_osc52_write_enabled") {
@@ -976,8 +1028,7 @@ pub unsafe extern "C" fn bb_term_flush_sync_update(term: *mut BBTerm, force: u8)
         if term.is_null() {
             return 0;
         }
-        // Poisoned after a caught panic (see `BBTerm::poisoned`): no-op.
-        if (*term).poisoned.get() {
+        if poison_blocked(term) {
             return 0;
         }
         if ffi_reentry_blocked("bb_term_flush_sync_update") {
@@ -1089,6 +1140,9 @@ pub unsafe extern "C" fn bb_term_scroll(term: *mut BBTerm, delta: i32) {
         if term.is_null() || delta == 0 {
             return;
         }
+        if poison_blocked(term) {
+            return;
+        }
         if ffi_reentry_blocked("bb_term_scroll") {
             return;
         }
@@ -1112,6 +1166,9 @@ pub unsafe extern "C" fn bb_term_scroll(term: *mut BBTerm, delta: i32) {
 pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
     guard_with_term(term, (), || {
         if term.is_null() {
+            return;
+        }
+        if poison_blocked(term) {
             return;
         }
         if ffi_reentry_blocked("bb_term_scroll_to_bottom") {
@@ -1139,8 +1196,7 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         if term.is_null() {
             return;
         }
-        // Poisoned after a caught panic (see `BBTerm::poisoned`): no-op.
-        if (*term).poisoned.get() {
+        if poison_blocked(term) {
             return;
         }
         if ffi_reentry_blocked("bb_term_clear_all") {
@@ -1185,6 +1241,9 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         bb.osc_possibly_pending = false;
         bb.in_xtgettcap = false;
         bb.xtgettcap_buf.clear();
+        bb.in_decrqss = false;
+        bb.decrqss_buf.clear();
+        bb.osc99_pending = None;
         // Rate-limit budgets are session state. A pre-clear OSC 11 flood
         // shouldn't leave the post-clear session unable to answer
         // legitimate color queries for the rest of the 1s window.
@@ -1271,6 +1330,9 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
 pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, rgb: u32) {
     guard_with_term(term, (), || {
         if term.is_null() {
+            return;
+        }
+        if poison_blocked(term) {
             return;
         }
         if ffi_reentry_blocked("bb_term_set_named_color") {
@@ -1570,3 +1632,16 @@ pub unsafe extern "C" fn bb_term_test_only_panic(term: *mut BBTerm) {
 
 #[cfg(test)]
 mod tests;
+
+/// True when a caught panic has poisoned this terminal (see
+/// `BBTerm::poisoned`). Every MUTATING entry consults this right after its
+/// null check so the "no-op after a panic" invariant holds by construction
+/// rather than per call site. Read-only entries (snapshot, text range,
+/// mode) stay open so the Swift side can still show and copy what was on
+/// screen when the core died.
+///
+/// # Safety
+/// `term` must be non-null and point at a live `BBTerm`.
+unsafe fn poison_blocked(term: *const BBTerm) -> bool {
+    (*term).poisoned.get()
+}

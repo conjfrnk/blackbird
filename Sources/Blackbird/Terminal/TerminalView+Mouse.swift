@@ -206,6 +206,9 @@ extension TerminalView {
         }
         if selectionController.endDrag() {
             didReportMouseDown = false
+            if Preferences.shared.copyOnSelect, selection != nil {
+                copy(nil)
+            }
             return
         }
         // Mirror what mousedown DID. Re-deriving `mouseReportingEnabled()`

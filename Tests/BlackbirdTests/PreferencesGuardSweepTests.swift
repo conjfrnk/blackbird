@@ -49,6 +49,8 @@ final class PreferencesGuardSweepTests: XCTestCase {
     private var savedShellPath: String = ""
     private var savedHangDetection: Bool = true
     private var savedProgramNotifications: Bool = true
+    private var savedScrollbackLines: Double = 100_000
+    private var savedCopyOnSelect: Bool = false
 
     override class func setUp() {
         super.setUp()
@@ -77,6 +79,8 @@ final class PreferencesGuardSweepTests: XCTestCase {
         savedShellPath             = p.shellPath
         savedHangDetection         = p.hangDetection
         savedProgramNotifications  = p.programNotifications
+        savedScrollbackLines       = p.scrollbackLines
+        savedCopyOnSelect          = p.copyOnSelect
         savedTranslucency          = p.translucency
     }
 
@@ -102,6 +106,8 @@ final class PreferencesGuardSweepTests: XCTestCase {
         p.shellPath             = savedShellPath
         p.hangDetection         = savedHangDetection
         p.programNotifications  = savedProgramNotifications
+        p.scrollbackLines       = savedScrollbackLines
+        p.copyOnSelect          = savedCopyOnSelect
         super.tearDown()
     }
 
@@ -218,6 +224,17 @@ final class PreferencesGuardSweepTests: XCTestCase {
             name: "programNotifications",
             current: p.programNotifications,
             write: { p.programNotifications = $0 }
+        ))
+        probes.append(makeBoolProbe(
+            name: "copyOnSelect",
+            current: p.copyOnSelect,
+            write: { p.copyOnSelect = $0 }
+        ))
+        probes.append(makeDoubleProbe(
+            name: "scrollbackLines",
+            current: p.scrollbackLines,
+            inRangeAlternative: p.scrollbackLines == 50_000 ? 100_000 : 50_000,
+            write: { p.scrollbackLines = $0 }
         ))
         probes.append(makeStringProbe(
             name: "shellPath",
@@ -502,6 +519,8 @@ final class PreferencesGuardSweepTests: XCTestCase {
             "bb.shellPath":             "shellPath",
             "bb.hangDetection":         "hangDetection",
             "bb.programNotifications":  "programNotifications",
+            "bb.scrollbackLines":       "scrollbackLines",
+            "bb.copyOnSelect":          "copyOnSelect",
         ]
         let unknownKeys = declaredKeys.subtracting(appStorageKeyToPropertyName.keys)
         XCTAssertTrue(

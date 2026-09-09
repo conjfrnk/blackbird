@@ -76,7 +76,7 @@ public final class BBTerm {
         /// string otherwise.
         case promptMark(kind: PromptMarkKind, exitCode: String)
         /// OSC 9 / 777 / 99 desktop notification, scrubbed and capped in
-        /// the core. Either half may be empty, never both.
+        /// the core, which never emits one with both halves empty.
         case notification(title: String, body: String)
         case fatal(String)
     }
@@ -423,6 +423,20 @@ public final class BBTerm {
     public func setColorQueryEnabled(_ enabled: Bool) {
         guard let h = handle else { return }
         bb_term_set_color_query_enabled(h, enabled ? 1 : 0)
+    }
+
+    /// True once a caught core panic poisoned this terminal; every core
+    /// entry is a no-op from then on. The session tears itself down on the
+    /// first `.fatal`, so this is a diagnostic / test seam.
+    public var isPoisoned: Bool {
+        guard let h = handle else { return false }
+        return bb_term_is_poisoned(h) != 0
+    }
+
+    /// Version string for XTVERSION (`CSI > q`) replies.
+    public func setTerminalVersion(_ version: String) {
+        guard let h = handle else { return }
+        version.withCString { bb_term_set_terminal_version(h, $0) }
     }
 
     /// Allow OSC 52 clipboard writes to reach the `.osc52Clipboard` event

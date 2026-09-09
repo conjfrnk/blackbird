@@ -82,8 +82,11 @@ if ! "$SCRIPT_DIR/changelog-section.sh" "$VERSION" >/dev/null; then
 fi
 
 # CI gate: HEAD must have a successful ci.yml run. Tags trigger only
-# release.yml, which builds and signs but runs no tests, so this is the
-# only place a red main can be stopped from becoming a release.
+# release.yml, which builds and signs but runs no tests, so this is where
+# a red main is stopped from becoming a release. Note the tag lands on the
+# version-bump commit created BELOW (project.yml / Info.plist / pbxproj
+# only), whose own CI run happens after the push; the gate covers the
+# code it carries, not that commit's run.
 # BB_SKIP_CI_GATE=1 is an explicit operator override (e.g. a docs-only
 # re-cut while GitHub Actions is down) and is printed loudly.
 if [[ "${BB_SKIP_CI_GATE:-0}" == "1" ]]; then

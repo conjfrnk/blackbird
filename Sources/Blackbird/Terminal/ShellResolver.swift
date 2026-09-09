@@ -48,6 +48,20 @@ enum ShellResolver {
         return Resolution(path: lastResort, preferenceRejected: preferenceRejected)
     }
 
+    /// Arguments a NEW session passes to the resolved program. Shells get
+    /// the interactive-login pair; a non-shell program named in Settings
+    /// (the field invites "the absolute path of another program") would
+    /// reject `-il`, so it gets none.
+    static func launchArguments(for path: String) -> [String] {
+        // Only the shells known to accept the combined `-il`: tcsh wants
+        // `-l` alone, nu/elvish/xonsh spell the flags differently, and a
+        // non-shell would reject it. Those run with no arguments (still
+        // interactive on a tty) rather than fail to start.
+        let name = (path as NSString).lastPathComponent
+        let posixLike: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh"]
+        return posixLike.contains(name) ? ["-il"] : []
+    }
+
     /// `access(path, X_OK)` on a regular file.
     static func isExecutableFile(_ path: String) -> Bool {
         var isDir: ObjCBool = false

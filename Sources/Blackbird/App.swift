@@ -170,28 +170,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installTabOrderObserver()
         installExternalTabActionObserver()
         NSApp.servicesProvider = self
+        didFinishLaunching = true
         // A launch via `open -a Blackbird <dir>`, a folder dropped on the
         // Dock icon, or Finder's "Open With" delivers `application(_:open:)`
-        // BEFORE this hook; that window is the first window then.
-        if !didOpenWindowForURL {
+        // BEFORE this hook; those URLs were held and open now, as the first
+        // window(s). Only if none of them resolves does $HOME open.
+        let held = pendingOpenURLs
+        pendingOpenURLs = []
+        var opened = 0
+        for url in held where openTerminalWindow(atFileURL: url) != nil {
+            opened += 1
+        }
+        if opened == 0 {
             openFirstWindow()
         }
     }
 
-    // MARK: - Open at a folder
+    // MARK: - Dock menu
 
-    /// Set by `application(_:open:)` so a launch-with-folder doesn't also
-    /// open the $HOME window `openFirstWindow` would create.
-    private var didOpenWindowForURL = false
+    /// Right-clicking the Dock icon offers "New Window" like every peer.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "New Window", action: #selector(newWindow(_:)), keyEquivalent: "")
+        return menu
+    }
+
+    // MARK: - Open at a folder
 
     /// Finder "Open With" / drag onto the Dock icon / `open -a Blackbird
     /// <path>`. Folders open a new window there; a file opens at its
     /// parent. Non-file URLs are ignored (no URL scheme is registered).
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls {
-            openTerminalWindow(atFileURL: url)
+        // Before applicationDidFinishLaunching nothing is wired (signals,
+        // theme, menus, tab observers, watchdog), and MainWindowController
+        // starts its shell synchronously in init — so hold launch URLs and
+        // open them at the end of the launch hook.
+        if !didFinishLaunching {
+            pendingOpenURLs.append(contentsOf: urls)
+            return
+        }
+        var opened = 0
+        for url in urls where openTerminalWindow(atFileURL: url) != nil {
+            opened += 1
+        }
+        if opened == 0 {
+            AppDelegate.launchLogger.error("open: none of \(urls.count, privacy: .public) URL(s) named an existing folder or file")
+            NSSound.beep()
         }
     }
+
+    private var didFinishLaunching = false
+    private var pendingOpenURLs: [URL] = []
+    static let launchLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "launch")
 
     /// The Services menu entry "New Blackbird Terminal at Folder" (see the
     /// NSServices block in project.yml). Finder shows it in the context
@@ -207,8 +237,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             error.pointee = "The pasteboard carried no folder."
             return
         }
-        for url in urls {
-            openTerminalWindow(atFileURL: url)
+        var opened = 0
+        for url in urls where openTerminalWindow(atFileURL: url) != nil {
+            opened += 1
+        }
+        if opened == 0 {
+            error.pointee = "None of the items is an existing folder or file."
         }
     }
 
@@ -227,7 +261,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     func openTerminalWindow(atFileURL url: URL) -> MainWindowController? {
         guard let dir = Self.startingDirectory(forOpening: url) else { return nil }
-        didOpenWindowForURL = true
         let controller = createTerminalController(cwd: dir, autosaveFrame: false)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)

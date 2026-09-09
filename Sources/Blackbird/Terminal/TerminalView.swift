@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import Carbon.HIToolbox
 import CoreText
 import Combine
@@ -1048,6 +1049,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - Rendering
 
     public func applyTheme(_ palette: ThemePalette) {
+        wakeRenderLoop()
         let bgR = Double((palette.background >> 16) & 0xFF) / 255.0
         let bgG = Double((palette.background >> 8)  & 0xFF) / 255.0
         let bgB = Double(palette.background & 0xFF) / 255.0
@@ -1131,6 +1133,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public func render(snapshot: BBSnapshot) {
         wakeRenderLoop()
+        // A partial wheel line accrued under one delivery mode must not be
+        // credited to the next (leaving `less` into a mouse-reporting TUI).
+        let wheelBits: BBTermMode = [.altScreen, .alternateScroll, .mouseReportClick, .mouseMotion, .mouseDrag]
+        if let prev = currentSnapshot?.termMode,
+           prev.intersection(wheelBits) != snapshot.termMode.intersection(wheelBits) {
+            wheelAccumulator.reset()
+        }
         let wasFocusMode = currentSnapshot?.termMode.contains(.focusInOut) ?? false
         let nowFocusMode = snapshot.termMode.contains(.focusInOut)
         // Bugs #14 + #15: invalidate the active selection on snapshot
@@ -1843,6 +1852,15 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
             .store(in: &cancellables)
 
+        session.$coreFailureMessage
+            .receive(on: DispatchQueue.main)
+            .compactMap { $0 }
+            .sink { [weak self] message in
+                guard let self else { return }
+                (self.window?.windowController as? MainWindowController)?.presentCoreFailure(message)
+            }
+            .store(in: &cancellables)
+
         session.notifications
             .receive(on: DispatchQueue.main)
             .sink { [weak self] note in
@@ -1851,7 +1869,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 let titled = note.title.isEmpty
                     ? TerminalNotification(title: self.window?.title ?? "Blackbird", body: note.body)
                     : note
-                NotificationPresenter.shared.post(titled)
+                NotificationPresenter.shared.post(titled, windowNumber: self.window?.windowNumber)
                 self.markTabUnseenAttention()
             }
             .store(in: &cancellables)
@@ -2228,6 +2246,58 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         findController.findBar?.focus()
     }
 
+    /// ⌘E (Edit → Find → Use Selection for Find): the standard macOS item.
+    /// Takes the selection's first line (a multi-row selection can't be a
+    /// substring query) and installs the bar if needed.
+    @objc public func useSelectionForFind(_ sender: Any?) {
+        guard let raw = selectedStringForServices(), !raw.isEmpty else {
+            bellController.ring()
+            return
+        }
+        let firstLine = raw.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) ?? raw
+        let query = firstLine.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else {
+            bellController.ring()
+            return
+        }
+        if findController.findBar == nil { findController.installFindBar() }
+        findController.findBar?.setQuery(query)
+        findController.findBar?.focus()
+    }
+
+    /// File → Export Scrollback… (⌘⇧S): the whole retained buffer as UTF-8
+    /// text, scrollback first. Goes through the same clipboard scrub as ⌘C
+    /// so a hostile remote's control / bidi bytes never land in a file
+    /// either.
+    @objc public func exportScrollback(_ sender: Any?) {
+        guard let session, let snap = currentSnapshot, let window else {
+            bellController.ring()
+            return
+        }
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "\(window.title.isEmpty ? "Blackbird" : window.title).txt"
+        panel.allowedContentTypes = [.plainText]
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            let raw = session.textRange(
+                from: BufferPoint(line: -Int32(clamping: snap.historySize), col: 0),
+                to:   BufferPoint(line: Int32(clamping: snap.rows - 1), col: max(0, snap.cols - 1)),
+                rectangular: false
+            )
+            let scrubbed = PasteSanitizer.stripBidiOverrides(
+                PasteSanitizer.sanitizePasteControls(Data(raw.utf8))
+            )
+            do {
+                try scrubbed.write(to: url, options: .atomic)
+            } catch {
+                Self.rendererLogger.error("exportScrollback: write failed: \(error.localizedDescription, privacy: .public)")
+                let alert = NSAlert(error: error)
+                alert.beginSheetModal(for: window)
+            }
+        }
+    }
+
     @objc public func performFindNextAction(_ sender: Any?)     { findController.advanceFind(direction: .forward) }
     @objc public func performFindPreviousAction(_ sender: Any?) { findController.advanceFind(direction: .backward) }
 
@@ -2339,6 +2409,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// click worth"; finer values fire too aggressively on a single finger
     /// slip, coarser miss small deliberate zooms.
     public override func magnify(with event: NSEvent) {
+        wakeRenderLoop()
         pinchAccumulator += event.magnification
         while pinchAccumulator >= 0.15 {
             increaseFontSize(nil)

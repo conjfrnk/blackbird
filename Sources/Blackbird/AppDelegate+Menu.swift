@@ -133,6 +133,14 @@ extension AppDelegate {
             action: #selector(newWindowForTab(_:)),
             keyEquivalent: "t"
         )
+        menu.addItem(.separator())
+        let export = NSMenuItem(
+            title: "Export Scrollback…",
+            action: #selector(TerminalView.exportScrollback(_:)),
+            keyEquivalent: "s"
+        )
+        export.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(export)
         return menu
     }
 
@@ -185,6 +193,13 @@ extension AppDelegate {
         )
         findPrev.keyEquivalentModifierMask = [.command, .shift]
         findSubmenu.addItem(findPrev)
+        // Standard macOS item: seed the find field from the selection.
+        let useSelection = NSMenuItem(
+            title: "Use Selection for Find",
+            action: #selector(TerminalView.useSelectionForFind(_:)),
+            keyEquivalent: "e"
+        )
+        findSubmenu.addItem(useSelection)
         let replaceSelection = NSMenuItem(
             title: "Replace Selection",
             action: #selector(TerminalView.performReplaceCurrent(_:)),

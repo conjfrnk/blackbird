@@ -353,6 +353,13 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     public func focus() { window?.makeFirstResponder(field) }
 
+    /// Seed the query field (Edit → Find → Use Selection for Find, ⌘E) and
+    /// run the search as if the user had typed it.
+    public func setQuery(_ query: String) {
+        field.stringValue = query
+        delegate?.findBar(self, didChangeQuery: query)
+    }
+
     // MARK: - Match label
 
     /// Monotonic token bumped every time the match label is written. The
