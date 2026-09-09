@@ -184,6 +184,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// `hoverCoordinator.hoveredLinkID` across the file boundary. `lazy` because
     /// it needs `self`; its back-reference to the view is `unowned` (no cycle).
     lazy var hoverCoordinator = HoverCoordinator(view: self)
+    /// Modifiers of the `keyDown` currently being routed through the input
+    /// context (see `routeKeyDownThroughIME`); nil outside that window.
+    var pendingInsertTextModifiers: KeyEncoder.Modifiers?
     /// Wheel-delta → line accumulator for the mouse-report and DEC 1007
     /// alternate-scroll paths (see `scrollWheel`). Reset on `mouseExited`.
     var wheelAccumulator = WheelScrollAccumulator()
@@ -1108,6 +1111,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     public func render(snapshot: BBSnapshot) {
+        wakeRenderLoop()
         let wasFocusMode = currentSnapshot?.termMode.contains(.focusInOut) ?? false
         let nowFocusMode = snapshot.termMode.contains(.focusInOut)
         // Bugs #14 + #15: invalidate the active selection on snapshot
@@ -1289,6 +1293,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             object: window,
             queue: .main
         ) { [weak self] _ in
+            self?.wakeRenderLoop()
             // Focus-event emission (CSI I) is owned by MainWindowController's
             // windowDidBecomeKey → session.focusChanged, which gates on the
             // live core mode. Don't also emit here — the old snapshot-gated
@@ -1310,6 +1315,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             object: window,
             queue: .main
         ) { [weak self] _ in
+            self?.wakeRenderLoop()
             // Focus-event emission (CSI O) is owned by MainWindowController's
             // windowDidResignKey → session.focusChanged. Keep the SKE /
             // IME-composition / hover teardown below, which ARE this view's
@@ -1405,6 +1411,43 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// Audit latency-power F5.
     private var isThermalThrottled: Bool = false
 
+    /// Idle throttle. The display link runs at the panel's native rate
+    /// (up to 120 Hz) for the view's whole life, and each tick pays a
+    /// wakeup, a main-thread hop, an AppKit `contentRect` round-trip and a
+    /// FrameKey compare before short-circuiting. With cursor blink off
+    /// (the default) nothing animates on an idle terminal, so after
+    /// `idleThrottleAfterFrames` consecutive skipped frames the rate drops
+    /// to `idleFPS`; any input, snapshot publish, resize or focus change
+    /// restores it via `wakeRenderLoop()`. A change the FrameKey notices on
+    /// its own (blink phase, a hover computed elsewhere) still renders at
+    /// the idle rate, i.e. within 100 ms.
+    static let idleThrottleAfterFrames = 120
+    static let idleFPS = 10
+    private var consecutiveSkippedFrames = 0
+    private(set) var isIdleThrottled = false
+
+    /// Restore the full frame rate. Cheap when not throttled.
+    func wakeRenderLoop() {
+        consecutiveSkippedFrames = 0
+        if isIdleThrottled {
+            isIdleThrottled = false
+            applyPowerAwareFrameRate()
+        }
+    }
+
+    /// Called from `draw(in:)` with whether the renderer skipped this frame.
+    private func noteFrameOutcome(skipped: Bool) {
+        if skipped {
+            consecutiveSkippedFrames &+= 1
+            if !isIdleThrottled, consecutiveSkippedFrames >= Self.idleThrottleAfterFrames {
+                isIdleThrottled = true
+                applyPowerAwareFrameRate()
+            }
+        } else {
+            consecutiveSkippedFrames = 0
+        }
+    }
+
     /// Read current NSProcessInfo + occlusion state, compute the
     /// target frame rate via `preferredFrameRate(...)`, and apply it
     /// to this MTKView. Safe to call from any notification handler.
@@ -1445,7 +1488,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         case .paused:
             self.isPaused = true
         case .fps(let n):
-            self.preferredFramesPerSecond = n
+            self.preferredFramesPerSecond = isIdleThrottled ? min(n, Self.idleFPS) : n
             self.isPaused = false
         }
     }
@@ -1523,6 +1566,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - MTKViewDelegate
 
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        wakeRenderLoop()
         // setFrameSize + viewDidEndLiveResize own the points-based resize
         // path; we mustn't double-fire SIGWINCH from here (zoom button etc.).
         // What this callback IS good for: detecting a backing-scale change,
@@ -1600,6 +1644,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // that originated as u16.
         renderer.setHoveredLinkID(UInt16(truncatingIfNeeded: hoverCoordinator.hoveredLinkID))
         renderer.render(in: view, snapshot: currentSnapshot, focused: focused, selection: selection)
+        noteFrameOutcome(skipped: renderer.didFrameSkipLastRender)
         // Any frame after a keystroke counts as "the keystroke landed on
         // screen" for probe purposes. The renderer can short-circuit
         // (frameKey unchanged → no encode, no present; drawable
@@ -1710,9 +1755,20 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         hoverCoordinator.invalidateURLMatchCache()
         findController.findMatchesSeq = nil
 
+        // NO `.receive(on: DispatchQueue.main)` here. `DispatchQueue` as a
+        // Combine scheduler ALWAYS dispatches asynchronously, even when the
+        // value is already emitted on main — which every publish path does
+        // (`SnapshotCoalescer.publishPendingSnapshot` hops to main itself,
+        // `publishImmediate` publishes inline on main). The hop cost a full
+        // runloop turn per snapshot and broke `ResizeController.resize`'s
+        // synchronous contract: it blocks main so the new-size snapshot is
+        // in place before the next display-link tick, and the deferred
+        // delivery let the old-grid-at-new-viewport frame draw anyway. The
+        // audit-F3 comment that claimed the hop "saved a tick" had it
+        // backwards. The precondition pins the contract instead.
         session.$snapshot
-            .receive(on: DispatchQueue.main)
             .sink { [weak self] snap in
+                dispatchPrecondition(condition: .onQueue(.main))
                 guard let self, let snap else { return }
                 self.render(snapshot: snap)
             }
@@ -1744,6 +1800,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // MARK: - Input
 
     public override func keyDown(with event: NSEvent) {
+        wakeRenderLoop()
         // Typing dismisses any dwell-tooltip the pointer might be about
         // to reveal — otherwise a hovered URL tooltip would obscure the
         // user's own output as it scrolls past.
@@ -1825,6 +1882,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// chords and non-Option input (CJK/Korean IME) keep the normal IME path.
     private func routeKeyDownThroughIME(_ event: NSEvent) -> Bool {
         didInsertTextViaIME = false
+        // Every plain printable reaches the encoder through
+        // `insertText(_:replacementRange:)`, which AppKit calls with the
+        // resolved text and no modifier information. Stash this event's
+        // modifiers so that path can report Shift under kitty flags 4/8
+        // (`CSI 97:65;2u` for Shift+A, not `CSI 97u`); cleared again below.
+        pendingInsertTextModifiers = KeyEncoder.Modifiers(event: event)
+        defer { pendingInsertTextModifiers = nil }
         let optionMetaChord = KeyEventClassifier.isOptionMetaChord(
             optionIsMeta: encoder.optionIsMeta,
             modifierFlags: event.modifierFlags

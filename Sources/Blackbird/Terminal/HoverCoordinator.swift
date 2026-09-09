@@ -130,6 +130,12 @@ final class HoverCoordinator {
     /// apart at a caller that clears one and forgets the other.
     private(set) var cachedURLMatches: [URLMatch] = []
     private(set) var cachedURLMatchesSeq: UInt64?
+    /// Grid geometry the cache was built against. An incremental rescan is
+    /// only valid while these match the new snapshot (buffer lines then map
+    /// 1:1 to screen rows).
+    private var cachedURLMatchesOffset: Int = 0
+    private var cachedURLMatchesCols: Int = 0
+    private var cachedURLMatchesRows: Int = 0
 
     /// Drop the URL-match cache (both fields together) so the next ⌘-hover scan
     /// repopulates. Used by the session-rebind paths (per-session sequence ids
@@ -137,6 +143,22 @@ final class HoverCoordinator {
     func invalidateURLMatchCache() {
         cachedURLMatches = []
         cachedURLMatchesSeq = nil
+        cachedURLMatchesOffset = 0
+        cachedURLMatchesCols = 0
+        cachedURLMatchesRows = 0
+    }
+
+    /// Screen rows to rescan for an incremental refresh: each damaged row
+    /// plus its neighbours, because a wrapped URL joins across a row
+    /// boundary in either direction. Pure; exposed for tests.
+    static func incrementalRescanRows(damaged: [Int], rows: Int) -> Set<Int> {
+        var out = Set<Int>()
+        for r in damaged {
+            for d in (r - 1)...(r + 1) where d >= 0 && d < rows {
+                out.insert(d)
+            }
+        }
+        return out
     }
     // The scheduled tooltip reveal (`hoverTooltipItem`) lives on the VIEW, not
     // here: the view's `deinit` / `viewWillMove` cancel it, and reaching through
@@ -386,20 +408,45 @@ final class HoverCoordinator {
             return
         }
         guard cachedURLMatchesSeq != snap.sequenceID else { return }
-        // No damage-based skip here, deliberately. It is tempting — this now
-        // runs on every publish while ⌘ is held, and the scan is
-        // O(rows × cols) — but any such skip has to reason about "row R is
-        // unchanged since the scan", and the publish path legitimately DROPS
-        // snapshots (`SnapshotCoalescer`'s latest-wins slot). Damage is drained
-        // per snapshot taken, not per snapshot published, so the damage a
-        // dropped snapshot carried is simply gone and the induction has holes
-        // exactly where a repainting TUI is busiest. A stale cache there would
-        // paint the ⌘-hover underline for a URL that is no longer under the
-        // pointer — the same "affordance the click won't honour" defect class
-        // as issue #30 itself. The scan is ~0.3–1 ms at a typical grid and only
-        // runs while the user is physically holding ⌘.
+        // Incremental path. A damage-based skip has to reason about "row R
+        // is unchanged since the scan", and the publish path legitimately
+        // DROPS snapshots (`SnapshotCoalescer`'s latest-wins slot); damage
+        // is drained per snapshot TAKEN, not per snapshot published, so a
+        // dropped snapshot's damage is gone. The guard that makes the
+        // induction sound: sequence ids are assigned per snapshot taken,
+        // so `sequenceID == cached + 1` proves nothing was taken (and
+        // therefore nothing dropped) in between. With that, plus unchanged
+        // scroll offset and grid size, the new snapshot's damage set is
+        // exactly the delta — rescan those rows (± neighbours for wrap
+        // joins) and keep the rest. Anything else falls back to the full
+        // O(rows × cols) scan, which used to run on EVERY publish while ⌘
+        // was held: 60 grid walks per second over a repainting TUI.
+        if let prev = cachedURLMatchesSeq,
+           snap.sequenceID == prev &+ 1,
+           !snap.damageIsFull,
+           snap.displayOffset == cachedURLMatchesOffset,
+           snap.cols == cachedURLMatchesCols,
+           snap.rows == cachedURLMatchesRows {
+            let damaged = snap.damagedRows
+            if damaged.isEmpty {
+                cachedURLMatchesSeq = snap.sequenceID
+                return
+            }
+            if damaged.count < (snap.rows + 1) / 2 {
+                let rescan = Self.incrementalRescanRows(damaged: damaged, rows: snap.rows)
+                let offset = snap.displayOffset
+                let rescanLines = Set(rescan.map { Int32($0 - offset) })
+                let kept = cachedURLMatches.filter { !rescanLines.contains($0.line) }
+                cachedURLMatches = kept + URLDetector.scan(snapshot: snap, rows: rescan)
+                cachedURLMatchesSeq = snap.sequenceID
+                return
+            }
+        }
         cachedURLMatches = URLDetector.scan(snapshot: snap)
         cachedURLMatchesSeq = snap.sequenceID
+        cachedURLMatchesOffset = snap.displayOffset
+        cachedURLMatchesCols = snap.cols
+        cachedURLMatchesRows = snap.rows
         // No hover state is dropped here any more. The old shape nil'd
         // `lastHoverCell` on every snapshot replacement because the cell was a
         // screen-space row baked at mouseMoved time against the *previous*

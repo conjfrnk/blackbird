@@ -103,7 +103,12 @@ public enum URLDetector {
     /// character reads on a 200 × 80 grid in the worst case. Bounded by
     /// the viewport; a future "scan entire scrollback" feature would need
     /// to revisit the cap. Audit cwd-hyperlink F12.
-    public static func scan(snapshot: BBSnapshot) -> [URLMatch] {
+    /// `rows`: when non-nil, only these SCREEN rows are scanned (a wrapped
+    /// URL that starts in a scanned row may still consume the next row's
+    /// prefix). Used by `HoverCoordinator` to rescan damaged rows and merge
+    /// the result over its cache instead of walking the whole grid per
+    /// published snapshot while ⌘ is held.
+    public static func scan(snapshot: BBSnapshot, rows: Set<Int>? = nil) -> [URLMatch] {
         var out: [URLMatch] = []
         // Track ranges already consumed by a wrapped-URL join so the
         // per-row scan doesn't emit a second match for the continuation
@@ -111,6 +116,7 @@ public enum URLDetector {
         // previous row's URL. Audit cwd-hyperlink F9.
         var consumedNextRowPrefix: [Int: Int] = [:]  // row -> how many leading cols are part of a prior-row URL
         for row in 0..<snapshot.rows {
+            if let rows, !rows.contains(row) { continue }
             // Build the line AND a parallel UTF-16-offset → column map so
             // the regex's NSRange (UTF-16 units) can be translated back to
             // cell columns. A non-BMP character (e.g. 😀 = U+1F600 = 2

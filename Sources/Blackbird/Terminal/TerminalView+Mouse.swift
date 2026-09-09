@@ -92,6 +92,7 @@ extension TerminalView {
     }
 
     public override func mouseDown(with event: NSEvent) {
+        wakeRenderLoop()
         // Renumber BEFORE any early return below, so a first click consumed
         // by ⌘-URL-open, window-drag or mouse reporting still counts as a
         // click this view saw — otherwise the following genuine double-click
@@ -425,6 +426,7 @@ extension TerminalView {
     // / `end`.
 
     public override func scrollWheel(with event: NSEvent) {
+        wakeRenderLoop()
         // Scrolling moves the grid beneath the pointer — the cell the
         // user was dwelling on now has different content, so any pending
         // tooltip would pop up with a stale URL. Cancel both the pending
@@ -537,6 +539,7 @@ extension TerminalView {
     }
 
     public override func mouseDragged(with event: NSEvent) {
+        wakeRenderLoop()
         // A ⌘-mousedown on a link that turns into a real drag is a window
         // drag, not a click: drop the pending open and hand the gesture to
         // `performDrag`. Below the slop it stays pending so a shaky click

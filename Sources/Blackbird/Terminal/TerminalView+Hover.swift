@@ -42,6 +42,7 @@ extension TerminalView {
     }
 
     public override func mouseMoved(with event: NSEvent) {
+        wakeRenderLoop()
         super.mouseMoved(with: event)
         let point = bufferPointFromEvent(event)
         let screenRow = Int(point.line) + (currentSnapshot?.displayOffset ?? 0)
@@ -71,6 +72,7 @@ extension TerminalView {
     }
 
     public override func flagsChanged(with event: NSEvent) {
+        wakeRenderLoop()
         super.flagsChanged(with: event)
         hoverCoordinator.handleFlagsChanged(flags: event.modifierFlags)
     }
