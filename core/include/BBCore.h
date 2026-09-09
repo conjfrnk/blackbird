@@ -768,6 +768,16 @@ uint32_t bb_term_current_mode(struct BBTerm *term);
 struct BBSyncStatus bb_term_sync_status(struct BBTerm *term);
 
 /**
+ * True once a caught panic has poisoned this terminal (see
+ * `BBTerm::poisoned`). Read-only.
+ *
+ * # Safety
+ * `term` must be null or a handle returned by `bb_term_new` that has not
+ * been freed.
+ */
+uint8_t bb_term_is_poisoned(const struct BBTerm *term);
+
+/**
  * Terminate a pending DEC 2026 synchronized update, replaying the parser's
  * buffered bytes into the grid.
  *

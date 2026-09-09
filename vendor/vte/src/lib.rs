@@ -70,6 +70,14 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
 }
 
 impl Parser {
+    /// Blackbird addition (re-apply on bump): true when nothing is pending
+    /// across chunks — the state machine is in Ground and no partial UTF-8
+    /// sequence is buffered. `blackbird_core` uses it to decide whether an
+    /// ESC-free chunk still has to be run through this parser.
+    pub fn is_ground(&self) -> bool {
+        matches!(self.state, State::Ground) && self.partial_utf8_len == 0
+    }
+
     /// Create a new Parser
     pub fn new() -> Parser {
         Default::default()

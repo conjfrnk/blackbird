@@ -96,7 +96,7 @@ final class SnapshotCoalescer {
         // the pending-snapshot slot updated below, so we can't end up with
         // a scheduled dispatch for a session that has since terminated.
         publishLock.lock()
-        if session.isTerminated {
+        if session.isTerminated || session.coreFailed {
             publishLock.unlock()
             return
         }

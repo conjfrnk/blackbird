@@ -446,7 +446,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// `SessionLifecycle`. `internal` so `SessionLifecycle`'s "Retry" sheet
     /// handler can re-invoke it.
     func startSession(inView view: TerminalView) {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let resolved = ShellResolver.resolve(
+            preference: Preferences.shared.shellPath,
+            loginShell: ShellResolver.loginShellFromPasswd(),
+            environmentShell: ProcessInfo.processInfo.environment["SHELL"],
+            isExecutable: ShellResolver.isExecutableFile
+        )
+        if resolved.preferenceRejected {
+            Self.tabsLogger.error("Settings → Shell names '\(Preferences.shared.shellPath, privacy: .public)', which is not an executable file; using \(resolved.path, privacy: .public)")
+        }
+        let shell = resolved.path
         // Seed a useful default title (shell basename) so tabs aren't all
         // "Blackbird" before the shell emits OSC 0/2. The TerminalView
         // subscriber will replace this the moment the shell sets its own.

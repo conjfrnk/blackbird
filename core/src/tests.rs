@@ -3,6 +3,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::vte::ansi::{Handler, Rgb};
 
 use crate::osc::OSC7_URL_MAX;
+use crate::rate_limit::PTY_WRITE_REPLY_BURST;
 use crate::scrub::scrub_title_controls;
 
 #[test]
@@ -3043,16 +3044,16 @@ fn xtgettcap_pty_write_cap_holds() {
         let writes = *sink.count.lock().unwrap();
         // Reviewer feedback (2026-04-29): assert exact saturation,
         // not `<= cap`. The N=200 input is designed to overflow the
-        // 32/sec budget by ~6×, so anything other than exactly 32
+        // 128-token bucket by ~1.6×, so anything other than exactly 128
         // PtyWrites is a regression: e.g. if a future bug makes
         // `allow()` always return false, `0 <= 32` would still pass
         // and the cap would silently fail-open at zero.
         assert_eq!(
-            writes, PTY_WRITE_REPLY_PER_SECOND as usize,
+            writes, PTY_WRITE_REPLY_BURST as usize,
             "XTGETTCAP must saturate the PtyWrite cap exactly; expected \
-                 {} PtyWrites within one window (N={N} cap-hex tokens overflows \
-                 by ~6×), got {}",
-            PTY_WRITE_REPLY_PER_SECOND, writes
+                 {} PtyWrites from a fresh bucket (N={N} cap-hex tokens overflows \
+                 by ~1.6×), got {}",
+            PTY_WRITE_REPLY_BURST, writes
         );
 
         bb_term_free(term);
@@ -3085,14 +3086,14 @@ fn pty_write_cap_holds_across_paths() {
     // same 32/sec budget.
     let mut input: Vec<u8> = Vec::new();
     input.extend_from_slice(b"\x1bP+q");
-    for i in 0..50 {
+    for i in 0..100 {
         if i > 0 {
             input.push(b';');
         }
         input.extend_from_slice(b"544E");
     }
     input.extend_from_slice(b"\x1b\\");
-    for _ in 0..50 {
+    for _ in 0..100 {
         input.extend_from_slice(b"\x1b[6n"); // DSR cursor position
     }
 
@@ -3106,16 +3107,16 @@ fn pty_write_cap_holds_across_paths() {
 
         let writes = *sink.count.lock().unwrap();
         // Reviewer feedback (2026-04-29): assert exact saturation,
-        // not `<= cap`. The combined 50 + 50 input overflows the
-        // 32/sec budget by ~3×, so the cap MUST land exactly at 32.
+        // not `<= cap`. The combined 100 + 100 input overflows the
+        // 128-token bucket by ~1.6×, so the cap MUST land exactly at 128.
         // A weaker `<=` assertion would let `writes == 0` pass, which
         // is the failure mode if a future refactor breaks `allow()`
         // to always return false.
         assert_eq!(
-            writes, PTY_WRITE_REPLY_PER_SECOND as usize,
+            writes, PTY_WRITE_REPLY_BURST as usize,
             "combined XTGETTCAP + DSR PtyWrites must saturate the shared \
-                 cap exactly; expected {} (50+50 inputs overflow by ~3×), got {}",
-            PTY_WRITE_REPLY_PER_SECOND, writes
+                 bucket exactly; expected {} (100+100 inputs overflow by ~1.6×), got {}",
+            PTY_WRITE_REPLY_BURST, writes
         );
 
         // Reviewer feedback (2026-04-29): the sibling

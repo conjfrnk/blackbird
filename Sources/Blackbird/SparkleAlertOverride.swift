@@ -48,6 +48,18 @@ enum SparkleAlertOverride {
     /// only for test isolation.
     private static var originalIMP: IMP?
 
+    /// True only for Sparkle's "you are on the latest version" outcome. An
+    /// absent / unrecognised reason is treated as "not on latest" so the
+    /// user sees Sparkle's own wording rather than a possibly-false
+    /// reassurance. Pure; exposed for tests.
+    static func isOnLatestVersion(_ error: Error) -> Bool {
+        let info = (error as NSError).userInfo
+        guard let raw = info[SPUNoUpdateFoundReasonKey] else { return false }
+        let code: Int? = (raw as? NSNumber)?.intValue ?? (raw as? Int)
+        guard let code else { return false }
+        return code == Int(SPUNoUpdateFoundReason.onLatestVersion.rawValue)
+    }
+
     /// Build the "up to date" informative text. Extracted so the empty-
     /// version path is unit-testable without an in-process Sparkle UI hop.
     /// When `version` is empty (Info.plist missing CFBundleShortVersionString
@@ -226,8 +238,25 @@ enum SparkleAlertOverride {
         typealias Block = @convention(block) (AnyObject, Error, @escaping () -> Void) -> Void
         // Thin trampoline: the alert presentation lives in `presentUpToDate`
         // (the swizzled-in selector ignores the driver + error args).
-        let block: Block = { _, _, ack in
-            Self.presentUpToDate(ack: ack)
+        let block: Block = { driver, error, ack in
+            // Sparkle calls this for EVERY no-update outcome and encodes why
+            // in `SPUNoUpdateFoundReasonKey`: on the latest version, on a
+            // NEWER-than-latest build, macOS too old / too new for the
+            // newest item, or an arm64-only item on Intel. Only the first is
+            // "you're up to date"; substituting our short alert for the
+            // others told a user on a too-old macOS that they were current
+            // the day a release raised minimumSystemVersion. Everything but
+            // OnLatestVersion goes to Sparkle's own (correct) dialog.
+            if Self.isOnLatestVersion(error) {
+                Self.presentUpToDate(ack: ack)
+            } else if let orig = originalIMP {
+                typealias Original = @convention(c) (AnyObject, Selector, Error, @escaping () -> Void) -> Void
+                let fn = unsafeBitCast(orig, to: Original.self)
+                fn(driver, sel, error, ack)
+            } else {
+                logger.error("SparkleAlertOverride: no original IMP to forward a non-latest no-update reason to")
+                ack()
+            }
         }
         let imp = imp_implementationWithBlock(block as Any)
         // F-S7-001: free the previously-installed block IMP, if any. We

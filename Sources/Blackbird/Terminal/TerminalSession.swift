@@ -180,6 +180,10 @@ public final class TerminalSession: ObservableObject {
     /// Terminate latch. `private(set)` so only `terminate()` flips it; the
     /// coalescer reads it (under `publishLock`) but never writes it.
     private(set) var isTerminated: Bool = false
+    /// Set (under `publishLock`) on the first `.fatal` event. The core has
+    /// poisoned itself after a caught panic; feeding more bytes would only
+    /// produce a Fatal per chunk against a grid in an unknown state.
+    private(set) var coreFailed: Bool = false
 
     /// The main-publish coalescer. Owns the F1/F11/H8 pending-slot machinery
     /// and the feed/scheduleSnapshotAfterBurst/publish paths, sharing this
@@ -1137,7 +1141,10 @@ public final class TerminalSession: ObservableObject {
             // invariant holds — single writer, no divergence between
             // `title` and `displayTitle`.
             titleState.titleOverride = nil
-            titleState.applyOscTitle("[fatal] core panic: \(msg)")
+            titleState.applyOscTitle("[fatal] core panic — close this tab: \(msg)")
+            publishLock.lock()
+            coreFailed = true
+            publishLock.unlock()
         }
     }
 

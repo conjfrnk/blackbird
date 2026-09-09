@@ -9,9 +9,19 @@ use std::cell::UnsafeCell;
 /// BBTerm-owning thread; the Send/Sync impls below upgrade the
 /// `Arc<…>` to thread-safe under that discipline (same pattern as
 /// `ColorRequestQueue`).
+/// Token bucket for PTY-write replies (DA1, CPR, DECRQM, kitty `CSI ?u`,
+/// XTGETTCAP, colour queries). Was a 32/s tumbling window, which silently
+/// dropped legitimate protocol replies when a tmux attach and an nvim
+/// startup inside it landed in the same second — a dropped DA1/CPR stalls
+/// the TUI until its own timeout. Now: `PTY_WRITE_REPLY_BURST` tokens up
+/// front, refilled at `PTY_WRITE_REPLY_PER_SECOND`, so the sustained rate
+/// (the DoS bound) is unchanged while a startup burst goes through.
 #[derive(Debug)]
 pub(crate) struct PtyWriteRateState {
-    window_start: std::time::Instant,
+    last_refill: std::time::Instant,
+    tokens: f64,
+    /// Replies allowed since construction / `reset` — observable for
+    /// tests and for `bb_term_clear_all`'s reset pin.
     pub(crate) window_count: u32,
 }
 
@@ -60,7 +70,8 @@ impl PtyWriteRateCell {
 }
 
 pub(crate) const PTY_WRITE_REPLY_PER_SECOND: u32 = 32;
-pub(crate) const PTY_WRITE_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+/// Bucket capacity: how many replies may go out back-to-back from idle.
+pub(crate) const PTY_WRITE_REPLY_BURST: u32 = 128;
 
 /// Tumbling-window state for the Title/Bell event caps (audit S1-002).
 /// ("Tumbling", not sliding: `window_start` resets on expiry, so up to
@@ -127,23 +138,25 @@ pub(crate) const EVENT_RATE_WINDOW: std::time::Duration = std::time::Duration::f
 impl PtyWriteRateState {
     pub(crate) fn new() -> Self {
         Self {
-            window_start: std::time::Instant::now(),
+            last_refill: std::time::Instant::now(),
+            tokens: f64::from(PTY_WRITE_REPLY_BURST),
             window_count: 0,
         }
     }
 
-    /// Returns true if the dispatch is allowed; false if the cap has
-    /// been hit and the caller should drop the event silently.
+    /// Returns true if the dispatch is allowed; false if the bucket is
+    /// empty and the caller should drop the event silently.
     pub(crate) fn allow(&mut self) -> bool {
         let now = std::time::Instant::now();
-        if now.duration_since(self.window_start) >= PTY_WRITE_REPLY_WINDOW {
-            self.window_start = now;
-            self.window_count = 0;
-        }
-        if self.window_count >= PTY_WRITE_REPLY_PER_SECOND {
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+        self.tokens = (self.tokens + elapsed * f64::from(PTY_WRITE_REPLY_PER_SECOND))
+            .min(f64::from(PTY_WRITE_REPLY_BURST));
+        if self.tokens < 1.0 {
             return false;
         }
-        self.window_count += 1;
+        self.tokens -= 1.0;
+        self.window_count = self.window_count.saturating_add(1);
         true
     }
 }

@@ -25,6 +25,9 @@ final class PreferencesTests: XCTestCase {
     private var savedColorQueryEnabled: Bool = false
     private var savedConfirmMultiLinePaste: Bool = false
     private var savedTranslucency: Double = 0
+    private var savedSetLocaleEnvironment: Bool = true
+    private var savedShellPath: String = ""
+    private var savedHangDetection: Bool = true
     private var savedWindowDragModifierRaw: String = ""
     private var savedWindowResizeModifierRaw: String = ""
 
@@ -69,6 +72,9 @@ final class PreferencesTests: XCTestCase {
         savedOSC52Enabled      = p.osc52Enabled
         savedColorQueryEnabled = p.colorQueryEnabled
         savedConfirmMultiLinePaste = p.confirmMultiLinePaste
+        savedSetLocaleEnvironment = p.setLocaleEnvironment
+        savedShellPath         = p.shellPath
+        savedHangDetection     = p.hangDetection
         savedTranslucency      = p.translucency
         savedWindowDragModifierRaw   = p.windowDragModifierRaw
         savedWindowResizeModifierRaw = p.windowResizeModifierRaw
@@ -89,6 +95,9 @@ final class PreferencesTests: XCTestCase {
         p.osc52Enabled      = savedOSC52Enabled
         p.colorQueryEnabled = savedColorQueryEnabled
         p.confirmMultiLinePaste = savedConfirmMultiLinePaste
+        p.setLocaleEnvironment = savedSetLocaleEnvironment
+        p.shellPath         = savedShellPath
+        p.hangDetection     = savedHangDetection
         p.translucency      = savedTranslucency
         p.windowDragModifierRaw   = savedWindowDragModifierRaw
         p.windowResizeModifierRaw = savedWindowResizeModifierRaw
@@ -147,6 +156,7 @@ final class PreferencesTests: XCTestCase {
             "bb.confirmMultiLinePaste",
             "bb.translucency",
             "bb.windowDragModifier", "bb.windowResizeModifier",
+            "bb.setLocaleEnvironment", "bb.shellPath", "bb.hangDetection",
         ]
         let missing = Set(declared).subtracting(tracked)
         XCTAssertTrue(

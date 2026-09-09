@@ -57,11 +57,16 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
         // this branch because `osc_possibly_pending` stays true from
         // the DCS's opening ESC; kept as a safety belt.
         if bb.osc_possibly_pending || has_bel || bb.in_xtgettcap {
-            let mut osc = osc_scanner!(bb);
-            bb.osc_parser.advance(&mut osc, slice);
-            if has_bel {
-                bb.osc_possibly_pending = false;
+            {
+                let mut osc = osc_scanner!(bb);
+                bb.osc_parser.advance(&mut osc, slice);
             }
+            // Clear the latch as soon as the tap parser is back in Ground
+            // with no partial UTF-8 — NOT only on a BEL. The bundled prompt
+            // marks terminate with ST (ESC \), so the BEL-only clear left the
+            // latch set for the rest of the session after the first prompt
+            // and every plain-text chunk ran through both parsers.
+            bb.osc_possibly_pending = !bb.osc_parser.is_ground();
         }
         finish_advance(bb);
         return;
@@ -69,12 +74,16 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // Chunk contains ESC — may open a new OSC that terminates in a
     // later chunk. Set the latch so subsequent ESC-free chunks still
     // reach the parser.
-    bb.osc_possibly_pending = true;
     // Drive the parallel OSC parser whole-chunk: it watches for OSC 7,
     // OSC 133, and the modify-other-keys CSI. None of those need byte-
-    // precise dispatch positions, so a single `advance` is enough.
-    let mut osc = osc_scanner!(bb);
-    bb.osc_parser.advance(&mut osc, slice);
+    // precise dispatch positions, so a single `advance` is enough. The
+    // latch is then set only if the tap parser is still mid-sequence at
+    // the chunk boundary (see the ESC-free branch above).
+    {
+        let mut osc = osc_scanner!(bb);
+        bb.osc_parser.advance(&mut osc, slice);
+    }
+    bb.osc_possibly_pending = !bb.osc_parser.is_ground();
     bb.processor.advance(&mut bb.term, slice);
     finish_advance(bb);
 }

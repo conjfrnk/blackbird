@@ -611,8 +611,8 @@ fn decrqm_replies_respect_pty_write_rate_cap() {
     }
     let writes = run(&burst);
     assert!(
-        writes.len() <= 32,
-        "DECRQM-flood replies must respect the 32/sec cap; got {} replies",
+        writes.len() <= 128,
+        "DECRQM-flood replies must respect the 128-token bucket (32/s refill); got {} replies",
         writes.len()
     );
     assert!(

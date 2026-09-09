@@ -245,9 +245,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         let installWatchdog = (hangEnv != "0")
         #else
-        let installWatchdog = (hangEnv == "1")
+        // Release: the Settings → Diagnostics toggle (default ON) decides;
+        // the env var still forces either way. Through v0.8.0 Release
+        // installed the watchdog only under BB_HANG_WATCHDOG=1 — a Finder
+        // launch can't set that — while the Diagnostics tab promised hang
+        // reports, so a user who hit a beachball found nothing there.
+        let installWatchdog: Bool = {
+            switch hangEnv {
+            case "1": return true
+            case "0": return false
+            default: return Preferences.shared.hangDetection
+            }
+        }()
         #endif
-        if installWatchdog { MainThreadWatchdog.install() }
+        // 0.25 s ping (was 0.1: ten background wakeups/s for the app's
+        // lifetime); a 1 s hang is still caught well inside the beachball.
+        if installWatchdog { MainThreadWatchdog.install(hangThreshold: 1.0, pingInterval: 0.25) }
         // S4-003 (2026-05-17): reap orphan hang-*.txt.partial siblings left
         // over from a prior session's force-quit during the captureHangReport
         // sample(1) window. These are invisible to the Settings → Diagnostics
@@ -269,6 +282,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // on, is what protects a live partial.
         DispatchQueue.global(qos: .utility).async {
             HangReportStore.pruneOrphanPartials()
+            // Each report is a full `sample(1)` trace (hundreds of KB) and the
+            // store had no count cap: a session with periodic stalls grew
+            // ~/Library/Logs/Blackbird without bound. Keep the newest 20.
+            HangReportStore.pruneExcessReports(keep: 20)
         }
     }
 

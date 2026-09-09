@@ -63,19 +63,32 @@ final class SessionLifecycle {
         // prewarmed materialized root; [:] whenever the feature is off,
         // the shell is unsupported (bash), or materialization failed —
         // in every such case the spawn is byte-identical to pre-#23.
-        let integrationEnv = ShellIntegration.envOverrides(
+        let parentEnv = ProcessInfo.processInfo.environment
+        var env = ShellIntegration.envOverrides(
             shellPath: shell,
             integrationDir: Bundle.main.resourcePath,
             materializedRoot: ShellIntegration.currentRoot(),
-            parentEnv: ProcessInfo.processInfo.environment,
+            parentEnv: parentEnv,
             enabled: Preferences.shared.automaticShellIntegration
+        )
+        // A Finder-launched app inherits no LANG, so the login shell ran in
+        // the C locale unless dotfiles set one. Never overrides a parent
+        // value; see `LocaleEnvironment`.
+        env.merge(
+            LocaleEnvironment.overrides(
+                enabled: Preferences.shared.setLocaleEnvironment,
+                parentEnv: parentEnv,
+                locale: Locale.current,
+                isAvailable: LocaleEnvironment.localeDefinitionExists
+            ),
+            uniquingKeysWith: { current, _ in current }
         )
         return try TerminalSession.start(
             shell: shell,
             arguments: ["-il"],  // interactive login shell
             size: .init(cols: size.cols, rows: size.rows),
             initialWorkingDirectory: controller.initialWorkingDirectory,
-            envOverrides: integrationEnv
+            envOverrides: env
         )
     }
 

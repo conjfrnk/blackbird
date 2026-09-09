@@ -225,6 +225,17 @@ public final class Preferences: ObservableObject {
     /// command. iTerm2's "Confirm when pasting more than N lines"
     /// has the same shape; we keep it simple at one-line-or-more.
     @AppStorage("bb.confirmMultiLinePaste") public var confirmMultiLinePaste: Bool = false
+    /// Export `LANG` to the child shell when the parent environment carries
+    /// no locale (a Finder launch never does). See `LocaleEnvironment`.
+    @AppStorage("bb.setLocaleEnvironment") public var setLocaleEnvironment: Bool = true
+    /// Absolute path of the program new tabs run; empty means "the account's
+    /// login shell". See `ShellResolver` for the resolution order.
+    @AppStorage("bb.shellPath") public var shellPath: String = ""
+    /// Main-thread hang detection in Release builds (Debug is always on,
+    /// `BB_HANG_WATCHDOG` still overrides both). Reports land under
+    /// ~/Library/Logs/Blackbird and surface in Settings → Diagnostics, which
+    /// advertised them while the watchdog was dark in every shipped build.
+    @AppStorage("bb.hangDetection") public var hangDetection: Bool = true
     /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. ON by default
     /// since issue #24: modern TUIs (Codex CLI, nvim, delta, fzf) probe
     /// OSC 10/11 at startup for light/dark theme detection, and a silent
@@ -431,6 +442,9 @@ public final class Preferences: ObservableObject {
             // sweep — a `defaults write … -string "foo"` would persist
             // unsanitized while every other bool pref gets cleaned up.
             Preferences.k("confirmMultiLinePaste"): false,
+            Preferences.k("setLocaleEnvironment"): true,
+            Preferences.k("shellPath"):         "",
+            Preferences.k("hangDetection"):     true,
         ])
 
         // Type-guard pass. `@AppStorage<Double>` trusts the KVC getter — a

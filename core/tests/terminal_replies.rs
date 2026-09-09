@@ -257,8 +257,8 @@ fn pty_write_reply_capped_under_burst() {
     }
     let writes = run(&burst);
     assert!(
-        writes.len() <= 32,
-        "expected ≤ 32 replies under PTY_WRITE_REPLY_PER_SECOND cap; got {}",
+        writes.len() <= 128,
+        "expected ≤ 128 replies (PTY_WRITE_REPLY_BURST) from a fresh bucket; got {}",
         writes.len()
     );
     // Must produce at LEAST one reply — the cap is a ceiling, not
@@ -282,8 +282,8 @@ fn pty_write_reply_cap_applies_across_query_kinds() {
     }
     let writes = run(&burst);
     assert!(
-        writes.len() <= 32,
-        "mixed-kind burst must respect the same total cap; got {}",
+        writes.len() <= 128,
+        "mixed-kind burst must respect the same 128-token bucket; got {}",
         writes.len()
     );
 }
@@ -299,8 +299,8 @@ fn pty_write_reply_first_32_succeed() {
     }
     let writes = run(&burst);
     assert!(
-        writes.len() >= 32 || writes.len() == 100,
-        "first 32 queries in a fresh window must succeed; saw {}",
+        writes.len() == 100,
+        "a 100-query burst fits inside the 128-token bucket, so every reply must succeed; saw {}",
         writes.len()
     );
 }

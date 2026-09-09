@@ -45,6 +45,9 @@ final class PreferencesGuardSweepTests: XCTestCase {
     private var savedColorQueryEnabled: Bool = false
     private var savedConfirmMultiLinePaste: Bool = false
     private var savedTranslucency: Double = 0
+    private var savedSetLocaleEnvironment: Bool = true
+    private var savedShellPath: String = ""
+    private var savedHangDetection: Bool = true
 
     override class func setUp() {
         super.setUp()
@@ -69,6 +72,9 @@ final class PreferencesGuardSweepTests: XCTestCase {
         savedOSC52Enabled          = p.osc52Enabled
         savedColorQueryEnabled     = p.colorQueryEnabled
         savedConfirmMultiLinePaste = p.confirmMultiLinePaste
+        savedSetLocaleEnvironment  = p.setLocaleEnvironment
+        savedShellPath             = p.shellPath
+        savedHangDetection         = p.hangDetection
         savedTranslucency          = p.translucency
     }
 
@@ -90,6 +96,9 @@ final class PreferencesGuardSweepTests: XCTestCase {
         p.colorQueryEnabled     = savedColorQueryEnabled
         p.confirmMultiLinePaste = savedConfirmMultiLinePaste
         p.translucency          = savedTranslucency
+        p.setLocaleEnvironment  = savedSetLocaleEnvironment
+        p.shellPath             = savedShellPath
+        p.hangDetection         = savedHangDetection
         super.tearDown()
     }
 
@@ -191,6 +200,22 @@ final class PreferencesGuardSweepTests: XCTestCase {
             name: "autoUpdateChecks",
             current: p.autoUpdateChecks,
             write: { p.autoUpdateChecks = $0 }
+        ))
+        probes.append(makeBoolProbe(
+            name: "setLocaleEnvironment",
+            current: p.setLocaleEnvironment,
+            write: { p.setLocaleEnvironment = $0 }
+        ))
+        probes.append(makeBoolProbe(
+            name: "hangDetection",
+            current: p.hangDetection,
+            write: { p.hangDetection = $0 }
+        ))
+        probes.append(makeStringProbe(
+            name: "shellPath",
+            current: p.shellPath,
+            candidates: ["", "/bin/zsh", "/bin/bash"],
+            write: { p.shellPath = $0 }
         ))
         probes.append(makeBoolProbe(
             name: "osc52Enabled",
@@ -465,6 +490,9 @@ final class PreferencesGuardSweepTests: XCTestCase {
             "bb.colorQueryEnabled":     "colorQueryEnabled",
             "bb.confirmMultiLinePaste": "confirmMultiLinePaste",
             "bb.translucency":          "translucency",
+            "bb.setLocaleEnvironment":  "setLocaleEnvironment",
+            "bb.shellPath":             "shellPath",
+            "bb.hangDetection":         "hangDetection",
         ]
         let unknownKeys = declaredKeys.subtracting(appStorageKeyToPropertyName.keys)
         XCTAssertTrue(

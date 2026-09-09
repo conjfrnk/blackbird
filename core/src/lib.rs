@@ -106,6 +106,14 @@ pub enum BBPromptMarkKind {
 /// each Arc keeps its inner cell alive as long as any clone exists, so an
 /// event firing during `Term`'s destruction still lands on live memory.
 pub struct BBTerm {
+    /// Set by `guard_with_term` after a caught panic. A panic mid-
+    /// `processor.advance` can leave alacritty's grid / cursor invariants
+    /// broken; before this flag the core kept accepting input on that
+    /// `Term`, producing a Fatal per chunk from then on. Every mutating
+    /// entry point checks it and becomes a no-op; the Swift side stops
+    /// feeding on the first Fatal. `Cell` so the read-only guard path can
+    /// set it through `&*term`.
+    pub(crate) poisoned: std::cell::Cell<bool>,
     pub(crate) term: Term<RoutingListener>,
     pub(crate) processor: Processor,
     /// Parallel `vte::Parser` that drives `OscScanner` for OSC 7 (cwd) and
@@ -382,6 +390,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             color_queue,
             color_query_enabled: false,
             osc_possibly_pending: false,
+            poisoned: std::cell::Cell::new(false),
             in_xtgettcap: false,
             xtgettcap_buf: Vec::with_capacity(64),
             callback,
@@ -478,6 +487,10 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // purpose. Audit H-5 extended the same gate to every other
         // entry point that reborrows `&mut *term` / `&*term`; the
         // helper centralises the latch read and one-shot log.
+        // Poisoned after a caught panic (see `BBTerm::poisoned`): no-op.
+        if (*term).poisoned.get() {
+            return;
+        }
         if ffi_reentry_blocked("bb_term_input") {
             return;
         }
@@ -888,6 +901,20 @@ pub unsafe extern "C" fn bb_term_sync_status(term: *mut BBTerm) -> BBSyncStatus 
     })
 }
 
+/// True once a caught panic has poisoned this terminal (see
+/// `BBTerm::poisoned`). Read-only.
+///
+/// # Safety
+/// `term` must be null or a handle returned by `bb_term_new` that has not
+/// been freed.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_is_poisoned(term: *const BBTerm) -> u8 {
+    if term.is_null() {
+        return 0;
+    }
+    u8::from((*term).poisoned.get())
+}
+
 /// Terminate a pending DEC 2026 synchronized update, replaying the parser's
 /// buffered bytes into the grid.
 ///
@@ -919,6 +946,10 @@ pub unsafe extern "C" fn bb_term_sync_status(term: *mut BBTerm) -> BBSyncStatus 
 pub unsafe extern "C" fn bb_term_flush_sync_update(term: *mut BBTerm, force: u8) -> u8 {
     guard_with_term(term, 0u8, || {
         if term.is_null() {
+            return 0;
+        }
+        // Poisoned after a caught panic (see `BBTerm::poisoned`): no-op.
+        if (*term).poisoned.get() {
             return 0;
         }
         if ffi_reentry_blocked("bb_term_flush_sync_update") {
@@ -1078,6 +1109,10 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
 pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
     guard_with_term(term, (), || {
         if term.is_null() {
+            return;
+        }
+        // Poisoned after a caught panic (see `BBTerm::poisoned`): no-op.
+        if (*term).poisoned.get() {
             return;
         }
         if ffi_reentry_blocked("bb_term_clear_all") {

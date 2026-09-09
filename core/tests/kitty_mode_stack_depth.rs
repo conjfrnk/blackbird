@@ -342,7 +342,7 @@ fn keyboard_mode_overflow_does_not_consume_the_title_stack() {
 fn small_push_pop_sequences_round_trip_the_reported_mode() {
     // Query, push flag 1, query, push flags 3 (disambiguate | report event
     // types), query, pop one, query, pop one, query. Five replies, comfortably
-    // under the 32/sec PtyWrite reply cap.
+    // inside the PtyWrite reply bucket.
     let h = Harness::new();
     h.feed(b"\x1b[?u\x1b[>1u\x1b[?u\x1b[>3u\x1b[?u\x1b[<1u\x1b[?u\x1b[<1u\x1b[?u");
 

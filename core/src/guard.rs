@@ -56,6 +56,7 @@ pub(crate) unsafe fn guard_with_term<T>(
             let _guard = FatalInFlightGuard::enter();
             if !term.is_null() {
                 let bb = &*term;
+                bb.poisoned.set(true);
                 let msg = payload_to_string(&*payload);
                 let (cb, ctx) = *bb.callback.slot.get();
                 if let Some(cb) = cb {

@@ -187,10 +187,14 @@ public struct SettingsView: View {
                 }
                 Toggle("Confirm quit while processes are running", isOn: $prefs.confirmClose)
                 Toggle("Automatic shell integration", isOn: $prefs.automaticShellIntegration)
+                Toggle("Set locale environment variables (LANG)", isOn: $prefs.setLocaleEnvironment)
+                TextField("Shell", text: $prefs.shellPath, prompt: Text("Login shell"))
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
             } header: {
                 Text("Terminal")
             } footer: {
-                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs. Shell integration adds prompt marks and the ssh terminfo fix for zsh and fish without touching your rc files; changes apply to new sessions.")
+                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs. Shell integration adds prompt marks and the ssh terminfo fix for zsh and fish without touching your rc files. Shell: leave empty to run your account's login shell, or give the absolute path of another program. Changes apply to new sessions.")
             }
 
             Section {

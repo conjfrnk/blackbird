@@ -157,6 +157,46 @@ enum HangReportStore {
         pruneOrphanPartials(in: logDirectory(), olderThan: 60)
     }
 
+    /// Keep only the newest `keep` completed `hang-*.txt` reports in
+    /// `directory` (by modification date; ties by name), deleting the rest.
+    /// `.partial` files are the orphan reaper's business, not this one's.
+    /// Pure filesystem work; safe on any queue.
+    static func pruneExcessReports(in directory: String, keep: Int) {
+        guard keep >= 0 else { return }
+        let fm = FileManager.default
+        let entries: [String]
+        do {
+            entries = try fm.contentsOfDirectory(atPath: directory)
+        } catch let error as NSError {
+            if error.domain != NSCocoaErrorDomain || error.code != NSFileReadNoSuchFileError {
+                logger.error("pruneExcessReports enumerate \(directory, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
+            return
+        }
+        var dated: [(name: String, mtime: Date)] = []
+        for name in entries where name.hasPrefix("hang-") && name.hasSuffix(".txt") {
+            let path = "\(directory)/\(name)"
+            guard let attrs = try? fm.attributesOfItem(atPath: path),
+                  let mtime = attrs[.modificationDate] as? Date else { continue }
+            dated.append((name, mtime))
+        }
+        guard dated.count > keep else { return }
+        dated.sort { $0.mtime != $1.mtime ? $0.mtime > $1.mtime : $0.name > $1.name }
+        for victim in dated.dropFirst(keep) {
+            let path = "\(directory)/\(victim.name)"
+            do {
+                try fm.removeItem(atPath: path)
+                logger.log("pruned excess hang report \(victim.name, privacy: .public)")
+            } catch {
+                logger.error("pruneExcessReports remove \(path, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    static func pruneExcessReports(keep: Int) {
+        pruneExcessReports(in: logDirectory(), keep: keep)
+    }
+
     /// Return (and create on demand) `~/Library/Logs/Blackbird/`. Falls
     /// back to `/tmp` only if the real directory can't be created — a
     /// hang report in `/tmp` is still better than dropping the sample

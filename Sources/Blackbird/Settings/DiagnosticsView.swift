@@ -34,6 +34,8 @@ struct DiagnosticsView: View {
     /// rather than inlined in the URL string (REFACTOR.md Area 7).
     private static let supportEmail = "conjfrnk@gmail.com"
 
+    @ObservedObject private var prefs = Preferences.shared
+
     init() {}
 
     var body: some View {
@@ -63,6 +65,18 @@ struct DiagnosticsView: View {
                     Crash reports may include file paths under your home folder, \
                     process arguments, and dyld image paths — review the compose \
                     window before sending.
+                    """)
+            }
+
+            Section {
+                Toggle("Detect main-thread hangs", isOn: $prefs.hangDetection)
+            } header: {
+                Text("Hang detection")
+            } footer: {
+                SettingsChrome.footer("""
+                    When on, a main-thread stall of one second or more writes a \
+                    sampled stack trace to ~/Library/Logs/Blackbird (newest 20 are \
+                    kept). Takes effect at the next launch.
                     """)
             }
 
