@@ -14,13 +14,19 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # One in-flight run per ref, newest wins — EXCEPT the `release: vX.Y.Z`
+  # commit that cut-release.sh pushes. publish-update.sh pushes a website
+  # commit minutes later, which used to cancel the release commit's CI run
+  # every time (v0.5.1 … v0.8.0 all show `cancelled`), so no tag was ever
+  # test-gated. Release commits get their own group keyed on the SHA.
+  group: ci-${{ github.ref }}${{ startsWith(github.event.head_commit.message, 'release:') && format('-{0}', github.sha) || '' }}
   cancel-in-progress: true
 
 jobs:
   rust:
     name: Rust — fmt, clippy, test (debug + release)
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -80,18 +86,20 @@ jobs:
 
   xcode:
     name: Xcode — build + test
-    # Matrix the AppKit/Metal-affected jobs across Sonoma + Sequoia so OS
+    # Matrix the AppKit/Metal-affected jobs across Sequoia + Tahoe so OS
     # major regressions in NSWindow / CAMetalLayer / NSEvent surface on
-    # PR CI rather than via a v1.0 user. macos-14 = Sonoma (Xcode 15.x
-    # default but we pin 16.2), macos-15 = Sequoia (Xcode 16.x default).
-    # Rust-only and trend-tracking jobs stay single-OS — see their inline
-    # comments. macos-26 (Tahoe) deliberately excluded until it's GA on
-    # GHA; trying to provision a non-GA image fails the workflow.
+    # PR CI rather than via a user. macos-15 = Sequoia (Xcode 16.4, the
+    # macOS 15 SDK release DMGs are built against); macos-26 = Tahoe
+    # (Xcode 26.6, what local dev runs). macos-14 was retired by GitHub
+    # on 2026-11-02 (brownouts from 2026-10-05, actions/runner-images
+    # #13518). Rust-only and trend-tracking jobs stay single-OS — see
+    # their inline comments.
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15]
+        os: [macos-15, macos-26]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     needs: rust
     steps:
       - uses: actions/checkout@v7
@@ -108,8 +116,19 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.2
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode (per runner image)
+        # macos-15 pins the newest Xcode 16 the image ships (macOS 15 SDK,
+        # the SDK release DMGs are built against); macos-26 pins Xcode 26
+        # (macOS 26 SDK, what local dev on Tahoe runs). Keep both legs so
+        # SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
+        # hit-testing) is compiled and exercised on PR CI, not by users.
+        run: |
+          case "${{ matrix.os }}" in
+            macos-15) sudo xcode-select -s /Applications/Xcode_16.4.app ;;
+            macos-26) sudo xcode-select -s /Applications/Xcode_26.6.app ;;
+            *) echo "unexpected runner ${{ matrix.os }}" >&2; exit 1 ;;
+          esac
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -122,10 +141,13 @@ jobs:
         # merges fine and silently diverges the two.
         run: |
           xcodegen generate
-          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
-            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+          # Info.plist is ALSO written by xcodegen (project.yml `info:`)
+          # and tracked, so a hand edit to SUFeedURL / SUPublicEDKey /
+          # SUEnableInstallerLauncherService must trip the same gate.
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist; then
+            echo "error: project.pbxproj / Info.plist drifted from project.yml —" >&2
             echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
-            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist >&2
             exit 1
           fi
 
@@ -133,7 +155,7 @@ jobs:
         run: scripts/build-core.sh
 
       # The Blackbird scheme enables ASan + UBSan in its test action
-      # (project.yml:181-187). On macos-14 GHA, the cumulative ASan
+      # (project.yml:181-187). On GHA macOS runners, the cumulative ASan
       # instrumentation overhead at xctest-bundle load time exceeds the
       # per-process VM-mapping ceiling once the suite reached 900+ tests
       # in the v0.1.9 hardening sweep. We chased eight whack-a-mole
@@ -271,7 +293,8 @@ jobs:
   # `bench-latency.sh` header.
   latency-gate:
     name: Latency probe plumbing format pin
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 30
     needs: xcode
     steps:
       - uses: actions/checkout@v7
@@ -288,8 +311,13 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.2
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode 16.4
+        # Newest Xcode 16 on the macos-15 image (macOS 15 SDK — the SDK
+        # release DMGs are built against). See the matrix jobs for the
+        # Xcode 26 leg.
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -302,10 +330,13 @@ jobs:
         # merges fine and silently diverges the two.
         run: |
           xcodegen generate
-          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
-            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+          # Info.plist is ALSO written by xcodegen (project.yml `info:`)
+          # and tracked, so a hand edit to SUFeedURL / SUPublicEDKey /
+          # SUEnableInstallerLauncherService must trip the same gate.
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist; then
+            echo "error: project.pbxproj / Info.plist drifted from project.yml —" >&2
             echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
-            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist >&2
             exit 1
           fi
 
@@ -328,8 +359,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15]
+        os: [macos-15, macos-26]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     needs: rust
     steps:
       - uses: actions/checkout@v7
@@ -346,8 +378,19 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.2
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode (per runner image)
+        # macos-15 pins the newest Xcode 16 the image ships (macOS 15 SDK,
+        # the SDK release DMGs are built against); macos-26 pins Xcode 26
+        # (macOS 26 SDK, what local dev on Tahoe runs). Keep both legs so
+        # SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
+        # hit-testing) is compiled and exercised on PR CI, not by users.
+        run: |
+          case "${{ matrix.os }}" in
+            macos-15) sudo xcode-select -s /Applications/Xcode_16.4.app ;;
+            macos-26) sudo xcode-select -s /Applications/Xcode_26.6.app ;;
+            *) echo "unexpected runner ${{ matrix.os }}" >&2; exit 1 ;;
+          esac
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -360,10 +403,13 @@ jobs:
         # merges fine and silently diverges the two.
         run: |
           xcodegen generate
-          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
-            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+          # Info.plist is ALSO written by xcodegen (project.yml `info:`)
+          # and tracked, so a hand edit to SUFeedURL / SUPublicEDKey /
+          # SUEnableInstallerLauncherService must trip the same gate.
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist; then
+            echo "error: project.pbxproj / Info.plist drifted from project.yml —" >&2
             echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
-            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist >&2
             exit 1
           fi
 
@@ -398,11 +444,11 @@ jobs:
     # runs `arch=arm64`; without this gate, half the shipped binary has
     # no smoke signal and Intel users are the canary for any
     # x86_64-specific regression (linker errors, missing dylibs, init
-    # crashes that don't reproduce under arm64). The macos-14 GHA runner
+    # crashes that don't reproduce under arm64). The GHA macOS runner
     # is arm64, but Rosetta 2 transparently translates x86_64 binaries —
     # good enough to catch *gross* regressions even though it isn't a
     # real Intel CPU.
-    runs-on: macos-14
+    runs-on: macos-15
     # Sequenced after swift-release-universal so a broken Release build
     # fails the universal job first (clearer signal). We still rebuild
     # below — ci.yml doesn't upload the Release .app as an artifact, so
@@ -414,7 +460,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Rosetta is preinstalled on macos-14 GHA runners as of 2024-Q4,
+      # Rosetta is preinstalled on arm64 GHA macOS runners as of 2024-Q4,
       # but the install command is idempotent and cheap when it's
       # already present — leave it as a defensive belt-and-suspenders
       # so this job doesn't silently regress to "arch refused to run
@@ -442,8 +488,13 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.2
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode 16.4
+        # Newest Xcode 16 on the macos-15 image (macOS 15 SDK — the SDK
+        # release DMGs are built against). See the matrix jobs for the
+        # Xcode 26 leg.
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -455,10 +506,13 @@ jobs:
         # config. Audit xcode-project F1.
         run: |
           xcodegen generate
-          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
-            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+          # Info.plist is ALSO written by xcodegen (project.yml `info:`)
+          # and tracked, so a hand edit to SUFeedURL / SUPublicEDKey /
+          # SUEnableInstallerLauncherService must trip the same gate.
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist; then
+            echo "error: project.pbxproj / Info.plist drifted from project.yml —" >&2
             echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
-            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist >&2
             exit 1
           fi
 
@@ -568,8 +622,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15]
+        os: [macos-15, macos-26]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     needs: xcode
     steps:
       - uses: actions/checkout@v7
@@ -586,8 +641,19 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.2
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode (per runner image)
+        # macos-15 pins the newest Xcode 16 the image ships (macOS 15 SDK,
+        # the SDK release DMGs are built against); macos-26 pins Xcode 26
+        # (macOS 26 SDK, what local dev on Tahoe runs). Keep both legs so
+        # SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
+        # hit-testing) is compiled and exercised on PR CI, not by users.
+        run: |
+          case "${{ matrix.os }}" in
+            macos-15) sudo xcode-select -s /Applications/Xcode_16.4.app ;;
+            macos-26) sudo xcode-select -s /Applications/Xcode_26.6.app ;;
+            *) echo "unexpected runner ${{ matrix.os }}" >&2; exit 1 ;;
+          esac
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -600,10 +666,13 @@ jobs:
         # merges fine and silently diverges the two.
         run: |
           xcodegen generate
-          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj; then
-            echo "error: Blackbird.xcodeproj/project.pbxproj drifted from project.yml —" >&2
+          # Info.plist is ALSO written by xcodegen (project.yml `info:`)
+          # and tracked, so a hand edit to SUFeedURL / SUPublicEDKey /
+          # SUEnableInstallerLauncherService must trip the same gate.
+          if ! git diff --quiet -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist; then
+            echo "error: project.pbxproj / Info.plist drifted from project.yml —" >&2
             echo "       re-run \`xcodegen generate\` locally and commit the diff." >&2
-            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj >&2
+            git --no-pager diff -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist >&2
             exit 1
           fi
 
@@ -633,7 +702,8 @@ jobs:
 
   rust-fuzz-smoke:
     name: Rust — fuzz smoke (30s/target)
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 20
     # Blocking. Corpus is stable; a new crash here should fail the build so we
     # fix it rather than accumulating latent bugs. If a flake emerges, prefer
     # shrinking + committing the offending input to corpus/ over reintroducing
@@ -682,7 +752,8 @@ jobs:
 
   rust-throughput:
     name: Rust — parser throughput gate
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 20
     needs: rust
     steps:
       - uses: actions/checkout@v7
@@ -707,7 +778,8 @@ jobs:
 
   rust-memory:
     name: Rust — long-session memory gate
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 20
     needs: rust
     steps:
       - uses: actions/checkout@v7
@@ -735,7 +807,8 @@ jobs:
 
   rust-resources:
     name: Rust — long-session FD + thread gate
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 20
     needs: rust
     steps:
       - uses: actions/checkout@v7
@@ -766,7 +839,8 @@ jobs:
 
   security-posture:
     name: Security posture — entitlements + hardened runtime
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 

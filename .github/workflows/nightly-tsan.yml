@@ -29,7 +29,7 @@
 # Why TSAN nightly, not on every PR
 # ---------------------------------
 # Same reason ASan is disabled on PR CI (see ci.yml:117-144 for the
-# full whack-a-mole history): the macos-14 GHA runner has a per-process
+# full whack-a-mole history): the macos-15 GHA runner has a per-process
 # VM-mapping ceiling that the cumulative sanitiser-instrumentation
 # overhead at xctest-bundle load time exceeds once the suite reaches
 # ~900 tests. TSAN has the SAME loader-overhead profile as ASan — its
@@ -120,7 +120,7 @@ name: Nightly TSAN
 
 on:
   # 08:00 UTC = 04:00 EDT / 01:00 PDT — staggered after nightly-miri
-  # (06:00) and the soak job (07:00) so we don't pile three macos-14
+  # (06:00) and the soak job (07:00) so we don't pile three macos-15
   # runs onto contended runners simultaneously.
   schedule:
     - cron: "0 8 * * *"
@@ -144,9 +144,9 @@ concurrency:
 jobs:
   tsan:
     name: TSAN — concurrency race hunter (curated subset)
-    runs-on: macos-14
+    runs-on: macos-15
     # TSAN-instrumented tests run ~3-5x slower than uninstrumented; the
-    # 8-class / ~55-test subset measures ~10-20 min wall at macos-14
+    # 8-class / ~55-test subset measures ~10-20 min wall at macos-15
     # pace. 60 min is headroom for runner contention and toolchain
     # regressions. If this ever times out, the right response is to
     # investigate the slowdown, not to bump the cap.
@@ -166,8 +166,13 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.2
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode 16.4
+        # Newest Xcode 16 on the macos-15 image (macOS 15 SDK — the SDK
+        # release DMGs are built against). See the matrix jobs for the
+        # Xcode 26 leg.
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen

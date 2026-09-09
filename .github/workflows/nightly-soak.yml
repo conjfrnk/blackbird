@@ -70,8 +70,8 @@
 #   TEST_RUNNER_BB_RUN_SOAK=1 xcodebuild test ...
 #   -> xctest sees env["BB_RUN_SOAK"] == "1" (prefix stripped).
 # We use this form below. It is independent of any project.yml
-# scheme-level env config and works on Xcode 16.2 (the version
-# pinned by ci.yml's `sudo xcode-select -s /Applications/Xcode_16.2.app`).
+# scheme-level env config and works on Xcode 16.4 (the version
+# pinned by ci.yml's macos-15 leg).
 #
 # Belt-and-braces: the final step of the swift-soak job greps the
 # captured xcodebuild log for evidence the soak tests actually RAN
@@ -106,7 +106,7 @@ name: Nightly - soak / leak gates
 on:
   # 07:00 UTC = 03:00 EDT / 00:00 PDT. Picked one hour after
   # nightly-miri (06:00 UTC) so the two heavy nightlies don't
-  # contend for macos-14 runner availability when GitHub's hosted
+  # contend for macos-15 runner availability when GitHub's hosted
   # runner pool is tight. Both finish well within their 60-min
   # caps, so even back-to-back start times wouldn't actually
   # collide on runner allocation - but staggering keeps the
@@ -134,9 +134,9 @@ concurrency:
 jobs:
   rust-soak:
     name: Rust - long-session memory + resource + sweep soak gates
-    runs-on: macos-14
+    runs-on: macos-15
     # Per-job 60-min cap. Empirically each `--ignored` gate runs
-    # 1-5 min on macos-14; the 60 s sweep_soak_60s adds 60 s wall;
+    # 1-5 min on macos-15; the 60 s sweep_soak_60s adds 60 s wall;
     # total wall is well under 30 min. 60 min is headroom for a
     # nightly toolchain regression that slows release-mode codegen
     # or for runner-image churn on cargo cache hydrate. If this
@@ -215,7 +215,7 @@ jobs:
 
   swift-soak:
     name: Swift - RSS-returns-to-baseline + 10s feed/snapshot soak
-    runs-on: macos-14
+    runs-on: macos-15
     # 60-min cap - see rust-soak for rationale. Swift soak is
     # ~10 min wall (toolchain + xcodegen + universal core build +
     # xcodebuild test for two test classes including 32x1 MiB
@@ -239,12 +239,14 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.2
-        # Same Xcode pin as ci.yml's xcode/smoke/latency-gate jobs.
-        # Xcode version drift across CI lanes risks a Swift compiler
-        # change that only reproduces on one - and would defeat the
-        # nightly soak's bisect signal.
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode 16.4
+        # Same Xcode pin as ci.yml's macos-15 leg. Xcode version drift
+        # across CI lanes risks a Swift compiler change that only
+        # reproduces on one - and would defeat the nightly soak's bisect
+        # signal.
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -275,7 +277,7 @@ jobs:
         # documented (xcodebuild(1) man page) mechanism: xcodebuild
         # strips the `TEST_RUNNER_` prefix and injects the variable
         # into the test runner's environment. Confirmed working
-        # on Xcode 16.2.
+        # on Xcode 16.4.
         #
         # BB_RUN_SOAK gates BOTH Swift soak suites
         # (SwiftSessionRSSReturnsToBaselineTests and
@@ -296,7 +298,7 @@ jobs:
         # they're off on ci.yml's xcode job: the scheme enables
         # them by default (project.yml:181-187) and the cumulative
         # ASan instrumentation overhead at xctest-bundle load time
-        # has tripped the macos-14 runner's VM-mapping ceiling.
+        # has tripped the macos-15 runner's VM-mapping ceiling.
         # Soak tests do NOT need ASan - the gates here are about
         # RSS leakage, FD / thread leakage, and cumulative state
         # corruption. ASan catches different bugs (heap UB, OOB
@@ -305,7 +307,7 @@ jobs:
         # FFI re-entry surface.
         #
         # `set +e` / result-based check: same infra-quirk
-        # absorption as ci.yml - the macos-14 runner occasionally
+        # absorption as ci.yml - the macos-15 runner occasionally
         # exits the test host with a phantom non-zero on a
         # successful pass. We trust the test-result lines in the
         # log, not the xcodebuild exit code. See ci.yml lines

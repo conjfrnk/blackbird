@@ -19,7 +19,7 @@ permissions:
 jobs:
   release:
     name: Build, sign, notarize, publish DMG
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: write      # needed to create/upload to releases
 
@@ -42,8 +42,13 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.2
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode 16.4
+        # Newest Xcode 16 on the macos-15 image (macOS 15 SDK — the SDK
+        # release DMGs are built against). See the matrix jobs for the
+        # Xcode 26 leg.
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -87,12 +92,18 @@ jobs:
           TEAM_ID: ${{ secrets.TEAM_ID }}
         run: |
           set -euo pipefail
-          if [ -n "${APPLE_ID:-}" ] && [ -n "${APP_SPECIFIC_PASSWORD:-}" ] && [ -n "${TEAM_ID:-}" ]; then
-            scripts/release.sh notarize
-          else
-            echo "Notarization secrets absent — producing unsigned DMG"
-            scripts/release.sh
-          fi
+          # A tag build MUST be signed + notarized. The old fallback
+          # ("secrets absent — producing unsigned DMG") would have uploaded
+          # an unsigned DMG as a public, non-draft release the day a secret
+          # expired or was rotated away; release.sh's codesign gate was the
+          # only thing standing in the way. Fail loud instead.
+          for v in APPLE_ID APP_SPECIFIC_PASSWORD TEAM_ID DEVELOPER_ID; do
+            if [ -z "${!v:-}" ]; then
+              echo "error: $v is empty — refusing to build an unsigned release DMG" >&2
+              exit 1
+            fi
+          done
+          scripts/release.sh notarize
 
       - name: Stage DMGs (versioned + stable alias)
         id: dmg

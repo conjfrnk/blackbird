@@ -26,7 +26,7 @@
 #    Quarantining miri to a scheduled job keeps that flake class out of
 #    the merge path; we treat a miri failure as a real signal but
 #    investigate it asynchronously.
-# 4. Cost: PR CI already has six macos-14 jobs. A nightly cadence amortises
+# 4. Cost: PR CI already has six macos-15 jobs. A nightly cadence amortises
 #    miri's runtime over once-per-day, not per-push.
 #
 # Canonical target: `handler_reentry_guard`
@@ -62,7 +62,7 @@ name: Nightly miri
 
 on:
   # 06:00 UTC = 02:00 EDT / 23:00 PDT — low-traffic window for both
-  # Connor's working hours and GHA macos-14 runner contention.
+  # Connor's working hours and GHA macos-15 runner contention.
   schedule:
     - cron: "0 6 * * *"
   # Manual trigger for on-demand verification (e.g. after touching FFI
@@ -85,7 +85,7 @@ concurrency:
 jobs:
   miri:
     name: miri — handler_reentry_guard (FFI re-entry UB)
-    runs-on: macos-14
+    runs-on: macos-15
     # miri is 10-100x slower than native. The single canonical target
     # fits in <30 min comfortably; 60 min is headroom for nightly
     # toolchain regressions that slow the interpreter further. If this
