@@ -129,10 +129,16 @@ final class FindController {
         scheduleFindRefresh()
     }
 
+    /// Coalescing window for snapshot-driven reruns. One rerun per main
+    /// turn (the old shape) meant a streaming build log re-searched the
+    /// whole buffer up to the publish rate; 100 ms keeps the count fresh
+    /// to the eye while bounding the work to ten scans a second.
+    static let refreshCoalesceInterval: TimeInterval = 0.1
+
     private func scheduleFindRefresh() {
         guard !findRefreshPending else { return }
         findRefreshPending = true
-        DispatchQueue.main.async { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.refreshCoalesceInterval) { [weak self] in
             guard let self else { return }
             self.findRefreshPending = false
             // Query could have been cleared by the time the dispatch fires
@@ -140,6 +146,75 @@ final class FindController {
             guard !self.findQuery.isEmpty, self.findBar != nil else { return }
             self.performSearch(query: self.findQuery)
         }
+    }
+
+    /// Lines per `textRange` round trip when capturing scrollback. The
+    /// pre-v0.8.1 capture issued one `coreQueue.sync` per line — 100k
+    /// round trips per search at the default history, each also waiting
+    /// behind queued feed chunks. Rectangular extraction over the full
+    /// width yields exactly one row per '\n' (no wrap joins, no trailing
+    /// trim) so the chunk splits back into lines 1:1.
+    static let scrollbackChunkRows: Int32 = 4096
+
+    /// Haystacks for every buffer line in `topLine...bottomLine`: viewport
+    /// rows via the snapshot's cell walker (exact UTF-16 → column map),
+    /// scrollback rows in chunks of `scrollbackChunkRows` (one-cell-per-
+    /// char approximation, as before). Empty rows are omitted.
+    func captureRows(
+        topLine: Int32,
+        bottomLine: Int32,
+        cols: Int,
+        session: TerminalSession,
+        snap: BBSnapshot?
+    ) -> [(line: Int32, hay: String, utf16ToCol: [Int]?)] {
+        var rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)] = []
+        guard bottomLine >= topLine else { return rows }
+        rows.reserveCapacity(Int(bottomLine - topLine + 1))
+        let offset = snap?.displayOffset ?? 0
+        let screenRows = snap?.rows ?? 0
+        func inViewport(_ ln: Int32) -> Bool {
+            let screenRow = Int(ln) + offset
+            return snap != nil && screenRow >= 0 && screenRow < screenRows
+        }
+        func flushChunk(_ a: Int32, _ b: Int32) {
+            let joined = session.textRange(
+                from: BufferPoint(line: a, col: 0),
+                to:   BufferPoint(line: b, col: max(0, cols - 1)),
+                rectangular: true
+            )
+            var ln = a
+            for piece in joined.split(separator: "\n", omittingEmptySubsequences: false) {
+                if ln > b { break }
+                // Rectangular extraction pads to the full width; drop the
+                // trailing run of spaces so a " " query can't hit padding.
+                let hay = String(piece).replacingOccurrences(
+                    of: " +$", with: "", options: .regularExpression)
+                if !hay.isEmpty {
+                    rows.append((line: ln, hay: hay, utf16ToCol: nil))
+                }
+                ln += 1
+            }
+        }
+        var chunkStart: Int32? = nil
+        var ln = topLine
+        while ln <= bottomLine {
+            if inViewport(ln) {
+                if let a = chunkStart { flushChunk(a, ln - 1); chunkStart = nil }
+                let screenRow = Int(ln) + offset
+                if let mapped = snap?.rowTextWithUTF16ToColMap(row: screenRow), !mapped.text.isEmpty {
+                    rows.append((line: ln, hay: mapped.text, utf16ToCol: mapped.utf16ToCol))
+                }
+            } else {
+                if chunkStart == nil { chunkStart = ln }
+                if let a = chunkStart, ln - a + 1 >= Self.scrollbackChunkRows {
+                    flushChunk(a, ln); chunkStart = nil
+                }
+            }
+            if ln == Int32.max { break }
+            ln += 1
+        }
+        if let a = chunkStart { flushChunk(a, bottomLine) }
+        return rows
     }
 
     // MARK: - Cycle (⌘G / ⌘⇧G)
@@ -362,20 +437,17 @@ final class FindController {
         // scrollback rows (outside the snapshot's viewport) the snapshot
         // doesn't carry cell info; fall back to `session.textRange` and
         // accept the legacy approximation (one-cell-per-char). Audit H4.
-        outer: for ln in topLine...bottomLine {
-            let screenRow = Int(ln) + snap.displayOffset
-            let mapped = snap.rowTextWithUTF16ToColMap(row: screenRow)
-            let hay = mapped?.text ?? session.textRange(
-                from: BufferPoint(line: ln, col: 0),
-                to:   BufferPoint(line: ln, col: snap.cols - 1),
-                rectangular: false
-            )
-            guard !hay.isEmpty else { continue }
+        let captured = captureRows(
+            topLine: topLine, bottomLine: bottomLine, cols: snap.cols, session: session, snap: snap
+        )
+        outer: for row in captured {
+            let ln = row.line
+            let hay = row.hay
             var cursor = hay.startIndex
             while let r = hay.range(of: query, options: stringOptions, range: cursor..<hay.endIndex) {
                 let startCol: Int
                 let endCol: Int
-                if let utf16ToCol = mapped?.utf16ToCol {
+                if let utf16ToCol = row.utf16ToCol {
                     let lo16 = hay.utf16.distance(
                         from: hay.utf16.startIndex,
                         to: r.lowerBound.samePosition(in: hay.utf16) ?? hay.utf16.startIndex
@@ -502,25 +574,9 @@ final class FindController {
     ) -> (rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)], scanSeq: UInt64?) {
         let snap = view.currentSnapshot
         let scanSeq = snap?.sequenceID
-        var rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)] = []
-        rows.reserveCapacity(Int(bottomLine - topLine + 1))
-        for ln in topLine...bottomLine {
-            let screenRow = Int(ln) + (snap?.displayOffset ?? 0)
-            if let mapped = snap?.rowTextWithUTF16ToColMap(row: screenRow) {
-                if !mapped.text.isEmpty {
-                    rows.append((line: ln, hay: mapped.text, utf16ToCol: mapped.utf16ToCol))
-                }
-            } else {
-                let hay = session.textRange(
-                    from: BufferPoint(line: ln, col: 0),
-                    to:   BufferPoint(line: ln, col: cols - 1),
-                    rectangular: false
-                )
-                if !hay.isEmpty {
-                    rows.append((line: ln, hay: hay, utf16ToCol: nil))
-                }
-            }
-        }
+        let rows = captureRows(
+            topLine: topLine, bottomLine: bottomLine, cols: cols, session: session, snap: snap
+        )
         return (rows, scanSeq)
     }
 

@@ -177,6 +177,9 @@ public final class TerminalSession: ObservableObject {
     //
     // Internal (not private): the coalescer shares this exact `NSLock`.
     let publishLock = NSLock()
+    /// Bounded byte budget between the PTY read loop and `coreQueue`
+    /// (see `FeedBudget`). The reader blocks past 4 MiB in flight.
+    let feedBudget = FeedBudget()
     /// Terminate latch. `private(set)` so only `terminate()` flips it; the
     /// coalescer reads it (under `publishLock`) but never writes it.
     private(set) var isTerminated: Bool = false
@@ -351,8 +354,11 @@ public final class TerminalSession: ObservableObject {
     /// `coreQueue.sync` drains every internally deferred work item before
     /// the next chunk is enqueued.
     func enqueueBytesForTests(_ bytes: Data) {
+        guard feedBudget.acquire(bytes.count) else { return }
         coreQueue.async { [weak self] in
-            self?.snapshotCoalescer.feed(bytes)
+            guard let self else { return }
+            defer { self.feedBudget.release(bytes.count) }
+            self.snapshotCoalescer.feed(bytes)
         }
     }
 
@@ -785,6 +791,10 @@ public final class TerminalSession: ObservableObject {
     }
 
     public func terminate() {
+        // Wake a read loop parked on the feed budget BEFORE tearing the
+        // PTY down, or `pty.terminate()`'s join would wait on a thread
+        // that is waiting on us. After cancel every acquire is a no-op.
+        feedBudget.cancel()
         // Gate the feed path (F11): coreQueue may have queued feeds ahead
         // of us; those will run `feed(_:)` after terminate() returns and
         // would otherwise keep waking main with fresh snapshots of a grid
@@ -1010,8 +1020,15 @@ public final class TerminalSession: ObservableObject {
         // in lockstep if preprocessing is ever added here.
         pty?.setOnBytes { [weak self] data in
             guard let self else { return }
+            // Backpressure: block the read loop (and, through the pty
+            // buffer, the child) while more than the budget is queued and
+            // unparsed. Returns false only after `terminate()` cancelled
+            // the budget, in which case the bytes are dropped on purpose.
+            guard self.feedBudget.acquire(data.count) else { return }
             self.coreQueue.async { [weak self] in
-                self?.snapshotCoalescer.feed(data)
+                guard let self else { return }
+                defer { self.feedBudget.release(data.count) }
+                self.snapshotCoalescer.feed(data)
             }
         }
         pty?.startReading()
