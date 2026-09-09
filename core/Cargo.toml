@@ -24,7 +24,7 @@ memchr = "2"
 # the generated C header on `cargo update`. Audit rust-build F4. The
 # workspace lockfile already fixes the exact version in practice, but
 # this makes the floor explicit for consumers without the lockfile.
-cbindgen = "=0.27.0"
+cbindgen = "=0.29.4"
 
 [dev-dependencies]
 # Property-based testing for FFI invariants (parse idempotence over split
