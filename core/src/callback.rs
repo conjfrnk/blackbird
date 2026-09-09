@@ -544,7 +544,22 @@ impl EventListener for RoutingListener {
                         .color_queue
                         .push(ColorRequestEntry { index, formatter });
                 }
-                // All other variants (MouseCursorDirty, ResetTitle, ClipboardLoad,
+                // `ResetTitle` fires from `pop_title` (XTWINOPS 23) when the
+                // saved title was `None` — i.e. nvim's save/restore in a
+                // shell that never set one — and from `set_title(None)`.
+                // Forward it as a Title event with an EMPTY payload:
+                // `SessionTitleState.applyOscTitle("")` clears the OSC
+                // title so the shell-basename seed reappears. Dropping it
+                // left the tab reading "nvim" after nvim exited.
+                Event::ResetTitle => {
+                    self.cell.fire(BBEvent {
+                        kind: BBEventKind::Title,
+                        payload: core::ptr::null(),
+                        len: 0,
+                        i32_arg: 0,
+                    });
+                }
+                // All other variants (MouseCursorDirty, ClipboardLoad,
                 // TextAreaSizeRequest, CursorBlinkingChange, Wakeup, Exit,
                 // ChildExit) are intentionally ignored.
                 _ => {}

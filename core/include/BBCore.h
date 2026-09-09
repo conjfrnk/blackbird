@@ -141,6 +141,23 @@
 #define MODIFY_OTHER_KEYS (1 << 16)
 
 /**
+ * DEC private mode 1007 (xterm "alternate scroll"). alacritty sets it
+ * by default; a TUI clears it with `CSI ? 1007 l`. While it is set and
+ * the alt screen is active with mouse reporting OFF, the wheel is
+ * translated into cursor-key presses so `less`, `man`, `git log` and
+ * vim-without-mouse scroll — the alt grid has no history for
+ * `scroll_display` to move through.
+ */
+#define ALTERNATE_SCROLL (1 << 17)
+
+/**
+ * DEC private mode 1005 (UTF-8 mouse coordinates). Exposed so the
+ * Swift reporter can pick the right coordinate encoding; SGR (1006)
+ * takes precedence when both are set.
+ */
+#define UTF8_MOUSE (1 << 18)
+
+/**
  * Kind of terminal event forwarded to the C caller.
  */
 enum BBEventKind

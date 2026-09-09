@@ -117,6 +117,17 @@ pub mod bb_mode {
     /// modifyOtherKeys. A TUI that pushes Kitty gets Kitty output;
     /// Emacs without Kitty gets modifyOtherKeys output.
     pub const MODIFY_OTHER_KEYS: u32 = 1 << 16;
+    /// DEC private mode 1007 (xterm "alternate scroll"). alacritty sets it
+    /// by default; a TUI clears it with `CSI ? 1007 l`. While it is set and
+    /// the alt screen is active with mouse reporting OFF, the wheel is
+    /// translated into cursor-key presses so `less`, `man`, `git log` and
+    /// vim-without-mouse scroll — the alt grid has no history for
+    /// `scroll_display` to move through.
+    pub const ALTERNATE_SCROLL: u32 = 1 << 17;
+    /// DEC private mode 1005 (UTF-8 mouse coordinates). Exposed so the
+    /// Swift reporter can pick the right coordinate encoding; SGR (1006)
+    /// takes precedence when both are set.
+    pub const UTF8_MOUSE: u32 = 1 << 18;
 }
 
 /// Immutable snapshot of terminal grid state. Ref-counted via `bb_snap_retain` /
@@ -446,6 +457,12 @@ pub(crate) fn extract_mode(term_mode: &TermMode) -> u32 {
     }
     if term_mode.contains(TermMode::REPORT_ASSOCIATED_TEXT) {
         m |= bb_mode::REPORT_ASSOCIATED_TEXT;
+    }
+    if term_mode.contains(TermMode::ALTERNATE_SCROLL) {
+        m |= bb_mode::ALTERNATE_SCROLL;
+    }
+    if term_mode.contains(TermMode::UTF8_MOUSE) {
+        m |= bb_mode::UTF8_MOUSE;
     }
     m
 }

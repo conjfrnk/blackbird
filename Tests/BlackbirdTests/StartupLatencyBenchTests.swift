@@ -128,7 +128,7 @@ final class StartupLatencyBenchTests: XCTestCase {
             desc.colorAttachments[0].pixelFormat = .bgra8Unorm
             desc.colorAttachments[0].isBlendingEnabled = true
             desc.colorAttachments[0].rgbBlendOperation = .add
-            desc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            desc.colorAttachments[0].sourceRGBBlendFactor = .one   // premultiplied, matches MetalRenderer
             desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
             _ = try device.makeRenderPipelineState(descriptor: desc)
             let cdesc = MTLRenderPipelineDescriptor()

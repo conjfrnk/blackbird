@@ -57,6 +57,8 @@ extension TerminalView {
     }
 
     public override func mouseExited(with event: NSEvent) {
+        // A partial wheel line must not carry into the next gesture.
+        wheelAccumulator.reset()
         super.mouseExited(with: event)
         hoverCoordinator.clearHover()
         // Mouse-reporting concern, kept next to the hover clear because they

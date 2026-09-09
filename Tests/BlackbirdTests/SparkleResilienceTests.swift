@@ -27,8 +27,8 @@ import XCTest
 ///      shape as "auto-update silently broken" (which is a launch-blocker
 ///      for v1.0 but invisible to a user who never opens Settings →
 ///      Updates).
-///   4. `SUEnableAutomaticChecks` is `false` in the shipped plist — auto
-///      checks are user-opt-in via Preferences (`bb.autoUpdateChecks`).
+///   4. `SUEnableAutomaticChecks` is `true` in the shipped plist — auto
+///      checks default ON since v0.8.1; `bb.autoUpdateChecks` is the opt-out.
 ///      A `true` here would override the user's opt-out without consent.
 ///   5. (Removed.) The previous test cross-checked `AppDelegate.isUpdaterConfigured`
 ///      against a recomputation of its own predicate from Info.plist — both sides
@@ -132,18 +132,23 @@ final class SparkleResilienceTests: XCTestCase {
         )
     }
 
-    func testSUEnableAutomaticChecksDefaultsOff() throws {
+    func testSUEnableAutomaticChecksDefaultsOn() throws {
         // Memory: <1 KB. Wall: ~1 ms.
-        // Auto-checks are user-opt-in via Settings → Updates.
-        // `SUEnableAutomaticChecks=true` would override that opt-out.
+        // Since v0.8.1 automatic checks default ON: the key stays PRESENT
+        // (so Sparkle never shows its own permission prompt — the app owns
+        // the decision) and reads `true`, mirroring the registered default
+        // of `bb.autoUpdateChecks`. The user's opt-out is the Settings →
+        // Updates toggle, which `installAutoUpdateBridge` writes onto the
+        // updater; Sparkle persists that per-user, so the plist value does
+        // not override a stored opt-out.
         let value = Bundle.main.object(forInfoDictionaryKey: "SUEnableAutomaticChecks")
         let bool = try XCTUnwrap(
             value as? Bool,
             "SUEnableAutomaticChecks must be present in Info.plist"
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             bool,
-            "SUEnableAutomaticChecks must be false; auto-update is user-opt-in via bb.autoUpdateChecks. true here ignores the user's opt-out."
+            "SUEnableAutomaticChecks must be true (auto-update default ON since v0.8.1; bb.autoUpdateChecks is the opt-out)."
         )
     }
 

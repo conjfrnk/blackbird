@@ -623,7 +623,12 @@ public final class MetalRenderer {
         desc.colorAttachments[0].pixelFormat = .bgra8Unorm
         desc.colorAttachments[0].isBlendingEnabled = true
         desc.colorAttachments[0].rgbBlendOperation = .add
-        desc.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        // PREMULTIPLIED source (see Shaders.metal `fragment_cell`): the
+        // fragment already scaled rgb by its alpha, so the RGB factor is
+        // ONE, not SRC_ALPHA. With SRC_ALPHA the glyph coverage was applied
+        // twice on default-bg cells (c² instead of c) and text rendered
+        // thinner than the rasterizer produced it.
+        desc.colorAttachments[0].sourceRGBBlendFactor = .one
         desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         desc.colorAttachments[0].alphaBlendOperation = .add
         desc.colorAttachments[0].sourceAlphaBlendFactor = .one
@@ -1626,12 +1631,14 @@ public final class MetalRenderer {
     /// rebuild. nil when the row cache is incompatible (CacheKey mismatch /
     /// disabled / row-count drift — passed in via `cacheCompatible`), when
     /// alacritty reports full damage, when an intermediate snapshot was coalesced
-    /// away (its per-row damage is gone), or when damage is empty / covers ≥ half
-    /// the screen (per-row-skip overhead would exceed the savings). Otherwise the
+    /// away (its per-row damage is gone), or when damage covers ≥ half the
+    /// screen (per-row-skip overhead would exceed the savings). Empty damage
+    /// yields just the cursor rows (possibly the empty set). Otherwise the
     /// damaged rows, plus the rows the cursor just left / moved to (metal-renderer
     /// F3 — pure cursor motion doesn't always flag those, leaving a ghost inverted
     /// cell). Pure given its arguments.
-    private func decideRebuildRows(
+    // Internal (not private) so the pure decision is unit-testable.
+    func decideRebuildRows(
         snap: BBSnapshot,
         cacheCompatible: Bool,
         snapshotCoalesced: Bool,
@@ -1644,7 +1651,12 @@ public final class MetalRenderer {
         guard !snap.damageIsFull else { return nil }
         guard !snapshotCoalesced else { return nil }
         let damaged = snap.damagedRows
-        if damaged.isEmpty || damaged.count >= (snap.rows + 1) / 2 {
+        // Empty damage is the CHEAPEST case, not a reason to rebuild
+        // everything: DSR/DA replies, mode toggles, OSC handling and bells
+        // publish a snapshot with a new sequence id and no changed cells.
+        // Only the cursor rows (below) can need work. Returning nil here
+        // used to cost a full grid walk + encode + present per such event.
+        if damaged.count >= (snap.rows + 1) / 2 {
             return nil
         }
         var rows = Set(damaged)

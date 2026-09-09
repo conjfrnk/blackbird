@@ -441,6 +441,7 @@ extension TerminalView {
         // scrollback locally, even inside a TUI that captured the wheel.
         // Matches the ⌥-click escape on mouseDown.
         let optionHeld = event.modifierFlags.contains(.option)
+        let mode = currentSnapshot?.termMode ?? []
         if mouseReportingEnabled() && !optionHeld {
             // Mouse mode: forward as SGR/X10 scroll events.
             // xterm wheel-up (button 64) = "show older content" (less
@@ -460,10 +461,48 @@ extension TerminalView {
             // which gave the right answer for Natural ON via wishful
             // thinking but was backwards for Natural OFF — `less` /
             // `tmux` scrolled in the wrong direction. Audit M7.
-            if event.scrollingDeltaY > 0 {
-                sendMouseEvent(event, button: 65, press: true)
-            } else if event.scrollingDeltaY < 0 {
-                sendMouseEvent(event, button: 64, press: true)
+            //
+            // One report per CELL HEIGHT of travel (precise devices) or
+            // per notch (classic wheel), via the accumulator — not one per
+            // NSEvent. A trackpad flick with momentum used to fire dozens
+            // of reports, each a 3-line step in less/vim/tmux.
+            let n = wheelAccumulator.lines(
+                deltaY: event.scrollingDeltaY,
+                precise: event.hasPreciseScrollingDeltas,
+                pointsPerLine: Double(metrics.cellHeight),
+                linesPerNotch: 1
+            )
+            let button = n > 0 ? 65 : 64
+            for _ in 0..<min(abs(n), Self.maxWheelUnitsPerEvent) {
+                _ = sendMouseEvent(event, button: button, press: true)
+            }
+        } else if mode.contains(.altScreen), mode.contains(.alternateScroll), !optionHeld {
+            // DEC 1007 alternate scroll: the alt screen has no history for
+            // `scroll_display` to move through, so through v0.8.0 the wheel
+            // did NOTHING in `less`, `man`, `git log`, vim with mouse off,
+            // and every ssh pager. Every peer terminal translates the wheel
+            // into cursor-key presses here (xterm's alternateScroll);
+            // alacritty sets 1007 by default and a TUI opts out with
+            // `CSI ? 1007 l`. Same direction convention as the report
+            // branch: deltaY > 0 → newer content → ↓.
+            let n = wheelAccumulator.lines(
+                deltaY: event.scrollingDeltaY,
+                precise: event.hasPreciseScrollingDeltas,
+                pointsPerLine: Double(metrics.cellHeight),
+                linesPerNotch: 3
+            )
+            if n != 0 {
+                let key: KeyEncoder.SpecialKey = n > 0 ? .down : .up
+                let one = encoder.encodeSpecial(
+                    key,
+                    modifiers: [],
+                    applicationCursorKeys: mode.contains(.appCursor),
+                    applicationKeypad: mode.contains(.appKeypad),
+                    mode: mode
+                )
+                var bytes = Data()
+                for _ in 0..<min(abs(n), Self.maxWheelUnitsPerEvent) { bytes.append(one) }
+                if !bytes.isEmpty { sendToSession(bytes) }
             }
         } else {
             // Normal mode: scroll the display through scrollback history.
@@ -589,6 +628,11 @@ extension TerminalView {
     /// because the DEC 1003 any-event path in
     /// `TerminalView+Hover.swift`'s `mouseMoved` reuses it for the
     /// no-button motion case.
+    /// Upper bound on wheel reports / arrow presses emitted for ONE
+    /// NSEvent. A pathological delta (bridged garbage, a runaway device)
+    /// must not turn into a megabyte of `CSI B` on the PTY.
+    static let maxWheelUnitsPerEvent = 64
+
     @discardableResult
     func sendMouseEvent(_ event: NSEvent, button: Int, press: Bool) -> Bool {
         let loc = convert(event.locationInWindow, from: nil)

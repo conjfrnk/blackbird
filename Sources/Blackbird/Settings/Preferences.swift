@@ -194,7 +194,13 @@ public final class Preferences: ObservableObject {
     @AppStorage("bb.windowDragModifier")   public var windowDragModifierRaw: String = WindowGestureModifier.command.rawValue
     @AppStorage("bb.windowResizeModifier") public var windowResizeModifierRaw: String = WindowGestureModifier.command.rawValue
     @AppStorage("bb.confirmClose")   public var confirmClose: Bool = true
-    @AppStorage("bb.autoUpdateChecks") public var autoUpdateChecks: Bool = false
+    /// ON by default since v0.8.1. Info.plist ships `SUEnableAutomaticChecks`
+    /// (which suppresses Sparkle's own second-launch permission prompt) and
+    /// `App.installAutoUpdateBridge` forces this value onto the updater at
+    /// every launch — so with a `false` default nobody was ever asked, and
+    /// twelve releases of fixes reached only users who opened Settings →
+    /// Updates. The toggle below remains the opt-out.
+    @AppStorage("bb.autoUpdateChecks") public var autoUpdateChecks: Bool = true
     /// Default off (v0.1.10): arbitrary PTY output can overwrite the system
     /// clipboard up to 1 MiB without user consent when on. The scrub
     /// pipeline blocks raw C0/C1/bidi bytes, but cross-app paste into a
@@ -412,7 +418,7 @@ public final class Preferences: ObservableObject {
             Preferences.k("windowDragModifier"):   WindowGestureModifier.command.rawValue,
             Preferences.k("windowResizeModifier"): WindowGestureModifier.command.rawValue,
             Preferences.k("confirmClose"):      true,
-            Preferences.k("autoUpdateChecks"):  false,
+            Preferences.k("autoUpdateChecks"):  true,
             Preferences.k("osc52Enabled"):      false,
             Preferences.k("colorQueryEnabled"): true,
             Preferences.k("automaticShellIntegration"): true,

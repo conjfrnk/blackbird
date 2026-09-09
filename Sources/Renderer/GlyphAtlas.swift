@@ -153,6 +153,14 @@ public final class GlyphAtlas {
         subsystem: "dev.conjfrnk.blackbird", category: "atlas"
     )
 
+    /// Storage mode for atlas textures. `.shared` is only valid for textures
+    /// on unified-memory devices (every Apple-silicon Mac); discrete-GPU
+    /// Intel Macs must use `.managed`. Both take CPU writes via
+    /// `replace(region:)`. Exposed for tests.
+    static func textureStorageMode(for device: MTLDevice) -> MTLStorageMode {
+        device.hasUnifiedMemory ? .shared : .managed
+    }
+
     public init?(device: MTLDevice, metrics: CellMetrics, capacityGlyphs: Int, scale: CGFloat = 1.0) {
         // Guard against nonsensical inputs up front: zero capacity would
         // compute cols = 0 and then divide by zero when picking rows, and
@@ -185,9 +193,16 @@ public final class GlyphAtlas {
             mipmapped: false
         )
         desc.usage = [.shaderRead]
-        // Shared storage avoids explicit didModifyRange synchronization and
-        // works identically on Apple Silicon unified memory and Intel Macs.
-        desc.storageMode = .shared
+        // Shared storage avoids explicit didModifyRange synchronization on
+        // unified-memory (Apple silicon) GPUs. On macOS, TEXTURES may only
+        // use `.shared` when `device.hasUnifiedMemory`; on Intel iGPU / AMD
+        // hosts `makeTexture` returns nil for a shared texture, which made
+        // `GlyphAtlas.init?` → `MetalRenderer.init?` → `TerminalView`'s
+        // fatalError fire before the first window on every Intel Mac. The
+        // x86_64 CI smoke runs under Rosetta on an Apple GPU and could not
+        // see it. `.managed` keeps the same `replace(region:)` upload path
+        // (didModifyRange is buffers-only) and Metal syncs the GPU copy.
+        desc.storageMode = Self.textureStorageMode(for: device)
         guard let tex = device.makeTexture(descriptor: desc) else { return nil }
         self.texture = tex
 
@@ -207,7 +222,7 @@ public final class GlyphAtlas {
             mipmapped: false
         )
         placeholderDesc.usage = [.shaderRead]
-        placeholderDesc.storageMode = .shared
+        placeholderDesc.storageMode = Self.textureStorageMode(for: device)
         guard let placeholder = device.makeTexture(descriptor: placeholderDesc) else { return nil }
         self.colorTexture = placeholder
 
@@ -255,9 +270,9 @@ public final class GlyphAtlas {
             mipmapped: false
         )
         colorDesc.usage = [.shaderRead]
-        // Shared storage avoids explicit didModifyRange synchronization and
-        // works identically on Apple Silicon unified memory and Intel Macs.
-        colorDesc.storageMode = .shared
+        // See `textureStorageMode(for:)` — `.shared` textures are
+        // unified-memory-only on macOS.
+        colorDesc.storageMode = Self.textureStorageMode(for: device)
         guard let colorTex = device.makeTexture(descriptor: colorDesc) else {
             if !colorTextureAllocFailureLogged {
                 colorTextureAllocFailureLogged = true

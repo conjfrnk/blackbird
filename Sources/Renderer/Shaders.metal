@@ -27,6 +27,8 @@ struct VertexOut {
     uint   underlineColorPacked;  // 0x00RRGGBB or 0xFFFFFFFF sentinel (use fg)
     float2 localPx;       // position within the cell's quad, in points
     float2 quadSizePx;    // cell quad size (same for all 6 verts per instance)
+    float  cellOriginX;   // quad's left edge in points — makes undercurl /
+                          // dotted / dashed phase continuous across cells
 };
 
 vertex VertexOut vertex_cell(
@@ -63,6 +65,7 @@ vertex VertexOut vertex_cell(
     out.underlineColorPacked = inst.attrs.z;
     out.localPx = corners[vid] * inst.quadSizePx;
     out.quadSizePx = inst.quadSizePx;
+    out.cellOriginX = inst.cellPosPx.x;
     return out;
 }
 
@@ -84,6 +87,13 @@ constant uint BB_ATTR_ANY_UNDERLINE      = BB_ATTR_UNDERLINE
                                          | BB_ATTR_UNDERLINE_DOTTED
                                          | BB_ATTR_UNDERLINE_DASHED;
 
+/// Straight-alpha → premultiplied. Decoration colours (underline, strike,
+/// accent) are opaque today, so this is the identity; kept so every return
+/// from `fragment_cell` speaks the pipeline's premultiplied contract.
+static inline float4 premul(float4 c) {
+    return float4(c.rgb * c.a, c.a);
+}
+
 fragment float4 fragment_cell(
     VertexOut in [[stage_in]],
     texture2d<float> atlas [[texture(0)]],
@@ -103,6 +113,27 @@ fragment float4 fragment_cell(
     // floats — deferred as a future user toggle.
     constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
     uint flags = in.flags;
+
+    // ---- Compositing model: PREMULTIPLIED output, blend ONE / ONE_MINUS_SRC_ALPHA.
+    //
+    // `base` is the cell's colour with the glyph composited over its own
+    // background, expressed premultiplied: rgb already scaled by alpha.
+    // The pipeline blends `out = src + dst * (1 - src.a)`, so a default-bg
+    // cell (bg.a == 0) contributes exactly `fg * coverage` over the clear
+    // colour, an explicit opaque bg contributes the fully-resolved pixel,
+    // and a translucent bg (backgroundOpacity < 1) lets the framebuffer
+    // show through by (1 - coverage) * (1 - bg.a).
+    //
+    // History: the previous formula returned `mix(bg, fg, c)` as a STRAIGHT
+    // colour with alpha `c` for default-bg cells and blended with
+    // SRC_ALPHA / ONE_MINUS_SRC_ALPHA. That squares the coverage:
+    // `c * (c * fg) + (1 - c) * dst` = `c² fg + …` — every anti-aliased edge
+    // pixel of ordinary text was thinner than CoreText rasterised it, while
+    // explicit-bg cells (alpha 1) got the correct `c`, so text visibly
+    // changed weight under the block cursor, in selections, and on status
+    // lines. Premultiplied output makes both cell classes identical.
+    float4 bg = in.bgColor;
+    float3 bgPre = bg.rgb * bg.a;
     float4 base;
     if ((flags & BB_ATTR_IS_COLOR_GLYPH) != 0u) {
         // Color emoji path. The color atlas stores premultiplied BGRA
@@ -110,39 +141,31 @@ fragment float4 fragment_cell(
         // `premultipliedFirst | byteOrder32Little` + transparent-cleared
         // background (see GlyphAtlas.rasterizeColor). Metal samples the
         // texture as `bgra8Unorm`, which maps the memory bytes to the
-        // float4's color components in natural RGBA order.
-        //
-        // De-premultiply so the existing straight-alpha blend op
-        // (`.sourceAlpha` / `.oneMinusSourceAlpha`) composites the emoji
-        // correctly without double-multiplying alpha. `1.0/255.0` is the
-        // smallest representable non-zero 8-bit alpha — any sampled texel
-        // is either ≥ that or exactly zero, and the zero case falls into
-        // the else branch below.
+        // float4's color components in natural RGBA order — already
+        // premultiplied, so composite it straight over the cell bg.
+        // A flushed slot / rasterization failure / outside-ink texel
+        // samples as 0 and yields the bare bg, same as the mono path at
+        // zero coverage.
         float4 sample = colorAtlas.sample(s, in.uv);
-        if (sample.a > 0.0) {
-            base = float4(sample.rgb / max(sample.a, 1.0 / 255.0), sample.a);
-        } else {
-            // Empty texel (flushed atlas slot, rasterization failure, or
-            // sampled outside the glyph's ink). Returning float4(0) would
-            // leave the framebuffer's previous contents visible — wrong
-            // over a cell that declared a non-default background
-            // (selection highlight, vim status line, link-hover accent).
-            // Falling back to `in.bgColor` matches the mono path's
-            // zero-coverage behaviour exactly: the cell's own bg paints,
-            // same as `mix(bg, fg, 0)`.
-            base = in.bgColor;
-        }
+        base = float4(sample.rgb + bgPre * (1.0 - sample.a),
+                      sample.a + bg.a * (1.0 - sample.a));
     } else {
-        float coverage = atlas.sample(s, in.uv).r;
-        // Blend fg glyph over bg. coverage = 0 → pure bg, coverage = 1 → pure fg.
-        base = mix(in.bgColor, in.fgColor, coverage);
+        // `fgColor.a` is 1 today; honouring it keeps the formula correct if
+        // DIM ever moves to an alpha encoding.
+        float coverage = atlas.sample(s, in.uv).r * in.fgColor.a;
+        base = float4(in.fgColor.rgb * coverage + bgPre * (1.0 - coverage),
+                      coverage + bg.a * (1.0 - coverage));
     }
 
     // The rest of the function overlays strike/underline/undercurl on top of
     // `base`, same code path for both mono and color glyphs (you can still
     // underline an emoji).
     float distFromBottom = in.quadSizePx.y - in.localPx.y;
-    float x = in.localPx.x;
+    // Phase input for undercurl / dotted / dashed: the ABSOLUTE x in points,
+    // not the quad-local x. `localPx.x` restarts at 0 in every cell, and
+    // 8 pt × 1.4 rad is not a multiple of 2π, so the wave (and the dot /
+    // dash parity for odd cell widths) broke at every cell seam.
+    float x = in.cellOriginX + in.localPx.x;
 
     // Unpack CSI 58 underline colour. 0xFFFFFFFF sentinel → use fg; any
     // other value is 0x00RRGGBB. Keeping this in a local avoids five
@@ -161,7 +184,7 @@ fragment float4 fragment_cell(
     if ((flags & BB_ATTR_STRIKE) != 0u) {
         float strikeY = in.quadSizePx.y * 0.55;
         if (in.localPx.y >= strikeY && in.localPx.y <= strikeY + 1.5) {
-            return in.fgColor;
+            return premul(in.fgColor);
         }
     }
 
@@ -169,7 +192,7 @@ fragment float4 fragment_cell(
     // be visibly distinct even when the cell also carries a plain underline.
     // 2 pt band at the very bottom, in the theme accent.
     if ((flags & BB_ATTR_LINK_HOVER) != 0u && distFromBottom <= 2.0) {
-        return in.accentColor;
+        return premul(in.accentColor);
     }
 
     // Underline family. All variants sit at the bottom 3 pt of the cell and
@@ -180,12 +203,12 @@ fragment float4 fragment_cell(
     if ((flags & BB_ATTR_ANY_UNDERLINE) != 0u) {
         // Plain single underline — 1.5 pt band along the baseline.
         if ((flags & BB_ATTR_UNDERLINE) != 0u && distFromBottom <= 1.5) {
-            return ulColor;
+            return premul(ulColor);
         }
         // Double underline — two 1 pt bands with a 1 pt gap between.
         if ((flags & BB_ATTR_UNDERLINE_DOUBLE) != 0u) {
-            if (distFromBottom <= 1.0) return ulColor;
-            if (distFromBottom >= 2.0 && distFromBottom <= 3.0) return ulColor;
+            if (distFromBottom <= 1.0) return premul(ulColor);
+            if (distFromBottom >= 2.0 && distFromBottom <= 3.0) return premul(ulColor);
         }
         // Undercurl — sine wave baseline ±1 pt. Tuned so a single cycle is
         // about 3 cells wide; fast enough to read as "wavy" at terminal
@@ -194,7 +217,7 @@ fragment float4 fragment_cell(
             float baseline = in.quadSizePx.y - 2.5;
             float wave = sin(x * 1.4) * 1.2;
             if (abs(in.localPx.y - (baseline + wave)) <= 0.7) {
-                return ulColor;
+                return premul(ulColor);
             }
         }
         // Dotted — every other *point* at the baseline, so the band
@@ -214,13 +237,13 @@ fragment float4 fragment_cell(
         // Audit shaders F3.
         if ((flags & BB_ATTR_UNDERLINE_DOTTED) != 0u && distFromBottom <= 1.5) {
             uint phase = uint(floor(x));
-            if ((phase & 1u) == 0u) return ulColor;
+            if ((phase & 1u) == 0u) return premul(ulColor);
         }
         // Dashed — 2 points on, 2 points off (same DPI caveat as
         // dotted: doubles to 4-pixel runs on Retina, 2-pixel on 1x).
         if ((flags & BB_ATTR_UNDERLINE_DASHED) != 0u && distFromBottom <= 1.5) {
             uint phase = uint(floor(x));
-            if ((phase % 4u) < 2u) return ulColor;
+            if ((phase % 4u) < 2u) return premul(ulColor);
         }
     }
 

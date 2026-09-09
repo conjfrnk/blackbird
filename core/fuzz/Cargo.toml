@@ -18,6 +18,11 @@ cargo-fuzz = true
 # with the root Cargo.toml's patch.
 [patch.crates-io]
 alacritty_terminal = { path = "../../vendor/alacritty_terminal" }
+# Same trap, second crate: without this line the fuzz lockfile resolved
+# `vte` from crates.io, so the blocking CI fuzz job never exercised the
+# vendored fork's 8 MiB OSC cap or its partial-UTF-8 fix. ci.yml asserts
+# neither crate resolves from a registry source in core/fuzz/Cargo.lock.
+vte = { path = "../../vendor/vte" }
 
 [dependencies]
 libfuzzer-sys = "0.4"

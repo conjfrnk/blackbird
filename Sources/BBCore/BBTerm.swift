@@ -616,6 +616,13 @@ public struct BBTermMode: OptionSet {
     public static let reportAlternateKeys  = BBTermMode(rawValue: 1 << 13)
     public static let reportAllKeysAsEsc   = BBTermMode(rawValue: 1 << 14)
     public static let reportAssociatedText = BBTermMode(rawValue: 1 << 15)
+    // (bit 16 = modifyOtherKeys, declared below.)
+    /// DEC 1007 "alternate scroll": on by default; a TUI opts out with
+    /// `CSI ? 1007 l`. With `altScreen` set and mouse reporting off, the
+    /// wheel becomes ↑/↓ key presses (see `TerminalView.scrollWheel`).
+    public static let alternateScroll  = BBTermMode(rawValue: 1 << 17)
+    /// DEC 1005 UTF-8 mouse coordinates.
+    public static let utf8Mouse        = BBTermMode(rawValue: 1 << 18)
     /// xterm `modifyOtherKeys` level ≥ 1. Set when the TUI pushes
     /// `CSI > 4 ; 1 m` or `CSI > 4 ; 2 m`. The encoder emits
     /// `CSI 27 ; <mod> ; <cp> ~` for modified printables + control-code

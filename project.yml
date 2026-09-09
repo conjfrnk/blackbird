@@ -129,7 +129,11 @@ targets:
         NSAppleEventsUsageDescription: "Blackbird uses Apple Events to coordinate with scripts you run from a terminal session."
         SUFeedURL: https://blackbird-terminal.com/appcast.xml
         SUPublicEDKey: c0owV2OCS9djxEodLrUloctbMw+qQl52pVkZDuT8fV4=
-        SUEnableAutomaticChecks: false
+        # true since v0.8.1: automatic checks default ON (bb.autoUpdateChecks
+        # mirrors this and is the user-facing opt-out). Keeping the key
+        # present still suppresses Sparkle's own permission prompt, so the
+        # app owns the decision in one place.
+        SUEnableAutomaticChecks: true
         SUScheduledCheckInterval: 86400
         # Keep the privileged InstallerLauncher XPC service OFF until a
         # real signed appcast (non-placeholder SUFeedURL + non-empty

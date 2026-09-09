@@ -726,6 +726,28 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
+      - name: Fuzz lockfile must resolve the vendored forks
+        # core/fuzz is its own cargo workspace; if its [patch.crates-io]
+        # ever falls out of sync with the root's, the fuzz targets silently
+        # fuzz UPSTREAM alacritty/vte and the vendored fixes (OSC cap,
+        # partial-UTF-8, keyboard-stack) get no coverage. This happened for
+        # vte through v0.8.0.
+        working-directory: core/fuzz
+        run: |
+          set -euo pipefail
+          for crate in vte alacritty_terminal; do
+            if awk -v c="$crate" '
+                /^\[\[package\]\]/ { inpkg = 0 }
+                $0 == "name = \"" c "\"" { inpkg = 1 }
+                inpkg && /^source = "registry\+/ { found = 1 }
+                END { exit found ? 0 : 1 }' Cargo.lock; then
+              echo "error: core/fuzz/Cargo.lock resolves $crate from crates.io, not vendor/$crate" >&2
+              echo "       add it to core/fuzz/Cargo.toml [patch.crates-io] and run: cargo update -p $crate" >&2
+              exit 1
+            fi
+          done
+          echo "fuzz lockfile uses vendored vte + alacritty_terminal"
+
       - name: Short fuzz each target
         working-directory: core/fuzz
         run: |

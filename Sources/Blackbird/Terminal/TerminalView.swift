@@ -184,6 +184,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// `hoverCoordinator.hoveredLinkID` across the file boundary. `lazy` because
     /// it needs `self`; its back-reference to the view is `unowned` (no cycle).
     lazy var hoverCoordinator = HoverCoordinator(view: self)
+    /// Wheel-delta → line accumulator for the mouse-report and DEC 1007
+    /// alternate-scroll paths (see `scrollWheel`). Reset on `mouseExited`.
+    var wheelAccumulator = WheelScrollAccumulator()
 
     /// Trackpad pinch gesture accumulator. Magnification events deliver
     /// fractional deltas; we wait until the running sum crosses ±0.15
