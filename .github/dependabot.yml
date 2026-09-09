@@ -21,6 +21,14 @@ updates:
     labels:
       - dependencies
       - rust
+    ignore:
+      # cbindgen is pinned `=0.27.0` on purpose: a minor bump reshapes the
+      # generated C header (audit rust-build F4). Bump it by hand with a
+      # header review.
+      - dependency-name: cbindgen
+      # The vendored fork pins alacritty_terminal exactly; a bump means
+      # re-applying the documented patch hunks, not a PR.
+      - dependency-name: alacritty_terminal
   - package-ecosystem: swift
     directory: /
     schedule:

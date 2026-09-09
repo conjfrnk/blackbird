@@ -193,11 +193,17 @@ fn sustained_refill_is_32_per_second() {
         bb_term_free(term);
 
         let extra = count(&sink, BBEventKind::PtyWrite) - BURST;
-        let expected = elapsed.as_secs_f64() * REFILL_PER_SEC;
+        // Assert against the MEASURED elapsed time, not the nominal 250 ms:
+        // a loaded CI runner can sleep 400 ms and legitimately refill 12.
+        // The bucket is capped at BURST, so a very long sleep tops out at 20
+        // (the whole second burst).
+        let expected = (elapsed.as_secs_f64() * REFILL_PER_SEC).min(20.0);
+        let lo = (expected - 3.0).floor().max(1.0) as usize;
+        let hi = (expected + 3.0).ceil().min(20.0) as usize;
         assert!(
-            (6..=10).contains(&extra),
-            "expected ~8 refilled replies after 250 ms at 32/s (≈{expected:.1} for the \
-             measured {elapsed:?}); got {extra}"
+            (lo..=hi).contains(&extra),
+            "expected ≈{expected:.1} refilled replies at 32/s for the measured \
+             {elapsed:?} (tolerance ±3); got {extra}"
         );
     }
     assert_eq!(count(&sink, BBEventKind::Fatal), 0);
