@@ -42,7 +42,20 @@ mk_publish_fixture() {
 
     # Copy real script under test.
     cp "$BB_REPO_ROOT/scripts/publish-update.sh" "$root/scripts/publish-update.sh"
-    chmod +x "$root/scripts/publish-update.sh"
+    # publish-update.sh renders the release-notes page the appcast links
+    # from CHANGELOG.md via these two helpers (real copies, not stubs).
+    cp "$BB_REPO_ROOT/scripts/changelog-section.sh" "$root/scripts/changelog-section.sh"
+    cp "$BB_REPO_ROOT/scripts/render-release-notes.sh" "$root/scripts/render-release-notes.sh"
+    chmod +x "$root/scripts/publish-update.sh" \
+        "$root/scripts/changelog-section.sh" "$root/scripts/render-release-notes.sh"
+    cat >"$root/CHANGELOG.md" <<'MD'
+# Changelog
+
+## [0.2.0] - 2026-01-01
+
+### Added
+- fixture release
+MD
 
     # Pre-existing valid appcast.xml — the file we DO NOT want truncated.
     cat >"$root/website/appcast.xml" <<'XML'
@@ -1006,6 +1019,324 @@ STUB
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# Helper for the happy-path cases below — layer the two things a run
+# needs to get all the way to git push on top of mk_publish_fixture:
+#   * a codesign stub whose --display output carries the pinned Team ID
+#     (the fixture default is a bare `exit 0`, which fails verify_dmg),
+#   * a committed website/index.html with all three stale version
+#     anchors so the rewrite + STRAY steps have something valid to do.
+# Mirrors case 8's setup, which is the known-good exit-0 path.
+# ---------------------------------------------------------------------------
+mk_publish_happy_path() {
+    local root="$1"
+    cat >"$root/stub-bin/codesign" <<'STUB'
+#!/usr/bin/env bash
+mode=""
+for arg in "$@"; do
+    case "$arg" in
+        --display) mode="display" ;;
+    esac
+done
+case "$mode" in
+    display)
+        cat <<'EOF'
+Executable=/path/to/Blackbird.dmg
+TeamIdentifier=F2B95Q4CT8
+EOF
+        ;;
+esac
+exit 0
+STUB
+    chmod +x "$root/stub-bin/codesign"
+
+    cat >"$root/website/index.html" <<'HTML'
+<!doctype html>
+<html><head>
+<script type="application/ld+json">
+{"softwareVersion": "0.1.15"}
+</script>
+</head>
+<body>
+<div class="reqs">Apple Silicon and Intel · v0.1.15</div>
+<div class="row dim">Compiling blackbird_core v0.1.15</div>
+</body></html>
+HTML
+    (cd "$root" && git add website/index.html \
+        && git -c commit.gpgsign=false commit -q -m "seed index.html")
+}
+
+# ---------------------------------------------------------------------------
+# CASE 12 — release-notes page. A successful publish of 0.2.0 renders
+# CHANGELOG.md's `## [0.2.0] - 2026-01-01` section to
+# website/releases/v0.2.0.html — bullets as <li>, a "Blackbird 0.2.0"
+# heading and a "Released 2026-01-01" date line — and that file rides in
+# the same commit as the appcast so the deployed site never links to a
+# page the repo doesn't track.
+# ---------------------------------------------------------------------------
+case_release_notes_page_written() {
+    local tmp; tmp="$(mk_tmp bb-pub-12)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+    mk_publish_happy_path "$tmp"
+
+    local before_head; before_head="$(cd "$tmp" && git rev-parse HEAD)"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+    if [[ "$rc" != "0" ]]; then
+        fail "release notes: publish-update.sh 0.2.0 should succeed (rc=$rc)"
+        tail -30 "$log" | sed 's/^/      | /' >&2
+        rm -f "$log"
+        return
+    fi
+    pass "release notes: publish-update.sh 0.2.0 exit 0"
+
+    local page="$tmp/website/releases/v0.2.0.html"
+    assert_nonempty_file "$page" "release notes: website/releases/v0.2.0.html written"
+    if [[ -s "$page" ]]; then
+        local html; html="$(cat "$page")"
+        assert_contains "$html" "fixture release" "release notes: page carries the changelog bullet text"
+        assert_contains "$html" "<li>" "release notes: bullet rendered as <li>"
+        assert_contains "$html" "Blackbird 0.2.0" "release notes: page names 'Blackbird 0.2.0'"
+        assert_contains "$html" "Released 2026-01-01" "release notes: page carries 'Released 2026-01-01'"
+    fi
+
+    local after_head; after_head="$(cd "$tmp" && git rev-parse HEAD)"
+    if [[ "$after_head" != "$before_head" ]]; then
+        pass "release notes: publish made a commit"
+    else
+        fail "release notes: no commit made by publish-update.sh"
+    fi
+    local committed; committed="$(cd "$tmp" && git show --name-only --format= HEAD)"
+    assert_contains "$committed" "website/releases/v0.2.0.html" \
+        "release notes: v0.2.0.html is part of the publish commit"
+    assert_contains "$committed" "website/appcast.xml" \
+        "release notes: appcast.xml is part of the same commit"
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 13 — Homebrew cask bump. When packaging/homebrew/blackbird.rb is
+# present, a successful publish rewrites its `version` line to the
+# published version and its `sha256` line to the sha256 of the verified
+# dist/Blackbird-<version>.dmg, and the cask file rides in the publish
+# commit. (Absence of the cask file is the existing cases' default and
+# must keep working — they don't seed one.)
+# ---------------------------------------------------------------------------
+case_homebrew_cask_bumped() {
+    local tmp; tmp="$(mk_tmp bb-pub-13)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+    mk_publish_happy_path "$tmp"
+
+    mkdir -p "$tmp/packaging/homebrew"
+    cat >"$tmp/packaging/homebrew/blackbird.rb" <<'RB'
+cask "blackbird" do
+  version "0.1.0"
+  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+
+  url "https://github.com/conjfrnk/blackbird/releases/download/v#{version}/Blackbird-#{version}.dmg"
+  name "Blackbird"
+  app "Blackbird.app"
+end
+RB
+    (cd "$tmp" && git add packaging/homebrew/blackbird.rb \
+        && git -c commit.gpgsign=false commit -q -m "seed cask")
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+    if [[ "$rc" != "0" ]]; then
+        fail "cask: publish-update.sh 0.2.0 should succeed with a cask present (rc=$rc)"
+        tail -30 "$log" | sed 's/^/      | /' >&2
+        rm -f "$log"
+        return
+    fi
+    pass "cask: publish-update.sh 0.2.0 exit 0"
+
+    local cask="$tmp/packaging/homebrew/blackbird.rb"
+    local dmg="$tmp/dist/Blackbird-0.2.0.dmg"
+    if [[ ! -s "$dmg" ]]; then
+        fail "cask: expected verified DMG at dist/Blackbird-0.2.0.dmg to compute the sha256 against"
+        rm -f "$log"
+        return
+    fi
+    local expected_sha; expected_sha="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+
+    if grep -qE '^  version "0\.2\.0"$' "$cask"; then
+        pass "cask: version line rewritten to \"0.2.0\""
+    else
+        fail "cask: version line not rewritten to \"0.2.0\""
+        grep -n 'version' "$cask" | sed 's/^/      | /' >&2
+    fi
+    if grep -qE "^  sha256 \"${expected_sha}\"$" "$cask"; then
+        pass "cask: sha256 line matches sha256 of dist/Blackbird-0.2.0.dmg"
+    else
+        fail "cask: sha256 line does not match the DMG's sha256 ($expected_sha)"
+        grep -n 'sha256' "$cask" | sed 's/^/      | /' >&2
+    fi
+    if grep -q "0000000000000000000000000000000000000000000000000000000000000000" "$cask"; then
+        fail "cask: placeholder sha256 survived the publish"
+    else
+        pass "cask: placeholder sha256 gone"
+    fi
+    # Only those two lines change — the url template / app stanza stay.
+    if grep -qF 'url "https://github.com/conjfrnk/blackbird/releases/download/v#{version}/Blackbird-#{version}.dmg"' "$cask" \
+        && grep -qF 'app "Blackbird.app"' "$cask"; then
+        pass "cask: unrelated stanzas preserved"
+    else
+        fail "cask: unrelated stanzas were altered"
+        cat "$cask" | sed 's/^/      | /' >&2
+    fi
+
+    local committed; committed="$(cd "$tmp" && git show --name-only --format= HEAD)"
+    assert_contains "$committed" "packaging/homebrew/blackbird.rb" \
+        "cask: blackbird.rb is part of the publish commit"
+    assert_contains "$committed" "website/appcast.xml" \
+        "cask: appcast.xml is in the same commit as the cask"
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 14 — missing CHANGELOG section. If CHANGELOG.md has no
+# `## [0.2.0]` heading there is nothing to render the release-notes page
+# from, so the publish must abort: non-zero exit, the tracked appcast.xml
+# still carries the SENTINEL (not replaced), no commit, and deploy.sh
+# never runs.
+# ---------------------------------------------------------------------------
+case_changelog_section_missing_aborts() {
+    local tmp; tmp="$(mk_tmp bb-pub-14)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+    mk_publish_happy_path "$tmp"
+
+    # Replace the seeded changelog with one that has every section BUT
+    # 0.2.0 — a near-miss (0.2.1) guards against a substring match.
+    cat >"$tmp/CHANGELOG.md" <<'MD'
+# Changelog
+
+## [0.2.1] - 2026-01-02
+
+### Fixed
+- not the section being published
+
+## [0.1.9] - 2025-12-30
+
+### Fixed
+- older fixture release
+MD
+
+    cat >"$tmp/website/deploy.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "TRIPWIRE: deploy.sh ran despite missing changelog section" >&2
+exit 0
+STUB
+    chmod +x "$tmp/website/deploy.sh"
+
+    local before_head; before_head="$(cd "$tmp" && git rev-parse HEAD)"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "changelog gate: publish-update.sh refuses with no ## [0.2.0] section (rc=$rc)"
+    else
+        fail "changelog gate: publish-update.sh exited 0 with no ## [0.2.0] section"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "SENTINEL_GOOD_APPCAST_DO_NOT_TRUNCATE" "$tmp/website/appcast.xml"; then
+        pass "changelog gate: tracked appcast.xml not replaced"
+    else
+        fail "changelog gate: website/appcast.xml was replaced despite the abort"
+        head -10 "$tmp/website/appcast.xml" | sed 's/^/      | /' >&2
+    fi
+
+    local after_head; after_head="$(cd "$tmp" && git rev-parse HEAD)"
+    if [[ "$after_head" == "$before_head" ]]; then
+        pass "changelog gate: no commit made"
+    else
+        fail "changelog gate: a commit landed despite the abort"
+        (cd "$tmp" && git log --oneline -3) | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "TRIPWIRE: deploy.sh ran" "$log"; then
+        fail "changelog gate: deploy.sh ran despite the abort"
+    else
+        pass "changelog gate: deploy.sh did NOT run"
+    fi
+
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 15 — make-appcast receives APPCAST_RELEASE_NOTES_URL. The feed's
+# <sparkle:releaseNotesLink> must point at the rendered page on the live
+# site, so publish-update.sh has to hand make-appcast.sh
+# APPCAST_RELEASE_NOTES_URL=https://blackbird-terminal.com/releases/v0.2.0.html
+# in its environment. Swap the make-appcast stub for one that records the
+# variable (or UNSET) into a marker file and otherwise behaves like the
+# "ok" stub.
+# ---------------------------------------------------------------------------
+case_make_appcast_gets_release_notes_url() {
+    local tmp; tmp="$(mk_tmp bb-pub-15)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_publish_fixture "$tmp" "ok"
+    mk_publish_happy_path "$tmp"
+
+    local marker="$tmp/stub-bin/release-notes-url.marker"
+    cat >"$tmp/scripts/make-appcast.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\${APPCAST_RELEASE_NOTES_URL:-UNSET}" > "$marker"
+if [[ -z "\${APPCAST_DMG:-}" ]]; then
+    echo "stub make-appcast.sh: APPCAST_DMG not set" >&2
+    exit 1
+fi
+DMG_NAME="\$(basename "\$APPCAST_DMG")"
+VERSION="\$(echo "\$DMG_NAME" | sed -E 's/^Blackbird-(.*)\\.dmg\$/\\1/')"
+cat <<XML
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>Blackbird</title>
+    <description>fixture full appcast</description>
+    <item>
+      <title>Version \${VERSION}</title>
+      <sparkle:version>42</sparkle:version>
+      <sparkle:shortVersionString>\${VERSION}</sparkle:shortVersionString>
+      <enclosure url="\${APPCAST_BASE_URL%/}/\${DMG_NAME}"
+                 type="application/x-apple-diskimage" />
+    </item>
+  </channel>
+</rss>
+XML
+exit 0
+STUB
+    chmod +x "$tmp/scripts/make-appcast.sh"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(run_publish_update "$tmp" 0.2.0 "$log")"
+    echo "    info: publish-update rc=$rc"
+
+    if [[ -s "$marker" ]]; then
+        pass "release-notes URL: make-appcast.sh was invoked"
+        local seen; seen="$(cat "$marker")"
+        assert_eq "$seen" "https://blackbird-terminal.com/releases/v0.2.0.html" \
+            "release-notes URL: APPCAST_RELEASE_NOTES_URL points at the live v0.2.0 page"
+    else
+        fail "release-notes URL: make-appcast.sh never ran (no marker written)"
+        tail -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log"
+}
+
 case_atomic_appcast
 case_arg_validation
 case_push_then_deploy
@@ -1017,5 +1348,9 @@ case_jsonld_softwareversion_rewritten
 case_jsonld_softwareversion_stray_guard
 case_stray_check_prerelease_substring
 case_appcast_crosscheck_wrong_feed
+case_release_notes_page_written
+case_homebrew_cask_bumped
+case_changelog_section_missing_aborts
+case_make_appcast_gets_release_notes_url
 
 test_end

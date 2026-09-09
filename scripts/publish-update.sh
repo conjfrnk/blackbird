@@ -221,6 +221,7 @@ if [[ "$RECHECK_SHA" != "$DMG_SHA" ]]; then
 fi
 APPCAST_DMG="$DMG_PATH" \
   APPCAST_BASE_URL="https://github.com/conjfrnk/blackbird/releases/download/${TAG}" \
+  APPCAST_RELEASE_NOTES_URL="https://blackbird-terminal.com/releases/v${VERSION}.html" \
   APPCAST_FEED_URL="https://blackbird-terminal.com/appcast.xml" \
   APPCAST_PUB_DATE="$TAG_PUB_DATE" \
   bash scripts/make-appcast.sh --full > "$TMP_APPCAST"
@@ -276,6 +277,32 @@ if ! grep -qF "<sparkle:version>${EXPECTED_BUILD}</sparkle:version>" "$TMP_APPCA
 fi
 mv -f "$TMP_APPCAST" website/appcast.xml
 
+# Render the release-notes page the appcast item just linked. The
+# section must exist (cut-release.sh gated on it), so a failure here
+# means CHANGELOG.md was edited between cut and publish — stop, because
+# the appcast now points at a page that would 404.
+echo "==> Rendering website/releases/v${VERSION}.html from CHANGELOG.md"
+if ! bash scripts/render-release-notes.sh "$VERSION" >/dev/null; then
+    echo "!! Could not render release notes for ${VERSION} — appcast NOT published." >&2
+    git checkout -- website/appcast.xml
+    exit 1
+fi
+
+# Bump the Homebrew cask to the DMG that was just verified. The cask is
+# hand-maintained and sat at 0.2.6 for twelve releases; publish-update
+# is the only step that knows both the version and the verified sha, so
+# it owns the bump. Idempotent: re-running rewrites the same values.
+CASK=packaging/homebrew/blackbird.rb
+if [[ -f "$CASK" ]]; then
+    echo "==> Bumping $CASK to ${VERSION} (sha256 ${DMG_SHA:0:12}…)"
+    sed -i '' -E "s|^(  version )\"[^\"]+\"|\1\"${VERSION}\"|" "$CASK"
+    sed -i '' -E "s|^(  sha256 )\"[0-9a-f]+\"|\1\"${DMG_SHA}\"|" "$CASK"
+    if ! grep -q "^  version \"${VERSION}\"" "$CASK" || ! grep -q "^  sha256 \"${DMG_SHA}\"" "$CASK"; then
+        echo "!! $CASK did not pick up version/sha256 — check its 'version'/'sha256' lines." >&2
+        exit 1
+    fi
+fi
+
 # Bump the three version-bearing strings in website/index.html so the
 # splash always reads the version that was just shipped:
 #   1. the download sub-line     → "Apple Silicon and Intel · v<X.Y.Z>"
@@ -327,12 +354,13 @@ fi
 # idempotent: the appcast regenerates to the same content (same DMG bytes,
 # same EdDSA signature input), `git diff --cached --quiet` will then say
 # "nothing to commit" and we fall through to re-deploying S3 on retry.
-echo "==> Committing appcast.xml + index.html"
-git add website/appcast.xml website/index.html
+echo "==> Committing appcast.xml + index.html + release notes + cask"
+git add website/appcast.xml website/index.html "website/releases/v${VERSION}.html"
+if [[ -f "$CASK" ]]; then git add "$CASK"; fi
 if git diff --cached --quiet; then
     echo "==> nothing to commit — skipping (assuming retry after S3 failure)"
 else
-    git commit -m "feat(website): signed appcast + version label for ${TAG}"
+    git commit -m "release(website): appcast, notes page, cask for ${TAG}"
 fi
 
 echo "==> Pushing to origin main (before S3 deploy — if this fails we stop)"

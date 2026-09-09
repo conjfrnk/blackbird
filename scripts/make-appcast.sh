@@ -29,6 +29,8 @@ set -euo pipefail
 #   SIGN_UPDATE        — path to Sparkle's sign_update binary. If unset,
 #                        the script looks in PATH first, then in the
 #                        Xcode DerivedData SPM artifact tree.
+#   APPCAST_RELEASE_NOTES_URL — optional URL of the HTML release notes
+#                        page; emitted as <sparkle:releaseNotesLink>.
 #   APPCAST_DMG        — explicit path to the DMG to sign and reference.
 #                        When set, the dist/ auto-pick below is skipped
 #                        entirely. publish-update.sh ALWAYS sets this to
@@ -286,13 +288,21 @@ PUB_DATE="${APPCAST_PUB_DATE:-$(date -u +"%a, %d %b %Y %H:%M:%S +0000")}"
 
 URL="${APPCAST_BASE_URL%/}/$DMG_NAME"
 
+# Optional release-notes page. Sparkle renders the linked HTML in the
+# update dialog; without it the dialog shows only a version number.
+# publish-update.sh passes the page it just rendered from CHANGELOG.md.
+NOTES_LINE=""
+if [[ -n "${APPCAST_RELEASE_NOTES_URL:-}" ]]; then
+    NOTES_LINE=$'\n'"      <sparkle:releaseNotesLink>${APPCAST_RELEASE_NOTES_URL}</sparkle:releaseNotesLink>"
+fi
+
 ITEM=$(cat <<XML
     <item>
       <title>Version ${VERSION}</title>
       <pubDate>${PUB_DATE}</pubDate>
       <sparkle:version>${BUILD}</sparkle:version>
       <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>${NOTES_LINE}
       <enclosure url="${URL}"
                  type="application/x-apple-diskimage"
                  ${SIG_LINE} />

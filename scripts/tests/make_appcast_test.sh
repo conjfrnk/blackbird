@@ -511,6 +511,135 @@ case_autopick_skips_prerelease() {
     rm -f "$log"
 }
 
+# ---------------------------------------------------------------------------
+# Helper for the release-notes cases — run make-appcast.sh --full with
+# APPCAST_RELEASE_NOTES_URL controlled explicitly. "$notes_mode" is one
+# of: set (export the given URL), empty (export ""), unset (remove the
+# variable). stdout goes to $log, stderr to $errlog, exit code echoed.
+# The operator's own shell value is never inherited: every mode starts
+# from a clean slate so the "no element" cases can't pass because the
+# variable happened to be absent in the outer environment.
+# ---------------------------------------------------------------------------
+run_make_appcast_notes() {
+    local fixture="$1" notes_mode="$2" notes_url="$3" log="$4" errlog="$5"
+    local rc=0
+    (
+        cd "$fixture"
+        unset APPCAST_DMG
+        unset APPCAST_RELEASE_NOTES_URL
+        export PATH="$fixture/stub-bin:$PATH"
+        export APPCAST_BASE_URL="https://example.test/blackbird"
+        export APPCAST_FEED_URL="https://example.test/appcast.xml"
+        export SIGN_UPDATE="$fixture/stub-bin/sign_update"
+        case "$notes_mode" in
+            set)   export APPCAST_RELEASE_NOTES_URL="$notes_url" ;;
+            empty) export APPCAST_RELEASE_NOTES_URL="" ;;
+            unset) ;;
+        esac
+        bash "$fixture/scripts/make-appcast.sh" --full
+    ) >"$log" 2>"$errlog" || rc=$?
+    echo "$rc"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 12 — APPCAST_RELEASE_NOTES_URL set → the <item> carries
+# <sparkle:releaseNotesLink>URL</sparkle:releaseNotesLink>, placed inside
+# the item and BEFORE the <enclosure> element (Sparkle reads the link
+# from the item body; publish-update.sh points it at the rendered
+# website/releases/vX.Y.Z.html page). The full document must still be
+# well-formed XML.
+# ---------------------------------------------------------------------------
+case_release_notes_link_emitted() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-12)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+    printf 'fake dmg 0.2.0\n' > "$tmp/dist/Blackbird-0.2.0.dmg"
+
+    local notes_url="https://example.test/releases/v0.2.0.html"
+    local log errlog; log="$(mktemp)"; errlog="$(mktemp)"
+    local rc
+    rc="$(run_make_appcast_notes "$tmp" set "$notes_url" "$log" "$errlog")"
+    assert_eq "$rc" "0" "releaseNotesLink: make-appcast.sh --full exits 0 with APPCAST_RELEASE_NOTES_URL set"
+
+    local expected="<sparkle:releaseNotesLink>${notes_url}</sparkle:releaseNotesLink>"
+    if grep -qF "$expected" "$log"; then
+        pass "releaseNotesLink: exact element emitted with the configured URL"
+    else
+        fail "releaseNotesLink: '$expected' missing from stdout"
+        head -40 "$log" | sed 's/^/      | /' >&2
+        head -5 "$errlog" | sed 's/^/      | stderr: /' >&2
+    fi
+
+    # Ordering: <item> ... <sparkle:releaseNotesLink> ... <enclosure.
+    # Compare line numbers of the first occurrence of each.
+    local item_line notes_line encl_line
+    item_line="$(grep -n '<item>' "$log" | head -1 | cut -d: -f1 || true)"
+    notes_line="$(grep -nF 'releaseNotesLink' "$log" | head -1 | cut -d: -f1 || true)"
+    encl_line="$(grep -n '<enclosure' "$log" | head -1 | cut -d: -f1 || true)"
+    if [[ -n "$item_line" && -n "$notes_line" && -n "$encl_line" ]] \
+        && (( item_line < notes_line )) && (( notes_line < encl_line )); then
+        pass "releaseNotesLink: sits inside <item> and before <enclosure> (lines $item_line < $notes_line < $encl_line)"
+    else
+        fail "releaseNotesLink: ordering wrong — item=$item_line notes=$notes_line enclosure=$encl_line"
+        head -40 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    # Exactly one link element — a duplicate would be a template bug.
+    local count
+    count="$(grep -c 'releaseNotesLink' "$log" || true)"
+    # Opening + closing tag live on the same line, so one line == one element.
+    assert_eq "$count" "1" "releaseNotesLink: emitted exactly once"
+
+    if python3 -c "import xml.etree.ElementTree as E; E.parse('$log')" 2>/dev/null; then
+        pass "releaseNotesLink: document still well-formed XML"
+    else
+        fail "releaseNotesLink: emitted document is malformed XML"
+        head -40 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    rm -f "$log" "$errlog"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 13 — APPCAST_RELEASE_NOTES_URL unset or empty → no
+# releaseNotesLink element at all. An empty <sparkle:releaseNotesLink/>
+# would make Sparkle fetch "" and show a broken notes pane, so both the
+# unset and the empty-string forms must suppress the element entirely.
+# ---------------------------------------------------------------------------
+case_release_notes_link_omitted() {
+    local tmp; tmp="$(mk_tmp bb-mkapc-13)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_appcast_fixture "$tmp"
+    printf 'fake dmg 0.2.0\n' > "$tmp/dist/Blackbird-0.2.0.dmg"
+
+    local mode
+    for mode in unset empty; do
+        local log errlog; log="$(mktemp)"; errlog="$(mktemp)"
+        local rc
+        rc="$(run_make_appcast_notes "$tmp" "$mode" "" "$log" "$errlog")"
+        assert_eq "$rc" "0" "releaseNotesLink ($mode): make-appcast.sh --full exits 0"
+
+        if grep -q 'releaseNotesLink' "$log"; then
+            fail "releaseNotesLink ($mode): element emitted despite no URL"
+            grep -n 'releaseNotesLink' "$log" | sed 's/^/      | /' >&2
+        else
+            pass "releaseNotesLink ($mode): no releaseNotesLink element emitted"
+        fi
+
+        # The item itself must still be intact — suppressing the link
+        # must not swallow the enclosure.
+        if grep -q '<enclosure' "$log"; then
+            pass "releaseNotesLink ($mode): <enclosure> still present"
+        else
+            fail "releaseNotesLink ($mode): <enclosure> missing from output"
+            head -40 "$log" | sed 's/^/      | /' >&2
+        fi
+        rm -f "$log" "$errlog"
+    done
+}
+
 case_dmg_selection_deterministic
 case_missing_base_url
 case_no_dmgs
@@ -522,5 +651,7 @@ case_appcast_dmg_prerelease_short_version
 case_appcast_dmg_nonexistent_path
 case_appcast_dmg_bad_basename
 case_autopick_skips_prerelease
+case_release_notes_link_emitted
+case_release_notes_link_omitted
 
 test_end

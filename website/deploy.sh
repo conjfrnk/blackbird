@@ -64,6 +64,17 @@ aws s3 cp sitemap.xml "s3://${BUCKET}/sitemap.xml" \
   --content-type "application/xml; charset=utf-8" \
   --profile "$PROFILE"
 
+# Release-notes pages (one per tag, linked from the appcast). Immutable
+# once published — a re-render of the same tag is byte-identical.
+if compgen -G "releases/*.html" >/dev/null; then
+  for page in releases/*.html; do
+    aws s3 cp "$page" "s3://${BUCKET}/${page}" \
+      --cache-control "public,max-age=3600" \
+      --content-type "text/html; charset=utf-8" \
+      --profile "$PROFILE"
+  done
+fi
+
 # Sparkle appcast: clients poll once a day, so keep it revalidating.
 aws s3 cp appcast.xml "s3://${BUCKET}/appcast.xml" \
   --cache-control "public,max-age=0,must-revalidate" \

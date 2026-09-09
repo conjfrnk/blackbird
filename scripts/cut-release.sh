@@ -69,6 +69,48 @@ if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
     echo "!! Tag $TAG already exists locally." >&2
     exit 1
 fi
+
+# Release notes gate: every tag needs a `## [X.Y.Z]` section in
+# CHANGELOG.md. release.yml uses it as the GitHub release body and
+# publish-update.sh renders it into the page the Sparkle appcast links,
+# so a missing section would ship an update whose dialog says nothing.
+# (CHANGELOG.md sat at 0.2.6 for twelve releases before this gate.)
+if ! "$SCRIPT_DIR/changelog-section.sh" "$VERSION" >/dev/null; then
+    echo "!! CHANGELOG.md has no '## [$VERSION]' section. Write the release" >&2
+    echo "   notes first (newest section at the top, Keep-a-Changelog style)." >&2
+    exit 1
+fi
+
+# CI gate: HEAD must have a successful ci.yml run. Tags trigger only
+# release.yml, which builds and signs but runs no tests, so this is the
+# only place a red main can be stopped from becoming a release.
+# BB_SKIP_CI_GATE=1 is an explicit operator override (e.g. a docs-only
+# re-cut while GitHub Actions is down) and is printed loudly.
+if [[ "${BB_SKIP_CI_GATE:-0}" == "1" ]]; then
+    echo "!! BB_SKIP_CI_GATE=1 — skipping the CI-green check for $LOCAL" >&2
+else
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "!! gh not found — needed to verify CI is green on HEAD." >&2
+        echo "   Install it (brew install gh) or set BB_SKIP_CI_GATE=1 to override." >&2
+        exit 1
+    fi
+    CI_STATUS=0
+    CI_CONCLUSION="$(gh run list --workflow ci.yml --commit "$LOCAL" \
+        --json status,conclusion \
+        --jq 'map(select(.status == "completed")) | map(.conclusion) | first // "none"' \
+        2>&1)" || CI_STATUS=$?
+    if [[ $CI_STATUS -ne 0 ]]; then
+        echo "!! gh could not query CI runs for $LOCAL:" >&2
+        echo "   $CI_CONCLUSION" >&2
+        exit 1
+    fi
+    if [[ "$CI_CONCLUSION" != "success" ]]; then
+        echo "!! CI is not green on HEAD ($LOCAL): latest completed ci.yml run = '$CI_CONCLUSION'." >&2
+        echo "   Wait for CI (gh run watch), fix main, or set BB_SKIP_CI_GATE=1 to override." >&2
+        exit 1
+    fi
+    echo "    CI green on $LOCAL"
+fi
 if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
     echo "!! Tag $TAG already exists on origin." >&2
     exit 1

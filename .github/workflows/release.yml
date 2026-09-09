@@ -117,6 +117,24 @@ jobs:
           echo "versioned=$VERSIONED" >> "$GITHUB_OUTPUT"
           echo "stable=dist/Blackbird.dmg" >> "$GITHUB_OUTPUT"
 
+      - name: Release notes from CHANGELOG.md
+        # cut-release.sh refuses to tag a version without a CHANGELOG
+        # section, so this is only empty for tags cut by hand. Fall back
+        # to GitHub's auto-generated notes rather than an empty body.
+        id: notes
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if scripts/changelog-section.sh "$TAG" > "$RUNNER_TEMP/notes.md"; then
+            echo "path=$RUNNER_TEMP/notes.md" >> "$GITHUB_OUTPUT"
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::CHANGELOG.md has no section for $TAG — using auto-generated notes"
+            : > "$RUNNER_TEMP/notes.md"
+            echo "path=$RUNNER_TEMP/notes.md" >> "$GITHUB_OUTPUT"
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload DMGs to release
         uses: softprops/action-gh-release@v2
         with:
@@ -124,6 +142,7 @@ jobs:
           files: |
             ${{ steps.dmg.outputs.versioned }}
             ${{ steps.dmg.outputs.stable }}
+          body_path: ${{ steps.notes.outputs.path }}
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: ${{ steps.notes.outputs.generate }}

@@ -24,5 +24,9 @@ cask "blackbird" do
     "~/Library/Saved Application State/dev.conjfrnk.blackbird.savedState",
     "~/Library/HTTPStorages/dev.conjfrnk.blackbird",
     "~/Library/Caches/dev.conjfrnk.blackbird",
+    # Written by the app itself, not by the installer:
+    "~/.terminfo/x/xterm-kitty",        # KittyTerminfo.swift
+    "~/.local/share/blackbird",         # shell-integration bootstrap
+    "~/.local/state/blackbird",         # ssh terminfo-wrapper cache
   ]
 end

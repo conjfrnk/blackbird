@@ -113,7 +113,44 @@ STUB
     # runs. Add a .gitignore for stub-bin/ since those are test-only
     # commands that shouldn't show up as version-controlled bits.
     cp "$BB_REPO_ROOT/scripts/cut-release.sh" "$root/scripts/cut-release.sh"
-    chmod +x "$root/scripts/cut-release.sh"
+    cp "$BB_REPO_ROOT/scripts/changelog-section.sh" "$root/scripts/changelog-section.sh"
+    chmod +x "$root/scripts/cut-release.sh" "$root/scripts/changelog-section.sh"
+
+    # cut-release.sh refuses to tag a version with no CHANGELOG section.
+    # Seed sections for every version the cases below cut.
+    cat >"$root/CHANGELOG.md" <<'MD'
+# Changelog
+
+## [Unreleased]
+
+## [0.2.1] - 2026-01-02
+
+### Fixed
+- second fixture release
+
+## [0.2.0] - 2026-01-01
+
+### Added
+- fixture release
+
+## [0.1.10] - 2025-12-31
+
+### Fixed
+- fixture patch
+MD
+
+    # cut-release.sh asks `gh run list --commit <sha>` whether CI is
+    # green on HEAD. Default stub: success. Cases that exercise the gate
+    # overwrite this stub.
+    cat >"$root/stub-bin/gh" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "run" && "${2:-}" == "list" ]]; then
+    echo "success"
+    exit 0
+fi
+exit 0
+STUB
+    chmod +x "$root/stub-bin/gh"
     cat >"$root/.gitignore" <<'IGN'
 stub-bin/
 IGN
@@ -125,7 +162,7 @@ IGN
     # fixture content as a second commit so the tree is fully clean.
     (
         cd "$root"
-        git add project.yml Sources Blackbird.xcodeproj scripts
+        git add project.yml Sources Blackbird.xcodeproj scripts CHANGELOG.md
         git -c commit.gpgsign=false commit -q -m "fixture content"
         git push -q origin main
     )
@@ -494,6 +531,341 @@ case_7() {
 }
 
 # ---------------------------------------------------------------------------
+# Shared assertions for the refusal cases below — after a refused cut,
+# project.yml must still carry the fixture's original 0.1.9 / build 9,
+# the working tree must be clean, and no tag for the requested version
+# may exist (locally or on the bare origin).
+# ---------------------------------------------------------------------------
+
+assert_fixture_untouched() {
+    local fixture="$1" version="$2" label="$3"
+    if grep -qE '^ *CFBundleShortVersionString: "0\.1\.9"' "$fixture/project.yml" \
+        && grep -qE '^ *CFBundleVersion: "9"' "$fixture/project.yml"; then
+        pass "$label: project.yml still 0.1.9 / build 9"
+    else
+        fail "$label: project.yml was modified by a refused cut"
+        grep -nE 'CFBundle(ShortVersionString|Version)' "$fixture/project.yml" \
+            | sed 's/^/      | /' >&2
+    fi
+    if [[ -z "$(cd "$fixture" && git status --porcelain)" ]]; then
+        pass "$label: working tree clean after refusal"
+    else
+        fail "$label: refused cut left the working tree dirty"
+        (cd "$fixture" && git status --porcelain) | sed 's/^/      | /' >&2
+    fi
+    if [[ -z "$(cd "$fixture" && git tag -l "v$version")" ]]; then
+        pass "$label: no local tag v$version created"
+    else
+        fail "$label: tag v$version exists despite refusal"
+    fi
+    if ! (cd "$fixture" && git ls-remote --tags origin 2>/dev/null | grep -q "refs/tags/v$version"); then
+        pass "$label: no tag v$version pushed to origin"
+    else
+        fail "$label: tag v$version was pushed to origin despite refusal"
+    fi
+}
+
+# Install a gh stub that records every invocation's argv to
+# $fixture/stub-bin/gh-args.log (under the gitignored stub-bin/ so the
+# log never dirties the fixture's working tree) and answers
+# `gh run list ...` with $answer.
+mk_gh_stub() {
+    local fixture="$1" answer="$2"
+    cat >"$fixture/stub-bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$fixture/stub-bin/gh-args.log"
+if [[ "\${1:-}" == "run" && "\${2:-}" == "list" ]]; then
+    printf '%s\n' "$answer"
+    exit 0
+fi
+exit 0
+STUB
+    chmod +x "$fixture/stub-bin/gh"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 8 — CHANGELOG gate: cutting a version with no `## [<version>]`
+# heading in CHANGELOG.md is refused. Exit non-zero, project.yml stays at
+# 0.1.9 / build 9, no tag, and the diagnostic names both CHANGELOG.md and
+# the version so the operator knows what to write. The fixture seeds
+# 0.2.0 / 0.2.1 / 0.1.10 only, so 0.3.0 has no section.
+# ---------------------------------------------------------------------------
+
+case_8() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-8)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(unset BB_SKIP_CI_GATE; run_cut_release "$tmp" 0.3.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "CHANGELOG gate: cut-release.sh refuses 0.3.0 with no changelog section (rc=$rc)"
+    else
+        fail "CHANGELOG gate: cut-release.sh exited 0 with no ## [0.3.0] section"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if grep -q "CHANGELOG.md" "$log"; then
+        pass "CHANGELOG gate: diagnostic names CHANGELOG.md"
+    else
+        fail "CHANGELOG gate: diagnostic does not mention CHANGELOG.md"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+    if grep -q "0.3.0" "$log"; then
+        pass "CHANGELOG gate: diagnostic names the missing version 0.3.0"
+    else
+        fail "CHANGELOG gate: diagnostic does not mention 0.3.0"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    assert_fixture_untouched "$tmp" 0.3.0 "CHANGELOG gate"
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 9 — CI-green gate, red CI. Before bumping anything the script asks
+# `gh run list --workflow ci.yml --commit <HEAD sha> --json
+# status,conclusion --jq ...` and requires exactly `success`. A stub that
+# answers `failure` must make the script refuse: non-zero exit,
+# project.yml untouched, no tag, and a diagnostic saying CI is not green
+# that names the BB_SKIP_CI_GATE escape hatch. The stub also records its
+# argv so we can pin the query shape (workflow, HEAD sha, json fields).
+# ---------------------------------------------------------------------------
+
+case_9() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-9)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+    mk_gh_stub "$tmp" "failure"
+
+    local head_sha; head_sha="$(cd "$tmp" && git rev-parse HEAD)"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(unset BB_SKIP_CI_GATE; run_cut_release "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "CI gate: cut-release.sh refuses when gh reports failure (rc=$rc)"
+    else
+        fail "CI gate: cut-release.sh exited 0 despite gh reporting CI failure"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    if grep -qi "not green" "$log"; then
+        pass "CI gate: diagnostic says CI is not green"
+    else
+        fail "CI gate: diagnostic does not say CI is not green"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+    if grep -q "BB_SKIP_CI_GATE" "$log"; then
+        pass "CI gate: diagnostic names the BB_SKIP_CI_GATE override"
+    else
+        fail "CI gate: diagnostic does not mention BB_SKIP_CI_GATE"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    # Query shape: gh must have been asked about ci.yml on HEAD's sha
+    # with status+conclusion fields. A gate that checks the wrong
+    # commit (e.g. the branch tip on the remote) or the wrong workflow
+    # would pass a green-looking stub for the wrong reason.
+    if [[ -s "$tmp/stub-bin/gh-args.log" ]]; then
+        pass "CI gate: gh was invoked"
+        local run_list_line
+        run_list_line="$(grep -E '^run list' "$tmp/stub-bin/gh-args.log" | head -1 || true)"
+        assert_contains "$run_list_line" "ci.yml" "CI gate: gh run list targets the ci.yml workflow"
+        assert_contains "$run_list_line" "--commit $head_sha" "CI gate: gh run list targets HEAD's sha"
+        assert_contains "$run_list_line" "status,conclusion" "CI gate: gh run list requests status,conclusion"
+    else
+        fail "CI gate: gh was never invoked (gate skipped or bypassed)"
+    fi
+
+    assert_fixture_untouched "$tmp" 0.2.0 "CI gate (failure)"
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 10 — CI-green gate, no run at all. `gh run list` printing `none`
+# (no CI run recorded for HEAD — e.g. the operator forgot to push) is not
+# `success` and must be refused exactly like a red run. Only an exact
+# `success` passes the gate.
+# ---------------------------------------------------------------------------
+
+case_10() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-10)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+    mk_gh_stub "$tmp" "none"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(unset BB_SKIP_CI_GATE; run_cut_release "$tmp" 0.2.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "CI gate: cut-release.sh refuses when gh reports no run (rc=$rc)"
+    else
+        fail "CI gate: cut-release.sh exited 0 when gh reported 'none' for HEAD"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+    if grep -qi "not green" "$log" && grep -q "BB_SKIP_CI_GATE" "$log"; then
+        pass "CI gate: 'not green' diagnostic with BB_SKIP_CI_GATE hint"
+    else
+        fail "CI gate: missing 'not green' / BB_SKIP_CI_GATE diagnostic for 'none'"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    assert_fixture_untouched "$tmp" 0.2.0 "CI gate (none)"
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 11 — CI-green gate, gh absent from PATH entirely. A missing tool
+# is not a green CI; the script must refuse (non-zero, project.yml
+# untouched, no tag) and the diagnostic must name `gh` so the operator
+# installs it rather than reaching for the override. We run with a
+# restricted PATH (stub-bin + the system dirs) so the operator's own
+# /opt/homebrew/bin/gh cannot leak in.
+# ---------------------------------------------------------------------------
+
+case_11() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-11)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+    rm -f "$tmp/stub-bin/gh"
+
+    local restricted_path="$tmp/stub-bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    if PATH="$restricted_path" command -v gh >/dev/null 2>&1; then
+        fail "precondition: gh still resolvable on restricted PATH ($(PATH="$restricted_path" command -v gh))"
+        return
+    fi
+    pass "precondition: gh absent from restricted PATH"
+
+    local log; log="$(mktemp)"
+    local rc=0
+    (
+        cd "$tmp"
+        unset BB_SKIP_CI_GATE
+        export PATH="$restricted_path"
+        bash "$tmp/scripts/cut-release.sh" 0.2.0
+    ) >"$log" 2>&1 || rc=$?
+
+    if [[ "$rc" != "0" ]]; then
+        pass "CI gate: cut-release.sh refuses when gh is not installed (rc=$rc)"
+    else
+        fail "CI gate: cut-release.sh exited 0 with no gh on PATH"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+    if grep -q "gh" "$log"; then
+        pass "CI gate: diagnostic mentions gh"
+    else
+        fail "CI gate: diagnostic does not mention gh"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    assert_fixture_untouched "$tmp" 0.2.0 "CI gate (gh absent)"
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 12 — BB_SKIP_CI_GATE=1 bypasses the CI-green gate. With a gh stub
+# that reports failure AND the override set, the cut must proceed and
+# succeed end-to-end exactly like case 1 (project.yml + Info.plist at
+# 0.2.0 / build 10, tag v0.2.0 pushed), and the script must print a loud
+# line containing `BB_SKIP_CI_GATE=1` to stderr so the bypass is visible
+# in the operator's transcript.
+# ---------------------------------------------------------------------------
+
+case_12() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-12)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+    mk_gh_stub "$tmp" "failure"
+
+    local out err; out="$(mktemp)"; err="$(mktemp)"
+    local rc=0
+    (
+        cd "$tmp"
+        export PATH="$tmp/stub-bin:$PATH"
+        export BB_SKIP_CI_GATE=1
+        bash "$tmp/scripts/cut-release.sh" 0.2.0
+    ) >"$out" 2>"$err" || rc=$?
+
+    if [[ "$rc" == "0" ]]; then
+        pass "BB_SKIP_CI_GATE=1: cut-release.sh succeeds despite red CI (rc=0)"
+    else
+        fail "BB_SKIP_CI_GATE=1: cut-release.sh failed (rc=$rc) — override not honoured"
+        head -30 "$out" | sed 's/^/      | stdout: /' >&2
+        head -30 "$err" | sed 's/^/      | stderr: /' >&2
+        rm -f "$out" "$err"
+        return
+    fi
+
+    if grep -q "BB_SKIP_CI_GATE=1" "$err"; then
+        pass "BB_SKIP_CI_GATE=1: bypass announced on stderr"
+    else
+        fail "BB_SKIP_CI_GATE=1: no stderr line containing BB_SKIP_CI_GATE=1"
+        head -30 "$err" | sed 's/^/      | stderr: /' >&2
+    fi
+
+    # End-to-end post-conditions, mirroring case 1's first bump.
+    local short build
+    short="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+        "$tmp/Sources/Blackbird/Info.plist")"
+    build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+        "$tmp/Sources/Blackbird/Info.plist")"
+    assert_eq "$short" "0.2.0" "BB_SKIP_CI_GATE=1: Info.plist short version 0.2.0"
+    assert_eq "$build" "10" "BB_SKIP_CI_GATE=1: Info.plist CFBundleVersion 9 -> 10"
+    if grep -qE '^ *CFBundleShortVersionString: "0\.2\.0"' "$tmp/project.yml"; then
+        pass "BB_SKIP_CI_GATE=1: project.yml bumped to 0.2.0"
+    else
+        fail "BB_SKIP_CI_GATE=1: project.yml not bumped"
+    fi
+    if (cd "$tmp" && git ls-remote --tags origin | grep -q "refs/tags/v0.2.0"); then
+        pass "BB_SKIP_CI_GATE=1: tag v0.2.0 pushed to origin"
+    else
+        fail "BB_SKIP_CI_GATE=1: tag v0.2.0 not on origin"
+    fi
+
+    rm -f "$out" "$err"
+}
+
+# ---------------------------------------------------------------------------
+# CASE 13 — gate ordering: red CI AND a missing CHANGELOG section. Either
+# gate may fire first; what matters is that neither leaves a half-bumped
+# tree behind. Exit non-zero, project.yml untouched, no tag.
+# ---------------------------------------------------------------------------
+
+case_13() {
+    local tmp; tmp="$(mk_tmp bb-cut-rel-13)"
+    trap "rm -rf '$tmp'" RETURN
+
+    mk_fixture "$tmp"
+    mk_gh_stub "$tmp" "failure"
+
+    local log; log="$(mktemp)"
+    local rc; rc="$(unset BB_SKIP_CI_GATE; run_cut_release "$tmp" 0.3.0 "$log")"
+
+    if [[ "$rc" != "0" ]]; then
+        pass "gate ordering: refused with red CI + missing changelog section (rc=$rc)"
+    else
+        fail "gate ordering: cut-release.sh exited 0 with red CI AND no ## [0.3.0] section"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+    if grep -q "CHANGELOG.md" "$log" || grep -q "BB_SKIP_CI_GATE" "$log"; then
+        pass "gate ordering: one of the two gate diagnostics was printed"
+    else
+        fail "gate ordering: neither the CHANGELOG nor the CI-gate diagnostic appeared"
+        head -30 "$log" | sed 's/^/      | /' >&2
+    fi
+
+    assert_fixture_untouched "$tmp" 0.3.0 "gate ordering"
+    rm -f "$log"
+}
+
+# ---------------------------------------------------------------------------
 # Run all cases.
 # ---------------------------------------------------------------------------
 
@@ -504,5 +876,11 @@ case_4
 case_5
 case_6
 case_7
+case_8
+case_9
+case_10
+case_11
+case_12
+case_13
 
 test_end
