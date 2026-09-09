@@ -85,6 +85,7 @@ extension TerminalView: NSTextInputClient {
         } else {
             committed = ""
         }
+        let hadComposition = composition != nil
         composition = nil
         refreshPreeditOverlay()
         // Set the flag even for empty commits — keyDown treats "IME said
@@ -95,10 +96,20 @@ extension TerminalView: NSTextInputClient {
         guard !committed.isEmpty else { return }
         // Commit path: route through the same encoder keyDown uses so
         // termMode-aware quirks (e.g. paste-like batching) stay consistent.
-        // Modifiers are empty — the IME has already resolved the user's
-        // intent into a final grapheme cluster.
+        // Modifiers are empty for a real IME commit — the IME has resolved
+        // the user's intent into a final grapheme cluster. But AppKit also
+        // delivers EVERY plain printable through here with no modifier
+        // information, so under kitty flags 4/8 (which encode the key as
+        // its unshifted codepoint plus modifier bits) Shift was lost:
+        // Shift+A became `CSI 97u` and the TUI typed `a`. Use the routing
+        // keyDown's modifiers when this commit is that key, i.e. when no
+        // composition was in flight.
         let mode = currentSnapshot?.termMode ?? []
-        let bytes = encoder.encode(chars: committed, modifiers: [], mode: mode)
+        let wantsShiftBits = mode.contains(.reportAllKeysAsEsc) || mode.contains(.reportAlternateKeys)
+        let mods: KeyEncoder.Modifiers = (wantsShiftBits && !hadComposition)
+            ? (pendingInsertTextModifiers ?? []).intersection(.shift)
+            : []
+        let bytes = encoder.encode(chars: committed, modifiers: mods, mode: mode)
         if !bytes.isEmpty { sendToSession(bytes) }
     }
 

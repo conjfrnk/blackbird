@@ -99,19 +99,28 @@ final class KittyKeyboardProtocolTests: XCTestCase {
                        csiU(104, mod: 5))
     }
 
-    func test_ctrlC_disambiguateMode_stillSendsSigInt() {
-        // Ctrl+c is NOT an ambiguous binding — 0x03 is unique to Ctrl+c. Every
-        // shell in the world expects 0x03 for SIGINT. Emitting CSI u here
-        // would silently break `^C`.
+    func test_ctrlC_disambiguateMode_emitsCsiU() {
+        // Spec (flag 1): "report the Esc, alt+key, ctrl+key, ctrl+alt+key,
+        // shift+alt+key keys using CSI u sequences instead of legacy ones".
+        // A TUI that pushed flag 1 asked for `CSI 99;5u` and handles it —
+        // kitty, Ghostty, WezTerm and foot all send exactly this. (Legacy
+        // 0x03 still flows when no kitty flag is active; see below.)
+        // Pre-v0.8.1 pinned the C0 byte here, a spec misreading.
         let enc = KeyEncoder()
         XCTAssertEqual(enc.encode(chars: "c", modifiers: [.control], mode: kittyOn),
-                       Data([0x03]))
+                       csiU(99, mod: 5))
     }
 
-    func test_ctrlA_disambiguateMode_stillControlByte() {
+    func test_ctrlA_disambiguateMode_emitsCsiU() {
         let enc = KeyEncoder()
         XCTAssertEqual(enc.encode(chars: "a", modifiers: [.control], mode: kittyOn),
-                       Data([0x01]))
+                       csiU(97, mod: 5))
+    }
+
+    func test_ctrlC_noKitty_stillSendsSigInt() {
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: "c", modifiers: [.control], mode: []),
+                       Data([0x03]))
     }
 
     // MARK: - Tab
@@ -160,10 +169,20 @@ final class KittyKeyboardProtocolTests: XCTestCase {
                        csiU(27, mod: 2))
     }
 
-    func test_plainEsc_disambiguateMode_stillEsc() {
+    func test_plainEsc_disambiguateMode_emitsCsiU() {
+        // Spec: Esc is reported as `CSI 27 u` under flag 1 — only Enter, Tab
+        // and Backspace keep their legacy bytes unmodified. Bare 0x1B left
+        // the TUI with the ESC-vs-Alt timeout ambiguity the flag removes.
         let enc = KeyEncoder()
         XCTAssertEqual(enc.encode(chars: "\u{1B}", modifiers: [], mode: kittyOn),
-                       Data([0x1B]))
+                       csiU(27))
+    }
+
+    func test_plainEnterTabBackspace_disambiguateMode_stayLegacy() {
+        let enc = KeyEncoder()
+        XCTAssertEqual(enc.encode(chars: "\r", modifiers: [], mode: kittyOn), Data([0x0D]))
+        XCTAssertEqual(enc.encode(chars: "\t", modifiers: [], mode: kittyOn), Data([0x09]))
+        XCTAssertEqual(enc.encode(chars: "\u{7F}", modifiers: [], mode: kittyOn), Data([0x7F]))
     }
 
     // MARK: - ⌘ always suppressed
@@ -233,13 +252,28 @@ final class KittyKeyboardProtocolTests: XCTestCase {
                        csiU(13, mod: 2))
     }
 
-    // Option+printable under kitty + Meta mode — legacy ESC-prefix Meta.
-    // Kitty flag 1 only disambiguates the four C0-aliasing keys; other
-    // printables still use Meta-ESC so Emacs M-x etc. keep working.
+    // Option+printable under kitty + Meta mode — CSI u with the alt bit.
+    // Spec (flag 1): alt+key and shift+alt+key are CSI u; `ESC a` is the
+    // very ambiguity the flag exists to remove. Emacs under kitty decodes
+    // `CSI 97;3u` as M-a itself.
 
-    func test_optionA_metaMode_kittyOn_stillEscPrefix() {
+    func test_optionA_metaMode_kittyOn_emitsCsiU() {
         let enc = KeyEncoder(optionIsMeta: true)
         XCTAssertEqual(enc.encode(chars: "a", modifiers: [.option], mode: kittyOn),
+                       csiU(97, mod: 3))
+    }
+
+    func test_shiftOptionA_metaMode_kittyOn_emitsCsiUWithBothBits() {
+        // AppKit hands us "A" for Shift+Option+a; the key codepoint is the
+        // unshifted 97 with shift(1)+alt(2) → mod 4.
+        let enc = KeyEncoder(optionIsMeta: true)
+        XCTAssertEqual(enc.encode(chars: "A", modifiers: [.option, .shift], mode: kittyOn),
+                       csiU(97, mod: 4))
+    }
+
+    func test_optionA_metaMode_noKitty_stillEscPrefix() {
+        let enc = KeyEncoder(optionIsMeta: true)
+        XCTAssertEqual(enc.encode(chars: "a", modifiers: [.option], mode: []),
                        Data([0x1B, 0x61]))
     }
 
@@ -773,11 +807,13 @@ final class KittyKeyboardProtocolTests: XCTestCase {
                        csiU(49, mod: 5))
     }
 
-    func test_ctrlLetterA_flag1_keepsC0Byte_notCsiU() {
-        // Letter 'a' HAS a C0 mapping (0x01); F-S3 must NOT promote it to CSI u.
+    func test_ctrlLetterA_flag1_emitsCsiU_likeEveryOtherCtrlKey() {
+        // v0.8.1: letters are no exception. Flag 1's spec reports ctrl+key as
+        // CSI u for every ASCII key; the old F-S3 gate kept the C0 byte for
+        // letters, which was a misreading (see the disambiguate tests above).
         let enc = KeyEncoder()
         XCTAssertEqual(enc.encode(chars: "a", modifiers: [.control], mode: kittyOn),
-                       Data([0x01]))
+                       csiU(97, mod: 5))
     }
 
     func test_ctrlPeriod_legacyMode_dropsCtrl_bareChar() {

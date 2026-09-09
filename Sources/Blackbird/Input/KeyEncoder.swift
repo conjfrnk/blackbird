@@ -206,6 +206,17 @@ public final class KeyEncoder {
 
         // Option as Meta: prepend ESC.
         if optionIsMeta && modifiers.contains(.option) {
+            // Flag 1: alt+key / shift+alt+key are CSI u (see the Ctrl branch
+            // in `tryControlPrintable` for the spec quote). `ESC a` for
+            // Meta-a is exactly the Alt-vs-Esc ambiguity the flag removes;
+            // nvim, helix, fish 4 and Claude Code all push flag 1 and would
+            // otherwise fall back to ESC-timeout heuristics.
+            if kitty, chars.unicodeScalars.count == 1,
+               let scalar = chars.unicodeScalars.first,
+               scalar.value >= 0x20, scalar.value != 0x7F {
+                let base = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
+                return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
+            }
             var out = Data([0x1B])
             out.append(contentsOf: Array(chars.utf8))
             return out
@@ -257,11 +268,19 @@ public final class KeyEncoder {
         // these through the reportAllKeys branch; this closes the flag-1-only
         // gap.) Non-US layouts miss the shifted-symbol base map — same
         // UCKeyTranslate caveat as flag 4.
+        //
+        // v0.8.1: the `controlByte(for:) == nil` gate is gone. Flag 1's
+        // spec reads "report the Esc, alt+key, ctrl+key, ctrl+alt+key,
+        // shift+alt+key keys using CSI u sequences instead of legacy ones",
+        // so EVERY Ctrl+printable — Ctrl+c included — is CSI u once a TUI
+        // has pushed kitty; kitty, Ghostty, WezTerm and foot all send it and
+        // the TUI asked for it. Keeping the C0 byte for letters was the
+        // KNOWN_ISSUES "scope correction" misreading the spec. The key
+        // codepoint is the unshifted lower-case key; Shift rides in the
+        // modifier bits. Legacy C0 still flows with no kitty flag active.
         if (kitty || allKeys),
-           controlByte(for: scalar) == nil,
            scalar.value >= 0x20, scalar.value != 0x7F {
-            let base = (modifiers.contains(.shift)
-                        ? Self.usLayoutUnshiftedSymbol(scalar) : nil) ?? scalar.value
+            let base = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
             return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
         }
         if eventType == .release {
@@ -299,7 +318,15 @@ public final class KeyEncoder {
         eventType: EventType,
         associatedText: Bool
     ) -> Data? {
-        guard kitty, hasMods, let cp = kittyDisambiguationCodepoint(for: chars) else {
+        guard kitty, let cp = kittyDisambiguationCodepoint(for: chars) else {
+            return nil
+        }
+        // Spec: "The only exceptions are the Enter, Tab and Backspace keys
+        // which still generate the same bytes as in legacy mode" — so an
+        // UNMODIFIED Enter/Tab/Backspace stays legacy, but a plain Esc is
+        // `CSI 27 u` under flag 1. Emitting bare 0x1B left the TUI with the
+        // ESC-vs-Alt timeout ambiguity the flag exists to remove.
+        if !hasMods && cp != 27 {
             return nil
         }
         return csiU(
