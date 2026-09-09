@@ -58,7 +58,7 @@ protocol contracts those apps depend on are pinned by automated tests:
 | OSC 7 SSH trust gate                     | `Tests/BlackbirdTests/CwdTests.swift`                               |
 | OSC 133 prompt marks                     | `Tests/BlackbirdTests/OSC133Tests.swift`                            |
 | OSC 52 paste (defense-in-depth, opt-in)  | Covered in `core/` and `Tests/BlackbirdTests/HostileInputIntegrationTests.swift` |
-| URL detection (http/https/ftp/mailto)    | `Tests/BlackbirdTests/URLDetectorTests.swift`                       |
+| URL detection (http/https/mailto open; `ftp://` matched by the detector but rejected by the allowlist, never clickable) | `Tests/BlackbirdTests/URLDetectorTests.swift`, `HyperlinkTests.swift` |
 | IME astral-plane glyphs                  | `Tests/BlackbirdTests/IMEAstralRectTests.swift`, `IMETests.swift`   |
 | BBTerm FFI memory invariants             | `Tests/BlackbirdTests/BBTermLifetimeTests.swift`, `core/tests/`     |
 
@@ -72,9 +72,31 @@ if the contract drifts without a test update.
 it equals the base codepoint and does not synthesize for IME multi-scalar
 commits.
 
-## v0.2 ship status
+## Not yet covered
+
+Scenarios that have never been exercised against Blackbird. Absence
+from the table above is not a ✅ — treat these as unknown until someone
+runs the manual checklist on them.
+
+- **Alternate scroll** (wheel inside `less` / `man` / any pager that
+  is on the alt screen with mouse reporting *off*). **Not supported
+  today:** the wheel does nothing there — Blackbird does not translate
+  wheel events into arrow keys (DECSET 1007). A fix is in progress.
+- **helix** and **kakoune** — never run; Kitty keyboard / true-color /
+  mouse status unknown.
+- **zsh-autosuggestions** and **fzf-tab** — never exercised, in
+  particular against the automatic `ZDOTDIR` shell-integration
+  bootstrap and OSC 133 prompt marks.
+- **Codex CLI** — its OSC 10/11 startup colour probe was the driver
+  for enabling colour-query replies (issue #24), but a full TUI pass
+  (paste, mouse, resize, find) has not been done.
+
+## Ship status
 
 Compat doc shipped 2026-04-30 as part of v0.2 (spec
 `docs/superpowers/specs/2026-04-30-blackbird-v0.2-design.md`). Last
-reviewed 2026-05-18 against v0.2.6 — no row state changes in the
-v0.2.1–v0.2.6 window; all shipped work was correctness / hardening.
+reviewed 2026-09-09 against v0.8.0: the Claude Code row already
+reflects the issue #30 ⌘-click-through-mouse-grab fix; URL-detection
+contract row corrected (`ftp://` is detected but never clickable);
+"Not yet covered" list added. No other row state changes since the
+2026-05-18 review against v0.2.6.

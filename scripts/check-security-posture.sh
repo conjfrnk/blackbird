@@ -170,31 +170,37 @@ fi
 pass "no App Sandbox entitlement (intentional — terminals need arbitrary-fork capability)"
 
 # ---------------------------------------------------------------------------
-# 9. Sparkle's privileged InstallerLauncher XPC service must be OFF until
-#    a real signed appcast ships. With a placeholder feed the updater
-#    can't run anyway, and leaving a root-capable XPC helper registered
-#    widens the attack surface for no benefit.
+# 9. Sparkle's privileged InstallerLauncher XPC service must stay OFF.
+#    The appcast (website/appcast.xml, served from blackbird-terminal.com)
+#    has been live and EdDSA-signed since v0.1.0, but Blackbird installs
+#    updates in-place as the logged-in user, so the root-capable
+#    installer-launcher helper is never needed — leaving it registered
+#    widens the attack surface for no benefit. Policy, not a
+#    pre-release placeholder.
 # ---------------------------------------------------------------------------
 if grep -E "^[[:space:]]*SUEnableInstallerLauncherService:[[:space:]]*true[[:space:]]*$" project.yml; then
-  fail "SUEnableInstallerLauncherService is true with a placeholder appcast — turn off until first real release"
+  fail "SUEnableInstallerLauncherService is true — policy is OFF (in-place user updates need no root helper)"
 fi
 pass "SUEnableInstallerLauncherService is off / unset"
 
 # ---------------------------------------------------------------------------
-# 8. Sparkle consistency: if SUFeedURL is a real URL (not empty, not the
-#    example.com placeholder) then SUPublicEDKey must also be set. Without
-#    the EdDSA public key Sparkle accepts unsigned update payloads — a
-#    trivial supply-chain compromise if the feed URL ever becomes real.
-#    The runtime `isUpdaterConfigured` gate (App.swift) already refuses
-#    to start Sparkle in that case, but we want the posture pinned at
-#    build time too so a future "simplification" PR can't drop the gate.
+# 8. Sparkle consistency: SUFeedURL is the live production feed
+#    (https://blackbird-terminal.com/appcast.xml), so SUPublicEDKey must
+#    be set alongside it. Without the EdDSA public key Sparkle accepts
+#    unsigned update payloads — a trivial supply-chain compromise. The
+#    empty / example.com branch below is kept so a fork or a local
+#    build that blanks the feed still passes; it is not the shipping
+#    state. The runtime `isUpdaterConfigured` gate (App.swift) already
+#    refuses to start Sparkle when either key is missing, but we want
+#    the posture pinned at build time too so a future "simplification"
+#    PR can't drop the gate.
 # ---------------------------------------------------------------------------
 FEED_LINE="$(awk '/CFBundleExecutable/{exit} /SUFeedURL:/{print $2; exit}' project.yml || true)"
 KEY_LINE="$(awk '/CFBundleExecutable/{exit} /SUPublicEDKey:/{print substr($0, index($0,$2)); exit}' project.yml || true)"
 # Strip trailing comment / whitespace artefacts.
 FEED_URL="$(printf '%s' "$FEED_LINE" | awk '{print $1}')"
 if [[ -z "$FEED_URL" || "$FEED_URL" == *example.com* ]]; then
-  pass "SUFeedURL is unset or placeholder — Sparkle is correctly gated off"
+  pass "SUFeedURL is unset or example.com — Sparkle is gated off (fork / local build)"
 else
   if [[ -z "$KEY_LINE" || "$KEY_LINE" == '""' || "$KEY_LINE" == "''" ]]; then
     fail "SUFeedURL ($FEED_URL) is real but SUPublicEDKey is empty — updates would ship unsigned"

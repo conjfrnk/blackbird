@@ -22,14 +22,14 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 - **Tabs.** Native `NSWindow` tab groups, per-tab shell session, confirmation before closing multi-tab windows.
 - **Input.** Full IME support for CJK, dead keys, trackpad pinch-to-zoom.
 - **Find.** ⌘F regex search across scrollback; ⌘⌥E for replace.
-- **URLs.** ⌘-click opens `http`/`https`/`mailto` — including inside full-screen TUIs that have grabbed the mouse (Claude Code, vim, htop), since ⌘ isn't representable in the xterm mouse protocol and can safely stay terminal-local. `ftp`, `file://` and other schemes are intentionally blocked — terminal output shouldn't be one click away from executing a local path. OSC 8 hyperlinks supported.
+- **URLs.** ⌘-click opens `http`/`https`/`mailto` — including inside full-screen TUIs that have grabbed the mouse (Claude Code, vim, htop), since ⌘ isn't representable in the xterm mouse protocol and can safely stay terminal-local. `ftp`, `file://` and every other scheme are rejected by the URL allowlist, so they never underline on hover and never open — terminal output shouldn't be one click away from executing a local path. OSC 8 hyperlinks supported.
 - **Escaping a TUI's mouse grab.** Hold ⌥ to take any mouse gesture back from an application that enabled mouse reporting: ⌥-drag selects text, ⌥-scroll reaches Blackbird's own scrollback, ⌥-right-click opens the context menu.
-- **Clipboard.** ⌘C/⌘V with paste and copy scrubbing (strips C0 controls and Unicode bidi overrides). OSC 52 remote-clipboard writes are disabled by default; the Swift gate (size cap + scrub) is defense-in-depth if ever flipped on.
+- **Clipboard.** ⌘C/⌘V with paste and copy scrubbing (strips C0 controls and Unicode bidi overrides). OSC 52 remote-clipboard writes are disabled in the Rust core with no toggle; the Swift gate (size cap + scrub) is defense-in-depth if that ever changes. OSC 10/11/12 colour queries are answered (rate-capped) so TUIs can detect light/dark; Settings → Security turns that off.
 - **Drag-and-drop.** File paths dropped onto the terminal are shell-quoted and forwarded to the foreground child. C0 / DEL / bidi-override bytes are stripped before send.
 - **Accessibility.** VoiceOver navigates the terminal by character, word, and line. `.textArea` contract pinned by tests.
 - **Color emoji.** Apple Color Emoji and any third-party COLRv1 / sbix / CBDT font rasterizes through a dedicated `bgra8` atlas alongside the mono coverage atlas.
-- **Themes.** Default, Gruvbox, Solarized, Catppuccin. Light/dark auto-follows the system.
-- **Shell integration (opt-in).** Bundled OSC 133 snippets for bash/zsh/fish enable prompt-jumping with ⌘⇧↑/⌘⇧↓.
+- **Themes.** Default, Gruvbox, Solarized, Catppuccin. Dark by default; Settings → Theme → Mode offers Light and Auto (follow system).
+- **Shell integration (automatic).** On by default: zsh and fish get OSC 133 prompt marks and the ssh terminfo fix injected via environment (`ZDOTDIR` / `XDG_DATA_DIRS`) without touching your rc files; prompt-jumping with ⌘⇧↑/⌘⇧↓ just works. bash users source the bundled snippet manually. Settings → Terminal turns injection off for new sessions.
 - **Fonts.** Hack Nerd Font Mono ships in the bundle. Any installed monospaced family is selectable.
 - **Diagnostics.** Settings → Diagnostics surfaces hang reports and macOS crash reports with Copy / Reveal / Email actions. No upload, no SDK, no backend.
 - **Auto-updates.** Sparkle 2.x, signed appcast.
@@ -96,7 +96,7 @@ The Debug scheme enables ASan and UBSan. A cargo-fuzz target for the parser live
 
 CI gates on parser throughput (`plain_text` ≥ 25 MiB/s, `binary_garbage` ≥ 15 MiB/s, `ansi_log` ≥ 30 MiB/s over 64 MiB payloads) and long-session memory stability. Dev-machine numbers typically run 2–3× the floors.
 
-See [`docs/benchmarks/vtebench-2026-04-20.md`](docs/benchmarks/vtebench-2026-04-20.md) for a cross-terminal throughput comparison (Terminal.app, iTerm2, Ghostty, Alacritty, Blackbird).
+See [`docs/benchmarks/throughput-2026-06-09.md`](docs/benchmarks/throughput-2026-06-09.md) for the current cross-terminal throughput comparison (vtebench + kitten bench; the older [`vtebench-2026-04-20.md`](docs/benchmarks/vtebench-2026-04-20.md) predates the 8 MB/s feed-cap fix).
 
 ## Security and known issues
 
