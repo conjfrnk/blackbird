@@ -1165,6 +1165,16 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         let _ = flush_sync_update(bb, true);
         // H = cursor home, 2J = erase display, 3J = erase scrollback.
         bb.processor.advance(&mut bb.term, b"\x1b[H\x1b[2J\x1b[3J");
+        // 3J only reaches the ACTIVE grid; with the alt screen up (Claude
+        // Code holds it for its whole session) that is the alt grid's empty
+        // history, and the primary scrollback returned on exit.
+        if bb
+            .term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        {
+            bb.term.clear_inactive_history();
+        }
         // Audit RC-02 + P2-02 — also reset our parallel-parser state and
         // rate-limit windows. Without this, a mid-sequence parser
         // continues into post-clear bytes (most dangerous: a mid-DCS

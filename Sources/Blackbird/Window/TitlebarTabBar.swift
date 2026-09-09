@@ -38,7 +38,11 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
             w.performClose(nil)
         }
         stripView.onAddTab = {
-            NSApp.sendAction(Selector(("newWindowForTab:")), to: nil, from: nil)
+            // Typed selector: a rename of `AppDelegate.newWindowForTab(_:)`
+            // now fails to compile instead of silently killing the `+`.
+            if !NSApp.sendAction(#selector(AppDelegate.newWindowForTab(_:)), to: nil, from: nil) {
+                TitlebarTabBarViewController.tabBarLogger.error("newWindowForTab: found no responder; the + button did nothing")
+            }
         }
         // Inline-rename commit: the strip has already trimmed the input
         // and converted "" → nil; just hand the value to the window's
@@ -91,6 +95,8 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     /// `MainWindowController` is the single authority for reservation
     /// arithmetic.
     /// See `TabStripView.detachTabs`. Idempotent.
+    static let tabBarLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "tabs")
+
     func clearTabs() {
         stripView.detachTabs()
     }
@@ -1524,11 +1530,11 @@ final class TabStripView: NSView {
         else { return nil }
 
         let targetWindow = tabs[idx]
-        // Bring the right-clicked tab to the front before showing the menu.
-        // This is still the correct UX (the menu visually corresponds to
-        // the selected pill), even though the explicit menu targets below
-        // no longer depend on responder chain state.
-        onSelectWindow?(targetWindow)
+        // No selection side effect (v0.8.1): right-clicking a background
+        // pill used to foreground it before the menu appeared, so "Close
+        // Tab" on a background tab first switched to it and the menu was
+        // then shown by a strip whose window had just been ordered out.
+        // Every item below carries `targetWindow` explicitly.
 
         let menu = NSMenu()
 
@@ -2241,32 +2247,8 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
     }
 }
 
-private extension NSBezierPath {
-    var cgPath: CGPath {
-        let path = CGMutablePath()
-        var points = [CGPoint](repeating: .zero, count: 3)
-        for i in 0..<elementCount {
-            let type = element(at: i, associatedPoints: &points)
-            switch type {
-            case .moveTo:    path.move(to: points[0])
-            case .lineTo:    path.addLine(to: points[0])
-            // `.curveTo` and `.cubicCurveTo` share the same raw value in
-            // macOS 14+; either name reaches this case. Swift's Element
-            // import keeps both names distinct, so we can only list one —
-            // `.curveTo` is the deprecated alias that still matches.
-            case .curveTo:   path.addCurve(to: points[2], control1: points[0], control2: points[1])
-            case .quadraticCurveTo:
-                // New in macOS 14. Our current paths (roundedRect, ovalIn)
-                // don't emit quadratics, but if a future path source does
-                // we want to draw it rather than silently skip the segment.
-                path.addQuadCurve(to: points[1], control: points[0])
-            case .closePath: path.closeSubpath()
-            @unknown default: break
-            }
-        }
-        return path
-    }
-}
+// `NSBezierPath.cgPath` comes from the macOS 14 SDK (the app's floor);
+// the private reimplementation that lived here was deleted in v0.8.1.
 
 /// VoiceOver accessibility for `TabStripView` (hoisted collaborator, `unowned
 /// view`). Each pill + the `+` button are drawn shapes, not real views, so

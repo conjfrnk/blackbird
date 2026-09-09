@@ -17,7 +17,9 @@ options:
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    from: 2.6.0
+    # Floor raised to what Package.resolved already pins; a fresh resolve
+    # could otherwise land on 2.6.x and only the posture script would notice.
+    from: 2.9.2
 
 settings:
   base:
@@ -153,6 +155,9 @@ targets:
         # app owns the decision in one place.
         SUEnableAutomaticChecks: true
         SUScheduledCheckInterval: 86400
+        # Verify the EdDSA signature BEFORE extracting the archive (Sparkle's
+        # recommended mode for new apps); the default verifies afterwards.
+        SUVerifyUpdateBeforeExtraction: true
         # Keep the privileged InstallerLauncher XPC service OFF until a
         # real signed appcast (non-placeholder SUFeedURL + non-empty
         # SUPublicEDKey) ships. Sparkle registers a root-level helper

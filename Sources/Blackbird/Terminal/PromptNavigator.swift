@@ -237,6 +237,9 @@ public final class PromptNavigator {
             }
             return session.promptMarks.count - 1
         }()
+        // Already at the oldest mark: report "no more prompts" so the
+        // caller's beep fires (it used to fire only for an empty ring).
+        if let cur = promptCursor, next == cur { return false }
         promptCursor = next
         scrollToMark(session.promptMarks[next])
         return true
@@ -250,6 +253,7 @@ public final class PromptNavigator {
     func jumpToNextPrompt() -> Bool {
         guard let cur = promptCursor, !session.promptMarks.isEmpty else { return false }
         let next = min(session.promptMarks.count - 1, cur + 1)
+        if next == cur { return false }
         promptCursor = next
         scrollToMark(session.promptMarks[next])
         return true

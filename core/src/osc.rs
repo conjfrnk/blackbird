@@ -498,7 +498,19 @@ impl OscScanner<'_> {
     }
 
     fn handle_osc7(&mut self, params: &[&[u8]]) {
-        let Some(url) = params.get(1) else { return };
+        if params.len() < 2 {
+            return;
+        }
+        // vte splits the OSC body on every ';'. A path containing ';' used
+        // to be truncated at the first one (`file:///a;b` → `/a`); join the
+        // tail back the way alacritty's own OSC 8 handler does.
+        let joined: Vec<u8>;
+        let url: &[u8] = if params.len() == 2 {
+            params[1]
+        } else {
+            joined = Self::join_params(params, 1);
+            &joined
+        };
 
         // Audit L-20 (2026-04-29): cap the input length BEFORE
         // `percent_decode`. percent_decode does
@@ -737,8 +749,16 @@ impl OscScanner<'_> {
         // at most 3–4 digits; anything longer is either malicious spam or
         // a bug and the hosting TUI wouldn't know what to do with it
         // either.
-        let cap = exit_code_bytes.len().min(16);
-        let payload = &exit_code_bytes[..cap];
+        // A 17+-digit "exit code" is hostile or broken, not a number to
+        // truncate: reject it instead of delivering a bogus 16-digit prefix.
+        if exit_code_bytes.len() > 16 {
+            if !*self.osc133_d_nondigit_logged {
+                *self.osc133_d_nondigit_logged = true;
+                eprintln!("[blackbird_core] OSC 133 D rejected (exit code longer than 16 bytes)");
+            }
+            return;
+        }
+        let payload = exit_code_bytes;
 
         // Audit L1. Validate the D-kind payload as ASCII decimal digits
         // before delivering. A hostile shell can emit OSC 133;D;<bytes>

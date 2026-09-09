@@ -133,6 +133,12 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
+      - name: Install fish + shellcheck
+        # Fish suites (double OSC-133 marks under fish 4, ssh wrapper ports)
+        # skipped on CI because no workflow installed fish; the shellcheck
+        # gate passed only because the image happened to ship it.
+        run: brew install fish shellcheck
+
       - name: Generate Xcode project
         # Regenerate + fail if the committed pbxproj drifted from what
         # project.yml describes. Audit xcode-project F1 — the pbxproj is
@@ -242,6 +248,10 @@ jobs:
         # S2-009 verified-DMG pin) only ran when an operator remembered
         # to invoke them by hand — a regression merged green. Review
         # follow-up to audit S2-009/S4-001.
+        env:
+          # Failure-path cases (release.sh codesign / notarize refusals)
+          # are opt-in and were never enabled on CI.
+          BB_TEST_RELEASE_FAILURE: "1"
         run: bash scripts/tests/run.sh
 
       - name: Upload test logs on failure

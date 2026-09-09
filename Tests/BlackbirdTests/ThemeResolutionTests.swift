@@ -362,14 +362,22 @@ final class ThemeResolutionTests: XCTestCase {
             XCTFail("Could not locate Preferences.swift via #filePath at \(url.path) — source pin cannot run")
             return
         }
+        // v0.8.1: the getter falls back to the SAME constant the registration
+        // domain and the repair pass use (`Preferences.defaultThemeChoice`),
+        // so the window between a corrupt write and the observer-driven
+        // repair shows the theme the repair will install — not a different
+        // one (the pre-v0.8.1 `?? .defaultTheme` vs registered gruvbox split).
         XCTAssertTrue(
-            src.contains("Theme(rawValue: themeRaw) ?? .defaultTheme"),
+            src.contains("Theme(rawValue: themeRaw) ?? Preferences.defaultThemeChoice"),
             """
-            Preferences.theme getter must use `Theme(rawValue: themeRaw) ?? .defaultTheme` as its formula. \
-            Drift to `?? .gruvbox` (or anything else) would change the user-visible behaviour during the \
-            window between a corrupt write and the observer-driven repair (M4 audit). Update both this \
-            test and the formula in Sources/Blackbird/Settings/Preferences.swift if you intend to change it.
+            Preferences.theme getter must use `Theme(rawValue: themeRaw) ?? Preferences.defaultThemeChoice` \
+            as its formula so the corrupt-write fallback and the repair pass agree. Update both this test \
+            and the formula in Sources/Blackbird/Settings/Preferences.swift if you intend to change it.
             """
+        )
+        XCTAssertTrue(
+            src.contains("static let defaultThemeChoice: Theme = .gruvbox"),
+            "the registered default and the fallback must be one constant"
         )
     }
 

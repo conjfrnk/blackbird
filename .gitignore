@@ -13,6 +13,11 @@ docs/*
 !docs/benchmarks/
 !docs/compat-matrix.md
 !docs/voiceover-pass.md
+# Curated dossiers other sessions depend on (simulation harness catalogue,
+# the tab-behaviour RCA, the 2026-09-08 improvement backlog).
+!docs/SIMULATIONS.md
+!docs/rca-tab-behaviors-2026-07-01.md
+!docs/IMPROVEMENTS-2026-09-08.md
 CLAUDE.md
 AGENTS.md
 .cursor/

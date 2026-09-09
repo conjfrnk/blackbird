@@ -156,6 +156,18 @@ final class FindController {
     /// trim) so the chunk splits back into lines 1:1.
     static let scrollbackChunkRows: Int32 = 4096
 
+    /// `s` without its trailing run of U+0020 (only spaces: a wide-char
+    /// spacer or NBSP is content).
+    static func trimmingTrailingSpaces(_ s: String) -> String {
+        var end = s.endIndex
+        while end > s.startIndex {
+            let prev = s.index(before: end)
+            if s[prev] != " " { break }
+            end = prev
+        }
+        return String(s[..<end])
+    }
+
     /// Haystacks for every buffer line in `topLine...bottomLine`: viewport
     /// rows via the snapshot's cell walker (exact UTF-16 → column map),
     /// scrollback rows in chunks of `scrollbackChunkRows` (one-cell-per-
@@ -187,8 +199,7 @@ final class FindController {
                 if ln > b { break }
                 // Rectangular extraction pads to the full width; drop the
                 // trailing run of spaces so a " " query can't hit padding.
-                let hay = String(piece).replacingOccurrences(
-                    of: " +$", with: "", options: .regularExpression)
+                let hay = Self.trimmingTrailingSpaces(String(piece))
                 if !hay.isEmpty {
                     rows.append((line: ln, hay: hay, utf16ToCol: nil))
                 }
@@ -201,8 +212,15 @@ final class FindController {
             if inViewport(ln) {
                 if let a = chunkStart { flushChunk(a, ln - 1); chunkStart = nil }
                 let screenRow = Int(ln) + offset
-                if let mapped = snap?.rowTextWithUTF16ToColMap(row: screenRow), !mapped.text.isEmpty {
-                    rows.append((line: ln, hay: mapped.text, utf16ToCol: mapped.utf16ToCol))
+                if let mapped = snap?.rowTextWithUTF16ToColMap(row: screenRow) {
+                    // The cell walker pads to the grid width; trim the trailing
+                    // run of spaces (a prefix cut keeps `utf16ToCol` valid for
+                    // every remaining index) and skip all-blank rows, matching
+                    // the scrollback chunks.
+                    let hay = Self.trimmingTrailingSpaces(mapped.text)
+                    if !hay.isEmpty {
+                        rows.append((line: ln, hay: hay, utf16ToCol: mapped.utf16ToCol))
+                    }
                 }
             } else {
                 if chunkStart == nil { chunkStart = ln }
@@ -558,7 +576,7 @@ final class FindController {
     }
 
     /// Snapshot the rows to scan, on the main thread (`session.textRange` reads
-    /// the BBTerm grid which lives on the main actor). For in-viewport rows
+    /// the BBTerm grid, which is owned by the session's coreQueue). For in-viewport rows
     /// also capture the cell-derived UTF-16-to-col map so the worker can map
     /// `NSRange` offsets to columns without skewing across wide / non-BMP
     /// chars; scrollback rows fall back to `session.textRange` with a nil map

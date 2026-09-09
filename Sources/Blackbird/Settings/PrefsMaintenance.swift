@@ -17,6 +17,14 @@ import Foundation
 /// to NSGlobalDomain can't surface a foreign value into a gate or clamp.
 /// (audit S5-R-001 / S5-001 family)
 enum PersistentDomainReader {
+    /// A Bool from the app's persistent domain only — never NSGlobalDomain
+    /// or the registration domain. nil when absent or wrong-typed.
+    static func bool(forKey key: String, in defaults: UserDefaults, domain: String) -> Bool? {
+        guard let persistent = defaults.persistentDomain(forName: domain) else { return nil }
+        if let n = persistent[key] as? NSNumber { return n.boolValue }
+        return nil
+    }
+
     /// Read the stored schema version from the app's persistent domain only —
     /// NOT via `defaults.integer(forKey:)` which walks the full UserDefaults
     /// search list (app persistent → NSGlobalDomain → registration). A hostile
@@ -255,7 +263,7 @@ enum PrefsMigrator {
     /// prefixed value). That check called `defaults.object(forKey: prefixed)`,
     /// which walks the search list and returns the registered default —
     /// `bb.theme` always reads non-nil because `Preferences.init` registers
-    /// `Theme.gruvbox.rawValue`. So `alreadyPrefixed != nil` was effectively
+    /// `Preferences.defaultThemeChoice.rawValue`. So `alreadyPrefixed != nil` was effectively
     /// always true, and the copy never happened. Result: legacy v1 users had
     /// their unprefixed keys silently deleted on upgrade, and their settings
     /// reset to the registered defaults. We unconditionally copy now. The

@@ -217,9 +217,14 @@ final class TabOrderCoordinator {
         for w in live where !seen.contains(ObjectIdentifier(w)) {
             if let hintIndex = departureHints.firstIndex(where: { $0.departed === w }) {
                 let hint = departureHints[hintIndex]
-                departureHints.remove(at: hintIndex) // one-shot
+                // One-shot, but consumed only on a successful anchor match:
+                // a reconcile in an intermediate group (every strip refresh
+                // there) used to eat the hint, so "move away, then move
+                // back" lost the remembered slot. An unmatched hint stays
+                // until it matches or `purgeStaleDepartureHints` ages it.
                 switch hint.anchor {
                 case .front:
+                    departureHints.remove(at: hintIndex)
                     // Debug-level, not `.notice`: this is the EXPECTED,
                     // successful case (a returning tab reclaiming its old
                     // slot), not an anomaly — but the match is a flat,
@@ -236,6 +241,7 @@ final class TabOrderCoordinator {
                 case .afterNeighbor(let box):
                     if let neighbor = box.value,
                        let neighborIndex = result.firstIndex(where: { $0 === neighbor }) {
+                        departureHints.remove(at: hintIndex)
                         Self.logger.debug("reconcile: restored departed window after its remembered neighbor at index \(neighborIndex, privacy: .public) (hint match)")
                         result.insert(w, at: neighborIndex + 1)
                         continue

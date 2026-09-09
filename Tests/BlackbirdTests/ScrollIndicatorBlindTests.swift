@@ -14,9 +14,8 @@ import AppKit
 ///   CALayer-backed thumb. Out-of-range inputs clamp, never crash.
 /// - `updatePromptMarks(...)` plots marks; concrete signature unknown,
 ///   so the prompt-mark-count tests use *only* signatures we can
-///   discover by overload search. If the actual signature differs, the
-///   two prompt-mark tests are skipped at compile time (#if false guard
-///   below) — failure mode is a documented gap, not a red build.
+///   discover by overload search. (An earlier revision kept two of them
+///   behind `#if false`; both compile against the real signature now.)
 /// - `hitTest(NSPoint)` returns nil (visual-only overlay).
 final class ScrollIndicatorBlindTests: XCTestCase {
 

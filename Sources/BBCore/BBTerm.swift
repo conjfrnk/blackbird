@@ -414,10 +414,11 @@ public final class BBTerm {
         bb_term_set_named_color(h, UInt16(slot), rgb)
     }
 
-    /// Enable or disable OSC 10 / 11 / 12 `?` reply behaviour. Off by
-    /// default so a hostile remote can't round-trip the palette back into
-    /// the PTY (mitigates the zsh-vi-mode command-injection class). Users
-    /// who want Neovim / tmux auto-theming on a modern shell can opt in
+    /// Enable or disable OSC 10 / 11 / 12 `?` reply behaviour. The CORE
+    /// starts with replies off (fail-closed); the app turns them on at
+    /// wire-up because `bb.colorQueryEnabled` defaults to true since
+    /// v0.6.0 (Codex CLI, nvim, delta and fzf probe them for light/dark
+    /// detection; replies are rate-capped). Settings → Security opts out
     /// via Preferences — see `Preferences.shared.colorQueryEnabled`.
     public func setColorQueryEnabled(_ enabled: Bool) {
         guard let h = handle else { return }

@@ -20,8 +20,9 @@
 # LATENCY_P999_MS / LATENCY_MAX_MS once we have a baseline.
 set -euo pipefail
 
-P50_THRESHOLD_MS="${LATENCY_P50_MS:-3.0}"
-P99_THRESHOLD_MS="${LATENCY_P99_MS:-10.0}"
+# Defaults match the CI gate (ci.yml / CLAUDE.md); they were 3.0 / 10.0.
+P50_THRESHOLD_MS="${LATENCY_P50_MS:-6.0}"
+P99_THRESHOLD_MS="${LATENCY_P99_MS:-20.0}"
 
 TMPDIR_WORK="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_WORK"' EXIT

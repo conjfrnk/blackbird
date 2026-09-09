@@ -868,6 +868,17 @@ public final class KeyEncoder {
         case 0x61...0x7A: return UInt8(v - 0x60)       // a..z    -> 0x01..0x1A
         case 0x20:        return 0x00                  // Ctrl-Space -> NUL
         case 0x3F:        return 0x7F                  // Ctrl-?     -> DEL
+        // xterm's legacy digit/symbol chords (v0.8.1; these typed the bare
+        // character before). Ctrl-1 and Ctrl-9/0 have no C0 mapping in
+        // xterm either and stay bare.
+        case 0x32:        return 0x00                  // Ctrl-2 -> NUL
+        case 0x33:        return 0x1B                  // Ctrl-3 -> ESC
+        case 0x34:        return 0x1C                  // Ctrl-4 -> FS
+        case 0x35:        return 0x1D                  // Ctrl-5 -> GS
+        case 0x36:        return 0x1E                  // Ctrl-6 -> RS
+        case 0x37:        return 0x1F                  // Ctrl-7 -> US
+        case 0x38:        return 0x7F                  // Ctrl-8 -> DEL
+        case 0x2D, 0x2F:  return 0x1F                  // Ctrl-- / Ctrl-/ -> US
         default:          return nil
         }
     }

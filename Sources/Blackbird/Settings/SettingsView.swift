@@ -185,7 +185,7 @@ public struct SettingsView: View {
                         Text(m.rawValue).tag(m.rawValue)
                     }
                 }
-                Toggle("Confirm quit while processes are running", isOn: $prefs.confirmClose)
+                Toggle("Confirm closing a tab or quitting while processes are running", isOn: $prefs.confirmClose)
                 Toggle("Show notifications from programs", isOn: $prefs.programNotifications)
                 Toggle("Automatic shell integration", isOn: $prefs.automaticShellIntegration)
                 Toggle("Set locale environment variables (LANG)", isOn: $prefs.setLocaleEnvironment)

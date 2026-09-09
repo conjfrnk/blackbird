@@ -5,11 +5,32 @@
 # exposure; this is the lighter-weight alternative to pinning every action
 # to a specific SHA.
 #
-# Cargo dependencies are already pinned via Cargo.lock + the exact `=0.26.0`
-# pin on alacritty_terminal in core/Cargo.toml. Swift package deps are
-# resolved via Package.resolved. So only GitHub Actions need this channel.
+# Cargo and Swift package deps are pinned (Cargo.lock / Package.resolved);
+# `cargo audit` catches advisories but nothing surfaced ordinary updates, so
+# those ecosystems get a monthly channel too (Cargo.lock last moved by hand
+# on 2026-06-30).
 version: 2
 updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - rust
+  - package-ecosystem: swift
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies
+      - swift
   - package-ecosystem: github-actions
     directory: /
     schedule:

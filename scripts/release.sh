@@ -43,6 +43,7 @@ xcodebuild \
     -configuration Release \
     -archivePath "$ARCHIVE_PATH" \
     -derivedDataPath "$DIST_DIR/DerivedData" \
+    -clonedSourcePackagesDirPath "$DIST_DIR/SourcePackages" \
     archive \
     ONLY_ACTIVE_ARCH=NO \
     CODE_SIGN_STYLE=Manual \

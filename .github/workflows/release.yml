@@ -85,6 +85,13 @@ jobs:
             | awk -F'"' '/Developer ID Application/ {print $2; exit}')
           echo "DEVELOPER_ID=$IDENTITY" >> "$GITHUB_ENV"
 
+      - name: Clear the SwiftPM checkout cache
+        # The "already exists in file system" exit 74 at `xcodebuild archive`
+        # was a stale shared SwiftPM checkout colliding with the Sparkle
+        # artifact; release.sh now clones packages under dist/ and this
+        # removes the shared cache the runner image may carry.
+        run: rm -rf ~/Library/Caches/org.swift.swiftpm ~/Library/Developer/Xcode/DerivedData/*/SourcePackages || true
+
       - name: Build, sign, package
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}

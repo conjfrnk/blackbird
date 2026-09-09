@@ -98,13 +98,13 @@ fn prompt_marks(events: &[(u32, Vec<u8>, i32)]) -> Vec<(i32, Vec<u8>)> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn osc_133_d_long_exit_code_truncates_to_16_bytes() {
-    // pre-flight: ~80 KiB + 80 B payload, ~1 ms.
-    // TST-S1-004 (high). OSC 133 D's payload is the exit-code string.
-    // The implementation caps at 16 bytes (`exit_code.len().min(16)`)
-    // to bound the per-event allocation. A regression to no-cap or
-    // off-by-one would let a TUI emit `OSC 133 ; D ; <large>` and
-    // pump megabytes through the event delivery path.
+fn osc_133_d_long_exit_code_is_rejected_over_16_bytes() {
+    // pre-flight: ~100 B payload, ~1 ms.
+    // TST-S1-004 (high), v0.8.1 shape. OSC 133 D's payload is the exit-code
+    // string. Anything longer than 16 bytes is hostile or broken, so the
+    // core REJECTS the mark (it used to deliver a truncated 16-digit
+    // prefix as a bogus exit code). A 16-byte payload still goes through
+    // intact, and the delivery path never sees more than 16 bytes.
     let payload_str: String = "9".repeat(50); // 50-byte exit code
     let mut seq: Vec<u8> = Vec::new();
     seq.extend_from_slice(b"\x1b]133;D;");
@@ -113,27 +113,26 @@ fn osc_133_d_long_exit_code_truncates_to_16_bytes() {
 
     let events = drive(&seq);
     let marks = prompt_marks(&events);
+    assert!(
+        marks.is_empty(),
+        "a 50-byte OSC 133 D exit code must be rejected, not truncated; got {marks:?}"
+    );
+
+    let ok: String = "9".repeat(16);
+    let mut seq: Vec<u8> = Vec::new();
+    seq.extend_from_slice(b"\x1b]133;D;");
+    seq.extend_from_slice(ok.as_bytes());
+    seq.extend_from_slice(b"\x1b\\");
+    let events = drive(&seq);
+    let marks = prompt_marks(&events);
     assert_eq!(
         marks.len(),
         1,
-        "expected one PromptMark event; got {marks:?}"
+        "a 16-byte exit code is at the cap and must be delivered"
     );
     let (kind, bytes) = &marks[0];
     assert_eq!(*kind, 4, "kind must be D=4");
-    assert!(
-        bytes.len() <= 16,
-        "OSC 133 D payload must be capped at ≤16 bytes; got {} bytes",
-        bytes.len()
-    );
-    // Every byte must come from the original payload (no scrambled
-    // metadata leaking in).
-    for b in bytes {
-        assert_eq!(
-            *b, b'9',
-            "truncated payload byte must come from original payload, got 0x{:02x}",
-            b
-        );
-    }
+    assert_eq!(bytes.len(), 16, "16-byte exit code must arrive intact");
 }
 
 #[test]

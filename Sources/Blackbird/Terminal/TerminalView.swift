@@ -19,6 +19,14 @@ public struct CellMetrics {
     public let ascent: CGFloat
     public let descent: CGFloat
     public let leading: CGFloat
+    /// Underline centre, in points ABOVE the cell's bottom edge (the
+    /// baseline sits `descent` above it; CoreText's underline position is
+    /// negative below the baseline). Strike sits at half the x-height.
+    /// Font-derived since v0.8.1: the fixed 1.5 pt / 0.55·cellHeight
+    /// constants were a hairline at 32 pt and a strike above the x-height.
+    public let underlineCenterFromBottom: CGFloat
+    public let underlineThickness: CGFloat
+    public let strikeCenterFromBottom: CGFloat
 
     public init(font: NSFont) {
         self.font = font
@@ -26,6 +34,16 @@ public struct CellMetrics {
         self.ascent = CTFontGetAscent(ct)
         self.descent = CTFontGetDescent(ct)
         self.leading = CTFontGetLeading(ct)
+        let ulPos = CTFontGetUnderlinePosition(ct)      // typically negative
+        let ulThick = CTFontGetUnderlineThickness(ct)
+        let xHeight = CTFontGetXHeight(ct)
+        let thick = (ulThick.isFinite && ulThick > 0) ? ulThick : max(1, font.pointSize / 14)
+        self.underlineThickness = max(1, thick)
+        let ulCenter = self.descent + (ulPos.isFinite ? ulPos : -1.0)
+        // Keep the whole band inside the cell: never below the bottom edge.
+        self.underlineCenterFromBottom = max(self.underlineThickness / 2 + 0.5, ulCenter)
+        let xh = (xHeight.isFinite && xHeight > 0) ? xHeight : font.pointSize * 0.5
+        self.strikeCenterFromBottom = self.descent + xh / 2
         // Floor both metrics at 1pt so downstream grid math and atlas
         // texture sizing never hit a division-by-zero or a zero-sized
         // Metal texture. The settings picker only lists monospace families
@@ -1042,6 +1060,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         themeDefaultFgRgb = palette.foreground
         renderer.setDefaultBgRgb(palette.background)
         renderer.setCursorColor(rgb: palette.cursor)
+        renderer.setSelectionColors(highlightRgb: palette.selection, foregroundRgb: palette.selectionForeground)
         // Single slider — explicit colors (status lines, highlights) fade
         // with the window. Users who want solid highlights just lower
         // translucency.
@@ -1604,11 +1623,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // should be surfaced rather than silently eaten. Audit
             // terminal-view-1 F7.
             if !renderer.reconfigure(metrics: metrics, scale: newScale) {
-                #if DEBUG
-                Self.fpsLogger.log(
+                // Release users on a hot-plugged display got blurry glyphs
+                // with no breadcrumb: this was DEBUG-only.
+                Self.rendererLogger.error(
                     "drawableSizeWillChange reconfigure failed, atlas stays at \(self.renderer.atlas.scale, privacy: .public)x"
                 )
-                #endif
             }
         }
     }
@@ -2169,7 +2188,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let scrubbed = PasteSanitizer.stripBidiOverrides(
             PasteSanitizer.sanitizePasteControls(Data(data))
         )
-        let clean = String(decoding: scrubbed, as: UTF8.self)
+        var clean = String(decoding: scrubbed, as: UTF8.self)
+        // The byte cap can land inside a multi-byte scalar; `String(decoding:)`
+        // then ends the string with U+FFFD. Drop it rather than paste garbage.
+        if data.count == copyMax, clean.hasSuffix("\u{FFFD}") {
+            clean.removeLast()
+        }
         let pb = NSPasteboard.general
         if clean.isEmpty {
             // Sanitization dropped everything — likely a user who selected

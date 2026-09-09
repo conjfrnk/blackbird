@@ -4,7 +4,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-DERIVED="$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 1 -type d -name "Blackbird-*" | head -1)"
+# BB_DERIVED_DATA overrides; otherwise the NEWEST Blackbird-* DerivedData
+# (a worktree or second checkout used to make `find | head -1` pick a
+# stale build at random).
+DERIVED="${BB_DERIVED_DATA:-$(ls -td ~/Library/Developer/Xcode/DerivedData/Blackbird-*/ 2>/dev/null | head -1)}"
+DERIVED="${DERIVED%/}"
 if [[ -z "$DERIVED" ]]; then
     echo "No DerivedData for Blackbird; run xcodebuild build first."
     exit 1

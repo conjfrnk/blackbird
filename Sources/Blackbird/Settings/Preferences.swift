@@ -159,7 +159,11 @@ public final class Preferences: ObservableObject {
         }
     }
 
-    @AppStorage("bb.theme")          public var themeRaw: String  = Theme.gruvbox.rawValue
+    /// The registered default theme; `theme` falls back to the SAME value
+    /// so an invalid stored raw never shows a different palette between an
+    /// external write and the repair pass.
+    public static let defaultThemeChoice: Theme = .gruvbox
+    @AppStorage("bb.theme")          public var themeRaw: String  = Preferences.defaultThemeChoice.rawValue
     @AppStorage("bb.themeMode")      public var themeModeRaw: String = ThemeMode.dark.rawValue
     @AppStorage("bb.fontName")       public var fontName: String = "Hack Nerd Font Mono"
     @AppStorage("bb.fontSize")       public var fontSize: Double = 13 {
@@ -275,7 +279,14 @@ public final class Preferences: ObservableObject {
     /// where a same-value write must be a true no-op.
     public var automaticShellIntegration: Bool {
         get {
-            (UserDefaults.standard.object(forKey: Self.k("automaticShellIntegration")) as? Bool) ?? true
+            // Persistent-domain read only (S5-001 discipline): a stray
+            // `defaults write -g bb.automaticShellIntegration` must not be
+            // able to flip injection on or off.
+            PersistentDomainReader.bool(
+                forKey: Self.k("automaticShellIntegration"),
+                in: UserDefaults.standard,
+                domain: Self.persistentDomainName
+            ) ?? true
         }
         set {
             guard newValue != automaticShellIntegration else { return }
@@ -305,7 +316,7 @@ public final class Preferences: ObservableObject {
         }
     }
 
-    public var theme: Theme         { Theme(rawValue: themeRaw) ?? .defaultTheme }
+    public var theme: Theme         { Theme(rawValue: themeRaw) ?? Preferences.defaultThemeChoice }
     public var themeMode: ThemeMode { ThemeMode(rawValue: themeModeRaw) ?? .auto }
     public var bell: BellStyle      { BellStyle(rawValue: bellRaw) ?? .visual }
     public var cursorShape: CursorShape { CursorShape(rawValue: cursorShapeRaw) ?? .followShell }
@@ -423,7 +434,7 @@ public final class Preferences: ObservableObject {
             // `migrateIfNeeded(in:domain:)` testable: a fresh
             // `UserDefaults(suiteName:)` truly reads 0 and exercises
             // the v1→v2 path.
-            Preferences.k("theme"):             Theme.gruvbox.rawValue,
+            Preferences.k("theme"):             Preferences.defaultThemeChoice.rawValue,
             Preferences.k("themeMode"):         ThemeMode.dark.rawValue,
             Preferences.k("fontName"):          "Hack Nerd Font Mono",
             Preferences.k("fontSize"):          13.0,

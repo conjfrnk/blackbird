@@ -505,6 +505,14 @@ impl<T> Term<T> {
         self.config.osc52 = osc52;
     }
 
+    /// Blackbird addition (re-apply on bump): drop the INACTIVE grid's
+    /// scrollback. `ESC [ 3 J` clears only the active grid's history, so a
+    /// "clear scrollback" issued while the alt screen is active (⌘K inside
+    /// a TUI) left the primary scrollback intact and it came back on exit.
+    pub fn clear_inactive_history(&mut self) {
+        self.inactive_grid.clear_history();
+    }
+
     pub fn set_options(&mut self, options: Config)
     where
         T: EventListener,

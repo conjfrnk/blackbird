@@ -618,19 +618,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func markUnseenAttention() {
         guard !hasUnseenAttention else { return }
         hasUnseenAttention = true
-        if let window {
-            NotificationCenter.default.post(name: .blackbirdTabTitleChanged, object: window)
-            tabObserver.refreshTabBar()
-        }
+        broadcastAttentionChange()
     }
 
     private func clearUnseenAttention() {
         guard hasUnseenAttention else { return }
         hasUnseenAttention = false
-        if let window {
-            NotificationCenter.default.post(name: .blackbirdTabTitleChanged, object: window)
-            tabObserver.refreshTabBar()
-        }
+        broadcastAttentionChange()
+    }
+
+    /// Sibling strips refresh through `.blackbirdTabTitleChanged` (the
+    /// observer skips the sender's own window), so repaint our own strip
+    /// directly — no `refreshTabBar`, which can re-post the notification
+    /// through the title KVO and double-fire it.
+    private func broadcastAttentionChange() {
+        guard let window else { return }
+        NotificationCenter.default.post(name: .blackbirdTabTitleChanged, object: window)
+        titlebarTabBar?.view.needsDisplay = true
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
