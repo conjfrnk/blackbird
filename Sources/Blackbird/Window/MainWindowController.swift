@@ -267,9 +267,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 window.setFrame(nudged, display: false)
             }
         } else {
-            // Cascade new standalone windows so they don't stack exactly.
-            // Tabs don't need this — AppKit positions them within the group.
-            window.setContentSize(rect.size)
+            // Standalone ⌘N windows take the SAVED frame's size (origin is
+            // left to `showWindow`'s cascade so they don't stack exactly).
+            // They used to take the 800×480 constructor default, and the
+            // first user drag then persisted that default over the user's
+            // real frame via `windowDidMove` — next launch opened at
+            // 800×480. Seeding from the saved size closes that path and
+            // removes the "⌘N windows are tiny" complaint with it.
+            if window.setFrameUsingName(Self.frameAutosaveName) {
+                let saved = window.frame
+                window.setFrame(
+                    NSRect(origin: window.frame.origin, size: saved.size),
+                    display: false
+                )
+            } else {
+                window.setContentSize(rect.size)
+            }
         }
         // Group all terminal windows into a shared tab bar. .preferred means
         // AppKit keeps them in one tabGroup; we'll render the tab pills
@@ -516,6 +529,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         isClosing = true
         exitCancellable?.cancel()
         exitCancellable = nil
+        selectVisualNeighborIfClosingSelectedTab()
+        // Break the strip → window cycle (see `TabStripView.detachTabs`).
+        titlebarTabBar?.clearTabs()
         // No close-time `saveCurrentFrame` here: the resize / move delegate
         // hooks already capture the live frame on every user-driven
         // change, so close is purely redundant in the happy path — and
@@ -526,6 +542,26 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // removed the per-window save gate.
         terminateSessions()
         onClose?()
+    }
+
+    /// When the group's SELECTED (front) tab is closing, pre-select its
+    /// VISUAL neighbour (TabOrderCoordinator order) so focus lands on the
+    /// strip-adjacent pill rather than whatever AppKit auto-promotes in
+    /// arrival order — which, after a drag-reorder, can be a visually
+    /// non-adjacent tab. Non-selected closes don't move selection.
+    ///
+    /// Runs from `windowWillClose`, i.e. only once the close is certain:
+    /// `windowShouldClose` (the "process still running" confirm) can refuse,
+    /// and selecting the neighbour before that point left the user on the
+    /// wrong tab after Cancel. Every close entry point (hover ×, ⌘W, the
+    /// strip's Delete key, the context menu) funnels through here.
+    private func selectVisualNeighborIfClosingSelectedTab() {
+        guard let w = window, let group = w.tabGroup, group.selectedWindow === w else { return }
+        let order = TabOrderCoordinator.shared.orderedTabs(for: group)
+        guard let idx = order.firstIndex(where: { $0 === w }),
+              let nIdx = TabOrderCoordinator.neighborIndexAfterClose(
+                  closingIndex: idx, count: order.count) else { return }
+        group.selectedWindow = order[nIdx]
     }
 
     /// Persist the live window frame under our autosave key. Called from

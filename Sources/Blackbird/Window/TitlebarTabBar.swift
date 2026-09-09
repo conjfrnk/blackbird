@@ -29,21 +29,12 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
             self?.hostWindow?.tabGroup?.selectedWindow = w
             w.makeKeyAndOrderFront(nil)
         }
-        stripView.onCloseWindow = { [weak self] w in
-            // When closing the group's SELECTED (front) tab, pre-select its
-            // VISUAL neighbour (TabOrderCoordinator order) before closing, so
-            // focus lands on the strip-adjacent pill rather than whatever AppKit
-            // auto-promotes in arrival order — which, after a drag-reorder, can
-            // be a visually non-adjacent tab. Non-selected closes don't move
-            // selection, so they're left to AppKit untouched.
-            if let group = self?.hostWindow?.tabGroup, group.selectedWindow === w {
-                let order = TabOrderCoordinator.shared.orderedTabs(for: group)
-                if let idx = order.firstIndex(where: { $0 === w }),
-                   let nIdx = TabOrderCoordinator.neighborIndexAfterClose(
-                       closingIndex: idx, count: order.count) {
-                    group.selectedWindow = order[nIdx]
-                }
-            }
+        stripView.onCloseWindow = { w in
+            // Visual-neighbour selection for a closing SELECTED tab lives in
+            // `MainWindowController.windowWillClose` (teardown is certain
+            // there). It used to run HERE, before `performClose`, so a
+            // "Close this tab?" → Cancel left the user parked on a different
+            // tab than the one they had tried to close.
             w.performClose(nil)
         }
         stripView.onAddTab = {
@@ -99,6 +90,11 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     /// the traffic lights. The strip owns zero layout math of its own —
     /// `MainWindowController` is the single authority for reservation
     /// arithmetic.
+    /// See `TabStripView.detachTabs`. Idempotent.
+    func clearTabs() {
+        stripView.detachTabs()
+    }
+
     func refresh(availableWidth: CGFloat) {
         guard let window = hostWindow else { return }
         // Visual order is owned by `TabOrderCoordinator`, not by AppKit's
@@ -291,6 +287,28 @@ final class TabStripView: NSView {
         if NSPointInRect(local, addButtonFrame) { return self }
         for rect in pillFrames where NSPointInRect(local, rect) { return self }
         return nil
+    }
+
+    /// Drop every window reference the strip holds. `tabs` is a STRONG
+    /// `[NSWindow]` that includes the strip's own host, so an un-cleared
+    /// strip closes the cycle `NSWindow → titlebarAccessoryViewControllers
+    /// → view → tabs → NSWindow` and every window that was ever in a
+    /// multi-tab group leaked after close (with its TerminalView, MTKView,
+    /// MetalRenderer and glyph atlases). Called from the host controller's
+    /// `windowWillClose` and from the ≤1-tab refresh branch, which hides
+    /// the strip without an `update` and would otherwise keep the departed
+    /// sibling alive until the next multi-tab relayout.
+    func detachTabs() {
+        commitEditIfNeeded()
+        tabs = []
+        selectedTab = nil
+        pillFrames = []
+        focusedPill = nil
+        hoveredPill = nil
+        hoveredClose = false
+        hoveredAdd = false
+        tabAccessibility.invalidateCache()
+        needsDisplay = true
     }
 
     func update(tabs: [NSWindow], selected: NSWindow, width: CGFloat) {

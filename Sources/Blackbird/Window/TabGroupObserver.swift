@@ -425,6 +425,11 @@ final class TabGroupObserver {
             // `TabStripView.update`) but single-tab transitions skip the
             // update path entirely; cover it here. (main-window F8)
             controller.titlebarTabBar?.commitAnyInFlightEdit()
+            // Drop the strip's strong window list: after a sibling closes
+            // this is the only refresh the survivor gets, and without it
+            // the closed window stays retained from here (leak, see
+            // `TabStripView.detachTabs`).
+            controller.titlebarTabBar?.clearTabs()
             // Restore the stock single-tab titlebar: title text centered,
             // no custom pill chrome. Hide the accessory view AND collapse
             // its frame to zero so AppKit doesn't keep reserving the strip's
