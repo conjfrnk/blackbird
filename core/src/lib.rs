@@ -847,6 +847,34 @@ pub unsafe extern "C" fn bb_term_set_color_query_enabled(term: *mut BBTerm, enab
     })
 }
 
+/// Allow (`enabled != 0`) or refuse OSC 52 clipboard WRITES (the `c;<base64>`
+/// store form). Reads (`?`) are never answered regardless. Off at
+/// `bb_term_new`; the Swift preference `bb.osc52Enabled` drives it. When
+/// on, an accepted write reaches the callback as
+/// `BBEventKind::Osc52Clipboard` with the decoded text, where the Swift
+/// side applies its own size cap and control-scrub before touching the
+/// pasteboard.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_set_osc52_write_enabled(term: *mut BBTerm, enabled: u8) {
+    guard_with_term(term, (), || {
+        if term.is_null() {
+            return;
+        }
+        if ffi_reentry_blocked("bb_term_set_osc52_write_enabled") {
+            return;
+        }
+        let policy = if enabled != 0 {
+            alacritty_terminal::term::Osc52::OnlyCopy
+        } else {
+            alacritty_terminal::term::Osc52::Disabled
+        };
+        (*term).term.set_osc52(policy);
+    })
+}
+
 /// Read the current terminal mode bitfield as a `bb_mode::*` union.
 /// O(1) — no snapshot allocation. Use when a caller needs to branch on
 /// a single mode bit (e.g., focus-event emission must check

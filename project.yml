@@ -127,6 +127,24 @@ targets:
         # tab-scripting / CLI-helper addition doesn't need to touch
         # Info.plist. Audit xcode-project F5.
         NSAppleEventsUsageDescription: "Blackbird uses Apple Events to coordinate with scripts you run from a terminal session."
+        # Folders as "documents" so Finder's Open With, a drop on the Dock
+        # icon and `open -a Blackbird <dir>` all land in
+        # `application(_:open:)` (App.swift) and start a session there.
+        # Alternate rank: never the default handler for folders.
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Folder
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.folder
+        # Finder context-menu service on folders → AppDelegate.newTerminalAtFolder.
+        NSServices:
+          - NSMenuItem:
+              default: New Blackbird Terminal at Folder
+            NSMessage: newTerminalAtFolder
+            NSPortName: Blackbird
+            NSSendFileTypes:
+              - public.folder
         SUFeedURL: https://blackbird-terminal.com/appcast.xml
         SUPublicEDKey: c0owV2OCS9djxEodLrUloctbMw+qQl52pVkZDuT8fV4=
         # true since v0.8.1: automatic checks default ON (bb.autoUpdateChecks

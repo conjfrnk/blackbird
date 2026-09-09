@@ -28,6 +28,7 @@ final class PreferencesTests: XCTestCase {
     private var savedSetLocaleEnvironment: Bool = true
     private var savedShellPath: String = ""
     private var savedHangDetection: Bool = true
+    private var savedProgramNotifications: Bool = true
     private var savedWindowDragModifierRaw: String = ""
     private var savedWindowResizeModifierRaw: String = ""
 
@@ -75,6 +76,7 @@ final class PreferencesTests: XCTestCase {
         savedSetLocaleEnvironment = p.setLocaleEnvironment
         savedShellPath         = p.shellPath
         savedHangDetection     = p.hangDetection
+        savedProgramNotifications = p.programNotifications
         savedTranslucency      = p.translucency
         savedWindowDragModifierRaw   = p.windowDragModifierRaw
         savedWindowResizeModifierRaw = p.windowResizeModifierRaw
@@ -98,6 +100,7 @@ final class PreferencesTests: XCTestCase {
         p.setLocaleEnvironment = savedSetLocaleEnvironment
         p.shellPath         = savedShellPath
         p.hangDetection     = savedHangDetection
+        p.programNotifications = savedProgramNotifications
         p.translucency      = savedTranslucency
         p.windowDragModifierRaw   = savedWindowDragModifierRaw
         p.windowResizeModifierRaw = savedWindowResizeModifierRaw
@@ -157,6 +160,7 @@ final class PreferencesTests: XCTestCase {
             "bb.translucency",
             "bb.windowDragModifier", "bb.windowResizeModifier",
             "bb.setLocaleEnvironment", "bb.shellPath", "bb.hangDetection",
+            "bb.programNotifications",
         ]
         let missing = Set(declared).subtracting(tracked)
         XCTAssertTrue(
@@ -180,8 +184,8 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(Preferences.ThemeMode.allCases, [.auto, .light, .dark])
     }
 
-    func test_bellStyle_allCases_exactlyVisualOff() {
-        XCTAssertEqual(Preferences.BellStyle.allCases, [.visual, .off])
+    func test_bellStyle_allCases_exactlyVisualSoundBothOff() {
+        XCTAssertEqual(Preferences.BellStyle.allCases, [.visual, .sound, .visualAndSound, .off])
     }
 
     func test_optionKey_allCases_exactlyMetaNative() {

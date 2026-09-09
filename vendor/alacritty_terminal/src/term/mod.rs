@@ -496,6 +496,15 @@ impl<T> Term<T> {
     }
 
     /// Set new options for the [`Term`].
+    /// Blackbird addition (re-apply on bump): flip the OSC 52 policy at run
+    /// time without rebuilding the whole `Config` (`set_options` would also
+    /// reset the kitty keyboard stacks and re-fire the title). The policy
+    /// is consulted per sequence in `clipboard_store` / `clipboard_load`,
+    /// so the change takes effect for the next OSC 52.
+    pub fn set_osc52(&mut self, osc52: Osc52) {
+        self.config.osc52 = osc52;
+    }
+
     pub fn set_options(&mut self, options: Config)
     where
         T: EventListener,

@@ -15,7 +15,7 @@ use crate::event::{BBEvent, BBEventCb, BBEventKind};
 use crate::guard::HandlerInFlightGuard;
 use crate::rate_limit::{
     EventRateState, PtyWriteRateCell, BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW,
-    TITLE_EVENT_PER_SECOND,
+    NOTIFICATION_EVENT_PER_SECOND, TITLE_EVENT_PER_SECOND,
 };
 use crate::scrub::scrub_title_controls;
 
@@ -66,6 +66,7 @@ pub(crate) struct CallbackCell {
     /// busy-guard scopes.
     title_rate: UnsafeCell<EventRateState>,
     bell_rate: UnsafeCell<EventRateState>,
+    notification_rate: UnsafeCell<EventRateState>,
     /// Coalesce-to-latest latch for rate-suppressed titles (review
     /// follow-up to audit S1-002). Title is last-writer-wins state: a
     /// plain drop of the NEWEST title in a burst left the window title
@@ -149,6 +150,10 @@ impl CallbackCell {
                 BELL_EVENT_PER_SECOND,
                 EVENT_RATE_WINDOW,
             )),
+            notification_rate: UnsafeCell::new(EventRateState::new(
+                NOTIFICATION_EVENT_PER_SECOND,
+                EVENT_RATE_WINDOW,
+            )),
             suppressed_title: UnsafeCell::new(None),
             title_suppressed_logged: UnsafeCell::new(false),
             #[cfg(debug_assertions)]
@@ -178,6 +183,8 @@ impl CallbackCell {
         let _busy = self.debug_enter();
         *self.title_rate.get() = EventRateState::new(TITLE_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
         *self.bell_rate.get() = EventRateState::new(BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
+        *self.notification_rate.get() =
+            EventRateState::new(NOTIFICATION_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
     }
 
     /// Re-attempt delivery of a rate-suppressed title (see
@@ -299,6 +306,11 @@ impl CallbackCell {
             }
         }
         if matches!(event.kind, BBEventKind::Bell) && !(*self.bell_rate.get()).allow() {
+            return;
+        }
+        if matches!(event.kind, BBEventKind::Notification)
+            && !(*self.notification_rate.get()).allow()
+        {
             return;
         }
         // Audit M-9 follow-up (2026-04-29): set the

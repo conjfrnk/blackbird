@@ -201,6 +201,14 @@ enum BBEventKind
    * `payload` is the ASCII decimal exit code for kind D, empty otherwise.
    */
   BB_EVENT_KIND_PROMPT_MARK = 7,
+  /**
+   * Program-originated desktop notification: OSC 9 (iTerm2 form),
+   * OSC 777 `;notify;title;body`, or kitty OSC 99. Payload is UTF-8
+   * `title U+001F body`, both halves already scrubbed of control /
+   * bidi scalars and length-capped in the core. Rate-capped to
+   * `NOTIFICATION_EVENT_PER_SECOND`.
+   */
+  BB_EVENT_KIND_NOTIFICATION = 8,
   BB_EVENT_KIND_FATAL = 99,
 };
 #ifndef __cplusplus
@@ -731,6 +739,20 @@ const char *bb_snap_link_url(const struct BBSnap *snap, uint32_t link_id);
  * Same preconditions as `bb_term_input`. Null is a no-op.
  */
 void bb_term_set_color_query_enabled(struct BBTerm *term, uint8_t enabled);
+
+/**
+ * Allow (`enabled != 0`) or refuse OSC 52 clipboard WRITES (the `c;<base64>`
+ * store form). Reads (`?`) are never answered regardless. Off at
+ * `bb_term_new`; the Swift preference `bb.osc52Enabled` drives it. When
+ * on, an accepted write reaches the callback as
+ * `BBEventKind::Osc52Clipboard` with the decoded text, where the Swift
+ * side applies its own size cap and control-scrub before touching the
+ * pasteboard.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null is a no-op.
+ */
+void bb_term_set_osc52_write_enabled(struct BBTerm *term, uint8_t enabled);
 
 /**
  * Read the current terminal mode bitfield as a `bb_mode::*` union.

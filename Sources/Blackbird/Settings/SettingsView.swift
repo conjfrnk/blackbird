@@ -186,6 +186,7 @@ public struct SettingsView: View {
                     }
                 }
                 Toggle("Confirm quit while processes are running", isOn: $prefs.confirmClose)
+                Toggle("Show notifications from programs", isOn: $prefs.programNotifications)
                 Toggle("Automatic shell integration", isOn: $prefs.automaticShellIntegration)
                 Toggle("Set locale environment variables (LANG)", isOn: $prefs.setLocaleEnvironment)
                 TextField("Shell", text: $prefs.shellPath, prompt: Text("Login shell"))
@@ -194,7 +195,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Terminal")
             } footer: {
-                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs. Shell integration adds prompt marks and the ssh terminfo fix for zsh and fish without touching your rc files. Shell: leave empty to run your account's login shell, or give the absolute path of another program. Changes apply to new sessions.")
+                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs. Shell integration adds prompt marks and the ssh terminfo fix for zsh and fish without touching your rc files. Shell: leave empty to run your account's login shell, or give the absolute path of another program. Notifications: programs that emit OSC 9, OSC 777 or kitty OSC 99 (and a bell while you're in another tab or app) reach Notification Center and dot the tab. Changes apply to new sessions.")
             }
 
             Section {
@@ -208,6 +209,11 @@ public struct SettingsView: View {
                 // for if the core ever opts back in, but they are no longer
                 // user-exposed.
                 Toggle("Reply to color queries (OSC 10/11/12)", isOn: $prefs.colorQueryEnabled)
+                // v0.8.1: the core gained a runtime switch
+                // (`bb_term_set_osc52_write_enabled`), so the toggle removed
+                // in audit S4-001 is back and now does what it says. Writes
+                // only — reads (`OSC 52 ; c ; ?`) are never answered.
+                Toggle("Allow programs to write the clipboard (OSC 52)", isOn: $prefs.osc52Enabled)
                 // The preference existed (registered, sanitized, honoured by
                 // the paste path) but had no control — the one paste-jacking
                 // mitigation a user could turn on was reachable only via
@@ -216,7 +222,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Security")
             } footer: {
-                SettingsChrome.footer("OSC 10/11/12 lets TUIs like Codex, Neovim, and tmux query your current foreground, background, and cursor colors for light/dark theme detection. On by default (replies are rate-capped); turn off as a hardening measure if you don't trust your shell's escape-handling — some TUIs will fall back to degraded colors. The paste confirmation asks before pasting text that contains a newline into a program that has not enabled bracketed paste (a bare shell prompt), so a clipboard from an untrusted page can't run commands on your behalf.")
+                SettingsChrome.footer("OSC 10/11/12 lets TUIs like Codex, Neovim, and tmux query your current foreground, background, and cursor colors for light/dark theme detection. On by default (replies are rate-capped); turn off as a hardening measure if you don't trust your shell's escape-handling — some TUIs will fall back to degraded colors. The paste confirmation asks before pasting text that contains a newline into a program that has not enabled bracketed paste (a bare shell prompt), so a clipboard from an untrusted page can't run commands on your behalf. OSC 52 lets Neovim, tmux (`set-clipboard on`) and `pbcopy`-style helpers over ssh copy into your clipboard; off by default because any program running in the terminal could then overwrite it. Reading the clipboard is never allowed.")
             }
         }
         .formStyle(.grouped)

@@ -610,7 +610,31 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// either — but the detached window becomes key almost immediately.
     /// Piggybacking on this callback keeps chrome consistent without
     /// sprinkling extra notifications.
+    /// A bell or program notification arrived while this tab was not the
+    /// one the user was looking at. The pill shows a dot until the tab is
+    /// next selected (which makes its window key).
+    private(set) var hasUnseenAttention = false
+
+    func markUnseenAttention() {
+        guard !hasUnseenAttention else { return }
+        hasUnseenAttention = true
+        if let window {
+            NotificationCenter.default.post(name: .blackbirdTabTitleChanged, object: window)
+            tabObserver.refreshTabBar()
+        }
+    }
+
+    private func clearUnseenAttention() {
+        guard hasUnseenAttention else { return }
+        hasUnseenAttention = false
+        if let window {
+            NotificationCenter.default.post(name: .blackbirdTabTitleChanged, object: window)
+            tabObserver.refreshTabBar()
+        }
+    }
+
     func windowDidBecomeKey(_ notification: Notification) {
+        clearUnseenAttention()
         session?.focusChanged(true)
         tabObserver.refreshTabBarIfStateChanged()
         // Catch the native tab bar as early as possible on freshly-

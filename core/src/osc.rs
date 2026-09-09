@@ -139,6 +139,9 @@ impl Perform for OscScanner<'_> {
         match params.first().copied() {
             Some(b"7") => self.handle_osc7(params),
             Some(b"133") => self.handle_osc133(params),
+            Some(b"9") => self.handle_osc9(params),
+            Some(b"777") => self.handle_osc777(params),
+            Some(b"99") => self.handle_osc99(params),
             _ => {}
         }
         // bell_terminated is irrelevant to downstream semantics; included
@@ -397,7 +400,103 @@ fn osc7_reject(latches: &mut [bool; 8], class: usize, name: &str) {
     }
 }
 
+/// Length caps for notification text, in chars. Notification Center
+/// truncates far earlier; the cap bounds the event payload.
+const NOTIFICATION_TITLE_MAX_CHARS: usize = 128;
+const NOTIFICATION_BODY_MAX_CHARS: usize = 1024;
+
 impl OscScanner<'_> {
+    /// Join OSC parameters `from..` back with ';' — vte splits the body on
+    /// every ';', but a notification body may legitimately contain them.
+    fn join_params(params: &[&[u8]], from: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, p) in params.iter().enumerate().skip(from) {
+            if i > from {
+                out.push(b';');
+            }
+            out.extend_from_slice(p);
+        }
+        out
+    }
+
+    /// Scrub + cap one notification field. Lossy UTF-8 so a hostile
+    /// stream can't make the scrub itself fail; `scrub_title_controls`
+    /// drops C0/C1/bidi/invisible scalars.
+    fn notification_field(bytes: &[u8], max_chars: usize) -> String {
+        let s = String::from_utf8_lossy(bytes);
+        let scrubbed = crate::scrub::scrub_title_controls(&s);
+        scrubbed
+            .chars()
+            .take(max_chars)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    fn emit_notification(&mut self, title: &[u8], body: &[u8]) {
+        let title = Self::notification_field(title, NOTIFICATION_TITLE_MAX_CHARS);
+        let body = Self::notification_field(body, NOTIFICATION_BODY_MAX_CHARS);
+        if title.is_empty() && body.is_empty() {
+            return;
+        }
+        let mut payload = title.into_bytes();
+        payload.push(0x1F);
+        payload.extend_from_slice(body.as_bytes());
+        // SAFETY: `fire` is the same single-thread-per-BBTerm discipline
+        // every other tap dispatch uses; the payload outlives the call.
+        unsafe {
+            self.cell.fire(BBEvent {
+                kind: BBEventKind::Notification,
+                payload: payload.as_ptr(),
+                len: payload.len(),
+                i32_arg: 0,
+            });
+        }
+    }
+
+    /// iTerm2 form: `OSC 9 ; message ST`. `OSC 9 ; 4 ; …` is the ConEmu /
+    /// Windows Terminal progress-bar sequence and is not a notification.
+    fn handle_osc9(&mut self, params: &[&[u8]]) {
+        if params.len() < 2 {
+            return;
+        }
+        if params.len() >= 3 && params[1] == b"4" {
+            return;
+        }
+        let body = Self::join_params(params, 1);
+        self.emit_notification(b"", &body);
+    }
+
+    /// rxvt-unicode / Ghostty / foot form: `OSC 777 ; notify ; title ; body ST`.
+    fn handle_osc777(&mut self, params: &[&[u8]]) {
+        if params.len() < 3 || params[1] != b"notify" {
+            return;
+        }
+        let title = params[2];
+        let body = Self::join_params(params, 3);
+        self.emit_notification(title, &body);
+    }
+
+    /// kitty form: `OSC 99 ; metadata ; payload ST`, metadata being
+    /// `key=value` pairs joined by ':'. Supported: `p=title` (the payload
+    /// is the title), `p=body` / absent (the payload is the body), and
+    /// `d=0` (a partial chunk; more follow) is delivered as-is rather
+    /// than reassembled — kitty's multi-chunk protocol is rare in the
+    /// wild and reassembly would need per-id state.
+    fn handle_osc99(&mut self, params: &[&[u8]]) {
+        if params.len() < 3 {
+            return;
+        }
+        let metadata = params[1];
+        let payload = Self::join_params(params, 2);
+        let is_title = metadata.split(|&b| b == b':').any(|kv| kv == b"p=title");
+        if is_title {
+            self.emit_notification(&payload, b"");
+        } else {
+            self.emit_notification(b"", &payload);
+        }
+    }
+
     fn handle_osc7(&mut self, params: &[&[u8]]) {
         let Some(url) = params.get(1) else { return };
 

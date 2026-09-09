@@ -68,7 +68,13 @@ final class BellController {
     }
 
     private func flash() {
-        guard Preferences.shared.bell == .visual else { return }
+        let style = Preferences.shared.bell
+        if style.sounds && !Self.suppressed {
+            // Audible bell (v0.8.1): the only sound before this was the
+            // unhandled-key beep; a program's BEL could not make a noise.
+            NSSound.beep()
+        }
+        guard style.flashes else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.08
             flashView.animator().alphaValue = 1.0

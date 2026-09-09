@@ -83,6 +83,10 @@ public final class TerminalSession: ObservableObject {
     /// the rename flow sets `session.titleState.titleOverride`.
     public let titleState = SessionTitleState()
     @Published public private(set) var bellCounter: UInt64 = 0
+    /// Program notifications (OSC 9 / 777 / 99), delivered on main. The
+    /// view decides whether to post to Notification Center (only when the
+    /// user is not already looking at this tab) and marks the tab.
+    public let notifications = PassthroughSubject<TerminalNotification, Never>()
     /// Set once after the shell process has exited. The value is the child's
     /// exit code (-1 for abnormal termination). Observers (e.g. the window
     /// controller) close the window in response.
@@ -858,9 +862,20 @@ public final class TerminalSession: ObservableObject {
     /// Apply the OSC 10/11/12 color-query preference to the core now (default
     /// off for security; user opt-in), and keep it in sync at runtime via a
     /// `Preferences` subscription.
+    /// Last values pushed to the core, so a `Preferences.objectWillChange`
+    /// burst (one @AppStorage write ≈ 17 emissions) re-sends only on change
+    /// instead of one FFI call per emission per open tab.
+    private var lastSentColorQueryEnabled: Bool?
+    private var lastSentOsc52WriteEnabled: Bool?
+
     private func wireColorQueryPreference() {
+        let colorQuery = Preferences.shared.colorQueryEnabled
+        let osc52 = Preferences.shared.osc52Enabled
+        lastSentColorQueryEnabled = colorQuery
+        lastSentOsc52WriteEnabled = osc52
         coreQueue.async { [bbterm] in
-            bbterm.setColorQueryEnabled(Preferences.shared.colorQueryEnabled)
+            bbterm.setColorQueryEnabled(colorQuery)
+            bbterm.setOsc52WriteEnabled(osc52)
         }
         // ⚠ FEEDBACK-LOOP HAZARD — DO NOT WRITE USERDEFAULTS HERE. Any write
         // to UserDefaults from this closure fires NSUserDefaultsDidChange-
@@ -874,6 +889,12 @@ public final class TerminalSession: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 let enabled = Preferences.shared.colorQueryEnabled
+                let osc52 = Preferences.shared.osc52Enabled
+                let colorChanged = enabled != self.lastSentColorQueryEnabled
+                let osc52Changed = osc52 != self.lastSentOsc52WriteEnabled
+                guard colorChanged || osc52Changed else { return }
+                self.lastSentColorQueryEnabled = enabled
+                self.lastSentOsc52WriteEnabled = osc52
                 // L-23: weak bbterm so the inner coreQueue.async block is
                 // never the last strong ref. Without this, a sink fire that
                 // races terminate() can land here, dispatch its coreQueue
@@ -888,7 +909,8 @@ public final class TerminalSession: ObservableObject {
                 // clean no-op.
                 self.coreQueue.async { [weak bbterm = self.bbterm] in
                     guard let bbterm else { return }
-                    bbterm.setColorQueryEnabled(enabled)
+                    if colorChanged { bbterm.setColorQueryEnabled(enabled) }
+                    if osc52Changed { bbterm.setOsc52WriteEnabled(osc52) }
                 }
             }
     }
@@ -1075,6 +1097,8 @@ public final class TerminalSession: ObservableObject {
             titleState.applyOscTitle(t)
         case .bell:
             self.bellCounter &+= 1
+        case .notification(let title, let body):
+            notifications.send(TerminalNotification(title: title, body: body))
         case .ptyWrite:
             break  // handled above, before the main hop
         case .osc52Clipboard(let text):

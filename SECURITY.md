@@ -63,17 +63,19 @@ Blackbird from transitively poisoning other apps' pastes with bidi /
 control bytes received from a hostile remote. Same code path as
 inbound paste — symmetric.
 
-OSC 52 (remote shell writes to your clipboard) is more nuanced.
-**The Rust core pins `osc52: Osc52::Disabled`** at `bb_term_new`, so
-`Event::ClipboardStore` is never emitted from alacritty's parser.
-The Swift `.osc52Clipboard` handler in `TerminalSession`, including
-its size cap, scrub chain, and `osc52Enabled` preference toggle, is
-therefore unreachable defense-in-depth: if a future change ever
-flips the Rust gate to `OnlyCopy` or `CopyPaste`, the Swift gate
-already exists to scrub-and-cap before `NSPasteboard.setString`.
-The `osc52Enabled` user preference is wired and persisted but has
-no observable effect today (audit SI-02). When triaging an "OSC 52
-isn't writing to my clipboard" report, the answer is: by design.
+OSC 52 (remote shell writes to your clipboard) is opt-in. The Rust
+core starts at `osc52: Osc52::Disabled` (`bb_term_new`) and only
+Settings → Security → "Allow programs to write the clipboard (OSC 52)"
+flips it to `OnlyCopy` through `bb_term_set_osc52_write_enabled`
+(v0.8.1). Reads (`OSC 52 ; c ; ?`) are never answered in either state
+— `OnlyPaste` / `CopyPaste` are not reachable. When on, an accepted
+write reaches `TerminalSession`'s `.osc52Clipboard` handler, which
+caps the payload at 1 MiB and runs the same control/bidi scrub chain
+as paste before `NSPasteboard.setString`; the handler also re-checks
+the preference at dispatch time so a toggle mid-stream can't race a
+queued write onto the pasteboard. Default off because any program
+running in the terminal (including a hostile remote over ssh) could
+otherwise overwrite what you paste next.
 
 ### URL scheme allowlist
 

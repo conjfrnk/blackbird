@@ -687,6 +687,19 @@ final class TabStripView: NSView {
             y: titleArea.midY - tsize.height / 2
         ))
 
+        // Unseen-attention dot: a bell or program notification arrived in
+        // this tab while the user was elsewhere. Accent-coloured, 6 pt,
+        // tucked into the pill's trailing edge; cleared when the tab is
+        // next selected.
+        if !isSelected,
+           (w.windowController as? MainWindowController)?.hasUnseenAttention == true {
+            let d: CGFloat = 6
+            let dot = NSRect(x: rect.maxX - d - 6, y: rect.midY - d / 2, width: d, height: d)
+            ctx.addPath(NSBezierPath(ovalIn: dot).cgPath)
+            ctx.setFillColor(NSColor.controlAccentColor.cgColor)
+            ctx.fillPath()
+        }
+
         // Keyboard focus ring. Full-Keyboard-Access users can't
         // reach the pills without one. Drawn on TOP of the fill +
         // title so it's visible regardless of selected/hovered

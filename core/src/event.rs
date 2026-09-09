@@ -37,6 +37,12 @@ pub enum BBEventKind {
     /// 2=B (command start), 3=C (command output start), 4=D (command end).
     /// `payload` is the ASCII decimal exit code for kind D, empty otherwise.
     PromptMark = 7,
+    /// Program-originated desktop notification: OSC 9 (iTerm2 form),
+    /// OSC 777 `;notify;title;body`, or kitty OSC 99. Payload is UTF-8
+    /// `title U+001F body`, both halves already scrubbed of control /
+    /// bidi scalars and length-capped in the core. Rate-capped to
+    /// `NOTIFICATION_EVENT_PER_SECOND`.
+    Notification = 8,
     Fatal = 99,
 }
 

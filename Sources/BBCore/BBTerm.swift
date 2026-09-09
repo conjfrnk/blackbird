@@ -75,6 +75,9 @@ public final class BBTerm {
         /// command end). `exitCode` is populated only for kind D; empty
         /// string otherwise.
         case promptMark(kind: PromptMarkKind, exitCode: String)
+        /// OSC 9 / 777 / 99 desktop notification, scrubbed and capped in
+        /// the core. Either half may be empty, never both.
+        case notification(title: String, body: String)
         case fatal(String)
     }
 
@@ -421,6 +424,13 @@ public final class BBTerm {
         bb_term_set_color_query_enabled(h, enabled ? 1 : 0)
     }
 
+    /// Allow OSC 52 clipboard writes to reach the `.osc52Clipboard` event
+    /// (reads are never answered). Off by default in the core.
+    public func setOsc52WriteEnabled(_ enabled: Bool) {
+        guard let h = handle else { return }
+        bb_term_set_osc52_write_enabled(h, enabled ? 1 : 0)
+    }
+
     /// Extract UTF-8 text between two buffer points. `rectangular` selects
     /// the axis-aligned bounding box between start/end; `false` selects the
     /// prose-style sweep (first line from startCol, middle lines full, last
@@ -492,6 +502,7 @@ public final class BBTerm {
         static let ptyWrite: UInt32 = 5
         static let cwdChanged: UInt32 = 6
         static let promptMark: UInt32 = 7
+        static let notification: UInt32 = 8
         static let fatal: UInt32 = 99
     }
 
@@ -563,6 +574,16 @@ public final class BBTerm {
                     "BB_EVENT_KIND_PROMPT_MARK with unknown raw value \(ev.i32_arg). "
                     + "Swift PromptMarkKind covers 1..=4; Rust ABI has drifted. Audit L-3."
                 )
+            }
+        case EventKind.notification:
+            let joined = Self.string(from: ev)
+            if let sep = joined.firstIndex(of: "\u{1F}") {
+                handler(.notification(
+                    title: String(joined[..<sep]),
+                    body: String(joined[joined.index(after: sep)...])
+                ))
+            } else {
+                handler(.notification(title: "", body: joined))
             }
         case EventKind.fatal:
             handler(.fatal(Self.string(from: ev)))

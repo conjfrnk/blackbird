@@ -102,8 +102,10 @@ public final class Preferences: ObservableObject {
     }
 
     public enum BellStyle: String, CaseIterable, Identifiable {
-        case visual = "Visual", off = "Off"
+        case visual = "Visual", sound = "Sound", visualAndSound = "Visual and Sound", off = "Off"
         public var id: String { rawValue }
+        public var flashes: Bool { self == .visual || self == .visualAndSound }
+        public var sounds: Bool { self == .sound || self == .visualAndSound }
     }
 
     public enum OptionKey: String, CaseIterable, Identifiable {
@@ -236,6 +238,9 @@ public final class Preferences: ObservableObject {
     /// ~/Library/Logs/Blackbird and surface in Settings → Diagnostics, which
     /// advertised them while the watchdog was dark in every shipped build.
     @AppStorage("bb.hangDetection") public var hangDetection: Bool = true
+    /// Show a macOS notification for OSC 9 / 777 / 99 from programs when
+    /// this tab is not the one the user is looking at.
+    @AppStorage("bb.programNotifications") public var programNotifications: Bool = true
     /// Allow OSC 10 / 11 / 12 `?` queries to emit a reply. ON by default
     /// since issue #24: modern TUIs (Codex CLI, nvim, delta, fzf) probe
     /// OSC 10/11 at startup for light/dark theme detection, and a silent
@@ -445,6 +450,7 @@ public final class Preferences: ObservableObject {
             Preferences.k("setLocaleEnvironment"): true,
             Preferences.k("shellPath"):         "",
             Preferences.k("hangDetection"):     true,
+            Preferences.k("programNotifications"): true,
         ])
 
         // Type-guard pass. `@AppStorage<Double>` trusts the KVC getter — a

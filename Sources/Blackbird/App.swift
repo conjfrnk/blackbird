@@ -169,7 +169,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installAutoUpdateBridge()
         installTabOrderObserver()
         installExternalTabActionObserver()
-        openFirstWindow()
+        NSApp.servicesProvider = self
+        // A launch via `open -a Blackbird <dir>`, a folder dropped on the
+        // Dock icon, or Finder's "Open With" delivers `application(_:open:)`
+        // BEFORE this hook; that window is the first window then.
+        if !didOpenWindowForURL {
+            openFirstWindow()
+        }
+    }
+
+    // MARK: - Open at a folder
+
+    /// Set by `application(_:open:)` so a launch-with-folder doesn't also
+    /// open the $HOME window `openFirstWindow` would create.
+    private var didOpenWindowForURL = false
+
+    /// Finder "Open With" / drag onto the Dock icon / `open -a Blackbird
+    /// <path>`. Folders open a new window there; a file opens at its
+    /// parent. Non-file URLs are ignored (no URL scheme is registered).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            openTerminalWindow(atFileURL: url)
+        }
+    }
+
+    /// The Services menu entry "New Blackbird Terminal at Folder" (see the
+    /// NSServices block in project.yml). Finder shows it in the context
+    /// menu of a folder; `NSApp.servicesProvider = self` routes it here.
+    @objc func newTerminalAtFolder(
+        _ pboard: NSPasteboard,
+        userData: String,
+        error: AutoreleasingUnsafeMutablePointer<NSString>
+    ) {
+        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard let urls = pboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL],
+              !urls.isEmpty else {
+            error.pointee = "The pasteboard carried no folder."
+            return
+        }
+        for url in urls {
+            openTerminalWindow(atFileURL: url)
+        }
+    }
+
+    /// Resolve a file URL to the directory a new session should start in:
+    /// the folder itself, or a file's parent. nil for non-file URLs and
+    /// paths that don't exist (never guess — `PTY` falls back to $HOME on
+    /// a bad cwd, but a Finder gesture should not silently land there).
+    static func startingDirectory(forOpening url: URL) -> String? {
+        guard url.isFileURL else { return nil }
+        let path = url.standardizedFileURL.path
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else { return nil }
+        return isDir.boolValue ? path : url.standardizedFileURL.deletingLastPathComponent().path
+    }
+
+    @discardableResult
+    func openTerminalWindow(atFileURL url: URL) -> MainWindowController? {
+        guard let dir = Self.startingDirectory(forOpening: url) else { return nil }
+        didOpenWindowForURL = true
+        let controller = createTerminalController(cwd: dir, autosaveFrame: false)
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        scheduleTabBarRefresh()
+        return controller
     }
 
     /// Process-wide signal configuration. Ignore SIGPIPE so a write() racing

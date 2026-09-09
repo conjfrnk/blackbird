@@ -133,6 +133,9 @@ pub(crate) const TITLE_EVENT_PER_SECOND: u32 = 32;
 /// 16/sec is far above perception — the Swift bell flash visually
 /// coalesces long before that.
 pub(crate) const BELL_EVENT_PER_SECOND: u32 = 16;
+/// Desktop notifications: a hostile stream must not be able to spam
+/// Notification Center; four per second is far above any real program.
+pub(crate) const NOTIFICATION_EVENT_PER_SECOND: u32 = 4;
 pub(crate) const EVENT_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl PtyWriteRateState {

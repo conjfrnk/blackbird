@@ -1426,6 +1426,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private var consecutiveSkippedFrames = 0
     private(set) var isIdleThrottled = false
 
+    /// Is the user NOT already looking at this tab? (App inactive, window
+    /// not key, or another tab of the group selected.) See `AttentionPolicy`.
+    func attentionNeeded() -> Bool {
+        let tabSelected: Bool = {
+            guard let window, let group = window.tabGroup else { return true }
+            return group.selectedWindow === window
+        }()
+        return AttentionPolicy.needsAttention(
+            appActive: NSApp.isActive,
+            windowKey: window?.isKeyWindow ?? false,
+            tabSelected: tabSelected
+        )
+    }
+
+    /// Dot this tab's pill until it is next selected.
+    func markTabUnseenAttention() {
+        (window?.windowController as? MainWindowController)?.markUnseenAttention()
+    }
+
     /// Restore the full frame rate. Cheap when not throttled.
     func wakeRenderLoop() {
         consecutiveSkippedFrames = 0
@@ -1792,7 +1811,29 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         session.$bellCounter
             .receive(on: DispatchQueue.main)
             .sink { [weak self] counter in
-                self?.bellController.handleBellCounter(counter)
+                guard let self else { return }
+                self.bellController.handleBellCounter(counter)
+                // A bell while the user is elsewhere bounces the Dock icon
+                // and dots the tab (Claude Code's `terminal_bell` channel is
+                // a BEL; through v0.8.0 it produced at most a flash nobody
+                // was looking at).
+                if counter > 0, self.attentionNeeded() {
+                    NSApp.requestUserAttention(.informationalRequest)
+                    self.markTabUnseenAttention()
+                }
+            }
+            .store(in: &cancellables)
+
+        session.notifications
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] note in
+                guard let self, Preferences.shared.programNotifications else { return }
+                guard self.attentionNeeded() else { return }
+                let titled = note.title.isEmpty
+                    ? TerminalNotification(title: self.window?.title ?? "Blackbird", body: note.body)
+                    : note
+                NotificationPresenter.shared.post(titled)
+                self.markTabUnseenAttention()
             }
             .store(in: &cancellables)
     }

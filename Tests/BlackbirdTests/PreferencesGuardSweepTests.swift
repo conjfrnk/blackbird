@@ -48,6 +48,7 @@ final class PreferencesGuardSweepTests: XCTestCase {
     private var savedSetLocaleEnvironment: Bool = true
     private var savedShellPath: String = ""
     private var savedHangDetection: Bool = true
+    private var savedProgramNotifications: Bool = true
 
     override class func setUp() {
         super.setUp()
@@ -75,6 +76,7 @@ final class PreferencesGuardSweepTests: XCTestCase {
         savedSetLocaleEnvironment  = p.setLocaleEnvironment
         savedShellPath             = p.shellPath
         savedHangDetection         = p.hangDetection
+        savedProgramNotifications  = p.programNotifications
         savedTranslucency          = p.translucency
     }
 
@@ -99,6 +101,7 @@ final class PreferencesGuardSweepTests: XCTestCase {
         p.setLocaleEnvironment  = savedSetLocaleEnvironment
         p.shellPath             = savedShellPath
         p.hangDetection         = savedHangDetection
+        p.programNotifications  = savedProgramNotifications
         super.tearDown()
     }
 
@@ -210,6 +213,11 @@ final class PreferencesGuardSweepTests: XCTestCase {
             name: "hangDetection",
             current: p.hangDetection,
             write: { p.hangDetection = $0 }
+        ))
+        probes.append(makeBoolProbe(
+            name: "programNotifications",
+            current: p.programNotifications,
+            write: { p.programNotifications = $0 }
         ))
         probes.append(makeStringProbe(
             name: "shellPath",
@@ -493,6 +501,7 @@ final class PreferencesGuardSweepTests: XCTestCase {
             "bb.setLocaleEnvironment":  "setLocaleEnvironment",
             "bb.shellPath":             "shellPath",
             "bb.hangDetection":         "hangDetection",
+            "bb.programNotifications":  "programNotifications",
         ]
         let unknownKeys = declaredKeys.subtracting(appStorageKeyToPropertyName.keys)
         XCTAssertTrue(
