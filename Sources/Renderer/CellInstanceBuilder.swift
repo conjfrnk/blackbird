@@ -42,6 +42,11 @@ struct CellInstanceBuilder {
     let keepBgOpaque: Bool
     let backgroundOpacity: Float
     let cursorColor: SIMD4<Float>
+    /// Theme-derived selection highlight and the foreground substituted for
+    /// selected cells whose own fg lacks contrast against it (v0.8.1; the
+    /// highlight was a hard-coded blue and fg was left as-is).
+    let selectionColor: SIMD4<Float>
+    let selectionForeground: SIMD4<Float>
     /// Layout offsets in points added to every cell quad — the same values
     /// TerminalView feeds the renderer via `setTopInsetPoints` /
     /// `setLeftInsetPoints` on each `layout()`.
@@ -78,7 +83,7 @@ struct CellInstanceBuilder {
         blockCursorCell: (row: Int, col: Int)?,
         into out: inout [CellInstance]
     ) {
-        let selectionTint = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)
+        let selectionTint = selectionColor
         let cellW = Float(metrics.cellWidth)
         let cellH = Float(metrics.cellHeight)
         let cellsPtr = snapshot.cellsPointer
@@ -146,6 +151,11 @@ struct CellInstanceBuilder {
             let selected = isSelected(bufferLine, col)
             var effectiveBg = selected ? selectionTint : resolved.bg
             var effectiveHasBg = selected ? true : hasBg
+            if selected, Self.contrastRatio(fg, selectionTint) < Self.minSelectedContrast {
+                // A foreground close to the highlight (light-blue prompt on
+                // a blue selection) disappeared when selected.
+                fg = selectionForeground
+            }
 
             // Invert at the cursor cell so the block cursor shows the
             // underlying glyph in reverse-video. Selection wins over
@@ -415,7 +425,25 @@ struct CellInstanceBuilder {
     /// `MetalRenderer.setCursorColor` shares the same constant.
     static let inv255: Float = 1.0 / 255.0
 
-    private static func rgbToSIMD(_ rgb: UInt32) -> SIMD4<Float> {
+    /// WCAG-style contrast floor under which selected text swaps to the
+    /// theme's selection foreground.
+    static let minSelectedContrast: Float = 1.8
+
+    /// Relative luminance (sRGB, WCAG 2 formula) of an RGBA colour.
+    static func relativeLuminance(_ c: SIMD4<Float>) -> Float {
+        func lin(_ v: Float) -> Float {
+            v <= 0.03928 ? v / 12.92 : powf((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * lin(c.x) + 0.7152 * lin(c.y) + 0.0722 * lin(c.z)
+    }
+
+    /// WCAG contrast ratio, ≥ 1.
+    static func contrastRatio(_ a: SIMD4<Float>, _ b: SIMD4<Float>) -> Float {
+        let la = relativeLuminance(a), lb = relativeLuminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    static func rgbToSIMD(_ rgb: UInt32) -> SIMD4<Float> {
         // Unpack the 24-bit colour into a 4-lane SIMD so the float
         // conversion and scaling are vectorised as a single op. `1.0`
         // in the alpha lane lands in the default fully-opaque result;

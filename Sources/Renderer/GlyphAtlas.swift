@@ -119,6 +119,16 @@ public final class GlyphAtlas {
     /// once per (bold × italic) combination rather than per glyph insertion.
     /// Up to 4 entries total.
     private var styledFonts: [Style: NSFont] = [:]
+    /// Styles the base font has no real variant for, so the rasterizer
+    /// synthesises them (stroke for bold, shear for italic) the way
+    /// Terminal.app and iTerm2 do instead of silently drawing regular.
+    private var syntheticStyles: [Style: (bold: Bool, italic: Bool)] = [:]
+
+    /// Which parts of `style` must be synthesised at draw time.
+    func syntheticTraits(for style: Style) -> (bold: Bool, italic: Bool) {
+        _ = styledFont(for: style)
+        return syntheticStyles[style] ?? (false, false)
+    }
     /// Slot bookkeeping — which slot a glyph lands in, wide-glyph row alignment
     /// + orphan reclaim (glyph-atlas F4), and the saturation-flush reset
     /// (audit F3/H3/M-6). Extracted into a pure, GPU-free value type so its
@@ -631,14 +641,8 @@ public final class GlyphAtlas {
     }
 
     /// Build an atlas `Entry` from pixel-space rectangle coordinates.
-    /// Insets the left and right edges of the UV rect by half a texel
-    /// so the linear-filtered sampler in `fragment_cell` can't bleed
-    /// into neighbouring atlas slots on sub-pixel UVs. The vertical
-    /// axis is left untouched: glyph rasterisations have near-zero
-    /// alpha at the top/bottom of every slot (font descent/ascent is
-    /// transparent), so cross-row bleed is not observable in
-    /// practice, and insetting vertically would eat real ink on
-    /// tightly-typeset fonts. Audit shaders F4.
+    /// UV rect for a slot, 1:1 with its pixels on both axes (see the note
+    /// inside about the removed half-texel inset). Audit shaders F4.
     private static func makeEntry(
         pxX: Int, pxY: Int,
         pxW: Int, pxH: Int,
@@ -646,9 +650,17 @@ public final class GlyphAtlas {
         isWide: Bool,
         isColor: Bool
     ) -> Entry {
-        let halfTexelX = 0.5 / Float(texW)
+        // No half-texel inset (v0.8.1). The quad is `pxW` pixels wide and is
+        // pixel-aligned (integer cell width, integer insets, scale 1 or 2),
+        // so sampling exactly `pxW` texels puts every texel centre on a
+        // pixel centre — the 1:1 mapping the vertical axis always had. The
+        // old `+0.5 / -1 texel` inset made pixel i sample texel
+        // 0.5 + (i + 0.5)(pxW - 1)/pxW: the outer columns of every glyph
+        // blended ~50/50 with their neighbour, fading to sharp at the
+        // centre. Bleed safety comes from the pixel alignment; slots are
+        // cleared to zero coverage on allocation.
         let uvOrigin = SIMD2<Float>(
-            Float(pxX) / Float(texW) + halfTexelX,
+            Float(pxX) / Float(texW),
             Float(pxY) / Float(texH)
         )
         // Subtract one full texel's worth of width (half from each
@@ -656,7 +668,7 @@ public final class GlyphAtlas {
         // interior. On a 2x Retina atlas each texel is half a point,
         // so the lost edge ink is sub-perceptual.
         let uvSize = SIMD2<Float>(
-            Float(pxW) / Float(texW) - 2.0 * halfTexelX,
+            Float(pxW) / Float(texW),
             Float(pxH) / Float(texH)
         )
         return Entry(uvOrigin: uvOrigin, uvSize: uvSize, isWide: isWide, isColor: isColor)
@@ -677,16 +689,24 @@ public final class GlyphAtlas {
         if style.italic { traits.insert(.traitItalic) }
         let base = metrics.font as CTFont
         let resolved: NSFont
+        var synthetic = (bold: false, italic: false)
         if traits.isEmpty {
             resolved = metrics.font
         } else if let variant = CTFontCreateCopyWithSymbolicTraits(
             base, 0.0, nil, traits, traits
         ) {
             resolved = variant as NSFont
+            // CoreText may hand back a face that honours only some of the
+            // requested traits (a family with italic but no bold, say).
+            let got = CTFontGetSymbolicTraits(variant)
+            synthetic.bold = style.bold && !got.contains(.traitBold)
+            synthetic.italic = style.italic && !got.contains(.traitItalic)
         } else {
             resolved = metrics.font
+            synthetic = (style.bold, style.italic)
         }
         styledFonts[style] = resolved
+        syntheticStyles[style] = synthetic
         return resolved
     }
 
@@ -920,6 +940,19 @@ public final class GlyphAtlas {
             }
         }
 
+        // Synthetic styles when the family lacks the variant: a thin stroke
+        // around the fill for bold, a 12° shear for italic. Terminal.app
+        // and iTerm2 do the same; before v0.8.1 the regular face was drawn
+        // silently and SGR 1 / SGR 3 had no visible effect with such fonts.
+        let synthetic = syntheticTraits(for: style)
+        if synthetic.italic {
+            ctx.textMatrix = CGAffineTransform(a: 1, b: 0, c: 0.21, d: 1, tx: 0, ty: 0)
+        }
+        if synthetic.bold {
+            ctx.setTextDrawingMode(.fillStroke)
+            ctx.setStrokeColor(gray: 1, alpha: 1)
+            ctx.setLineWidth(max(0.5, metrics.font.pointSize / 28))
+        }
         ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
         CTLineDraw(line, ctx)
 

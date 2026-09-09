@@ -168,6 +168,10 @@ public final class MetalRenderer {
         /// translucent (keepBgOpaque == false in iTerm2 terms).
         var backgroundOpacity: Float = 1.0
         var keepBgOpaque: Bool = true
+        /// Selection highlight + the foreground substituted when a cell's
+        /// own fg lacks contrast against it (see `ThemePalette.selection`).
+        var selectionColor: SIMD4<Float> = SIMD4<Float>(0.25, 0.45, 0.90, 1.0)
+        var selectionForeground: SIMD4<Float> = SIMD4<Float>(0.10, 0.10, 0.12, 1.0)
     }
     private var themeColors = ThemeColors()
 
@@ -290,6 +294,8 @@ public final class MetalRenderer {
         let backgroundOpacity: Float
         let keepBgOpaque: Bool
         let accentColor: SIMD4<Float>     // Equatable; avoids collision risk
+        let selectionColor: SIMD4<Float>
+        let selectionForeground: SIMD4<Float>
         let cursorColor: SIMD4<Float>
         let blinkSkip: Bool
         /// ⌘-held regex URL range under pointer. Bundled in so the skip
@@ -495,6 +501,16 @@ public final class MetalRenderer {
     }
 
     public func setDefaultBgRgb(_ rgb: UInt32) { themeColors.defaultBgRgb = rgb }
+
+    /// Theme-derived selection colours (v0.8.1; was a hard-coded blue).
+    public func setSelectionColors(highlightRgb: UInt32, foregroundRgb: UInt32) {
+        var h = CellInstanceBuilder.rgbToSIMD(highlightRgb)
+        h.w = 1.0
+        var f = CellInstanceBuilder.rgbToSIMD(foregroundRgb)
+        f.w = 1.0
+        themeColors.selectionColor = h
+        themeColors.selectionForeground = f
+    }
 
     public func setBackgroundOpacity(_ opacity: Float, keepBgOpaque: Bool) {
         self.themeColors.backgroundOpacity = opacity
@@ -886,6 +902,8 @@ public final class MetalRenderer {
             keepBgOpaque: themeColors.keepBgOpaque,
             backgroundOpacity: themeColors.backgroundOpacity,
             cursorColor: themeColors.cursorColor,
+            selectionColor: themeColors.selectionColor,
+            selectionForeground: themeColors.selectionForeground,
             leftInsetPoints: insets.leftInsetPoints,
             topInsetPoints: insets.topInsetPoints,
             atlas: atlas
@@ -1128,6 +1146,8 @@ public final class MetalRenderer {
                 backgroundOpacity: themeColors.backgroundOpacity,
                 keepBgOpaque: themeColors.keepBgOpaque,
                 accentColor: themeColors.accentColor,
+                selectionColor: themeColors.selectionColor,
+                selectionForeground: themeColors.selectionForeground,
                 cursorColor: themeColors.cursorColor,
                 blinkSkip: blinkSkip,
                 cmdHoverBufferLine: cmdHover.bufferLine,
@@ -1175,6 +1195,8 @@ public final class MetalRenderer {
                 backgroundOpacity: themeColors.backgroundOpacity,
                 keepBgOpaque: themeColors.keepBgOpaque,
                 accentColor: themeColors.accentColor,
+                selectionColor: themeColors.selectionColor,
+                selectionForeground: themeColors.selectionForeground,
                 cursorColor: themeColors.cursorColor,
                 blinkSkip: blinkSkip,
                 cmdHoverBufferLine: cmdHover.bufferLine,
@@ -1688,7 +1710,13 @@ public final class MetalRenderer {
         var uniforms = FrameUniforms(
             viewportPx: viewportPoints,
             cellSizePx: cellSizePoints,
-            accentColor: themeColors.accentColor
+            accentColor: themeColors.accentColor,
+            decorationPx: SIMD4<Float>(
+                Float(metrics.underlineCenterFromBottom),
+                Float(metrics.underlineThickness),
+                Float(metrics.strikeCenterFromBottom),
+                0
+            )
         )
         encoder.setRenderPipelineState(pipelines.pipelineState)
         encoder.setVertexBuffer(ring.instanceBuffers[slot], offset: 0, index: 0)
@@ -1798,6 +1826,10 @@ struct FrameUniforms {
     /// blue so the renderer has something usable even before the theme
     /// installs one.
     var accentColor: SIMD4<Float>
+    /// x: underline centre above the quad bottom (pt); y: underline
+    /// thickness (pt); z: strike centre above the bottom (pt); w: unused.
+    /// Font-derived (`CellMetrics`) so decorations scale with the font.
+    var decorationPx: SIMD4<Float>
 }
 
 struct CursorUniforms {

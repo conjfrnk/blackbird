@@ -15,6 +15,8 @@ struct FrameUniforms {
     float2 viewportPx;
     float2 cellSizePx;
     float4 accentColor;   // sRGB RGBA underline colour for accent attributes
+    float4 decorationPx;  // x: underline centre from bottom, y: thickness,
+                          // z: strike centre from bottom, w: unused (pt)
 };
 
 struct VertexOut {
@@ -29,6 +31,7 @@ struct VertexOut {
     float2 quadSizePx;    // cell quad size (same for all 6 verts per instance)
     float  cellOriginX;   // quad's left edge in points — makes undercurl /
                           // dotted / dashed phase continuous across cells
+    float4 decorationPx;  // see FrameUniforms.decorationPx
 };
 
 vertex VertexOut vertex_cell(
@@ -66,6 +69,7 @@ vertex VertexOut vertex_cell(
     out.localPx = corners[vid] * inst.quadSizePx;
     out.quadSizePx = inst.quadSizePx;
     out.cellOriginX = inst.cellPosPx.x;
+    out.decorationPx = u.decorationPx;
     return out;
 }
 
@@ -178,71 +182,46 @@ fragment float4 fragment_cell(
         ulColor = float4(r, g, b, 1.0);
     }
 
-    // Strike: a single 1.5 pt band slightly above the glyph mid-line so it
-    // reads as a strike-through whether the glyph is tall (capital) or short
-    // (lowercase). Uses fg colour so it matches the text being crossed out.
+    // Decoration geometry comes from the font (FrameUniforms.decorationPx):
+    // underline centre / thickness from CTFontGetUnderlinePosition /
+    // Thickness, strike at half the x-height. The old fixed 1.5 pt band at
+    // 0.55·cellHeight was a hairline at 32 pt and sat above the x-height.
+    float ulCenter = in.decorationPx.x;          // pt above the quad bottom
+    float ulHalf   = max(0.5, in.decorationPx.y * 0.5);
+    float strikeC  = in.decorationPx.z;
     if ((flags & BB_ATTR_STRIKE) != 0u) {
-        float strikeY = in.quadSizePx.y * 0.55;
-        if (in.localPx.y >= strikeY && in.localPx.y <= strikeY + 1.5) {
+        if (abs(distFromBottom - strikeC) <= ulHalf) {
             return premul(in.fgColor);
         }
     }
 
-    // Link-hover wins the underline colour: an OSC-8 hover highlight should
-    // be visibly distinct even when the cell also carries a plain underline.
-    // 2 pt band at the very bottom, in the theme accent.
-    if ((flags & BB_ATTR_LINK_HOVER) != 0u && distFromBottom <= 2.0) {
+    if ((flags & BB_ATTR_LINK_HOVER) != 0u && abs(distFromBottom - ulCenter) <= ulHalf + 0.25) {
         return premul(in.accentColor);
     }
 
-    // Underline family. All variants sit at the bottom 3 pt of the cell and
-    // draw in the glyph's fg colour. Only one "style" bit is expected at a
-    // time (alacritty's ALL_UNDERLINES is mutually-exclusive at the parser
-    // level) but the checks are independent so a hypothetical future
-    // per-bit override still does the right thing.
     if ((flags & BB_ATTR_ANY_UNDERLINE) != 0u) {
-        // Plain single underline — 1.5 pt band along the baseline.
-        if ((flags & BB_ATTR_UNDERLINE) != 0u && distFromBottom <= 1.5) {
+        if ((flags & BB_ATTR_UNDERLINE) != 0u && abs(distFromBottom - ulCenter) <= ulHalf) {
             return premul(ulColor);
         }
-        // Double underline — two 1 pt bands with a 1 pt gap between.
         if ((flags & BB_ATTR_UNDERLINE_DOUBLE) != 0u) {
-            if (distFromBottom <= 1.0) return premul(ulColor);
-            if (distFromBottom >= 2.0 && distFromBottom <= 3.0) return premul(ulColor);
+            // Two bands of the underline thickness, one thickness apart.
+            float gap = max(1.0, in.decorationPx.y);
+            if (abs(distFromBottom - (ulCenter - gap)) <= ulHalf) return premul(ulColor);
+            if (abs(distFromBottom - (ulCenter + gap)) <= ulHalf) return premul(ulColor);
         }
-        // Undercurl — sine wave baseline ±1 pt. Tuned so a single cycle is
-        // about 3 cells wide; fast enough to read as "wavy" at terminal
-        // sizes but not so fast it aliases at normal zoom.
         if ((flags & BB_ATTR_UNDERCURL) != 0u) {
-            float baseline = in.quadSizePx.y - 2.5;
-            float wave = sin(x * 1.4) * 1.2;
-            if (abs(in.localPx.y - (baseline + wave)) <= 0.7) {
+            float amp = max(1.0, in.decorationPx.y * 1.2);
+            float wave = sin(x * 1.4) * amp;
+            if (abs(in.localPx.y - (in.quadSizePx.y - ulCenter + wave)) <= ulHalf) {
                 return premul(ulColor);
             }
         }
-        // Dotted — every other *point* at the baseline, so the band
-        // reads as 1/2-duty dots. `localPx` is in points, so at 2x
-        // Retina each point is 2 pixels; dots are therefore 2-pixel
-        // squares on Retina and 1-pixel on 1x displays. That's a
-        // DPI-linked density — bake the behaviour into the comment so
-        // a future "why is this fuzzy at 1x" bug report points here.
-        //
-        // Uses `floor(x)` + integer modulo instead of a raw
-        // `(uint)x` cast. The cast is defined for positive floats
-        // but `x` arrives pixel-centered at half-point offsets
-        // (e.g. 7.5 on the right edge of point 7), so the cast
-        // collapses a full-point phase into the same bucket. `floor`
-        // makes the phase math explicit: a 1/2-duty dot pattern
-        // whose boundaries land on integer point grid lines.
-        // Audit shaders F3.
-        if ((flags & BB_ATTR_UNDERLINE_DOTTED) != 0u && distFromBottom <= 1.5) {
-            uint phase = uint(floor(x));
+        if ((flags & BB_ATTR_UNDERLINE_DOTTED) != 0u && abs(distFromBottom - ulCenter) <= ulHalf) {
+            uint phase = uint(floor(x / max(1.0, in.decorationPx.y)));
             if ((phase & 1u) == 0u) return premul(ulColor);
         }
-        // Dashed — 2 points on, 2 points off (same DPI caveat as
-        // dotted: doubles to 4-pixel runs on Retina, 2-pixel on 1x).
-        if ((flags & BB_ATTR_UNDERLINE_DASHED) != 0u && distFromBottom <= 1.5) {
-            uint phase = uint(floor(x));
+        if ((flags & BB_ATTR_UNDERLINE_DASHED) != 0u && abs(distFromBottom - ulCenter) <= ulHalf) {
+            uint phase = uint(floor(x / max(1.0, in.decorationPx.y)));
             if ((phase % 4u) < 2u) return premul(ulColor);
         }
     }

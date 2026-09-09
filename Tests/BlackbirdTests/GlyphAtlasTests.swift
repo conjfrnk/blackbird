@@ -219,13 +219,12 @@ final class GlyphAtlasTests: XCTestCase {
             wide.uvOrigin.y, cellYFrac, accuracy: 1e-5,
             "wide glyph should have wrapped to row 1 instead of splitting"
         )
-        // UV origin X is inset by half a texel so the linear sampler
-        // can't bleed into the slot to the left (audit shaders F4).
-        // At column 0 of row 1 the "inset-corrected zero" is 0.5/texW.
-        let halfTexelX = 0.5 / Float(atlas.texture.width)
+        // UV origin X maps 1:1 to the slot's pixel column (v0.8.1 removed
+        // the half-texel inset, which resampled every glyph horizontally;
+        // bleed safety comes from pixel-aligned quads). Column 0 → 0.
         XCTAssertEqual(
-            wide.uvOrigin.x, halfTexelX, accuracy: 1e-5,
-            "wide glyph should start at column 0 of the new row (with half-texel inset)"
+            wide.uvOrigin.x, 0, accuracy: 1e-5,
+            "wide glyph should start at column 0 of the new row (uv 1:1 with pixels)"
         )
     }
 
@@ -310,10 +309,10 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertLessThanOrEqual(slotCols - 1, 20,
                                  "test seeds at most 20 distinct narrow glyphs")
 
-        // Pixel-space rect for an entry's slot region. uvOrigin carries
-        // a half-texel inset (audit shaders F4), so flooring uv × texDim
-        // recovers the slot's integer pixel origin. Wide entries cover
-        // two slot widths.
+        // Pixel-space rect for an entry's slot region: uv × texDim is the
+        // slot's integer pixel origin exactly (1:1 mapping since v0.8.1;
+        // flooring keeps this robust to float rounding). Wide entries
+        // cover two slot widths.
         func slotRect(_ e: GlyphAtlas.Entry) -> (x: Int, y: Int, w: Int, h: Int) {
             let x = Int((e.uvOrigin.x * Float(atlas.texture.width)).rounded(.down))
             let y = Int((e.uvOrigin.y * Float(atlas.texture.height)).rounded(.down))

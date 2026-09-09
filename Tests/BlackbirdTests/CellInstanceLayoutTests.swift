@@ -497,9 +497,12 @@ final class CellInstanceLayoutTests: XCTestCase {
     /// pin the actual values.
     func test_pinFunctionExists_andDoesNotCrash() {
         _pinCellInstanceLayout()
-        // If the call returned, the asserts (if any fire) passed.
-        // We assert true so the test has at least one observable
-        // outcome and isn't a "vacuous pass".
-        XCTAssertTrue(true)
+        // The pin function's own asserts fired if the layout drifted; also
+        // assert the two facts the Metal side relies on directly, so this
+        // test has a real observable outcome.
+        XCTAssertEqual(MemoryLayout<CellInstance>.stride % 16, 0,
+                       "CellInstance must stay 16-byte aligned for the instance buffer")
+        XCTAssertEqual(MemoryLayout<CellInstance>.size, MemoryLayout<CellInstance>.stride,
+                       "no tail padding: buffer offsets are computed as index × stride")
     }
 }

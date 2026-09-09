@@ -23,6 +23,33 @@ public struct ThemePalette: Equatable, Sendable {
     /// (WCAG 2.x midpoint) — drives titlebar/glass light-vs-dark chrome.
     private static let darkLuminanceThreshold: Double = 0.18
 
+    /// Selection highlight derived from the palette: the bright-blue ANSI
+    /// slot blended 45 % toward the background, so it reads as "this
+    /// theme's" selection rather than the hard-coded royal blue every
+    /// theme shared through v0.8.0. Opaque — a selection must stay
+    /// legible over a translucent window.
+    public var selection: UInt32 {
+        let blue = ansi.count > 12 ? ansi[12] : 0x4080FF
+        return Self.mix(blue, background, towardSecond: 0.45)
+    }
+
+    /// Foreground to draw selected text in when the cell's own foreground
+    /// has too little contrast against `selection` (a light-blue prompt on
+    /// a blue highlight): the palette background, i.e. dark text on a
+    /// light selection and vice versa.
+    public var selectionForeground: UInt32 { background }
+
+    /// Per-channel linear interpolation of two 0xRRGGBB colours.
+    static func mix(_ a: UInt32, _ b: UInt32, towardSecond t: Double) -> UInt32 {
+        let t = min(1, max(0, t))
+        func ch(_ shift: UInt32) -> UInt32 {
+            let ca = Double((a >> shift) & 0xFF)
+            let cb = Double((b >> shift) & 0xFF)
+            return UInt32((ca + (cb - ca) * t).rounded()) & 0xFF
+        }
+        return (ch(16) << 16) | (ch(8) << 8) | ch(0)
+    }
+
     public init(background: UInt32, foreground: UInt32, cursor: UInt32, ansi: [UInt32]) {
         // fix-#14 philosophy: don't abort the process on a malformed theme.
         // A non-16-entry `ansi` array previously hit a `precondition` that

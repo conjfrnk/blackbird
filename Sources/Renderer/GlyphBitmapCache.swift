@@ -98,6 +98,23 @@ enum GlyphBitmapCache {
     /// (the deployment floor); mirrors the project's existing lock idiom.
     private static let storage = OSAllocatedUnfairLock<[Key: Bitmap]>(initialState: [:])
 
+    /// A (font, size, scale) set — the unit of eviction. When the cache is
+    /// full, the least-recently-INSERTED group other than the incoming
+    /// key's is dropped whole, so a long session that zoomed through many
+    /// sizes keeps warming the sizes it still uses. Through v0.8.0 a full
+    /// cache refused every new entry for the process lifetime.
+    struct Group: Hashable {
+        let fontName: String
+        let sizeQ: Int
+        let scaleQ: Int
+        init(_ k: Key) { fontName = k.fontName; sizeQ = k.sizeQ; scaleQ = k.scaleQ }
+    }
+    /// Groups in first-insertion order (oldest first). Only ever touched
+    /// from inside `storage.withLock`, so the outer lock orders it.
+    private static let groupOrder = OSAllocatedUnfairLock<[Group]>(initialState: [])
+    private static let evictions = OSAllocatedUnfairLock<Int>(initialState: 0)
+    static var evictionCount: Int { evictions.withLock { $0 } }
+
     /// One-shot "cache saturated" breadcrumb. Only ever written inside
     /// `storage.withLock`, so the lock that guards `storage` also serialises
     /// it. Hitting the cap is a silent perf regression (every new glyph then
@@ -127,15 +144,33 @@ enum GlyphBitmapCache {
     /// new (bounded growth); always refreshes an existing key. The first
     /// declined insert logs once (see `saturationLogged`).
     static func put(_ key: Key, _ bitmap: Bitmap) {
+        let group = Group(key)
         storage.withLock { dict in
             if dict[key] == nil && dict.count >= maxEntries {
-                if !saturationLogged {
-                    saturationLogged = true
-                    logger.notice(
-                        "GlyphBitmapCache saturated at \(maxEntries, privacy: .public) entries — new glyphs now rasterise uncached; per-tab glyph prewarm latency may regress (logged once)"
-                    )
+                // Evict the oldest OTHER group. If the incoming group is the
+                // only one (a single font set really has > maxEntries
+                // distinct glyphs), refuse as before.
+                let victim: Group? = groupOrder.withLock { order in
+                    order.first { $0 != group }
                 }
-                return
+                guard let victim else {
+                    if !saturationLogged {
+                        saturationLogged = true
+                        logger.notice(
+                            "GlyphBitmapCache saturated at \(maxEntries, privacy: .public) entries within one font set — new glyphs rasterise uncached (logged once)"
+                        )
+                    }
+                    return
+                }
+                dict = dict.filter { Group($0.key) != victim }
+                groupOrder.withLock { order in order.removeAll { $0 == victim } }
+                evictions.withLock { $0 &+= 1 }
+                logger.log("GlyphBitmapCache evicted font set \(victim.fontName, privacy: .public)@\(victim.sizeQ, privacy: .public)/\(victim.scaleQ, privacy: .public) to admit new glyphs")
+            }
+            if dict[key] == nil {
+                groupOrder.withLock { order in
+                    if !order.contains(group) { order.append(group) }
+                }
             }
             dict[key] = bitmap
         }
@@ -147,6 +182,10 @@ enum GlyphBitmapCache {
     /// rasterisation) without exposing the storage.
     static var _countForTests: Int { storage.withLock { $0.count } }
     /// Test seam: drop all entries so a test starts from a known-cold cache.
-    static func _resetForTests() { storage.withLock { $0.removeAll(keepingCapacity: false) } }
+    static func _resetForTests() {
+        storage.withLock { $0.removeAll(keepingCapacity: false) }
+        groupOrder.withLock { $0.removeAll() }
+        evictions.withLock { $0 = 0 }
+    }
     #endif
 }
