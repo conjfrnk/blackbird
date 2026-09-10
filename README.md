@@ -66,7 +66,7 @@ Auto-updates ship through Sparkle once installed.
 
 ## Building
 
-Requirements: macOS 14+, Xcode 16.4 or 26.x (CI builds with both; release DMGs use 16.4), Rust stable with both Apple targets, [`xcodegen`](https://github.com/yonaskolb/XcodeGen).
+Requirements: macOS 14+, Xcode 16.4 or 26.x (CI builds with both; release DMGs use 26.x, which opts the app into Liquid Glass on macOS 26), Rust stable with both Apple targets, [`xcodegen`](https://github.com/yonaskolb/XcodeGen).
 
 ```sh
 xcodegen generate
