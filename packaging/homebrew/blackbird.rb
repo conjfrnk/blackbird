@@ -1,6 +1,6 @@
 cask "blackbird" do
-  version "0.2.6"
-  sha256 "8af40a705ee5ff0b422536aea50df42c72676d1c9af01fc9fb39a7991d505925"
+  version "0.8.1"
+  sha256 "88a3c705a65822414c0cdd72bd52a52104cfaee06f7ea20acd90a38297863d8a"
 
   url "https://github.com/conjfrnk/blackbird/releases/download/v#{version}/Blackbird-#{version}.dmg",
       verified: "github.com/conjfrnk/blackbird/"
