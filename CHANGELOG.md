@@ -7,6 +7,8 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-09
+
 ### Fixed
 - **Mouse wheel works in `less`, `man`, `git log`, vim with mouse off and ssh pagers.** With mouse reporting off the wheel scrolled the (empty) alt-screen history and did nothing. DEC 1007 "alternate scroll" is now exported from the core (`ALTERNATE_SCROLL`, on by default; `CSI ? 1007 l` opts a TUI out) and the view sends ↑/↓ (SS3 under DECCKM), 3 per notch or one per cell height of trackpad travel. Wheel events under mouse reporting are paced the same way instead of one report per NSEvent, which turned a trackpad flick into dozens of 3-line steps. (commit `14ab734`)
 - **Intel Macs no longer crash at launch.** The glyph-atlas textures used `.shared` storage, which macOS allows for textures only on unified-memory GPUs; on Intel iGPU / AMD hosts `makeTexture` returned nil and the view hit `fatalError`. Storage is `.shared` iff `device.hasUnifiedMemory`, else `.managed`. (commit `14ab734`)
