@@ -246,7 +246,7 @@ the next spawned shell, never live ones. Implemented in
   released on resign. Prevents peer processes (keyloggers,
   TextExpander) from seeing keystrokes while a shell prompt is
   focused.
-- Sparkle 2.9.2 (≥ 2.6.4 signed-feed-bypass fix). The appcast at
+- Sparkle 2.9.6 (≥ 2.6.4 signed-feed-bypass fix). The appcast at
   `https://blackbird-terminal.com/appcast.xml` is live and EdDSA-signed
   (`SUPublicEDKey` in `project.yml`; the private key never leaves the
   maintainer's machine — `scripts/publish-update.sh` is local-only).

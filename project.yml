@@ -19,7 +19,7 @@ packages:
     url: https://github.com/sparkle-project/Sparkle
     # Floor raised to what Package.resolved already pins; a fresh resolve
     # could otherwise land on 2.6.x and only the posture script would notice.
-    from: 2.9.2
+    from: 2.9.6
 
 settings:
   base:

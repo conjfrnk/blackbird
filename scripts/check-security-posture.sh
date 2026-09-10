@@ -119,11 +119,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Sparkle ≥ 2.6.4 — the release that fixed a signed-feed bypass letting
-#    a MITM swap the signed installer for alternate payload. The package
-#    requirement in `project.yml` is `from: 2.6.0`, which lets SPM resolve
-#    any 2.x including vulnerable 2.6.{0..3}. Read the actually-resolved
-#    version from Package.resolved and fail if it's below cutoff.
+# 6. Sparkle ≥ 2.9.6 — 2.6.4 fixed a signed-feed bypass letting a MITM
+#    swap the signed installer for alternate payload; 2.9.5/2.9.6 harden
+#    the installer against symlink attacks at the delta / archive
+#    destination and a root privilege escalation (sparkle-project/Sparkle
+#    #2891, #2895, #2897, #2898). The package requirement in `project.yml`
+#    is `from: 2.9.6`, but SPM honours Package.resolved, so read the
+#    actually-resolved version and fail if it's below the cutoff.
 # ---------------------------------------------------------------------------
 PKG_RESOLVED="$(
   find . -name 'Package.resolved' \
@@ -144,11 +146,11 @@ if [[ -z "$SPARKLE_VER" ]]; then
 fi
 IFS='.' read -r SP_MAJ SP_MIN SP_PATCH <<<"$SPARKLE_VER"
 if (( SP_MAJ < 2 )) \
-   || { (( SP_MAJ == 2 )) && (( SP_MIN < 6 )); } \
-   || { (( SP_MAJ == 2 )) && (( SP_MIN == 6 )) && (( SP_PATCH < 4 )); }; then
-  fail "Sparkle $SPARKLE_VER is below the 2.6.4 security cutoff (signed-feed bypass); bump the package requirement"
+   || { (( SP_MAJ == 2 )) && (( SP_MIN < 9 )); } \
+   || { (( SP_MAJ == 2 )) && (( SP_MIN == 9 )) && (( SP_PATCH < 6 )); }; then
+  fail "Sparkle $SPARKLE_VER is below the 2.9.6 security cutoff (installer symlink / root privilege-escalation fixes); bump the package requirement"
 fi
-pass "Sparkle $SPARKLE_VER ≥ 2.6.4 security cutoff"
+pass "Sparkle $SPARKLE_VER ≥ 2.9.6 security cutoff"
 
 # ---------------------------------------------------------------------------
 # 7. App Sandbox must NOT be enabled. A terminal with App Sandbox on can't
