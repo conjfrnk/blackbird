@@ -305,7 +305,7 @@ jobs:
   # `bench-latency.sh` header.
   latency-gate:
     name: Latency probe plumbing format pin
-    # macos-26 / Xcode 26.6: the toolchain release DMGs ship with.
+    # macos-26 / Xcode 26.6: the toolchain that release DMGs ship with.
     runs-on: macos-26
     timeout-minutes: 30
     needs: xcode
@@ -325,7 +325,7 @@ jobs:
           cache-bin: 'false'
 
       - name: Select Xcode 26.6
-        # Same Xcode / SDK release.yml ships with (macOS 26 SDK since
+        # The Xcode / SDK that release.yml ships with (macOS 26 SDK since
         # v0.8.1), so this job measures the binary users actually get.
         # ci.yml's macos-15 leg is the only place the macOS 15 SDK still
         # has to compile.

@@ -26,7 +26,7 @@
 #    Quarantining miri to a scheduled job keeps that flake class out of
 #    the merge path; we treat a miri failure as a real signal but
 #    investigate it asynchronously.
-# 4. Cost: PR CI already has six macos-15 jobs. A nightly cadence amortises
+# 4. Cost: PR CI already has a dozen hosted-macOS jobs. A nightly cadence amortises
 #    miri's runtime over once-per-day, not per-push.
 #
 # Canonical target: `handler_reentry_guard`
