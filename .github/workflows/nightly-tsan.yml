@@ -29,7 +29,8 @@
 # Why TSAN nightly, not on every PR
 # ---------------------------------
 # Same reason ASan is disabled on PR CI (see ci.yml:117-144 for the
-# full whack-a-mole history): the macos-15 GHA runner has a per-process
+# full whack-a-mole history): the GHA macOS runners (first seen on
+# macos-14/15, still assumed on macos-26) have a per-process
 # VM-mapping ceiling that the cumulative sanitiser-instrumentation
 # overhead at xctest-bundle load time exceeds once the suite reaches
 # ~900 tests. TSAN has the SAME loader-overhead profile as ASan — its
@@ -120,7 +121,7 @@ name: Nightly TSAN
 
 on:
   # 08:00 UTC = 04:00 EDT / 01:00 PDT — staggered after nightly-miri
-  # (06:00) and the soak job (07:00) so we don't pile three macos-15
+  # (06:00) and the soak job (07:00) so we don't pile three hosted-macOS
   # runs onto contended runners simultaneously.
   schedule:
     - cron: "0 8 * * *"
@@ -144,10 +145,12 @@ concurrency:
 jobs:
   tsan:
     name: TSAN — concurrency race hunter (curated subset)
-    runs-on: macos-15
+    # macos-26 / Xcode 26.6 since v0.8.1: the toolchain release DMGs ship
+    # with, so the race hunt instruments the compiler output users run.
+    runs-on: macos-26
     # TSAN-instrumented tests run ~3-5x slower than uninstrumented; the
-    # 8-class / ~55-test subset measures ~10-20 min wall at macos-15
-    # pace. 60 min is headroom for runner contention and toolchain
+    # 8-class / ~55-test subset measured ~10-20 min wall at macos-15
+    # pace (macos-26 is comparable hardware). 60 min is headroom for runner contention and toolchain
     # regressions. If this ever times out, the right response is to
     # investigate the slowdown, not to bump the cap.
     timeout-minutes: 60
@@ -166,12 +169,13 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.4
-        # Newest Xcode 16 on the macos-15 image (macOS 15 SDK, the oldest
-        # SDK we still build against; release DMGs use Xcode 26.6 on
-        # macos-26 — see release.yml and ci.yml's Xcode 26 leg).
+      - name: Select Xcode 26.6
+        # Same Xcode / SDK release.yml ships with (macOS 26 SDK since
+        # v0.8.1), so this job measures the binary users actually get.
+        # ci.yml's macos-15 leg is the only place the macOS 15 SDK still
+        # has to compile.
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.4.app
+          sudo xcode-select -s /Applications/Xcode_26.6.app
           xcodebuild -version
 
       - name: Install xcodegen
