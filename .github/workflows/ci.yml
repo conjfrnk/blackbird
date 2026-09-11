@@ -326,9 +326,11 @@ jobs:
 
       - name: Select Xcode 26.6
         # The Xcode / SDK that release.yml ships with (macOS 26 SDK since
-        # v0.8.1), so this job measures the binary users actually get.
-        # ci.yml's macos-15 leg is the only place the macOS 15 SDK still
-        # has to compile.
+        # v0.8.1), so the probe's log-line format is pinned against the
+        # toolchain users' builds come from (this job is a plumbing pin,
+        # ASan on, not a measurement - see the header above). ci.yml's
+        # macos-15 leg is the only place the macOS 15 SDK still has to
+        # compile.
         run: |
           sudo xcode-select -s /Applications/Xcode_26.6.app
           xcodebuild -version
