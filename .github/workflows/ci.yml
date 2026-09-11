@@ -305,7 +305,8 @@ jobs:
   # `bench-latency.sh` header.
   latency-gate:
     name: Latency probe plumbing format pin
-    runs-on: macos-15
+    # macos-26 / Xcode 26.6: the toolchain that release DMGs ship with.
+    runs-on: macos-26
     timeout-minutes: 30
     needs: xcode
     steps:
@@ -323,12 +324,15 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.4
-        # Newest Xcode 16 on the macos-15 image (macOS 15 SDK, the oldest
-        # SDK we still build against; release DMGs use Xcode 26.6 on
-        # macos-26 — see release.yml and the matrix jobs' Xcode 26 leg).
+      - name: Select Xcode 26.6
+        # The Xcode / SDK that release.yml ships with (macOS 26 SDK since
+        # v0.8.1), so the probe's log-line format is pinned against the
+        # toolchain users' builds come from (this job is a plumbing pin,
+        # ASan on, not a measurement - see the header above). ci.yml's
+        # macos-15 leg is the only place the macOS 15 SDK still has to
+        # compile.
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.4.app
+          sudo xcode-select -s /Applications/Xcode_26.6.app
           xcodebuild -version
 
       - name: Install xcodegen

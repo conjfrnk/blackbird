@@ -29,7 +29,8 @@
 # Why TSAN nightly, not on every PR
 # ---------------------------------
 # Same reason ASan is disabled on PR CI (see ci.yml:117-144 for the
-# full whack-a-mole history): the macos-15 GHA runner has a per-process
+# full whack-a-mole history): the GHA macOS runners (first seen on
+# macos-14/15, still assumed on macos-26) have a per-process
 # VM-mapping ceiling that the cumulative sanitiser-instrumentation
 # overhead at xctest-bundle load time exceeds once the suite reaches
 # ~900 tests. TSAN has the SAME loader-overhead profile as ASan — its
@@ -120,7 +121,7 @@ name: Nightly TSAN
 
 on:
   # 08:00 UTC = 04:00 EDT / 01:00 PDT — staggered after nightly-miri
-  # (06:00) and the soak job (07:00) so we don't pile three macos-15
+  # (06:00) and the soak job (07:00) so we don't pile three hosted-macOS
   # runs onto contended runners simultaneously.
   schedule:
     - cron: "0 8 * * *"
@@ -144,11 +145,13 @@ concurrency:
 jobs:
   tsan:
     name: TSAN — concurrency race hunter (curated subset)
-    runs-on: macos-15
+    # macos-26 / Xcode 26.6 since v0.8.1: the toolchain that release DMGs
+    # ship with, so the race hunt instruments the compiler output users run.
+    runs-on: macos-26
     # TSAN-instrumented tests run ~3-5x slower than uninstrumented; the
-    # 8-class / ~55-test subset measures ~10-20 min wall at macos-15
-    # pace. 60 min is headroom for runner contention and toolchain
-    # regressions. If this ever times out, the right response is to
+    # 8-class subset (69 tests, 6 skipped) measures ~10 s of test time
+    # and ~2-3 min of job wall on both macos-15 and macos-26. 60 min is
+    # headroom for runner contention and toolchain regressions. If this ever times out, the right response is to
     # investigate the slowdown, not to bump the cap.
     timeout-minutes: 60
     steps:
@@ -166,12 +169,13 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 16.4
-        # Newest Xcode 16 on the macos-15 image (macOS 15 SDK, the oldest
-        # SDK we still build against; release DMGs use Xcode 26.6 on
-        # macos-26 — see release.yml and ci.yml's Xcode 26 leg).
+      - name: Select Xcode 26.6
+        # The Xcode / SDK that release.yml ships with (macOS 26 SDK since
+        # v0.8.1), so this job measures the binary users actually get.
+        # ci.yml's macos-15 leg is the only place the macOS 15 SDK still
+        # has to compile.
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.4.app
+          sudo xcode-select -s /Applications/Xcode_26.6.app
           xcodebuild -version
 
       - name: Install xcodegen
@@ -289,13 +293,21 @@ jobs:
           # even though it never ran a logical assertion. xcodebuild
           # exits 65 with that test in `Failing tests:` and an empty
           # subsequent `Testing started` block (the restart). When
-          # BlackbirdTests.xctest reports "passed" on restart we
-          # trust it; otherwise we propagate the failure.
+          # BlackbirdTests.xctest reports "passed" on restart AND no
+          # test emitted a `failed` line we trust it; otherwise we
+          # propagate the failure. Same guard as ci.yml's xcode job
+          # and nightly-soak.yml - without the failed-line check a
+          # real assertion failure followed by an infra restart later
+          # in the run was absorbed as the quirk. `Testing started`
+          # is printed on every run, so the restart marker xcodebuild
+          # actually emits ("Restarting after unexpected exit") is
+          # what proves a restart happened.
           if [[ "$xcb_rc" -eq 0 ]]; then
             echo "::notice::TSAN run clean — no ThreadSanitizer warnings, xcodebuild exited 0."
           elif grep -q "Test Suite 'BlackbirdTests.xctest' passed" /tmp/tsan.log \
-               && grep -q "Testing started" /tmp/tsan.log; then
-            echo "::notice::xcodebuild exited $xcb_rc but test suite passed on restart; treating as success (xctest VM-space infra quirk)."
+               && grep -q "Restarting after unexpected exit" /tmp/tsan.log \
+               && ! grep -qE "Test Case .* failed" /tmp/tsan.log; then
+            echo "::notice::xcodebuild exited $xcb_rc but test suite passed on restart with no per-test failure; treating as success (xctest VM-space infra quirk)."
           else
             echo "::error::xcodebuild exited $xcb_rc (no TSAN warning detected, no clean restart — likely a real test failure)."
             exit "$xcb_rc"
@@ -335,6 +347,18 @@ jobs:
           set -e
           if [[ ! -f /tmp/tsan.log ]]; then
             echo "::error::xcodebuild log /tmp/tsan.log missing — previous step did not produce expected output."
+            exit 1
+          fi
+          # Proof of instrumentation. A green run with zero warnings is
+          # indistinguishable from an UNINSTRUMENTED run with zero
+          # warnings unless we check the sanitizer runtime was actually
+          # linked in: xcodebuild copies libclang_rt.tsan_osx_dynamic.dylib
+          # into the test bundle's Frameworks only when
+          # ENABLE_THREAD_SANITIZER took effect (seen on Xcode 16.4 and
+          # 26.6). If an Xcode upgrade ever ignores the flag, this is
+          # what turns the silent green red.
+          if ! grep -q "libclang_rt.tsan_osx_dynamic.dylib" /tmp/tsan.log; then
+            echo "::error::TSAN sentinel FAILED — libclang_rt.tsan_osx_dynamic.dylib never appeared in the xcodebuild log, so the test bundle was NOT ThreadSanitizer-instrumented. Check ENABLE_THREAD_SANITIZER / -enableThreadSanitizer handling on this Xcode."
             exit 1
           fi
           classes=(
