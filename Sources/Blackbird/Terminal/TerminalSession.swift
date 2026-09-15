@@ -184,6 +184,118 @@ public final class TerminalSession: ObservableObject {
     /// Bounded byte budget between the PTY read loop and `coreQueue`
     /// (see `FeedBudget`). The reader blocks past 4 MiB in flight.
     let feedBudget = FeedBudget()
+
+    // MARK: - Feed deferral (user actions never wait behind queued parsing)
+    //
+    // `coreQueue` is a serial FIFO and the PTY read loop enqueues one parse
+    // block per 128 KiB read. Through v0.8.1 a main-thread user action
+    // (`scroll`, `scrollToBottom`, `clearAll`, the drag-path `resize`, a copy's
+    // `textRange`) ran `coreQueue.sync` BEHIND every block already queued —
+    // up to the whole 4 MiB feed budget, ≈150 ms of dense-cell parsing — so
+    // scrolling up while a build streamed stuttered in 10–150 ms steps and a
+    // vertical drag hitched once per row crossing.
+    //
+    // The fix is cooperative: a queued feed block first checks whether a user
+    // action is waiting (`pendingUserActions > 0`). If so it appends its chunk
+    // to `deferredFeeds` and returns in O(1) instead of parsing, so the
+    // action's block — already queued right behind the feed blocks — runs
+    // after at most ONE chunk's parse. The action then schedules a drain that
+    // parses the deferred chunks in their original order. Every feed block
+    // appends before deciding, so a chunk that arrives after the action is
+    // ordered behind the deferred ones and the byte stream is never reordered.
+    // The feed budget is released per chunk when it is actually parsed, so a
+    // deferred backlog still counts against `highWater` and the read loop (and
+    // through the pty, the child) keeps blocking exactly as before.
+
+    /// Number of main-thread user actions currently waiting on or inside a
+    /// `coreQueue.sync`. Written under the lock from the calling thread, read
+    /// by feed blocks on `coreQueue`.
+    private let pendingUserActions = OSAllocatedUnfairLock<Int>(initialState: 0)
+    /// coreQueue-confined FIFO of chunks a feed block deferred.
+    private var deferredFeeds = DeferredFeedQueue()
+    /// coreQueue-confined count of feed chunks whose parse was deferred because
+    /// a user action was pending (diagnostics + `feedYieldsForTests`).
+    private var feedYieldCount = 0
+
+    /// Run `body` on `coreQueue` synchronously as a USER ACTION: queued feed
+    /// blocks yield to it (see the deferral notes above) and it schedules the
+    /// deferred-chunk drain on the way out. Every main-thread `coreQueue.sync`
+    /// that a user is waiting on goes through here.
+    func performUserAction<T>(_ body: () throws -> T) rethrows -> T {
+        // `coreQueue.sync` self-deadlocks from coreQueue; fail loud (M-12).
+        dispatchPrecondition(condition: .notOnQueue(coreQueue))
+        // The count goes up BEFORE `sync` enqueues our block, so a drain
+        // already running on coreQueue can see it, yield, and re-queue
+        // itself ahead of us once or twice (microseconds, O(1) each) — that
+        // inflates `feedYieldCount` slightly under contention; it is not a
+        // second action. `coreQueue.sync` cannot return without running the
+        // block, so the inner `defer` is the only decrement needed, and it
+        // runs INSIDE the block: nothing else runs on coreQueue between it
+        // and the drain it schedules, so the drain never observes a stale
+        // non-zero count.
+        pendingUserActions.withLock { $0 += 1 }
+        return try coreQueue.sync {
+            defer {
+                pendingUserActions.withLock { $0 -= 1 }
+                if !deferredFeeds.isEmpty {
+                    coreQueue.async { [weak self] in self?.drainDeferredFeeds() }
+                }
+            }
+            return try body()
+        }
+    }
+
+    /// Production feed entry: budget-gated, one block per chunk, cooperative
+    /// with pending user actions. `enqueueBytesForTests` routes through here
+    /// so tests exercise the exact production shape.
+    private func enqueueFeed(_ data: Data) {
+        // Backpressure: block the read loop (and, through the pty buffer, the
+        // child) while more than the budget is queued and unparsed. Returns
+        // false only after `terminate()` cancelled the budget, in which case
+        // the bytes are dropped on purpose.
+        guard feedBudget.acquire(data.count) else { return }
+        coreQueue.async { [weak self] in
+            guard let self else { return }
+            // Always append first so ordering against already-deferred chunks
+            // is preserved whichever branch runs.
+            self.deferredFeeds.append(data)
+            if self.pendingUserActions.withLock({ $0 }) > 0 {
+                self.feedYieldCount &+= 1
+                return  // the waiting action's block drains us on its way out
+            }
+            self.drainDeferredFeeds()
+        }
+    }
+
+    /// Parse every deferred chunk in order. coreQueue only. Yields (re-queues
+    /// itself) between chunks when a user action has started waiting, unless
+    /// the caller is itself synchronous (`feedBytesForTests`). Always parses
+    /// at least one chunk per entry: under a sustained stream of actions
+    /// (120 Hz wheel, autoscroll timer) progress must be guaranteed, not
+    /// probabilistic, or the budget fills and the child stalls while the
+    /// user keeps scrolling. The action's wait bound is unchanged — it was
+    /// always "the chunk currently being parsed".
+    private func drainDeferredFeeds(yieldingToUserActions: Bool = true) {
+        while let chunk = deferredFeeds.popFirst() {
+            snapshotCoalescer.feed(chunk)
+            feedBudget.release(chunk.count)
+            if yieldingToUserActions, !deferredFeeds.isEmpty,
+               pendingUserActions.withLock({ $0 }) > 0 {
+                feedYieldCount &+= 1
+                coreQueue.async { [weak self] in self?.drainDeferredFeeds() }
+                return
+            }
+        }
+    }
+
+    /// coreQueue only: parse everything deferred so far WITHOUT yielding.
+    /// Called at the head of the async resize paths so a coalesced column
+    /// reflow never runs ahead of output that arrived before it (bytes
+    /// emitted for the old width must reflow, not hard-wrap at the new one).
+    func drainDeferredFeedsBeforeCoreWork() {
+        dispatchPrecondition(condition: .onQueue(coreQueue))
+        drainDeferredFeeds(yieldingToUserActions: false)
+    }
     /// Terminate latch. `private(set)` so only `terminate()` flips it; the
     /// coalescer reads it (under `publishLock`) but never writes it.
     private(set) var isTerminated: Bool = false
@@ -352,8 +464,16 @@ public final class TerminalSession: ObservableObject {
     /// `CwdTests`). A helper that polled the runloop was previously here
     /// and proved flaky under CI contention.
     func feedBytesForTests(_ bytes: Data) {
+        // Account the bytes like the production path so the drain's
+        // per-chunk release balances (mixing sync + async feeds on one
+        // session must not under-count `bytesInFlight`).
+        guard feedBudget.acquire(bytes.count) else { return }
         coreQueue.sync {
-            self.snapshotCoalescer.feed(bytes)
+            // Behind any chunk a user action deferred, so a sync feed can't
+            // overtake bytes that were enqueued before it. Never yields: the
+            // caller is synchronous and expects the bytes parsed on return.
+            self.deferredFeeds.append(bytes)
+            self.drainDeferredFeeds(yieldingToUserActions: false)
         }
     }
 
@@ -364,12 +484,13 @@ public final class TerminalSession: ObservableObject {
     /// `coreQueue.sync` drains every internally deferred work item before
     /// the next chunk is enqueued.
     func enqueueBytesForTests(_ bytes: Data) {
-        guard feedBudget.acquire(bytes.count) else { return }
-        coreQueue.async { [weak self] in
-            guard let self else { return }
-            defer { self.feedBudget.release(bytes.count) }
-            self.snapshotCoalescer.feed(bytes)
-        }
+        enqueueFeed(bytes)
+    }
+
+    /// Test hook: how many feed chunks (or drain resumptions) were deferred
+    /// because a user action was waiting. 0 for a feed-only workload.
+    var feedYieldsForTests: Int {
+        coreQueue.sync { feedYieldCount }
     }
 
     /// Test hook: block until every enqueued feed AND any snapshot work
@@ -380,9 +501,13 @@ public final class TerminalSession: ObservableObject {
     /// snapshot work they deferred have finished — regardless of how many
     /// levels deep a future change makes the deferral.
     func waitForFeedsForTests() {
-        while coreQueue.sync(execute: { snapshotCoalescer.snapshotWorkQueued }) {
+        while coreQueue.sync(execute: {
+            snapshotCoalescer.snapshotWorkQueued || !deferredFeeds.isEmpty
+        }) {
             // Each pass queues behind whatever is currently in flight;
-            // no spin in practice (≤2 iterations for a single burst).
+            // no spin in practice (≤2 iterations for a single burst). The
+            // deferred-chunk check covers a drain that yielded to a user
+            // action and re-queued itself.
         }
     }
 
@@ -644,11 +769,9 @@ public final class TerminalSession: ObservableObject {
         // these methods; if that ever changes the precondition fires
         // (visible failure) instead of the `coreQueue.sync` below
         // deadlocking the queue silently.
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        var snap: BBSnapshot?
-        coreQueue.sync {
+        let snap = performUserAction {
             bbterm.scroll(delta: delta)
-            snap = bbterm.snapshot()
+            return bbterm.snapshot()
         }
         if let snap { snapshotCoalescer.publishImmediate(snap) }
     }
@@ -657,11 +780,9 @@ public final class TerminalSession: ObservableObject {
     /// (keystrokes, paste) so the user is never left "orphaned" in scrollback
     /// while typing. No-op if already pinned.
     public func scrollToBottom() {
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        var snap: BBSnapshot?
-        coreQueue.sync {
+        let snap = performUserAction {
             bbterm.scrollToBottom()
-            snap = bbterm.snapshot()
+            return bbterm.snapshot()
         }
         if let snap { snapshotCoalescer.publishImmediate(snap) }
     }
@@ -684,16 +805,14 @@ public final class TerminalSession: ObservableObject {
     /// the post-clear shell with the wrong colours. Re-pushing the
     /// resolved theme overwrites any adversarial palette state.
     public func clearAll() {
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        var s: BBSnapshot?
-        coreQueue.sync {
+        let s = performUserAction {
             bbterm.clearAll()
             // Audit S5-008: events fired on coreQueue BEFORE this point
             // carry the pre-bump epoch and their prompt-mark appends
             // self-discard on the main side. coreQueue-confined bump —
             // runs inside this `coreQueue.sync`, exactly as before.
             promptNavigator.bumpClearEpochCore()
-            s = bbterm.snapshot()
+            return bbterm.snapshot()
         }
         // H-6: drop prompt-state tied to the now-deleted scrollback. The
         // render-side gate handles `selection`; we own the OSC 133 ring +
@@ -788,16 +907,13 @@ public final class TerminalSession: ObservableObject {
         // find-match extraction (both on main today). `coreQueue.sync`
         // self-deadlocks if invoked from coreQueue, so fail loud rather
         // than wedge the session if a future caller lands here off-main.
-        dispatchPrecondition(condition: .notOnQueue(coreQueue))
-        var out = ""
-        coreQueue.sync {
-            out = bbterm.textRange(
+        return performUserAction {
+            bbterm.textRange(
                 startLine: start.line, startCol: start.col,
                 endLine: end.line, endCol: end.col,
                 rectangular: rectangular
             ) ?? ""
         }
-        return out
     }
 
     public func terminate() {
@@ -843,9 +959,13 @@ public final class TerminalSession: ObservableObject {
         // coreQueue we ARE the serial owner, so a direct call is
         // safe and gives identical thread-affinity guarantees.
         if isOnCoreQueue {
+            self.deferredFeeds.removeAll()
             self.bbterm.terminate()
         } else {
             coreQueue.sync {
+                // Deferred chunks would only be dropped by `feed`'s
+                // isTerminated gate one at a time; release them now.
+                self.deferredFeeds.removeAll()
                 self.bbterm.terminate()
             }
         }
@@ -1045,21 +1165,10 @@ public final class TerminalSession: ObservableObject {
         // assignment through PTY's readQueue, then startReading() launches
         // the loop. The bbterm event handler installed ABOVE means any
         // dispatch triggered by the first byte already has a target.
-        // NOTE: `enqueueBytesForTests` mirrors this closure exactly so the
-        // burst-coalescing tests exercise the production shape — keep both
-        // in lockstep if preprocessing is ever added here.
+        // NOTE: `enqueueBytesForTests` calls the same `enqueueFeed` so the
+        // burst-coalescing tests exercise the production shape.
         pty?.setOnBytes { [weak self] data in
-            guard let self else { return }
-            // Backpressure: block the read loop (and, through the pty
-            // buffer, the child) while more than the budget is queued and
-            // unparsed. Returns false only after `terminate()` cancelled
-            // the budget, in which case the bytes are dropped on purpose.
-            guard self.feedBudget.acquire(data.count) else { return }
-            self.coreQueue.async { [weak self] in
-                guard let self else { return }
-                defer { self.feedBudget.release(data.count) }
-                self.snapshotCoalescer.feed(data)
-            }
+            self?.enqueueFeed(data)
         }
         pty?.startReading()
 

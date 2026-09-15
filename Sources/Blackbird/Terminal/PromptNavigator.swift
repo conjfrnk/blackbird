@@ -279,8 +279,7 @@ public final class PromptNavigator {
         // public callers (jumpToPreviousPrompt / jumpToNextPrompt) run on
         // main today, but a future event-driven path could land here from
         // coreQueue and hit the sync self-deadlock invisibly.
-        dispatchPrecondition(condition: .notOnQueue(session.coreQueue))
-        guard let snap = session.coreQueue.sync(execute: { self.session.bbterm.snapshot() }) else {
+        guard let snap = session.performUserAction({ self.session.bbterm.snapshot() }) else {
             return
         }
         // Monotonic by contract; the defensive branch guards a future

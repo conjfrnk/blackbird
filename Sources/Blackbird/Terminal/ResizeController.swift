@@ -119,7 +119,10 @@ final class ResizeController {
         // would cause text past the clamp ceiling to wrap into oblivion.
         let clamped = TerminalSession.clampResize(size)
         var newSnap: BBSnapshot?
-        session.coreQueue.sync {
+        // A user action: queued feed blocks yield to it (see the feed-deferral
+        // notes on TerminalSession) so a row-only drag frame no longer waits
+        // out the whole parse backlog.
+        session.performUserAction {
             // Audit S1-007: gate on termination INSIDE the coreQueue
             // block — terminate() sets the flag before nil'ing the
             // handle via this same serial queue, so the read here is
@@ -178,6 +181,7 @@ final class ResizeController {
         let clamped = TerminalSession.clampResize(size)
         session.coreQueue.async { [weak self, weak session = self.session] in
             guard let self, let session else { return }
+            session.drainDeferredFeedsBeforeCoreWork()
             // Audit S1-007: same in-block termination gate as the sync
             // path — a font-change resizeAsync queued behind terminate()
             // used to reach a nil'd handle and emit the false
@@ -245,6 +249,9 @@ final class ResizeController {
         guard !alreadyQueued else { return }
         session.coreQueue.async { [weak self, weak session = self.session] in
             guard let self, let session else { return }
+            // Output queued before this reflow must be parsed at the OLD
+            // width first (feed blocks may have deferred to a user action).
+            session.drainDeferredFeedsBeforeCoreWork()
             self.coalescedLock.lock()
             let target = self.pendingCoalescedSize
             self.pendingCoalescedSize = nil
