@@ -21,10 +21,21 @@ final class GlyphAtlasStorageModeBlindTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    /// The oracle mirrors the production rule: `.managed` (deprecated in
+    /// the macOS 27 SDK) is only reachable in the x86_64 slice; every arm64
+    /// Mac has unified memory so `.shared` is the only legal answer there.
+    private static func expectedStorageMode(for device: MTLDevice) -> MTLStorageMode {
+        #if arch(x86_64)
+        return device.hasUnifiedMemory ? .shared : .managed
+        #else
+        return .shared
+        #endif
+    }
+
     func test_storageMode_matchesUnifiedMemoryOfSystemDevice() throws {
         let device = try requireMetalDevice()
         let mode = GlyphAtlas.textureStorageMode(for: device)
-        let expected: MTLStorageMode = device.hasUnifiedMemory ? .shared : .managed
+        let expected = Self.expectedStorageMode(for: device)
         XCTAssertEqual(mode, expected,
                        "hasUnifiedMemory=\(device.hasUnifiedMemory) must map to \(expected), got \(mode)")
         XCTAssertTrue(mode == .shared || mode == .managed,
@@ -45,7 +56,7 @@ final class GlyphAtlasStorageModeBlindTests: XCTestCase {
         let devices = MTLCopyAllDevices()
         try XCTSkipIf(devices.isEmpty, "no Metal devices enumerated")
         for device in devices {
-            let expected: MTLStorageMode = device.hasUnifiedMemory ? .shared : .managed
+            let expected = Self.expectedStorageMode(for: device)
             XCTAssertEqual(GlyphAtlas.textureStorageMode(for: device), expected,
                            "\(device.name): hasUnifiedMemory=\(device.hasUnifiedMemory)")
         }

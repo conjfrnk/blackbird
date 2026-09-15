@@ -75,9 +75,22 @@ public func preferredMetalDevice() -> MTLDevice? {
 /// `MTLDevice` values. Holds a strong reference — the wrapper's
 /// lifetime is bounded to the `chooseGPU` call stack, well within any
 /// reasonable `MTLCopyAllDevices` array lifetime.
+///
+/// `MTLDevice.isLowPower` / `.isRemovable` are deprecated as of the macOS 27
+/// SDK ("Not applicable on Apple Silicon"). On arm64 every device is the
+/// SoC GPU, which reports non-low-power anyway, so `chooseGPU` yields nil
+/// and the caller falls back to the system default — returning false/false
+/// there is the same behaviour without the SDK symbols. The Intel-only
+/// integrated-vs-discrete policy keeps the real properties in the x86_64
+/// slice.
 final class AnyMetalDevice: GPUDeviceProperties {
     let device: MTLDevice
     init(_ device: MTLDevice) { self.device = device }
+    #if arch(x86_64)
     var isLowPower: Bool { device.isLowPower }
     var isRemovable: Bool { device.isRemovable }
+    #else
+    var isLowPower: Bool { false }
+    var isRemovable: Bool { false }
+    #endif
 }

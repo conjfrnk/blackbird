@@ -167,8 +167,18 @@ public final class GlyphAtlas {
     /// on unified-memory devices (every Apple-silicon Mac); discrete-GPU
     /// Intel Macs must use `.managed`. Both take CPU writes via
     /// `replace(region:)`. Exposed for tests.
+    ///
+    /// `.managed` is deprecated as of the macOS 27 SDK ("has no effect on
+    /// Apple Silicon"), and every arm64 Mac has unified memory, so the
+    /// identifier only exists in the x86_64 slice — the arm64 compile stays
+    /// clean once the deployment target passes 27 while the Intel path
+    /// (where `.shared` textures still return nil) is untouched.
     static func textureStorageMode(for device: MTLDevice) -> MTLStorageMode {
-        device.hasUnifiedMemory ? .shared : .managed
+        #if arch(x86_64)
+        return device.hasUnifiedMemory ? .shared : .managed
+        #else
+        return .shared
+        #endif
     }
 
     public init?(device: MTLDevice, metrics: CellMetrics, capacityGlyphs: Int, scale: CGFloat = 1.0) {
