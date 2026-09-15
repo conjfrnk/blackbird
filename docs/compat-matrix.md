@@ -8,6 +8,15 @@ Status of apps and protocols Blackbird is tested against.
 | ⚠️     | Works with caveats — see Notes column. |
 | ❌     | Known broken / out of scope. |
 
+## macOS releases
+
+| macOS | Status | How it is verified                                                                                      | Notes                                                                                                   |
+|-------|--------|----------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| 14 Sonoma   | ⚠️ | Deployment floor (`LSMinimumSystemVersion 14.0`); compiled against, not executed on CI (GitHub retired `macos-14`). | No known issues; last hands-on soak predates v0.8. Report regressions.                                  |
+| 15 Sequoia  | ✅ | PR CI: build + full suite + both launch smokes on `macos-15` (Xcode 16.4, macOS 15 SDK).                   | The oldest SDK still compiled against.                                                                  |
+| 26 Tahoe    | ✅ | PR CI on `macos-26` (Xcode 26.6, macOS 26 SDK — the SDK release DMGs ship with); nightly TSAN + soak; daily driver. | Liquid Glass opt-in comes from linking the 26 SDK. Native tab-strip hit-testing quirk handled (v0.5.1). |
+| 27          | ✅ | PR CI on GitHub's `xcode-27` image — runs **on macOS 27** with Xcode 27 / the macOS 27 SDK: build, full suite, Release universal, both smokes; nightly windowed-rendering soak. Locally: warning-free build + full suite under Xcode 27. | Release DMGs still link the macOS 26 SDK (the `xcode-27` image carries a beta Xcode 27). SDK-header sweep found no 27.0 deprecation reachable on arm64; the Intel-only `MTLStorageMode.managed` / `isLowPower` paths are confined to the x86_64 slice. |
+
 ## Apps
 
 | App / protocol     | Tested version  | Status | Scenarios verified                                                  | Notes                                                                                  |

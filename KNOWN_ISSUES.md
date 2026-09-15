@@ -320,3 +320,37 @@ honest.
   it) and any later pref write self-heals. Hardening candidates if the
   window ever proves reachable in practice: retry budget/backoff in the
   sink, and an unconditional `applyEffectiveFont()` in `resetFontSize`.
+
+## Rendering smoothness — deferred items from the 2026-09-15 audit
+
+The macOS 27 readiness pass (v0.9.0) fixed the audit's top findings: user
+actions waiting behind queued PTY parsing, resize presents not tied to the
+CATransaction, per-event trackpad rounding, blink invalidating the whole
+row cache, and the un-occlude stretched frame. These are the residuals, with
+the reason each was left:
+
+- **Cursor blink keeps the display link at the panel's native rate.** The
+  idle throttle drops to 10 fps after 120 consecutive skipped frames; with
+  blink on a frame is encoded every 0.53 s (< 1 s at 120 Hz), so the
+  counter never reaches the threshold. Cost is a 120 Hz wakeup + FrameKey
+  compare per tick on an idle terminal, not smoothness. Fix would be a
+  2 Hz blink timer that calls `draw()` while the link runs at the idle
+  rate; deferred until the display link is owned by the view (below).
+- **Pinch-to-zoom / ⌘± rebuild the glyph atlas synchronously per step**
+  (`MetalRenderer.reconfigure`: new texture, CPU zero-fill, prewarm, full
+  row-cache invalidation, a coalesced column reflow + SIGWINCH). Several
+  steps per gesture → a visibly stepped zoom. Fix is an LRU of 2–4 atlases
+  keyed by (font, size, scale) plus one apply per display-link tick.
+- **Every scroll step is a full row rebuild** because `displayOffset` sits
+  in the row CacheKey. ~1–3 ms per frame at 300×100 on Apple silicon, well
+  inside the 8.3 ms budget; a viewport-relative cache would remove it.
+- **The frame loop is MTKView's internal display link** (CVDisplayLink
+  underneath, deprecated since macOS 15; MTKView itself is not). Rate
+  control is an integer divisor, `isPaused`/rate-change semantics are
+  opaque, and whether the link retargets when a window moves between a
+  60 Hz and a 120 Hz display is not verifiable from source (the DEBUG fps
+  log is the sensor). `NSView.displayLink(target:selector:)` (macOS 14+)
+  or `CAMetalDisplayLink` would give deterministic pacing and a
+  `preferredFrameRateRange`; not adopted here because the 3-drawable pool
+  + MTKView loop is what unlocked steady 120 Hz on ProMotion and a swap
+  needs a hands-on ProMotion measurement, not just CI.

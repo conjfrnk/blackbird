@@ -7,6 +7,21 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
+### macOS 27
+- **Verified on macOS 27 / Xcode 27.** The app builds warning-free against the macOS 27 SDK with Swift 6.4, and the full test suite (2 280 tests) passes under Xcode 27. CI now runs build + suite + both launch smokes on GitHub's `xcode-27` image — macOS 27 itself, with the macOS 27 SDK — next to the macOS 15 and 26 legs, and the nightly windowed-rendering soak runs there too. Release DMGs stay on Xcode 26.6 (macOS 26 SDK) until the image carries the GA Xcode 27.
+- Sparkle 2.10.0, which fixes file-system compression reapplication on macOS 27.
+- Every API the macOS 27 SDK deprecates that the app used (`MTLStorageMode.managed`, `MTLDevice.isLowPower` / `.isRemovable`, all Intel-only) is now confined to the x86_64 slice; the arm64 slice never took those branches. `mouseCancelled(with:)` (macOS 26+) ends a selection drag and releases a reported button cleanly when the system claims a gesture.
+- Xcode 26+ ships the Metal compiler as a separately downloaded component; CI and the README now say so (`xcodebuild -downloadComponent MetalToolchain`).
+
+### Rendering smoothness
+- **Scrolling and dragging no longer stutter while a program streams output.** A wheel event, a row-only window drag, ⌘K, or a copy used to run on the core queue *behind* every PTY chunk already queued for parsing — up to the whole 4 MiB feed budget, ≈150 ms — so scrolling up during a build moved in 10–150 ms steps. Queued chunks now yield to a waiting user action (they defer in O(1) and are parsed, in order, right after it), so the wait is bounded by one chunk's parse. Throughput is unchanged: the budget still back-pressures the child, bytes are never reordered relative to each other or dropped, and a queued column reflow still runs after the output that preceded it.
+- **Window resize presents in step with the window edge.** During a live resize (and the ⌘-right-drag resize) presents are tied to AppKit's transaction (`presentsWithTransaction`) and each resize frame is drawn synchronously, so the compositor never shows a drawable of the previous size stretched to the new bounds — the text shimmer at the edge while dragging is gone.
+- **Trackpad scrolling tracks the finger.** Fractional travel now carries across events (as the mouse-report and alternate-scroll paths already did): a slow two-finger drag no longer jumps a whole line per tiny event, momentum decays naturally instead of creeping one line per event and stopping dead, and a 1-pt nudge no longer scrolls a line. Feel is unchanged for a full-height swipe (still two lines per cell of travel) and for classic wheels (three lines per notch).
+- Cursor blink rebuilds only the cursor's row instead of re-walking the whole grid twice a second.
+- ⌘A / ⌘G on an idle terminal paint their highlight on the next frame instead of up to 100 ms later (the selection change now wakes the idle-throttled render loop).
+- Switching to a tab that was resized while hidden draws a correctly sized frame the moment it becomes visible instead of showing the old drawable stretched for a frame.
+- Frame-rate changes are only written to the view when the value actually changes (thermal / power / occlusion notifications no longer restart the display link needlessly).
+
 ## [0.8.1] - 2026-09-09
 
 ### Fixed
