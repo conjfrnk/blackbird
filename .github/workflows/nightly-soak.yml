@@ -269,7 +269,10 @@ jobs:
         # Mirrors ci.yml: Xcode 26+ ships the Metal compiler as a separate
         # download; no-op when already present.
         run: |
-          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
+          # a stub that fails with "missing Metal Toolchain" until the
+          # component is downloaded (seen on the xcode-27 image).
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
             xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk macosx metal --version

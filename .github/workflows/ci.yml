@@ -146,7 +146,10 @@ jobs:
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
         # present, including Xcode 16.4 which still bundles it.
         run: |
-          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
+          # a stub that fails with "missing Metal Toolchain" until the
+          # component is downloaded (seen on the xcode-27 image).
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
             xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk macosx metal --version
@@ -362,7 +365,10 @@ jobs:
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
         # present, including Xcode 16.4 which still bundles it.
         run: |
-          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
+          # a stub that fails with "missing Metal Toolchain" until the
+          # component is downloaded (seen on the xcode-27 image).
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
             xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk macosx metal --version
@@ -452,7 +458,10 @@ jobs:
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
         # present, including Xcode 16.4 which still bundles it.
         run: |
-          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
+          # a stub that fails with "missing Metal Toolchain" until the
+          # component is downloaded (seen on the xcode-27 image).
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
             xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk macosx metal --version
@@ -581,7 +590,10 @@ jobs:
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
         # present, including Xcode 16.4 which still bundles it.
         run: |
-          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
+          # a stub that fails with "missing Metal Toolchain" until the
+          # component is downloaded (seen on the xcode-27 image).
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
             xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk macosx metal --version
@@ -757,7 +769,10 @@ jobs:
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
         # present, including Xcode 16.4 which still bundles it.
         run: |
-          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
+          # a stub that fails with "missing Metal Toolchain" until the
+          # component is downloaded (seen on the xcode-27 image).
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
             xcodebuild -downloadComponent MetalToolchain
           fi
           xcrun -sdk macosx metal --version
