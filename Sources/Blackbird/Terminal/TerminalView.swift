@@ -305,12 +305,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     // `expandSelectionUnderAnchor()` and the mouse-selection path on
     // the main class can update the selection. Tests with
     // `@testable import Blackbird` can also write it directly —
-    // `didSet` below repaints regardless of the writer, so no gesture
-    // path is bypassed for redraw purposes. No production caller
-    // outside the view writes this.
+    // `didSet` below wakes the render loop regardless of the writer, so
+    // no gesture path is bypassed for redraw purposes. No production
+    // caller outside the view writes this.
+    //
+    // `wakeRenderLoop()`, not `setNeedsDisplay`: the view runs with
+    // `enableSetNeedsDisplay = false`, so the old `setNeedsDisplay(bounds)`
+    // was inert, and a ⌘A / ⌘G-on-screen after ≥1 s idle painted its
+    // highlight up to 100 ms late at the 10 fps idle rate. The selection is
+    // in the FrameKey, so the next tick re-encodes on its own.
     public internal(set) var selection: Selection? {
         didSet {
-            if oldValue != selection { setNeedsDisplay(bounds) }
+            if oldValue != selection { wakeRenderLoop() }
         }
     }
 
@@ -811,8 +817,63 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// the window via `performDrag(with:)` in `mouseDown`.
     public override var mouseDownCanMoveWindow: Bool { false }
 
+    // MARK: - Synchronous presentation during resize
+
+    /// True while presents are tied to the AppKit CATransaction (a live
+    /// window resize, or the modifier-right-drag resize which never sets
+    /// `inLiveResize`). See `beginSynchronousResizePresentation`.
+    private(set) var synchronousResizePresentation = false
+
+    #if DEBUG
+    /// Count of synchronous `draw()` calls made outside the display link
+    /// (resize frames + the un-occlude frame). Test sensor only.
+    var synchronousDrawsForTesting = 0
+    #endif
+
+    /// Tie every present to the window server transaction that carries the
+    /// new layer bounds. By default MTKView presents on a display-link tick
+    /// while AppKit commits the resized layer at the end of the event turn;
+    /// whichever lands first, the compositor shows one drawable scaled to the
+    /// other's bounds — the shader divides by the viewport, so that is the
+    /// text shimmer / edge gap visible during a drag. With
+    /// `presentsWithTransaction` on, `setFrameSize` draws synchronously and
+    /// the renderer waits until the command buffer is scheduled, so the
+    /// new-size drawable and the new bounds reach the screen together
+    /// (Apple's documented technique, also what Ghostty and Alacritty do).
+    /// The renderer reads the layer flag off the drawable, so the layer is
+    /// the single source of truth. Idempotent; `endSynchronousResizePresentation`
+    /// restores the async path once the gesture ends (live-resize end,
+    /// right-drag release, or the view leaving its window mid-gesture).
+    public func beginSynchronousResizePresentation() {
+        guard !synchronousResizePresentation else { return }
+        synchronousResizePresentation = true
+        (layer as? CAMetalLayer)?.presentsWithTransaction = true
+    }
+
+    public func endSynchronousResizePresentation() {
+        guard synchronousResizePresentation else { return }
+        synchronousResizePresentation = false
+        (layer as? CAMetalLayer)?.presentsWithTransaction = false
+    }
+
+    /// One frame outside the display link. `MTKView.draw()` runs the delegate
+    /// even while paused; the renderer tolerates a missing drawable (headless
+    /// views, ordered-out windows), so this is always safe to call.
+    private func drawSynchronously() {
+        #if DEBUG
+        synchronousDrawsForTesting += 1
+        #endif
+        draw()
+    }
+
+    public override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        beginSynchronousResizePresentation()
+    }
+
     public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
+        endSynchronousResizePresentation()
         // Drag ended — make sure the session lands on the final grid size.
         // In practice a no-op: `setFrameSize` fires for the final size too, so
         // the `lastPropagatedSize` dedup swallows this call. Kept as a cheap
@@ -835,6 +896,13 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // boundary. Programmatic / zoom / first-appear paths also land
         // here.
         propagateResize()
+        // Resize frame: present now, inside AppKit's transaction, rather than
+        // on the next display-link tick. The tick that follows sees an equal
+        // FrameKey (same viewport, same snapshot) and skips, so a drawable is
+        // never acquired twice per vblank.
+        if synchronousResizePresentation {
+            drawSynchronously()
+        }
     }
 
     private var lastPropagatedSize: PTY.Size?
@@ -1268,6 +1336,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     public override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil {
+            // A window torn down mid-gesture never delivers the live-resize
+            // end / right-mouse-up that would clear sync-presentation mode.
+            endSynchronousResizePresentation()
+        }
         // Drop the hover tooltip before the window reference changes. The
         // panel is parented to the current window; leaving it up across a
         // reparent lands it at stale coordinates (and, if the old window
@@ -1316,6 +1389,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             NotificationCenter.default.removeObserver(token)
         }
         focusObservers.removeAll()
+        // Same for the power / occlusion observers — BEFORE the window guard,
+        // so a detached view is never driven (occlusion cache, synchronous
+        // draw) by transitions of a window it no longer belongs to.
+        for token in powerObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        powerObservers.removeAll()
+        for token in occlusionObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        occlusionObservers.removeAll()
         guard let window else { return }
         let center = NotificationCenter.default
         focusObservers.append(center.addObserver(
@@ -1346,6 +1430,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             queue: .main
         ) { [weak self] _ in
             self?.wakeRenderLoop()
+            // A modifier-right-drag resize whose rightMouseUp went to another
+            // app (⌘-Tab mid-drag, a sheet) would otherwise leave presents tied
+            // to the transaction for the view's life. Idempotent.
+            self?.endSynchronousResizePresentation()
             // Focus-event emission (CSI O) is owned by MainWindowController's
             // windowDidResignKey → session.focusChanged. Keep the SKE /
             // IME-composition / hover teardown below, which ARE this view's
@@ -1379,19 +1467,16 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         })
         #endif
 
-        // Rebuild every frame-rate-related observer from scratch. Each
-        // viewDidMoveToWindow may cross a screen boundary (different
-        // nativeMaxFPS), a window change (different occlusionState
-        // source), or a re-attach after some other view moved between
-        // windows. Simplest correct behavior: tear down, rebuild.
-        for token in powerObservers {
-            NotificationCenter.default.removeObserver(token)
-        }
-        powerObservers.removeAll()
-        for token in occlusionObservers {
-            NotificationCenter.default.removeObserver(token)
-        }
-        occlusionObservers.removeAll()
+        // Rebuild every frame-rate-related observer from scratch (torn down
+        // above the window guard). Each viewDidMoveToWindow may cross a
+        // screen boundary (different nativeMaxFPS), a window change
+        // (different occlusionState source), or a re-attach after some
+        // other view moved between windows.
+        // Seed the cached occlusion state from the new window so the first
+        // `applyPowerAwareFrameRate()` below sees the same answer the live
+        // query used to give (a not-yet-shown window reports not visible →
+        // paused until AppKit's first occlusion notification un-pauses it).
+        isWindowOccluded = !window.occlusionState.contains(.visible)
 
         // Window-bound: occlusion + screen-change both affect the
         // target rate via `applyPowerAwareFrameRate`.
@@ -1399,8 +1484,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: window,
             queue: .main
-        ) { [weak self] _ in
-            self?.applyPowerAwareFrameRate()
+        ) { [weak self] note in
+            guard let self else { return }
+            let win = (note.object as? NSWindow) ?? self.window
+            let visible = win?.occlusionState.contains(.visible) ?? true
+            self.windowOcclusionDidChange(visible: visible)
         })
         occlusionObservers.append(center.addObserver(
             forName: NSWindow.didChangeScreenNotification,
@@ -1500,12 +1588,31 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// Read current NSProcessInfo + occlusion state, compute the
     /// target frame rate via `preferredFrameRate(...)`, and apply it
     /// to this MTKView. Safe to call from any notification handler.
+    /// Occlusion as last reported by AppKit (or read at window attach).
+    /// Cached rather than re-queried so `windowOcclusionDidChange` can act
+    /// on the hidden→visible TRANSITION, not just the current state.
+    private var isWindowOccluded = false
+
+    /// Occlusion changed. Hidden: pause the display link (nothing to paint
+    /// for). Visible again: restore the rate AND draw one frame right now.
+    /// A background tab receives the front tab's frame while paused (issue
+    /// #29 fan-out), so its layer still holds a drawable of the OLD size;
+    /// waiting for the first display-link tick after ⌘⇧] showed that stale
+    /// drawable stretched to the new bounds for a frame. Drawing on the
+    /// transition presents a correctly sized frame before the tick.
+    func windowOcclusionDidChange(visible: Bool) {
+        let wasOccluded = isWindowOccluded
+        isWindowOccluded = !visible
+        applyPowerAwareFrameRate()
+        if visible && wasOccluded {
+            wakeRenderLoop()
+            drawSynchronously()
+        }
+    }
+
     private func applyPowerAwareFrameRate() {
         let info = ProcessInfo.processInfo
-        let isOccluded: Bool = {
-            guard let window else { return false }
-            return !window.occlusionState.contains(.visible)
-        }()
+        let isOccluded = isWindowOccluded
         let nativeMax = window?.screen?.maximumFramesPerSecond ?? 60
         // Apply thermal hysteresis before consulting preferredFrameRate:
         // the pure function reacts to `.serious`/`.critical`, so we stretch
@@ -1533,14 +1640,28 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             thermalState: effectiveThermal,
             nativeMaxFPS: nativeMax
         )
+        // Same-value guards: MTKView's setters are not documented as
+        // idempotent, and this runs on every thermal / power / occlusion
+        // notification and every idle wake — never restart the display link
+        // for a value that did not change.
         switch target {
         case .paused:
-            self.isPaused = true
+            if !self.isPaused { self.isPaused = true }
         case .fps(let n):
-            self.preferredFramesPerSecond = isIdleThrottled ? min(n, Self.idleFPS) : n
-            self.isPaused = false
+            let fps = isIdleThrottled ? min(n, Self.idleFPS) : n
+            if self.preferredFramesPerSecond != fps { self.preferredFramesPerSecond = fps }
+            if self.isPaused { self.isPaused = false }
         }
     }
+
+    #if DEBUG
+    /// Test seam: enter the idle-throttled state directly (the production
+    /// path needs `idleThrottleAfterFrames` display-link ticks).
+    func _enterIdleThrottleForTesting() {
+        isIdleThrottled = true
+        applyPowerAwareFrameRate()
+    }
+    #endif
 
     deinit {
         for token in focusObservers {

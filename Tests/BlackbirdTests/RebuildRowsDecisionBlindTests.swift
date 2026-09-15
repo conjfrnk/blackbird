@@ -120,7 +120,7 @@ final class RebuildRowsDecisionBlindTests: XCTestCase {
     ) -> Set<Int>? {
         r.decideRebuildRows(
             snap: snap, cacheCompatible: cacheCompatible, snapshotCoalesced: coalesced,
-            cursorMoved: cursorMoved, prevCursorRow: prevRow, prevCursorCol: prevCol, curRow: curRow
+            cursorMoved: cursorMoved, blinkChanged: false, prevCursorRow: prevRow, prevCursorCol: prevCol, curRow: curRow
         )
     }
 

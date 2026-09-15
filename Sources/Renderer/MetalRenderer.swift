@@ -248,6 +248,13 @@ public final class MetalRenderer {
     }
     private var cursorState = CursorState()
 
+    /// Blink phase of the last frame whose rows were (re)built. Compared
+    /// against the current phase in `render` so a flip rebuilds only the
+    /// cursor's screen row (`decideRebuildRows(blinkChanged:)`) instead of
+    /// invalidating the whole row cache twice a second.
+    private var lastBuiltBlinkSkip = false
+
+
     /// The pixel-affecting inputs shared by `FrameKey` (the per-frame skip
     /// cache) and `CacheKey` (the per-row rebuild cache). Extracted into one
     /// Equatable struct both keys embed so the ~23 fields are authored ONCE: a
@@ -297,7 +304,6 @@ public final class MetalRenderer {
         let selectionColor: SIMD4<Float>
         let selectionForeground: SIMD4<Float>
         let cursorColor: SIMD4<Float>
-        let blinkSkip: Bool
         /// ⌘-held regex URL range under pointer. Bundled in so the skip
         /// optimisations correctly repaint when the highlighted run changes
         /// without a new snapshot arriving (FrameKey) / when linkHover flags on
@@ -362,6 +368,11 @@ public final class MetalRenderer {
         /// be invalidated by a resize.
         let viewportWidth: Float
         let viewportHeight: Float
+        /// Cursor blink phase. FrameKey ONLY: a flip changes pixels (the
+        /// frame must re-encode) but only in the cursor's row, so it must not
+        /// invalidate the per-row instance cache — `decideRebuildRows` takes
+        /// `blinkChanged` and adds just that screen row.
+        let blinkSkip: Bool
         let visual: VisualState
     }
     /// Frame-skip + per-row rebuild cache (Finding A cluster). The mutable
@@ -438,7 +449,8 @@ public final class MetalRenderer {
         let cols: Int
         let rows: Int
         /// The shared pixel-affecting inputs (selection, cursor shape/visibility,
-        /// insets, colours, blink, cmd-hover range, atlas/metrics generations).
+        /// insets, colours, cmd-hover range, atlas/metrics generations —
+        /// NOT blink or the viewport, which are FrameKey-only).
         /// Same struct `FrameKey` embeds — see `VisualState` for the per-field
         /// rationale (the displayOffset widening, the atlas/metrics-generation
         /// H3/M-20 invalidation, the cmd-hover bundling). CacheKey adds only the
@@ -1121,6 +1133,7 @@ public final class MetalRenderer {
             // itself and defeat frame-skip entirely (NaN != NaN).
             viewportWidth: Float(viewportPoints.width.sanitizedPixel),
             viewportHeight: Float(viewportPoints.height.sanitizedPixel),
+            blinkSkip: blinkSkip,
             visual: VisualState(
                 hoveredLinkID: hoveredLinkID,
                 selMode: selFields.mode,
@@ -1149,7 +1162,6 @@ public final class MetalRenderer {
                 selectionColor: themeColors.selectionColor,
                 selectionForeground: themeColors.selectionForeground,
                 cursorColor: themeColors.cursorColor,
-                blinkSkip: blinkSkip,
                 cmdHoverBufferLine: cmdHover.bufferLine,
                 cmdHoverStartCol: cmdHover.startCol,
                 cmdHoverEndCol: cmdHover.endCol,
@@ -1169,8 +1181,7 @@ public final class MetalRenderer {
         snap: BBSnapshot,
         focused: Bool,
         selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
-        effectiveShape: UInt8,
-        blinkSkip: Bool
+        effectiveShape: UInt8
     ) -> CacheKey {
         return CacheKey(
             cols: snap.cols,
@@ -1198,7 +1209,6 @@ public final class MetalRenderer {
                 selectionColor: themeColors.selectionColor,
                 selectionForeground: themeColors.selectionForeground,
                 cursorColor: themeColors.cursorColor,
-                blinkSkip: blinkSkip,
                 cmdHoverBufferLine: cmdHover.bufferLine,
                 cmdHoverStartCol: cmdHover.startCol,
                 cmdHoverEndCol: cmdHover.endCol,
@@ -1407,9 +1417,10 @@ public final class MetalRenderer {
             // set (nil = full rebuild); see `planRowRebuild`. Pure — `render`
             // records the returned CacheKey only after the buildInstances commit
             // below (H7 / S2-007 ordering).
+            let blinkChanged = blinkSkipNow != lastBuiltBlinkSkip
             let plan = planRowRebuild(
                 snap: snap, focused: focused, selFields: selFields,
-                blinkSkip: blinkSkipNow, geo: geo
+                blinkChanged: blinkChanged, geo: geo
             )
 
             guard let instanceCount = buildInstances(
@@ -1444,6 +1455,7 @@ public final class MetalRenderer {
                 return
             }
             skipCache.lastCacheKey = plan.cacheKey
+            lastBuiltBlinkSkip = blinkSkipNow
             // Record the snapshot seq we just rendered. `lastRenderedSnapshot
             // Seq` drives the coalesced-snapshot detection on the next
             // render; updating it HERE (after the row cache is in sync
@@ -1467,8 +1479,23 @@ public final class MetalRenderer {
         }
 
         encoder.endEncoding()
-        buffer.present(drawable)
-        buffer.commit()
+        if drawable.layer.presentsWithTransaction {
+            // Window resize (`TerminalView.beginSynchronousResizePresentation`
+            // set the layer flag): the present must ride the CATransaction
+            // that carries the new layer bounds, or the compositor shows the
+            // old drawable stretched for a frame. Apple's documented sequence
+            // is commit → waitUntilScheduled → `drawable.present()`; the
+            // command-buffer `present(_:)` convenience explicitly does NOT
+            // wait for a transaction. Sub-millisecond for one instanced draw.
+            // The layer is the single source of truth — no renderer flag to
+            // drift from it.
+            buffer.commit()
+            buffer.waitUntilScheduled()
+            drawable.present()
+        } else {
+            buffer.present(drawable)
+            buffer.commit()
+        }
     }
 
     /// Pure per-frame geometry produced by `computeFrameGeometry` and consumed by
@@ -1601,7 +1628,7 @@ public final class MetalRenderer {
         snap: BBSnapshot,
         focused: Bool,
         selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
-        blinkSkip: Bool,
+        blinkChanged: Bool,
         geo: FrameGeometry
     ) -> RebuildPlan {
         // Decide whether to take the partial-rebuild path. The cache is
@@ -1616,7 +1643,7 @@ public final class MetalRenderer {
         // Above the threshold, just rebuild everything.
         let newCacheKey = makeCacheKey(
             snap: snap, focused: focused, selFields: selFields,
-            effectiveShape: geo.effectiveShape, blinkSkip: blinkSkip
+            effectiveShape: geo.effectiveShape
         )
         let cacheCompatible = !debugToggles.dirtyRowsDisabled
             && skipCache.lastCacheKey == newCacheKey
@@ -1642,6 +1669,7 @@ public final class MetalRenderer {
             cacheCompatible: cacheCompatible,
             snapshotCoalesced: snapshotCoalesced,
             cursorMoved: geo.cursorMoved,
+            blinkChanged: blinkChanged,
             prevCursorRow: geo.prevCursorRow,
             prevCursorCol: geo.prevCursorCol,
             curRow: geo.curRow
@@ -1665,6 +1693,7 @@ public final class MetalRenderer {
         cacheCompatible: Bool,
         snapshotCoalesced: Bool,
         cursorMoved: Bool,
+        blinkChanged: Bool,
         prevCursorRow: Int32,
         prevCursorCol: Int32,
         curRow: Int32
@@ -1692,6 +1721,16 @@ public final class MetalRenderer {
                 rows.insert(newScreenRow)
             }
             _ = prevCursorCol // silence unused warning; col-level precision not needed
+        }
+        // A blink-phase flip only changes the cursor cell's inversion, which
+        // lives in the cursor's row instances (the separate cursor quad is not
+        // cached). Through v0.8.1 the phase sat in the CacheKey and every flip
+        // re-walked the whole grid.
+        if blinkChanged {
+            let cursorScreenRow = Int(curRow) + Int(snap.displayOffset)
+            if cursorScreenRow >= 0 && cursorScreenRow < snap.rows {
+                rows.insert(cursorScreenRow)
+            }
         }
         return rows
     }
