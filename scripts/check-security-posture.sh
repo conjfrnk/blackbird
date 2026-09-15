@@ -124,7 +124,7 @@ fi
 #    the installer against symlink attacks at the delta / archive
 #    destination and a root privilege escalation (sparkle-project/Sparkle
 #    #2891, #2895, #2897, #2898). The package requirement in `project.yml`
-#    is `from: 2.9.6`, but SPM honours Package.resolved, so read the
+#    is `from: 2.10.0`, but SPM honours Package.resolved, so read the
 #    actually-resolved version and fail if it's below the cutoff.
 # ---------------------------------------------------------------------------
 PKG_RESOLVED="$(
