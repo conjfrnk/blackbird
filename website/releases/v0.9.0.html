@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blackbird 0.9.0 — release notes</title>
+    <meta name="theme-color" content="#282828" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
+    <style>
+      main.notes { max-width: 720px; margin: 0 auto; padding: 48px 24px; text-align: left; }
+      main.notes h1 { margin-bottom: 4px; }
+      main.notes .tag { margin-top: 0; }
+      main.notes h2 { font-size: 1.05rem; margin: 28px 0 8px; color: #FABD2F; }
+      main.notes ul { padding-left: 1.2em; }
+      main.notes li { margin: 6px 0; line-height: 1.5; }
+      main.notes code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+      main.notes a { color: #83A598; }
+      main.notes .back { display: inline-block; margin-top: 32px; color: #A89984; }
+    </style>
+  </head>
+  <body>
+    <main class="notes">
+      <h1>Blackbird 0.9.0</h1>
+      <p class="tag">Released 2026-09-15</p>
+      <h2>macOS 27</h2>
+<ul>
+<li><strong>Verified on macOS 27 / Xcode 27.</strong> The app builds warning-free against the macOS 27 SDK with Swift 6.4, and the full test suite (2 280 tests) passes under Xcode 27. CI now runs build + suite + both launch smokes on GitHub&#x27;s <code>xcode-27</code> image — macOS 27 itself, with the macOS 27 SDK — next to the macOS 15 and 26 legs, and the nightly windowed-rendering soak runs there too. Release DMGs stay on Xcode 26.6 (macOS 26 SDK) until the image carries the GA Xcode 27.</li>
+<li>Sparkle 2.10.0, which fixes file-system compression reapplication on macOS 27.</li>
+<li>Every API the macOS 27 SDK deprecates that the app used (<code>MTLStorageMode.managed</code>, <code>MTLDevice.isLowPower</code> / <code>.isRemovable</code>, all Intel-only) is now confined to the x86_64 slice; the arm64 slice never took those branches. <code>mouseCancelled(with:)</code> (macOS 26+) ends a selection drag and releases a reported button cleanly when the system claims a gesture.</li>
+<li>Xcode 26+ ships the Metal compiler as a separately downloaded component; CI and the README now say so (<code>xcodebuild -downloadComponent MetalToolchain</code>).</li>
+</ul>
+<h2>Rendering smoothness</h2>
+<ul>
+<li><strong>Scrolling and dragging no longer stutter while a program streams output.</strong> A wheel event, a row-only window drag, ⌘K, or a copy used to run on the core queue *behind* every PTY chunk already queued for parsing — up to the whole 4 MiB feed budget, ≈150 ms — so scrolling up during a build moved in 10–150 ms steps. Queued chunks now yield to a waiting user action (they defer in O(1) and are parsed, in order, right after it), so the wait is bounded by one chunk&#x27;s parse. Throughput is unchanged: the budget still back-pressures the child, bytes are never reordered relative to each other or dropped, and a queued column reflow still runs after the output that preceded it.</li>
+<li><strong>Window resize presents in step with the window edge.</strong> During a live resize (and the ⌘-right-drag resize) presents are tied to AppKit&#x27;s transaction (<code>presentsWithTransaction</code>) and each resize frame is drawn synchronously, so the compositor never shows a drawable of the previous size stretched to the new bounds — the text shimmer at the edge while dragging is gone.</li>
+<li><strong>Trackpad scrolling tracks the finger.</strong> Fractional travel now carries across events (as the mouse-report and alternate-scroll paths already did): a slow two-finger drag no longer jumps a whole line per tiny event, momentum decays naturally instead of creeping one line per event and stopping dead, and a 1-pt nudge no longer scrolls a line. Feel is unchanged for a full-height swipe (still two lines per cell of travel) and for classic wheels (three lines per notch).</li>
+<li>Cursor blink rebuilds only the cursor&#x27;s row instead of re-walking the whole grid twice a second.</li>
+<li>⌘A / ⌘G on an idle terminal paint their highlight on the next frame instead of up to 100 ms later (the selection change now wakes the idle-throttled render loop).</li>
+<li>Switching to a tab that was resized while hidden draws a correctly sized frame the moment it becomes visible instead of showing the old drawable stretched for a frame.</li>
+<li>Frame-rate changes are only written to the view when the value actually changes (thermal / power / occlusion notifications no longer restart the display link needlessly).</li>
+</ul>
+      <a class="back" href="/">← blackbird-terminal.com</a>
+    </main>
+  </body>
+</html>
