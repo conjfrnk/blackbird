@@ -7,6 +7,8 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-15
+
 ### macOS 27
 - **Verified on macOS 27 / Xcode 27.** The app builds warning-free against the macOS 27 SDK with Swift 6.4, and the full test suite (2 280 tests) passes under Xcode 27. CI now runs build + suite + both launch smokes on GitHub's `xcode-27` image — macOS 27 itself, with the macOS 27 SDK — next to the macOS 15 and 26 legs, and the nightly windowed-rendering soak runs there too. Release DMGs stay on Xcode 26.6 (macOS 26 SDK) until the image carries the GA Xcode 27.
 - Sparkle 2.10.0, which fixes file-system compression reapplication on macOS 27.
