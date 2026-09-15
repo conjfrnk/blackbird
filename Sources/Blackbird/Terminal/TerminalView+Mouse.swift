@@ -220,6 +220,28 @@ extension TerminalView {
         sendMouseEvent(event, button: 0, press: false)
     }
 
+    /// macOS 26+ can end a left-button gesture without a `mouseUp` (the
+    /// system claimed it — a Sidecar / trackpad gesture, a window-manager
+    /// takeover). Treat it as a release with no click semantics: drop a
+    /// pending ⌘-link open, finish any selection drag (stop the autoscroll
+    /// timer), and mirror the release to a mouse-reporting TUI so it isn't
+    /// left with a button held. `mouseCancelled(with:)` exists from the
+    /// macOS 26 SDK; the override compiles against the 26+ SDK only and is
+    /// simply never called on older systems.
+    #if compiler(>=6.2)  // macOS 26 SDK (Xcode 26+); absent from Xcode 16.4's SDK.
+    @available(macOS 26.0, *)
+    public override func mouseCancelled(with event: NSEvent) {
+        pendingLinkClick = nil
+        if selectionController.endDrag() {
+            didReportMouseDown = false
+            return
+        }
+        guard didReportMouseDown else { return }
+        didReportMouseDown = false
+        sendMouseEvent(event, button: 0, press: false)
+    }
+    #endif
+
     /// The single view-local → buffer mapping: nil-snap guard (M-17),
     /// titlebar-Y pre-clamp (F13), and the grid math. `bufferPointFromEvent`
     /// converts an `NSEvent`'s window location and delegates here; the
@@ -277,6 +299,9 @@ extension TerminalView {
                 startMouseGlobal: NSEvent.mouseLocation,
                 windowFrame: win.frame
             )
+            // This gesture drives `setFrame` itself, so AppKit never enters
+            // live-resize; opt into transaction-synchronous presents by hand.
+            beginSynchronousResizePresentation()
             return
         }
         // ⌥+right-click escapes a TUI's mouse capture just like ⌥+left-click
@@ -291,6 +316,17 @@ extension TerminalView {
     }
 
     public override func rightMouseDragged(with event: NSEvent) {
+        // The release can go to another app (⌘-Tab mid-drag, a sheet, a
+        // system gesture) and there is no rightMouseCancelled. If the right
+        // button is no longer down, the gesture is over: end it here so the
+        // resize context and transaction-synchronous presentation don't
+        // outlive it (mirrors MainWindowController's pressedMouseButtons
+        // cross-check for isResizingInteractively).
+        if windowResizeController.isResizing, NSEvent.pressedMouseButtons & 0b10 == 0 {
+            _ = windowResizeController.end()
+            endSynchronousResizePresentation()
+            return
+        }
         if windowResizeController.isResizing, let win = window {
             // Clamp to contentMinSize (set by MainWindowController). The
             // controller pins the dragged edge on underflow; we just supply the
@@ -328,6 +364,7 @@ extension TerminalView {
         let resizeMovedTheFrame = windowResizeController.isResizing
             && window?.frame != windowResizeControllerStartFrame
         if windowResizeController.end() {
+            endSynchronousResizePresentation()
             // This gesture drives `setFrame` directly, so AppKit never marks
             // the window `inLiveResize` and never posts
             // `windowDidEndLiveResize`. Drive the settle explicitly or the
@@ -524,19 +561,21 @@ extension TerminalView {
             //     scrollingDeltaY is ~1 per physical click. 3 lines per click
             //     is the common terminal-emulator default (alacritty, kitty).
             //
-            // Rounding away from zero ensures tiny trackpad flicks register
-            // at least one line instead of truncating to 0. Clamp before
-            // casting to Int32 — a misbehaving input device or a NaN delta
-            // would otherwise trap the app in `Int32(Double)` on overflow.
-            let delta = event.scrollingDeltaY
-            let rawUnclamped: Double = event.hasPreciseScrollingDeltas
-                ? Double(delta) / Double(metrics.cellHeight) * 2.0
-                : Double(delta) * 3.0
-            let raw = rawUnclamped.isFinite ? rawUnclamped : 0
-            let clamped = min(Double(Int32.max), max(Double(Int32.min), raw))
-            let lines = Int32(clamped.rounded(.toNearestOrAwayFromZero))
+            // Through v0.8.1 each event was rounded on its own (away from
+            // zero), so a slow two-finger drag delivering 2–4 pt per event on
+            // a 16 pt cell moved a full line per event — 2–4× the finger —
+            // and a flick's momentum tail crept at a constant line per event
+            // then stopped dead. The accumulator carries the fractional
+            // remainder across events (same as the mouse-report and DEC 1007
+            // paths); `pointsPerLine = cellHeight / 2` keeps the ×2 feel.
+            let lines = wheelAccumulator.lines(
+                deltaY: event.scrollingDeltaY,
+                precise: event.hasPreciseScrollingDeltas,
+                pointsPerLine: Double(metrics.cellHeight) / 2.0,
+                linesPerNotch: 3
+            )
             if lines != 0 {
-                session.scroll(delta: lines)
+                session.scroll(delta: Int32(clamping: lines))
             }
         }
     }
