@@ -86,19 +86,22 @@ jobs:
 
   xcode:
     name: Xcode — build + test
-    # Matrix the AppKit/Metal-affected jobs across Sequoia + Tahoe so OS
-    # major regressions in NSWindow / CAMetalLayer / NSEvent surface on
-    # PR CI rather than via a user. macos-15 = Sequoia (Xcode 16.4, the
-    # oldest SDK we still build against); macos-26 = Tahoe (Xcode 26.6:
-    # the macOS 26 SDK release DMGs are built against since v0.8.1, and
-    # what local dev runs). macos-14 was retired by GitHub
+    # Matrix the AppKit/Metal-affected jobs across Sequoia + Tahoe +
+    # Golden Gate so OS major regressions in NSWindow / CAMetalLayer /
+    # NSEvent surface on PR CI rather than via a user. macos-15 = Sequoia
+    # (Xcode 16.4, the oldest SDK we still build against); macos-26 =
+    # Tahoe (Xcode 26.6: the macOS 26 SDK release DMGs are built against
+    # since v0.8.1, and what local dev runs); xcode-27 = GitHub's
+    # per-Xcode image, which runs macOS 27 itself with Xcode 27 / the
+    # macOS 27 SDK (arm64 only) — the only PR-CI leg that actually
+    # EXECUTES the suite on macOS 27. macos-14 was retired by GitHub
     # on 2026-11-02 (brownouts from 2026-10-05, actions/runner-images
     # #13518). Rust-only and trend-tracking jobs stay single-OS — see
     # their inline comments.
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-15, macos-26, xcode-27]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     needs: rust
@@ -121,16 +124,32 @@ jobs:
         # macos-15 pins the newest Xcode 16 the image ships (macOS 15 SDK,
         # the oldest SDK we still build against); macos-26 pins Xcode 26
         # (macOS 26 SDK: the SDK release DMGs are built against since
-        # v0.8.1, and what local dev on Tahoe runs). Keep both legs so
-        # SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
-        # hit-testing) is compiled and exercised on PR CI, not by users.
+        # v0.8.1, and what local dev on Tahoe runs); xcode-27 pins the
+        # image's Xcode 27 (macOS 27 SDK, run ON macOS 27). Keep all legs
+        # so SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
+        # hit-testing, macOS 27 runtime) is compiled and exercised on PR
+        # CI, not by users.
         run: |
           case "${{ matrix.os }}" in
             macos-15) sudo xcode-select -s /Applications/Xcode_16.4.app ;;
             macos-26) sudo xcode-select -s /Applications/Xcode_26.6.app ;;
+            xcode-27) sudo xcode-select -s /Applications/Xcode_27.0.app ;;
             *) echo "unexpected runner ${{ matrix.os }}" >&2; exit 1 ;;
           esac
           xcodebuild -version
+
+      - name: Ensure Metal toolchain
+        # Xcode 26+ ships the Metal compiler as a separately downloaded
+        # component; an image can carry the Xcode without it and
+        # `CompileMetalFile Shaders.metal` then fails with "cannot execute
+        # tool 'metal' due to missing Metal Toolchain" (hit locally on a
+        # fresh Xcode 27 install). No-op in <1 s when the tool is already
+        # present, including Xcode 16.4 which still bundles it.
+        run: |
+          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -260,7 +279,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: xcode-test-logs-${{ github.run_id }}
+          name: xcode-test-logs-${{ matrix.os }}-${{ github.run_id }}
           path: ~/Library/Developer/Xcode/DerivedData/**/Logs/Test
           if-no-files-found: ignore
           retention-days: 7
@@ -335,6 +354,19 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_26.6.app
           xcodebuild -version
 
+      - name: Ensure Metal toolchain
+        # Xcode 26+ ships the Metal compiler as a separately downloaded
+        # component; an image can carry the Xcode without it and
+        # `CompileMetalFile Shaders.metal` then fails with "cannot execute
+        # tool 'metal' due to missing Metal Toolchain" (hit locally on a
+        # fresh Xcode 27 install). No-op in <1 s when the tool is already
+        # present, including Xcode 16.4 which still bundles it.
+        run: |
+          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
       - name: Install xcodegen
         run: brew install xcodegen
 
@@ -375,7 +407,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-15, macos-26, xcode-27]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     needs: rust
@@ -398,16 +430,32 @@ jobs:
         # macos-15 pins the newest Xcode 16 the image ships (macOS 15 SDK,
         # the oldest SDK we still build against); macos-26 pins Xcode 26
         # (macOS 26 SDK: the SDK release DMGs are built against since
-        # v0.8.1, and what local dev on Tahoe runs). Keep both legs so
-        # SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
-        # hit-testing) is compiled and exercised on PR CI, not by users.
+        # v0.8.1, and what local dev on Tahoe runs); xcode-27 pins the
+        # image's Xcode 27 (macOS 27 SDK, run ON macOS 27). Keep all legs
+        # so SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
+        # hit-testing, macOS 27 runtime) is compiled and exercised on PR
+        # CI, not by users.
         run: |
           case "${{ matrix.os }}" in
             macos-15) sudo xcode-select -s /Applications/Xcode_16.4.app ;;
             macos-26) sudo xcode-select -s /Applications/Xcode_26.6.app ;;
+            xcode-27) sudo xcode-select -s /Applications/Xcode_27.0.app ;;
             *) echo "unexpected runner ${{ matrix.os }}" >&2; exit 1 ;;
           esac
           xcodebuild -version
+
+      - name: Ensure Metal toolchain
+        # Xcode 26+ ships the Metal compiler as a separately downloaded
+        # component; an image can carry the Xcode without it and
+        # `CompileMetalFile Shaders.metal` then fails with "cannot execute
+        # tool 'metal' due to missing Metal Toolchain" (hit locally on a
+        # fresh Xcode 27 install). No-op in <1 s when the tool is already
+        # present, including Xcode 16.4 which still bundles it.
+        run: |
+          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -470,7 +518,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-15, macos-26, xcode-27]
     runs-on: ${{ matrix.os }}
     # Sequenced after swift-release-universal so a broken Release build
     # fails the universal job first (clearer signal). We still rebuild
@@ -520,9 +568,23 @@ jobs:
           case "${{ matrix.os }}" in
             macos-15) sudo xcode-select -s /Applications/Xcode_16.4.app ;;
             macos-26) sudo xcode-select -s /Applications/Xcode_26.6.app ;;
+            xcode-27) sudo xcode-select -s /Applications/Xcode_27.0.app ;;
             *) echo "unexpected runner ${{ matrix.os }}" >&2; exit 1 ;;
           esac
           xcodebuild -version
+
+      - name: Ensure Metal toolchain
+        # Xcode 26+ ships the Metal compiler as a separately downloaded
+        # component; an image can carry the Xcode without it and
+        # `CompileMetalFile Shaders.metal` then fails with "cannot execute
+        # tool 'metal' due to missing Metal Toolchain" (hit locally on a
+        # fresh Xcode 27 install). No-op in <1 s when the tool is already
+        # present, including Xcode 16.4 which still bundles it.
+        run: |
+          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -643,14 +705,14 @@ jobs:
 
   smoke:
     name: Smoke — launch, 3s, SIGTERM
-    # Matrixed across Sonoma + Sequoia: a launch-time AppKit / dyld /
-    # hardened-runtime regression specific to one macOS major would
+    # Matrixed across Sequoia + Tahoe + macOS 27: a launch-time AppKit /
+    # dyld / hardened-runtime regression specific to one macOS major would
     # otherwise reach v1.0 users with zero CI signal. `needs: xcode`
     # waits for ALL xcode matrix combos by default — that's intended.
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-15, macos-26, xcode-27]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     needs: xcode
@@ -673,16 +735,32 @@ jobs:
         # macos-15 pins the newest Xcode 16 the image ships (macOS 15 SDK,
         # the oldest SDK we still build against); macos-26 pins Xcode 26
         # (macOS 26 SDK: the SDK release DMGs are built against since
-        # v0.8.1, and what local dev on Tahoe runs). Keep both legs so
-        # SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
-        # hit-testing) is compiled and exercised on PR CI, not by users.
+        # v0.8.1, and what local dev on Tahoe runs); xcode-27 pins the
+        # image's Xcode 27 (macOS 27 SDK, run ON macOS 27). Keep all legs
+        # so SDK-conditional AppKit behaviour (Liquid Glass, Tahoe NSTabBar
+        # hit-testing, macOS 27 runtime) is compiled and exercised on PR
+        # CI, not by users.
         run: |
           case "${{ matrix.os }}" in
             macos-15) sudo xcode-select -s /Applications/Xcode_16.4.app ;;
             macos-26) sudo xcode-select -s /Applications/Xcode_26.6.app ;;
+            xcode-27) sudo xcode-select -s /Applications/Xcode_27.0.app ;;
             *) echo "unexpected runner ${{ matrix.os }}" >&2; exit 1 ;;
           esac
           xcodebuild -version
+
+      - name: Ensure Metal toolchain
+        # Xcode 26+ ships the Metal compiler as a separately downloaded
+        # component; an image can carry the Xcode without it and
+        # `CompileMetalFile Shaders.metal` then fails with "cannot execute
+        # tool 'metal' due to missing Metal Toolchain" (hit locally on a
+        # fresh Xcode 27 install). No-op in <1 s when the tool is already
+        # present, including Xcode 16.4 which still bundles it.
+        run: |
+          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       - name: Install xcodegen
         run: brew install xcodegen

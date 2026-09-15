@@ -1,0 +1,8 @@
+# GitHub's per-Xcode-version macOS images (`xcode-27`, `xcode-27-xlarge`,
+# github.blog/changelog/2026-09-10-xcode-27-runner-image-now-runs-on-macos-27)
+# are newer than actionlint's built-in label list; declare them so
+# `actionlint` runs clean locally and in CI.
+self-hosted-runner:
+  labels:
+    - xcode-27
+    - xcode-27-xlarge

@@ -60,13 +60,13 @@ Not interested in: cross-platform, splits, session restore, profiles, plugins, s
 Download the signed, notarized DMG from
 [blackbird-terminal.com](https://blackbird-terminal.com) or the
 [Releases page](https://github.com/conjfrnk/blackbird/releases/latest).
-Universal binary — Apple Silicon and Intel, macOS 14 Sonoma or newer.
+Universal binary — Apple Silicon and Intel, macOS 14 Sonoma through macOS 27.
 
 Auto-updates ship through Sparkle once installed.
 
 ## Building
 
-Requirements: macOS 14+, Xcode 16.4 or 26.x (CI builds with both; release DMGs use 26.x, which opts the app into Liquid Glass on macOS 26), Rust stable with both Apple targets, [`xcodegen`](https://github.com/yonaskolb/XcodeGen).
+Requirements: macOS 14+, Xcode 16.4, 26.x or 27.x (CI builds with all three and runs the suite on macOS 15, 26 and 27; release DMGs use 26.x, which opts the app into Liquid Glass on macOS 26), Rust stable with both Apple targets, [`xcodegen`](https://github.com/yonaskolb/XcodeGen). Xcode 26+ needs the Metal toolchain component (`xcodebuild -downloadComponent MetalToolchain`) or `Shaders.metal` fails to compile.
 
 ```sh
 xcodegen generate

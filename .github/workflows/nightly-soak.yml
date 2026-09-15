@@ -218,8 +218,16 @@ jobs:
     name: Swift - RSS-returns-to-baseline + 10s feed/snapshot soak
     # macos-26 / Xcode 26.6 since v0.8.1: the toolchain that release DMGs
     # ship with, so RSS / soak numbers describe the binary users run.
-    # rust-soak above is Xcode-independent and stays on macos-15.
-    runs-on: macos-26
+    # xcode-27 is GitHub's per-Xcode image that runs macOS 27 itself:
+    # RealLatencyProbeWindowedTests is the only place a real NSWindow +
+    # MTKView presents frames on CI, so this leg is the nightly's macOS 27
+    # rendering signal. rust-soak above is Xcode-independent and stays on
+    # macos-15.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, xcode-27]
+    runs-on: ${{ matrix.os }}
     # 60-min cap - see rust-soak for rationale. Swift soak is
     # ~10 min wall (toolchain + xcodegen + universal core build +
     # xcodebuild test for two test classes including 32x1 MiB
@@ -243,14 +251,28 @@ jobs:
           workspaces: ". -> target"
           cache-bin: 'false'
 
-      - name: Select Xcode 26.6
-        # Same Xcode pin as release.yml and ci.yml's macos-26 leg. Xcode
-        # version drift between the soak and the shipped build risks a
-        # Swift compiler change that only reproduces on one - and would
-        # defeat the nightly soak's bisect signal.
+      - name: Select Xcode (per runner image)
+        # macos-26: same Xcode pin as release.yml and ci.yml's macos-26 leg.
+        # Xcode version drift between the soak and the shipped build risks
+        # a Swift compiler change that only reproduces on one - and would
+        # defeat the nightly soak's bisect signal. xcode-27: the image's
+        # Xcode 27 (macOS 27 SDK), mirroring ci.yml's xcode-27 leg.
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.6.app
+          case "${{ matrix.os }}" in
+            macos-26) sudo xcode-select -s /Applications/Xcode_26.6.app ;;
+            xcode-27) sudo xcode-select -s /Applications/Xcode_27.0.app ;;
+            *) echo "unexpected runner ${{ matrix.os }}" >&2; exit 1 ;;
+          esac
           xcodebuild -version
+
+      - name: Ensure Metal toolchain
+        # Mirrors ci.yml: Xcode 26+ ships the Metal compiler as a separate
+        # download; no-op when already present.
+        run: |
+          if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -461,7 +483,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: swift-soak-logs-${{ github.run_id }}
+          name: swift-soak-logs-${{ matrix.os }}-${{ github.run_id }}
           path: |
             ~/Library/Developer/Xcode/DerivedData/**/Logs/Test
             /tmp/swift-soak.log
