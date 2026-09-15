@@ -89,7 +89,7 @@ public final class ThemeManager {
     public func attach(toApp app: NSApplication) {
         currentApp = app
         appearanceObs = app.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.applyToAllIfPaletteChanged() }
+            DispatchQueue.main.async { [weak self] in self?.applyToAllIfPaletteChanged() }
         }
     }
 

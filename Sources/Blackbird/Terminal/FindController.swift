@@ -588,7 +588,11 @@ final class FindController {
         // worst case we run one extra row.
         let cancelFlag = AtomicFlag()
 
-        let workItem = DispatchWorkItem {
+        // Explicit `[weak self]` on the worker too: the nested main-queue
+        // hop below re-captures `self` weakly, and Swift 6.4 warns when an
+        // inner weak capture shadows an implicit strong one in the enclosing
+        // closure. Nothing in the worker body needs `self`.
+        let workItem = DispatchWorkItem { [weak self] in
             let matches = Self.scanRegexRows(rows, regex: regex, limit: limit, cancelFlag: cancelFlag)
             // If we were cancelled, the timeout already published its banner —
             // don't overwrite it with stale results.

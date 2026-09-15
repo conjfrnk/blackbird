@@ -25,7 +25,10 @@ enum DiagnosticFileLoader {
     /// (REFACTOR.md Part VI acceptance §4).
     static func loadAndSanitizeTraced(url: URL, cap: Int) async -> (Result<String, LoadError>, ranOffMain: Bool) {
         await Task.detached {
-            let ranOffMain = !Thread.isMainThread
+            // `Thread.isMainThread` is unavailable from async contexts as of
+            // Swift 6; pthread_main_np is the same check without the actor
+            // diagnostics.
+            let ranOffMain = pthread_main_np() == 0
             // Audit S5-003: open with O_NOFOLLOW so a TOCTOU swap of the
             // file inode between `reload()` (which filters symlinks at
             // enumerate time) and this read cannot redirect us to an

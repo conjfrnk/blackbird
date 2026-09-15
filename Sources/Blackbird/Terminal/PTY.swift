@@ -892,7 +892,7 @@ public final class PTY {
         // (Ctrl+C, Ctrl+D) in flight from the main thread can't land on a
         // freshly-closed — and potentially reused — fd.
         self.stateQueue.sync {
-            close(self.masterFD)
+            _ = close(self.masterFD)
         }
         // Reap the child. Usually the slave close that made read()
         // return 0 also means the child has exited; waitpid is just

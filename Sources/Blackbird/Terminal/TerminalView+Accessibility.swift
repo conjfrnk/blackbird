@@ -277,7 +277,7 @@ extension TerminalView {
         return offsets
     }
 
-    private static let selectionLogger = Logger(
+    nonisolated private static let selectionLogger = Logger(
         subsystem: "dev.conjfrnk.blackbird",
         category: "accessibility"
     )

@@ -424,7 +424,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private let dropHighlightView: NSBox = {
         let b = NSBox(frame: .zero)
         b.boxType = .custom
-        b.borderType = .lineBorder
+        // `.custom` boxes draw their border from borderWidth/borderColor;
+        // `borderType` only applied to the deprecated NSBoxOldStyle and
+        // is itself deprecated (Xcode 27 warns).
         b.borderColor = .controlAccentColor
         b.borderWidth = 2
         b.cornerRadius = 4
@@ -473,7 +475,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// repeated pre-publish clicks from spamming the unified log.
     /// Internal because both `TerminalView+Mouse.swift` callsites of
     /// `bufferPoint` share the same one-shot.
-    static let mouseLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
+    nonisolated static let mouseLogger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                     category: "mouse")
 
     /// Production-visible channel for renderer-state mismatches that
@@ -2279,7 +2281,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         panel.nameFieldStringValue = "\(window.title.isEmpty ? "Blackbird" : window.title).txt"
         panel.allowedContentTypes = [.plainText]
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
+            guard response == .OK, let url = panel.url, self != nil else { return }
             let raw = session.textRange(
                 from: BufferPoint(line: -Int32(clamping: snap.historySize), col: 0),
                 to:   BufferPoint(line: Int32(clamping: snap.rows - 1), col: max(0, snap.cols - 1)),

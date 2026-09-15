@@ -48,7 +48,7 @@ public final class BBTerm {
     /// Audit L-15 / DI-9 follow-up (2026-04-29).
     fileprivate static let didLogInvalidCell = OSAllocatedUnfairLock(initialState: false)
 
-    public struct Size: Equatable {
+    public struct Size: Equatable, Sendable {
         public var cols: UInt16
         public var rows: UInt16
         public init(cols: UInt16, rows: UInt16) {
@@ -875,10 +875,11 @@ public final class BBSnapshot {
                 // alacritty filter regression that lets surrogate /
                 // out-of-range scalars through is discoverable rather
                 // than silently skipped. Sibling of M-15 / L-17 / M-17.
+                let invalidCol = c
                 BBTerm.didLogInvalidCell.withLock { logged in
                     if !logged {
                         logged = true
-                        BBTerm.clampLogger.warning("rowTextWithUTF16ToColMap: encountered .invalid cell at row=\(row, privacy: .public) col=\(c, privacy: .public) — alacritty filter regression?")
+                        BBTerm.clampLogger.warning("rowTextWithUTF16ToColMap: encountered .invalid cell at row=\(row, privacy: .public) col=\(invalidCol, privacy: .public) — alacritty filter regression?")
                     }
                 }
                 c += 1

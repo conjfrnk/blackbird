@@ -22,7 +22,7 @@ final class ScrollIndicator: NSView {
     /// `log stream --predicate 'category == "scrollIndicator"'` in a
     /// release build. NO `#if DEBUG` gate — Release diagnosability
     /// matters more than the one-time line cost.
-    private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
+    nonisolated private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "scrollIndicator")
     private static let didLogOutOfRange = OSAllocatedUnfairLock(initialState: false)
 
