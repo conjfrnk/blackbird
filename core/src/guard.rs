@@ -134,10 +134,10 @@ thread_local! {
     /// each materialises its `&mut *term` / `&*term`, so a re-entrant call
     /// bails (reading this thread-local, no `*term` deref) before taking a
     /// second borrow. The Swift-side `isInsideEventDispatch` precondition
-    /// still backstops them. (Note: the remaining miri-validation of this
-    /// surface — confirming the borrow-stack is clean under Tree Borrows so
-    /// `core/tests/handler_reentry_guard.rs` can drop its `cfg_attr(miri,
-    /// ignore)` — is tracked in KNOWN_ISSUES.md; it needs a nightly miri run.)
+    /// still backstops them. `core/tests/handler_reentry_guard.rs` pins
+    /// this under nightly miri (Stacked + Tree Borrows); the latch check
+    /// must precede EVERY `*term` deref in an entry point, including the
+    /// poison flag read — see `poison_blocked` in lib.rs.
     static FFI_HANDLER_IN_FLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

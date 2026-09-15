@@ -802,7 +802,9 @@ struct BBSyncStatus bb_term_sync_status(struct BBTerm *term);
 
 /**
  * True once a caught panic has poisoned this terminal (see
- * `BBTerm::poisoned`). Read-only.
+ * `BBTerm::poisoned`). Read-only. Returns 0 when called re-entrantly from
+ * inside an event callback (same H-5 latch as every other entry: the read
+ * would alias the outer `&mut BBTerm`).
  *
  * # Safety
  * `term` must be null or a handle returned by `bb_term_new` that has not

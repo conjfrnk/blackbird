@@ -125,17 +125,13 @@ jobs:
       # `--no-fail-fast` so we see every failing case in one run rather
       # than bisecting via repeated nightly invocations.
       #
-      # All tests in handler_reentry_guard.rs are #[cfg_attr(miri,
-      # ignore)] today — see the file header for the deferred
-      # PRODUCT-BUG narrative (the H-5 surface materialises &mut bb.term
-      # BEFORE the FFI_HANDLER_IN_FLIGHT latch check, which both Stacked
-      # Borrows AND Tree Borrows flag as UB even though the latch
-      # suppresses any aliased read/write). The runtime invariants
-      # are still pinned by the non-miri runs of the same tests.
-      #
-      # When the H-5 surface is restructured to check the latch via
-      # raw-pointer access first, drop the cfg_attr from each #[test]
-      # in handler_reentry_guard.rs and miri will start exercising
-      # them again.
+      # handler_reentry_guard.rs runs fully under miri (clean under
+      # Stacked + Tree Borrows since 2026-06-20; the file header has the
+      # H-5 narrative). It is a real gate: the 2026-09-09 poison-flag
+      # change put a `*term` read ahead of the FFI_HANDLER_IN_FLIGHT
+      # latch and this job caught it (fixed 2026-09-15). Every FFI entry
+      # must check the latch — a thread-local, no `*term` deref — BEFORE
+      # touching the handle, or the re-entrant read aliases the outer
+      # `&mut BBTerm` that `process_input` holds.
       - name: cargo miri test handler_reentry_guard
         run: cargo +nightly miri test -p blackbird_core --test handler_reentry_guard --no-fail-fast

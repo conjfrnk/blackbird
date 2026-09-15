@@ -499,10 +499,10 @@ pub unsafe extern "C" fn bb_term_input(term: *mut BBTerm, bytes: *const u8, len:
         // purpose. Audit H-5 extended the same gate to every other
         // entry point that reborrows `&mut *term` / `&*term`; the
         // helper centralises the latch read and one-shot log.
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_input") {
             return;
         }
-        if ffi_reentry_blocked("bb_term_input") {
+        if poison_blocked(term) {
             return;
         }
         // Audit L-11 (2026-04-29): defense-in-depth against
@@ -634,10 +634,10 @@ pub unsafe extern "C" fn bb_term_resize2(
         if term.is_null() || cols == 0 || rows == 0 {
             return fallback;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_resize2") {
             return fallback;
         }
-        if ffi_reentry_blocked("bb_term_resize2") {
+        if poison_blocked(term) {
             return fallback;
         }
         // Floor + ceiling on dimensions. See module-level `MIN_DIM` /
@@ -854,10 +854,10 @@ pub unsafe extern "C" fn bb_term_set_color_query_enabled(term: *mut BBTerm, enab
         if term.is_null() {
             return;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_set_color_query_enabled") {
             return;
         }
-        if ffi_reentry_blocked("bb_term_set_color_query_enabled") {
+        if poison_blocked(term) {
             return;
         }
         (*term).color_query_enabled = enabled != 0;
@@ -877,10 +877,10 @@ pub unsafe extern "C" fn bb_term_set_terminal_version(term: *mut BBTerm, version
         if term.is_null() {
             return;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_set_terminal_version") {
             return;
         }
-        if ffi_reentry_blocked("bb_term_set_terminal_version") {
+        if poison_blocked(term) {
             return;
         }
         let bb = &mut *term;
@@ -912,10 +912,10 @@ pub unsafe extern "C" fn bb_term_set_osc52_write_enabled(term: *mut BBTerm, enab
         if term.is_null() {
             return;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_set_osc52_write_enabled") {
             return;
         }
-        if ffi_reentry_blocked("bb_term_set_osc52_write_enabled") {
+        if poison_blocked(term) {
             return;
         }
         let policy = if enabled != 0 {
@@ -982,7 +982,9 @@ pub unsafe extern "C" fn bb_term_sync_status(term: *mut BBTerm) -> BBSyncStatus 
 }
 
 /// True once a caught panic has poisoned this terminal (see
-/// `BBTerm::poisoned`). Read-only.
+/// `BBTerm::poisoned`). Read-only. Returns 0 when called re-entrantly from
+/// inside an event callback (same H-5 latch as every other entry: the read
+/// would alias the outer `&mut BBTerm`).
 ///
 /// # Safety
 /// `term` must be null or a handle returned by `bb_term_new` that has not
@@ -992,7 +994,10 @@ pub unsafe extern "C" fn bb_term_is_poisoned(term: *const BBTerm) -> u8 {
     if term.is_null() {
         return 0;
     }
-    u8::from((*term).poisoned.get())
+    if ffi_reentry_blocked("bb_term_is_poisoned") {
+        return 0;
+    }
+    u8::from(poison_blocked(term))
 }
 
 /// Terminate a pending DEC 2026 synchronized update, replaying the parser's
@@ -1028,10 +1033,10 @@ pub unsafe extern "C" fn bb_term_flush_sync_update(term: *mut BBTerm, force: u8)
         if term.is_null() {
             return 0;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_flush_sync_update") {
             return 0;
         }
-        if ffi_reentry_blocked("bb_term_flush_sync_update") {
+        if poison_blocked(term) {
             return 0;
         }
         u8::from(flush_sync_update(&mut *term, force != 0))
@@ -1140,10 +1145,10 @@ pub unsafe extern "C" fn bb_term_scroll(term: *mut BBTerm, delta: i32) {
         if term.is_null() || delta == 0 {
             return;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_scroll") {
             return;
         }
-        if ffi_reentry_blocked("bb_term_scroll") {
+        if poison_blocked(term) {
             return;
         }
         let bb = &mut *term;
@@ -1168,10 +1173,10 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
         if term.is_null() {
             return;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_scroll_to_bottom") {
             return;
         }
-        if ffi_reentry_blocked("bb_term_scroll_to_bottom") {
+        if poison_blocked(term) {
             return;
         }
         let bb = &mut *term;
@@ -1196,10 +1201,10 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         if term.is_null() {
             return;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_clear_all") {
             return;
         }
-        if ffi_reentry_blocked("bb_term_clear_all") {
+        if poison_blocked(term) {
             return;
         }
         let bb = &mut *term;
@@ -1332,10 +1337,10 @@ pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, r
         if term.is_null() {
             return;
         }
-        if poison_blocked(term) {
+        if ffi_reentry_blocked("bb_term_set_named_color") {
             return;
         }
-        if ffi_reentry_blocked("bb_term_set_named_color") {
+        if poison_blocked(term) {
             return;
         }
         let bb = &mut *term;
@@ -1635,13 +1640,22 @@ mod tests;
 
 /// True when a caught panic has poisoned this terminal (see
 /// `BBTerm::poisoned`). Every MUTATING entry consults this right after its
-/// null check so the "no-op after a panic" invariant holds by construction
-/// rather than per call site. Read-only entries (snapshot, text range,
-/// mode) stay open so the Swift side can still show and copy what was on
-/// screen when the core died.
+/// null check AND its `ffi_reentry_blocked` check so the "no-op after a
+/// panic" invariant holds by construction rather than per call site.
+/// Read-only entries (snapshot, text range, mode) stay open so the Swift
+/// side can still show and copy what was on screen when the core died.
+///
+/// Ordering is load-bearing: this reads through `*term`, and while the
+/// outer `bb_term_input` is inside `process_input(&mut *term, …)` that
+/// `&mut BBTerm` is a protected Unique borrow. A callback that re-enters
+/// any entry point must bail on the thread-local latch (no `*term` deref)
+/// BEFORE this read, or the read itself is the aliasing access Stacked
+/// Borrows rejects (nightly miri, 2026-09-09 → 2026-09-15 regression).
 ///
 /// # Safety
-/// `term` must be non-null and point at a live `BBTerm`.
+/// `term` must be non-null and point at a live `BBTerm`, and no `&mut
+/// BBTerm` derived from it may be live on this thread (guaranteed by
+/// checking `ffi_reentry_blocked` first).
 unsafe fn poison_blocked(term: *const BBTerm) -> bool {
     (*term).poisoned.get()
 }
