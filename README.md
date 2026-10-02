@@ -95,7 +95,7 @@ The Debug scheme enables ASan and UBSan. A cargo-fuzz target for the parser live
 
 ## Performance
 
-CI gates on parser throughput (`plain_text` ≥ 25 MiB/s, `binary_garbage` ≥ 15 MiB/s, `ansi_log` ≥ 30 MiB/s over 64 MiB payloads) and long-session memory stability. Dev-machine numbers typically run 2–3× the floors.
+CI gates on parser throughput (`plain_text` ≥ 25 MiB/s, `binary_garbage` ≥ 15 MiB/s, `ansi_log` ≥ 30 MiB/s over 64 MiB payloads, best of up to 5 runs each) and long-session memory stability. Dev-machine numbers typically run 2–3× the floors.
 
 See [`docs/benchmarks/throughput-2026-06-09.md`](docs/benchmarks/throughput-2026-06-09.md) for the current cross-terminal throughput comparison (vtebench + kitten bench; the older [`vtebench-2026-04-20.md`](docs/benchmarks/vtebench-2026-04-20.md) predates the 8 MB/s feed-cap fix).
 
