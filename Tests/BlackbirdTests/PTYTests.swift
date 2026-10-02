@@ -587,10 +587,14 @@ final class PTYTests: XCTestCase {
     /// bytes produced after the swap go to the NEW closure and never
     /// to the old one. A consumer that rebinds its handler (view
     /// re-attach, session adoption) must not keep feeding a dead
-    /// closure.
+    /// closure. The strict "A gets nothing after the swap" check holds
+    /// because the test quiesces the producer first; `setOnBytes` itself
+    /// only promises that at most one already-loaded chunk can still
+    /// reach the old closure.
     ///
     /// Pre-flight cost: one /bin/zsh -f child, a few hundred bytes of
-    /// prompt + echo traffic, < 6 s wall worst case. One live shell,
+    /// prompt + echo traffic, < 6 s typical, ~20 s worst case (15 s fence deadline + 5 s
+    /// nonce wait). One live shell,
     /// gated like the file's other real-spawn tests.
     func test_setOnBytes_swapMidSession_routesPostSwapBytesToNewClosureOnly() throws {
         try Self.skipIfFlakyOnCI()
@@ -615,12 +619,53 @@ final class PTYTests: XCTestCase {
         }
         pty.startReading()
 
-        // Give zsh time to start and emit its initial prompt to A.
-        // After the prompt, zsh sits in read(2) and produces nothing
-        // until we send input — which we only do AFTER the swap, so
-        // the two closure regimes are separated in time.
-        Thread.sleep(forTimeInterval: 0.3)
+        // Quiescence fence. zsh -f emits its startup as TWO pty writes
+        // (a PROMPT_EOL_MARK burst, then the prompt ending in
+        // ESC[?2004h) and then sits in read(2) until we send input. A
+        // fixed 0.3 s sleep let a loaded TSAN runner snapshot A between
+        // the two writes (nightly 2026-10-01: snapshot == first write
+        // == 104 B, 92 B of prompt then landed in A). The strict
+        // "A receives nothing after the swap" check below is only
+        // meaningful when no startup chunk is pending or already
+        // loaded-but-undelivered at the swap instant, so wait for the
+        // terminal marker at the END of A plus a quiet window. If the
+        // marker never shows (different zsh/TERM), fall back to a long (3 s)
+        // pure quiet window, well past any loaded-runner gap between zsh's
+        // two startup writes, rather than hard-failing.
+        let readyMarker = Data([0x1b]) + Data("[?2004h".utf8)
+        let deadline = Date().addingTimeInterval(15)
+        var lastCount = -1
+        var lastChange = Date()
+        var quiescent = false
+        while Date() < deadline {
+            lock.lock()
+            let snap = bytesA
+            lock.unlock()
+            if snap.count != lastCount {
+                lastCount = snap.count
+                lastChange = Date()
+            }
+            let quiet = Date().timeIntervalSince(lastChange)
+            if !snap.isEmpty,
+               (snap.suffix(readyMarker.count) == readyMarker && quiet >= 0.15) || quiet >= 3.0 {
+                quiescent = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        lock.lock()
+        let startup = bytesA
+        lock.unlock()
+        XCTAssertTrue(
+            quiescent,
+            "zsh never reached a quiescent prompt within 15 s; got \(startup.count) byte(s): "
+            + "\(startup.map { String(format: "%02x", $0) }.joined().prefix(400))"
+        )
+        guard quiescent else { return }
 
+        // Determinism comes from the quiescence above: zsh is blocked
+        // in read(2) and emits nothing until the write below, so no
+        // chunk can be in flight to A when the swap lands.
         lock.lock()
         let aCountAtSwap = bytesA.count
         lock.unlock()
@@ -660,7 +705,8 @@ final class PTYTests: XCTestCase {
         XCTAssertEqual(
             aFinal.count, aCountAtSwap,
             "closure A must receive nothing after the swap point — got "
-            + "\(aFinal.count - aCountAtSwap) extra byte(s) (S2-001)"
+            + "\(aFinal.count - aCountAtSwap) extra byte(s) (S2-001): "
+            + "\(aFinal.dropFirst(aCountAtSwap).map { String(format: "%02x", $0) }.joined().prefix(400))"
         )
     }
 

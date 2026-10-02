@@ -41,8 +41,16 @@ public final class PTY {
     /// Invoked with raw output bytes from the child. Called on the read
     /// queue. Mutate via `setOnBytes(_:)`; the lock guarantees the read
     /// loop observes a fully-published closure and that swaps take
-    /// effect from the next chunk — including mid-session (audit
-    /// S2-001).
+    /// effect from the next chunk the loop loads — including
+    /// mid-session (audit S2-001).
+    ///
+    /// The read loop loads the closure under `handlerLock` but INVOKES
+    /// it outside the lock, so a handler may re-enter `setOnBytes`
+    /// without deadlocking (PTYTests does). Consequence: one chunk the
+    /// loop already loaded may still reach the previous closure after
+    /// `setOnBytes` returns. Callers needing a hard cutover must
+    /// quiesce the producer first. Never hold `handlerLock` across the
+    /// callback.
     public var onBytes: ((Data) -> Void)? {
         handlerLock.lock()
         defer { handlerLock.unlock() }
