@@ -7,6 +7,16 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-01
+
+### Fixed
+- **Tab pills line up with the traffic lights on macOS 27.** In a multi-tab window the pill row sat 4 pt below the traffic-light midline: the pills were placed at a fixed offset tuned for a titlebar whose tab strip starts at the window's top edge, but macOS 27 centres the strip in a taller titlebar band while the traffic lights stay put. The pills now follow the close button's actual midline (clamped inside the strip, with the old position as the fallback for full screen or a hidden button), and re-align when AppKit moves the strip. An open inline rename follows the pills.
+
+### Maintenance
+- CI: the xcode-27 leg no longer fails when `xcodebuild -downloadComponent MetalToolchain` returns a few seconds before the toolchain is runnable; a shared `scripts/ensure-metal-toolchain.sh` polls with retries and prints diagnostics on failure.
+- The nightly parser-throughput gate is judged on the best of up to five serialised attempts instead of one shot, so a noisy runner no longer fails it (floors unchanged: 25 / 15 / 30 MiB/s).
+- The PTY `setOnBytes` mid-session swap test waits for the shell's startup output to finish instead of sleeping 0.3 s, and a deterministic regression test pins that; `PTY.onBytes` now documents that one already-loaded chunk can still reach the previous handler after a swap.
+
 ## [0.9.0] - 2026-09-15
 
 ### macOS 27
