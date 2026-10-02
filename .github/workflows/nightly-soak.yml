@@ -267,15 +267,10 @@ jobs:
 
       - name: Ensure Metal toolchain
         # Mirrors ci.yml: Xcode 26+ ships the Metal compiler as a separate
-        # download; no-op when already present.
-        run: |
-          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
-          # a stub that fails with "missing Metal Toolchain" until the
-          # component is downloaded (seen on the xcode-27 image).
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
+        # download; no-op when already present. The script polls after the
+        # download (see ci.yml) because the toolchain becomes runnable a
+        # few seconds after `xcodebuild -downloadComponent` returns.
+        run: scripts/ensure-metal-toolchain.sh
 
       - name: Install xcodegen
         run: brew install xcodegen

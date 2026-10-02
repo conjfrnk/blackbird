@@ -144,15 +144,13 @@ jobs:
         # `CompileMetalFile Shaders.metal` then fails with "cannot execute
         # tool 'metal' due to missing Metal Toolchain" (hit locally on a
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
-        # present, including Xcode 16.4 which still bundles it.
-        run: |
-          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
-          # a stub that fails with "missing Metal Toolchain" until the
-          # component is downloaded (seen on the xcode-27 image).
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
+        # present, including Xcode 16.4 which still bundles it. The script
+        # also polls after the download: `xcodebuild -downloadComponent`
+        # returns before the toolchain is runnable (a xcode-27 job probed
+        # 25 ms after "Done downloading" and failed; siblings took 2-3 s).
+        # `xcrun -f metal` is not a valid probe (stub until downloaded), so
+        # the script runs `metal --version`.
+        run: scripts/ensure-metal-toolchain.sh
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -363,15 +361,13 @@ jobs:
         # `CompileMetalFile Shaders.metal` then fails with "cannot execute
         # tool 'metal' due to missing Metal Toolchain" (hit locally on a
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
-        # present, including Xcode 16.4 which still bundles it.
-        run: |
-          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
-          # a stub that fails with "missing Metal Toolchain" until the
-          # component is downloaded (seen on the xcode-27 image).
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
+        # present, including Xcode 16.4 which still bundles it. The script
+        # also polls after the download: `xcodebuild -downloadComponent`
+        # returns before the toolchain is runnable (a xcode-27 job probed
+        # 25 ms after "Done downloading" and failed; siblings took 2-3 s).
+        # `xcrun -f metal` is not a valid probe (stub until downloaded), so
+        # the script runs `metal --version`.
+        run: scripts/ensure-metal-toolchain.sh
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -456,15 +452,13 @@ jobs:
         # `CompileMetalFile Shaders.metal` then fails with "cannot execute
         # tool 'metal' due to missing Metal Toolchain" (hit locally on a
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
-        # present, including Xcode 16.4 which still bundles it.
-        run: |
-          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
-          # a stub that fails with "missing Metal Toolchain" until the
-          # component is downloaded (seen on the xcode-27 image).
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
+        # present, including Xcode 16.4 which still bundles it. The script
+        # also polls after the download: `xcodebuild -downloadComponent`
+        # returns before the toolchain is runnable (a xcode-27 job probed
+        # 25 ms after "Done downloading" and failed; siblings took 2-3 s).
+        # `xcrun -f metal` is not a valid probe (stub until downloaded), so
+        # the script runs `metal --version`.
+        run: scripts/ensure-metal-toolchain.sh
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -588,15 +582,13 @@ jobs:
         # `CompileMetalFile Shaders.metal` then fails with "cannot execute
         # tool 'metal' due to missing Metal Toolchain" (hit locally on a
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
-        # present, including Xcode 16.4 which still bundles it.
-        run: |
-          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
-          # a stub that fails with "missing Metal Toolchain" until the
-          # component is downloaded (seen on the xcode-27 image).
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
+        # present, including Xcode 16.4 which still bundles it. The script
+        # also polls after the download: `xcodebuild -downloadComponent`
+        # returns before the toolchain is runnable (a xcode-27 job probed
+        # 25 ms after "Done downloading" and failed; siblings took 2-3 s).
+        # `xcrun -f metal` is not a valid probe (stub until downloaded), so
+        # the script runs `metal --version`.
+        run: scripts/ensure-metal-toolchain.sh
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -767,15 +759,13 @@ jobs:
         # `CompileMetalFile Shaders.metal` then fails with "cannot execute
         # tool 'metal' due to missing Metal Toolchain" (hit locally on a
         # fresh Xcode 27 install). No-op in <1 s when the tool is already
-        # present, including Xcode 16.4 which still bundles it.
-        run: |
-          # Run the tool, don't just locate it: `xcrun -f metal` resolves to
-          # a stub that fails with "missing Metal Toolchain" until the
-          # component is downloaded (seen on the xcode-27 image).
-          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
-            xcodebuild -downloadComponent MetalToolchain
-          fi
-          xcrun -sdk macosx metal --version
+        # present, including Xcode 16.4 which still bundles it. The script
+        # also polls after the download: `xcodebuild -downloadComponent`
+        # returns before the toolchain is runnable (a xcode-27 job probed
+        # 25 ms after "Done downloading" and failed; siblings took 2-3 s).
+        # `xcrun -f metal` is not a valid probe (stub until downloaded), so
+        # the script runs `metal --version`.
+        run: scripts/ensure-metal-toolchain.sh
 
       - name: Install xcodegen
         run: brew install xcodegen
