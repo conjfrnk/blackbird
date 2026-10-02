@@ -22,4 +22,26 @@ enum TabStripLayout {
         (x: pill.minX + closeWidth + titleLeadingGap,
          width: max(0, pill.width - (closeWidth + titleHorizontalInset)))
     }
+
+    /// Vertical origin of the pills inside a strip of `stripHeight`.
+    ///
+    /// The pills' midline should sit on the traffic lights' midline, and where
+    /// that is relative to the strip is decided by AppKit, not by us: the
+    /// accessory is centred in a titlebar band whose height differs by OS
+    /// (on macOS 27 the strip starts 4 pt below the window top while the
+    /// lights stay put, which left a fixed `y = 4` four points too low). So
+    /// callers pass the lights' midline in the strip's own coordinates.
+    ///
+    /// `trafficLightMidY` is `nil` when there is nothing to align to (no
+    /// window yet, buttons hidden, full screen); `fallback` is then used. The
+    /// result is clamped so the pills never leave the strip, and a non-finite
+    /// midline is treated as `nil`.
+    static func pillOriginY(stripHeight: CGFloat,
+                            pillHeight: CGFloat,
+                            trafficLightMidY: CGFloat?,
+                            fallback: CGFloat) -> CGFloat {
+        guard let mid = trafficLightMidY, mid.isFinite else { return fallback }
+        let maxY = max(0, stripHeight - pillHeight)
+        return min(max(mid - pillHeight / 2, 0), maxY)
+    }
 }

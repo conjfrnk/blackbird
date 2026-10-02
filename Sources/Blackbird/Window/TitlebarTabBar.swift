@@ -116,7 +116,9 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
         }
         let selected = window.tabGroup?.selectedWindow ?? window
         stripView.update(tabs: tabs, selected: selected, width: availableWidth)
-        view.frame = NSRect(x: 0, y: 0, width: availableWidth, height: TabStripView.height)
+        // Size only: the strip IS the accessory's view, so its origin belongs
+        // to AppKit and the pill placement measures against it.
+        view.setFrameSize(NSSize(width: availableWidth, height: TabStripView.height))
     }
 }
 
@@ -270,9 +272,23 @@ final class TabStripView: NSView {
         // draw(_:). User-reported 2026-04-23.
         focusRingType = .none
         updateTrackingAreas()
+        // AppKit places (and later moves) the accessory by setting this view's
+        // frame; a pure move dirties nothing, so ask for a redraw and let
+        // `viewWillDraw` re-align the pills to the traffic lights.
+        postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(frameDidChange(_:)),
+            name: NSView.frameDidChangeNotification, object: self)
     }
 
     required init?(coder: NSCoder) { fatalError("not supported") }
+
+    @objc private func frameDidChange(_ note: Notification) { needsDisplay = true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsDisplay = true
+    }
 
     override var isFlipped: Bool { true }
 
@@ -362,7 +378,7 @@ final class TabStripView: NSView {
         self.tabs = tabs
         self.selectedTab = selected
         self.totalWidth = width
-        self.frame = NSRect(x: 0, y: 0, width: width, height: Self.height)
+        setFrameSize(NSSize(width: width, height: Self.height))
         layoutPills()
         // Pill frames just changed — re-arm hover from the CURRENT cursor
         // position so a stationary-cursor relayout can't leave the close-×
@@ -423,19 +439,64 @@ final class TabStripView: NSView {
     private static let trailingInset: CGFloat = 4
     fileprivate static let titleFont = NSFont.systemFont(ofSize: 12, weight: .regular)
 
+    private static let pillHeight: CGFloat = 24
+
+    /// Pill origin used when there is no traffic light to align to (strip not
+    /// yet in a window, full screen, headless tests): flush with the strip's
+    /// bottom edge, which matched the lights on the pre-macOS-27 titlebar
+    /// where the strip started at the window top.
+    private static let fallbackPillY: CGFloat = TabStripView.height - TabStripView.pillHeight
+
+    /// Midline of the window's close button in this strip's coordinates, or
+    /// `nil` when it isn't a meaningful target (no window, hidden or detached
+    /// button, full screen where the lights leave the titlebar).
+    private func trafficLightMidY() -> CGFloat? {
+        guard let window,
+              !window.styleMask.contains(.fullScreen),
+              let button = window.standardWindowButton(.closeButton),
+              !button.isHidden,
+              button.window === window else { return nil }
+        return convert(button.bounds, from: button).midY
+    }
+
+    private func currentPillY() -> CGFloat {
+        TabStripLayout.pillOriginY(stripHeight: Self.height,
+                                   pillHeight: Self.pillHeight,
+                                   trafficLightMidY: trafficLightMidY(),
+                                   fallback: Self.fallbackPillY)
+    }
+
+    /// AppKit positions the accessory (and moves it on resize, tab-group and
+    /// full-screen changes) after `update(tabs:)` has run, so the lights'
+    /// midline is only knowable once the strip is placed. Re-place the pills
+    /// when the row they sit on no longer matches the lights; one `convert`
+    /// per draw otherwise. Everything positioned off `pillFrames` follows:
+    /// the inline-rename field is moved explicitly, hover re-armed, and the
+    /// whole strip repainted so a partial dirty rect can't leave two heights.
+    override func viewWillDraw() {
+        super.viewWillDraw()
+        guard let placed = pillFrames.first?.minY,
+              abs(currentPillY() - placed) > 0.01 else { return }
+        layoutPills()
+        tabRenameController.repositionFieldForWidthChange()
+        applyHoverAtCurrentCursorLocation()
+        needsDisplay = true
+    }
+
     private func layoutPills() {
         // Pill frames are about to change → any cached accessibility elements
         // (which embed a frame) are stale; rebuild lazily on next access.
         tabAccessibility.invalidateCache()
         pillFrames.removeAll(keepingCapacity: true)
-        // Pill geometry: the stripView is 28 pt tall (standard titlebar);
-        // pills are 24 pt at y=4 → center=16, which matches the traffic-
-        // light vertical midline. Traffic lights aren't exactly centered
-        // in the titlebar — their origin sits ~2pt below center on
-        // modern macOS — so strict mathematical centering (y=2, center=14)
-        // reads visibly high; y=4 restores the offset.
-        let h: CGFloat = 24
-        let y: CGFloat = 4
+        // Pill geometry: the strip is 28 pt tall and the pills 24 pt. Their
+        // midline is aligned to the live traffic-light midline rather than a
+        // fixed offset: AppKit centres the accessory in a titlebar band whose
+        // height varies by OS, and the lights don't move with it (macOS 27:
+        // strip 4 pt lower, lights unchanged, so the old fixed `y = 4` sat
+        // 4 pt low). `fallbackPillY` (the value that matched the lights on
+        // the older layout) applies until the strip is in a window.
+        let h = Self.pillHeight
+        let y = currentPillY()
         let addW = Self.addButtonWidth
         let gap = Self.pillSpacing
         let trail = Self.trailingInset
