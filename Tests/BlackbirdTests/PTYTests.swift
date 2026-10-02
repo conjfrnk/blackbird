@@ -598,9 +598,39 @@ final class PTYTests: XCTestCase {
     /// gated like the file's other real-spawn tests.
     func test_setOnBytes_swapMidSession_routesPostSwapBytesToNewClosureOnly() throws {
         try Self.skipIfFlakyOnCI()
+        try runSwapMidSessionScenario(executable: "/bin/zsh", arguments: ["-f"])
+    }
+
+    /// The swap must wait for the shell's WHOLE startup output. The nightly
+    /// TSAN flake (2026-09-29) was a startup write landing in the gap between
+    /// the test's snapshot of A and its swap to B; the fix is to swap only once
+    /// startup has gone quiet, so nothing is left to race. That gap is
+    /// microseconds wide and cannot be hit on demand, but its precondition can
+    /// be pinned: here the child emits a second startup write 0.8 s after the
+    /// first (longer than the old fixed 0.3 s sleep), ending in the ESC[?2004h
+    /// marker zsh uses. A test that swaps on a timer swaps before it and the
+    /// write goes to B; the quiescence fence must swap after it, so A holds it.
+    /// `sh` stands in for zsh so the gap is exact instead of load-dependent;
+    /// tty echo is off and the child only emits the nonce after its second
+    /// write (like zsh, whose ZLE echoes input only once the prompt is drawn),
+    /// so the nonce wait cannot finish early. One live child, ~1.5 s.
+    func test_setOnBytes_swapMidSession_waitsForSlowSecondStartupWrite() throws {
+        try Self.skipIfFlakyOnCI()
+        let closureA = try runSwapMidSessionScenario(
+            executable: "/bin/sh",
+            arguments: ["-c", "stty -echo; printf 'first\\n'; sleep 0.8; printf 'second\\033[?2004h'; read l; printf '%s\\n' \"$l\"; exec cat"]
+        )
+        XCTAssertTrue(
+            closureA.contains(Data("second".utf8)),
+            "the swap happened before the child's late startup write reached closure A "
+            + "(fixed-sleep behaviour); A got \(closureA.count) byte(s)"
+        )
+    }
+
+    private func runSwapMidSessionScenario(executable: String, arguments: [String]) throws -> Data {
         let pty = try PTY.spawn(
-            executable: "/bin/zsh",
-            arguments: ["-f"],
+            executable: executable,
+            arguments: arguments,
             envOverrides: [:],
             size: .init(cols: 80, rows: 24)
         )
@@ -661,7 +691,7 @@ final class PTYTests: XCTestCase {
             "zsh never reached a quiescent prompt within 15 s; got \(startup.count) byte(s): "
             + "\(startup.map { String(format: "%02x", $0) }.joined().prefix(400))"
         )
-        guard quiescent else { return }
+        guard quiescent else { return startup }
 
         // Determinism comes from the quiescence above: zsh is blocked
         // in read(2) and emits nothing until the write below, so no
@@ -708,6 +738,7 @@ final class PTYTests: XCTestCase {
             + "\(aFinal.count - aCountAtSwap) extra byte(s) (S2-001): "
             + "\(aFinal.dropFirst(aCountAtSwap).map { String(format: "%02x", $0) }.joined().prefix(400))"
         )
+        return aFinal
     }
 
     /// Audit M2: bytes the shell emits before the consumer wires `onBytes`
