@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blackbird 0.9.1 — release notes</title>
+    <meta name="theme-color" content="#282828" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
+    <style>
+      main.notes { max-width: 720px; margin: 0 auto; padding: 48px 24px; text-align: left; }
+      main.notes h1 { margin-bottom: 4px; }
+      main.notes .tag { margin-top: 0; }
+      main.notes h2 { font-size: 1.05rem; margin: 28px 0 8px; color: #FABD2F; }
+      main.notes ul { padding-left: 1.2em; }
+      main.notes li { margin: 6px 0; line-height: 1.5; }
+      main.notes code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+      main.notes a { color: #83A598; }
+      main.notes .back { display: inline-block; margin-top: 32px; color: #A89984; }
+    </style>
+  </head>
+  <body>
+    <main class="notes">
+      <h1>Blackbird 0.9.1</h1>
+      <p class="tag">Released 2026-10-01</p>
+      <h2>Fixed</h2>
+<ul>
+<li><strong>Tab pills line up with the traffic lights on macOS 27.</strong> In a multi-tab window the pill row sat 4 pt below the traffic-light midline: the pills were placed at a fixed offset tuned for a titlebar whose tab strip starts at the window&#x27;s top edge, but macOS 27 centres the strip in a taller titlebar band while the traffic lights stay put. The pills now follow the close button&#x27;s actual midline (clamped inside the strip, with the old position as the fallback for full screen or a hidden button), and re-align when AppKit moves the strip. An open inline rename follows the pills.</li>
+</ul>
+<h2>Maintenance</h2>
+<ul>
+<li>CI: the xcode-27 leg no longer fails when <code>xcodebuild -downloadComponent MetalToolchain</code> returns a few seconds before the toolchain is runnable; a shared <code>scripts/ensure-metal-toolchain.sh</code> polls with retries and prints diagnostics on failure.</li>
+<li>The nightly parser-throughput gate is judged on the best of up to five serialised attempts instead of one shot, so a noisy runner no longer fails it (floors unchanged: 25 / 15 / 30 MiB/s).</li>
+<li>The PTY <code>setOnBytes</code> mid-session swap test waits for the shell&#x27;s startup output to finish instead of sleeping 0.3 s, and a deterministic regression test pins that; <code>PTY.onBytes</code> now documents that one already-loaded chunk can still reach the previous handler after a swap.</li>
+</ul>
+      <a class="back" href="/">← blackbird-terminal.com</a>
+    </main>
+  </body>
+</html>
