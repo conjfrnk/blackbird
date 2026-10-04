@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blackbird 0.9.2 — release notes</title>
+    <meta name="theme-color" content="#282828" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
+    <style>
+      main.notes { max-width: 720px; margin: 0 auto; padding: 48px 24px; text-align: left; }
+      main.notes h1 { margin-bottom: 4px; }
+      main.notes .tag { margin-top: 0; }
+      main.notes h2 { font-size: 1.05rem; margin: 28px 0 8px; color: #FABD2F; }
+      main.notes ul { padding-left: 1.2em; }
+      main.notes li { margin: 6px 0; line-height: 1.5; }
+      main.notes code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+      main.notes a { color: #83A598; }
+      main.notes .back { display: inline-block; margin-top: 32px; color: #A89984; }
+    </style>
+  </head>
+  <body>
+    <main class="notes">
+      <h1>Blackbird 0.9.2</h1>
+      <p class="tag">Released 2026-10-04</p>
+      <h2>Fixed</h2>
+<ul>
+<li><strong>Ctrl+Enter (and Ctrl+Shift+Enter) reach the program in the terminal.</strong> AppKit treats Ctrl+Return as &quot;show the contextual menu&quot; and consumes it inside <code>NSApplication.sendEvent</code>, before any view&#x27;s <code>keyDown</code>: the Copy / Paste / AutoFill menu popped and the program (Claude Code&#x27;s new Ctrl+Enter send) never saw the key. A local event monitor now hands the chord to the focused terminal, which encodes it as <code>CSI 13 ; 5 u</code> under the kitty keyboard protocol (<code>13 ; 6</code> with Shift) and CR otherwise. Ctrl+keypad-Enter in a plain shell no longer sends Ctrl+C, and key release reports match the press. Right-click and Ctrl+click still show the menu; text fields keep the standard behavior. (A system-wide Ctrl+Space &quot;select previous input source&quot; shortcut is left alone: macOS keeps that chord, so disable it in System Settings if you need Ctrl+Space as NUL in the terminal.)</li>
+<li>Ctrl+keypad-Enter in a plain shell no longer sends Ctrl+C, and key-release reports for Return now match the press.</li>
+</ul>
+<h2>Known limitation</h2>
+<ul>
+<li><strong>Ctrl+Space never reaches the terminal while macOS&#x27;s &quot;Select the previous input source&quot; shortcut is on.</strong> The system consumes the chord before any app sees it (true of every Mac terminal), so tmux / Emacs / vim never get NUL. Untick that shortcut in System Settings → Keyboard → Keyboard Shortcuts → Input Sources. Details in <code>KNOWN_ISSUES.md</code>.</li>
+</ul>
+      <a class="back" href="/">← blackbird-terminal.com</a>
+    </main>
+  </body>
+</html>
