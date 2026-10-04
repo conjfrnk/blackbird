@@ -169,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installAutoUpdateBridge()
         installTabOrderObserver()
         installExternalTabActionObserver()
+        ContextMenuKeyInterceptor.install()
         NSApp.servicesProvider = self
         didFinishLaunching = true
         // A launch via `open -a Blackbird <dir>`, a folder dropped on the

@@ -103,3 +103,13 @@ extension TerminalView {
         pb.setString(url.absoluteString, forType: .string)
     }
 }
+
+/// Receives Ctrl+Return from `ContextMenuKeyInterceptor`, which AppKit would
+/// otherwise swallow (it opens the right-click menu and skips `keyDown`).
+extension TerminalView: ContextMenuKeyReceiving {
+    func receiveContextMenuChord(_ event: NSEvent) -> Bool {
+        guard session != nil else { return false }
+        keyDown(with: event)
+        return true
+    }
+}

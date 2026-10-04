@@ -6,6 +6,9 @@ import AppKit
 /// `TerminalView` (REFACTOR.md Part IV Wave-2) so the keyDown decision tree's
 /// building blocks are testable without a live `NSView`/input context.
 enum KeyEventClassifier {
+    private static let returnKeyCode: UInt16 = 36       // kVK_Return
+    private static let keypadEnterKeyCode: UInt16 = 76  // kVK_ANSI_KeypadEnter
+
     /// True when an Option+key event should bypass the IME and be encoded as a
     /// Meta chord (ESC + base char) rather than composed as a dead-key / accent.
     /// In "Use Option as Meta" mode, Option becomes the Meta modifier, so
@@ -24,6 +27,39 @@ enum KeyEventClassifier {
             && modifierFlags.contains(.option)
             && !modifierFlags.contains(.control)
             && !modifierFlags.contains(.command)
+    }
+
+    /// True for the Return chords `NSApplication.sendEvent` consumes itself —
+    /// AppKit's "show the contextual menu" keyboard gesture (Ctrl+Return, with
+    /// or without Shift). The event never reaches the window or the view's
+    /// `keyDown`, so the program (Claude Code's Ctrl+Enter send) never sees it
+    /// and the right-click menu pops instead; `ContextMenuKeyInterceptor`
+    /// re-routes it. Measured with real HID events: Ctrl+Option+Return and
+    /// Ctrl+keypad-Enter are NOT consumed (they reach `keyDown`), and ⌘ chords
+    /// stay app shortcuts, so neither qualifies.
+    static func isContextMenuKeyChord(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        keyCode == Self.returnKeyCode
+            && modifierFlags.contains(.control)
+            && !modifierFlags.contains(.option)
+            && !modifierFlags.contains(.command)
+    }
+
+    /// Return and keypad Enter. Under Ctrl their raw `characters` are not an
+    /// Enter byte (keypad Enter reports ETX, which the legacy control fast path
+    /// would send as 0x03 = SIGINT), so the encoder must decide, not that path.
+    static func isEnterKey(keyCode: UInt16) -> Bool {
+        keyCode == Self.returnKeyCode || keyCode == Self.keypadEnterKeyCode
+    }
+
+    /// The Return key is always Enter (`"\r"`) to the encoder, whatever
+    /// character Cocoa derives for it under Ctrl (Ctrl+Return can surface as
+    /// LF), so the kitty Enter mapping (`CSI 13 ; <mod> u`) always applies.
+    /// Every other key, keypad Enter included, keeps its characters.
+    static func normalizedReturnChars(keyCode: UInt16, chars: String) -> String {
+        keyCode == Self.returnKeyCode ? "\r" : chars
     }
 
     static func specialKey(for event: NSEvent) -> KeyEncoder.SpecialKey? {
@@ -119,7 +155,7 @@ enum KeyEventClassifier {
         case 89: return .kp7
         case 91: return .kp8
         case 92: return .kp9
-        case 76: return .kpEnter
+        case Self.keypadEnterKeyCode: return .kpEnter
         case 69: return .kpPlus
         case 78: return .kpMinus
         case 67: return .kpMultiply

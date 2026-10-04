@@ -2094,7 +2094,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             optionIsMeta: encoder.optionIsMeta,
             modifierFlags: event.modifierFlags
         )
-        if !optionMetaChord {
+        // Ctrl+Return arrives here via `ContextMenuKeyInterceptor`; it has
+        // nothing to compose, so keep the input context from absorbing it
+        // (an empty commit would drop the key, a non-empty one would skip the
+        // encoder's kitty framing). A live composition still owns the key.
+        let isContextMenuChord = !hasMarkedText() && KeyEventClassifier.isContextMenuKeyChord(
+            keyCode: event.keyCode, modifierFlags: event.modifierFlags
+        )
+        if !optionMetaChord && !isContextMenuChord {
             inputContext?.handleEvent(event)
         }
         return hasMarkedText() || didInsertTextViaIME
@@ -2117,6 +2124,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// C0 fast path would drop it, degrading M-C-f to plain ^F).
     private func sendControlFastPath(_ event: NSEvent, session: TerminalSession) -> Bool {
         guard event.modifierFlags.contains(.control) else { return false }
+        // Ctrl+Return / Ctrl+keypad-Enter: the raw characters aren't an Enter
+        // byte (keypad Enter is ETX → SIGINT); the encoder decides instead.
+        if KeyEventClassifier.isEnterKey(keyCode: event.keyCode) { return false }
         #if DEBUG
         Self.keyLogger.debug("keyDown: Control modifier detected")
         #endif
@@ -2194,7 +2204,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // source here for every remaining non-special printable — Meta
         // mode still wants the un-Option'd base letter so that Option+E
         // encodes to ESC "e" rather than ESC "´".
-        let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
+        let chars = KeyEventClassifier.normalizedReturnChars(
+            keyCode: event.keyCode,
+            chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
+        )
         // A key with no SpecialKey mapping whose characters are wholly
         // private-use is a function / editing / system key AppKit had no
         // printable form for. `encoder.encode(chars:)` would fall through to
@@ -2280,7 +2293,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
             return
         }
-        let chars = event.charactersIgnoringModifiers ?? event.characters ?? ""
+        let chars = KeyEventClassifier.normalizedReturnChars(
+            keyCode: event.keyCode,
+            chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
+        )
         let bytes = encoder.encode(
             chars: chars, modifiers: mods, mode: termMode, eventType: .release
         )
