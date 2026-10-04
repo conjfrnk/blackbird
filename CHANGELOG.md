@@ -7,8 +7,14 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-04
+
 ### Fixed
 - **Ctrl+Enter (and Ctrl+Shift+Enter) reach the program in the terminal.** AppKit treats Ctrl+Return as "show the contextual menu" and consumes it inside `NSApplication.sendEvent`, before any view's `keyDown`: the Copy / Paste / AutoFill menu popped and the program (Claude Code's new Ctrl+Enter send) never saw the key. A local event monitor now hands the chord to the focused terminal, which encodes it as `CSI 13 ; 5 u` under the kitty keyboard protocol (`13 ; 6` with Shift) and CR otherwise. Ctrl+keypad-Enter in a plain shell no longer sends Ctrl+C, and key release reports match the press. Right-click and Ctrl+click still show the menu; text fields keep the standard behavior. (A system-wide Ctrl+Space "select previous input source" shortcut is left alone: macOS keeps that chord, so disable it in System Settings if you need Ctrl+Space as NUL in the terminal.)
+- Ctrl+keypad-Enter in a plain shell no longer sends Ctrl+C, and key-release reports for Return now match the press.
+
+### Known limitation
+- **Ctrl+Space never reaches the terminal while macOS's "Select the previous input source" shortcut is on.** The system consumes the chord before any app sees it (true of every Mac terminal), so tmux / Emacs / vim never get NUL. Untick that shortcut in System Settings → Keyboard → Keyboard Shortcuts → Input Sources. Details in `KNOWN_ISSUES.md`.
 
 ## [0.9.1] - 2026-10-01
 
