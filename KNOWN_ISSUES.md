@@ -125,6 +125,23 @@ The flash is documented rather than fixed. If Apple ships a suppression API in a
 
 Not supported: ZWJ sequences like 👨‍👩‍👧 (family) still render as the base 👨 scalar because atlas keys are single `UnicodeScalar`. Proper grapheme-cluster keying is future work — a rare enough case that it stayed out of v1.
 
+## Ctrl+Space never reaches the terminal while macOS's input-source shortcut is on
+
+macOS reserves Ctrl+Space (and Ctrl+Shift+Space) for "Select the previous
+input source" once a second keyboard layout is enabled. The window server
+consumes the chord before any app sees it, so tmux / Emacs / vim never get
+NUL, in Blackbird and every other Mac terminal (widely reported: the system
+shortcut "takes precedence over application-specific shortcuts"; the
+documented fix is turning the shortcut off). Treated as not fixable in the
+app: a local event monitor can only act on events the system delivers, and an
+interceptor + Settings toggle for it could not be verified against a real
+keyboard (events posted straight to a process bypass the window server's
+hotkey handling, so they prove nothing), i.e. likely dead, misleading UI. A
+patch for that approach is NOT shipped. Workaround: System Settings → Keyboard → Keyboard
+Shortcuts → Input Sources → untick "Select the previous input source" (and the
+"next" one for Ctrl+Opt+Space). Ctrl+Return is different — AppKit consumes it
+inside `NSApplication.sendEvent` — and *is* fixed (`ContextMenuKeyInterceptor`).
+
 ## Kitty flag 4 / 16 — US-layout only
 
 **Flag 4 (`reportAlternateKeys`)** emits `base:shifted` for every ASCII letter and for the 21 US-layout shifted symbols (`!`→`1`, `@`→`2`, …, `|`→`\`). The Kitty key-code field is `unicode-key : shifted-key : base-layout-key`, so the shifted codepoint occupies the second sub-field; the third (base-layout / alt-layout) field is omitted because macOS exposes no per-key alternate-layout codepoint. (Through v0.2.9 this emitted `base:0:shifted`, which misread the spec — a literal `0` in the shifted slot and the real shifted value pushed into the base-layout slot — so a spec-compliant TUI read shifted-key = U+0000. Fixed to the spec-correct `base:shifted` shape.) Non-US layouts (German QWERTZ, Dvorak, BÉPO, …) still see only the shifted char with no alt-layout slot — the reverse lookup would need Carbon's `UCKeyTranslate` + current-layout plumbing, deferred to a dedicated session.
