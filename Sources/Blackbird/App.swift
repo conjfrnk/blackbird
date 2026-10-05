@@ -178,10 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // window(s). Only if none of them resolves does $HOME open.
         let held = pendingOpenURLs
         pendingOpenURLs = []
-        var opened = 0
-        for url in held where openTerminalWindow(atFileURL: url) != nil {
-            opened += 1
-        }
+        let opened = openTerminalWindows(atFileURLs: held)
         if opened == 0 {
             openFirstWindow()
         }
@@ -210,10 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pendingOpenURLs.append(contentsOf: urls)
             return
         }
-        var opened = 0
-        for url in urls where openTerminalWindow(atFileURL: url) != nil {
-            opened += 1
-        }
+        let opened = openTerminalWindows(atFileURLs: urls)
         if opened == 0 {
             AppDelegate.launchLogger.error("open: none of \(urls.count, privacy: .public) URL(s) named an existing folder or file")
             NSSound.beep()
@@ -238,13 +232,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             error.pointee = "The pasteboard carried no folder."
             return
         }
+        let opened = openTerminalWindows(atFileURLs: urls)
+        if opened == 0 {
+            error.pointee = "None of the items is an existing folder or file."
+        }
+    }
+
+    /// Open one window per URL that resolves (see `openTerminalWindow`);
+    /// returns how many did. Callers own the zero-opened handling.
+    @discardableResult
+    private func openTerminalWindows(atFileURLs urls: [URL]) -> Int {
         var opened = 0
         for url in urls where openTerminalWindow(atFileURL: url) != nil {
             opened += 1
         }
-        if opened == 0 {
-            error.pointee = "None of the items is an existing folder or file."
-        }
+        return opened
     }
 
     /// Resolve a file URL to the directory a new session should start in:
@@ -713,12 +715,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // TabOrderCoordinator. `tabbedWindows` is system order and would
         // route ⌘1-9 against the system permutation after the user has
         // dragged a pill, jumping to a tab whose pill sits elsewhere.
-        let tabs: [NSWindow]
-        if let group = window.tabGroup {
-            tabs = TabOrderCoordinator.shared.orderedTabs(for: group)
-        } else {
-            tabs = [window]
-        }
+        let tabs = TabOrderCoordinator.shared.orderedTabs(of: window)
         let index = item.tag - 1
         guard index >= 0, index < tabs.count else {
             Self.menuLogger.debug(
@@ -811,12 +808,7 @@ extension AppDelegate: NSMenuItemValidation {
             // guard-fail silently. Counts converge instantly in
             // practice but the inconsistency is gratuitous; both
             // paths go through the coordinator.
-            let tabs: [NSWindow]
-            if let group = win.tabGroup {
-                tabs = TabOrderCoordinator.shared.orderedTabs(for: group)
-            } else {
-                tabs = [win]
-            }
+            let tabs = TabOrderCoordinator.shared.orderedTabs(of: win)
             return item.tag >= 1 && item.tag <= tabs.count
         case #selector(closeWindow(_:)):
             return ownedKeyWindow() != nil

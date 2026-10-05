@@ -108,12 +108,7 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
         // pill strip is the user's source of truth, so the strip — and
         // every position-based consumer (⌘1-9, ⌘⇧] / ⌘⇧[) — reads from
         // the coordinator. Selection stays identity-based.
-        let tabs: [NSWindow]
-        if let group = window.tabGroup {
-            tabs = TabOrderCoordinator.shared.orderedTabs(for: group)
-        } else {
-            tabs = [window]
-        }
+        let tabs = TabOrderCoordinator.shared.orderedTabs(of: window)
         let selected = window.tabGroup?.selectedWindow ?? window
         // `stripView` IS the accessory's view and `update` sizes it (size
         // only — its origin belongs to AppKit and the pill placement

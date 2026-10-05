@@ -113,6 +113,15 @@ final class TabOrderCoordinator {
                          commitTo: ObjectIdentifier(group))
     }
 
+    /// User-visible tab order for the group `window` belongs to, or just
+    /// `[window]` when it is untabbed. The single definition of "what counts
+    /// as a tab and in what order" for ⌘1-9 (action and menu validation) and
+    /// the pill strip, so they cannot diverge.
+    func orderedTabs(of window: NSWindow) -> [NSWindow] {
+        guard let group = window.tabGroup else { return [window] }
+        return orderedTabs(for: group)
+    }
+
     /// Move `window` from its current visual position to `newIndex`
     /// (clamped to `[0, count-1]`). No-op if the window isn't in the
     /// group or the index doesn't change order. Posts
