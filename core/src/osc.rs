@@ -127,6 +127,21 @@ pub(crate) struct Osc99Pending {
     pub(crate) body: Vec<u8>,
 }
 
+/// Per-field (title, body) byte cap on a pending chunked OSC 99. The
+/// emitted notification is cut to 128/1024 chars anyway, so 64 KiB is
+/// invisible to real senders; without it a stream of same-id `d=0`
+/// chunks grows the accumulator without bound (the vte 8 MiB cap is per
+/// sequence, not per sum). Bytes past the cap are silently dropped.
+const OSC99_PENDING_FIELD_MAX_BYTES: usize = 64 * 1024;
+
+/// Append `src` to `dst`, never letting `dst` exceed
+/// [`OSC99_PENDING_FIELD_MAX_BYTES`]. A cut inside a UTF-8 scalar is
+/// harmless: `notification_field` decodes lossily.
+fn append_capped(dst: &mut Vec<u8>, src: &[u8]) {
+    let room = OSC99_PENDING_FIELD_MAX_BYTES.saturating_sub(dst.len());
+    dst.extend_from_slice(&src[..src.len().min(room)]);
+}
+
 /// Maximum byte length of a single OSC 7 URL accepted for percent-decode
 /// (audit L-20, 2026-04-29). OSC 8's `OSC8_URI_MAX` is 4096 by the same
 /// reasoning: a legitimate `file://` URL for a cwd is at most a few
@@ -591,8 +606,8 @@ impl OscScanner<'_> {
             body: Vec::new(),
         });
         match part {
-            b"title" => pending.title.extend_from_slice(&payload),
-            b"body" => pending.body.extend_from_slice(&payload),
+            b"title" => append_capped(&mut pending.title, &payload),
+            b"body" => append_capped(&mut pending.body, &payload),
             _ => {}
         }
         if more {
