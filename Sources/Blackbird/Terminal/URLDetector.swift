@@ -112,13 +112,21 @@ public enum URLDetector {
     /// continue into the next row's leftmost column.
     private static func isURLContinuationChar(_ ch: Character?) -> Bool {
         guard let ch else { return false }
-        let set = CharacterSet(charactersIn:
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
-            "abcdefghijklmnopqrstuvwxyz" +
-            "0123456789" +
-            "-._~:/?#[]@!$&'()*+,;=%"
-        )
-        return ch.unicodeScalars.allSatisfy { set.contains($0) }
+        // Pure scalar switch over the same 85-member set the old per-call
+        // `CharacterSet(charactersIn:)` held (A-Z a-z 0-9 and
+        // `-._~:/?#[]@!$&'()*+,;=%`); no per-call allocation. `allSatisfy`
+        // keeps the old semantics: any non-member scalar (including the
+        // extra scalars of a multi-scalar grapheme) rejects.
+        return ch.unicodeScalars.allSatisfy { scalar in
+            switch scalar {
+            case "A"..."Z", "a"..."z", "0"..."9",
+                 "-", ".", "_", "~", ":", "/", "?", "#", "[", "]", "@",
+                 "!", "$", "&", "'", "(", ")", "*", "+", ",", ";", "=", "%":
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     /// Scan every visible row of `snapshot`. Returns matches whose `line`
@@ -185,45 +193,49 @@ public enum URLDetector {
             // suppress email matches that fall inside a URL (e.g. the
             // `user@host.com` substring of `https://user:pass@host.com`).
             var urlColRangesThisRow: [(startCol: Int, endCol: Int)] = []
-            forEachURLRange(
-                in: line,
-                nsLine: nsLine,
-                from: searchStartUTF16
-            ) { r, _ in
-                let substring = nsLine.substring(with: r)
-                let bufferLine = Int32(row - snapshot.displayOffset)
-                // Defensive bounds — the map is always the exact length of
-                // `nsLine.length`, but pin the reads just in case a future
-                // snapshot helper returns an odd-width cell (e.g. a
-                // combining-mark preceding a base glyph).
-                let startIdx = min(max(0, r.location), utf16ToCol.count - 1)
-                let endIdx = min(r.location + r.length - 1, utf16ToCol.count - 1)
-                let startCol = utf16ToCol[startIdx]
-                let endCol = utf16ToCol[endIdx]
-                let finalURLString = Self.wrapJoinedURL(
-                    firstRowSubstring: substring,
-                    row: row,
-                    endCol: endCol,
-                    snapshot: snapshot,
-                    consumedNextRowPrefix: &consumedNextRowPrefix
-                )
-                guard let url = URL(string: finalURLString) else {
-                    #if DEBUG
-                    // Diagnosability: silent drops mean a future regex
-                    // loosening can break URL parsing without anyone
-                    // noticing. Log at debug level in DEBUG builds.
-                    // Audit cwd-hyperlink F11.
-                    debugPrint("URLDetector: regex matched but URL(string:) rejected: \(finalURLString)")
-                    #endif
-                    return
+            // Every URL match needs the literal `://`, so a row with no
+            // ASCII ':' cannot match -- skip the regex pass entirely.
+            if line.utf8.contains(0x3A) {
+                forEachURLRange(
+                    in: line,
+                    nsLine: nsLine,
+                    from: searchStartUTF16
+                ) { r, _ in
+                    let substring = nsLine.substring(with: r)
+                    let bufferLine = Int32(row - snapshot.displayOffset)
+                    // Defensive bounds — the map is always the exact length of
+                    // `nsLine.length`, but pin the reads just in case a future
+                    // snapshot helper returns an odd-width cell (e.g. a
+                    // combining-mark preceding a base glyph).
+                    let startIdx = min(max(0, r.location), utf16ToCol.count - 1)
+                    let endIdx = min(r.location + r.length - 1, utf16ToCol.count - 1)
+                    let startCol = utf16ToCol[startIdx]
+                    let endCol = utf16ToCol[endIdx]
+                    let finalURLString = Self.wrapJoinedURL(
+                        firstRowSubstring: substring,
+                        row: row,
+                        endCol: endCol,
+                        snapshot: snapshot,
+                        consumedNextRowPrefix: &consumedNextRowPrefix
+                    )
+                    guard let url = URL(string: finalURLString) else {
+                        #if DEBUG
+                        // Diagnosability: silent drops mean a future regex
+                        // loosening can break URL parsing without anyone
+                        // noticing. Log at debug level in DEBUG builds.
+                        // Audit cwd-hyperlink F11.
+                        debugPrint("URLDetector: regex matched but URL(string:) rejected: \(finalURLString)")
+                        #endif
+                        return
+                    }
+                    out.append(URLMatch(
+                        url: url,
+                        line: bufferLine,
+                        startCol: startCol,
+                        endCol: endCol
+                    ))
+                    urlColRangesThisRow.append((startCol: startCol, endCol: endCol))
                 }
-                out.append(URLMatch(
-                    url: url,
-                    line: bufferLine,
-                    startCol: startCol,
-                    endCol: endCol
-                ))
-                urlColRangesThisRow.append((startCol: startCol, endCol: endCol))
             }
             // Email pass — runs after the URL pass so we can suppress
             // emails inside URL matches (the `user@host.com` substring of
