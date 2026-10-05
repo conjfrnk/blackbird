@@ -2199,9 +2199,9 @@ fn osc8_intern_cache_is_retained_on_bbterm() {
         // allocation (not a fresh one).
         let cached_arc = bb
             .uri_cstr_cache
-            .get("https://x.test/")
+            .get(b"https://x.test/".as_slice())
             .expect("URI must be interned after first snapshot");
-        let cached_ptr = cached_arc.as_ptr();
+        let cached_ptr = cached_arc.arc().as_ptr();
 
         // Second snapshot — same URI still in the grid. Must reuse.
         let s2 = bb_term_take_snapshot(term);
@@ -2214,10 +2214,10 @@ fn osc8_intern_cache_is_retained_on_bbterm() {
         );
         let cached_arc_2 = bb
             .uri_cstr_cache
-            .get("https://x.test/")
+            .get(b"https://x.test/".as_slice())
             .expect("URI must still be interned on second snapshot");
         assert_eq!(
-            cached_arc_2.as_ptr(),
+            cached_arc_2.arc().as_ptr(),
             cached_ptr,
             "repeated URI across snapshots must share the same Arc<CStr> \
                  allocation, not re-intern"
@@ -3124,4 +3124,19 @@ fn pty_write_cap_holds_across_paths() {
         // this one was leaking the BBTerm. Symmetric cleanup.
         bb_term_free(term);
     }
+}
+
+/// `UriKey` must hash like the `[u8]` it borrows as, or `HashSet::get(&[u8])`
+/// silently misses and the intern cache re-allocates every snapshot.
+#[test]
+fn uri_key_borrow_lookup_agrees_with_stored_hash() {
+    let mut set = std::collections::HashSet::new();
+    let arc: std::sync::Arc<std::ffi::CStr> =
+        std::ffi::CString::new("https://k.test/a").unwrap().into();
+    set.insert(crate::UriKey::new(std::sync::Arc::clone(&arc)));
+    let hit = set
+        .get(b"https://k.test/a".as_slice())
+        .expect("byte lookup must find the interned entry");
+    assert!(std::sync::Arc::ptr_eq(hit.arc(), &arc));
+    assert!(!set.contains(b"https://k.test/b".as_slice()));
 }

@@ -98,6 +98,43 @@ pub enum BBPromptMarkKind {
 // BBTerm
 // ---------------------------------------------------------------------------
 
+/// Set element for `BBTerm::uri_cstr_cache`: the interned `Arc<CStr>` is the
+/// only copy of the URI bytes. Hashing and equality go through `to_bytes()`
+/// (no NUL), and `Borrow<[u8]>` matches `<[u8] as Hash>`, so
+/// `set.get(uri_str.as_bytes())` finds an entry without a `String` key copy.
+#[derive(Debug)]
+pub(crate) struct UriKey(Arc<std::ffi::CStr>);
+
+impl UriKey {
+    pub(crate) fn new(arc: Arc<std::ffi::CStr>) -> Self {
+        Self(arc)
+    }
+
+    pub(crate) fn arc(&self) -> &Arc<std::ffi::CStr> {
+        &self.0
+    }
+}
+
+impl PartialEq for UriKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bytes() == other.0.to_bytes()
+    }
+}
+
+impl Eq for UriKey {}
+
+impl std::hash::Hash for UriKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bytes().hash(state);
+    }
+}
+
+impl std::borrow::Borrow<[u8]> for UriKey {
+    fn borrow(&self) -> &[u8] {
+        self.0.to_bytes()
+    }
+}
+
 /// Opaque handle exposed to Swift.
 ///
 /// `callback` and `color_queue` are shared with the owned `Term`'s
@@ -226,9 +263,10 @@ pub struct BBTerm {
     /// eviction would invalidate the `*const c_char` returned by
     /// `bb_snap_link_url` on still-live snapshots that reference those
     /// Arcs.
-    pub(crate) uri_cstr_cache: std::collections::HashMap<String, Arc<std::ffi::CStr>>,
+    pub(crate) uri_cstr_cache: std::collections::HashSet<UriKey>,
     /// Total bytes currently retained by `uri_cstr_cache` (sum of URI byte
-    /// lengths, excluding the terminating NUL). Drives the
+    /// lengths, excluding the terminating NUL; each URI is stored once,
+    /// inside its `Arc<CStr>`). Drives the
     /// `OSC8_TOTAL_INTERN_BYTES_CAP` gate in `bb_term_take_snapshot`.
     pub(crate) uri_cache_bytes: usize,
     /// One-shot latch: have we already emitted the per-snapshot
@@ -406,7 +444,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc99_pending: None,
             xtgettcap_buf: Vec::with_capacity(64),
             callback,
-            uri_cstr_cache: std::collections::HashMap::new(),
+            uri_cstr_cache: std::collections::HashSet::new(),
             uri_cache_bytes: 0,
             osc8_id_exhaustion_logged: false,
             osc8_intern_cap_logged: false,

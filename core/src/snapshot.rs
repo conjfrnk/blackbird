@@ -15,7 +15,7 @@ use alacritty_terminal::term::TermMode;
 
 use crate::color::color_to_rgb;
 use crate::scrub::contains_bidi_or_invisible;
-use crate::{BBTerm, UNDERLINE_COLOR_UNSET};
+use crate::{BBTerm, UriKey, UNDERLINE_COLOR_UNSET};
 
 /// Flat cell layout for cross-language consumption. Swift reads these directly.
 #[repr(C)]
@@ -561,8 +561,10 @@ fn intern_osc8_links(
     local_to_final.push(0); // local 0 reserved for "no link"
     for uri in phase1_uris {
         let uri_str: &str = uri.as_ref();
-        let cstr_arc: Option<Arc<std::ffi::CStr>> = if let Some(existing) =
-            bb.uri_cstr_cache.get(uri_str).cloned()
+        let cstr_arc: Option<Arc<std::ffi::CStr>> = if let Some(existing) = bb
+            .uri_cstr_cache
+            .get(uri_str.as_bytes())
+            .map(|k| Arc::clone(k.arc()))
         {
             Some(existing)
         } else if bb.uri_cache_bytes.saturating_add(uri_str.len()) > OSC8_TOTAL_INTERN_BYTES_CAP {
@@ -587,8 +589,7 @@ fn intern_osc8_links(
             match std::ffi::CString::new(uri_str) {
                 Ok(cs) => {
                     let arc: Arc<std::ffi::CStr> = cs.into();
-                    bb.uri_cstr_cache
-                        .insert(uri_str.to_owned(), Arc::clone(&arc));
+                    bb.uri_cstr_cache.insert(UriKey::new(Arc::clone(&arc)));
                     bb.uri_cache_bytes += uri_str.len();
                     Some(arc)
                 }
