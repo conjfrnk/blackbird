@@ -342,3 +342,25 @@ fn osc8_uri_with_safe_unicode_still_attributes() {
         "OSC 8 URI with safe unicode (percent-encoded checkmark) must still attribute"
     );
 }
+
+#[test]
+fn osc8_multi_cell_runs_resolve_per_cell() {
+    // Per-run memoisation in the snapshot loop must not change per-cell
+    // results: a bidi URI stays unlinked across its whole run; two runs with
+    // the same URI but different explicit OSC 8 ids both resolve to that URI;
+    // an unlinked cell between two cells of one run stays unlinked.
+    let bidi = "\x1b]8;;https://evil.test/\u{202E}gpj\x1b\\abc\x1b]8;;\x1b\\";
+    for col in 0..3 {
+        assert_eq!(snap_link_for_cell(bidi.as_bytes(), 0, col), None);
+    }
+    let seq = "\x1b]8;id=a;https://example.com\x1b\\xy\x1b]8;;\x1b\\ \
+               \x1b]8;id=b;https://example.com\x1b\\zw\x1b]8;;\x1b\\";
+    for col in [0u16, 1, 3, 4] {
+        assert_eq!(
+            snap_link_for_cell(seq.as_bytes(), 0, col).as_deref(),
+            Some("https://example.com"),
+            "col {col}"
+        );
+    }
+    assert_eq!(snap_link_for_cell(seq.as_bytes(), 0, 2), None);
+}

@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::cell::Flags as CellFlags;
+use alacritty_terminal::term::cell::{Flags as CellFlags, Hyperlink};
 use alacritty_terminal::term::TermMode;
 
 use crate::color::color_to_rgb;
@@ -513,15 +513,18 @@ fn resolve_link_id(
         Some(u) if !u.is_empty() && u.len() <= OSC8_URI_MAX => u,
         _ => return 0,
     };
+    // Dedup lookup BEFORE the bidi scan: `local_uri_to_id` only ever holds URIs
+    // that already passed the empty / oversize / bidi checks below, so a hit
+    // skips the full-URI scan on a repeated URI.
+    if let Some(&id) = local_uri_to_id.get(uri) {
+        return id;
+    }
     // Audit S4-001 / fix-#03: drop attribution for URIs carrying raw
     // bidi-override / invisible scalars (parity with the OSC 7 + title scrub
     // paths) so a display-side consumer can't be tricked into rendering a
     // visually-flipped URL the user reads.
     if contains_bidi_or_invisible(uri.as_bytes()) {
         return 0;
-    }
-    if let Some(&id) = local_uri_to_id.get(uri) {
-        return id;
     }
     if phase1_uris.len() + 1 >= u16::MAX as usize {
         // Out of per-snapshot ids (65 534 distinct URIs — well past any real
@@ -683,16 +686,33 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
     // `bb.osc8_id_exhaustion_logged` field can't be touched while
     // `grid` borrows `bb.term`). Audit S2-014.
     let mut osc8_id_exhausted_this_snapshot = false;
+    // Memo of the last resolved link. Adjacent cells of one OSC 8 run share the
+    // same `Arc<HyperlinkInner>` (Term::input clones the cursor template's
+    // Hyperlink), so `Hyperlink == Hyperlink` hits Arc's pointer-equality
+    // short-circuit and the whole URI validate + hash is paid once per run, not
+    // per cell. Equal Hyperlinks carry equal URIs, hence the same id (and the
+    // 0 results — bidi / oversize / exhausted — are deterministic within one
+    // snapshot). Updated only on linked cells so an unlinked cell between two
+    // cells of one run doesn't break the memo.
+    let mut last_link: Option<(Hyperlink, u16)> = None;
     for indexed in grid.display_iter() {
-        // OSC 8 link id (phase 1: dedup within this snapshot). The
-        // `Option<Hyperlink>` temporary lives to the end of this statement, so
-        // the borrowed `&str` handed to `resolve_link_id` is valid for the call.
-        let link_id = resolve_link_id(
-            indexed.cell.hyperlink().as_ref().map(|h| h.uri()),
-            &mut phase1_uris,
-            &mut local_uri_to_id,
-            &mut osc8_id_exhausted_this_snapshot,
-        );
+        // OSC 8 link id (phase 1: dedup within this snapshot).
+        let link_id = match indexed.cell.hyperlink() {
+            None => 0,
+            Some(h) => match &last_link {
+                Some((lh, id)) if *lh == h => *id,
+                _ => {
+                    let id = resolve_link_id(
+                        Some(h.uri()),
+                        &mut phase1_uris,
+                        &mut local_uri_to_id,
+                        &mut osc8_id_exhausted_this_snapshot,
+                    );
+                    last_link = Some((h, id));
+                    id
+                }
+            },
+        };
         // Underline colour (CSI 58): alacritty stores as Option<Color>.
         // None → sentinel (shader falls back to fg). Some(c) → resolve
         // through the palette, same as fg/bg so indexed colours route
