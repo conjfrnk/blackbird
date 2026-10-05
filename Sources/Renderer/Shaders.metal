@@ -34,6 +34,11 @@ struct VertexOut {
     float4 decorationPx;  // see FrameUniforms.decorationPx
 };
 
+// Shader-internal marker (NOT a CellAttributeMask bit — the CPU never sets
+// it): vertex_cell ORs it into `flags` for instances whose UV rect is empty.
+// Bit 31 keeps the Swift side's reserved bits 8-30 free.
+constant uint BB_ATTR_NO_GLYPH           = 1u << 31;
+
 vertex VertexOut vertex_cell(
     uint vid [[vertex_id]],
     uint iid [[instance_id]],
@@ -64,7 +69,13 @@ vertex VertexOut vertex_cell(
     out.fgColor = inst.fgColor;
     out.bgColor = inst.bgColor;
     out.accentColor = u.accentColor;
-    out.flags = inst.attrs.x;
+    // Glyph-less quads (bg / selection / decoration-only cells, wide-char
+    // spacers) are emitted with a zero UV rect. Mark them so the fragment
+    // stage skips the atlas fetch: without this they sample texel (0,0) of
+    // slot 0, which is blank only until the first atlas saturation flush
+    // rewinds to slot 0 and rasterises a (possibly full-block) glyph there.
+    out.flags = inst.attrs.x
+              | ((inst.uvSize.x == 0.0 && inst.uvSize.y == 0.0) ? BB_ATTR_NO_GLYPH : 0u);
     out.underlineColorPacked = inst.attrs.z;
     out.localPx = corners[vid] * inst.quadSizePx;
     out.quadSizePx = inst.quadSizePx;
@@ -74,6 +85,7 @@ vertex VertexOut vertex_cell(
 }
 
 // CellAttributeMask bits — must stay in lockstep with Sources/Renderer/CellInstance.swift.
+// (BB_ATTR_NO_GLYPH, bit 31, is declared above vertex_cell and is shader-internal.)
 // Lifted to named constants so the shader branches read like the Swift side.
 constant uint BB_ATTR_LINK_HOVER         = 1u << 0;
 constant uint BB_ATTR_STRIKE             = 1u << 1;
@@ -156,7 +168,12 @@ fragment float4 fragment_cell(
     } else {
         // `fgColor.a` is 1 today; honouring it keeps the formula correct if
         // DIM ever moves to an alpha encoding.
-        float coverage = atlas.sample(s, in.uv).r * in.fgColor.a;
+        // Glyph-less quad: coverage is 0 by construction; the flag is flat
+        // across the quad so the skipped fetch costs no divergence.
+        float coverage = 0.0;
+        if ((flags & BB_ATTR_NO_GLYPH) == 0u) {
+            coverage = atlas.sample(s, in.uv).r * in.fgColor.a;
+        }
         base = float4(in.fgColor.rgb * coverage + bgPre * (1.0 - coverage),
                       coverage + bg.a * (1.0 - coverage));
     }

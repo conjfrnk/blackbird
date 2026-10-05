@@ -9,7 +9,9 @@ import simd
 ///
 /// Bit-budget reservation: bits 0-7 are render-state toggles; bits 8-31
 /// are reserved for future per-cell data (e.g., an underline-color index
-/// once colored underlines land in Task 2.5).
+/// once colored underlines land in Task 2.5). Bit 31 is the exception: the
+/// vertex shader sets `BB_ATTR_NO_GLYPH` there itself for zero-UV-rect
+/// (glyph-less) instances, so the CPU must never set it.
 struct CellAttributeMask: OptionSet {
     let rawValue: UInt32
     init(rawValue: UInt32) { self.rawValue = rawValue }
