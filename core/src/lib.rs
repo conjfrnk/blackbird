@@ -186,29 +186,12 @@ pub struct BBTerm {
     /// skip the osc_parser entirely — the dominant case for `yes(1)`,
     /// `cat` on logs, and pipe output. Saves ~10-15 % on plain_text.
     pub(crate) osc_possibly_pending: bool,
-    /// XTGETTCAP (Kitty capability query) parser state. `in_xtgettcap`
-    /// latches true between `hook` (header `DCS + q` seen) and `unhook`
-    /// (ST terminator seen); `xtgettcap_buf` accumulates the payload
-    /// bytes. Persists across `bb_term_input` calls so a DCS fragmented
-    /// across PTY reads resolves to a single reply. See `OscScanner`'s
-    /// `hook`/`put`/`unhook` and `core/tests/xtgettcap.rs`.
-    pub(crate) in_xtgettcap: bool,
-    /// DECRQSS parser state (see `OscScanner::hook`).
-    pub(crate) in_decrqss: bool,
-    pub(crate) decrqss_buf: Vec<u8>,
+    /// DCS (XTGETTCAP / DECRQSS), chunked OSC 99 and `modifyOtherKeys`
+    /// state that persists across `bb_term_input` calls. See `OscTapState`.
+    pub(crate) osc_tap: crate::osc::OscTapState,
     /// App version advertised by XTVERSION; empty until
     /// `bb_term_set_terminal_version` is called.
     pub(crate) terminal_version: String,
-    /// Chunked kitty OSC 99 awaiting its final chunk (see `OscScanner`).
-    pub(crate) osc99_pending: Option<crate::osc::Osc99Pending>,
-    pub(crate) xtgettcap_buf: Vec<u8>,
-    /// xterm `modifyOtherKeys` current level. `0` = off, `1` = level 1
-    /// (encode colliders + "unmapped" Ctrl combos), `2` = level 2
-    /// (encode every modified printable, overriding legacy byte
-    /// mappings). Driven by parser observations of `CSI > 4 ; N m`.
-    /// Swift-side KeyEncoder reads this indirectly via
-    /// `bb_mode::MODIFY_OTHER_KEYS` (any non-zero level → bit set).
-    pub(crate) modify_other_keys: u8,
     /// OSC 133 A/B/C rate-limit window (audit synthesis #10). See
     /// `PROMPT_MARK_PER_SECOND`. Persisted across `bb_term_input` calls so
     /// the sliding window covers prompt marks that arrive in different
@@ -218,26 +201,9 @@ pub struct BBTerm {
     /// `OSC7_INGEST_PER_SECOND`. Persisted across `bb_term_input` calls — same
     /// rationale as `prompt_mark_rate`.
     pub(crate) osc7_rate: EventRateState,
-    /// OSC 7 reject-log latches, one bool per `OSC7_REJECT_*` class
-    /// index. Audit L3: pre-fix these were a process-wide
-    /// `static [Once; 8]`, so the first BBTerm in the process to hit
-    /// each rejection class consumed the latch and sibling tabs (or
-    /// reborn shells in the same tab) silently dropped the same
-    /// reject. Per-instance flags restore one-shot-per-session log
-    /// semantics without re-introducing log flood.
-    pub(crate) osc7_reject_logged: [bool; 8],
-    /// One-shot latch for the OSC 133 D non-digit reject path (audit
-    /// L1 + reviewer follow-up). Same per-instance / one-shot rule
-    /// as `osc7_reject_logged` but only one class so a single bool
-    /// suffices.
-    pub(crate) osc133_d_nondigit_logged: bool,
-    /// One-shot latch for the OSC 133 A/B/C tainted-payload reject path
-    /// (audit S3R-001/S3R-002). Same per-instance / one-shot rule as
-    /// `osc133_d_nondigit_logged`.
-    pub(crate) osc133_abc_tainted_logged: bool,
-    /// One-shot latch for the OSC 133 rate-cap drop breadcrumb (audit
-    /// S5-009). Same per-instance / one-shot rule as its siblings.
-    pub(crate) osc133_rate_limited_logged: bool,
+    /// Scanner-side one-shot reject-log latches (OSC 7 / OSC 133). See
+    /// `OscLatches`; `bb_term_clear_all` leaves them alone.
+    pub(crate) osc_latches: crate::osc::OscLatches,
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
     /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
     /// 256+ allocations, but a hostile stream can fan replies across many
@@ -437,24 +403,16 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             color_query_enabled: false,
             osc_possibly_pending: false,
             poisoned: std::cell::Cell::new(false),
-            in_xtgettcap: false,
-            in_decrqss: false,
-            decrqss_buf: Vec::with_capacity(16),
+            osc_tap: crate::osc::OscTapState::default(),
             terminal_version: String::new(),
-            osc99_pending: None,
-            xtgettcap_buf: Vec::with_capacity(64),
             callback,
             uri_cstr_cache: std::collections::HashSet::new(),
             uri_cache_bytes: 0,
             osc8_id_exhaustion_logged: false,
             osc8_intern_cap_logged: false,
-            modify_other_keys: 0,
             prompt_mark_rate: EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW),
             osc7_rate: EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW),
-            osc7_reject_logged: [false; 8],
-            osc133_d_nondigit_logged: false,
-            osc133_abc_tainted_logged: false,
-            osc133_rate_limited_logged: false,
+            osc_latches: crate::osc::OscLatches::default(),
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
         });
@@ -1282,11 +1240,8 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         // grid; our scanner is a separate vte::Parser tracked alongside.
         bb.osc_parser = Parser::new();
         bb.osc_possibly_pending = false;
-        bb.in_xtgettcap = false;
-        bb.xtgettcap_buf.clear();
-        bb.in_decrqss = false;
-        bb.decrqss_buf.clear();
-        bb.osc99_pending = None;
+        // (also zeroes `modify_other_keys`; see H-3 item 3 below)
+        bb.osc_tap.reset();
         // Rate-limit budgets are session state. A pre-clear OSC 11 flood
         // shouldn't leave the post-clear session unable to answer
         // legitimate color queries for the rest of the 1s window.
@@ -1302,7 +1257,7 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         //   2. `osc7_rate` — pre-clear OSC 7 flood ate the 1-s ingest
         //      budget, so post-clear `cd` events dropped silently.
         //   3. `modify_other_keys` — xterm modifyOtherKeys mode persisted
-        //      across the wipe.
+        //      across the wipe (reset above via `osc_tap.reset()`).
         //   4. `pty_write_rate` (Arc on the callback) — pre-clear OSC 11
         //      flood ate the 1-s PTY-write budget.
         //   5. `uri_cstr_cache` / `uri_cache_bytes` — pre-clear OSC 8
@@ -1310,7 +1265,6 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         //      until app relaunch (the 1 MiB byte-cap stayed exhausted).
         bb.prompt_mark_rate = EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW);
         bb.osc7_rate = EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW);
-        bb.modify_other_keys = 0;
         bb.callback.pty_write_rate.reset();
         bb.callback.reset_event_rates();
 

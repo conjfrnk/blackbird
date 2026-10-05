@@ -468,13 +468,13 @@ pub(crate) fn extract_mode(term_mode: &TermMode) -> u32 {
 }
 
 /// Like `extract_mode` but also folds in the `modifyOtherKeys` bit
-/// sourced from `BBTerm.modify_other_keys` (any non-zero level → bit
+/// sourced from `BBTerm.osc_tap.modify_other_keys` (any non-zero level → bit
 /// set). Kept separate from `extract_mode` so the pure
 /// `TermMode → u32` mapping (exposed to callers that only see the
 /// alacritty mode) stays argument-clean.
 pub(crate) fn extract_mode_with_extras(bb: &BBTerm) -> u32 {
     let mut m = extract_mode(bb.term.mode());
-    if bb.modify_other_keys > 0 {
+    if bb.osc_tap.modify_other_keys > 0 {
         m |= bb_mode::MODIFY_OTHER_KEYS;
     }
     m
@@ -577,8 +577,7 @@ fn intern_osc8_links(
             // u16 id ceiling next door, this cap is actually reachable in a
             // long session (~16 400 distinct 64-byte URIs) and only
             // `bb_term_clear_all` clears the cache.
-            if !bb.osc8_intern_cap_logged {
-                bb.osc8_intern_cap_logged = true;
+            if crate::osc::once(&mut bb.osc8_intern_cap_logged) {
                 eprintln!(
                     "[blackbird_core] OSC 8 URI intern budget ({} bytes) exhausted — \
                      attribution silently dropped for every NEW hyperlink from now on. \
@@ -771,8 +770,7 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
     // Deferred S2-014 breadcrumb: if any cell hit the u16 link-id
     // ceiling during phase 1, log exactly once per BBTerm session.
     // Mutating bb here is sound because the grid borrow ended above.
-    if osc8_id_exhausted_this_snapshot && !bb.osc8_id_exhaustion_logged {
-        bb.osc8_id_exhaustion_logged = true;
+    if osc8_id_exhausted_this_snapshot && crate::osc::once(&mut bb.osc8_id_exhaustion_logged) {
         eprintln!(
             "[blackbird_core] OSC 8 link-id cap (u16) saturated for this snapshot — \
                  attribution silently dropped on cells past 65 534 distinct URIs. \

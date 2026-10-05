@@ -24,25 +24,17 @@ use crate::BBPromptMarkKind;
 /// (`bb.osc_parser.advance(&mut scanner, …)`). A `&mut self` method would lock
 /// the whole `BBTerm` and the parser borrow would conflict; a macro expands
 /// inline so the borrow checker sees the per-field split. Kills the verbatim
-/// 10-field constructor that was copy-pasted at both `process_input` sites
+/// 14-field constructor that was copy-pasted at both `process_input` sites
 /// (REFACTOR.md Part IV).
 macro_rules! osc_scanner {
     ($bb:expr) => {
         $crate::osc::OscScanner {
             cell: &$bb.callback,
-            in_xtgettcap: &mut $bb.in_xtgettcap,
-            xtgettcap_buf: &mut $bb.xtgettcap_buf,
-            modify_other_keys: &mut $bb.modify_other_keys,
+            tap: &mut $bb.osc_tap,
+            latches: &mut $bb.osc_latches,
             prompt_mark_rate: &mut $bb.prompt_mark_rate,
             osc7_rate: &mut $bb.osc7_rate,
-            osc7_reject_logged: &mut $bb.osc7_reject_logged,
-            osc133_d_nondigit_logged: &mut $bb.osc133_d_nondigit_logged,
-            osc133_abc_tainted_logged: &mut $bb.osc133_abc_tainted_logged,
-            osc133_rate_limited_logged: &mut $bb.osc133_rate_limited_logged,
-            in_decrqss: &mut $bb.in_decrqss,
-            decrqss_buf: &mut $bb.decrqss_buf,
             terminal_version: &$bb.terminal_version,
-            osc99_pending: &mut $bb.osc99_pending,
         }
     };
 }
@@ -75,13 +67,11 @@ pub(crate) use osc_scanner;
 /// scanner is re-created per call and borrows the state via `&mut`.
 pub(crate) struct OscScanner<'a> {
     pub(crate) cell: &'a CallbackCell,
-    pub(crate) in_xtgettcap: &'a mut bool,
-    pub(crate) xtgettcap_buf: &'a mut Vec<u8>,
-    /// xterm `modifyOtherKeys` level bucket. `csi_dispatch` updates this
-    /// when it sees `CSI > 4 ; N m`. 0 = off, 1 / 2 = level. Writer
-    /// into `BBTerm.modify_other_keys`; downstream code reads the same
-    /// field and maps non-zero to `bb_mode::MODIFY_OTHER_KEYS`.
-    pub(crate) modify_other_keys: &'a mut u8,
+    /// DCS / OSC 99 / `modifyOtherKeys` state that must persist across
+    /// `bb_term_input` calls (the scanner is rebuilt per call).
+    pub(crate) tap: &'a mut OscTapState,
+    /// Per-instance one-shot reject-log latches.
+    pub(crate) latches: &'a mut OscLatches,
     /// Sliding-window state for OSC 133 A/B/C rate limiting (audit
     /// synthesis #10 — prompt-mark forgery DoS / phishing). Persisted
     /// on `BBTerm` and threaded in via `&mut` because the scanner is
@@ -91,32 +81,101 @@ pub(crate) struct OscScanner<'a> {
     /// M-7 — `classifyForegroundNamespace()` proc_listpids amplification).
     /// Same threading reason as `prompt_mark_rate`.
     pub(crate) osc7_rate: &'a mut EventRateState,
-    /// Per-class reject-log latches (audit L3). Threaded in from
-    /// BBTerm so the one-shot-per-class log is per-instance rather
-    /// than process-wide.
-    pub(crate) osc7_reject_logged: &'a mut [bool; 8],
-    /// One-shot latch for the OSC 133 D non-digit reject path
-    /// (audit L1 + reviewer follow-up). Mirrors the per-instance
-    /// stance L3 established for OSC 7.
-    pub(crate) osc133_d_nondigit_logged: &'a mut bool,
-    /// One-shot latch for the OSC 133 A/B/C tainted-payload reject path
-    /// (audit S3R-001/S3R-002 + silent-failure review). Same per-instance,
-    /// one-shot rule as the D-path latch so a hostile flood can't drown the
-    /// log while still leaving one breadcrumb when prompt marks are dropped.
-    pub(crate) osc133_abc_tainted_logged: &'a mut bool,
-    /// One-shot latch for the OSC 133 rate-cap drop path (audit S5-009).
-    /// Dropped marks are user-visible (missing ⌘-navigation entries,
-    /// lost exit codes), so the first drop per session must leave a
-    /// breadcrumb; per-drop logging would amplify the flood the cap
-    /// defends against.
-    pub(crate) osc133_rate_limited_logged: &'a mut bool,
-    /// DECRQSS (`DCS $ q <Pt> ST`) parser state, same shape as XTGETTCAP.
-    pub(crate) in_decrqss: &'a mut bool,
-    pub(crate) decrqss_buf: &'a mut Vec<u8>,
     /// App version string for XTVERSION replies (`bb_term_set_terminal_version`).
     pub(crate) terminal_version: &'a str,
+}
+
+/// Parser state the OSC tap carries across `bb_term_input` calls, owned by
+/// `BBTerm` and borrowed by each per-call `OscScanner`.
+#[derive(Debug)]
+pub(crate) struct OscTapState {
+    /// XTGETTCAP (Kitty capability query) parser state. `in_xtgettcap`
+    /// latches true between `hook` (header `DCS + q` seen) and `unhook`
+    /// (ST terminator seen); `xtgettcap_buf` accumulates the payload
+    /// bytes. Persists across `bb_term_input` calls so a DCS fragmented
+    /// across PTY reads resolves to a single reply. See `OscScanner`'s
+    /// `hook`/`put`/`unhook` and `core/tests/xtgettcap.rs`.
+    pub(crate) in_xtgettcap: bool,
+    pub(crate) xtgettcap_buf: Vec<u8>,
+    /// DECRQSS (`DCS $ q <Pt> ST`) parser state, same shape as XTGETTCAP.
+    pub(crate) in_decrqss: bool,
+    pub(crate) decrqss_buf: Vec<u8>,
     /// In-flight kitty OSC 99 (`d=0` chunks) awaiting its final chunk.
-    pub(crate) osc99_pending: &'a mut Option<Osc99Pending>,
+    pub(crate) osc99_pending: Option<Osc99Pending>,
+    /// xterm `modifyOtherKeys` level. `0` = off, `1` = level 1
+    /// (encode colliders + "unmapped" Ctrl combos), `2` = level 2
+    /// (encode every modified printable, overriding legacy byte
+    /// mappings). `csi_dispatch` updates this when it sees
+    /// `CSI > 4 ; N m`. Swift-side KeyEncoder reads this indirectly via
+    /// `bb_mode::MODIFY_OTHER_KEYS` (any non-zero level -> bit set).
+    pub(crate) modify_other_keys: u8,
+}
+
+impl Default for OscTapState {
+    fn default() -> Self {
+        Self {
+            in_xtgettcap: false,
+            xtgettcap_buf: Vec::with_capacity(64),
+            in_decrqss: false,
+            decrqss_buf: Vec::with_capacity(16),
+            osc99_pending: None,
+            modify_other_keys: 0,
+        }
+    }
+}
+
+impl OscTapState {
+    /// Back to the freshly-constructed state, keeping the buffers'
+    /// capacity. Used by `bb_term_clear_all` (a mid-DCS XTGETTCAP must not
+    /// accumulate post-clear bytes into its reply).
+    pub(crate) fn reset(&mut self) {
+        self.in_xtgettcap = false;
+        self.xtgettcap_buf.clear();
+        self.in_decrqss = false;
+        self.decrqss_buf.clear();
+        self.osc99_pending = None;
+        self.modify_other_keys = 0;
+    }
+}
+
+/// One-shot log latches for the scanner's reject paths. Per-instance rather
+/// than process-wide so every session leaves its own breadcrumb, and one-shot
+/// so a hostile flood cannot drown the log. Deliberately NOT reset by
+/// `bb_term_clear_all`: a reject class that already logged stays quiet across
+/// ⌘K. (The snapshot-side OSC 8 latches live on `BBTerm`; they are not the
+/// scanner's business.)
+#[derive(Debug, Default)]
+pub(crate) struct OscLatches {
+    /// OSC 7 reject-log latches, one bool per `OSC7_REJECT_*` class
+    /// index. Audit L3: pre-fix these were a process-wide
+    /// `static [Once; 8]`, so the first BBTerm in the process to hit
+    /// each rejection class consumed the latch and sibling tabs (or
+    /// reborn shells in the same tab) silently dropped the same
+    /// reject. Per-instance flags restore one-shot-per-session log
+    /// semantics without re-introducing log flood.
+    pub(crate) osc7_reject: [bool; 8],
+    /// OSC 133 D non-digit / over-long reject path (audit L1 + reviewer
+    /// follow-up). Same per-instance / one-shot rule as `osc7_reject`
+    /// but only one class so a single bool suffices.
+    pub(crate) osc133_d_nondigit: bool,
+    /// OSC 133 A/B/C tainted-payload reject path (audit S3R-001/S3R-002 +
+    /// silent-failure review). Same rule as `osc133_d_nondigit`, so a
+    /// hostile flood can't drown the log while still leaving one
+    /// breadcrumb when prompt marks are dropped.
+    pub(crate) osc133_abc_tainted: bool,
+    /// OSC 133 rate-cap drop path (audit S5-009). Dropped marks are
+    /// user-visible (missing ⌘-navigation entries, lost exit codes), so
+    /// the first drop per session must leave a breadcrumb; per-drop
+    /// logging would amplify the flood the cap defends against.
+    pub(crate) osc133_rate_limited: bool,
+}
+
+/// One-shot latch: returns `true` exactly once per flag (the first call),
+/// `false` afterwards. Callers keep their own `eprintln!` so the message is
+/// only formatted on the first hit.
+#[inline]
+pub(crate) fn once(flag: &mut bool) -> bool {
+    !std::mem::replace(flag, true)
 }
 
 /// Accumulator for a chunked kitty OSC 99 notification.
@@ -227,7 +286,7 @@ impl Perform for OscScanner<'_> {
                     1 | 2 => level as u8,
                     _ => return, // unknown level — ignore, don't poison state
                 };
-                *self.modify_other_keys = clamped;
+                self.tap.modify_other_keys = clamped;
             }
         }
     }
@@ -255,33 +314,33 @@ impl Perform for OscScanner<'_> {
         // bracketed-paste stay set would introduce the opposite
         // desync. Mirror alacritty exactly.
         if byte == b'c' && intermediates.is_empty() {
-            *self.modify_other_keys = 0;
+            self.tap.modify_other_keys = 0;
         }
     }
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         if intermediates == b"+" && action == 'q' {
-            *self.in_xtgettcap = true;
-            self.xtgettcap_buf.clear();
+            self.tap.in_xtgettcap = true;
+            self.tap.xtgettcap_buf.clear();
         } else if intermediates == b"$" && action == 'q' {
             // DECRQSS: `DCS $ q <Pt> ST`. vim probes `$qm` (SGR) at startup.
-            *self.in_decrqss = true;
-            self.decrqss_buf.clear();
+            self.tap.in_decrqss = true;
+            self.tap.decrqss_buf.clear();
         }
     }
 
     fn put(&mut self, byte: u8) {
-        if *self.in_xtgettcap && self.xtgettcap_buf.len() < 4096 {
-            self.xtgettcap_buf.push(byte);
-        } else if *self.in_decrqss && self.decrqss_buf.len() < 16 {
-            self.decrqss_buf.push(byte);
+        if self.tap.in_xtgettcap && self.tap.xtgettcap_buf.len() < 4096 {
+            self.tap.xtgettcap_buf.push(byte);
+        } else if self.tap.in_decrqss && self.tap.decrqss_buf.len() < 16 {
+            self.tap.decrqss_buf.push(byte);
         }
     }
 
     fn unhook(&mut self) {
-        if *self.in_decrqss {
-            *self.in_decrqss = false;
-            let buf = std::mem::take(self.decrqss_buf);
+        if self.tap.in_decrqss {
+            self.tap.in_decrqss = false;
+            let buf = std::mem::take(&mut self.tap.decrqss_buf);
             // Valid (`1$r`) only for the requests whose current value the
             // tap can state without reaching into the grid: SGR reports the
             // reset state (what every other terminal answers), cursor style
@@ -303,11 +362,11 @@ impl Perform for OscScanner<'_> {
             }
             return;
         }
-        if !*self.in_xtgettcap {
+        if !self.tap.in_xtgettcap {
             return;
         }
-        *self.in_xtgettcap = false;
-        let buf = std::mem::take(self.xtgettcap_buf);
+        self.tap.in_xtgettcap = false;
+        let buf = std::mem::take(&mut self.tap.xtgettcap_buf);
         unsafe { dispatch_xtgettcap(self.cell, &buf) };
     }
 }
@@ -467,8 +526,7 @@ const OSC7_REJECT_TRAVERSAL: usize = 7;
 /// re-introducing log floods.
 fn osc7_reject(latches: &mut [bool; 8], class: usize, name: &str) {
     if let Some(slot) = latches.get_mut(class) {
-        if !*slot {
-            *slot = true;
+        if once(slot) {
             eprintln!("[blackbird_core] OSC 7 rejected ({})", name);
         }
     }
@@ -595,12 +653,14 @@ impl OscScanner<'_> {
             return;
         }
         // A chunk for a different notification id flushes the pending one.
-        if self.osc99_pending.is_some() && self.osc99_pending.as_ref().map(|p| &p.id) != Some(&id) {
-            if let Some(p) = self.osc99_pending.take() {
+        if self.tap.osc99_pending.is_some()
+            && self.tap.osc99_pending.as_ref().map(|p| &p.id) != Some(&id)
+        {
+            if let Some(p) = self.tap.osc99_pending.take() {
                 self.emit_notification(&p.title, &p.body);
             }
         }
-        let mut pending = self.osc99_pending.take().unwrap_or(Osc99Pending {
+        let mut pending = self.tap.osc99_pending.take().unwrap_or(Osc99Pending {
             id: id.clone(),
             title: Vec::new(),
             body: Vec::new(),
@@ -611,7 +671,7 @@ impl OscScanner<'_> {
             _ => {}
         }
         if more {
-            *self.osc99_pending = Some(pending);
+            self.tap.osc99_pending = Some(pending);
         } else {
             self.emit_notification(&pending.title, &pending.body);
         }
@@ -684,7 +744,7 @@ impl OscScanner<'_> {
 
         let Some(decoded) = percent_decode(path_bytes) else {
             osc7_reject(
-                self.osc7_reject_logged,
+                &mut self.latches.osc7_reject,
                 OSC7_REJECT_PERCENT_DECODE,
                 "percent_decode",
             );
@@ -697,7 +757,7 @@ impl OscScanner<'_> {
         // UTF-8 bytes — Swift wraps the pointer in a Swift String which
         // assumes UTF-8 validity.
         let Ok(decoded_str) = std::str::from_utf8(&decoded) else {
-            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_UTF8, "utf8");
+            osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_UTF8, "utf8");
             return;
         };
         // Reject embedded NUL bytes. `%00` is valid UTF-8 and slips past
@@ -706,7 +766,7 @@ impl OscScanner<'_> {
         // hostile payload truncate what downstream consumers see when
         // they cast through a C API. TST-S1-014.
         if decoded.contains(&0) {
-            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_NUL, "nul");
+            osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_NUL, "nul");
             return;
         }
         // Reject every other ASCII control byte (0x01..=0x1F, 0x7F) AND
@@ -725,7 +785,11 @@ impl OscScanner<'_> {
             let cp = c as u32;
             cp <= 0x1F || cp == 0x7F || (0x80..=0x9F).contains(&cp)
         }) {
-            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_CONTROL, "control");
+            osc7_reject(
+                &mut self.latches.osc7_reject,
+                OSC7_REJECT_CONTROL,
+                "control",
+            );
             return;
         }
         // Reject Unicode bidi-control / zero-width / invisible-payload
@@ -736,7 +800,7 @@ impl OscScanner<'_> {
         // the actual filesystem target is what Finder will open). Same
         // codepoint list the Swift paste sanitizer strips. Audit M2.
         if contains_bidi_or_invisible(decoded.as_slice()) {
-            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_BIDI, "bidi");
+            osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_BIDI, "bidi");
             return;
         }
         // Audit synthesis #13 — path-traversal via percent-encoded `..`.
@@ -749,7 +813,7 @@ impl OscScanner<'_> {
         // by spec.
         if !decoded_str.starts_with('/') {
             osc7_reject(
-                self.osc7_reject_logged,
+                &mut self.latches.osc7_reject,
                 OSC7_REJECT_NON_ABSOLUTE,
                 "non_absolute",
             );
@@ -759,7 +823,11 @@ impl OscScanner<'_> {
             match component {
                 // The standard parent-dir component.
                 std::path::Component::ParentDir => {
-                    osc7_reject(self.osc7_reject_logged, OSC7_REJECT_TRAVERSAL, "traversal");
+                    osc7_reject(
+                        &mut self.latches.osc7_reject,
+                        OSC7_REJECT_TRAVERSAL,
+                        "traversal",
+                    );
                     return;
                 }
                 // Defensive paranoia for the `\..` shape on
@@ -768,7 +836,11 @@ impl OscScanner<'_> {
                 // higher layer mis-parsed components, but we'd still
                 // refuse it.
                 std::path::Component::Normal(s) if s.as_encoded_bytes() == b".." => {
-                    osc7_reject(self.osc7_reject_logged, OSC7_REJECT_TRAVERSAL, "traversal");
+                    osc7_reject(
+                        &mut self.latches.osc7_reject,
+                        OSC7_REJECT_TRAVERSAL,
+                        "traversal",
+                    );
                     return;
                 }
                 _ => {}
@@ -792,7 +864,7 @@ impl OscScanner<'_> {
         // BFS per event (main-thread work that beachballs the UI), so excess
         // valid events are still dropped within the sliding window (M-7).
         if !self.osc7_rate.allow() {
-            osc7_reject(self.osc7_reject_logged, OSC7_REJECT_RATE, "rate");
+            osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_RATE, "rate");
             return;
         }
 
@@ -855,8 +927,7 @@ impl OscScanner<'_> {
             // navigation and exit-code chrome — leave one breadcrumb
             // per session (same one-shot stance as the sibling reject
             // latches above/below).
-            if !*self.osc133_rate_limited_logged {
-                *self.osc133_rate_limited_logged = true;
+            if once(&mut self.latches.osc133_rate_limited) {
                 eprintln!(
                     "[blackbird_core] OSC 133 prompt-mark rate cap ({PROMPT_MARK_PER_SECOND}/s) \
                      engaged — dropping excess marks. One-shot per session."
@@ -872,8 +943,7 @@ impl OscScanner<'_> {
         // A 17+-digit "exit code" is hostile or broken, not a number to
         // truncate: reject it instead of delivering a bogus 16-digit prefix.
         if exit_code_bytes.len() > 16 {
-            if !*self.osc133_d_nondigit_logged {
-                *self.osc133_d_nondigit_logged = true;
+            if once(&mut self.latches.osc133_d_nondigit) {
                 eprintln!("[blackbird_core] OSC 133 D rejected (exit code longer than 16 bytes)");
             }
             return;
@@ -896,8 +966,7 @@ impl OscScanner<'_> {
             // first reject of this class on this BBTerm produces a
             // breadcrumb; subsequent rejects stay silent so a flood
             // can't drown the log.
-            if !*self.osc133_d_nondigit_logged {
-                *self.osc133_d_nondigit_logged = true;
+            if once(&mut self.latches.osc133_d_nondigit) {
                 eprintln!("[blackbird_core] OSC 133 D rejected (non-digit payload)");
             }
             return;
@@ -940,8 +1009,7 @@ impl OscScanner<'_> {
                 // navigation / exit-code chrome stopped working. Subsequent
                 // rejects on this instance stay silent so a flood can't drown
                 // the log.
-                if !*self.osc133_abc_tainted_logged {
-                    *self.osc133_abc_tainted_logged = true;
+                if once(&mut self.latches.osc133_abc_tainted) {
                     eprintln!(
                         "[blackbird_core] OSC 133 A/B/C rejected (control/bidi/non-UTF-8 payload)"
                     );

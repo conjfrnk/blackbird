@@ -49,14 +49,14 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
         // a `put`-heavy hex payload can be pure ASCII with no ESC/BEL,
         // so the `hook` latch is what keeps us here.
         //
-        // `|| bb.in_xtgettcap`: defensive. If a future code path ever
+        // `|| bb.osc_tap.in_xtgettcap`: defensive. If a future code path ever
         // clears `osc_possibly_pending` while a DCS is still open
         // (e.g. a ST-only terminator path we haven't needed yet),
         // this keeps the osc_parser alive so our hook/put/unhook
         // state advances. No current fragmentation scenario reaches
         // this branch because `osc_possibly_pending` stays true from
         // the DCS's opening ESC; kept as a safety belt.
-        if bb.osc_possibly_pending || has_bel || bb.in_xtgettcap {
+        if bb.osc_possibly_pending || has_bel || bb.osc_tap.in_xtgettcap {
             {
                 let mut osc = osc_scanner!(bb);
                 bb.osc_parser.advance(&mut osc, slice);

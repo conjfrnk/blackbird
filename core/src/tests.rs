@@ -1919,7 +1919,7 @@ fn clear_all_resets_modify_other_keys_and_prompt_rate() {
         let set_mok = b"\x1b[>4;2m";
         bb_term_input(term, set_mok.as_ptr(), set_mok.len());
         assert_eq!(
-            (*term).modify_other_keys,
+            (*term).osc_tap.modify_other_keys,
             2,
             "precondition: modify_other_keys should latch to 2"
         );
@@ -1961,7 +1961,7 @@ fn clear_all_resets_modify_other_keys_and_prompt_rate() {
         bb_term_clear_all(term);
 
         assert_eq!(
-            (*term).modify_other_keys,
+            (*term).osc_tap.modify_other_keys,
             0,
             "clear_all must reset modify_other_keys"
         );
