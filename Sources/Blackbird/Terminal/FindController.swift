@@ -159,13 +159,17 @@ final class FindController {
     /// `s` without its trailing run of U+0020 (only spaces: a wide-char
     /// spacer or NBSP is content).
     static func trimmingTrailingSpaces(_ s: String) -> String {
-        var end = s.endIndex
-        while end > s.startIndex {
-            let prev = s.index(before: end)
-            if s[prev] != " " { break }
+        // UTF-8 backward scan: U+0020 is the single byte 0x20 and never a
+        // continuation byte, so this avoids grapheme stepping, and the
+        // common nothing-to-trim case returns `s` without a second String.
+        let u = s.utf8
+        var end = u.endIndex
+        while end > u.startIndex {
+            let prev = u.index(before: end)
+            if u[prev] != 0x20 { break }
             end = prev
         }
-        return String(s[..<end])
+        return end == u.endIndex ? s : String(s[..<end])
     }
 
     /// Haystacks for every buffer line in `topLine...bottomLine`: viewport
@@ -189,18 +193,23 @@ final class FindController {
             return snap != nil && screenRow >= 0 && screenRow < screenRows
         }
         func flushChunk(_ a: Int32, _ b: Int32) {
-            let joined = session.textRange(
+            var joined = session.textRange(
                 from: BufferPoint(line: a, col: 0),
                 to:   BufferPoint(line: b, col: max(0, cols - 1)),
                 rectangular: true
             )
-            let pieces = joined.split(separator: "\n", omittingEmptySubsequences: false)
+            // Byte-level split: the Character-based `split` + `String(piece)`
+            // + trim cost two String allocations and grapheme stepping per
+            // row, ~16x slower over a 100k-line scan on the main thread.
+            // Core rows never contain CR, so '\n' bytes and Character
+            // newlines agree.
+            let rowCount = joined.utf8.reduce(1) { $1 == 0x0A ? $0 + 1 : $0 }
             // History can shrink between computing `topLine` and this call
             // (RIS, ⌘K, a reflowing resize); the core then clamps the range
             // and returns fewer rows, and assigning them from `a` would shift
             // every match in the chunk. Fall back to per-row capture, which
             // can't misattribute.
-            if pieces.count != Int(b - a + 1) {
+            if rowCount != Int(b - a + 1) {
                 var ln = a
                 while ln <= b {
                     let hay = Self.trimmingTrailingSpaces(session.textRange(
@@ -214,16 +223,26 @@ final class FindController {
                 }
                 return
             }
-            var ln = a
-            for piece in pieces {
-                if ln > b { break }
-                // Rectangular extraction pads to the full width; drop the
-                // trailing run of spaces so a " " query can't hit padding.
-                let hay = Self.trimmingTrailingSpaces(String(piece))
-                if !hay.isEmpty {
-                    rows.append((line: ln, hay: hay, utf16ToCol: nil))
+            joined.withUTF8 { buf in
+                var ln = a
+                var start = 0
+                let n = buf.count
+                while start <= n {
+                    var nl = start
+                    while nl < n && buf[nl] != 0x0A { nl += 1 }
+                    // Rectangular extraction pads to the full width; drop the
+                    // trailing run of spaces so a " " query can't hit padding.
+                    var end = nl
+                    while end > start && buf[end - 1] == 0x20 { end -= 1 }
+                    if end > start {
+                        let hay = String(
+                            decoding: UnsafeBufferPointer(rebasing: buf[start..<end]),
+                            as: UTF8.self)
+                        rows.append((line: ln, hay: hay, utf16ToCol: nil))
+                    }
+                    ln &+= 1
+                    start = nl + 1
                 }
-                ln += 1
             }
         }
         var chunkStart: Int32? = nil
