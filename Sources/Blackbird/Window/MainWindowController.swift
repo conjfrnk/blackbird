@@ -399,8 +399,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // RCA docs/rca-tab-behaviors-2026-07-01.md).
         guard !didReapplyThemeAfterOrderIn else { return }
         didReapplyThemeAfterOrderIn = true
-        DispatchQueue.main.async {
-            ThemeManager.shared.refresh()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            ThemeManager.shared.refresh(owner: self)
         }
     }
 
@@ -681,7 +682,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // don't re-theme every focus gain.
         if !didReapplyThemeAfterOrderIn {
             didReapplyThemeAfterOrderIn = true
-            ThemeManager.shared.refresh()
+            ThemeManager.shared.refresh(owner: self)
         }
         // When AppKit promotes a sibling tab on close (⌘W or `exit`
         // typed in the shell), the survivor's first responder doesn't

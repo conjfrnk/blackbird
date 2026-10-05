@@ -107,7 +107,7 @@ public final class ThemeManager {
             sessionProvider: sessionProvider,
             viewProvider: viewProvider
         )
-        apply(session: sessionProvider(), view: viewProvider())
+        apply(session: sessionProvider(), view: viewProvider(), palette: resolvedPalette)
     }
 
     /// Whether the app is currently rendering in a dark appearance. The ONE
@@ -138,6 +138,20 @@ public final class ThemeManager {
         // the palette itself hasn't changed since the last apply (the window
         // number wasn't live last time). Bypass the equality gate.
         applyToAll(inputs: currentPaletteInputs())
+    }
+
+    /// Re-apply the theme to ONE registration's view only. For the per-window
+    /// "just became ready" hooks (first show / first key), where the only
+    /// thing missing is the live windowNumber the CGS blur call needs:
+    /// `register()` already pushed the session palette, so re-pushing it
+    /// (24 `setColor` + a full snapshot) is redundant for the owner and, for
+    /// every OTHER tab, pointless work that also wipes any OSC 4/10/11
+    /// palette a program set. Unconditional (no dedup), silent no-op for an
+    /// unregistered owner, and deliberately leaves `lastPaletteInputs` and
+    /// the registration table alone — the all-registrations path owns both.
+    public func refresh(owner: AnyObject) {
+        guard let reg = registrations[ObjectIdentifier(owner)], reg.owner === owner else { return }
+        reg.viewProvider()?.applyTheme(resolvedPalette)
     }
 
     /// Called from the Preferences-change sink and the effectiveAppearance
@@ -187,13 +201,14 @@ public final class ThemeManager {
         // side. (main-window F1)
         reapDeadRegistrations()
         lastPaletteInputs = inputs
+        // Resolve once, not per registration — N tabs share one palette.
+        let palette = resolvedPalette
         for reg in registrations.values {
-            apply(session: reg.sessionProvider(), view: reg.viewProvider())
+            apply(session: reg.sessionProvider(), view: reg.viewProvider(), palette: palette)
         }
     }
 
-    private func apply(session: TerminalSession?, view: TerminalView?) {
-        let palette = resolvedPalette
+    private func apply(session: TerminalSession?, view: TerminalView?, palette: ThemePalette) {
         session?.applyPalette(palette)
         view?.applyTheme(palette)
     }
