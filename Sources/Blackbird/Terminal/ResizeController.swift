@@ -133,25 +133,7 @@ final class ResizeController {
             // triage of REAL core panics (the only consumer of that
             // message).
             if session.isTerminatedLocked() { return }
-            // Audit M3: when bb_term_resize2 panics, BBTerm.resize returns
-            // nil. Skip TIOCSWINSZ so the kernel winsize stays in lockstep
-            // with the grid (which kept its prior dims). Snapshot still
-            // publishes so the renderer doesn't stall.
-            if let applied = session.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
-                session.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
-                // INSIDE the coreQueue block, matching resizeAsync —
-                // lastAppliedGridSize is coreQueue-confined, and calling
-                // from the caller's thread here raced a concurrent
-                // font-change resizeAsync (review finding on this
-                // batch). noteAppliedGridSize never re-enters coreQueue
-                // (its @Published mutations hop to main), so this is
-                // deadlock-free.
-                self.noteAppliedGridSize(TerminalSession.Size(cols: applied.cols, rows: applied.rows))
-            } else {
-                TerminalSession.sessionLogger.warning(
-                    "BBTerm.resize returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
-                )
-            }
+            self.applyGridResize(clamped, variant: "")
             newSnap = session.bbterm.snapshot()
         }
         guard let newSnap else { return }
@@ -187,18 +169,7 @@ final class ResizeController {
             // used to reach a nil'd handle and emit the false
             // 'Rust panic fallback' warning.
             if session.isTerminatedLocked() { return }
-            // Same Bug #3/#9 ordering as the sync `resize(to:)`: bbterm
-            // first, then pty with the actually-applied (post-clamp) dims.
-            // Audit M3 sibling of the sync path: nil => Rust panic
-            // fallback, skip TIOCSWINSZ.
-            if let applied = session.bbterm.resize(to: .init(cols: clamped.cols, rows: clamped.rows)) {
-                session.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
-                self.noteAppliedGridSize(TerminalSession.Size(cols: applied.cols, rows: applied.rows))
-            } else {
-                TerminalSession.sessionLogger.warning(
-                    "BBTerm.resize (async) returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
-                )
-            }
+            self.applyGridResize(clamped, variant: " (async)")
             guard let snap = session.bbterm.snapshot() else { return }
             session.snapshotCoalescer.publishPendingSnapshot(snap)
         }
@@ -269,18 +240,7 @@ final class ResizeController {
             // Audit S1-007: termination gate read INSIDE the coreQueue block,
             // exactly as the sync and async paths do.
             if session.isTerminatedLocked() { return }
-            // Bug #9 / Bug #3 / audit M3 ordering, identical to the sync path:
-            // grid first, then TIOCSWINSZ with the dims the grid actually
-            // applied; a nil return means the core panicked, so leave the
-            // kernel winsize alone rather than desyncing it from the grid.
-            if let applied = session.bbterm.resize(to: .init(cols: target.cols, rows: target.rows)) {
-                session.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
-                self.noteAppliedGridSize(TerminalSession.Size(cols: applied.cols, rows: applied.rows))
-            } else {
-                TerminalSession.sessionLogger.warning(
-                    "BBTerm.resize (coalesced) returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
-                )
-            }
+            self.applyGridResize(target, variant: " (coalesced)")
             guard let snap = session.bbterm.snapshot() else { return }
             session.snapshotCoalescer.publishPendingSnapshot(snap)
         }
@@ -299,6 +259,35 @@ final class ResizeController {
         coalescedLock.lock()
         defer { coalescedLock.unlock() }
         return coalescedWorkQueued || outstandingCoalescedBlocks > 0
+    }
+
+    /// The one place that owns the grid-resize -> TIOCSWINSZ ordering contract
+    /// shared by `resize(to:)`, `resizeAsync` and `resizeCoalesced`. Must run
+    /// inside a coreQueue block: `lastAppliedGridSize` is coreQueue-confined
+    /// (calling from the caller's thread raced a concurrent font-change
+    /// resizeAsync), and `noteAppliedGridSize` never re-enters coreQueue (its
+    /// @Published mutations hop to main), so this is deadlock-free even for
+    /// the main-thread sync caller inside `coreQueue.sync`.
+    ///
+    /// Order matters (Bug #9 / Bug #3): grid first, then `pty.resize` with
+    /// the dims the grid actually APPLIED (post-clamp), so the shell's
+    /// SIGWINCH lands on an already-reflowed grid and is never told a width
+    /// the renderer can't display. Audit M3: a nil return means the core
+    /// panicked (the grid kept its prior dims), so skip TIOCSWINSZ to keep
+    /// the kernel winsize in lockstep with the grid.
+    ///
+    /// `variant` is a log-text suffix (" (async)" etc.); it is `.public`
+    /// because os.Logger would otherwise redact it to `<private>`.
+    private func applyGridResize(_ size: TerminalSession.Size, variant: String) {
+        dispatchPrecondition(condition: .onQueue(session.coreQueue))
+        if let applied = session.bbterm.resize(to: .init(cols: size.cols, rows: size.rows)) {
+            session.pty?.resize(to: PTY.Size(cols: applied.cols, rows: applied.rows))
+            noteAppliedGridSize(TerminalSession.Size(cols: applied.cols, rows: applied.rows))
+        } else {
+            TerminalSession.sessionLogger.warning(
+                "BBTerm.resize\(variant, privacy: .public) returned nil with a live handle (Rust panic fallback); skipping TIOCSWINSZ to keep kernel winsize aligned with grid"
+            )
+        }
     }
 
     /// Invalidate prompt-mark anchors when the applied grid size
