@@ -85,6 +85,13 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
 
     required init?(coder: NSCoder) { fatalError("not supported") }
 
+    static let tabBarLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "tabs")
+
+    /// See `TabStripView.detachTabs`. Idempotent.
+    func clearTabs() {
+        stripView.detachTabs()
+    }
+
     /// Re-read the tab group and re-lay pills. Caller is responsible for
     /// toggling `view.isHidden` based on tab count before calling this —
     /// single-tab windows skip the custom strip entirely.
@@ -94,13 +101,6 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     /// the traffic lights. The strip owns zero layout math of its own —
     /// `MainWindowController` is the single authority for reservation
     /// arithmetic.
-    /// See `TabStripView.detachTabs`. Idempotent.
-    static let tabBarLogger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "tabs")
-
-    func clearTabs() {
-        stripView.detachTabs()
-    }
-
     func refresh(availableWidth: CGFloat) {
         guard let window = hostWindow else { return }
         // Visual order is owned by `TabOrderCoordinator`, not by AppKit's
@@ -115,10 +115,10 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
             tabs = [window]
         }
         let selected = window.tabGroup?.selectedWindow ?? window
+        // `stripView` IS the accessory's view and `update` sizes it (size
+        // only — its origin belongs to AppKit and the pill placement
+        // measures against it), so no separate setFrameSize here.
         stripView.update(tabs: tabs, selected: selected, width: availableWidth)
-        // Size only: the strip IS the accessory's view, so its origin belongs
-        // to AppKit and the pill placement measures against it.
-        view.setFrameSize(NSSize(width: availableWidth, height: TabStripView.height))
     }
 }
 
@@ -326,9 +326,7 @@ final class TabStripView: NSView {
         selectedTab = nil
         pillFrames = []
         focusedPill = nil
-        hoveredPill = nil
-        hoveredClose = false
-        hoveredAdd = false
+        clearHover()
         tabAccessibility.invalidateCache()
         needsDisplay = true
     }
@@ -1101,13 +1099,8 @@ final class TabStripView: NSView {
     private func commitEditOnOutsideClick(_ p: CGPoint) -> Bool {
         guard let idx = tabRenameController.editingPill, idx < pillFrames.count else { return false }
         let editingRect = pillFrames[idx]
-        if !NSPointInRect(p, editingRect) {
-            tabRenameController.commitEdit()
-            return false
-        } else {
-            tabRenameController.commitEdit()
-            return true
-        }
+        tabRenameController.commitEdit()
+        return NSPointInRect(p, editingRect)
     }
 
     /// Double-click on a pill body (outside the close hotspot) → enter inline
@@ -1506,6 +1499,14 @@ final class TabStripView: NSView {
         applyHover(at: convert(event.locationInWindow, from: nil))
     }
 
+    /// Drop all three hover fields together (they only make sense as a set).
+    /// Callers own the `needsDisplay` — the sites differ in when they repaint.
+    fileprivate func clearHover() {
+        hoveredPill = nil
+        hoveredClose = false
+        hoveredAdd = false
+    }
+
     /// Recompute hovered pill / close-hotspot / add-button for `p` (in the
     /// strip's own coordinate space) and repaint if anything changed.
     /// Shared by `mouseMoved` (the event's live location) and
@@ -1515,9 +1516,7 @@ final class TabStripView: NSView {
         let prevPill = hoveredPill
         let prevClose = hoveredClose
         let prevAdd = hoveredAdd
-        hoveredPill = nil
-        hoveredClose = false
-        hoveredAdd = false
+        clearHover()
         if NSPointInRect(p, addButtonFrame) {
             hoveredAdd = true
         } else {
@@ -1565,9 +1564,7 @@ final class TabStripView: NSView {
         // a redraw.
         if tabDragController.isDragging { return }
         if hoveredPill != nil || hoveredAdd || hoveredClose {
-            hoveredPill = nil
-            hoveredAdd = false
-            hoveredClose = false
+            clearHover()
             needsDisplay = true
         }
     }
@@ -1960,9 +1957,7 @@ private final class TabDragController {
                 // hover state off: we're not painting close hotspots or hover
                 // backgrounds while a drag is in flight, and stale hover
                 // indices would visibly linger under the moving pill.
-                view.hoveredPill = nil
-                view.hoveredClose = false
-                view.hoveredAdd = false
+                view.clearHover()
                 phase = .dragging(DragState(
                     originalIndex: pending.pillIndex,
                     downOffsetX: pending.downOffsetX,
@@ -1978,9 +1973,7 @@ private final class TabDragController {
                 // `performDrag(with:)` blocks until mouse-up), so reset
                 // to `.idle` *before* the hand-off — no `mouseUp` will
                 // arrive to clear it for us.
-                view.hoveredPill = nil
-                view.hoveredClose = false
-                view.hoveredAdd = false
+                view.clearHover()
                 phase = .idle
                 view.needsDisplay = true
                 // `performDrag(with:)`'s documented contract wants the
@@ -2150,20 +2143,7 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
             return
         }
         editingPill = pillIndex
-        let pill = view.pillFrames[pillIndex]
-        let closeRect = view.closeHotspot(in: pill)
-        // Size the field to the pill's title area (the SAME horizontal math
-        // the drawing path uses, via TabStripLayout). 2 pt top/bottom inset
-        // keeps the field slightly inside the pill body so its focus-ring-free
-        // border is visible.
-        let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
-        let fieldRect = NSRect(
-            x: title.x,
-            y: pill.minY + 2,
-            width: title.width,
-            height: pill.height - 4
-        )
-        let field = NSTextField(frame: fieldRect)
+        let field = NSTextField(frame: fieldRect(for: view.pillFrames[pillIndex]))
         field.font = TabStripView.titleFont
         field.alignment = .center
         field.isBezeled = false
@@ -2252,10 +2232,18 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
               idx < view.pillFrames.count,
               let field = editField
         else { return }
-        let pill = view.pillFrames[idx]
+        field.frame = fieldRect(for: view.pillFrames[idx])
+    }
+
+    /// The edit field's frame inside `pill`: the pill's title area (the SAME
+    /// horizontal math the drawing path uses, via TabStripLayout). 2 pt
+    /// top/bottom inset keeps the field slightly inside the pill body so its
+    /// focus-ring-free border is visible. Shared by `beginEditing` and
+    /// `repositionFieldForWidthChange` so the two can't drift.
+    private func fieldRect(for pill: NSRect) -> NSRect {
         let closeRect = view.closeHotspot(in: pill)
         let title = TabStripLayout.titleArea(in: pill, closeWidth: closeRect.width)
-        field.frame = NSRect(
+        return NSRect(
             x: title.x,
             y: pill.minY + 2,
             width: title.width,
