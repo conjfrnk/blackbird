@@ -1892,16 +1892,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // terminal-view-1 F5.
         guard let session else {
             currentSnapshot = nil
-            findController.findMatches.removeAll()
-            findController.findMatchesSeq = nil
+            findController.reset()
+            // The selection's coordinates addressed the session's grid that
+            // `currentSnapshot = nil` just discarded; leaving it set would
+            // keep a highlight (and a copyable range) over nothing. Unlike
+            // findBarDidClose (F30) there is no on-screen grid to copy from.
+            selection = nil
             // Per-session sequence ids (audit S6-003) can collide across
             // sessions, so the URL-hover cache key must be cleared on any
             // rebind — global uniqueness no longer invalidates it for
             // free (F-S5-018 follow-up). `!=`-gated, so over-clearing is
             // harmless.
             hoverCoordinator.invalidateURLMatchCache()
-            findController.findCurrentIndex = 0
-            findController.findQuery = ""
             setNeedsDisplay(bounds)
             return
         }
@@ -2862,11 +2864,7 @@ extension TerminalView: FindBarDelegate {
         findController.findBar = nil
         // F10: wipe match state so ⌘G after close doesn't cycle stale
         // coordinates against a mutated buffer or a new (yet-unissued) query.
-        findController.findMatches.removeAll()
-        findController.findMatchesSeq = nil
-        findController.findCurrentIndex = 0
-        findController.findQuery = ""
-        findController.pendingRegexAdvance = nil
+        findController.reset()
         // F30: deliberately preserve `selection` so Esc-then-⌘C on a found
         // match still copies. The selection is wiped by the next mouse click
         // or shell-bound keystroke (see keyDown handler).

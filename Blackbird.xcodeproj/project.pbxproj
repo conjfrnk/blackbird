@@ -86,6 +86,7 @@
 		47D05186187480764B518E95 /* ShellResolverBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B34A090CDCF6336E4C1B31 /* ShellResolverBlindTests.swift */; };
 		4AD3D1AE4B02E0B85E7770DB /* SyncPresentationBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 651F356486780383B32074DA /* SyncPresentationBlindTests.swift */; };
 		4D998CBEB54F5EBA512EE58F /* TerminalView+IME.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */; };
+		4E6B3BBE972AA59AF45DBEFA /* FindStaleRegexScanBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9406FCA2A8E409CA36B05E5 /* FindStaleRegexScanBlindTests.swift */; };
 		4EF72DEC45FF7A4A4381B9C7 /* FindAsciiFastPathBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82F6CC97AE0CDED90ECD165D /* FindAsciiFastPathBlindTests.swift */; };
 		5171C533B2589D177D3CE953 /* NormalScrollAccumulationBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBE50317421F1A0C4805B683 /* NormalScrollAccumulationBlindTests.swift */; };
 		52310493C35874C62D8BC37D /* SelectionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20CE086EA354443743E30486 /* SelectionController.swift */; };
@@ -518,6 +519,7 @@
 		C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelGeometry.swift; sourceTree = "<group>"; };
 		C735D6264882444369074ACB /* CellInstance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstance.swift; sourceTree = "<group>"; };
 		C81B55889FCFFCA2A3AF0708 /* MainThreadWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainThreadWatchdogTests.swift; sourceTree = "<group>"; };
+		C9406FCA2A8E409CA36B05E5 /* FindStaleRegexScanBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindStaleRegexScanBlindTests.swift; sourceTree = "<group>"; };
 		C9B348536E063859D3D278C8 /* TabResizeFanoutBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabResizeFanoutBlindTests.swift; sourceTree = "<group>"; };
 		C9E38BAB38899CD10A229243 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		CA48BC361DD9FDF58015FED6 /* KeyEncoderAdversarialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderAdversarialTests.swift; sourceTree = "<group>"; };
@@ -672,6 +674,7 @@
 				6EA5A9A40E642096A6A99805 /* FindCaptureRowsBlindTests.swift */,
 				A8CDAE1F06200AF8AEA9FA67 /* FindRefreshCoalescingBlindTests.swift */,
 				12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */,
+				C9406FCA2A8E409CA36B05E5 /* FindStaleRegexScanBlindTests.swift */,
 				B07A32BEBADF4A5789EFDCC8 /* FirstResponderRestoreTests.swift */,
 				859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */,
 				EF3965715F1DF2021784E790 /* FunctionKeyF13F20Tests.swift */,
@@ -1289,6 +1292,7 @@
 				F12C8BA147BF04E7F1068152 /* FindCaptureRowsBlindTests.swift in Sources */,
 				2D36CF8A509FBC807D32FFB9 /* FindRefreshCoalescingBlindTests.swift in Sources */,
 				6A4A848FAF8BE625DC512F81 /* FindReplaceIntegrationTests.swift in Sources */,
+				4E6B3BBE972AA59AF45DBEFA /* FindStaleRegexScanBlindTests.swift in Sources */,
 				2719DE75AF486E2E0B8E688E /* FirstResponderRestoreTests.swift in Sources */,
 				A25F8643DAD775E8251392EC /* FocusEventsTests.swift in Sources */,
 				242064EC63C93D69A922E41C /* FunctionKeyF13F20Tests.swift in Sources */,

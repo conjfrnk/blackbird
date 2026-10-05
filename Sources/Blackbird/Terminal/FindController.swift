@@ -84,6 +84,22 @@ final class FindController {
         findBar?.setMatchCount(0, of: 0)
     }
 
+    /// Wipe ALL match state, including the query and any deferred ⌘G. Used by
+    /// the find-bar close and the nil-session rebind, which both mean "no
+    /// search is active any more". Unlike `clearMatches()` (the Replace-path
+    /// variant that keeps the live query) this leaves nothing for a later
+    /// ⌘G to cycle, and it makes any in-flight regex scan unwanted (its
+    /// publish checks `findQuery`). Deliberately does NOT touch
+    /// `view.selection` (F30: Esc-then-⌘C must still copy the found match)
+    /// or the bar.
+    func reset() {
+        findMatches.removeAll()
+        findMatchesSeq = nil
+        findCurrentIndex = 0
+        findQuery = ""
+        pendingRegexAdvance = nil
+    }
+
     // MARK: - Theming
 
     /// The palette most recently pushed through `applyTheme`. Cached so a
@@ -682,6 +698,7 @@ final class FindController {
 
         let mySearchID = nextRegexSearchID()
         activeRegexSearchID = mySearchID
+        let scanQuery = findQuery
 
         // Cooperative cancellation via a heap-allocated atomic-ish flag — a
         // stable reference both the timeout (writes, main) and the worker
@@ -702,7 +719,7 @@ final class FindController {
             // main-thread-only.
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.publishRegexResults(matches, searchID: mySearchID, scanSeq: scanSeq)
+                self.publishRegexResults(matches, searchID: mySearchID, scanSeq: scanSeq, query: scanQuery)
             }
         }
 
@@ -710,7 +727,7 @@ final class FindController {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.regexSearchTimeout) { [weak self] in
             guard let self else { return }
-            self.handleRegexTimeout(searchID: mySearchID, cancelFlag: cancelFlag)
+            self.handleRegexTimeout(searchID: mySearchID, query: scanQuery, cancelFlag: cancelFlag)
         }
     }
 
@@ -781,8 +798,20 @@ final class FindController {
         return matches
     }
 
+    /// Whether the scan launched for `query` should still land. The search-ID
+    /// guard alone misses the paths that abandon a scan WITHOUT minting a new
+    /// ID (and `advanceFind` relies on the ID only changing when a scan really
+    /// starts, so they can't mint one): closing the bar, clearing the field,
+    /// an invalid / gate-rejected pattern edit, and toggling regex off. Each
+    /// leaves the bar gone, the query changed, or regex mode off.
+    private func isRegexScanStillWanted(query: String) -> Bool {
+        guard let bar = findBar, bar.options.regex else { return false }
+        return findQuery == query
+    }
+
     /// Publish a completed regex scan on the main thread. Drops the batch when
-    /// a newer search has started (stale-ID guard); stamps `findMatchesSeq`
+    /// a newer search has started (stale-ID guard) or the scan was abandoned
+    /// without one (`isRegexScanStillWanted`); stamps `findMatchesSeq`
     /// with the seq the scan ran against (NOT the live `currentSnapshot`, which
     /// may have moved on); honours a ⌘G that arrived mid-scan
     /// (`pendingRegexAdvance`) by resuming from the user's position instead of
@@ -790,9 +819,11 @@ final class FindController {
     private func publishRegexResults(
         _ matches: [(line: Int32, startCol: Int, endCol: Int)],
         searchID mySearchID: UInt64,
-        scanSeq: UInt64?
+        scanSeq: UInt64?,
+        query: String
     ) {
-        guard activeRegexSearchID == mySearchID else { return }
+        guard activeRegexSearchID == mySearchID,
+              isRegexScanStillWanted(query: query) else { return }
         regexSearchCompletedID = mySearchID
         findMatches = matches
         findMatchesSeq = scanSeq
@@ -816,10 +847,13 @@ final class FindController {
     /// ⌘G so it can't fire a surprise delayed jump, and show the "too complex"
     /// banner. Runs on main — serialised with the success-path publish, so
     /// observing `regexSearchCompletedID == mySearchID` means it fully landed.
-    private func handleRegexTimeout(searchID mySearchID: UInt64, cancelFlag: AtomicFlag) {
+    private func handleRegexTimeout(searchID mySearchID: UInt64, query: String, cancelFlag: AtomicFlag) {
         if regexSearchCompletedID == mySearchID { return }
         cancelFlag.value = true
-        guard activeRegexSearchID == mySearchID else { return }
+        // An abandoned scan (bar closed, query edited / cleared, regex off)
+        // must not show a banner or wipe the selection — F30 preserves it.
+        guard activeRegexSearchID == mySearchID,
+              isRegexScanStillWanted(query: query) else { return }
         // A deferred ⌘G (pendingRegexAdvance) was owed to THIS scan, which is
         // now abandoned — drop it deterministically so it isn't silently
         // stranded and can't fire a surprising delayed jump if a later re-run
