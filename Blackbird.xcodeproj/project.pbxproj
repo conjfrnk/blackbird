@@ -15,6 +15,7 @@
 		06091BF7C4ABAC9C8EF04124 /* TerminalView+Services.swift in Sources */ = {isa = PBXBuildFile; fileRef = D34795F71D3BA1AFE330FE0C /* TerminalView+Services.swift */; };
 		066BC101049897C27F5BB3E5 /* osc133.zsh in Resources */ = {isa = PBXBuildFile; fileRef = 1178A5B3ED186EDB37EAB9E2 /* osc133.zsh */; };
 		09A8AB1BBF1844EDC2746FB1 /* TabRenameClickSequenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFB630DDF3A888ACF4020340 /* TabRenameClickSequenceTests.swift */; };
+		09C1B391DBFE5E7F9FDFB15C /* TerminalView+TestFakes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBE037518B835A9B14AFF4EB /* TerminalView+TestFakes.swift */; };
 		0A38D6D97FCE22C1211E33E3 /* PasteSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B9FC36E18F7230ED943F1A0 /* PasteSanitizer.swift */; };
 		0B375C1AB55AF536212EEE11 /* BellStyleBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B6B2B9D836E3684B131A8B7 /* BellStyleBlindTests.swift */; };
 		0B6D85142353CF96BD4391D9 /* MetalDrawableCountSourcePinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F89FAA17C3055BBE6D0556C1 /* MetalDrawableCountSourcePinTests.swift */; };
@@ -84,6 +85,7 @@
 		47D05186187480764B518E95 /* ShellResolverBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B34A090CDCF6336E4C1B31 /* ShellResolverBlindTests.swift */; };
 		4AD3D1AE4B02E0B85E7770DB /* SyncPresentationBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 651F356486780383B32074DA /* SyncPresentationBlindTests.swift */; };
 		4D998CBEB54F5EBA512EE58F /* TerminalView+IME.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */; };
+		4E6B3BBE972AA59AF45DBEFA /* FindStaleRegexScanBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9406FCA2A8E409CA36B05E5 /* FindStaleRegexScanBlindTests.swift */; };
 		5171C533B2589D177D3CE953 /* NormalScrollAccumulationBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBE50317421F1A0C4805B683 /* NormalScrollAccumulationBlindTests.swift */; };
 		52310493C35874C62D8BC37D /* SelectionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20CE086EA354443743E30486 /* SelectionController.swift */; };
 		551CBC0C51F905E2A83A4195 /* BlinkRebuildRowsBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F415301ACCAC93A1183403F3 /* BlinkRebuildRowsBlindTests.swift */; };
@@ -128,6 +130,7 @@
 		7AB35A63B397C29D2B86A882 /* WindowResizeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76802601D94186225882DF4A /* WindowResizeController.swift */; };
 		7ACE07558D328D4B0273A975 /* URLDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */; };
 		7AD80C7208B9CEDB09EDF9CB /* WindowOffscreenNudgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B4CECF4880D654BD5CB5BB7 /* WindowOffscreenNudgeTests.swift */; };
+		7B2C80287EB75BC86A751C85 /* FindSubstringSearchBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13AE63A03B70E9FAFB38FF1 /* FindSubstringSearchBlindTests.swift */; };
 		7BACEACA83D3F47078E3B121 /* LatencyProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B359BBCEB85D55F2981EDD /* LatencyProbe.swift */; };
 		7D6A312595E2EDA4CC6F574D /* TabResizeFanoutBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9B348536E063859D3D278C8 /* TabResizeFanoutBlindTests.swift */; };
 		7EF890F5A6A35115DDDFBE4B /* MenuValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F72D7CF594F8484A75DF835 /* MenuValidationTests.swift */; };
@@ -245,6 +248,7 @@
 		DB72D29AB444929F85605A8B /* TabStripLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C9A88764B5EA6114CF35C8C /* TabStripLayout.swift */; };
 		DBE34E7B92C81F99CCE11087 /* SingleCharWordSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9599B2B84D847BCB281BDE97 /* SingleCharWordSelectionTests.swift */; };
 		DD0B95742A24306E26FCBDB7 /* KeyEncoderRoundtripProps.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9C2B3AC096BA3AF2FC3BB6C /* KeyEncoderRoundtripProps.swift */; };
+		DF443AC68F45EA33294C95DB /* URLDetectorContinuationBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 315F9E7540DF14DF0072EE89 /* URLDetectorContinuationBlindTests.swift */; };
 		DFF84049846D6175C420DD37 /* FeedYieldBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 464B60F423EF4E3C274C134B /* FeedYieldBlindTests.swift */; };
 		E05C1AF142C74AF9E8FB302E /* SingleSessionSteadyStateLeakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 924DCF3EFC76DBFCD0250EBB /* SingleSessionSteadyStateLeakTests.swift */; };
 		E0E1272012D9B7B00E10E664 /* GlyphAtlasTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */; };
@@ -341,6 +345,7 @@
 		2F96C43E82A34FB57CB37965 /* osc133.bash */ = {isa = PBXFileReference; path = osc133.bash; sourceTree = "<group>"; };
 		3005731945C943A451CB4DDF /* TerminalNotificationEventBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalNotificationEventBlindTests.swift; sourceTree = "<group>"; };
 		3064BAFAEEFDB859D8B347F7 /* CellInstanceLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstanceLayoutTests.swift; sourceTree = "<group>"; };
+		315F9E7540DF14DF0072EE89 /* URLDetectorContinuationBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetectorContinuationBlindTests.swift; sourceTree = "<group>"; };
 		31710E3D7CE95A9DEB4BDBD9 /* GlyphAtlasSyntheticTraitsBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasSyntheticTraitsBlindTests.swift; sourceTree = "<group>"; };
 		31E704D0F8E9B3F0E6FEA5F1 /* SnapshotCoalescer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotCoalescer.swift; sourceTree = "<group>"; };
 		32FB896E365943951AE8E7D8 /* CellInstanceContrastBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstanceContrastBlindTests.swift; sourceTree = "<group>"; };
@@ -468,6 +473,7 @@
 		9FF8FC4039E89A9339E58F9F /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
 		A0E2CD4DCD085F5C47CA901B /* CellInstanceBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstanceBuilder.swift; sourceTree = "<group>"; };
 		A0FE9727273DA0D746915F5A /* HangReportStorePruneExcessBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HangReportStorePruneExcessBlindTests.swift; sourceTree = "<group>"; };
+		A13AE63A03B70E9FAFB38FF1 /* FindSubstringSearchBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindSubstringSearchBlindTests.swift; sourceTree = "<group>"; };
 		A13EEDE788104CDCE7BAF53C /* MainThreadWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainThreadWatchdog.swift; sourceTree = "<group>"; };
 		A28AB63EC9CBA4574314FEC0 /* SelectionReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionReconciler.swift; sourceTree = "<group>"; };
 		A3B21EB9F8E347FEDA4676CF /* CwdTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdTracker.swift; sourceTree = "<group>"; };
@@ -506,6 +512,7 @@
 		C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelGeometry.swift; sourceTree = "<group>"; };
 		C735D6264882444369074ACB /* CellInstance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstance.swift; sourceTree = "<group>"; };
 		C81B55889FCFFCA2A3AF0708 /* MainThreadWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainThreadWatchdogTests.swift; sourceTree = "<group>"; };
+		C9406FCA2A8E409CA36B05E5 /* FindStaleRegexScanBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindStaleRegexScanBlindTests.swift; sourceTree = "<group>"; };
 		C9B348536E063859D3D278C8 /* TabResizeFanoutBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabResizeFanoutBlindTests.swift; sourceTree = "<group>"; };
 		C9E38BAB38899CD10A229243 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		CA48BC361DD9FDF58015FED6 /* KeyEncoderAdversarialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderAdversarialTests.swift; sourceTree = "<group>"; };
@@ -531,6 +538,7 @@
 		D7C664676DD703EF60C54509 /* FeedBudgetBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedBudgetBlindTests.swift; sourceTree = "<group>"; };
 		DA6CB5E0B80FEA2E7834664E /* SyncUpdateFlushTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncUpdateFlushTests.swift; sourceTree = "<group>"; };
 		DACE89CC5DC7A082BAF6BF37 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		DBE037518B835A9B14AFF4EB /* TerminalView+TestFakes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+TestFakes.swift"; sourceTree = "<group>"; };
 		DC3BC2585B0C354C6AC61171 /* SyncUpdateWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncUpdateWatchdog.swift; sourceTree = "<group>"; };
 		DC63CD202483C22F3E8DAE71 /* PromptJumpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptJumpTests.swift; sourceTree = "<group>"; };
 		DCE4EE07BCC1F913C3E6A081 /* WheelScrollAccumulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WheelScrollAccumulator.swift; sourceTree = "<group>"; };
@@ -655,6 +663,8 @@
 				6EA5A9A40E642096A6A99805 /* FindCaptureRowsBlindTests.swift */,
 				A8CDAE1F06200AF8AEA9FA67 /* FindRefreshCoalescingBlindTests.swift */,
 				12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */,
+				C9406FCA2A8E409CA36B05E5 /* FindStaleRegexScanBlindTests.swift */,
+				A13AE63A03B70E9FAFB38FF1 /* FindSubstringSearchBlindTests.swift */,
 				B07A32BEBADF4A5789EFDCC8 /* FirstResponderRestoreTests.swift */,
 				859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */,
 				EF3965715F1DF2021784E790 /* FunctionKeyF13F20Tests.swift */,
@@ -774,6 +784,7 @@
 				C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */,
 				D766892D203AEA71CC70B95C /* TranslucencyCurveTests.swift */,
 				F296A4AD26E54D873DAE0873 /* UnseenAttentionBlindTests.swift */,
+				315F9E7540DF14DF0072EE89 /* URLDetectorContinuationBlindTests.swift */,
 				0C31E953108A36157B8BE920 /* URLDetectorMultiRowWrapTests.swift */,
 				4E560FE25E1C2DA526BA7DE0 /* URLDetectorReDoSTests.swift */,
 				02A66A954FBE1F74FCE73E3F /* URLDetectorRowSubsetBlindTests.swift */,
@@ -893,6 +904,7 @@
 				7CC2349BAF9EB4C640D5A38F /* TerminalView+Mouse.swift */,
 				9A2D7C60D8EDCD6659DD9161 /* TerminalView+Paste.swift */,
 				D34795F71D3BA1AFE330FE0C /* TerminalView+Services.swift */,
+				DBE037518B835A9B14AFF4EB /* TerminalView+TestFakes.swift */,
 				A593F1C330636A1A636EBF96 /* TooltipController.swift */,
 				EC1D8A560291CE5E7A0CAD11 /* URLDetector.swift */,
 				DCE4EE07BCC1F913C3E6A081 /* WheelScrollAccumulator.swift */,
@@ -1208,6 +1220,7 @@
 				A867066B7521F3033D1766D7 /* TerminalView+Mouse.swift in Sources */,
 				A2A3F1C9087CDA86E7A2B1A8 /* TerminalView+Paste.swift in Sources */,
 				06091BF7C4ABAC9C8EF04124 /* TerminalView+Services.swift in Sources */,
+				09C1B391DBFE5E7F9FDFB15C /* TerminalView+TestFakes.swift in Sources */,
 				CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */,
 				BD4D63111AD3250BC3552962 /* TerminalWindow.swift in Sources */,
 				E4A64F722504E7660313F106 /* TestHostSupport.swift in Sources */,
@@ -1264,6 +1277,8 @@
 				F12C8BA147BF04E7F1068152 /* FindCaptureRowsBlindTests.swift in Sources */,
 				2D36CF8A509FBC807D32FFB9 /* FindRefreshCoalescingBlindTests.swift in Sources */,
 				6A4A848FAF8BE625DC512F81 /* FindReplaceIntegrationTests.swift in Sources */,
+				4E6B3BBE972AA59AF45DBEFA /* FindStaleRegexScanBlindTests.swift in Sources */,
+				7B2C80287EB75BC86A751C85 /* FindSubstringSearchBlindTests.swift in Sources */,
 				2719DE75AF486E2E0B8E688E /* FirstResponderRestoreTests.swift in Sources */,
 				A25F8643DAD775E8251392EC /* FocusEventsTests.swift in Sources */,
 				242064EC63C93D69A922E41C /* FunctionKeyF13F20Tests.swift in Sources */,
@@ -1382,6 +1397,7 @@
 				055461D558F6B6145F1508F1 /* ThemePaletteSelectionBlindTests.swift in Sources */,
 				3C3768AC47652608F2DBE7BF /* ThemeResolutionTests.swift in Sources */,
 				21EF977F67811E7BCCE03C22 /* TranslucencyCurveTests.swift in Sources */,
+				DF443AC68F45EA33294C95DB /* URLDetectorContinuationBlindTests.swift in Sources */,
 				D3A6C740DF8E3C7C91D4ED1F /* URLDetectorMultiRowWrapTests.swift in Sources */,
 				1B7772AA1F390AADA5942983 /* URLDetectorReDoSTests.swift in Sources */,
 				CC9BABD751C25500199DD485 /* URLDetectorRowSubsetBlindTests.swift in Sources */,

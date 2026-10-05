@@ -37,6 +37,31 @@ public enum URLDetector {
         return try! NSRegularExpression(pattern: pattern)
     }()
 
+    /// Enumerate http(s)/ftp URL candidates in `line` from UTF-16 offset
+    /// `start`, with the trailing-punctuation trim already applied and
+    /// zero-length results dropped. Shared by `scan` and the DEBUG-only
+    /// `FakeHyperlinkSnapshot` so tests exercise the shipped pattern
+    /// instead of a second copy of it.
+    static func forEachURLRange(
+        in line: String,
+        nsLine: NSString,
+        from start: Int = 0,
+        _ body: (NSRange, UnsafeMutablePointer<ObjCBool>) -> Void
+    ) {
+        regex.enumerateMatches(
+            in: line,
+            range: NSRange(location: start, length: nsLine.length - start)
+        ) { result, _, stop in
+            guard var r = result?.range else { return }
+            while r.length > 0 {
+                let last = nsLine.character(at: r.location + r.length - 1)
+                if ".,);:]}>'\"".utf16.contains(last) { r.length -= 1 } else { break }
+            }
+            guard r.length > 0 else { return }
+            body(r, stop)
+        }
+    }
+
     // Bare email → `mailto:` URL detection. Conservative by design:
     //
     //   - Local part: one or more of A–Z / a–z / 0–9 / `.` / `_` / `+` / `-`.
@@ -160,16 +185,11 @@ public enum URLDetector {
             // suppress email matches that fall inside a URL (e.g. the
             // `user@host.com` substring of `https://user:pass@host.com`).
             var urlColRangesThisRow: [(startCol: Int, endCol: Int)] = []
-            regex.enumerateMatches(
+            forEachURLRange(
                 in: line,
-                range: NSRange(location: searchStartUTF16, length: nsLine.length - searchStartUTF16)
-            ) { result, _, _ in
-                guard var r = result?.range else { return }
-                while r.length > 0 {
-                    let last = nsLine.character(at: r.location + r.length - 1)
-                    if ".,);:]}>'\"".utf16.contains(last) { r.length -= 1 } else { break }
-                }
-                guard r.length > 0 else { return }
+                nsLine: nsLine,
+                from: searchStartUTF16
+            ) { r, _ in
                 let substring = nsLine.substring(with: r)
                 let bufferLine = Int32(row - snapshot.displayOffset)
                 // Defensive bounds — the map is always the exact length of
