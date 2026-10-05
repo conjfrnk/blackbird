@@ -57,6 +57,43 @@ final class PTYTests: XCTestCase {
         pty.terminate()
     }
 
+    /// Read-loop coalescing guard. A child that emits a known number of
+    /// bytes and exits immediately must have EVERY byte delivered through
+    /// `onBytes` before `onExit` fires (EOF/EIO must not drop a partially
+    /// accumulated batch), and no single chunk may exceed the coalescing cap
+    /// (32 KiB) or a user-action yield point would wait on an oversized
+    /// parse. 200 000 bytes of non-newline output (no ONLCR expansion) is
+    /// ~6 full buffers plus a tail; memory cost is under 1 MiB.
+    func test_floodOutputDeliveredCompletelyInBoundedChunks() throws {
+        try Self.skipIfFlakyOnCI()
+        let total = 200_000
+        let pty = try PTY.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "head -c \(total) /dev/zero | tr '\\0' x"],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        let lock = NSLock()
+        var received = 0
+        var maxChunk = 0
+        var allX = true
+        pty.setOnBytes { chunk in
+            lock.lock(); defer { lock.unlock() }
+            received += chunk.count
+            maxChunk = max(maxChunk, chunk.count)
+            if chunk.contains(where: { $0 != UInt8(ascii: "x") }) { allX = false }
+        }
+        let exited = expectation(description: "child exited")
+        pty.setOnExit { _ in exited.fulfill() }
+        pty.startReading()
+        wait(for: [exited], timeout: 10.0)
+
+        lock.lock(); defer { lock.unlock() }
+        XCTAssertEqual(received, total, "every byte written before exit must be delivered")
+        XCTAssertTrue(allX, "payload must arrive intact")
+        XCTAssertLessThanOrEqual(maxChunk, 32 * 1024, "coalesced chunk must respect the cap")
+    }
+
     func test_writeBytesEchoedBack() throws {
         try Self.skipIfFlakyOnCI()
         // sh with -i echoes input back; feed "exit\n" so it terminates cleanly.

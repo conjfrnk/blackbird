@@ -207,17 +207,18 @@ public final class PTY {
     }
     private var reapState: ReapState = .running
     private var _isRunning = true
-    /// Per-`read(2)` buffer size. Darwin's PTY master delivers up to the
-    /// kernel's pipe-buffer limit per syscall (typically 16 KiB), so a
-    /// larger user-space buffer doesn't force larger reads — it just lets
-    /// a very fast producer (build logs, `cat hugefile`, ANSI-art streams)
-    /// drain more than one kernel buffer per syscall when several chunks
-    /// are queued back-to-back. Benchmarks on comparable terminals show the
-    /// throughput curve flattens around 64–256 KiB (see Evan Jones' PTY
-    /// read/write buffer study). 128 KiB is the sweet spot: 8× the prior
-    /// 16 KiB cap without burning meaningful memory (one allocation per
-    /// tab, shared across all reads).
-    private let readBufferSize = 128 * 1024
+    /// Read-coalescing buffer size. Darwin's PTY master hands back only
+    /// ~1 KiB per `read(2)` (TTYHOG-sized; measured on macOS 27 with an 8 MB
+    /// flood: 7812 reads of exactly 1024 bytes), so one read per `onBytes`
+    /// would push ~70k chunks/s through the whole per-chunk pipeline
+    /// (FeedBudget lock, `coreQueue.async`, deferred-feed bookkeeping, a
+    /// `Data` + `[UInt8]` copy) under a flood. The read loop therefore keeps
+    /// reading the non-blocking master until it would block (EAGAIN) or this
+    /// buffer fills, and delivers ONE chunk. 32 KiB — not larger — keeps a
+    /// user-action yield point (a keystroke waits for the chunk being
+    /// parsed) at ~1 ms of parse at the dense-cell throughput floor. One
+    /// allocation per tab, reused across all reads.
+    private let readBufferSize = 32 * 1024
 
     /// Shared `os.Logger` for PTY diagnostics (read-loop errno, envOverride
     /// rejections). `os.Logger` — not `NSLog` — so messages appear in
@@ -817,54 +818,87 @@ public final class PTY {
                    "PTY.startReading() called before setOnBytes(_:); bytes will be silently dropped. Wire the closure first.")
             #endif
             var buffer = [UInt8](repeating: 0, count: self.readBufferSize)
+            let cap = self.readBufferSize
+            // Park until the master is readable. The master is O_NONBLOCK
+            // (audit S1-001 — so WRITES can't wedge the write queue), so
+            // reads get their blocking behaviour back by parking in poll;
+            // a bare retry on EAGAIN would spin at 100% CPU on an idle
+            // shell. Teardown still works like the blocking-read era:
+            // SIGHUP -> child exits -> slave closes -> POLLIN/POLLHUP wakes
+            // us -> read returns 0/EIO -> loop exits. Returns false when
+            // poll itself failed and the session was torn down.
+            func waitReadable() -> Bool {
+                var pfd = pollfd(fd: self.masterFD, events: Int16(POLLIN), revents: 0)
+                let rc = poll(&pfd, 1, -1)
+                if rc < 0 && errno != EINTR {
+                    let pollErrno = errno
+                    Self.logger.log(
+                        "PTY.read poll error errno=\(pollErrno, privacy: .public) fd=\(self.masterFD, privacy: .public) — tearing down"
+                    )
+                    self.markStopped()
+                    return false
+                }
+                return true
+            }
+            // Set when the coalescing read already observed EAGAIN, so the
+            // next iteration parks in poll directly instead of issuing a
+            // second read that would just return EAGAIN again.
+            var wouldBlock = false
             while self.shouldKeepRunning() {
-                let n = buffer.withUnsafeMutableBufferPointer { buf -> Int in
-                    read(self.masterFD, buf.baseAddress, buf.count)
+                if wouldBlock {
+                    wouldBlock = false
+                    if !waitReadable() { break }
                 }
-                if n > 0 {
-                    let data = Data(buffer[0..<n])
-                    self.onBytes?(data)
-                    continue
+                // Fill the buffer: read until EAGAIN, EOF, a fatal errno or
+                // the buffer is full, then deliver ONE chunk. A terminal
+                // condition (EOF / fatal errno) is recorded and acted on only
+                // AFTER the accumulated bytes are delivered, so tail output
+                // is never dropped. Between reads we skip shouldKeepRunning():
+                // the buffer cap bounds the extra work, and the masterFD is
+                // only ever closed by this queue.
+                var off = 0
+                var eof = false
+                var fatalErrno: Int32 = 0
+                while off < cap {
+                    let n = buffer.withUnsafeMutableBufferPointer { buf -> Int in
+                        read(self.masterFD, buf.baseAddress! + off, cap - off)
+                    }
+                    if n > 0 {
+                        off += n
+                        continue
+                    }
+                    if n == 0 {
+                        // Genuine EOF — slave closed, child has exited.
+                        eof = true
+                        break
+                    }
+                    // n < 0: inspect errno. EINTR is always safe to retry.
+                    // EAGAIN/EWOULDBLOCK means drained for now. Any other
+                    // errno — EIO (slave gone), EBADF (fd closed under us),
+                    // ENXIO, etc. — means the session is unrecoverable.
+                    let savedErrno = errno
+                    if savedErrno == EINTR { continue }
+                    if savedErrno == EAGAIN || savedErrno == EWOULDBLOCK {
+                        wouldBlock = true
+                        break
+                    }
+                    fatalErrno = savedErrno
+                    break
                 }
-                if n == 0 {
-                    // Genuine EOF — slave closed, child has exited.
+                if off > 0 {
+                    self.onBytes?(Data(buffer[0..<off]))
+                }
+                if eof {
                     self.markStopped()
                     break
                 }
-                // n < 0: inspect errno. EINTR is always safe to retry;
-                // EAGAIN/EWOULDBLOCK shouldn't normally fire on a blocking
-                // fd but retry defensively in case any subsystem toggles
-                // O_NONBLOCK. Any other errno — EIO (slave gone), EBADF
-                // (fd closed under us), ENXIO, etc. — means the session
-                // is unrecoverable; log and tear down.
-                let savedErrno = errno
-                if savedErrno == EINTR { continue }
-                if savedErrno == EAGAIN || savedErrno == EWOULDBLOCK {
-                    // The master is O_NONBLOCK (audit S1-001 — so WRITES
-                    // can't wedge the write queue). Reads get their
-                    // blocking behaviour back by parking in poll until
-                    // readable; a bare `continue` here would spin at
-                    // 100% CPU on an idle shell. Teardown still works
-                    // exactly like the blocking-read era: SIGHUP → child
-                    // exits → slave closes → POLLIN/POLLHUP wakes us →
-                    // read returns 0/EIO → loop exits.
-                    var pfd = pollfd(fd: self.masterFD, events: Int16(POLLIN), revents: 0)
-                    let rc = poll(&pfd, 1, -1)
-                    if rc < 0 && errno != EINTR {
-                        let pollErrno = errno
-                        Self.logger.log(
-                            "PTY.read poll error errno=\(pollErrno, privacy: .public) fd=\(self.masterFD, privacy: .public) — tearing down"
-                        )
-                        self.markStopped()
-                        break
-                    }
-                    continue
+                if fatalErrno != 0 {
+                    Self.logger.log(
+                        "PTY.read error errno=\(fatalErrno, privacy: .public) fd=\(self.masterFD, privacy: .public) — tearing down"
+                    )
+                    self.markStopped()
+                    break
                 }
-                Self.logger.log(
-                    "PTY.read error errno=\(savedErrno, privacy: .public) fd=\(self.masterFD, privacy: .public) — tearing down"
-                )
-                self.markStopped()
-                break
             }
             // Read loop has exited (genuine EOF, a fatal errno, or an
             // external markStopped via terminate()). The read queue is the
