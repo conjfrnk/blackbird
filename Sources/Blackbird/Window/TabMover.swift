@@ -11,7 +11,7 @@ final class TabMoveRequest: NSObject {
 
     /// A weakly-held window, boxed so it can live inside an enum case
     /// (Swift doesn't allow `weak` directly on an associated value) —
-    /// same shape as `TabOrderCoordinator.WeakWindowBox`.
+    /// same shape as `TabOrderCoordinator.WeakWindow`.
     final class WeakWindow {
         private(set) weak var value: NSWindow?
         init(_ value: NSWindow) { self.value = value }

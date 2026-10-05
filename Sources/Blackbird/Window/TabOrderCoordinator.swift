@@ -53,6 +53,30 @@ final class TabOrderCoordinator {
     /// map tracks only live groups.
     private var ordersByGroup: [ObjectIdentifier: [WeakWindow]] = [:]
 
+    /// Where a returning window should reinsert, relative to its remembered
+    /// position. A closed enum instead of a `Bool` + `Optional` pair
+    /// (the previous shape) so "was at the front AND had a remembered
+    /// neighbor" — representable but never actually constructed — is
+    /// statically unrepresentable rather than merely undocumented
+    /// (type-design review).
+    private enum ReinsertAnchor {
+        /// `departed` was at index 0 of its stored order — no left
+        /// neighbor ever existed.
+        case front
+        /// `departed` had a left neighbor at departure time. Boxed/weak:
+        /// if that neighbor has since deallocated, or isn't a member of
+        /// the destination this window is rejoining, the hint falls
+        /// through to an ordinary append rather than inserting anywhere
+        /// specific — we no longer know where `departed` belonged.
+        /// `WeakWindow` is the box because Swift doesn't allow `weak`
+        /// directly on an associated value.
+        case afterNeighbor(WeakWindow)
+    }
+    private struct DepartureHint {
+        weak var departed: NSWindow?
+        let anchor: ReinsertAnchor
+    }
+
     /// One-shot "where did I used to sit" hints for windows that recently
     /// dropped out of some group's visual order (closed, detached, or moved
     /// to another window) — an ARRAY holding weak references, not a
@@ -73,33 +97,6 @@ final class TabOrderCoordinator {
     /// (the common case for an unrelated join, since the neighbor almost
     /// certainly isn't a member of some other group), the window falls
     /// through to the ordinary newly-seen-arrival append.
-    /// A weakly-held window, boxed so it can live inside an enum case
-    /// (Swift doesn't allow `weak` directly on an associated value).
-    private struct WeakWindowBox {
-        weak var value: NSWindow?
-    }
-
-    /// Where a returning window should reinsert, relative to its remembered
-    /// position. A closed enum instead of a `Bool` + `Optional` pair
-    /// (the previous shape) so "was at the front AND had a remembered
-    /// neighbor" — representable but never actually constructed — is
-    /// statically unrepresentable rather than merely undocumented
-    /// (type-design review).
-    private enum ReinsertAnchor {
-        /// `departed` was at index 0 of its stored order — no left
-        /// neighbor ever existed.
-        case front
-        /// `departed` had a left neighbor at departure time. Boxed/weak:
-        /// if that neighbor has since deallocated, or isn't a member of
-        /// the destination this window is rejoining, the hint falls
-        /// through to an ordinary append rather than inserting anywhere
-        /// specific — we no longer know where `departed` belonged.
-        case afterNeighbor(WeakWindowBox)
-    }
-    private struct DepartureHint {
-        weak var departed: NSWindow?
-        let anchor: ReinsertAnchor
-    }
     private var departureHints: [DepartureHint] = []
 
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
@@ -210,7 +207,7 @@ final class TabOrderCoordinator {
                     // belonged relative to whatever survives.
                     departureHints.append(DepartureHint(
                         departed: w,
-                        anchor: .afterNeighbor(WeakWindowBox(value: stored[index - 1].value))))
+                        anchor: .afterNeighbor(WeakWindow(value: stored[index - 1].value))))
                 }
             }
         }
