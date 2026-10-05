@@ -38,6 +38,47 @@ enum SettingsChrome {
     }
 }
 
+/// Monospaced font families installed on the system, for the Settings Family
+/// picker. Built once per process and reused across SettingsView renders —
+/// without the cache, SwiftUI would re-enumerate on every body re-eval (every
+/// slider drag, every toggle). Fonts rarely change at runtime; a user who
+/// installs one can restart Settings to see it.
+///
+/// The enumeration costs hundreds of ms cold (one font lookup per installed
+/// family), so `prewarm()` runs it on a utility queue after launch instead of
+/// letting the first Cmd-, pay for it on the main thread. Uses CoreText, whose
+/// font APIs are thread-safe (NSFontManager is not documented as such). `all`
+/// is a `static let` (`swift_once`): a main-thread read that races the prewarm
+/// simply blocks until the one computation finishes, and never sees a partial
+/// or empty list.
+enum MonospaceFontFamilies {
+    static let all: [String] = compute()
+
+    /// Kick `all` onto a background queue. Idempotent and safe to call from any
+    /// thread.
+    static func prewarm() {
+        DispatchQueue.global(qos: .utility).async { _ = all }
+    }
+
+    /// Same result as filtering `NSFontManager.availableFontFamilies` on
+    /// `NSFont(name:size:)?.isFixedPitch`, via CoreText. Exposed (internal)
+    /// so tests can pin that parity.
+    static func compute() -> [String] {
+        let names = (CTFontManagerCopyAvailableFontFamilyNames() as? [String]) ?? []
+        return names
+            .filter { name in
+                // NSFontManager hides the dot-prefixed system families.
+                guard !name.hasPrefix(".") else { return false }
+                let font = CTFontCreateWithName(name as CFString, 12, nil)
+                // CTFontCreateWithName substitutes a default font for an
+                // unresolvable name where NSFont(name:) returned nil.
+                guard CTFontCopyFamilyName(font) as String == name else { return false }
+                return CTFontGetSymbolicTraits(font).contains(.traitMonoSpace)
+            }
+            .sorted()
+    }
+}
+
 public struct SettingsView: View {
     // `Preferences.shared` is a long-lived singleton; using `@ObservedObject`
     // (rather than `@StateObject`) makes it explicit that SettingsView doesn't
@@ -46,22 +87,6 @@ public struct SettingsView: View {
     // evaluated once, but it adds lifecycle semantics SettingsView doesn't
     // need and reads wrong at a glance.
     @ObservedObject private var prefs = Preferences.shared
-
-    /// Cached list of monospaced font families on the system. Built once
-    /// per process launch and reused across SettingsView renders —
-    /// without this, SwiftUI re-enumerates NSFontManager on every body
-    /// re-eval (every slider drag, every toggle), turning the 100+
-    /// font lookup into ~120× per second of wasted work during drags.
-    /// Fonts rarely change at runtime; if a user installs a new one
-    /// they can restart Settings to see it.
-    private static let cachedMonospaceFamilies: [String] = {
-        NSFontManager.shared.availableFontFamilies
-            .filter { name in
-                guard let font = NSFont(name: name, size: 12) else { return false }
-                return font.isFixedPitch
-            }
-            .sorted()
-    }()
 
     public init() {}
 
@@ -108,7 +133,7 @@ public struct SettingsView: View {
 
             Section("Font") {
                 Picker("Family", selection: $prefs.fontName) {
-                    ForEach(Self.cachedMonospaceFamilies, id: \.self) { name in
+                    ForEach(MonospaceFontFamilies.all, id: \.self) { name in
                         Text(name).tag(name)
                     }
                 }

@@ -182,6 +182,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if opened == 0 {
             openFirstWindow()
         }
+        // After the first window is up so the font enumeration never contends
+        // with first-window construction / PTY spawn; the first Cmd-, then
+        // finds the Family picker's list already built.
+        MonospaceFontFamilies.prewarm()
     }
 
     // MARK: - Dock menu
