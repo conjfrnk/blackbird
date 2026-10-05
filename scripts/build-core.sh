@@ -31,10 +31,21 @@ fi
 mkdir -p "$UNIVERSAL_DIR"
 
 echo "==> lipo"
+# Write to a temp file and only replace the real lib when the bytes differ:
+# the Xcode phase runs on every build, and an unconditional rewrite would
+# bump the .a mtime and force a Swift relink on every no-op build.
+UNIVERSAL_LIB="$UNIVERSAL_DIR/lib${CRATE}.a"
+UNIVERSAL_TMP="$UNIVERSAL_DIR/.lib${CRATE}.a.tmp.$$"
+trap 'rm -f "$UNIVERSAL_TMP"' EXIT
 lipo -create \
     "$TARGET_DIR/aarch64-apple-darwin/$PROFILE/lib${CRATE}.a" \
     "$TARGET_DIR/x86_64-apple-darwin/$PROFILE/lib${CRATE}.a" \
-    -output "$UNIVERSAL_DIR/lib${CRATE}.a"
+    -output "$UNIVERSAL_TMP"
+if [ -f "$UNIVERSAL_LIB" ] && cmp -s "$UNIVERSAL_TMP" "$UNIVERSAL_LIB"; then
+    rm -f "$UNIVERSAL_TMP"
+else
+    mv -f "$UNIVERSAL_TMP" "$UNIVERSAL_LIB"
+fi
 
 echo "==> wrote $UNIVERSAL_DIR/lib${CRATE}.a"
 lipo -info "$UNIVERSAL_DIR/lib${CRATE}.a"
