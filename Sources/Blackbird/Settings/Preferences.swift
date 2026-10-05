@@ -163,10 +163,15 @@ public final class Preferences: ObservableObject {
     /// so an invalid stored raw never shows a different palette between an
     /// external write and the repair pass.
     public static let defaultThemeChoice: Theme = .gruvbox
+    /// Numeric registered defaults, spelled once: the `@AppStorage`
+    /// initialisers, `registeredDefaults`, and the clamp fallbacks all read
+    /// these so they cannot drift apart.
+    public static let fontSizeDefault: Double = 13
+    public static let scrollbackLinesDefault: Double = 100_000
     @AppStorage("bb.theme")          public var themeRaw: String  = Preferences.defaultThemeChoice.rawValue
     @AppStorage("bb.themeMode")      public var themeModeRaw: String = ThemeMode.dark.rawValue
     @AppStorage("bb.fontName")       public var fontName: String = "Hack Nerd Font Mono"
-    @AppStorage("bb.fontSize")       public var fontSize: Double = 13 {
+    @AppStorage("bb.fontSize")       public var fontSize: Double = Preferences.fontSizeDefault {
         didSet {
             // A tampered plist or a stale UserDefaults key can surface
             // NaN, ±Infinity, negative, or absurdly large sizes.
@@ -188,7 +193,7 @@ public final class Preferences: ObservableObject {
             // recursive write entirely when we're already inside a
             // clamping pass — the outer `didSet` already produced the
             // user-visible objectWillChange.
-            let clamped = Self.fontSizeRange.clamping(fontSize, nonFiniteFallback: 13)
+            let clamped = Self.fontSizeRange.clamping(fontSize, nonFiniteFallback: Preferences.fontSizeDefault)
             guard clamped != fontSize else { return }
             withSelfWriteSuppressed { fontSize = clamped }
         }
@@ -248,10 +253,10 @@ public final class Preferences: ObservableObject {
     /// Scrollback lines per session, applied to NEW sessions. Stored as a
     /// Double like the other numeric prefs; clamped to
     /// `scrollbackLinesRange` on read (the core caps at 200k).
-    @AppStorage("bb.scrollbackLines") public var scrollbackLines: Double = 100_000
+    @AppStorage("bb.scrollbackLines") public var scrollbackLines: Double = Preferences.scrollbackLinesDefault
     public static let scrollbackLinesRange: ClosedRange<Double> = 1_000...200_000
     public var scrollbackLinesClamped: UInt32 {
-        let v = scrollbackLines.isFinite ? scrollbackLines : 100_000
+        let v = scrollbackLines.isFinite ? scrollbackLines : Self.scrollbackLinesDefault
         return UInt32(min(Self.scrollbackLinesRange.upperBound, max(Self.scrollbackLinesRange.lowerBound, v)))
     }
     /// Copy the selection to the clipboard as soon as a drag ends (iTerm2 /
@@ -421,17 +426,14 @@ public final class Preferences: ObservableObject {
         return (opacity, Int(round(max(0, blurFloat))))
     }
 
-    private init() {
-        // Register defaults in NSRegistrationDomain BEFORE the first
-        // `@AppStorage` read so that `defaults read <bundle-id>`
-        // surfaces our full pref set even on a fresh install (where no
-        // persistent-domain values exist yet), and so `@AppStorage`'s
-        // default-on-missing-key path matches the registered defaults
-        // exactly. Without this, a tool asking for `bb.fontSize` before
-        // Blackbird has ever written one gets nil instead of `13`.
-        // (settings F7)
-        let defaults = UserDefaults.standard
-        defaults.register(defaults: [
+    /// Every registered default, keyed by `bb.`-prefixed name. The single
+    /// source for `register(defaults:)` AND for `PrefsSanitizer`'s wrong-type
+    /// sweep, which derives its Bool / Double key lists from the value types
+    /// here — a new numeric/bool pref registered below is sanitized
+    /// automatically. Computed (not a stored static) so the `[String: Any]`
+    /// payload doesn't trip a non-Sendable-static diagnostic.
+    static var registeredDefaults: [String: Any] {
+        [
             // Audit EI-02: do NOT register `schemaVersionKey`. Earlier
             // builds did, on the theory that a fresh install would
             // read back as currentSchemaVersion and skip the
@@ -449,7 +451,7 @@ public final class Preferences: ObservableObject {
             Preferences.k("theme"):             Preferences.defaultThemeChoice.rawValue,
             Preferences.k("themeMode"):         ThemeMode.dark.rawValue,
             Preferences.k("fontName"):          "Hack Nerd Font Mono",
-            Preferences.k("fontSize"):          13.0,
+            Preferences.k("fontSize"):          Preferences.fontSizeDefault,
             Preferences.k("cursorBlink"):       false,
             Preferences.k("bell"):              BellStyle.visual.rawValue,
             Preferences.k("cursorShape"):       CursorShape.followShell.rawValue,
@@ -474,9 +476,22 @@ public final class Preferences: ObservableObject {
             Preferences.k("shellPath"):         "",
             Preferences.k("hangDetection"):     true,
             Preferences.k("programNotifications"): true,
-            Preferences.k("scrollbackLines"):   100_000.0,
+            Preferences.k("scrollbackLines"):   Preferences.scrollbackLinesDefault,
             Preferences.k("copyOnSelect"):      false,
-        ])
+        ]
+    }
+
+    private init() {
+        // Register defaults in NSRegistrationDomain BEFORE the first
+        // `@AppStorage` read so that `defaults read <bundle-id>`
+        // surfaces our full pref set even on a fresh install (where no
+        // persistent-domain values exist yet), and so `@AppStorage`'s
+        // default-on-missing-key path matches the registered defaults
+        // exactly. Without this, a tool asking for `bb.fontSize` before
+        // Blackbird has ever written one gets nil instead of `13`.
+        // (settings F7)
+        let defaults = UserDefaults.standard
+        defaults.register(defaults: Self.registeredDefaults)
 
         // Type-guard pass. `@AppStorage<Double>` trusts the KVC getter — a
         // CLI write like `defaults write <bundle-id> bb.fontSize
@@ -717,7 +732,7 @@ public final class Preferences: ObservableObject {
         if let diskFontSize = Preferences.doubleInPersistentDomain(
             in: defaults, domain: domain, key: Preferences.k("fontSize")
         ) {
-            let clampedFont = Self.fontSizeRange.clamping(diskFontSize, nonFiniteFallback: 13)
+            let clampedFont = Self.fontSizeRange.clamping(diskFontSize, nonFiniteFallback: Preferences.fontSizeDefault)
             if clampedFont != diskFontSize {
                 Preferences.logger.log("re-clamping fontSize after external defaults write: \(diskFontSize, privacy: .public) → \(clampedFont, privacy: .public)")
                 self.fontSize = clampedFont

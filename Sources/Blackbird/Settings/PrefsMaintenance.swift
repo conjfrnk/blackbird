@@ -74,20 +74,14 @@ enum PrefsSanitizer {
     /// v0.1.5 with a corrupted legacy key still gets cleaned up before the
     /// migration copies it forward. (settings F7)
     static func sanitizeStoredTypes(in defaults: UserDefaults, domain: String) {
-        let numericDoubleKeys = ["fontSize", "translucency", "scrollbackLines"]
-        let boolKeys = [
-            "cursorBlink", "confirmClose", "autoUpdateChecks",
-            "osc52Enabled", "colorQueryEnabled",
-            // Audit fix-#15: include confirmMultiLinePaste in the sanitize
-            // sweep so a wrong-typed CLI write (e.g. defaults write … -string
-            // yes) is stripped before the registered default is applied,
-            // matching sibling bool prefs.
-            "confirmMultiLinePaste",
-            "setLocaleEnvironment", "hangDetection", "programNotifications", "copyOnSelect",
-            // Issue #23: manual computed property (not @AppStorage) but the
-            // same wrong-type CLI-write hazard applies to its raw key.
-            "automaticShellIntegration",
-        ]
+        // Derived from the registered-defaults table: every `bb.` key whose
+        // default is a Bool or Double is a numeric-like pref (the
+        // `@AppStorage<Double>` / `<Bool>` / manual-bool cases alike). String
+        // prefs (fontName, shellPath, enum raws) are deliberately not swept.
+        let numericLikeNames: [String] = Preferences.registeredDefaults.compactMap { key, value in
+            guard key.hasPrefix("bb."), value is Bool || value is Double else { return nil }
+            return String(key.dropFirst("bb.".count))
+        }
         // S5-009: read from the persistent domain only, mirroring the S5-001
         // migration fix. `defaults.object(forKey:)` walks the full search list
         // (app persistent → NSGlobalDomain → registration); a `defaults write
@@ -98,14 +92,7 @@ enum PrefsSanitizer {
         // reads ONLY the app's domain, so we sanitize what we can actually mutate.
         guard let persistent = defaults.persistentDomain(forName: domain) else { return }
         let isNumericLike: (Any) -> Bool = { $0 is NSNumber }
-        for name in numericDoubleKeys {
-            for key in [Preferences.k(name), name] {
-                if let v = persistent[key], !isNumericLike(v) {
-                    defaults.removeObject(forKey: key)
-                }
-            }
-        }
-        for name in boolKeys {
+        for name in numericLikeNames {
             for key in [Preferences.k(name), name] {
                 if let v = persistent[key], !isNumericLike(v) {
                     defaults.removeObject(forKey: key)
@@ -158,7 +145,7 @@ enum PrefsSanitizer {
             }
         }
 
-        repair("theme", Theme.self, default: .gruvbox) { prefs.themeRaw = $0 }
+        repair("theme", Theme.self, default: Preferences.defaultThemeChoice) { prefs.themeRaw = $0 }
         repair("themeMode", Preferences.ThemeMode.self, default: .dark) { prefs.themeModeRaw = $0 }
         repair("bell", Preferences.BellStyle.self, default: .visual) { prefs.bellRaw = $0 }
         repair("cursorShape", Preferences.CursorShape.self, default: .followShell) { prefs.cursorShapeRaw = $0 }

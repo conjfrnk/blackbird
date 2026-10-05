@@ -649,4 +649,83 @@ final class PreferencesAdversarialTests: XCTestCase {
             "Preferences.shared returned multiple distinct instances under concurrent first-touch: \(observed.count) total observations, \(Set(observed).count) unique"
         )
     }
+
+    // MARK: - sanitizeStoredTypes key coverage (derived from registered defaults)
+
+    /// The 3 numeric + 11 bool pref names the wrong-type sweep has always
+    /// covered. Pinned literally so deriving the sweep from the registered
+    /// defaults can never silently shrink it.
+    private static let expectedSweptNames = [
+        "fontSize", "translucency", "scrollbackLines",
+        "cursorBlink", "confirmClose", "autoUpdateChecks", "osc52Enabled",
+        "colorQueryEnabled", "confirmMultiLinePaste", "setLocaleEnvironment",
+        "hangDetection", "programNotifications", "copyOnSelect",
+        "automaticShellIntegration",
+    ]
+
+    /// A String planted under any numeric/bool pref key (prefixed or legacy
+    /// unprefixed) is stripped; String-valued prefs are left alone.
+    func test_sanitizeStoredTypes_stripsWrongTypeFromEveryNumericAndBoolKey() {
+        let suiteName = "blackbird.tests.sanitizecoverage.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+
+        for name in Self.expectedSweptNames {
+            suite.set("garbage", forKey: "bb.\(name)")
+            suite.set("garbage", forKey: name)
+        }
+        suite.set("Some Font", forKey: "bb.fontName")
+        suite.set("/bin/zsh", forKey: "bb.shellPath")
+
+        PrefsSanitizer.sanitizeStoredTypes(in: suite, domain: suiteName)
+
+        let persistent = suite.persistentDomain(forName: suiteName) ?? [:]
+        for name in Self.expectedSweptNames {
+            XCTAssertNil(persistent["bb.\(name)"], "wrong-type bb.\(name) was not stripped")
+            XCTAssertNil(persistent[name], "wrong-type legacy \(name) was not stripped")
+        }
+        XCTAssertEqual(persistent["bb.fontName"] as? String, "Some Font")
+        XCTAssertEqual(persistent["bb.shellPath"] as? String, "/bin/zsh")
+    }
+
+    /// Valid numeric/bool values survive the sweep untouched.
+    func test_sanitizeStoredTypes_keepsWellTypedValues() {
+        let suiteName = "blackbird.tests.sanitizekeep.\(UUID().uuidString)"
+        guard let suite = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Could not create isolated UserDefaults suite \(suiteName)")
+            return
+        }
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        suite.set(14.0, forKey: "bb.fontSize")
+        suite.set(true, forKey: "bb.cursorBlink")
+
+        PrefsSanitizer.sanitizeStoredTypes(in: suite, domain: suiteName)
+
+        XCTAssertEqual(suite.persistentDomain(forName: suiteName)?["bb.fontSize"] as? Double, 14.0)
+        XCTAssertEqual(suite.persistentDomain(forName: suiteName)?["bb.cursorBlink"] as? Bool, true)
+    }
+
+    /// Drift guard: every registered Bool/Double default is covered by the
+    /// pinned list above, and vice versa — a new numeric/bool pref must be
+    /// added here deliberately.
+    func test_registeredNumericAndBoolDefaults_matchSweptNames() {
+        let registered = Preferences.registeredDefaults
+            .filter { $0.key.hasPrefix("bb.") && ($0.value is Bool || $0.value is Double) }
+            .map { String($0.key.dropFirst(3)) }
+        XCTAssertEqual(Set(registered), Set(Self.expectedSweptNames))
+        XCTAssertNil(Preferences.registeredDefaults["bb.prefsSchemaVersion"],
+                     "schema version must stay unregistered (audit EI-02)")
+    }
+
+    /// repair() must fall back to the same theme the registered default and
+    /// the `theme` getter use.
+    func test_registeredThemeDefault_matchesDefaultThemeChoice() {
+        XCTAssertEqual(
+            Preferences.registeredDefaults["bb.theme"] as? String,
+            Preferences.defaultThemeChoice.rawValue
+        )
+    }
 }
