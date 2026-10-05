@@ -677,24 +677,25 @@ public final class Preferences: ObservableObject {
     /// clamp/repair writes can't re-enter the handler (audit M5 — one
     /// reentry-suppression primitive).
     private func applyExternalDefaultsChange() {
-        let defaults = UserDefaults.standard
+        // ONE copy of the app's persistent domain for the whole pass —
+        // `persistentDomain(forName:)` copies the entire dictionary (every
+        // NSWindow Frame key, Sparkle state, …) and this handler runs on every
+        // UserDefaults write. Reuse is sound because the enum repair below only
+        // writes the seven enum-backed keys, never the schema-version /
+        // fontSize / translucency keys read from the snapshot afterwards, and
+        // the clamp writes come last. If a repair ever starts touching those
+        // keys, re-read the domain before them.
+        let persistent = UserDefaults.standard.persistentDomain(forName: Self.persistentDomainName)
 
         // H-8 downgrade gate: skip the enum repair when the on-disk
         // schema version is ahead of the current binary. Same predicate
         // as init. Reads via persistent-domain helper (audit S5-R-001)
         // so a hostile `defaults write -g bb.prefsSchemaVersion 99` can't
         // poison the gate.
-        let storedSchemaVersion = Preferences.storedSchemaVersion(
-            in: defaults,
-            domain: Self.persistentDomainName
-        )
+        let storedSchemaVersion = PersistentDomainReader.storedSchemaVersion(inSnapshot: persistent)
         let isDowngrade = storedSchemaVersion > Preferences.currentSchemaVersion
         if !isDowngrade {
-            Preferences.repairEnumRawValues(
-                in: self,
-                defaults: defaults,
-                domain: Self.persistentDomainName
-            )
+            PrefsSanitizer.repairEnumRawValues(in: self, snapshot: persistent)
         }
 
         // Numeric clamps — same envelope as the `didSet` blocks. The
@@ -727,10 +728,8 @@ public final class Preferences: ObservableObject {
         // would have walked NSGlobalDomain → registration → 13 in that
         // case, then either matched (no write) or re-clamped to a
         // global-poisoned value.
-        let domain = Self.persistentDomainName
-
-        if let diskFontSize = Preferences.doubleInPersistentDomain(
-            in: defaults, domain: domain, key: Preferences.k("fontSize")
+        if let diskFontSize = PersistentDomainReader.double(
+            inSnapshot: persistent, key: Preferences.k("fontSize")
         ) {
             let clampedFont = Self.fontSizeRange.clamping(diskFontSize, nonFiniteFallback: Preferences.fontSizeDefault)
             if clampedFont != diskFontSize {
@@ -739,8 +738,8 @@ public final class Preferences: ObservableObject {
             }
         }
 
-        if let diskTrans = Preferences.doubleInPersistentDomain(
-            in: defaults, domain: domain, key: Preferences.k("translucency")
+        if let diskTrans = PersistentDomainReader.double(
+            inSnapshot: persistent, key: Preferences.k("translucency")
         ) {
             let clampedTrans = Self.translucencyRange.clamping(diskTrans, nonFiniteFallback: Self.translucencyRange.lowerBound)
             if clampedTrans != diskTrans {

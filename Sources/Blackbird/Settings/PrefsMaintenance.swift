@@ -39,8 +39,14 @@ enum PersistentDomainReader {
     /// Returns 0 when the key is absent from the persistent domain, matching
     /// `integer(forKey:)`'s contract for missing keys.
     static func storedSchemaVersion(in defaults: UserDefaults, domain: String) -> Int {
-        guard let persistent = defaults.persistentDomain(forName: domain) else { return 0 }
-        if let n = persistent[Preferences.schemaVersionKey] as? NSNumber { return n.intValue }
+        storedSchemaVersion(inSnapshot: defaults.persistentDomain(forName: domain))
+    }
+
+    /// Snapshot form of `storedSchemaVersion(in:domain:)` — decodes from an
+    /// already-fetched `persistentDomain(forName:)` result so a caller that
+    /// needs several reads in one pass copies the domain dictionary once.
+    static func storedSchemaVersion(inSnapshot persistent: [String: Any]?) -> Int {
+        if let n = persistent?[Preferences.schemaVersionKey] as? NSNumber { return n.intValue }
         return 0
     }
 
@@ -55,8 +61,12 @@ enum PersistentDomainReader {
     /// disk" (use the registered default) from "key set to 0" (a legitimate but
     /// out-of-envelope value worth re-clamping).
     static func double(in defaults: UserDefaults, domain: String, key: String) -> Double? {
-        guard let persistent = defaults.persistentDomain(forName: domain) else { return nil }
-        if let n = persistent[key] as? NSNumber { return n.doubleValue }
+        double(inSnapshot: defaults.persistentDomain(forName: domain), key: key)
+    }
+
+    /// Snapshot form of `double(in:domain:key:)` — see `storedSchemaVersion(inSnapshot:)`.
+    static func double(inSnapshot persistent: [String: Any]?, key: String) -> Double? {
+        if let n = persistent?[key] as? NSNumber { return n.doubleValue }
         return nil
     }
 }
@@ -126,7 +136,16 @@ enum PrefsSanitizer {
     /// + drive the standard domain. This split is inherent to `@AppStorage`, not
     /// this extraction.
     static func repairEnumRawValues(in prefs: Preferences, defaults: UserDefaults, domain: String) {
-        let persistent = defaults.persistentDomain(forName: domain) ?? [:]
+        repairEnumRawValues(in: prefs, snapshot: defaults.persistentDomain(forName: domain))
+    }
+
+    /// Snapshot form of `repairEnumRawValues(in:defaults:domain:)`: decodes the
+    /// raw values from an already-fetched persistent domain. The repair writes
+    /// only the seven enum-backed keys, never the schema-version / fontSize /
+    /// translucency keys, so a caller may keep reusing the same snapshot for
+    /// reads of those afterwards.
+    static func repairEnumRawValues(in prefs: Preferences, snapshot: [String: Any]?) {
+        let persistent = snapshot ?? [:]
         func storedRaw(_ name: String) -> String? { persistent[Preferences.k(name)] as? String }
 
         // Repair one enum-backed pref: if the stored rawValue doesn't decode to
