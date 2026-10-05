@@ -280,20 +280,55 @@ public final class GlyphAtlas {
         guard let placeholder = device.makeTexture(descriptor: placeholderDesc) else { return nil }
         self.colorTexture = placeholder
 
-        // Zero the mono texture initially. baseAddress can't be nil because
-        // `count: texW * texH` is positive for any valid atlas (init bails
-        // earlier on zero-dim textures via MTLTextureDescriptor). The color
-        // texture's zero-fill happens when its real allocation lands in
-        // `ensureRealColorTexture()`.
-        let zero = [UInt8](repeating: 0, count: texW * texH)
-        zero.withUnsafeBytes { ptr in
-            guard let base = ptr.baseAddress else { return }
+        // Zero the mono texture initially. The color texture's zero-fill
+        // happens when its real allocation lands in `ensureRealColorTexture()`.
+        Self.zeroFill(tex, bytesPerPixel: 1)
+    }
+
+    /// Cap on the shared zero buffer `zeroFill` uploads from. Large enough
+    /// that a typical atlas needs only a handful of `replace` calls, small
+    /// enough to stay cache-resident and avoid a multi-MB transient.
+    private static let zeroBandBytes = 256 * 1024
+
+    /// Shared, immutable, calloc'd zero source for `zeroFill` (read-only
+    /// after creation, so safe from any thread). Never freed.
+    private static let zeroBand: UnsafeMutableRawPointer = {
+        guard let p = calloc(zeroBandBytes, 1) else {
+            preconditionFailure("GlyphAtlas: calloc(\(zeroBandBytes)) failed")
+        }
+        return p
+    }()
+
+    /// Zero every texel of `tex` by uploading a small shared zero buffer in
+    /// horizontal bands, instead of materialising a texture-sized `[UInt8]`
+    /// (2-12 MB mono, 9-47 MB color) just to copy it in and free it. Metal
+    /// does not guarantee a fresh texture is zeroed (Intel `.managed` memory
+    /// isn't), so the explicit fill is required. A row wider than the shared
+    /// buffer falls back to a one-row-per-band temporary.
+    private static func zeroFill(_ tex: MTLTexture, bytesPerPixel: Int) {
+        let width = tex.width
+        let height = tex.height
+        let bytesPerRow = width * bytesPerPixel
+        guard width > 0, height > 0 else { return }
+        var source = UnsafeRawPointer(zeroBand)
+        var temp: UnsafeMutableRawPointer?
+        defer { free(temp) }
+        if bytesPerRow > zeroBandBytes {
+            guard let t = calloc(bytesPerRow, 1) else { return }
+            temp = t
+            source = UnsafeRawPointer(t)
+        }
+        let bandRows = max(1, min(height, zeroBandBytes / bytesPerRow))
+        var y = 0
+        while y < height {
+            let h = min(bandRows, height - y)
             tex.replace(
-                region: MTLRegionMake2D(0, 0, texW, texH),
+                region: MTLRegionMake2D(0, y, width, h),
                 mipmapLevel: 0,
-                withBytes: base,
-                bytesPerRow: texW
+                withBytes: source,
+                bytesPerRow: bytesPerRow
             )
+            y += h
         }
     }
 
@@ -339,16 +374,7 @@ public final class GlyphAtlas {
         // Zero so unwritten slots (and the inter-slot padding linear
         // filtering can fractionally sample at glyph edges) are transparent
         // — same correctness contract as the mono texture's init zero-fill.
-        let zeroColor = [UInt8](repeating: 0, count: texW * texH * 4)
-        zeroColor.withUnsafeBytes { ptr in
-            guard let base = ptr.baseAddress else { return }
-            colorTex.replace(
-                region: MTLRegionMake2D(0, 0, texW, texH),
-                mipmapLevel: 0,
-                withBytes: base,
-                bytesPerRow: texW * 4
-            )
-        }
+        Self.zeroFill(colorTex, bytesPerPixel: 4)
         self.colorTexture = colorTex
         return true
     }
