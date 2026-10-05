@@ -29,9 +29,8 @@ public final class MetalRenderer {
     /// if it was ever negative. Today BBCore's snapshot accessor wraps
     /// a Rust `u32` so the negative branch is unreachable, but the
     /// clamp is the contract pin (M-16) and the warning is the early
-    /// signal for a regression that lets the contract drift. Two call
-    /// sites (FrameKey + CacheKey); both per-frame, so the helper
-    /// avoids duplicating the comment block at each one.
+    /// signal for a regression that lets the contract drift. Its one
+    /// call site is `makeFrameKey` (the CacheKey reuses that VisualState).
     private static func clampDisplayOffset(_ raw: Int) -> UInt32 {
         if raw < 0, !MetalRenderer.negativeDisplayOffsetWarned {
             MetalRenderer.negativeDisplayOffsetWarned = true
@@ -148,7 +147,7 @@ public final class MetalRenderer {
 
     /// Theme-derived colour state (Finding A cluster). Grouped into one value
     /// struct; every field keeps its name/type and is read as `themeColors.<f>`.
-    /// These feed `makeFrameKey`/`makeCacheKey` and the cell/cursor encoders;
+    /// These feed `makeFrameKey` and the cell/cursor encoders;
     /// grouping is a pure relocation — the key values stay byte-identical.
     private struct ThemeColors {
         var cursorColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)
@@ -240,7 +239,8 @@ public final class MetalRenderer {
         ///
         /// Cache invalidation runs through the frame-key / cache-key
         /// substitution in `render(in:)`: changing the override mutates
-        /// `effectiveShape`, which flows into both keys and forces a rebuild.
+        /// `effectiveShape`, which flows into the frame key (and, via its
+        /// `VisualState`, the cache key) and forces a rebuild.
         /// `setCursorShapeOverride` also nulls the last-keys so the override
         /// lands on the very next frame even if the snapshot is otherwise
         /// identical.
@@ -257,12 +257,12 @@ public final class MetalRenderer {
 
     /// The pixel-affecting inputs shared by `FrameKey` (the per-frame skip
     /// cache) and `CacheKey` (the per-row rebuild cache). Extracted into one
-    /// Equatable struct both keys embed so the ~23 fields are authored ONCE: a
-    /// field added here must be populated in BOTH `makeFrameKey` and
-    /// `makeCacheKey` (the compiler enforces it via the memberwise init), which
-    /// converts the prior "add to one struct, forget the other" hazard (Part I
-    /// §34 / M-20 / H3 — a dropped field silently misses redraws) into a build
-    /// error. Equatable derives field-by-field, so embedding it leaves both
+    /// Equatable struct both keys embed so the ~23 fields are authored ONCE:
+    /// only `makeFrameKey` builds it (the `CacheKey` is derived from
+    /// `FrameKey.visual` in `planRowRebuild`), and the compiler enforces a new
+    /// field via the memberwise init, which converts the prior "add to one
+    /// struct, forget the other" hazard (Part I §34 / M-20 / H3 — a dropped
+    /// field silently misses redraws) into a build error. Equatable derives field-by-field, so embedding it leaves both
     /// keys' comparison semantics byte-identical to the prior flat layout.
     private struct VisualState: Equatable {
         let hoveredLinkID: UInt16
@@ -1171,53 +1171,6 @@ public final class MetalRenderer {
         )
     }
 
-    /// Build the partial-rebuild cache key: every input the per-row instance
-    /// builder consumes (grid dims, selection, cursor, insets, colours, blink,
-    /// cmd-hover, atlas/metrics generations). When this equals `lastCacheKey`
-    /// the row cache is reusable and only alacritty's damaged rows need a
-    /// rebuild. Pure: touches no GPU state. Sibling of `makeFrameKey` — same
-    /// `clampDisplayOffset` (M-16) and generation rationale.
-    private func makeCacheKey(
-        snap: BBSnapshot,
-        focused: Bool,
-        selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
-        effectiveShape: UInt8
-    ) -> CacheKey {
-        return CacheKey(
-            cols: snap.cols,
-            rows: snap.rows,
-            visual: VisualState(
-                hoveredLinkID: hoveredLinkID,
-                selMode: selFields.mode,
-                selALine: selFields.aLine,
-                selBLine: selFields.bLine,
-                selACol: selFields.aCol,
-                selBCol: selFields.bCol,
-                focused: focused,
-                cursorShape: effectiveShape,
-                cursorVisible: snap.cursorVisible,
-                // Sibling of the FrameKey site — same clamping rationale,
-                // routed through `clampDisplayOffset` for the one-shot
-                // negative-detected warning. Audit M-16 (2026-04-29).
-                displayOffset: Self.clampDisplayOffset(snap.displayOffset),
-                topInsetPoints: insets.topInsetPoints,
-                leftInsetPoints: insets.leftInsetPoints,
-                defaultBgRgb: themeColors.defaultBgRgb,
-                backgroundOpacity: themeColors.backgroundOpacity,
-                keepBgOpaque: themeColors.keepBgOpaque,
-                accentColor: themeColors.accentColor,
-                selectionColor: themeColors.selectionColor,
-                selectionForeground: themeColors.selectionForeground,
-                cursorColor: themeColors.cursorColor,
-                cmdHoverBufferLine: cmdHover.bufferLine,
-                cmdHoverStartCol: cmdHover.startCol,
-                cmdHoverEndCol: cmdHover.endCol,
-                metricsGeneration: metricsGeneration,
-                atlasGeneration: atlas.generation
-            )
-        )
-    }
-
     // MARK: - Triple-buffer slot lifecycle
     //
     // The four phases of a frame's claim on a `.storageModeShared` instance
@@ -1419,7 +1372,7 @@ public final class MetalRenderer {
             // below (H7 / S2-007 ordering).
             let blinkChanged = blinkSkipNow != lastBuiltBlinkSkip
             let plan = planRowRebuild(
-                snap: snap, focused: focused, selFields: selFields,
+                snap: snap, visual: frameKey.visual,
                 blinkChanged: blinkChanged, geo: geo
             )
 
@@ -1626,8 +1579,7 @@ public final class MetalRenderer {
     /// buildInstances commit, preserving the H7/S2-007 ordering.
     private func planRowRebuild(
         snap: BBSnapshot,
-        focused: Bool,
-        selFields: (mode: UInt8, aLine: Int32, bLine: Int32, aCol: Int32, bCol: Int32),
+        visual: VisualState,
         blinkChanged: Bool,
         geo: FrameGeometry
     ) -> RebuildPlan {
@@ -1641,10 +1593,12 @@ public final class MetalRenderer {
         // `decideRebuildRows`) guards against the case where damage covers most of
         // the screen anyway: the per-row-skip overhead would exceed the savings.
         // Above the threshold, just rebuild everything.
-        let newCacheKey = makeCacheKey(
-            snap: snap, focused: focused, selFields: selFields,
-            effectiveShape: geo.effectiveShape
-        )
+        // Derived from the frame key's `VisualState` (built once in `render`):
+        // with a snapshot present, cursorShape / cursorVisible / displayOffset
+        // are the same values `makeFrameKey` read, and nothing mutates the
+        // other inputs between the two points (atlas generation only bumps
+        // inside `buildInstances`, which runs after this plan).
+        let newCacheKey = CacheKey(cols: snap.cols, rows: snap.rows, visual: visual)
         let cacheCompatible = !debugToggles.dirtyRowsDisabled
             && skipCache.lastCacheKey == newCacheKey
             && skipCache.rowInstanceCache.count == snap.rows
