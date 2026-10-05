@@ -188,6 +188,10 @@ enum OSC8URLPolicy {
     /// Cheapest mitigation: reject the URL before any per-scheme
     /// comparison runs.
     private static func containsPercentEncodedControlBytes(_ s: String) -> Bool {
+        // Fast path: every pattern below starts with a literal '%', so a
+        // string without one cannot match. Skips 11 NSString regex
+        // searches per call on the hover/click hot paths.
+        guard s.utf8.contains(0x25) else { return false }
         // %00-%1F covers all C0 controls (NUL through US incl. BS, HT,
         // LF, CR, ESC). %7F covers DEL. Hex digits are case-insensitive
         // because Foundation may emit either case in absoluteString.
