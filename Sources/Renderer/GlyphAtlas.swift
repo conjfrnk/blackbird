@@ -115,6 +115,40 @@ public final class GlyphAtlas {
     public let scale: CGFloat
 
     private var byKey: [GlyphKey: Entry] = [:]
+    /// Flat fast path in front of `byKey` for narrow-text printable ASCII
+    /// (U+0020...U+007E, `!emojiPresentation`) — the overwhelming majority of
+    /// cells. `lookupOrInsert` runs once per visible glyph cell on every row
+    /// rebuild, and a `[GlyphKey: Entry]` probe costs a SipHash over four
+    /// `combine()` calls; this is an array index instead. Slot =
+    /// `(scalar - 0x20) * 4 + bold + italic * 2`. INVARIANT: a pure subset
+    /// of `byKey` — written only by `cacheStore` and cleared only by
+    /// `cacheReset`, the sole mutators of either cache, so they cannot desync.
+    private var asciiFast = [Entry?](repeating: nil, count: GlyphAtlas.asciiFastSlots)
+    private static let asciiFastSlots = (0x7E - 0x20 + 1) * 4
+
+    /// `asciiFast` slot for this glyph identity, or nil when it isn't
+    /// ASCII-eligible (non-ASCII, control bytes, or the emoji-presentation
+    /// variant, which has its own `byKey` entry).
+    @inline(__always)
+    private static func asciiFastIndex(scalar: UInt32, bold: Bool, italic: Bool, emojiPresentation: Bool) -> Int? {
+        guard !emojiPresentation, scalar &- 0x20 <= 0x7E - 0x20 else { return nil }
+        return Int(scalar &- 0x20) << 2 | (bold ? 1 : 0) | (italic ? 2 : 0)
+    }
+
+    private func cacheStore(_ key: GlyphKey, _ entry: Entry) {
+        byKey[key] = entry
+        if let i = Self.asciiFastIndex(
+            scalar: key.scalarValue, bold: key.bold, italic: key.italic,
+            emojiPresentation: key.emojiPresentation
+        ) {
+            asciiFast[i] = entry
+        }
+    }
+
+    private func cacheReset() {
+        byKey.removeAll(keepingCapacity: true)
+        for i in asciiFast.indices { asciiFast[i] = nil }
+    }
     /// Font-variant cache so we only pay CTFontCreateCopyWithSymbolicTraits
     /// once per (bold × italic) combination rather than per glyph insertion.
     /// Up to 4 entries total.
@@ -485,6 +519,12 @@ public final class GlyphAtlas {
         style: Style = .regular,
         emojiPresentation: Bool = false
     ) -> Entry? {
+        if let i = Self.asciiFastIndex(
+            scalar: scalar.value, bold: style.bold, italic: style.italic,
+            emojiPresentation: emojiPresentation
+        ), let hit = asciiFast[i] {
+            return hit
+        }
         let key = GlyphKey(
             scalarValue: scalar.value,
             bold: style.bold,
@@ -525,7 +565,7 @@ public final class GlyphAtlas {
                 isWide: false,
                 isColor: colorPath
             )
-            byKey[key] = entry
+            cacheStore(key, entry)
             return entry
         }
 
@@ -558,7 +598,7 @@ public final class GlyphAtlas {
             // buffer can sample slot 0 with old UVs while the new rasterisation
             // lands in the same shared bytes, producing a torn glyph. Audit H6.
             flushBarrier?()
-            byKey.removeAll(keepingCapacity: true)
+            cacheReset()
             // The allocator discards its stale orphan records, rewinds nextSlot,
             // and bumps `generation`, returning the post-flush plan (slot 0, no
             // orphans). The STAGED orphans from this very insert are pre-flush
@@ -595,7 +635,7 @@ public final class GlyphAtlas {
             isWide: wide,
             isColor: colorPath
         )
-        byKey[key] = entry
+        cacheStore(key, entry)
         return entry
     }
 

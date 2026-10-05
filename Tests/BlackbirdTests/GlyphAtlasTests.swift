@@ -107,6 +107,66 @@ final class GlyphAtlasTests: XCTestCase {
                        "cache-hit lookups must not bump generation")
     }
 
+    // MARK: - ASCII fast-table coherence with the dictionary cache
+
+    /// The flat ASCII fast path must be dropped by a saturation flush. A
+    /// stale slot would hand back the pre-flush UV, which after the flush
+    /// belongs to whichever glyph now occupies slot 0.
+    func test_asciiFastPath_flushDoesNotReturnStaleEntry() throws {
+        let font = NSFont(name: "Menlo", size: 13) ?? .systemFont(ofSize: 13)
+        let metrics = CellMetrics(font: font)
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let atlas = try XCTUnwrap(GlyphAtlas(
+            device: device, metrics: metrics, capacityGlyphs: 4, scale: 1
+        ))
+        let a = try XCTUnwrap(UnicodeScalar(0x41 as UInt32))
+        let preFlushA = try XCTUnwrap(atlas.lookupOrInsert(scalar: a))
+        for cp: UInt32 in 0x42...0x44 {
+            _ = atlas.lookupOrInsert(scalar: try XCTUnwrap(UnicodeScalar(cp)))
+        }
+        // Overflow: flushes, and E lands in slot 0 (A's pre-flush slot).
+        let e = try XCTUnwrap(UnicodeScalar(0x45 as UInt32))
+        let eEntry = try XCTUnwrap(atlas.lookupOrInsert(scalar: e))
+        XCTAssertEqual(eEntry.uvOrigin, preFlushA.uvOrigin, "post-flush slot 0 is reused")
+        let postFlushA = try XCTUnwrap(atlas.lookupOrInsert(scalar: a))
+        XCTAssertNotEqual(
+            postFlushA.uvOrigin, eEntry.uvOrigin,
+            "A must be re-rasterised into a fresh slot after the flush, not served from a stale cache entry"
+        )
+        // And the re-inserted entry is itself stable on repeat lookups.
+        let again = try XCTUnwrap(atlas.lookupOrInsert(scalar: a))
+        XCTAssertEqual(again.uvOrigin, postFlushA.uvOrigin)
+    }
+
+    func test_asciiFastPath_styleVariantsAndEmojiFlagStayDistinct() throws {
+        let font = NSFont(name: "Menlo", size: 13) ?? .systemFont(ofSize: 13)
+        let metrics = CellMetrics(font: font)
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let atlas = try XCTUnwrap(GlyphAtlas(
+            device: device, metrics: metrics, capacityGlyphs: 64, scale: 1
+        ))
+        let g = try XCTUnwrap(UnicodeScalar(0x67 as UInt32))
+        let styles: [GlyphAtlas.Style] = [
+            .regular, .init(bold: true, italic: false),
+            .init(bold: false, italic: true), .init(bold: true, italic: true),
+        ]
+        var origins = Set<[Float]>()
+        for st in styles {
+            let en = try XCTUnwrap(atlas.lookupOrInsert(scalar: g, style: st))
+            origins.insert([en.uvOrigin.x, en.uvOrigin.y])
+        }
+        let emoji = try XCTUnwrap(atlas.lookupOrInsert(scalar: g, emojiPresentation: true))
+        origins.insert([emoji.uvOrigin.x, emoji.uvOrigin.y])
+        XCTAssertEqual(origins.count, 5, "4 style variants + the emoji-presentation key must each own a slot")
+        // Repeat lookups (fast-path hits) return the same entries.
+        for st in styles {
+            let first = try XCTUnwrap(atlas.lookupOrInsert(scalar: g, style: st))
+            let second = try XCTUnwrap(atlas.lookupOrInsert(scalar: g, style: st))
+            XCTAssertEqual(first.uvOrigin, second.uvOrigin)
+        }
+        XCTAssertEqual(atlas.generation, 0)
+    }
+
     func test_initRejectsZeroCapacity() {
         // Guard: zero capacity would divide by zero picking grid rows.
         let font = NSFont.systemFont(ofSize: 13)
