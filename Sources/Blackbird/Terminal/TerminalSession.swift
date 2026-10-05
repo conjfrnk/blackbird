@@ -377,7 +377,8 @@ public final class TerminalSession: ObservableObject {
         case coreInitFailed
     }
 
-    private init(bbterm: BBTerm, pty: PTY, spawnedAt: CFTimeInterval) {
+    /// Shared by `start()` and the DEBUG headless factory (`pty == nil`).
+    private init(bbterm: BBTerm, pty: PTY?, spawnedAt: CFTimeInterval) {
         self.bbterm = bbterm
         self.pty = pty
         self.spawnedAt = spawnedAt
@@ -421,39 +422,14 @@ public final class TerminalSession: ObservableObject {
             // than returning an unusable optional to the test.
             fatalError("BBTerm.init(size:) returned nil for 2×2 headless test session")
         }
-        return TerminalSession(headlessBBTerm: bb)
-    }
-
-    private init(headlessBBTerm bb: BBTerm) {
-        self.bbterm = bb
-        self.pty = nil
-        // Headless test sessions never log spawn-relative timing.
-        self.spawnedAt = CACurrentMediaTime()
-        // `.userInitiated` matches `PTY.readQueue`. It used to be implicit:
-        // every resize reached the queue via `coreQueue.sync` from main, which
-        // priority-boosts the target queue for the duration. `resizeCoalesced`
-        // deliberately removes that sync — so without an explicit QoS the
-        // reflow would run at whatever priority the PTY read queue happened to
-        // enqueue at, and a drag would feel worse rather than better.
-        let q = DispatchQueue(label: "blackbird.core", qos: .userInitiated)
-        let token = ObjectIdentifier(bb)
-        q.setSpecific(key: Self.coreQueueKey, value: token)
-        self.coreQueue = q
-        self.coreQueueToken = token
-        self.snapshotCoalescer = SnapshotCoalescer(session: self)
-        self.paletteApplier = PaletteApplier(session: self)
-        self.promptNavigator = PromptNavigator(session: self)
-        self.cwdTracker = CwdTracker(session: self)
-        self.focusEmitter = FocusEmitter(session: self)
-        self.resizeController = ResizeController(session: self)
-        self.syncUpdateWatchdog = SyncUpdateWatchdog(session: self)
-        // `wire()` is safe in headless mode: every PTY hookup uses optional
-        // chaining, so with `pty == nil` only the bbterm.onEvent handler is
-        // installed. That's exactly what the OSC 7 / cwd tests need — feed
-        // bytes in, observe `lastKnownCwd` / `title` land. Title tests that
-        // poke `applyOscTitle` directly still work because that path runs
+        // Headless test sessions never log spawn-relative timing, so
+        // `spawnedAt` is just "now". `wire()` is safe with `pty == nil`: every
+        // PTY hookup uses optional chaining, so only the bbterm.onEvent
+        // handler is installed. That's exactly what the OSC 7 / cwd tests need
+        // — feed bytes in, observe `lastKnownCwd` / `title` land. Title tests
+        // that poke `applyOscTitle` directly still work because that path runs
         // synchronously on the caller.
-        wire()
+        return TerminalSession(bbterm: bb, pty: nil, spawnedAt: CACurrentMediaTime())
     }
 
     /// Feed raw bytes into the VT parser on the core queue. Does **not**
