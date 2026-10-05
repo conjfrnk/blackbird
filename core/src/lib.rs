@@ -210,14 +210,14 @@ pub struct BBTerm {
     /// `bb_mode::MODIFY_OTHER_KEYS` (any non-zero level → bit set).
     pub(crate) modify_other_keys: u8,
     /// OSC 133 A/B/C rate-limit window (audit synthesis #10). See
-    /// `PromptMarkRateState`. Persisted across `bb_term_input` calls so
+    /// `PROMPT_MARK_PER_SECOND`. Persisted across `bb_term_input` calls so
     /// the sliding window covers prompt marks that arrive in different
     /// PTY chunks.
-    pub(crate) prompt_mark_rate: PromptMarkRateState,
+    pub(crate) prompt_mark_rate: EventRateState,
     /// OSC 7 (CWD) ingest rate-limit window (audit M-7). See
-    /// `Osc7RateState`. Persisted across `bb_term_input` calls — same
+    /// `OSC7_INGEST_PER_SECOND`. Persisted across `bb_term_input` calls — same
     /// rationale as `prompt_mark_rate`.
-    pub(crate) osc7_rate: Osc7RateState,
+    pub(crate) osc7_rate: EventRateState,
     /// OSC 7 reject-log latches, one bool per `OSC7_REJECT_*` class
     /// index. Audit L3: pre-fix these were a process-wide
     /// `static [Once; 8]`, so the first BBTerm in the process to hit
@@ -449,8 +449,8 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc8_id_exhaustion_logged: false,
             osc8_intern_cap_logged: false,
             modify_other_keys: 0,
-            prompt_mark_rate: PromptMarkRateState::new(),
-            osc7_rate: Osc7RateState::new(),
+            prompt_mark_rate: EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW),
+            osc7_rate: EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW),
             osc7_reject_logged: [false; 8],
             osc133_d_nondigit_logged: false,
             osc133_abc_tainted_logged: false,
@@ -1308,8 +1308,8 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         //   5. `uri_cstr_cache` / `uri_cache_bytes` — pre-clear OSC 8
         //      cache flood blocked legitimate post-clear OSC 8 links
         //      until app relaunch (the 1 MiB byte-cap stayed exhausted).
-        bb.prompt_mark_rate = PromptMarkRateState::new();
-        bb.osc7_rate = Osc7RateState::new();
+        bb.prompt_mark_rate = EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW);
+        bb.osc7_rate = EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW);
         bb.modify_other_keys = 0;
         bb.callback.pty_write_rate.reset();
         bb.callback.reset_event_rates();

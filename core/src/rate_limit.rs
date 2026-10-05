@@ -164,7 +164,8 @@ impl PtyWriteRateState {
     }
 }
 
-/// Per-terminal sliding-window rate limiter for OSC 133 prompt marks.
+/// Per-terminal rate limit for OSC 133 prompt marks (an `EventRateState`
+/// built from `PROMPT_MARK_PER_SECOND` / `PROMPT_MARK_WINDOW`).
 ///
 /// Mitigates audit synthesis bug #10: an attacker emitting `OSC 133;A`
 /// thousands of times per second floods Swift's `recordPromptStart` ring
@@ -176,7 +177,7 @@ impl PtyWriteRateState {
 /// `handle_osc133` for why D is included; RC-03).
 ///
 /// The window resets when `Instant::now()` is more than 1 second past
-/// `window_start`. Excess fires within an active window are dropped;
+/// the window start. Excess fires within an active window are dropped;
 /// the first drop per session leaves a one-shot breadcrumb (see
 /// `osc133_rate_limited_logged`).
 ///
@@ -191,12 +192,6 @@ impl PtyWriteRateState {
 /// while still bounding a hostile flood to 240 small main-thread hops
 /// per second on the Swift side — the phishing/DoS mitigation #10
 /// cares about is preserved.
-#[derive(Clone, Copy)]
-pub(crate) struct PromptMarkRateState {
-    window_start: std::time::Instant,
-    pub(crate) window_count: u32,
-}
-
 pub(crate) const PROMPT_MARK_PER_SECOND: u32 = 240;
 pub(crate) const PROMPT_MARK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -205,12 +200,15 @@ pub(crate) const PROMPT_MARK_WINDOW: std::time::Duration = std::time::Duration::
 /// chunk, but a hostile shell can split queries across many tight chunks to
 /// bypass that per-call cap and amplify replies through the PTY. This
 /// sliding-window cap covers the cross-chunk case using the same pattern as
-/// `PromptMarkRateState`. 32/sec is generous (legitimate apps probe at most
-/// a handful per second); excess replies are dropped silently.
+/// the prompt-mark limiter (`EventRateState`). 32/sec is generous (legitimate
+/// apps probe at most a handful per second); excess replies are dropped silently.
 pub(crate) const COLOR_QUERY_REPLY_PER_SECOND: u32 = 32;
 pub(crate) const COLOR_QUERY_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// OSC 7 (CWD reporting) ingest rate limit (audit M-7, 2026-04-29).
+/// OSC 7 (CWD reporting) ingest rate limit (audit M-7, 2026-04-29), an
+/// `EventRateState` per terminal. `bb_term_clear_all` resets it separately
+/// from the prompt-mark limiter so each stays individually targetable
+/// (audit H-3).
 /// Legitimate shells emit one OSC 7 per `cd` — typically far fewer than
 /// 1/sec interactively. A hostile remote streaming OSC 7s in a tight
 /// loop forces `TerminalSession.handleCwdChanged` (Swift) to run
@@ -221,60 +219,3 @@ pub(crate) const COLOR_QUERY_REPLY_WINDOW: std::time::Duration = std::time::Dura
 /// flood-amplification threshold. Excess OSC 7s are dropped silently.
 pub(crate) const OSC7_INGEST_PER_SECOND: u32 = 32;
 pub(crate) const OSC7_INGEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
-
-impl PromptMarkRateState {
-    pub(crate) fn new() -> Self {
-        Self {
-            window_start: std::time::Instant::now(),
-            window_count: 0,
-        }
-    }
-
-    /// Returns true if the dispatch is allowed; false if the window cap
-    /// has been hit and the caller should drop the event.
-    pub(crate) fn allow(&mut self) -> bool {
-        let now = std::time::Instant::now();
-        if now.duration_since(self.window_start) >= PROMPT_MARK_WINDOW {
-            self.window_start = now;
-            self.window_count = 0;
-        }
-        if self.window_count >= PROMPT_MARK_PER_SECOND {
-            return false;
-        }
-        self.window_count += 1;
-        true
-    }
-}
-
-/// Per-terminal sliding-window rate limiter for OSC 7 (CWD) ingest.
-/// See `OSC7_INGEST_PER_SECOND` for sizing rationale (audit M-7).
-/// Same shape as `PromptMarkRateState` — kept as a separate type so the
-/// constants are independent and the `clear_all` reset can target each
-/// limiter individually (audit H-3).
-#[derive(Clone, Copy)]
-pub(crate) struct Osc7RateState {
-    window_start: std::time::Instant,
-    pub(crate) window_count: u32,
-}
-
-impl Osc7RateState {
-    pub(crate) fn new() -> Self {
-        Self {
-            window_start: std::time::Instant::now(),
-            window_count: 0,
-        }
-    }
-
-    pub(crate) fn allow(&mut self) -> bool {
-        let now = std::time::Instant::now();
-        if now.duration_since(self.window_start) >= OSC7_INGEST_WINDOW {
-            self.window_start = now;
-            self.window_count = 0;
-        }
-        if self.window_count >= OSC7_INGEST_PER_SECOND {
-            return false;
-        }
-        self.window_count += 1;
-        true
-    }
-}

@@ -209,7 +209,7 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
             bb.color_query_reply_window_count = 0;
         }
         if bb.color_query_reply_window_count >= COLOR_QUERY_REPLY_PER_SECOND {
-            // Drop silently — matching the PromptMarkRateState pattern.
+            // Drop silently — matching the prompt-mark limiter pattern.
             continue;
         }
 

@@ -9,7 +9,7 @@ use alacritty_terminal::vte::{Params, Perform};
 
 use crate::callback::CallbackCell;
 use crate::event::{BBEvent, BBEventKind};
-use crate::rate_limit::{Osc7RateState, PromptMarkRateState, PROMPT_MARK_PER_SECOND};
+use crate::rate_limit::{EventRateState, PROMPT_MARK_PER_SECOND};
 use crate::scrub::{
     contains_bidi_or_invisible, is_bidi_or_invisible_scalar, percent_decode,
     strip_prefix_ascii_case_insensitive,
@@ -86,11 +86,11 @@ pub(crate) struct OscScanner<'a> {
     /// synthesis #10 — prompt-mark forgery DoS / phishing). Persisted
     /// on `BBTerm` and threaded in via `&mut` because the scanner is
     /// rebuilt per `bb_term_input` call.
-    pub(crate) prompt_mark_rate: &'a mut PromptMarkRateState,
+    pub(crate) prompt_mark_rate: &'a mut EventRateState,
     /// Sliding-window state for OSC 7 (CWD) ingest rate limiting (audit
     /// M-7 — `classifyForegroundNamespace()` proc_listpids amplification).
     /// Same threading reason as `prompt_mark_rate`.
-    pub(crate) osc7_rate: &'a mut Osc7RateState,
+    pub(crate) osc7_rate: &'a mut EventRateState,
     /// Per-class reject-log latches (audit L3). Threaded in from
     /// BBTerm so the one-shot-per-class log is per-instance rather
     /// than process-wide.
