@@ -511,9 +511,35 @@ final class FindController {
         let captured = captureRows(
             topLine: topLine, bottomLine: bottomLine, cols: snap.cols, session: session, snap: snap
         )
+        // ASCII fast path: terminal rows and find queries are overwhelmingly
+        // ASCII, and Foundation's `range(of:options:)` costs ~8 us per row.
+        // Pre-fold the needle once; any non-ASCII (or CR-bearing) query or
+        // row falls through to the Foundation loop below, unchanged.
+        let asciiNeedle = Self.asciiNeedle(query: query, caseSensitive: opts.caseSensitive)
         outer: for row in captured {
             let ln = row.line
             let hay = row.hay
+            if let needle = asciiNeedle,
+               let ranges = Self.asciiMatchRanges(
+                   hay: hay, needle: needle, caseSensitive: opts.caseSensitive,
+                   limit: findMatchLimit - findMatches.count
+               ) {
+                for m in ranges {
+                    let startCol: Int
+                    let endCol: Int
+                    if let utf16ToCol = row.utf16ToCol {
+                        let cols = Self.mapUTF16RangeToCols(lo: m.lo, hi: m.hi, utf16ToCol: utf16ToCol)
+                        startCol = cols.startCol
+                        endCol = cols.endCol
+                    } else {
+                        startCol = m.lo
+                        endCol = m.hi - 1
+                    }
+                    findMatches.append((line: ln, startCol: startCol, endCol: endCol))
+                }
+                if findMatches.count >= findMatchLimit { break outer }
+                continue
+            }
             var cursor = hay.startIndex
             while let r = hay.range(of: query, options: stringOptions, range: cursor..<hay.endIndex) {
                 let startCol: Int
@@ -547,6 +573,62 @@ final class FindController {
         findMatchesSeq = snap.sequenceID
         findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
         highlightCurrentMatch()
+    }
+
+    /// Pre-folded needle bytes for the ASCII fast path, or nil when the query
+    /// is not eligible (non-ASCII, or contains CR — a CRLF pair is a single
+    /// Character to Foundation, so CR handling stays on the slow path).
+    /// Case-insensitive needles are lowercased (A-Z only) once per search.
+    static func asciiNeedle(query: String, caseSensitive: Bool) -> [UInt8]? {
+        var bytes = Array(query.utf8)
+        guard !bytes.isEmpty else { return nil }
+        for b in bytes where b >= 0x80 || b == 0x0D { return nil }
+        if !caseSensitive {
+            for i in bytes.indices where bytes[i] >= 0x41 && bytes[i] <= 0x5A { bytes[i] |= 0x20 }
+        }
+        return bytes
+    }
+
+    /// Non-overlapping byte-offset match ranges of `needle` in `hay`, equal to
+    /// the Foundation `range(of:)` loop for pure-ASCII, CR-free haystacks.
+    /// Returns nil when the row is ineligible (any byte >= 0x80 or a CR) so the
+    /// caller falls back to Foundation. At most `limit` ranges are returned.
+    /// Offsets are UTF-8 == UTF-16 == Character offsets for ASCII-only text.
+    static func asciiMatchRanges(
+        hay: String, needle: [UInt8], caseSensitive: Bool, limit: Int
+    ) -> [(lo: Int, hi: Int)]? {
+        var hay = hay
+        return hay.withUTF8 { buf -> [(lo: Int, hi: Int)]? in
+            let n = buf.count
+            let m = needle.count
+            for b in buf where b >= 0x80 || b == 0x0D { return nil }
+            var out: [(lo: Int, hi: Int)] = []
+            guard m > 0, n >= m, limit > 0 else { return out }
+            let first = needle[0]
+            var i = 0
+            let last = n - m
+            while i <= last {
+                var c = buf[i]
+                if !caseSensitive, c >= 0x41, c <= 0x5A { c |= 0x20 }
+                if c == first {
+                    var j = 1
+                    while j < m {
+                        var h = buf[i + j]
+                        if !caseSensitive, h >= 0x41, h <= 0x5A { h |= 0x20 }
+                        if h != needle[j] { break }
+                        j += 1
+                    }
+                    if j == m {
+                        out.append((lo: i, hi: i + m))
+                        if out.count >= limit { return out }
+                        i += m
+                        continue
+                    }
+                }
+                i += 1
+            }
+            return out
+        }
     }
 
     /// Map a cell-derived UTF-16 `[lo, hi)` range to grid columns. Both ends
