@@ -1054,6 +1054,20 @@ public final class PTY {
     /// order is preserved even when a drain retry interleaves with new
     /// keystrokes.
     private var pendingWrite = Data()
+    /// Offset of the first undelivered byte in `pendingWrite`. Partial
+    /// kernel writes advance this instead of `removeFirst`-ing (a
+    /// memmove of the whole remainder per ~1 KiB tty-queue-full write —
+    /// quadratic over a multi-MiB paste). The delivered prefix is
+    /// reclaimed when the buffer drains or the head passes half of it.
+    /// Accessed only on `writeQueue`.
+    private var pendingHead = 0
+    /// Undelivered byte count (`pendingWrite` minus the delivered prefix).
+    private var pendingCount: Int { pendingWrite.count - pendingHead }
+    /// True when the last `flushPendingLocked` moved at least one byte
+    /// before the kernel pushed back — i.e. the child is reading, just
+    /// slower than we write. Selects the drain cadence. Accessed only on
+    /// `writeQueue`.
+    private var pendingFlushMadeProgress = false
     /// True while a drain retry is scheduled on `writeQueue`; avoids
     /// stacking redundant timers. Accessed only on `writeQueue`.
     private var pendingDrainScheduled = false
@@ -1067,16 +1081,20 @@ public final class PTY {
     /// when the child resumes.
     private static let pendingWriteCap = 4 * 1024 * 1024
     /// Drain retry cadence. Only ticks while bytes are pending against a
-    /// full kernel queue — i.e. only in the pathological stopped-child
-    /// state — so the polling cost is irrelevant; latency on resume is
-    /// one tick at worst.
+    /// full kernel queue, so there is no idle cost. A wedged/stopped child
+    /// (the last tick moved nothing) polls at the slow interval; a child
+    /// that is reading but slower than us (a paste into `cat` or any
+    /// canonical-mode reader: the kernel tty input queue takes only ~1 KiB
+    /// at a time) retries at the fast one so a large paste is not capped
+    /// at one queue-full per 10 ms.
     private static let pendingDrainInterval: DispatchTimeInterval = .milliseconds(10)
+    private static let pendingDrainProgressInterval: DispatchTimeInterval = .milliseconds(1)
 
     /// Queue/deliver bytes. Caller MUST hold writeQueue. Appends to the
     /// pending buffer (capped) then flushes as much as the kernel will
     /// take; any remainder stays buffered with a drain retry scheduled.
     private func sendLocked(_ data: Data) {
-        let room = Self.pendingWriteCap - pendingWrite.count
+        let room = Self.pendingWriteCap - pendingCount
         if data.count <= room {
             pendingWrite.append(data)
         } else {
@@ -1097,13 +1115,23 @@ public final class PTY {
     /// MUST hold writeQueue.
     private func flushPendingLocked() {
         let fd = self.masterFD
-        while !pendingWrite.isEmpty {
+        pendingFlushMadeProgress = false
+        while pendingCount > 0 {
+            let head = pendingHead
             let written: Int = pendingWrite.withUnsafeBytes { raw -> Int in
                 guard let base = raw.baseAddress else { return 0 }
-                return Darwin.write(fd, base, raw.count)
+                return Darwin.write(fd, base + head, raw.count - head)
             }
             if written > 0 {
-                pendingWrite.removeFirst(written)
+                pendingFlushMadeProgress = true
+                pendingHead += written
+                if pendingHead == pendingWrite.count {
+                    pendingWrite.removeAll()
+                    pendingHead = 0
+                } else if pendingHead >= pendingWrite.count / 2 {
+                    pendingWrite.removeSubrange(0..<pendingHead)
+                    pendingHead = 0
+                }
                 continue
             }
             if errno == EINTR { continue }
@@ -1124,11 +1152,17 @@ public final class PTY {
             // the line is dead, and retrying would loop forever.
             let savedErrno = errno
             Self.logger.error(
-                "PTY.write FAILED with \(self.pendingWrite.count, privacy: .public) bytes undelivered errno=\(savedErrno, privacy: .public) fd=\(fd, privacy: .public)"
+                "PTY.write FAILED with \(self.pendingCount, privacy: .public) bytes undelivered errno=\(savedErrno, privacy: .public) fd=\(fd, privacy: .public)"
             )
-            pendingWrite.removeAll()
+            discardPendingLocked()
             return
         }
+    }
+
+    /// Drop all undelivered bytes. Caller MUST hold writeQueue.
+    private func discardPendingLocked() {
+        pendingWrite.removeAll()
+        pendingHead = 0
     }
 
     /// Schedule one drain retry on writeQueue. Caller MUST hold
@@ -1140,11 +1174,13 @@ public final class PTY {
     private func scheduleDrainLocked() {
         guard !pendingDrainScheduled else { return }
         pendingDrainScheduled = true
-        writeQueue.asyncAfter(deadline: .now() + Self.pendingDrainInterval) { [weak self] in
+        let interval =
+            pendingFlushMadeProgress ? Self.pendingDrainProgressInterval : Self.pendingDrainInterval
+        writeQueue.asyncAfter(deadline: .now() + interval) { [weak self] in
             guard let self else { return }
             self.pendingDrainScheduled = false
             guard self.shouldKeepRunning() else {
-                self.pendingWrite.removeAll()
+                self.discardPendingLocked()
                 return
             }
             self.flushPendingLocked()

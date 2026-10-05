@@ -619,6 +619,57 @@ final class PTYTests: XCTestCase {
         )
     }
 
+    /// A paste into a child that IS reading, just slower than we write,
+    /// must drain at the child's pace. The kernel tty input queue takes
+    /// only ~1 KiB at a time, so the pending-write drain retries on every
+    /// EAGAIN; a fixed 10 ms retry took ~5 s for 1 MiB (ASan build), the
+    /// progress-adaptive 1 ms retry ~2 s. The child
+    /// consumes exactly 1 MiB in raw mode (no canonical line limit, no
+    /// echo) then prints a sentinel, so the sentinel's arrival marks the
+    /// moment the last byte was delivered. The 4 s bound sits between the
+    /// two measurements — it catches a regression to the fixed slow
+    /// cadence or a re-quadratic drain; the 8 s wait only bounds a hang.
+    ///
+    /// Pre-flight cost (project rule): one 1 MiB Data, one /bin/sh child
+    /// with `head`; the write buffer is capped at 4 MiB. Gated like every
+    /// other real-spawn test in this file.
+    func test_largeWriteToReadingChild_drainsPromptly() throws {
+        try Self.skipIfFlakyOnCI()
+        let total = 1024 * 1024
+        let pty = try PTY.spawn(
+            executable: "/bin/sh",
+            arguments: ["-c", "stty raw -echo; head -c \(total) >/dev/null; printf DRAINED_OK"],
+            envOverrides: [:],
+            size: .init(cols: 80, rows: 24)
+        )
+        defer { pty.terminate() }
+        let lock = NSLock()
+        var out = Data()
+        let drained = expectation(description: "child consumed all bytes")
+        var fulfilled = false
+        pty.setOnBytes { chunk in
+            lock.lock()
+            out.append(chunk)
+            let hit = !fulfilled && String(data: out, encoding: .utf8)?.contains("DRAINED_OK") == true
+            if hit { fulfilled = true }
+            lock.unlock()
+            if hit { drained.fulfill() }
+        }
+        pty.startReading()
+        // Let `stty raw -echo` take effect before the paste lands so the
+        // line discipline never sees the bytes in cooked mode.
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let start = Date()
+        pty.write(Data(repeating: 0x61, count: total))
+        wait(for: [drained], timeout: 8.0)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(
+            elapsed, 4.0,
+            "1 MiB paste into a reading child took \(elapsed)s to drain"
+        )
+    }
+
     /// Audit S2-001: `setOnBytes` called mid-session (after
     /// `startReading()`) must swap the live read loop's consumer —
     /// bytes produced after the swap go to the NEW closure and never
