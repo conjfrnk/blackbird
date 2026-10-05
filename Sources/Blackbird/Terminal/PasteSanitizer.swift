@@ -10,17 +10,49 @@ import Foundation
 /// bracketed vs lone-CR); Variation Selectors are stripped only from *display*
 /// (scrubURLForDisplay), never from paste/drop bytes.
 enum PasteSanitizer {
+    /// Finish a copy-on-first-hit rewrite: if no hit was recorded the input is
+    /// returned untouched (clean text allocates nothing); otherwise the clean
+    /// tail after the last hit is appended and the result wrapped once.
+    private static func finishRewrite(
+        _ input: Data, _ out: inout [UInt8], dirty: Bool,
+        _ p: UnsafeRawBufferPointer, from runStart: Int
+    ) -> Data {
+        guard dirty else { return input }
+        out.append(contentsOf: UnsafeRawBufferPointer(rebasing: p[runStart..<p.count]))
+        return Data(out)
+    }
+
+    /// Record a hit at `i`: bulk-copy the clean run `runStart..<i` into `out`
+    /// (allocating it on the first hit) so the scan loops stay copy-free until
+    /// something actually needs rewriting.
+    private static func flushRun(
+        _ out: inout [UInt8], dirty: inout Bool,
+        _ p: UnsafeRawBufferPointer, from runStart: Int, to i: Int
+    ) {
+        if !dirty {
+            out.reserveCapacity(p.count)
+            dirty = true
+        }
+        out.append(contentsOf: UnsafeRawBufferPointer(rebasing: p[runStart..<i]))
+    }
+
     /// Replace every standalone CR (0x0D) with LF (0x0A). CR-LF pairs are
     /// already collapsed to LF by `normalizePasteLineEndings`, so any CR
     /// reaching this function is a lone CR. Audit L4.
+    ///
+    /// Like every transform below, this scans `withUnsafeBytes` with integer
+    /// indices (Data's per-byte `index(after:)` / `append` is ~20x slower) and
+    /// returns `input` untouched when nothing needs rewriting.
     static func convertLoneCRToLF(_ input: Data) -> Data {
         guard input.contains(0x0D) else { return input }
-        var out = Data()
-        out.reserveCapacity(input.count)
-        for b in input {
-            out.append(b == 0x0D ? 0x0A : b)
+        return input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
+            var out = [UInt8]()
+            out.reserveCapacity(p.count)
+            for b in p {
+                out.append(b == 0x0D ? 0x0A : b)
+            }
+            return Data(out)
         }
-        return out
     }
 
     /// Collapse CRLF → LF in pasted content. Cross-platform clipboards (Windows,
@@ -30,23 +62,24 @@ enum PasteSanitizer {
     /// real paste content and some applications still want it as Enter.
     static func normalizePasteLineEndings(_ input: Data) -> Data {
         guard input.contains(0x0D) else { return input }
-        var out = Data()
-        out.reserveCapacity(input.count)
-        var i = input.startIndex
-        while i < input.endIndex {
-            let b = input[i]
-            if b == 0x0D {
-                let next = input.index(after: i)
-                if next < input.endIndex, input[next] == 0x0A {
-                    out.append(0x0A)
-                    i = input.index(after: next)
-                    continue
+        return input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
+            let n = p.count
+            var out = [UInt8]()
+            var dirty = false
+            var runStart = 0
+            var i = 0
+            while i < n {
+                // Single left-to-right pass: a CR LF pair drops its CR, and
+                // the LF is part of the run (CR CR LF → CR LF).
+                if p[i] == 0x0D, i + 1 < n, p[i + 1] == 0x0A {
+                    flushRun(&out, dirty: &dirty, p, from: runStart, to: i)
+                    i += 1
+                    runStart = i
                 }
+                i += 1
             }
-            out.append(b)
-            i = input.index(after: i)
+            return finishRewrite(input, &out, dirty: dirty, p, from: runStart)
         }
-        return out
     }
 
     /// Replace C0 + C1 control bytes (other than TAB / LF / CR) and DEL
@@ -72,44 +105,50 @@ enum PasteSanitizer {
     /// formatted paste still lines up. Matches Ghostty ≥1.3.0 and
     /// xterm's default paste sanitizer.
     static func sanitizePasteControls(_ input: Data) -> Data {
-        var out = Data()
-        out.reserveCapacity(input.count)
-        var i = input.startIndex
-        while i < input.endIndex {
-            let b = input[i]
-            // TAB / LF / CR pass through — legitimate whitespace in paste.
-            // (CR is normalised to LF upstream, but a lone CR arriving
-            // from an old-Mac-encoded file is still valid input.)
-            if b == 0x09 || b == 0x0A || b == 0x0D {
-                out.append(b)
-                i = input.index(after: i)
-                continue
-            }
-            // C0 (0x00–0x1F excluding TAB/LF/CR) and DEL (0x7F) → space.
-            if b < 0x20 || b == 0x7F {
-                out.append(0x20)
-                i = input.index(after: i)
-                continue
-            }
-            // C1 controls encoded as UTF-8: lead 0xC2 followed by a byte
-            // in 0x80–0x9F. Replace the whole two-byte scalar with a
-            // single space so the parser never sees 0x9B / 0x9D / 0x90.
-            // This doesn't strip lone continuation bytes (those are
-            // invalid UTF-8 and handled by the parser's UTF-8 state
-            // machine); we only match the valid C1 encoding pattern.
-            if b == 0xC2,
-               input.index(after: i) < input.endIndex {
-                let next = input[input.index(after: i)]
-                if (0x80...0x9F).contains(next) {
-                    out.append(0x20)
-                    i = input.index(i, offsetBy: 2)
+        input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
+            let n = p.count
+            var out = [UInt8]()
+            var dirty = false
+            var runStart = 0
+            var i = 0
+            while i < n {
+                let b = p[i]
+                // Common case first: printable ASCII / high bytes that are
+                // neither C0, DEL, nor the C1 lead 0xC2.
+                if b >= 0x20, b != 0x7F, b != 0xC2 {
+                    i += 1
                     continue
                 }
+                // TAB / LF / CR pass through — legitimate whitespace in paste.
+                // (CR is normalised to LF upstream, but a lone CR arriving
+                // from an old-Mac-encoded file is still valid input.)
+                if b == 0x09 || b == 0x0A || b == 0x0D {
+                    i += 1
+                    continue
+                }
+                var consumed = 1
+                if b == 0xC2 {
+                    // C1 controls encoded as UTF-8: lead 0xC2 followed by a
+                    // byte in 0x80–0x9F. Replace the whole two-byte scalar
+                    // with a single space so the parser never sees 0x9B /
+                    // 0x9D / 0x90. Lone continuation bytes are invalid UTF-8
+                    // and left to the parser's UTF-8 state machine; we only
+                    // match the valid C1 encoding pattern.
+                    guard i + 1 < n, (0x80...0x9F).contains(p[i + 1]) else {
+                        i += 1
+                        continue
+                    }
+                    consumed = 2
+                }
+                // C0 (0x00–0x1F excluding TAB/LF/CR), DEL (0x7F), or a C1
+                // scalar → one space.
+                flushRun(&out, dirty: &dirty, p, from: runStart, to: i)
+                out.append(0x20)
+                i += consumed
+                runStart = i
             }
-            out.append(b)
-            i = input.index(after: i)
+            return finishRewrite(input, &out, dirty: dirty, p, from: runStart)
         }
-        return out
     }
 
     /// Drop every Unicode bidi-control / zero-width / invisible-payload
@@ -165,105 +204,94 @@ enum PasteSanitizer {
     /// paste / drop carrying an emoji-presentation selector. See the
     /// rationale block in `TerminalView+Dragging.sanitizeDropPath`.
     static func stripBidiOverrides(_ input: Data) -> Data {
-        // Fast path: lead bytes for any tracked codepoint are
-        // C2 / D8 / E1 / E2 / EF / F3. Absence of all six → no match.
-        guard input.contains(where: {
-            $0 == 0xC2 || $0 == 0xD8 || $0 == 0xE1
-                || $0 == 0xE2 || $0 == 0xEF || $0 == 0xF3
-        })
-        else { return input }
-        var out = Data()
-        out.reserveCapacity(input.count)
-        var i = input.startIndex
-        while i < input.endIndex {
-            let b0 = input[i]
-            let remaining = input.distance(from: i, to: input.endIndex)
+        input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
+            let n = p.count
+            var out = [UInt8]()
+            var dirty = false
+            var runStart = 0
+            var i = 0
+            while i < n {
+                let b0 = p[i]
+                // Lead bytes for any tracked codepoint are C2 / D8 / E1 / E2 /
+                // EF / F3; everything else (all ASCII) can't start a match.
+                guard b0 == 0xC2 || b0 == 0xD8 || b0 == 0xE1
+                    || b0 == 0xE2 || b0 == 0xEF || b0 == 0xF3
+                else {
+                    i += 1
+                    continue
+                }
+                let remaining = n - i
+                var matched = 0
 
-            // 2-byte sequences:
-            //   U+00AD soft hyphen (C2 AD)
-            //   U+061C ALM        (D8 9C)
-            if remaining >= 2 {
-                let b1 = input[input.index(after: i)]
-                if b0 == 0xC2 && b1 == 0xAD {
-                    i = input.index(i, offsetBy: 2)
+                if remaining >= 2 {
+                    let b1 = p[i + 1]
+                    // 2-byte sequences:
+                    //   U+00AD soft hyphen (C2 AD)
+                    //   U+061C ALM        (D8 9C)
+                    if (b0 == 0xC2 && b1 == 0xAD) || (b0 == 0xD8 && b1 == 0x9C) {
+                        matched = 2
+                    }
+                }
+
+                if matched == 0, remaining >= 3 {
+                    let b1 = p[i + 1]
+                    let b2 = p[i + 2]
+                    // 3-byte sequences:
+                    //   U+180E MVS               (E1 A0 8E)
+                    //   U+200B-F ZWSP/ZWNJ/ZWJ/LRM/RLM (E2 80 8B-8F)
+                    //   U+2028/9 LS/PS           (E2 80 A8/A9)
+                    //   U+202A-E embed/override  (E2 80 AA-AE)
+                    //   U+2060 WJ                (E2 81 A0)
+                    //   U+2066-9 isolates        (E2 81 A6-A9)
+                    //   U+FEFF BOM               (EF BB BF)
+                    // (VS1-16, EF B8 80..8F, is deliberately preserved — see
+                    // the doc comment above.)
+                    if b0 == 0xE1, b1 == 0xA0, b2 == 0x8E {
+                        matched = 3
+                    } else if b0 == 0xE2 {
+                        if b1 == 0x80, (0x8B...0x8F).contains(b2) || (0xA8...0xAE).contains(b2) {
+                            matched = 3
+                        } else if b1 == 0x81, b2 == 0xA0 || (0xA6...0xA9).contains(b2) {
+                            matched = 3
+                        }
+                    } else if b0 == 0xEF, b1 == 0xBB, b2 == 0xBF {
+                        matched = 3
+                    }
+                }
+
+                // 4-byte sequences:
+                //   U+E0000-E007F tag block   (F3 A0 80 80 - F3 A0 81 BF)
+                // (VS17-256, F3 A0 84 80 - F3 A0 87 AF, is deliberately
+                // preserved — see the doc comment above.)
+                if matched == 0, remaining >= 4, b0 == 0xF3 {
+                    let b1 = p[i + 1]
+                    let b2 = p[i + 2]
+                    let b3 = p[i + 3]
+                    // Tag block U+E0000–E007F: F3 A0 {80|81} XX, where XX must
+                    // be a UTF-8 continuation byte (0x80–0xBF) for the four
+                    // bytes to form a valid scalar. Validate b3 so a
+                    // *malformed* lead `F3 A0 80 <non-continuation>` is NOT
+                    // mistaken for a tag-block scalar and over-consumed —
+                    // over-consuming would silently drop the byte after the
+                    // prefix. Like every other near-miss above (e.g.
+                    // `C2 <not AD>`, `E2 80 <out of range>`), an unrecognised
+                    // lead falls through and is preserved verbatim. Audit
+                    // S3-005.
+                    if b1 == 0xA0, b2 == 0x80 || b2 == 0x81, (0x80...0xBF).contains(b3) {
+                        matched = 4
+                    }
+                }
+
+                guard matched > 0 else {
+                    i += 1
                     continue
                 }
-                if b0 == 0xD8 && b1 == 0x9C {
-                    i = input.index(i, offsetBy: 2)
-                    continue
-                }
+                flushRun(&out, dirty: &dirty, p, from: runStart, to: i)
+                i += matched
+                runStart = i
             }
-
-            // 3-byte sequences:
-            //   U+180E MVS               (E1 A0 8E)
-            //   U+200B-F ZWSP/ZWNJ/ZWJ/LRM/RLM (E2 80 8B-8F)
-            //   U+2028/9 LS/PS           (E2 80 A8/A9)
-            //   U+202A-E embed/override  (E2 80 AA-AE)
-            //   U+2060 WJ                (E2 81 A0)
-            //   U+2066-9 isolates        (E2 81 A6-A9)
-            //   U+FEFF BOM               (EF BB BF)
-            if remaining >= 3 {
-                let b1 = input[input.index(i, offsetBy: 1)]
-                let b2 = input[input.index(i, offsetBy: 2)]
-                if b0 == 0xE1, b1 == 0xA0, b2 == 0x8E {
-                    i = input.index(i, offsetBy: 3)
-                    continue
-                }
-                if b0 == 0xE2 {
-                    // E2 80 8B..8F  → ZWSP/ZWNJ/ZWJ/LRM/RLM
-                    if b1 == 0x80 && (0x8B...0x8F).contains(b2) {
-                        i = input.index(i, offsetBy: 3)
-                        continue
-                    }
-                    // E2 80 A8..AE  → LS/PS plus the embed/override block
-                    if b1 == 0x80 && (0xA8...0xAE).contains(b2) {
-                        i = input.index(i, offsetBy: 3)
-                        continue
-                    }
-                    // E2 81 A0       → Word Joiner
-                    // E2 81 A6..A9   → isolates
-                    if b1 == 0x81 && (b2 == 0xA0 || (0xA6...0xA9).contains(b2)) {
-                        i = input.index(i, offsetBy: 3)
-                        continue
-                    }
-                }
-                if b0 == 0xEF {
-                    // EF BB BF       → BOM / ZWNBSP. (VS1-16, EF B8
-                    // 80..8F, is deliberately preserved — see the doc
-                    // comment above.)
-                    if b1 == 0xBB && b2 == 0xBF {
-                        i = input.index(i, offsetBy: 3)
-                        continue
-                    }
-                }
-            }
-
-            // 4-byte sequences:
-            //   U+E0000-E007F tag block   (F3 A0 80 80 - F3 A0 81 BF)
-            // (VS17-256, F3 A0 84 80 - F3 A0 87 AF, is deliberately
-            // preserved — see the doc comment above.)
-            if remaining >= 4, b0 == 0xF3 {
-                let b1 = input[input.index(i, offsetBy: 1)]
-                let b2 = input[input.index(i, offsetBy: 2)]
-                let b3 = input[input.index(i, offsetBy: 3)]
-                // Tag block U+E0000–E007F: F3 A0 {80|81} XX, where XX must be a
-                // UTF-8 continuation byte (0x80–0xBF) for the four bytes to form
-                // a valid scalar. Validate b3 so a *malformed* lead
-                // `F3 A0 80 <non-continuation>` is NOT mistaken for a tag-block
-                // scalar and over-consumed — over-consuming would silently drop
-                // the byte after the prefix. Like every other near-miss above
-                // (e.g. `C2 <not AD>`, `E2 80 <out of range>`), an unrecognised
-                // lead falls through and is preserved verbatim. Audit S3-005.
-                if b1 == 0xA0, b2 == 0x80 || b2 == 0x81, (0x80...0xBF).contains(b3) {
-                    i = input.index(i, offsetBy: 4)
-                    continue
-                }
-            }
-
-            out.append(b0)
-            i = input.index(after: i)
+            return finishRewrite(input, &out, dirty: dirty, p, from: runStart)
         }
-        return out
     }
 
     /// Scrub a remote-controlled string for safe display in chrome
@@ -321,29 +349,36 @@ enum PasteSanitizer {
     /// nested-paste attack surface.
     static func sanitizeBracketedPaste(_ input: Data) -> Data {
         let terminator: [UInt8] = [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]
-        guard input.count >= terminator.count else { return input }
-        var out = Data()
-        out.reserveCapacity(input.count)
-        var i = input.startIndex
-        while i < input.endIndex {
-            let remaining = input.distance(from: i, to: input.endIndex)
-            if remaining >= terminator.count {
-                var match = true
-                for k in 0..<terminator.count {
-                    if input[input.index(i, offsetBy: k)] != terminator[k] {
-                        match = false
-                        break
-                    }
-                }
-                if match {
-                    i = input.index(i, offsetBy: terminator.count)
+        let tlen = terminator.count
+        guard input.count >= tlen else { return input }
+        return input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
+            let n = p.count
+            var out = [UInt8]()
+            var dirty = false
+            var runStart = 0
+            var i = 0
+            // Only an ESC can start the terminator, so the common (ESC-free)
+            // case is a single byte compare per position.
+            while i + tlen <= n {
+                guard p[i] == terminator[0] else {
+                    i += 1
                     continue
                 }
+                var match = true
+                for k in 1..<tlen where p[i + k] != terminator[k] {
+                    match = false
+                    break
+                }
+                guard match else {
+                    i += 1
+                    continue
+                }
+                flushRun(&out, dirty: &dirty, p, from: runStart, to: i)
+                i += tlen
+                runStart = i
             }
-            out.append(input[i])
-            i = input.index(after: i)
+            return finishRewrite(input, &out, dirty: dirty, p, from: runStart)
         }
-        return out
     }
 
     /// Wrap a file path in single quotes using the POSIX `'\''` recipe to

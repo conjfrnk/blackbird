@@ -2341,9 +2341,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Mail / Chat. 16 MiB covers every realistic "select the whole
         // world" case. Same sanitizer as paste-inbound (symmetric).
         let copyMax = 16 * 1024 * 1024
+        // A Data slice is fine here: the sanitizers scan via withUnsafeBytes
+        // (slice-safe), so no zero-based re-copy of up to 16 MiB is needed.
         let data = Data(raw.utf8).prefix(copyMax)
         let scrubbed = PasteSanitizer.stripBidiOverrides(
-            PasteSanitizer.sanitizePasteControls(Data(data))
+            PasteSanitizer.sanitizePasteControls(data)
         )
         var clean = String(decoding: scrubbed, as: UTF8.self)
         // The byte cap can land inside a multi-byte scalar; `String(decoding:)`
