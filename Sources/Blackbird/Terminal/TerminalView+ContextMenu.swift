@@ -22,8 +22,11 @@ extension TerminalView {
             // content on the pasteboard. Before this check, a paste on a
             // view with no session silently dropped the clipboard content
             // instead of clearly disabling the menu item.
-            // Audit terminal-view-2 F13.
-            return session != nil && NSPasteboard.general.string(forType: .string) != nil
+            // Audit terminal-view-2 F13. Presence-only: `availableType`
+            // does not decode the payload, so a multi-MB clipboard costs
+            // O(1) per validation pass instead of a full copy + UTF-8
+            // decode on main; `paste(_:)` does the real read.
+            return session != nil && NSPasteboard.general.availableType(from: [.string]) != nil
         case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
         case #selector(performFindNextAction(_:)):     return !findController.findMatches.isEmpty
         case #selector(performFindPreviousAction(_:)): return !findController.findMatches.isEmpty

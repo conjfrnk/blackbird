@@ -189,6 +189,39 @@ final class PasteboardSourceTypePinTests: XCTestCase {
         }
     }
 
+    // MARK: - Paste menu validation (presence-only check)
+
+    private func pasteMenuEnabled(_ view: TerminalView) -> Bool {
+        view.validateMenuItem(NSMenuItem(title: "Paste",
+                                         action: #selector(TerminalView.paste(_:)),
+                                         keyEquivalent: "v"))
+    }
+
+    /// Paste is enabled iff there is a session AND `.string` on the
+    /// pasteboard; a file-URL-only or empty pasteboard greys it out.
+    func test_validateMenuItem_paste_tracksStringPresenceAndSession() throws {
+        let pb = NSPasteboard.general
+        let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())
+
+        pb.clearContents()
+        pb.setString("hello", forType: .string)
+        XCTAssertFalse(pasteMenuEnabled(view), "no session -> disabled even with text")
+
+        let session = TerminalSession.makeHeadlessForTests()  // view.session is weak
+        view.session = session
+        XCTAssertTrue(pasteMenuEnabled(view), "session + string -> enabled")
+
+        pb.clearContents()
+        XCTAssertFalse(pasteMenuEnabled(view), "empty pasteboard -> disabled")
+
+        let fileItem = NSPasteboardItem()
+        fileItem.setData(URL(fileURLWithPath: "/tmp/x").dataRepresentation,
+                         forType: .fileURL)
+        XCTAssertTrue(pb.writeObjects([fileItem]))
+        XCTAssertFalse(pasteMenuEnabled(view), "file-URL-only pasteboard -> disabled")
+        withExtendedLifetime(session) {}
+    }
+
     // MARK: - Test 4: source-level pin
 
     /// Static analysis pin: the production paste source file must
