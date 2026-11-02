@@ -56,11 +56,12 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     /// process. Evaluated once; the answer cannot change at run time.
     let isSystemCenterAvailable: Bool
 
-    /// Authorization is a three-state affair: unknown until asked, pending
-    /// while the permission prompt is up (or a post re-reads the status
-    /// after a denial), then granted or denied. Posting during `pending`
-    /// used to call `add` unauthorized and lose the notification; posting
-    /// after `denied` kept calling `add` and logging.
+    /// Authorization is a three-state affair: unknown until asked (and again
+    /// after a request that left macOS undecided), pending while the
+    /// permission prompt is up (or a post re-reads the status after a
+    /// denial), then granted or denied. Posting during `pending` used to
+    /// call `add` unauthorized and lose the notification; posting after
+    /// `denied` kept calling `add` and logging.
     enum AuthState: Equatable { case unknown, pending, granted, denied }
     private(set) var authState: AuthState = .unknown
     /// Notifications that arrived while the prompt was up; delivered on
@@ -113,15 +114,16 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
                 let status = settings.authorizationStatus
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    let queued = self.queuedWhilePending
-                    self.queuedWhilePending = []
                     switch status {
                     case .authorized, .provisional, .ephemeral:
-                        self.authState = .granted
-                        for (n, w) in queued { self.deliver(n, windowNumber: w) }
+                        self.settlePending(.granted)
+                    case .notDetermined:
+                        // Not a denial: macOS holds no decision (the user reset
+                        // the permission), so ask again with the queued post.
+                        self.requestAuthorization()
                     default:
                         // Still off: drop silently, the denial was logged once.
-                        self.authState = .denied
+                        self.settlePending(.denied)
                     }
                 }
             }
@@ -133,24 +135,45 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         case .unknown:
             authState = .pending
             queuedWhilePending = [(notification, windowNumber)]
-            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    if let error {
-                        Self.logger.error("notification authorization failed: \(error.localizedDescription, privacy: .public)")
-                    }
-                    let queued = self.queuedWhilePending
-                    self.queuedWhilePending = []
-                    if granted {
-                        self.authState = .granted
-                        for (n, w) in queued { self.deliver(n, windowNumber: w) }
-                    } else {
-                        self.authState = .denied
-                        Self.logger.log("notification authorization denied; \(queued.count, privacy: .public) queued program notification(s) dropped and later ones will not be shown (System Settings → Notifications → Blackbird)")
-                    }
+            requestAuthorization()
+        }
+    }
+
+    /// Puts the permission prompt in front of the user. Main thread, in
+    /// `.pending` with the triggering notification queued.
+    private func requestAuthorization() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let error {
+                    Self.logger.error("notification authorization failed: \(error.localizedDescription, privacy: .public)")
+                }
+                let dropped = self.queuedWhilePending.count
+                if granted {
+                    self.settlePending(.granted)
+                } else if error != nil {
+                    // A failed request records no decision with macOS, so
+                    // latching a denial would mute notifications until
+                    // relaunch over something the user never said. Back to
+                    // `.unknown`: the next post asks again.
+                    self.settlePending(.unknown)
+                    Self.logger.log("notification authorization request failed; \(dropped, privacy: .public) queued program notification(s) dropped, the next one asks again")
+                } else {
+                    self.settlePending(.denied)
+                    Self.logger.log("notification authorization denied; \(dropped, privacy: .public) queued program notification(s) dropped; later ones are re-checked against System Settings → Notifications → Blackbird and shown once it is enabled")
                 }
             }
         }
+    }
+
+    /// Ends `.pending` in `state`: the queued notifications are delivered on
+    /// a grant and dropped otherwise.
+    private func settlePending(_ state: AuthState) {
+        let queued = queuedWhilePending
+        queuedWhilePending = []
+        authState = state
+        guard state == .granted else { return }
+        for (n, w) in queued { deliver(n, windowNumber: w) }
     }
 
     private func deliver(_ notification: TerminalNotification, windowNumber: Int?) {
