@@ -190,6 +190,7 @@
 		986BA3465A246BA5AAFD097B /* GlyphAtlasInvariantTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26BA0CAC55ADFCE4A1F02D62 /* GlyphAtlasInvariantTests.swift */; };
 		99BAB7D360EB5354FC267CD5 /* LinkClickUnderMouseReportingBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE61D946FE9C29CBBD1BCDD2 /* LinkClickUnderMouseReportingBlindTests.swift */; };
 		9A94A1F1D27A5BCB26C70A1F /* WindowFramePersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74275178A18334975662C89C /* WindowFramePersistence.swift */; };
+		9B8CC12154E6A79FDE647943 /* KittyKeyRepeatEventTypeBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29B3E82A4501BBC90AF74B61 /* KittyKeyRepeatEventTypeBlindTests.swift */; };
 		9CBDD8951EDFFDD16224C33C /* IMEAstralRectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20D4A2742422F440F7C65BB5 /* IMEAstralRectTests.swift */; };
 		9D0657AA882549B377408EB1 /* URLDetectorBalancedParenBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C6840094DF834E5E45694B5 /* URLDetectorBalancedParenBlindTests.swift */; };
 		9F19C00C0A9328C8DF97E23F /* SelectionAutoscroller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BD18F9A4B904F415752829 /* SelectionAutoscroller.swift */; };
@@ -371,6 +372,7 @@
 		26BA0CAC55ADFCE4A1F02D62 /* GlyphAtlasInvariantTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasInvariantTests.swift; sourceTree = "<group>"; };
 		28AC18E4DFA1B4F34FA78C71 /* PowerAwareRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerAwareRendering.swift; sourceTree = "<group>"; };
 		291265177FC694F905FFDC57 /* PTYLargePasteBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYLargePasteBlindTests.swift; sourceTree = "<group>"; };
+		29B3E82A4501BBC90AF74B61 /* KittyKeyRepeatEventTypeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyKeyRepeatEventTypeBlindTests.swift; sourceTree = "<group>"; };
 		2B23446ADB6651910E08359F /* GlyphBitmapCacheEvictionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphBitmapCacheEvictionBlindTests.swift; sourceTree = "<group>"; };
 		2E8CF6A327FF6AF427167BFA /* NotificationPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPresenter.swift; sourceTree = "<group>"; };
 		2F96C43E82A34FB57CB37965 /* osc133.bash */ = {isa = PBXFileReference; path = osc133.bash; sourceTree = "<group>"; };
@@ -763,6 +765,7 @@
 				7936FD8340E39C555EDD95CD /* KeypadApplicationModeBlindTests.swift */,
 				8CB767EEE215AE9308F8984F /* KittyFlag1CtrlOptionBlindTests.swift */,
 				CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */,
+				29B3E82A4501BBC90AF74B61 /* KittyKeyRepeatEventTypeBlindTests.swift */,
 				70085016F53D542CFD455D7F /* KittyTerminfoDeletionBlindTests.swift */,
 				9B99D2970157272D6841E2F5 /* LatencyHarnessTests.swift */,
 				4C1918604B5A7FA5FF34818C /* LatencyProbeTests.swift */,
@@ -1403,6 +1406,7 @@
 				20E0EC839350531D064FD050 /* KeychainCouplingTests.swift in Sources */,
 				5DF4A2C309952861372616CE /* KeypadApplicationModeBlindTests.swift in Sources */,
 				B4BB53B751F68CE9E03F70B7 /* KittyFlag1CtrlOptionBlindTests.swift in Sources */,
+				9B8CC12154E6A79FDE647943 /* KittyKeyRepeatEventTypeBlindTests.swift in Sources */,
 				FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */,
 				11A85BB1B88C97F27058B66F /* KittyTerminfoDeletionBlindTests.swift in Sources */,
 				D99C39D366CE2D06BF4082EB /* LatencyHarnessTests.swift in Sources */,

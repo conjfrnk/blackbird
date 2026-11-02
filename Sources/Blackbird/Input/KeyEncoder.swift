@@ -724,20 +724,22 @@ public final class KeyEncoder {
         // traffic — matches the printable release path). The mod field is
         // forced present (even unmodified) because the `:event` sub-param needs
         // a parameter to attach to. Keypad (DECPAM/SS3) keys have no such form
-        // (`csiParamShape` returns nil) so their releases also emit nothing.
+        // (`csiParamShape` returns nil) so their releases also emit nothing;
+        // their repeats fall through to the press encoding below, otherwise a
+        // held keypad key would stop auto-repeating after the first press.
         if eventType != .press {
-            guard mode.contains(.reportEventTypes),
-                  let shape = Self.csiParamShape(for: key) else {
-                return Data()
+            guard mode.contains(.reportEventTypes) else { return Data() }
+            if let shape = Self.csiParamShape(for: key) {
+                var bytes: [UInt8] = [0x1B, 0x5B]                            // ESC [
+                bytes.append(contentsOf: Array(shape.lead.utf8))            // <lead>
+                bytes.append(0x3B)                                          // ;
+                bytes.append(contentsOf: Array(String(max(modBits, 1)).utf8)) // <mod>
+                bytes.append(0x3A)                                          // :
+                bytes.append(contentsOf: Array(String(eventType.rawValue).utf8)) // <event>
+                bytes.append(shape.term)                                   // <final> / ~
+                return Data(bytes)
             }
-            var bytes: [UInt8] = [0x1B, 0x5B]                            // ESC [
-            bytes.append(contentsOf: Array(shape.lead.utf8))            // <lead>
-            bytes.append(0x3B)                                          // ;
-            bytes.append(contentsOf: Array(String(max(modBits, 1)).utf8)) // <mod>
-            bytes.append(0x3A)                                          // :
-            bytes.append(contentsOf: Array(String(eventType.rawValue).utf8)) // <event>
-            bytes.append(shape.term)                                   // <final> / ~
-            return Data(bytes)
+            guard eventType == .repeat else { return Data() }
         }
 
         switch key {
@@ -761,7 +763,7 @@ public final class KeyEncoder {
              .kpEnter, .kpPlus, .kpMinus, .kpMultiply, .kpDivide,
              .kpDecimal, .kpEquals:
             return encodeKeypadKey(key, applicationKeypad: applicationKeypad,
-                                   modifiers: modifiers, mode: mode)
+                                   modifiers: modifiers, mode: mode, eventType: eventType)
         }
     }
 
@@ -781,7 +783,8 @@ public final class KeyEncoder {
         _ key: SpecialKey,
         applicationKeypad: Bool,
         modifiers: Modifiers,
-        mode: BBTermMode
+        mode: BBTermMode,
+        eventType: EventType
     ) -> Data {
         let final: UInt8 = {
             switch key {
@@ -827,7 +830,7 @@ public final class KeyEncoder {
             }
         }()
         guard !legacyChar.isEmpty else { return Data() }
-        return encode(chars: legacyChar, modifiers: modifiers, mode: mode)
+        return encode(chars: legacyChar, modifiers: modifiers, mode: mode, eventType: eventType)
     }
 
     /// xterm `modifyOtherKeys` emit — `CSI 27 ; <mod> ; <cp> ~`. Uses

@@ -206,6 +206,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// Modifiers of the `keyDown` currently being routed through the input
     /// context (see `routeKeyDownThroughIME`); nil outside that window.
     var pendingInsertTextModifiers: KeyEncoder.Modifiers?
+    /// `isARepeat` of that same `keyDown`; the `insertText` path can't see it.
+    var pendingInsertTextIsRepeat = false
     /// Wheel-delta → line accumulator for the mouse-report and DEC 1007
     /// alternate-scroll paths (see `scrollWheel`). Reset on `mouseExited`.
     var wheelAccumulator = WheelScrollAccumulator()
@@ -2095,7 +2097,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // modifiers so that path can report Shift under kitty flags 4/8
         // (`CSI 97:65;2u` for Shift+A, not `CSI 97u`); cleared again below.
         pendingInsertTextModifiers = KeyEncoder.Modifiers(event: event)
-        defer { pendingInsertTextModifiers = nil }
+        pendingInsertTextIsRepeat = event.isARepeat
+        defer {
+            pendingInsertTextModifiers = nil
+            pendingInsertTextIsRepeat = false
+        }
         let optionMetaChord = KeyEventClassifier.isOptionMetaChord(
             optionIsMeta: encoder.optionIsMeta,
             modifierFlags: event.modifierFlags
@@ -2182,6 +2188,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         return false
     }
 
+    /// Kitty flag 2: a key-down with `isARepeat` is event type 2, not a fresh
+    /// press. Gated on the mode here because the encoder drops every non-press
+    /// event unless `reportEventTypes` is set, which would silence ordinary
+    /// auto-repeat for every shell and TUI that never asked for it.
+    static func keyDownEventType(isRepeat: Bool, mode: BBTermMode) -> KeyEncoder.EventType {
+        isRepeat && mode.contains(.reportEventTypes) ? .repeat : .press
+    }
+
     /// Final keyDown stage: encode the event into PTY bytes and send. Special
     /// keys (arrows / function / keypad) route through `encodeSpecial`; every
     /// other printable through `encode(chars:)`. An empty encoding (F13–F24,
@@ -2190,6 +2204,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     private func encodeAndSendKey(_ event: NSEvent) {
         let mods = KeyEncoder.Modifiers(event: event)
         let termMode = currentSnapshot?.termMode ?? []
+        let eventType = Self.keyDownEventType(isRepeat: event.isARepeat, mode: termMode)
 
         if let special = KeyEventClassifier.specialKey(for: event) {
             let appCursor = termMode.contains(.appCursor)
@@ -2203,7 +2218,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 // can route its plain character through encode(chars:) and pick
                 // up Meta / Kitty / modifyOtherKeys framing instead of dropping
                 // the modifiers in the legacy fallback.
-                mode: termMode
+                mode: termMode,
+                eventType: eventType
             )
             if !bytes.isEmpty { sendToSession(bytes) }
             return
@@ -2232,7 +2248,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             super.keyDown(with: event)
             return
         }
-        let bytes = encoder.encode(chars: chars, modifiers: mods, mode: termMode)
+        let bytes = encoder.encode(chars: chars, modifiers: mods, mode: termMode, eventType: eventType)
         #if DEBUG
         if !bytes.isEmpty {
             let hex = bytes.map { String(format: "0x%02x", $0) }.joined(separator: " ")

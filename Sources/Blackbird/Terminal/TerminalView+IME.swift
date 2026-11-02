@@ -109,7 +109,12 @@ extension TerminalView: NSTextInputClient {
         let mods: KeyEncoder.Modifiers = (wantsShiftBits && !hadComposition)
             ? (pendingInsertTextModifiers ?? []).intersection(.shift)
             : []
-        let bytes = encoder.encode(chars: committed, modifiers: mods, mode: mode)
+        // A held plain key reaches here too (flag 8 makes it a CSI u escape
+        // code); an IME commit is never a repeat.
+        let eventType = hadComposition
+            ? KeyEncoder.EventType.press
+            : Self.keyDownEventType(isRepeat: pendingInsertTextIsRepeat, mode: mode)
+        let bytes = encoder.encode(chars: committed, modifiers: mods, mode: mode, eventType: eventType)
         if !bytes.isEmpty { sendToSession(bytes) }
     }
 
