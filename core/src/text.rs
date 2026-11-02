@@ -10,16 +10,24 @@ use alacritty_terminal::term::cell::Flags as CellFlags;
 
 use crate::{BBTerm, MAX_TEXT_RANGE_ROWS};
 
+/// `flags` bit 0: rectangular (box) selection instead of the prose sweep.
+const FLAG_RECT: u8 = 0b01;
+/// `flags` bit 1: keep a tab's blank fill (one output char per grid cell)
+/// instead of collapsing `\t` + fill to the lone `\t`. For Find haystacks,
+/// which read string offsets as grid columns.
+const FLAG_KEEP_TAB_FILL: u8 = 0b10;
+
 /// Extract the text in the (possibly rectangular) cell span as UTF-8 bytes.
 /// Returns empty for a degenerate/empty range. The caller wraps the bytes in a
-/// `BBString`.
+/// `BBString`. `flags` is `FLAG_RECT | FLAG_KEEP_TAB_FILL`; other bits are
+/// reserved and ignored.
 pub(crate) fn extract_text_range(
     bb: &BBTerm,
     start_line: i32,
     start_col: u16,
     end_line: i32,
     end_col: u16,
-    rect: u8,
+    flags: u8,
 ) -> Vec<u8> {
     let grid = bb.term.grid();
 
@@ -87,7 +95,8 @@ pub(crate) fn extract_text_range(
     let mut joined = String::new();
     let mut newline_pending = false;
 
-    let rectangular = rect != 0;
+    let rectangular = flags & FLAG_RECT != 0;
+    let keep_tab_fill = flags & FLAG_KEEP_TAB_FILL != 0;
     // The per-row branches compare line_i against iter_start /
     // iter_end (the clamped iteration bounds) so callers whose raw
     // s_line/e_line sat outside the grid still get column-respect on
@@ -136,8 +145,30 @@ pub(crate) fn extract_text_range(
         joined.reserve(col_hi.saturating_sub(col_lo) + 1);
         let row = &grid[Line(line_i)];
         let mut c = col_lo;
+        let mut tab_mode = false;
         while c <= col_hi {
             let cell = &row[Column(c)];
+            // HT stores '\t' in the first cell of its span only and leaves
+            // the rest of the span as blanks; emitting those blanks too
+            // pasted back 1-7 spurious spaces after every tab (TSV fields,
+            // Makefile / Go indents).
+            // Same rule as upstream's `line_to_string`: after a '\t', skip
+            // ' ' cells up to the next tab stop. A non-blank cell, or a
+            // space typed on a stop, ends the skip and is kept. A selection
+            // that starts mid-span has no '\t' in range and keeps its blanks.
+            // `keep_tab_fill` (Find) never enters the skip, so every cell
+            // still yields one char and a string offset stays its column.
+            if tab_mode {
+                if bb.term.is_tab_stop(Column(c)) || cell.c != ' ' {
+                    tab_mode = false;
+                } else {
+                    c += 1;
+                    continue;
+                }
+            }
+            if cell.c == '\t' && !keep_tab_fill {
+                tab_mode = true;
+            }
             // Skip wide-char spacer cells entirely. alacritty stores a
             // wide char (CJK, emoji) in the primary cell and a '\0'
             // sentinel in the continuation cell to its right; naively

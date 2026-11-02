@@ -521,6 +521,15 @@ impl<T> Term<T> {
         self.inactive_grid.clear_history();
     }
 
+    /// Blackbird addition (re-apply on bump): read-only view of the tab-stop
+    /// table (`tabs` is private). Text extraction outside this crate needs it
+    /// to tell a tab's blank fill from spaces that were typed, the way
+    /// `line_to_string`'s `tab_mode` does.
+    #[inline]
+    pub fn is_tab_stop(&self, column: Column) -> bool {
+        self.tabs[column]
+    }
+
     pub fn set_options(&mut self, options: Config)
     where
         T: EventListener,

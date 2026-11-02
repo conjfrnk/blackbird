@@ -947,14 +947,24 @@ void bb_term_set_named_color(struct BBTerm *term, uint16_t slot, uint32_t rgb);
  * visible viewport and negative values reach into scrollback (buffer-relative,
  * matching alacritty's `Line(i32)` convention).
  *
- * `rect == 0` selects prose mode: the first line is emitted from `start_col`
- * to the end of the row, the last line from column 0 to `end_col`, and
- * middle lines are taken in full. Trailing spaces are trimmed from every
- * line except the last to avoid pulling the grid's blank fill into copied
- * output.
+ * `flags` is a bit set; undefined bits are ignored.
  *
- * `rect != 0` selects rectangular mode: every line is clipped to
+ * Bit 0 (`1`) clear selects prose mode: the first line is emitted from
+ * `start_col` to the end of the row, the last line from column 0 to
+ * `end_col`, and middle lines are taken in full. Trailing spaces are trimmed
+ * from every line except the last to avoid pulling the grid's blank fill into
+ * copied output.
+ *
+ * Bit 0 (`1`) set selects rectangular mode: every line is clipped to
  * `[start_col, end_col]` with no trimming.
+ *
+ * A tab (HT) is stored as `\t` in the first cell of its span; the cells it
+ * skipped over stay blank. By default the blank fill up to the next tab stop
+ * is dropped, so `a<TAB>b` copies as `a\tb`; spaces that were typed (on or
+ * after a stop) are kept. Bit 1 (`2`) set keeps the fill, giving exactly one
+ * output char per grid cell (before wide-char spacer skipping and zero-width
+ * scalars): the find bar passes `3` because it reads string offsets as grid
+ * columns.
  *
  * `\0` cells (alacritty's "unrendered" sentinel) are emitted as spaces. Real
  * spaces come through as-is. Wide-char spacer cells (alacritty's
@@ -987,7 +997,7 @@ struct BBString *bb_term_text_range(struct BBTerm *term,
                                     uint16_t start_col,
                                     int32_t end_line,
                                     uint16_t end_col,
-                                    uint8_t rect);
+                                    uint8_t flags);
 
 /**
  * Free a `BBString` returned by `bb_term_text_range`.

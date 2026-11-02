@@ -451,6 +451,11 @@ public final class BBTerm {
     /// prose-style sweep (first line from startCol, middle lines full, last
     /// line to endCol). Lines outside the buffer are silently skipped.
     ///
+    /// A tab's blank fill up to the next tab stop is dropped (`a<TAB>b`
+    /// copies as `a\tb`). `keepTabFill` keeps it, so every grid cell yields
+    /// one character: callers that read a string offset as a grid column
+    /// (the find bar's scrollback haystacks) must pass `true`.
+    ///
     /// Returns `nil` on (a) null handle, (b) zero-area range (FFI returns
     /// an empty `BBString` and we forward `""`; an outright `nil` here is
     /// the C-side null-allocation fallback), or (c) a panic during text
@@ -462,7 +467,8 @@ public final class BBTerm {
     public func textRange(
         startLine: Int32, startCol: Int,
         endLine: Int32,   endCol: Int,
-        rectangular: Bool
+        rectangular: Bool,
+        keepTabFill: Bool = false
     ) -> String? {
         guard let h = handle else { return nil }
         // `UInt16(col)` traps on negative or > 65535. Selection cols
@@ -474,7 +480,7 @@ public final class BBTerm {
             h,
             startLine, UInt16(clamping: startCol),
             endLine,   UInt16(clamping: endCol),
-            rectangular ? 1 : 0
+            (rectangular ? 0b01 : 0) | (keepTabFill ? 0b10 : 0)
         ) else {
             return nil
         }

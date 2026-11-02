@@ -200,7 +200,9 @@ final class FindController {
     /// Haystacks for every buffer line in `topLine...bottomLine`: viewport
     /// rows via the snapshot's cell walker (exact UTF-16 → column map),
     /// scrollback rows in chunks of `scrollbackChunkRows` (one-cell-per-
-    /// char approximation, as before). Empty rows are omitted.
+    /// char approximation, as before; `keepTabFill` stops a tab's blank fill
+    /// being collapsed, which would shift every later match left of its
+    /// column). Empty rows are omitted.
     func captureRows(
         topLine: Int32,
         bottomLine: Int32,
@@ -221,7 +223,7 @@ final class FindController {
             var joined = session.textRange(
                 from: BufferPoint(line: a, col: 0),
                 to:   BufferPoint(line: b, col: max(0, cols - 1)),
-                rectangular: true
+                rectangular: true, keepTabFill: true
             )
             // Byte-level split: the Character-based `split` + `String(piece)`
             // + trim cost two String allocations and grapheme stepping per
@@ -240,7 +242,7 @@ final class FindController {
                     let hay = Self.trimmingTrailingSpaces(session.textRange(
                         from: BufferPoint(line: ln, col: 0),
                         to:   BufferPoint(line: ln, col: max(0, cols - 1)),
-                        rectangular: true
+                        rectangular: true, keepTabFill: true
                     ))
                     if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil)) }
                     if ln == Int32.max { break }
@@ -283,7 +285,7 @@ final class FindController {
                     let hay = Self.trimmingTrailingSpaces(session.textRange(
                         from: BufferPoint(line: ln, col: 0),
                         to:   BufferPoint(line: ln, col: max(0, cols - 1)),
-                        rectangular: true
+                        rectangular: true, keepTabFill: true
                     ))
                     if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil)) }
                     if ln == Int32.max { break }

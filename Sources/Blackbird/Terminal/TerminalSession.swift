@@ -877,7 +877,11 @@ public final class TerminalSession: ObservableObject {
     /// Extract text between two buffer points. Serialized through the core
     /// queue so the grid can't mutate mid-read (same discipline as other
     /// `bbterm.*` accessors).
-    public func textRange(from start: BufferPoint, to end: BufferPoint, rectangular: Bool) -> String {
+    /// `keepTabFill` is for callers that treat a string offset as a grid column
+    /// (Find); copy paths leave it off so a tab copies as the lone `\t`.
+    public func textRange(
+        from start: BufferPoint, to end: BufferPoint, rectangular: Bool, keepTabFill: Bool = false
+    ) -> String {
         // M-12 sibling: same tripwire rationale as recordPromptStart /
         // scrollToMark / resize. Public method used by selection-copy and
         // find-match extraction (both on main today). `coreQueue.sync`
@@ -887,7 +891,7 @@ public final class TerminalSession: ObservableObject {
             bbterm.textRange(
                 startLine: start.line, startCol: start.col,
                 endLine: end.line, endCol: end.col,
-                rectangular: rectangular
+                rectangular: rectangular, keepTabFill: keepTabFill
             ) ?? ""
         }
     }

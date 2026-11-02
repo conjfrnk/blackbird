@@ -1759,6 +1759,70 @@ fn text_range_skips_wide_char_spacer_cells() {
     }
 }
 
+/// Read `bb_term_text_range` back as a `String` (tab-fill tests below).
+unsafe fn text_range_string(
+    term: *mut BBTerm,
+    start: (i32, u16),
+    end: (i32, u16),
+    flags: u8,
+) -> String {
+    let s = bb_term_text_range(term, start.0, start.1, end.0, end.1, flags);
+    assert!(!s.is_null());
+    let bytes = std::slice::from_raw_parts((*s).bytes, (*s).len);
+    let out = std::str::from_utf8(bytes).unwrap().to_owned();
+    bb_string_release(s);
+    out
+}
+
+/// `flags` bit 1 keeps a tab's blank fill: `a<TAB>b` is `a`, `\t` in col 1,
+/// six blank cells, then `b` at col 8, so the extraction is nine chars and a
+/// string offset equals its grid column (what the find bar's scrollback
+/// haystacks rely on). Bit 1 clear (the copy paths) collapses it to `a\tb`.
+/// Both prose and rectangular modes honour the bit.
+#[test]
+fn text_range_keep_tab_fill_flag_yields_one_char_per_cell() {
+    unsafe {
+        let term = bb_term_new(20, 2, 100);
+        bb_term_input(term, b"a\tb".as_ptr(), 3);
+        assert_eq!(text_range_string(term, (0, 0), (0, 8), 0b00), "a\tb");
+        assert_eq!(text_range_string(term, (0, 0), (0, 8), 0b01), "a\tb");
+        let kept = "a\t      b";
+        assert_eq!(text_range_string(term, (0, 0), (0, 8), 0b10), kept);
+        assert_eq!(text_range_string(term, (0, 0), (0, 8), 0b11), kept);
+        assert_eq!(kept.chars().count(), 9);
+        assert_eq!(kept.chars().position(|c| c == 'b'), Some(8));
+        bb_term_free(term);
+    }
+}
+
+/// The blank-fill rule follows the terminal's ACTUAL tab stops, not a fixed
+/// 8-column grid. With stops cleared (`CSI 3 g`) and re-set at columns 5 and
+/// 12 (`CHA` + `HTS`), `ab<TAB>` fills cols 3-4 and a space TYPED on the
+/// stop at col 5 is data, not fill: it must survive. A fixed-8 rule would
+/// treat that space as fill and drop it.
+#[test]
+fn text_range_tab_fill_follows_custom_tab_stops() {
+    unsafe {
+        let term = bb_term_new(20, 2, 100);
+        let setup = b"\x1b[3g\x1b[6G\x1bH\x1b[13G\x1bH\r";
+        bb_term_input(term, setup.as_ptr(), setup.len());
+        let typed = b"ab\t c\t  d";
+        bb_term_input(term, typed.as_ptr(), typed.len());
+        // ab@0-1, tab@2 (fill 3-4), ' '@5, c@6, tab@7 (fill 8-11), ' '@12, ' '@13, d@14.
+        assert_eq!(
+            text_range_string(term, (0, 0), (0, 14), 0b00),
+            "ab\t c\t  d",
+            "fill ends at the custom stops (cols 5, 12); typed spaces on them stay"
+        );
+        assert_eq!(
+            text_range_string(term, (0, 0), (0, 14), 0b11),
+            "ab\t   c\t      d",
+            "keep-fill mode emits one char per cell"
+        );
+        bb_term_free(term);
+    }
+}
+
 /// `CSI 2 J` (ED All — erase visible viewport) MUST NOT touch the
 /// scrollback buffer. A previous revision auto-injected `CSI 3 J`
 /// after every top-level 2J so `clear(1)` would also wipe scrollback,

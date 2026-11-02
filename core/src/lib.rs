@@ -1411,14 +1411,24 @@ pub const BB_STRING_MAGIC: u64 = 0xB1AC_5BBD_5721_57E0;
 /// visible viewport and negative values reach into scrollback (buffer-relative,
 /// matching alacritty's `Line(i32)` convention).
 ///
-/// `rect == 0` selects prose mode: the first line is emitted from `start_col`
-/// to the end of the row, the last line from column 0 to `end_col`, and
-/// middle lines are taken in full. Trailing spaces are trimmed from every
-/// line except the last to avoid pulling the grid's blank fill into copied
-/// output.
+/// `flags` is a bit set; undefined bits are ignored.
 ///
-/// `rect != 0` selects rectangular mode: every line is clipped to
+/// Bit 0 (`1`) clear selects prose mode: the first line is emitted from
+/// `start_col` to the end of the row, the last line from column 0 to
+/// `end_col`, and middle lines are taken in full. Trailing spaces are trimmed
+/// from every line except the last to avoid pulling the grid's blank fill into
+/// copied output.
+///
+/// Bit 0 (`1`) set selects rectangular mode: every line is clipped to
 /// `[start_col, end_col]` with no trimming.
+///
+/// A tab (HT) is stored as `\t` in the first cell of its span; the cells it
+/// skipped over stay blank. By default the blank fill up to the next tab stop
+/// is dropped, so `a<TAB>b` copies as `a\tb`; spaces that were typed (on or
+/// after a stop) are kept. Bit 1 (`2`) set keeps the fill, giving exactly one
+/// output char per grid cell (before wide-char spacer skipping and zero-width
+/// scalars): the find bar passes `3` because it reads string offsets as grid
+/// columns.
 ///
 /// `\0` cells (alacritty's "unrendered" sentinel) are emitted as spaces. Real
 /// spaces come through as-is. Wide-char spacer cells (alacritty's
@@ -1452,7 +1462,7 @@ pub unsafe extern "C" fn bb_term_text_range(
     start_col: u16,
     end_line: i32,
     end_col: u16,
-    rect: u8,
+    flags: u8,
 ) -> *mut BBString {
     guard_with_term(term, std::ptr::null_mut(), || {
         if term.is_null() {
@@ -1462,7 +1472,7 @@ pub unsafe extern "C" fn bb_term_text_range(
             return std::ptr::null_mut();
         }
         bb_string_new(extract_text_range(
-            &*term, start_line, start_col, end_line, end_col, rect,
+            &*term, start_line, start_col, end_line, end_col, flags,
         ))
     })
 }
