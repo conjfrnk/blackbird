@@ -78,6 +78,10 @@ enum KeyEventClassifier {
         // DEL byte (0x7F), which the char-based path produces naturally from
         // event.charactersIgnoringModifiers. Only forward-delete maps here.
         case NSEvent.SpecialKey.deleteForward: return .delete
+        // A PC keyboard's Insert key reaches macOS as kVK_Help (keyCode 114)
+        // carrying NSHelpFunctionKey (U+F746); some drivers report
+        // NSInsertFunctionKey (U+F727) instead. Both are Insert (CSI 2 ~).
+        case NSEvent.SpecialKey.insert, NSEvent.SpecialKey.help: return .insert
         case NSEvent.SpecialKey.f1:  return .f1
         case NSEvent.SpecialKey.f2:  return .f2
         case NSEvent.SpecialKey.f3:  return .f3
