@@ -43,9 +43,10 @@ final class CellRenderHelpersTests: XCTestCase {
         )
     }
 
-    /// DIM halves the rgb lanes, leaving alpha untouched.
-    private func dimmed(_ v: SIMD4<Float>) -> SIMD4<Float> {
-        SIMD4<Float>(v.x * 0.5, v.y * 0.5, v.z * 0.5, v.w)
+    /// DIM fades the rgb lanes halfway toward the cell's bg, leaving alpha
+    /// untouched. (Toward black, i.e. a plain halve, only when the bg is black.)
+    private func dimmed(_ v: SIMD4<Float>, towardBg bg: SIMD4<Float>) -> SIMD4<Float> {
+        SIMD4<Float>((v.x + bg.x) * 0.5, (v.y + bg.y) * 0.5, (v.z + bg.z) * 0.5, v.w)
     }
 
     /// OR the raw values of a set of attribute masks.
@@ -270,22 +271,24 @@ final class CellRenderHelpersTests: XCTestCase {
         let out = CellInstanceBuilder.resolveColors(
             cell: cell, defaultBg: 0x0000_0000,
             keepBgOpaque: true, backgroundOpacity: 0.5)
-        let expectedFg = dimmed(expectedRGB(0x0080_4020))
-        assertSIMDEqual(out.fg, expectedFg, "DIM must halve fg rgb and leave alpha at 1.0")
+        let expectedFg = dimmed(expectedRGB(0x0080_4020), towardBg: expectedRGB(0x0000_0000))
+        assertSIMDEqual(out.fg, expectedFg, "DIM must halve fg rgb (toward a black bg) and leave alpha at 1.0")
         XCTAssertEqual(out.fg.w, 1.0, accuracy: 1e-6, "DIM must not touch the fg alpha lane")
     }
 
     func test_resolveColors_dimAppliedAfterReverse() {
-        // DIM + REVERSE: the dim halving must hit the post-swap fg, which
-        // originates from cell.bg.
+        // DIM + REVERSE: the dim fade must hit the post-swap fg, which
+        // originates from cell.bg, and blend toward the post-swap bg, which
+        // originates from cell.fg.
         let cell = makeCell(fg: 0x00FF_FFFF, bg: 0x0080_8080,
                             flags: UInt16(REVERSE) | UInt16(DIM))
         let out = CellInstanceBuilder.resolveColors(
             cell: cell, defaultBg: 0x0000_0000,
             keepBgOpaque: true, backgroundOpacity: 0.5)
-        // fg = dim(rgb(cell.bg)); proves dim runs AFTER the reverse swap.
-        assertSIMDEqual(out.fg, dimmed(expectedRGB(0x0080_8080)),
-                        "dim must apply to the reversed fg (sourced from cell.bg)")
+        // fg = dim(rgb(cell.bg)) toward rgb(cell.fg); proves dim runs AFTER the
+        // reverse swap and fades toward the swapped bg, not toward black.
+        assertSIMDEqual(out.fg, dimmed(expectedRGB(0x0080_8080), towardBg: expectedRGB(0x00FF_FFFF)),
+                        "dim must apply to the reversed fg (sourced from cell.bg), toward the reversed bg")
         var expectedBg = expectedRGB(0x00FF_FFFF)
         expectedBg.w = 1.0
         assertSIMDEqual(out.bg, expectedBg, "reverse: bg becomes original fg (undimmed), alpha 1.0")

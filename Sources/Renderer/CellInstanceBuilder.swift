@@ -367,25 +367,28 @@ struct CellInstanceBuilder {
             fg = bg
             bg = orig
         }
-        // DIM (SGR 2): halve the fg brightness so dimmed text reads softer
-        // without affecting bg. Applied after REVERSE so the resulting glyph
-        // colour is what's visibly dimmed.
+        // DIM (SGR 2): fade the fg halfway toward the cell's own bg so dimmed
+        // text reads softer without affecting bg. Applied after REVERSE so the
+        // resulting glyph colour (against the post-swap bg) is what's visibly
+        // dimmed. Fading toward the bg, not toward black: halving the fg only
+        // lowers contrast on a dark bg and RAISES it on a light theme, where
+        // faint text became the most contrasty text on screen.
         //
-        // Audit L13. The halve happens on sRGB-encoded float components
+        // Audit L13. The blend happens on sRGB-encoded float components
         // (matching `rgbToSIMD` which divides bytes by 255 without
         // linearization). Strictly correct "perceived half luminance" would
-        // gamma-decode → halve linear → gamma-encode, which on a midgray maps
+        // gamma-decode → blend linear → gamma-encode, which on a midgray maps
         // to roughly 0.73 in sRGB-encoded space rather than 0.50. We
-        // deliberately keep the sRGB-encoded halve so DIM is consistent with
+        // deliberately keep the sRGB-encoded blend so DIM is consistent with
         // the rest of the pipeline (cell composition, alpha blending, selection
         // overlay) which all operate in sRGB-encoded space — gamma-correcting
         // just DIM would visually clash. iTerm2 makes the same choice.
         // Re-evaluate as a unit if the renderer ever moves to a fully-linear
         // pipeline.
         if (cell.flags & UInt16(DIM)) != 0 {
-            fg.x *= 0.5
-            fg.y *= 0.5
-            fg.z *= 0.5
+            fg.x = (fg.x + bg.x) * 0.5
+            fg.y = (fg.y + bg.y) * 0.5
+            fg.z = (fg.z + bg.z) * 0.5
         }
         // Treat the theme's default bg as "no bg" so the transparent clearColor
         // can show through. Cells with explicit colors (vim highlights, status
