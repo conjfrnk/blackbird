@@ -279,13 +279,18 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             return;
         }
 
-        // Update display offset when not pinned to active area.
-        if self.display_offset != 0 {
-            self.display_offset = min(self.display_offset + positions, self.max_scroll_limit);
-        }
-
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
+            // Update display offset when not pinned to active area.
+            //
+            // Blackbird fork fix (VT-3): this used to run for every region. A
+            // region with a top margin below row 0 adds nothing to history, so
+            // bumping the offset pushed it past `history_size()`, which blanks
+            // the viewport's top rows and eventually panics `display_iter`.
+            if self.display_offset != 0 {
+                self.display_offset = min(self.display_offset + positions, self.max_scroll_limit);
+            }
+
             // Blackbird fork addition (audit S5-004/S5-005): count every
             // line this full-width rotation moves toward history,
             // including ones a saturated ring recycles. NOTE: vertical
