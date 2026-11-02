@@ -39,6 +39,9 @@ bitflags! {
 /// Counter for hyperlinks without explicit ID.
 static HYPERLINK_ID_SUFFIX: AtomicU32 = AtomicU32::new(0);
 
+/// Max zero-width scalars kept on one cell (see `Cell::push_zerowidth`).
+const ZEROWIDTH_MAX: usize = 32;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Hyperlink {
@@ -160,8 +163,17 @@ impl Cell {
     }
 
     /// Write a new zerowidth character to this cell.
+    ///
+    /// Blackbird fix (re-apply on bump): upstream appends without limit, and a zero-width
+    /// scalar never advances the cursor, so `CSI 65535 b` (REP) after one combining mark
+    /// piled 65,535 scalars (~256 KiB) onto a single cell per 8 input bytes. Scalars past
+    /// `ZEROWIDTH_MAX` are dropped; real grapheme clusters (ZWJ families, stacked marks) use
+    /// a handful, so only hostile input is truncated.
     #[inline]
     pub fn push_zerowidth(&mut self, character: char) {
+        if self.extra.as_ref().is_some_and(|extra| extra.zerowidth.len() >= ZEROWIDTH_MAX) {
+            return;
+        }
         let extra = self.extra.get_or_insert(Default::default());
         Arc::make_mut(extra).zerowidth.push(character);
     }
