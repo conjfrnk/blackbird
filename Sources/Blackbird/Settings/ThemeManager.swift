@@ -29,6 +29,13 @@ public final class ThemeManager {
         weak var owner: AnyObject?
         let sessionProvider: () -> TerminalSession?
         let viewProvider: () -> TerminalView?
+        /// The palette last pushed into this registration's session. The
+        /// session push overwrites palette slots 0-15 + fg/bg/cursor, wiping
+        /// whatever a program set via OSC 4/10/11/12, so it is gated on this
+        /// (the RESOLVED palette), not on `PaletteInputs`: translucency /
+        /// cursor / OS-appearance churn that resolves to the same palette
+        /// re-themes the view but must leave the program's colours alone.
+        var lastSessionPalette: ThemePalette?
     }
     private var registrations: [ObjectIdentifier: Registration] = [:]
 
@@ -102,12 +109,13 @@ public final class ThemeManager {
                          sessionProvider: @escaping () -> TerminalSession?,
                          viewProvider:    @escaping () -> TerminalView?) {
         let key = ObjectIdentifier(owner)
-        registrations[key] = Registration(
+        let registration = Registration(
             owner: owner,
             sessionProvider: sessionProvider,
             viewProvider: viewProvider
         )
-        apply(session: sessionProvider(), view: viewProvider(), palette: resolvedPalette)
+        registrations[key] = registration
+        apply(key, registration, palette: resolvedPalette, pushSession: true)
     }
 
     /// Whether the app is currently rendering in a dark appearance. The ONE
@@ -137,7 +145,7 @@ public final class ThemeManager {
         // Unconditional apply — first-show blur wiring needs this even when
         // the palette itself hasn't changed since the last apply (the window
         // number wasn't live last time). Bypass the equality gate.
-        applyToAll(inputs: currentPaletteInputs())
+        applyToAll(inputs: currentPaletteInputs(), forceSession: true)
     }
 
     /// Re-apply the theme to ONE registration's view only. For the per-window
@@ -193,8 +201,13 @@ public final class ThemeManager {
 
     /// Push the resolved palette to every (live) registration and stamp the
     /// dedup cache with `inputs` — the snapshot the caller already computed, so
-    /// the inputs are derived once per apply, not twice.
-    private func applyToAll(inputs: PaletteInputs) {
+    /// the inputs are derived once per apply, not twice. The view always
+    /// re-themes (it consumes translucency / cursor / blur); the session only
+    /// gets the palette when it differs from the one it last received, or when
+    /// `forceSession` is set. `PaletteInputs` also changes on inputs that leave
+    /// the resolved palette untouched, and re-pushing it then would clobber the
+    /// program's OSC 4/10/11/12 colours for nothing.
+    private func applyToAll(inputs: PaletteInputs, forceSession: Bool = false) {
         // Reap registrations whose owner (MainWindowController) has been
         // deallocated. Weak-owner keying means dead windows self-evict
         // here — no explicit unregister call is required from the caller
@@ -203,13 +216,20 @@ public final class ThemeManager {
         lastPaletteInputs = inputs
         // Resolve once, not per registration — N tabs share one palette.
         let palette = resolvedPalette
-        for reg in registrations.values {
-            apply(session: reg.sessionProvider(), view: reg.viewProvider(), palette: palette)
+        for (key, reg) in registrations {
+            apply(key, reg, palette: palette,
+                  pushSession: forceSession || reg.lastSessionPalette != palette)
         }
     }
 
-    private func apply(session: TerminalSession?, view: TerminalView?, palette: ThemePalette) {
-        session?.applyPalette(palette)
-        view?.applyTheme(palette)
+    private func apply(_ key: ObjectIdentifier, _ reg: Registration,
+                       palette: ThemePalette, pushSession: Bool) {
+        // Stamp only when a session actually received the palette, so a
+        // registration whose session isn't up yet is still pushed later.
+        if pushSession, let session = reg.sessionProvider() {
+            session.applyPalette(palette)
+            registrations[key]?.lastSessionPalette = palette
+        }
+        reg.viewProvider()?.applyTheme(palette)
     }
 }
