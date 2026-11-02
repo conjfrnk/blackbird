@@ -952,8 +952,12 @@ void bb_term_set_named_color(struct BBTerm *term, uint16_t slot, uint32_t rgb);
  * Bit 0 (`1`) clear selects prose mode: the first line is emitted from
  * `start_col` to the end of the row, the last line from column 0 to
  * `end_col`, and middle lines are taken in full. Trailing spaces are trimmed
- * from every line except the last to avoid pulling the grid's blank fill into
- * copied output.
+ * from every line to avoid pulling the grid's blank fill into copied output;
+ * the last line (or a single-line range) is trimmed only when `end_col` sits
+ * in the row's blank tail, so a selection ending inside the text keeps the
+ * spaces it covers. Only a one-cell pick of a blank on a single line keeps
+ * its lone space; a wider all-blank span (a triple-click on an empty line)
+ * yields an empty string.
  *
  * Bit 0 (`1`) set selects rectangular mode: every line is clipped to
  * `[start_col, end_col]` with no trimming.

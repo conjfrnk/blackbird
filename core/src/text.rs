@@ -115,6 +115,18 @@ pub(crate) fn extract_text_range(
 
     let mut line_i = iter_start;
     while line_i <= iter_end {
+        let row = &grid[Line(line_i)];
+        // The last row stops at the selection's end column, so it is only
+        // trimmed when that end sits in the row's blank fill: a triple-click
+        // (`cols - 1`) or a drag past the text must not copy the padding,
+        // while an end inside the text, or before more text ("a  |b"), keeps
+        // the spaces it selected. Upstream's `line_length` clamps likewise.
+        let blank_after = |col: usize| {
+            ((col + 1)..=last_col).all(|tc| {
+                let t = &row[Column(tc)];
+                (t.c == ' ' || t.c == '\0') && t.zerowidth().is_none()
+            })
+        };
         let (col_lo, col_hi, trim) = if rectangular {
             // Rectangular mode clips every row to the column span of
             // the bounding box. Tuple-normalisation above only orders
@@ -125,11 +137,11 @@ pub(crate) fn extract_text_range(
             // geometry is always extracted.
             (s_col.min(e_col), s_col.max(e_col), false)
         } else if single_line {
-            (s_col, e_col, false)
+            (s_col, e_col, blank_after(e_col))
         } else if line_i == iter_start {
             (s_col, last_col, true)
         } else if line_i == iter_end && !cap_truncated {
-            (0usize, e_col, false)
+            (0usize, e_col, blank_after(e_col))
         } else {
             (0usize, last_col, true)
         };
@@ -143,7 +155,6 @@ pub(crate) fn extract_text_range(
         // pushed.
         let row_start = joined.len();
         joined.reserve(col_hi.saturating_sub(col_lo) + 1);
-        let row = &grid[Line(line_i)];
         let mut c = col_lo;
         let mut tab_mode = false;
         while c <= col_hi {
@@ -225,7 +236,14 @@ pub(crate) fn extract_text_range(
         // that the trim is meant to drop.
         if trim && !wrapped {
             let trimmed_len = joined[row_start..].trim_end_matches(' ').len();
-            joined.truncate(row_start + trimmed_len);
+            // Only a deliberate one-cell pick of a blank (a click on, or a
+            // clamp to, a single empty cell) keeps its lone space. Any wider
+            // all-blank span, a triple-click on an empty line included,
+            // collapses to "" like every other row of a multi-row range.
+            let one_cell_pick = single_line && col_lo == col_hi;
+            if trimmed_len > 0 || !one_cell_pick {
+                joined.truncate(row_start + trimmed_len);
+            }
         }
 
         // A '\n' is owed before the NEXT row iff this one wasn't soft-
