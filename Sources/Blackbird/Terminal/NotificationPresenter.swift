@@ -57,9 +57,10 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     let isSystemCenterAvailable: Bool
 
     /// Authorization is a three-state affair: unknown until asked, pending
-    /// while the permission prompt is up, then granted or denied. Posting
-    /// during `pending` used to call `add` unauthorized and lose the
-    /// notification; posting after `denied` kept calling `add` and logging.
+    /// while the permission prompt is up (or a post re-reads the status
+    /// after a denial), then granted or denied. Posting during `pending`
+    /// used to call `add` unauthorized and lose the notification; posting
+    /// after `denied` kept calling `add` and logging.
     enum AuthState: Equatable { case unknown, pending, granted, denied }
     private(set) var authState: AuthState = .unknown
     /// Notifications that arrived while the prompt was up; delivered on
@@ -101,8 +102,29 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         case .granted:
             deliver(notification, windowNumber: windowNumber)
         case .denied:
-            // Logged once at denial time; nothing more to say per post.
-            return
+            // The permission is macOS's, and the denial log line tells the
+            // user to flip it in System Settings while we keep running, so
+            // a cached denial must not outlive the setting. Re-read the live
+            // status before dropping; `.pending` makes posts racing the
+            // async reply queue behind this one instead of issuing more reads.
+            authState = .pending
+            queuedWhilePending = [(notification, windowNumber)]
+            UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+                let status = settings.authorizationStatus
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    let queued = self.queuedWhilePending
+                    self.queuedWhilePending = []
+                    switch status {
+                    case .authorized, .provisional, .ephemeral:
+                        self.authState = .granted
+                        for (n, w) in queued { self.deliver(n, windowNumber: w) }
+                    default:
+                        // Still off: drop silently, the denial was logged once.
+                        self.authState = .denied
+                    }
+                }
+            }
         case .pending:
             queuedWhilePending.append((notification, windowNumber))
             if queuedWhilePending.count > Self.queueCap {

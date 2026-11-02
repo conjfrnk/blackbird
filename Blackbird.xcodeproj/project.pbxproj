@@ -10,6 +10,7 @@
 		007D6A6B8361AA725ACF9D0A /* OSC133Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D54AB14CA514CB4B38F0141 /* OSC133Tests.swift */; };
 		01B793D05544900E310E06ED /* NotificationPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E8CF6A327FF6AF427167BFA /* NotificationPresenter.swift */; };
 		02007B68AC1EAE3435AF574C /* LatencyProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C1918604B5A7FA5FF34818C /* LatencyProbeTests.swift */; };
+		03419427FB37333FD04C7DE9 /* NotificationAuthRefreshBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0112E43A4BD53FE9F5F7F2B5 /* NotificationAuthRefreshBlindTests.swift */; };
 		040EC525EB9390611B5CB0A4 /* FFIContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1F50B661E4AB6164DAC55FD /* FFIContractTests.swift */; };
 		055461D558F6B6145F1508F1 /* ThemePaletteSelectionBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DBAFB4C68AB7EAA5673BF79 /* ThemePaletteSelectionBlindTests.swift */; };
 		06091BF7C4ABAC9C8EF04124 /* TerminalView+Services.swift in Sources */ = {isa = PBXBuildFile; fileRef = D34795F71D3BA1AFE330FE0C /* TerminalView+Services.swift */; };
@@ -334,6 +335,7 @@
 		002A862CFC149DF32E992C50 /* TitlebarTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TitlebarTabBar.swift; sourceTree = "<group>"; };
 		00E03399349EE1327FBF8F2F /* Selection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Selection.swift; sourceTree = "<group>"; };
 		00E5603BF177A2BC06BB5822 /* HostileInputIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostileInputIntegrationTests.swift; sourceTree = "<group>"; };
+		0112E43A4BD53FE9F5F7F2B5 /* NotificationAuthRefreshBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationAuthRefreshBlindTests.swift; sourceTree = "<group>"; };
 		022C9DCF19B32FDF62A8D9A2 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		02A66A954FBE1F74FCE73E3F /* URLDetectorRowSubsetBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetectorRowSubsetBlindTests.swift; sourceTree = "<group>"; };
 		02E1CC2E85E2EDF96561CF70 /* BBTermLifetimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermLifetimeTests.swift; sourceTree = "<group>"; };
@@ -795,6 +797,7 @@
 				E79964F4FADD416B72D5FF32 /* MultiTabConcurrentSoakTests.swift */,
 				5FF7774133BC836284BDAC66 /* NativeTabStripHiderTests.swift */,
 				CBE50317421F1A0C4805B683 /* NormalScrollAccumulationBlindTests.swift */,
+				0112E43A4BD53FE9F5F7F2B5 /* NotificationAuthRefreshBlindTests.swift */,
 				42F0C84C641FACEEE80ACC59 /* NotificationPresenterBlindTests.swift */,
 				5FDB6B6E282A43F32284D1DA /* OpenAtFolderBlindTests.swift */,
 				D2FFB2752B57F80A026ADFD5 /* OSC8PercentGateBlindTests.swift */,
@@ -1441,6 +1444,7 @@
 				7386DF40D48E9E676E64A55E /* MultiTabConcurrentSoakTests.swift in Sources */,
 				F2562B65EE50C4189D77B765 /* NativeTabStripHiderTests.swift in Sources */,
 				5171C533B2589D177D3CE953 /* NormalScrollAccumulationBlindTests.swift in Sources */,
+				03419427FB37333FD04C7DE9 /* NotificationAuthRefreshBlindTests.swift in Sources */,
 				98043BEFBCB3E53B90EF0B52 /* NotificationPresenterBlindTests.swift in Sources */,
 				007D6A6B8361AA725ACF9D0A /* OSC133Tests.swift in Sources */,
 				E6261C82C5699EA5EF94AFAB /* OSC8PercentGateBlindTests.swift in Sources */,
