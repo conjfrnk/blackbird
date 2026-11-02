@@ -215,13 +215,14 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
 
         let slot: Option<alacritty_terminal::vte::ansi::Rgb> =
             if entry.index < alacritty_terminal::term::color::COUNT {
-                palette[entry.index]
+                palette[entry.index].or(bb.theme_colors[entry.index])
             } else {
                 None
             };
-        // palette[idx] is Option<Rgb>. None means the theme hasn't set
-        // this slot; fall back to a sensible default so we still reply
-        // rather than leaving the TUI timing out.
+        // palette[idx] is Option<Rgb>. None means no program has
+        // overridden this slot (or it was reset): use the host's theme,
+        // then a sensible default so we still reply rather than leaving
+        // the TUI timing out.
         let rgb = slot.unwrap_or_else(|| palette_default_rgb(entry.index));
         let reply = (entry.formatter)(rgb);
         // The `reply` String owns its bytes for the duration of this

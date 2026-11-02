@@ -28,23 +28,25 @@ pub(crate) fn palette_default_rgb(index: usize) -> Rgb {
 
 /// Convert an alacritty `Color` to a 0xRRGGBB u32, consulting the terminal's
 /// palette first (so OSC 4/10/11/12 and `bb_term_set_named_color` overrides
-/// route through). Falls back to built-in xterm defaults when a slot is unset.
+/// route through), then the host's `theme` (what OSC 104/110/111/112 reset
+/// back to), then the built-in xterm defaults for slots neither has set.
 pub(crate) fn color_to_rgb(
     color: &Color,
     palette: &alacritty_terminal::term::color::Colors,
+    theme: &alacritty_terminal::term::color::Colors,
 ) -> u32 {
     match color {
         Color::Spec(rgb) => ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32),
         Color::Named(name) => {
             let idx = *name as usize;
-            if let Some(rgb) = palette[idx] {
+            if let Some(rgb) = palette[idx].or(theme[idx]) {
                 ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32)
             } else {
                 named_color_rgb(name)
             }
         }
         Color::Indexed(idx) => {
-            if let Some(rgb) = palette[*idx as usize] {
+            if let Some(rgb) = palette[*idx as usize].or(theme[*idx as usize]) {
                 ((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | (rgb.b as u32)
             } else {
                 indexed_color_rgb(*idx)

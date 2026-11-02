@@ -175,6 +175,14 @@ pub struct BBTerm {
     /// `core/tests/terminal_replies.rs::osc_10_11_color_queries_are_silent`
     /// for the default-off pinning.
     pub(crate) color_query_enabled: bool,
+    /// The host's theme, as last pushed through `bb_term_set_named_color`.
+    /// `term.colors()` holds the same writes, but OSC 104 / 110 / 111 / 112
+    /// (`Term::reset_color`) clear those slots to `None`, which would drop
+    /// colour resolution to the hard-coded xterm tables. This shadow is the
+    /// fallback between a program's OSC override and those tables, so a
+    /// reset returns to the theme (xterm semantics: reset to the
+    /// terminal's configured default), not to black / 0xEEEEEE.
+    pub(crate) theme_colors: alacritty_terminal::term::color::Colors,
     /// Latch: "the prior `bb_term_input` chunk contained an ESC byte and
     /// may have left the OSC parser mid-sequence." When this is set, we
     /// advance the OSC parser regardless of whether the current chunk has
@@ -401,6 +409,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc_parser: Parser::new(),
             color_queue,
             color_query_enabled: false,
+            theme_colors: Default::default(),
             osc_possibly_pending: false,
             poisoned: std::cell::Cell::new(false),
             osc_tap: crate::osc::OscTapState::default(),
@@ -1353,6 +1362,7 @@ pub unsafe extern "C" fn bb_term_set_named_color(term: *mut BBTerm, slot: u16, r
         let b = (rgb & 0xFF) as u8;
         use alacritty_terminal::vte::ansi::{Handler, Rgb};
         bb.term.set_color(slot as usize, Rgb { r, g, b });
+        bb.theme_colors[slot as usize] = Some(Rgb { r, g, b });
     })
 }
 

@@ -634,6 +634,7 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
     bb.term.reset_damage();
 
     let palette = bb.term.colors();
+    let theme = &bb.theme_colors;
     let grid = bb.term.grid();
 
     let rows = grid.screen_lines() as u16;
@@ -717,7 +718,7 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
         // through the palette, same as fg/bg so indexed colours route
         // correctly.
         let underline_color = match indexed.cell.underline_color() {
-            Some(c) => color_to_rgb(&c, palette),
+            Some(c) => color_to_rgb(&c, palette, theme),
             None => UNDERLINE_COLOR_UNSET,
         };
         // Emoji-presentation: a text-default base carrying a VS16 (U+FE0F)
@@ -733,8 +734,8 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
         }
         cells.push(BBCell {
             ch: indexed.c as u32,
-            fg: color_to_rgb(&indexed.fg, palette),
-            bg: color_to_rgb(&indexed.bg, palette),
+            fg: color_to_rgb(&indexed.fg, palette, theme),
+            bg: color_to_rgb(&indexed.bg, palette, theme),
             flags,
             link_id,
             underline_color,
