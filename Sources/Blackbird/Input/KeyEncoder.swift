@@ -189,6 +189,22 @@ public final class KeyEncoder {
             return bytes
         }
 
+        // Option as Meta under flag 1: alt+key / shift+alt+key are CSI u (see
+        // the Ctrl branch in `tryControlPrintable` for the spec quote). `ESC a`
+        // for Meta-a is exactly the Alt-vs-Esc ambiguity the flag removes;
+        // nvim, helix, fish 4 and Claude Code all push flag 1 and would
+        // otherwise fall back to ESC-timeout heuristics. Handled BEFORE the
+        // release drop below: an escape-code press has a paired release form
+        // (`CSI <cp>;<mod>:3 u`), so flag 2 must report it like it does for
+        // Ctrl+key.
+        if kitty, optionIsMeta, modifiers.contains(.option),
+           chars.unicodeScalars.count == 1,
+           let scalar = chars.unicodeScalars.first,
+           scalar.value >= 0x20, scalar.value != 0x7F {
+            let base = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
+            return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
+        }
+
         // Release events past here would end up emitting a legacy byte
         // sequence (CSI Z, ESC+UTF-8, or plain UTF-8) with no paired
         // release form. Drop so release traffic matches press traffic.
@@ -206,17 +222,6 @@ public final class KeyEncoder {
 
         // Option as Meta: prepend ESC.
         if optionIsMeta && modifiers.contains(.option) {
-            // Flag 1: alt+key / shift+alt+key are CSI u (see the Ctrl branch
-            // in `tryControlPrintable` for the spec quote). `ESC a` for
-            // Meta-a is exactly the Alt-vs-Esc ambiguity the flag removes;
-            // nvim, helix, fish 4 and Claude Code all push flag 1 and would
-            // otherwise fall back to ESC-timeout heuristics.
-            if kitty, chars.unicodeScalars.count == 1,
-               let scalar = chars.unicodeScalars.first,
-               scalar.value >= 0x20, scalar.value != 0x7F {
-                let base = kittyAllKeysCodepoint(for: scalar, shifted: modifiers.contains(.shift))
-                return csiU(codepoint: base, modifiers: effectiveMods, eventType: eventType)
-            }
             var out = Data([0x1B])
             out.append(contentsOf: Array(chars.utf8))
             return out

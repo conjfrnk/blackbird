@@ -208,6 +208,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     var pendingInsertTextModifiers: KeyEncoder.Modifiers?
     /// `isARepeat` of that same `keyDown`; the `insertText` path can't see it.
     var pendingInsertTextIsRepeat = false
+    /// `keyCode`s whose `keyDown` got past the ⌘ / no-session early returns
+    /// (so the TUI was given a chance to see the press). `keyUp` forwards a
+    /// release only for these; a ⌘ shortcut's key-up arrives with `.command`
+    /// already lifted when the user releases ⌘ first, and would otherwise
+    /// look like a plain key release the TUI never saw go down.
+    private var forwardedKeyDownCodes = Set<UInt16>()
     /// Wheel-delta → line accumulator for the mouse-report and DEC 1007
     /// alternate-scroll paths (see `scrollWheel`). Reset on `mouseExited`.
     var wheelAccumulator = WheelScrollAccumulator()
@@ -2040,6 +2046,8 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             return
         }
 
+        forwardedKeyDownCodes.insert(event.keyCode)
+
         // Stamp the keystroke entry point for the input→pixel latency probe.
         // No-op unless BB_LATENCY_PROBE=1. Placed after the ⌘ / no-session
         // early returns so only keystrokes that actually dispatch toward the
@@ -2285,6 +2293,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// post-keystroke traffic we synthesise ourselves. Audit key-encoder F1
     /// (partial — flag 2 of the four progressive-enhancement flags).
     public override func keyUp(with event: NSEvent) {
+        let pressWasForwarded = forwardedKeyDownCodes.remove(event.keyCode) != nil
         // `session != nil` rather than a binding: the release bytes go out
         // through `sendToSession`, so nothing here needs the session itself —
         // this is purely "is there anywhere to send".
@@ -2300,6 +2309,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Fast path: if the TUI hasn't enabled release reporting the
         // encoder will return empty anyway, so skip the whole work.
         guard termMode.contains(.reportEventTypes) else {
+            super.keyUp(with: event)
+            return
+        }
+        // A release without a forwarded press is an app shortcut's key-up
+        // (⌘C, ⌘↑ with ⌘ lifted first, or a key-down the menu consumed before
+        // it reached the view). The TUI never saw the press, so it gets no
+        // release either.
+        guard pressWasForwarded else {
             super.keyUp(with: event)
             return
         }

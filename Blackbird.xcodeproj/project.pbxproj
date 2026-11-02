@@ -266,6 +266,7 @@
 		CA09532794391E7575C1496F /* KeyEncoderProtocolPrecedenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F0FCE2AE0963FDA59307506 /* KeyEncoderProtocolPrecedenceTests.swift */; };
 		CB9F22073BD8A42E1E580CC5 /* FeedBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F1A2FAB955E9F8F0D144D2C /* FeedBudget.swift */; };
 		CBBC6DFD9426CA00E35A9A5F /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4612F747000A5316DE0CD55F /* TerminalView.swift */; };
+		CC7C25396CBF44D677BA4E1F /* KittyReleaseAltCmdBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2A96EC0F3EF77F0164B1B4 /* KittyReleaseAltCmdBlindTests.swift */; };
 		CC9BABD751C25500199DD485 /* URLDetectorRowSubsetBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02A66A954FBE1F74FCE73E3F /* URLDetectorRowSubsetBlindTests.swift */; };
 		CCF833B9F8B09FAE33911018 /* SnapshotCoalescer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31E704D0F8E9B3F0E6FEA5F1 /* SnapshotCoalescer.swift */; };
 		CD2B11666A788D70A15DC315 /* PreferencesGuardSweepTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF71EC6E09217F7CCAB5FF22 /* PreferencesGuardSweepTests.swift */; };
@@ -384,6 +385,7 @@
 		189F9BFCE6B0F46BED00E135 /* MouseReportEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseReportEncoder.swift; sourceTree = "<group>"; };
 		1A14ACDB4E0E64E61FFD4773 /* MonospaceFontFamiliesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonospaceFontFamiliesTests.swift; sourceTree = "<group>"; };
 		1CA9E6BAC56657CC6C61F678 /* TerminalView+ContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+ContextMenu.swift"; sourceTree = "<group>"; };
+		1E2A96EC0F3EF77F0164B1B4 /* KittyReleaseAltCmdBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyReleaseAltCmdBlindTests.swift; sourceTree = "<group>"; };
 		20CE086EA354443743E30486 /* SelectionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionController.swift; sourceTree = "<group>"; };
 		20D4A2742422F440F7C65BB5 /* IMEAstralRectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEAstralRectTests.swift; sourceTree = "<group>"; };
 		21725BF76F3013670913A84E /* RecordingPTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingPTY.swift; sourceTree = "<group>"; };
@@ -810,6 +812,7 @@
 				8CB767EEE215AE9308F8984F /* KittyFlag1CtrlOptionBlindTests.swift */,
 				CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */,
 				29B3E82A4501BBC90AF74B61 /* KittyKeyRepeatEventTypeBlindTests.swift */,
+				1E2A96EC0F3EF77F0164B1B4 /* KittyReleaseAltCmdBlindTests.swift */,
 				70085016F53D542CFD455D7F /* KittyTerminfoDeletionBlindTests.swift */,
 				9B99D2970157272D6841E2F5 /* LatencyHarnessTests.swift */,
 				4C1918604B5A7FA5FF34818C /* LatencyProbeTests.swift */,
@@ -1470,6 +1473,7 @@
 				B4BB53B751F68CE9E03F70B7 /* KittyFlag1CtrlOptionBlindTests.swift in Sources */,
 				9B8CC12154E6A79FDE647943 /* KittyKeyRepeatEventTypeBlindTests.swift in Sources */,
 				FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */,
+				CC7C25396CBF44D677BA4E1F /* KittyReleaseAltCmdBlindTests.swift in Sources */,
 				11A85BB1B88C97F27058B66F /* KittyTerminfoDeletionBlindTests.swift in Sources */,
 				D99C39D366CE2D06BF4082EB /* LatencyHarnessTests.swift in Sources */,
 				02007B68AC1EAE3435AF574C /* LatencyProbeTests.swift in Sources */,
