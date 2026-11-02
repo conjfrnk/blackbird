@@ -1645,10 +1645,13 @@ impl<T: EventListener> Handler for Term<T> {
         let cursor = &self.grid.cursor;
         let bg = cursor.template.bg;
 
-        // Ensure deleting within terminal bounds.
-        let count = cmp::min(count, columns);
-
+        // Blackbird fix: upstream clamped `count` to the row width only, so with
+        // `count > columns - start` the final clear (`row[columns - count..]`) began
+        // left of the cursor and blanked cells DCH must never touch (`CSI 9999 P`
+        // wiped the whole row). Clamp to the cells at/after the cursor, as xterm does.
         let start = cursor.point.column.0;
+        let count = cmp::min(count, columns - start);
+
         let end = cmp::min(start + count, columns - 1);
         let num_cells = columns - end;
 
