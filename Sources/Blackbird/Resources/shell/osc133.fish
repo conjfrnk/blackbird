@@ -62,14 +62,23 @@ if functions -q fish_prompt
     and not string match -q '*__bb_osc133_b*' -- (functions fish_prompt | string collect)
     and functions -c fish_prompt __bb_original_fish_prompt
     # Wrapper defined only when the copy above succeeded — otherwise it
-    # would call a function that doesn't exist on every prompt. The
-    # in-wrapper existence check covers a persisted (funcsave'd) wrapper
-    # body running in a session where the copy was never made: degrade
-    # to a bare-but-working prompt instead of a per-prompt error.
+    # would call a function that doesn't exist on every prompt. The copy
+    # is called FIRST and unguarded: any builtin run before it (even
+    # `functions -q`) resets $status / $pipestatus, so the original
+    # prompt — which reads them on entry for the `[1]` indicator or a
+    # themed red prompt — would always see success.
     function fish_prompt
-        if functions -q __bb_original_fish_prompt
-            __bb_original_fish_prompt
-        end
+        __bb_original_fish_prompt
         __bb_osc133_b
+    end
+end
+
+# A persisted (funcsave'd) wrapper body runs in a session where the copy
+# above was never made; this no-op keeps it a bare-but-working prompt
+# instead of a per-prompt "Unknown command" error. Must stay AFTER the
+# wrap block — defined earlier it would defeat that block's
+# `not functions -q __bb_original_fish_prompt` check.
+if not functions -q __bb_original_fish_prompt
+    function __bb_original_fish_prompt
     end
 end
