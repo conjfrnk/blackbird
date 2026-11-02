@@ -52,6 +52,16 @@ final class BackgroundedRemoteJobCwdBlindTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    /// Real-shell tests: same gate as the other PTY shell-spawn suites. On the
+    /// macOS 15 CI image the rig's backgrounded fake `ssh` is never exec'd
+    /// ("precondition: background job ... must have exec'd the fake 'ssh'")
+    /// and the PTY reports not running, so the suite is opt-in
+    /// (`BB_RUN_FLAKY_PTY_TESTS=1`) until the rig is made CI-proof.
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        try PTYTests.skipIfFlakyOnCI()
+    }
+
     // MARK: - Rig
 
     private struct Workspace {
