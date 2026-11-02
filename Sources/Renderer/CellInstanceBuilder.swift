@@ -139,6 +139,9 @@ struct CellInstanceBuilder {
             // parked on the spacer that is NOT selected: it paints its
             // cursor-coloured quad (selection wins over the cursor, so a
             // selected spacer draws no cursor and is skipped like any other).
+            // `MetalRenderer` never hands it that cell for a WIDE_CHAR pair
+            // (it moves the cursor to the leading cell), so this is a
+            // defensive path for callers that pass a raw column.
             // An orphan spacer (no WIDE_CHAR to its left) falls through.
             if col > 0,
                Self.isSpacerCoveredByWideGlyph(cell: cell, leftNeighbor: cellsPtr[idx - 1]) {

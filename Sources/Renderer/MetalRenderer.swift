@@ -1424,7 +1424,8 @@ public final class MetalRenderer {
             }
             if geo.cursorOnScreen && !geo.useCellInvertedCursor {
                 encodeCursor(
-                    encoder: encoder, snap: snap, screenCursorRow: geo.screenCursorRow,
+                    encoder: encoder, paintCol: geo.cursorPaintCol,
+                    isWide: geo.cursorIsWide, screenCursorRow: geo.screenCursorRow,
                     shape: geo.shape, viewportPoints: geo.viewportPoints,
                     cellSizePoints: geo.cellSizePoints, focused: focused
                 )
@@ -1455,13 +1456,18 @@ public final class MetalRenderer {
     /// the rebuild planner + encoders. Carries no GPU handles — just the frame's
     /// viewport (drawable) and cell sizes, the resolved cursor shape/position, and
     /// the cursor-paint decision (`cursorOnScreen` / `useCellInvertedCursor` /
-    /// `blockCursorCell`). `prevCursor*` / `cursorMoved` snapshot the cursor's
+    /// `blockCursorCell`). `cursorPaintCol` / `cursorIsWide` are where the cursor
+    /// is DRAWN (a cursor on a wide glyph covers the whole glyph; see
+    /// `cursorPaintSpan`), while `curCol` stays the raw grid column.
+    /// `prevCursor*` / `cursorMoved` snapshot the cursor's
     /// prior grid position (read BEFORE `render` overwrites `cursorState.lastCursor*`)
     /// for the blink reset and the partial-rebuild vacated-row forcing.
     private struct FrameGeometry {
         let viewportPoints: SIMD2<Float>
         let cellSizePoints: SIMD2<Float>
         let screenCursorRow: Int
+        let cursorPaintCol: Int
+        let cursorIsWide: Bool
         let effectiveShape: UInt8
         let shape: UInt32
         let curRow: Int32
@@ -1543,13 +1549,16 @@ public final class MetalRenderer {
         // pipeline. This mirrors iTerm2 behaviour and keeps reverse-video cells
         // intact when the cursor crosses them.
         let useCellInvertedCursor = cursorOnScreen && focused && shape == 0
+        let paint = Self.cursorPaintSpan(snap: snap, screenRow: screenCursorRow)
         let blockCursorCell: (row: Int, col: Int)? = useCellInvertedCursor
-            ? (row: screenCursorRow, col: snap.cursorCol)
+            ? (row: screenCursorRow, col: paint.col)
             : nil
         return FrameGeometry(
             viewportPoints: viewportPoints,
             cellSizePoints: cellSizePoints,
             screenCursorRow: screenCursorRow,
+            cursorPaintCol: paint.col,
+            cursorIsWide: paint.isWide,
             effectiveShape: effectiveShape,
             shape: shape,
             curRow: curRow,
@@ -1561,6 +1570,34 @@ public final class MetalRenderer {
             useCellInvertedCursor: useCellInvertedCursor,
             blockCursorCell: blockCursorCell
         )
+    }
+
+    /// Where the cursor is drawn: the leading column of the glyph it sits on, and
+    /// whether that glyph spans two cells. A cursor on a `WIDE_CHAR` covers both
+    /// of its cells, and one parked on the trailing `WIDE_CHAR_SPACER` (CHA/CUB,
+    /// BS after a wide glyph) is drawn on the glyph's leading cell, as alacritty's
+    /// `RenderableCursor` does. Without this the hollow outline / underline stop
+    /// mid-glyph and a block on the spacer paints a glyph-less quad over the
+    /// glyph's right half. The snapshot's raw `cursorCol` is left alone: IME,
+    /// accessibility and the line editor model the logical cursor. Falls back to
+    /// the raw column for a cell outside the snapshot, an orphan spacer, or a
+    /// `WIDE_CHAR` in the last column.
+    private static func cursorPaintSpan(snap: BBSnapshot, screenRow: Int) -> (col: Int, isWide: Bool) {
+        let col = snap.cursorCol
+        guard screenRow >= 0, screenRow < snap.rows, col >= 0, col < snap.cols else {
+            return (col, false)
+        }
+        let idx = screenRow * snap.cols + col
+        guard idx < snap.cellCount else { return (col, false) }
+        let cells = snap.cellsPointer
+        if col > 0,
+           CellInstanceBuilder.isSpacerCoveredByWideGlyph(cell: cells[idx], leftNeighbor: cells[idx - 1]) {
+            return (col - 1, true)
+        }
+        if (cells[idx].flags & UInt16(WIDE_CHAR)) != 0, col + 1 < snap.cols {
+            return (col, true)
+        }
+        return (col, false)
     }
 
     /// The per-frame rebuild decision produced by `planRowRebuild`: the fresh
@@ -1726,10 +1763,13 @@ public final class MetalRenderer {
 
     /// Encode the standalone cursor quad (bar / underline / unfocused outline —
     /// the focused block cursor renders via cell inversion, not here). Filled
-    /// when focused, hollow when not.
+    /// when focused, hollow when not. `paintCol` / `isWide` come from
+    /// `cursorPaintSpan`: over a wide glyph the quad is two cells wide, which the
+    /// shader's outline / underline derive their extent from.
     private func encodeCursor(
         encoder: MTLRenderCommandEncoder,
-        snap: BBSnapshot,
+        paintCol: Int,
+        isWide: Bool,
         screenCursorRow: Int,
         shape: UInt32,
         viewportPoints: SIMD2<Float>,
@@ -1738,9 +1778,9 @@ public final class MetalRenderer {
     ) {
         var cu = CursorUniforms(
             viewportPx: viewportPoints,
-            cursorPosPx: SIMD2<Float>(Float(snap.cursorCol) * Float(metrics.cellWidth) + insets.leftInsetPoints,
+            cursorPosPx: SIMD2<Float>(Float(paintCol) * Float(metrics.cellWidth) + insets.leftInsetPoints,
                                       Float(screenCursorRow) * Float(metrics.cellHeight) + insets.topInsetPoints),
-            cellSizePx: cellSizePoints,
+            cellSizePx: isWide ? SIMD2<Float>(cellSizePoints.x * 2, cellSizePoints.y) : cellSizePoints,
             color: themeColors.cursorColor,
             strokeWidthPx: 1.0,
             filled: focused ? 1.0 : 0.0,
