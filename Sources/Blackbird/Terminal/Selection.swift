@@ -79,12 +79,14 @@ public struct Selection: Equatable {
 /// gives a top-origin Y in points that we divide by cell height for the
 /// display row.
 ///
-/// Columns clamp to `[0, cols-1]`. `line` clamps upward at `rows - 1`
-/// (so clicks below the last grid row snap to it). `line` also clamps
-/// downward at `-historySize` — a drag that overshoots the top of
-/// retained scrollback lands on the oldest visible line instead of
-/// producing an unreachable negative line that copies as empty. Audit
-/// M11. `historySize` is required (M-17 / EC-4): pass `0` only at
+/// Columns clamp to `[0, cols-1]`. The display row clamps to `rows - 1`
+/// (so clicks below the last grid row — the bottom content inset, the
+/// sub-row remainder, or past the window — snap to the last VISIBLE row,
+/// buffer line `rows - 1 - displayOffset` while scrolled back). `line`
+/// also clamps downward at `-historySize` — a drag that overshoots the
+/// top of retained scrollback lands on the oldest visible line instead
+/// of producing an unreachable negative line that copies as empty.
+/// Audit M11. `historySize` is required (M-17 / EC-4): pass `0` only at
 /// call sites that genuinely have no history info, with a comment
 /// explaining why.
 ///
@@ -143,7 +145,12 @@ public func bufferPoint(
         : 0
     let safeX = insetSubtractedX.sanitizedPixel
     let safeVH = viewportHeight.sanitizedPixel
-    let displayRow = max(0, Int((safeVH - safeY) / cellHeight))
+    // Clamp the display row, not just the resulting line: `viewportHeight`
+    // doesn't subtract the bottom inset / sub-row remainder, so a point in
+    // that strip yields displayRow == rows, which maps to the unseen line
+    // below the viewport whenever displayOffset > 0 (the line clamp below
+    // only catches it at the live bottom).
+    let displayRow = min(max(0, rows - 1), max(0, Int((safeVH - safeY) / cellHeight)))
     let col = max(0, min(cols - 1, Int(safeX / cellWidth)))
     let rawLine = displayRow - displayOffset
     // Clamp upward at rows-1; downward at -historySize. Pass 0 at
