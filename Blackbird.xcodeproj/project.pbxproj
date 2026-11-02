@@ -108,6 +108,7 @@
 		552D5F673F57C77CAB4C273F /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = C9E38BAB38899CD10A229243 /* Shaders.metal */; };
 		55E12C125E67E7550C67E506 /* RecordingPTY.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21725BF76F3013670913A84E /* RecordingPTY.swift */; };
 		580317F6EA8ED27E02060F8D /* SwiftSessionRSSReturnsToBaselineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDAF66C9AB7E24C8E9869235 /* SwiftSessionRSSReturnsToBaselineTests.swift */; };
+		58481D1443111A2AFE31E617 /* GlyphAtlasWideKeyBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90B47405DE79D1CC8F01401 /* GlyphAtlasWideKeyBlindTests.swift */; };
 		5C455FD6D14053AA4C1465D4 /* WordDragExtendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D725EB10E49F7689EBC93F3 /* WordDragExtendTests.swift */; };
 		5C4ADF49F205002F4160E1A7 /* ShellIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81D40026AFE0D6FC7C4B29FA /* ShellIntegrationTests.swift */; };
 		5CE494D770F0D5361B6E8993 /* RegexSafetyGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40C5A8C9337C9EB932DA1A60 /* RegexSafetyGate.swift */; };
@@ -585,6 +586,7 @@
 		C735D6264882444369074ACB /* CellInstance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstance.swift; sourceTree = "<group>"; };
 		C7D41B7AB4C224EF793857BD /* IMEDoCommandNoAlertBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEDoCommandNoAlertBlindTests.swift; sourceTree = "<group>"; };
 		C81B55889FCFFCA2A3AF0708 /* MainThreadWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainThreadWatchdogTests.swift; sourceTree = "<group>"; };
+		C90B47405DE79D1CC8F01401 /* GlyphAtlasWideKeyBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasWideKeyBlindTests.swift; sourceTree = "<group>"; };
 		C9406FCA2A8E409CA36B05E5 /* FindStaleRegexScanBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindStaleRegexScanBlindTests.swift; sourceTree = "<group>"; };
 		C9B348536E063859D3D278C8 /* TabResizeFanoutBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabResizeFanoutBlindTests.swift; sourceTree = "<group>"; };
 		C9E38BAB38899CD10A229243 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
@@ -765,6 +767,7 @@
 				B1B68195F4161FCEE7A5FB56 /* GlyphAtlasStorageModeBlindTests.swift */,
 				31710E3D7CE95A9DEB4BDBD9 /* GlyphAtlasSyntheticTraitsBlindTests.swift */,
 				15235D49E0866BAA7785FCF6 /* GlyphAtlasTests.swift */,
+				C90B47405DE79D1CC8F01401 /* GlyphAtlasWideKeyBlindTests.swift */,
 				2B23446ADB6651910E08359F /* GlyphBitmapCacheEvictionBlindTests.swift */,
 				A0FE9727273DA0D746915F5A /* HangReportStorePruneExcessBlindTests.swift */,
 				ECA94E43AEA8DADB1E41DE3B /* HorizontalInsetHelperTests.swift */,
@@ -1419,6 +1422,7 @@
 				E52AB9F08C03E0E5294E9D3D /* GlyphAtlasStorageModeBlindTests.swift in Sources */,
 				B79600DADE144E20F76E29FB /* GlyphAtlasSyntheticTraitsBlindTests.swift in Sources */,
 				E0E1272012D9B7B00E10E664 /* GlyphAtlasTests.swift in Sources */,
+				58481D1443111A2AFE31E617 /* GlyphAtlasWideKeyBlindTests.swift in Sources */,
 				42ACF7BF462FCDCA14411EB4 /* GlyphBitmapCacheEvictionBlindTests.swift in Sources */,
 				D2FF0F603F6C135E10977E3F /* HangReportStorePruneExcessBlindTests.swift in Sources */,
 				F66F5055267DF6D3861CEF5C /* HorizontalInsetHelperTests.swift in Sources */,

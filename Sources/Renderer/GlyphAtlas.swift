@@ -40,6 +40,12 @@ public final class GlyphAtlas {
         /// ⚠️) from the bare text-presentation base (⚠) so they occupy
         /// separate atlas entries instead of aliasing.
         let emojiPresentation: Bool
+        /// The cell's width, not just the glyph's: the same scalar is looked up
+        /// both narrow and wide (a VS16 emoji in the last column stays a 1-cell
+        /// cell, the same emoji mid-line is 2), and the 1-slot and 2-slot
+        /// entries differ in UV size. Without this the first width cached is
+        /// served to the other, stretching or squashing the glyph.
+        let wide: Bool
     }
 
     public struct Entry {
@@ -116,10 +122,10 @@ public final class GlyphAtlas {
 
     private var byKey: [GlyphKey: Entry] = [:]
     /// Flat fast path in front of `byKey` for narrow-text printable ASCII
-    /// (U+0020...U+007E, `!emojiPresentation`) — the overwhelming majority of
-    /// cells. `lookupOrInsert` runs once per visible glyph cell on every row
-    /// rebuild, and a `[GlyphKey: Entry]` probe costs a SipHash over four
-    /// `combine()` calls; this is an array index instead. Slot =
+    /// (U+0020...U+007E, `!emojiPresentation`, `!wide`) — the overwhelming
+    /// majority of cells. `lookupOrInsert` runs once per visible glyph cell on
+    /// every row rebuild, and a `[GlyphKey: Entry]` probe costs a SipHash over
+    /// five `combine()` calls; this is an array index instead. Slot =
     /// `(scalar - 0x20) * 4 + bold + italic * 2`. INVARIANT: a pure subset
     /// of `byKey` — written only by `cacheStore` and cleared only by
     /// `cacheReset`, the sole mutators of either cache, so they cannot desync.
@@ -127,11 +133,12 @@ public final class GlyphAtlas {
     private static let asciiFastSlots = (0x7E - 0x20 + 1) * 4
 
     /// `asciiFast` slot for this glyph identity, or nil when it isn't
-    /// ASCII-eligible (non-ASCII, control bytes, or the emoji-presentation
-    /// variant, which has its own `byKey` entry).
+    /// ASCII-eligible (non-ASCII, control bytes, or the emoji-presentation /
+    /// wide variants, which have their own `byKey` entries — a keycap base like
+    /// `1` + U+20E3 is a wide cell).
     @inline(__always)
-    private static func asciiFastIndex(scalar: UInt32, bold: Bool, italic: Bool, emojiPresentation: Bool) -> Int? {
-        guard !emojiPresentation, scalar &- 0x20 <= 0x7E - 0x20 else { return nil }
+    private static func asciiFastIndex(scalar: UInt32, bold: Bool, italic: Bool, emojiPresentation: Bool, wide: Bool) -> Int? {
+        guard !emojiPresentation, !wide, scalar &- 0x20 <= 0x7E - 0x20 else { return nil }
         return Int(scalar &- 0x20) << 2 | (bold ? 1 : 0) | (italic ? 2 : 0)
     }
 
@@ -139,7 +146,7 @@ public final class GlyphAtlas {
         byKey[key] = entry
         if let i = Self.asciiFastIndex(
             scalar: key.scalarValue, bold: key.bold, italic: key.italic,
-            emojiPresentation: key.emojiPresentation
+            emojiPresentation: key.emojiPresentation, wide: key.wide
         ) {
             asciiFast[i] = entry
         }
@@ -547,7 +554,7 @@ public final class GlyphAtlas {
     ) -> Entry? {
         if let i = Self.asciiFastIndex(
             scalar: scalar.value, bold: style.bold, italic: style.italic,
-            emojiPresentation: emojiPresentation
+            emojiPresentation: emojiPresentation, wide: wide
         ), let hit = asciiFast[i] {
             return hit
         }
@@ -555,7 +562,8 @@ public final class GlyphAtlas {
             scalarValue: scalar.value,
             bold: style.bold,
             italic: style.italic,
-            emojiPresentation: emojiPresentation
+            emojiPresentation: emojiPresentation,
+            wide: wide
         )
         if let existing = byKey[key] { return existing }
         let slotsNeeded = wide ? 2 : 1
