@@ -1222,10 +1222,9 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         //    changes), the buffer line/col those points named now refer
         //    to a different cell. Re-mapping is impossible without
         //    retaining the original byte stream, so the safe choice is to
-        //    drop the selection. We compare against the previous
-        //    snapshot's `cols` so a row-only resize (no scrollback
-        //    reflow) preserves the selection — typical e.g. when the
-        //    user drags only the bottom edge of the window.
+        //    drop the selection. A row-only resize doesn't reflow, but it
+        //    still shifts every buffer line (MSC-7: rows move between the
+        //    grid and history), so it drops the selection too.
         //
         //  - #15 (alt-screen exit/enter): `CSI ?1049h` swaps the visible
         //    grid for a fresh alt-screen and `?1049l` restores the prior

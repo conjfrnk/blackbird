@@ -12,10 +12,14 @@ import BBCore
 /// live selection):
 ///   - #14 column reflow: cols changed → alacritty re-wraps scrollback, the
 ///     points name different cells, re-mapping is impossible → DROP.
+///   - MSC-7 row change: a vertical resize pushes rows into (or pulls them
+///     back out of) history, shifting every buffer line index by an amount
+///     that depends on the cursor row and the scrollback cap and that the
+///     core does not report → the points name different text → DROP.
 ///   - #15 alt-screen toggle: the visible grid was swapped → DROP.
 ///   - H-6 history collapse (⌘K / RIS): history went non-zero → zero, the
 ///     selected scrollback lines are gone → DROP.
-///   - S5-005 output scroll (rows unchanged, linesScrolled advanced): rotate
+///   - S5-005 output scroll (linesScrolled advanced): rotate
 ///     both endpoints up by the lines-scrolled delta so the highlight stays
 ///     glued to its content; drop once an endpoint scrolls past retention. The
 ///     `.word` drag anchor is rotated in lockstep (or dropped if IT scrolls
@@ -31,19 +35,18 @@ enum SelectionReconciler {
         next: BBSnapshot
     ) -> (selection: Selection?, wordDragAnchor: (BufferPoint, BufferPoint)?) {
         let colsChanged = prev.cols != next.cols
+        let rowsChanged = prev.rows != next.rows
         let altScreenChanged = prev.termMode.contains(.altScreen)
             != next.termMode.contains(.altScreen)
         let historyCollapsed = prev.historySize > 0 && next.historySize == 0
-        if colsChanged || altScreenChanged || historyCollapsed {
-            // cols/altScreen/history gates fire: drop the selection. The word
+        if colsChanged || rowsChanged || altScreenChanged || historyCollapsed {
+            // cols/rows/altScreen/history gates fire: drop the selection. The word
             // drag anchor is left as-is (matches the original branch).
             return (nil, wordDragAnchor)
         }
-        // rows-equal gate: a vertical resize also bumps linesScrolled (the
-        // counter's any-resize caveat); rotating on that would shift a
-        // selection the row-only-resize contract (#14) promises to preserve.
-        // Only genuine output flow (rows unchanged) rotates.
-        guard prev.rows == next.rows, next.linesScrolled > prev.linesScrolled else {
+        // Rows are unchanged here (a row change dropped above), so a
+        // linesScrolled advance is genuine output flow, not a resize.
+        guard next.linesScrolled > prev.linesScrolled else {
             return (selection, wordDragAnchor)
         }
         var sel = selection

@@ -1233,7 +1233,7 @@ final class TerminalViewTests: XCTestCase {
                      "column shrink must clear the active selection (Bug #14)")
     }
 
-    func test_rowOnlyResize_preservesSelection() throws {
+    func test_rowOnlyResize_clearsSelection() throws {
         let (view, bb) = try makeViewForRenderInvalidation()
         let s1 = try XCTUnwrap(bb.snapshot())
         view.render(snapshot: s1)
@@ -1251,17 +1251,18 @@ final class TerminalViewTests: XCTestCase {
         )
         view.selection = sel
 
-        // Resize ROWS only — alacritty doesn't reflow scrollback on row
-        // changes, so the selection's (line, col) coordinates still
-        // address the same cells.
+        // Resize ROWS only — no reflow, but shrink/grow moves rows between
+        // the grid and history, so the same (line, col) coordinates now
+        // address different text (MSC-7). Content identity under a row
+        // resize is covered by SelectionVerticalResizeBlindTests.
         bb.resize(to: .init(cols: 80, rows: 12))
         let s3 = try XCTUnwrap(bb.snapshot())
         XCTAssertEqual(s3.cols, 80, "sanity: cols unchanged")
         XCTAssertEqual(s3.rows, 12, "sanity: rows shrunk")
         view.render(snapshot: s3)
 
-        XCTAssertEqual(view.selection, sel,
-                       "row-only resize must preserve selection (Bug #14)")
+        XCTAssertNil(view.selection,
+                     "row-only resize must clear the selection (MSC-7)")
     }
 
     func test_altScreenExit_clearsSelection() throws {
