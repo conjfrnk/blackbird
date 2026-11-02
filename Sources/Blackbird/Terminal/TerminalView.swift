@@ -2072,6 +2072,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// keystroke was ABSORBED — either still composing (`hasMarkedText()`) or a
     /// grapheme committed during this event (`didInsertTextViaIME`, set by
     /// `insertText`) — so `keyDown` must NOT also encode it (double-write).
+    /// A key that arrives while a composition is pending is the IME's even if it
+    /// ENDS that composition: Esc cancels it (`doCommand(cancelOperation:)`) and
+    /// Backspace can empty it (`setMarkedText("")` / `unmarkText`), none of which
+    /// raise `didInsertTextViaIME` or leave marked text behind, so the post-event
+    /// state alone would let the key through to the shell as ESC / DEL.
     /// Returns `false` when the IME did nothing; the caller falls through to the
     /// encoder.
     ///
@@ -2100,13 +2105,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // nothing to compose, so keep the input context from absorbing it
         // (an empty commit would drop the key, a non-empty one would skip the
         // encoder's kitty framing). A live composition still owns the key.
-        let isContextMenuChord = !hasMarkedText() && KeyEventClassifier.isContextMenuKeyChord(
+        let hadMarkedText = hasMarkedText()
+        let isContextMenuChord = !hadMarkedText && KeyEventClassifier.isContextMenuKeyChord(
             keyCode: event.keyCode, modifierFlags: event.modifierFlags
         )
         if !optionMetaChord && !isContextMenuChord {
             inputContext?.handleEvent(event)
         }
-        return hasMarkedText() || didInsertTextViaIME
+        return hadMarkedText || hasMarkedText() || didInsertTextViaIME
     }
 
     /// Fast path for control characters: macOS translates Ctrl+letter into the

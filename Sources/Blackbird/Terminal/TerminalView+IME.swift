@@ -273,7 +273,11 @@ extension TerminalView: NSTextInputClient {
     /// - `cancelOperation:` fires on Esc during an active composition; the
     ///   IME expects "abort the preedit" not "encode Esc". Clear the
     ///   composition so the user can re-start input without the stale
-    ///   marked text showing through.
+    ///   marked text showing through. `keyDown` also drops the Esc itself
+    ///   (`routeKeyDownThroughIME` owns any key that arrives mid-composition).
+    /// - `deleteBackward:` during a composition is how a dead-key preedit
+    ///   (Option+E → ´) hears Backspace; it must delete the pending preedit
+    ///   grapheme, not be absorbed and leave the accent stuck on screen.
     ///
     /// `noop:` (Ctrl+C/Z/U/W/S/G, F1-F20) and `complete:` (F5, Opt+Esc) are
     /// absorbed too. Nothing in the responder chain implements either, so
@@ -284,6 +288,21 @@ extension TerminalView: NSTextInputClient {
            composition != nil {
             inputContext?.discardMarkedText()
             unmarkText()
+            return
+        }
+        if selector == #selector(NSResponder.deleteBackward(_:)),
+           let c = composition {
+            let text = c.attributedText.string as NSString
+            let lastGrapheme = text.rangeOfComposedCharacterSequence(at: text.length - 1)
+            let kept = c.attributedText.attributedSubstring(
+                from: NSRange(location: 0, length: lastGrapheme.location)
+            )
+            setMarkedText(kept,
+                          selectedRange: NSRange(location: kept.length, length: 0),
+                          replacementRange: NSRange(location: NSNotFound, length: 0))
+            // Emptied: tell the system input context too, or it keeps the
+            // dead key armed and the next letter still gets the accent.
+            if composition == nil { inputContext?.discardMarkedText() }
             return
         }
         // Everything else: absorb silently. keyDown has already routed
