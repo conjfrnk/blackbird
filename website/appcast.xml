@@ -10,15 +10,15 @@
     <description>Release feed for Blackbird.</description>
     <language>en</language>
     <item>
-      <title>Version 0.9.2</title>
-      <pubDate>Sun, 04 Oct 2026 14:10:00 +0000</pubDate>
-      <sparkle:version>53</sparkle:version>
-      <sparkle:shortVersionString>0.9.2</sparkle:shortVersionString>
+      <title>Version 0.9.3</title>
+      <pubDate>Mon, 02 Nov 2026 18:58:20 +0000</pubDate>
+      <sparkle:version>54</sparkle:version>
+      <sparkle:shortVersionString>0.9.3</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <sparkle:releaseNotesLink>https://blackbird-terminal.com/releases/v0.9.2.html</sparkle:releaseNotesLink>
-      <enclosure url="https://github.com/conjfrnk/blackbird/releases/download/v0.9.2/Blackbird-0.9.2.dmg"
+      <sparkle:releaseNotesLink>https://blackbird-terminal.com/releases/v0.9.3.html</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/conjfrnk/blackbird/releases/download/v0.9.3/Blackbird-0.9.3.dmg"
                  type="application/x-apple-diskimage"
-                 sparkle:edSignature="zdqLvFCrxGH1nsat1Yi9Q/cWyRRjVDytGaELqKMvZC9QnBt8JVz784f/ptZi0fmyrbnAVcIs0zISrLQKKuftDg==" length="10418916" />
+                 sparkle:edSignature="aNXJ+qXvd/9G9I+ztxJ8iVlHcvnKFq7JjjznkbqmZL6DXlwYpKld9sEwWN5H9r6fJIBWSEnlcdvWHdIoDpCkBQ==" length="10438778" />
     </item>
   </channel>
 </rss>

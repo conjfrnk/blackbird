@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blackbird 0.9.3 — release notes</title>
+    <meta name="theme-color" content="#282828" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
+    <style>
+      main.notes { max-width: 720px; margin: 0 auto; padding: 48px 24px; text-align: left; }
+      main.notes h1 { margin-bottom: 4px; }
+      main.notes .tag { margin-top: 0; }
+      main.notes h2 { font-size: 1.05rem; margin: 28px 0 8px; color: #FABD2F; }
+      main.notes ul { padding-left: 1.2em; }
+      main.notes li { margin: 6px 0; line-height: 1.5; }
+      main.notes code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+      main.notes a { color: #83A598; }
+      main.notes .back { display: inline-block; margin-top: 32px; color: #A89984; }
+    </style>
+  </head>
+  <body>
+    <main class="notes">
+      <h1>Blackbird 0.9.3</h1>
+      <p class="tag">Released 2026-11-02</p>
+      <h2>Fixed</h2>
+<ul>
+<li><strong>Tab pills re-stretch after a display change.</strong> When the window moved to a monitor where it had a different size, or the computer was plugged back into one, the pill strip kept its old width until you switched tabs: pills ran under the traffic lights when the window shrank and left a gap on the left when it grew. macOS relocates every window of a tab group on a display change, background tabs included; a background tab relocated first pushed its frame onto the visible tab, which deliberately ignores its own resize callback during a push, so nothing told its strip the new width. The receiving tab now re-lays out its own strip right after a pushed frame (width only; no native-strip walk). Verified with a real virtual-display unplug and replug on macOS 27.</li>
+<li><strong>Settings section selector no longer collapses on macOS 27.</strong> SwiftUI&#x27;s tab strip came up 0×0 and drew Appearance / Behavior / Updates / Diagnostics on top of each other until the window was resized. The four sections are now chosen with a segmented control at the top of the window (the tab icons are gone).</li>
+<li><strong>Opening a tab or window no longer disturbs the others.</strong> The first-show theme refresh re-applied the palette to every existing tab: N extra palette pushes and redraws per ⌘T / ⌘N, and it wiped any OSC 4 / 10 / 11 palette a program in another tab had set. It now touches only the new window.</li>
+<li><strong>Blank cells keep their background colour after the glyph atlas fills up.</strong> After 4096+ distinct glyph/style combinations (CJK- or emoji-heavy output), a background-coloured, selected or underlined space could paint in the foreground colour. Glyph-less quads no longer sample the atlas.</li>
+<li><strong>Find: a late regex result no longer reappears after you close the bar or edit the query.</strong> A regex scan still in flight when the find bar closed, the query changed or the session was rebound could repopulate matches, select the first one and scroll the viewport after the find UI was gone.</li>
+<li><strong>A stream of chunked OSC 99 notifications can no longer grow memory without bound.</strong> Title and body each keep at most 64 KiB while a notification is pending; real notifications (cut to 128 / 1024 characters when shown) are unchanged.</li>
+</ul>
+<h2>Performance</h2>
+<ul>
+<li>Output floods are delivered in fewer, larger chunks: the PTY reader coalesces up to 32 KiB per delivery instead of Darwin&#x27;s ~1 KiB reads (up to ~32× fewer queue hops under a flooding child; no change for interactive use).</li>
+<li>Pasting a large block into a slow reader drains about twice as fast (1 MiB: ~2.1 s vs ~5.2 s): no per-write memmove of the remainder, and the retry timer is 1 ms while bytes are moving.</li>
+<li>Copy, copy-on-select, Export Scrollback and large pastes sanitise 7–22× faster on ~10 MiB, and the Paste menu item no longer decodes the whole clipboard on every menu validation.</li>
+<li>Find: the ASCII substring scan is ~50× faster on a long history, and splitting scrollback rows is ~16× faster.</li>
+<li>Hyperlinks: link resolution is done once per OSC 8 run instead of per cell, and URL checks skip their regexes when a row or link cannot match.</li>
+<li>New tabs are cheaper: ASCII glyph lookups use a flat table (58 → 26 ns), atlas textures are zeroed from a shared buffer (atlas init 2.4 → 0.4 ms, renderer init 5.9 → 2.8 ms).</li>
+<li>The first ⌘, no longer stalls the main thread for 0.4–0.8 s: the monospace font list is built off the main thread at launch.</li>
+<li>The preference store&#x27;s persistent domain is read once per defaults-change pass instead of four times.</li>
+</ul>
+<h2>Maintenance</h2>
+<ul>
+<li>Interned OSC 8 URIs are stored once, so the 1 MiB intern cap bounds the real bytes (it used to hold two copies), and the Rust core&#x27;s OSC rate and latch state is consolidated.</li>
+<li>Developer builds always run the Rust core phase, so editing a core source other than <code>lib.rs</code> no longer leaves a stale static library linked.</li>
+<li>Unused <code>serde</code> and <code>proptest</code> default features are dropped from the core&#x27;s dependencies.</li>
+<li>Internal de-duplication with no behaviour change: tab strip hover / edit-field geometry, tab-order lookup, preferences defaults table, theme contrast maths, grid-resize and session initialisers, renderer cache key, test fakes.</li>
+</ul>
+      <a class="back" href="/">← blackbird-terminal.com</a>
+    </main>
+  </body>
+</html>
