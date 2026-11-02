@@ -33,7 +33,8 @@ import BBCore
 ///
 /// Detection is mechanism-agnostic and load-robust: we sample every thread's
 /// Mach `run_state` 40 times over a 1 s window and call a thread "busy" if it
-/// was runnable/running in >= 80 % of the samples. A CPU-bound thread is
+/// was runnable/running in >= 80 % of the samples AND used at least 5 % of the
+/// window as CPU time (zero-CPU "running" threads are sampling artefacts). A CPU-bound thread is
 /// RUNNING even when other processes steal its core (so heavy parallel builds
 /// on the dev box cannot hide a leak), while an idle GCD worker is WAITING.
 /// The sampling thread itself is excluded, and threads already busy BEFORE
@@ -197,10 +198,18 @@ final class RegexFindWorkerCPULeakBlindTests: XCTestCase {
             if remaining > 0 { settle(remaining) }
         }
         let needed = Int((0.8 * Double(samples)).rounded(.up))
+        // A pinned worker burns CPU for the whole window. A thread that Mach
+        // reports as RUNNING in every sample yet consumed essentially none
+        // (seen on a machine at load ~20-28 inside the full suite: "+0.00 s
+        // CPU") is a scheduling/sampling artefact, not a leaked scan, so it
+        // must not fail the suite. 5% of the window is far below what any
+        // real spinner gets even when other processes steal most of its core.
+        let minCPU = 0.05 * window
         return running
             .filter { $0.value >= needed }
             .map { BusyThread(tid: $0.key, runningSamples: $0.value, totalSamples: samples,
                               cpuSeconds: (lastCPU[$0.key] ?? 0) - (firstCPU[$0.key] ?? 0)) }
+            .filter { $0.cpuSeconds >= minCPU }
             .sorted { $0.tid < $1.tid }
     }
 
