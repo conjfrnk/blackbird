@@ -1,5 +1,6 @@
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use bitflags::bitflags;
 #[cfg(feature = "serde")]
@@ -42,6 +43,20 @@ static HYPERLINK_ID_SUFFIX: AtomicU32 = AtomicU32::new(0);
 /// Max zero-width scalars kept on one cell (see `Cell::push_zerowidth`).
 const ZEROWIDTH_MAX: usize = 32;
 
+/// Max bytes of URI kept for one hyperlink. Matches `OSC8_URI_MAX` in blackbird_core's
+/// snapshot, which never surfaces a longer one as a link.
+const HYPERLINK_URI_MAX: usize = 4096;
+
+/// Max bytes of `id=` kept for one hyperlink.
+const HYPERLINK_ID_MAX: usize = 256;
+
+/// Max bytes of hyperlink data one terminal keeps alive across grid and scrollback.
+const HYPERLINK_LIVE_MAX: usize = 32 * 1024 * 1024;
+
+/// Bookkeeping charged per hyperlink on top of its strings (Arc header, two `String` headers,
+/// allocator rounding), so links with tiny URIs cannot slip under `HYPERLINK_LIVE_MAX`.
+const HYPERLINK_FIXED_COST: usize = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Hyperlink {
@@ -61,6 +76,32 @@ impl Hyperlink {
     pub fn uri(&self) -> &str {
         &self.inner.uri
     }
+
+    /// Build a link charged against `live`, or `None` (no link) when it must not be kept.
+    ///
+    /// Blackbird fix (re-apply on bump): upstream stores whatever OSC 8 delivers (vte allows
+    /// 8 MiB for the URI and for `id=`), and every cell written under the link shares that one
+    /// allocation, so each row pinned its own full-size copy until it left the scrollback and
+    /// retention tracked the bytes sent, 1:1. A URI or id past its cap is refused, and so is any
+    /// link that would take `live` (the terminal's running total, released as links drop) past
+    /// `HYPERLINK_LIVE_MAX`; the latter also covers many distinct links just under the caps.
+    pub fn bounded(link: VteHyperlink, live: &Arc<AtomicUsize>) -> Option<Self> {
+        let VteHyperlink { id, uri } = link;
+        let id_len = id.as_ref().map_or(0, String::len);
+        if uri.len() > HYPERLINK_URI_MAX || id_len > HYPERLINK_ID_MAX {
+            return None;
+        }
+
+        let mut inner = HyperlinkInner::new(id, uri);
+        let cost = inner.cost();
+        if live.load(Ordering::Relaxed) + cost > HYPERLINK_LIVE_MAX {
+            return None;
+        }
+        live.fetch_add(cost, Ordering::Relaxed);
+        inner.live = Some(Arc::clone(live));
+
+        Some(Self { inner: Arc::new(inner) })
+    }
 }
 
 impl From<VteHyperlink> for Hyperlink {
@@ -75,7 +116,7 @@ impl From<Hyperlink> for VteHyperlink {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 struct HyperlinkInner {
     /// Identifier for the given hyperlink.
@@ -83,6 +124,34 @@ struct HyperlinkInner {
 
     /// Resource identifier of the hyperlink.
     uri: String,
+
+    /// Terminal-wide byte total this link is charged to, credited back on drop.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    live: Option<Arc<AtomicUsize>>,
+}
+
+// Identity is `(id, uri)`; the accounting handle is not part of it.
+impl PartialEq for HyperlinkInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.uri == other.uri
+    }
+}
+
+impl Eq for HyperlinkInner {}
+
+impl Hash for HyperlinkInner {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+        self.uri.hash(state);
+    }
+}
+
+impl Drop for HyperlinkInner {
+    fn drop(&mut self) {
+        if let Some(live) = &self.live {
+            live.fetch_sub(self.cost(), Ordering::Relaxed);
+        }
+    }
 }
 
 impl HyperlinkInner {
@@ -96,7 +165,12 @@ impl HyperlinkInner {
             },
         };
 
-        Self { id, uri }
+        Self { id, uri, live: None }
+    }
+
+    /// Bytes charged against the terminal's hyperlink budget.
+    fn cost(&self) -> usize {
+        HYPERLINK_FIXED_COST + self.id.len() + self.uri.len()
     }
 }
 

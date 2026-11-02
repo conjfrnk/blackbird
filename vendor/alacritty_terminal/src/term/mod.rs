@@ -2,6 +2,7 @@
 
 use std::ops::{Index, IndexMut, Range};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::{cmp, mem, ptr, slice, str};
 
 #[cfg(feature = "serde")]
@@ -341,6 +342,9 @@ pub struct Term<T> {
     /// left neighbour is then not "the base just written".
     glyph_end: Option<Point>,
 
+    /// Bytes held by live hyperlinks in both grids, enforcing `Hyperlink::bounded`'s budget.
+    hyperlink_live: Arc<AtomicUsize>,
+
     /// Config directly for the terminal.
     config: Config,
 }
@@ -458,6 +462,7 @@ impl<T> Term<T> {
             title: Default::default(),
             mode: Default::default(),
             glyph_end: None,
+            hyperlink_live: Default::default(),
         }
     }
 
@@ -2028,7 +2033,10 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
         trace!("Setting hyperlink: {hyperlink:?}");
-        self.grid.cursor.template.set_hyperlink(hyperlink.map(|e| e.into()));
+        // Blackbird fix: an over-long or over-budget link becomes "no link", closing any open one.
+        let live = &self.hyperlink_live;
+        let hyperlink = hyperlink.and_then(|link| cell::Hyperlink::bounded(link, live));
+        self.grid.cursor.template.set_hyperlink(hyperlink);
     }
 
     /// Set a terminal attribute.
