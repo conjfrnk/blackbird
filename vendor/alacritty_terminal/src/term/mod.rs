@@ -333,6 +333,14 @@ pub struct Term<T> {
     /// Information about damaged cells.
     damage: TermDamageState,
 
+    /// BLACKBIRD PATCH: cursor position directly after the last glyph `input`
+    /// wrote, or `None` once that adjacency can no longer be trusted (scroll,
+    /// resize, screen swap). A VS16 / U+20E3 promotes the cell left of the
+    /// cursor to a wide glyph only while the cursor still sits exactly here;
+    /// any cursor move (CR, CUF, CUP, BS, HT, ...) takes it elsewhere, so the
+    /// left neighbour is then not "the base just written".
+    glyph_end: Option<Point>,
+
     /// Config directly for the terminal.
     config: Config,
 }
@@ -449,6 +457,7 @@ impl<T> Term<T> {
             selection: Default::default(),
             title: Default::default(),
             mode: Default::default(),
+            glyph_end: None,
         }
     }
 
@@ -714,6 +723,8 @@ impl<T> Term<T> {
 
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
 
+        self.glyph_end = None;
+
         // Move vi mode cursor with the content.
         let history_size = self.history_size();
         let mut delta = num_lines as i32 - old_lines as i32;
@@ -778,6 +789,7 @@ impl<T> Term<T> {
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
         self.mode ^= TermMode::ALT_SCREEN;
+        self.glyph_end = None;
         self.selection = None;
         self.mark_fully_damaged();
     }
@@ -789,6 +801,8 @@ impl<T> Term<T> {
     #[inline]
     fn scroll_down_relative(&mut self, origin: Line, mut lines: usize) {
         trace!("Scrolling down relative: origin={origin}, lines={lines}");
+
+        self.glyph_end = None;
 
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
         lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
@@ -817,6 +831,8 @@ impl<T> Term<T> {
     #[inline]
     fn scroll_up_relative(&mut self, origin: Line, mut lines: usize) {
         trace!("Scrolling up relative: origin={origin}, lines={lines}");
+
+        self.glyph_end = None;
 
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
 
@@ -1140,14 +1156,27 @@ impl<T: EventListener> Handler for Term<T> {
             // spacer) so cursor, selection, reflow and text extraction all use
             // alacritty's existing wide-cell machinery and stay consistent.
             //
-            // Only when the base sits before the right margin (`!input_needs_wrap`
-            // guarantees the cursor advanced to base+1, so there is room for the
+            // Only when the cursor is still directly after the glyph `input`
+            // wrote last (`glyph_end`), so the cell left of it really is the
+            // base and the spacer below lands on a cell nothing has claimed;
+            // otherwise a stray mark after CR / CUP / CUF / BS / HT would
+            // promote whatever neighbour the cursor happens to sit beside and
+            // the spacer write would erase the cell under the cursor. Also only
+            // when the base sits before the right margin (`!input_needs_wrap`
+            // means the cursor advanced to base+1, so there is room for the
             // spacer), the base actually carries a glyph, and it isn't already
             // wide. The rare exact-last-column case is intentionally left at
             // width 1 rather than retroactively moving the glyph across a line
             // wrap. Re-apply this patch on any alacritty_terminal bump.
+            //
+            // At column 0 there is no previous cell: `saturating_sub` leaves
+            // `column` on the cell UNDER the cursor (reachable even with a
+            // matching `glyph_end` on a 1-column grid after CR), so that case
+            // is excluded too. Such a mark falls through to push_zerowidth.
             if matches!(c, '\u{FE0F}' | '\u{20E3}')
                 && !self.grid.cursor.input_needs_wrap
+                && self.grid.cursor.point.column.0 > 0
+                && self.glyph_end == Some(self.grid.cursor.point)
                 // INSERT mode (IRM) shifts cells right by the glyph width when
                 // the base is written; a retroactive promotion can't re-shift
                 // for the extra column without clobbering an already-shifted
@@ -1179,6 +1208,7 @@ impl<T: EventListener> Handler for Term<T> {
                 } else {
                     self.grid.cursor.input_needs_wrap = true;
                 }
+                self.glyph_end = Some(self.grid.cursor.point);
             }
 
             self.grid[line][column].push_zerowidth(c);
@@ -1236,6 +1266,8 @@ impl<T: EventListener> Handler for Term<T> {
         } else {
             self.grid.cursor.input_needs_wrap = true;
         }
+
+        self.glyph_end = Some(self.grid.cursor.point);
     }
 
     #[inline]
