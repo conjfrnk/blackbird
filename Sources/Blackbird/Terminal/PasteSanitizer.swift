@@ -392,14 +392,32 @@ enum PasteSanitizer {
         }
     }
 
-    /// Wrap a file path in single quotes using the POSIX `'\''` recipe to
-    /// escape any embedded single quote. Single-quoted strings in sh/zsh
-    /// suppress *all* metacharacter interpretation (spaces, `$`, backticks,
-    /// newlines, globs), so this is safe against arbitrary filesystem paths
-    /// including ones that contain quotes. (Drop-path shell-quoting,
-    /// co-located with the paste/drop sanitizers — REFACTOR.md Part III §3.)
+    /// Wrap a file path in single quotes, stepping outside the quotes for
+    /// the only two characters that can't live inside them on every shell
+    /// we ship integration for: `'` becomes `'\''` and `\` becomes `'\\'`.
+    /// Single-quoted strings in sh/bash/zsh/fish suppress *all* other
+    /// metacharacter interpretation (spaces, `$`, backticks, newlines,
+    /// globs), so this is safe against arbitrary filesystem paths.
+    ///
+    /// The backslash rewrite is for fish: inside fish single quotes `\\` and
+    /// `\'` are escapes, so a name like `a\' ; cmd #` would swallow the
+    /// quote of a bare `'\''` and run the tail as a command. Keeping every
+    /// backslash outside the quotes, where `\\` and `\'` are a literal `\`
+    /// and `'` in POSIX shells and fish alike, makes one quoting valid
+    /// everywhere. (Drop-path shell-quoting, co-located with the
+    /// paste/drop sanitizers — REFACTOR.md Part III §3.)
     static func shellQuote(_ path: String) -> String {
-        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        var quoted = "'"
+        // Single pass over scalars: replacing `'` first would feed the
+        // backslash of `'\''` back into a second `\` rewrite.
+        for scalar in path.unicodeScalars {
+            switch scalar {
+            case "'": quoted += "'\\''"
+            case "\\": quoted += "'\\\\'"
+            default: quoted.unicodeScalars.append(scalar)
+            }
+        }
+        return quoted + "'"
     }
 
     /// Join N dropped file paths into a single space-separated, shell-quoted
