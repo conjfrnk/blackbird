@@ -378,11 +378,11 @@ final class URLDetectorTests: XCTestCase {
     /// phishing / trust-display gap.
     ///
     /// Setup: 40-col grid. Pad with 23 spaces, then `https://apple.com`
-    /// (17 chars) — the URL lands at cols 23..=39. Then `\r\n` moves
-    /// the cursor explicitly to row 1 col 0 (rather than relying on
-    /// pending-wrap state, which could itself collapse the two rows
-    /// from the detector's perspective). Then `.evil.com/login` is
-    /// written at row 1 starting at col 0.
+    /// (17 chars) — the URL lands at cols 23..=39. `.evil.com/login` is
+    /// written straight after, so the terminal itself soft-wraps it onto
+    /// row 1 col 0 (core WRAPLINE bit set on row 0). It must be a SOFT
+    /// wrap: a hard `\r\n` here would be rejected earlier by the wrap-bit
+    /// gate and never reach the host guard this test pins.
     func test_scan_wrapJoin_doesNotChangeHostUnderRightEdge() throws {
         let cols: UInt16 = 40
         let url = "https://apple.com"
@@ -390,11 +390,10 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(pad.count + url.count, Int(cols),
                        "setup: URL must end exactly at the last column")
         let nextRow = ".evil.com/login"
-        // `\r\n` returns cursor to col 0 then drops to the next row,
-        // so `.evil.com/login` starts at row 1 col 0 — physically
-        // separate from the URL on row 0.
+        // No line break: `.evil.com/login` pending-wraps onto row 1
+        // col 0, a genuine soft wrap (see the doc comment above).
         let snap = try snapshot(
-            from: "\(pad)\(url)\r\n\(nextRow)",
+            from: "\(pad)\(url)\(nextRow)",
             cols: cols,
             rows: 5
         )
@@ -438,7 +437,7 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(pad.count + url.count, Int(cols))
         let nextRow = "?return_to=https://evil.com"
         let snap = try snapshot(
-            from: "\(pad)\(url)\r\n\(nextRow)",
+            from: "\(pad)\(url)\(nextRow)",   // soft wrap, not a hard newline
             cols: cols,
             rows: 5
         )
@@ -469,7 +468,7 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(pad.count + url.count, Int(cols))
         let nextRow = ":8080/admin"
         let snap = try snapshot(
-            from: "\(pad)\(url)\r\n\(nextRow)",
+            from: "\(pad)\(url)\(nextRow)",   // soft wrap, not a hard newline
             cols: cols,
             rows: 5
         )
@@ -503,7 +502,7 @@ final class URLDetectorTests: XCTestCase {
         XCTAssertEqual(pad.count + url.count, Int(cols))
         let nextRow = ":8080/admin?token=stolen"
         let snap = try snapshot(
-            from: "\(pad)\(url)\r\n\(nextRow)",
+            from: "\(pad)\(url)\(nextRow)",   // soft wrap, not a hard newline
             cols: cols,
             rows: 5
         )

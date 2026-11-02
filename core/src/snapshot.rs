@@ -78,6 +78,13 @@ pub mod cell_flags {
     /// WIDE_CHAR; this bit only governs colour / glyph selection. Set by the
     /// snapshot FFI when a cell's zerowidth list contains U+FE0F.
     pub const EMOJI_PRESENTATION: u16 = 1 << 13;
+    /// The row ending in this cell soft-wrapped: the text ran out of columns
+    /// and continued on the next row, rather than being ended by a line break.
+    /// Only ever set on a row's LAST cell. Lets a consumer tell a URL that
+    /// genuinely wraps from one that merely ends at the right edge before a
+    /// hard newline. Apps that lay rows out with cursor motion (tmux, TUIs)
+    /// never set it, even where their text visually wraps.
+    pub const WRAPLINE: u16 = 1 << 14;
 }
 
 /// Terminal mode bitflags mirrored from `alacritty_terminal::term::TermMode`.
@@ -398,6 +405,9 @@ pub(crate) fn extract_cell_flags(f: CellFlags) -> u16 {
     }
     if f.contains(CellFlags::DASHED_UNDERLINE) {
         out |= cell_flags::UNDERLINE_DASHED;
+    }
+    if f.contains(CellFlags::WRAPLINE) {
+        out |= cell_flags::WRAPLINE;
     }
     out
 }

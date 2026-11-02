@@ -92,6 +92,16 @@
  */
 #define EMOJI_PRESENTATION (1 << 13)
 
+/**
+ * The row ending in this cell soft-wrapped: the text ran out of columns
+ * and continued on the next row, rather than being ended by a line break.
+ * Only ever set on a row's LAST cell. Lets a consumer tell a URL that
+ * genuinely wraps from one that merely ends at the right edge before a
+ * hard newline. Apps that lay rows out with cursor motion (tmux, TUIs)
+ * never set it, even where their text visually wraps.
+ */
+#define WRAPLINE (1 << 14)
+
 #define ALT_SCREEN (1 << 0)
 
 #define APP_CURSOR (1 << 1)

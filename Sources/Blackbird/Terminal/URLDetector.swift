@@ -327,6 +327,20 @@ public enum URLDetector {
     }
 
 
+    /// Whether screen row `row` runs on into `row + 1`. On the primary screen
+    /// that is the core's soft-wrap bit: a URL that merely ENDS at the last
+    /// column before a hard newline (`printf 'https://…\r\n'`) is not
+    /// continued, so the next line's text must not be glued onto it. On the
+    /// alt screen, tmux and full-screen TUIs lay wrapped rows out with cursor
+    /// motion and never set the bit, so there the join falls back to the
+    /// edge-plus-URL-safe-leader guess (the guards in `wrapJoinedURL` still
+    /// apply). That leaves a full-width URL followed by a hard newline on the
+    /// alt screen joining the next line; it is unfixable from the grid alone
+    /// and recorded in KNOWN_ISSUES.md.
+    private static func rowContinues(_ row: Int, in snapshot: BBSnapshot) -> Bool {
+        snapshot.termMode.contains(.altScreen) || snapshot.isSoftWrapped(row: row)
+    }
+
     /// Multi-row wrapped-URL join + its five phishing guards. When a first-row
     /// URL match ends at the grid's right edge with a URL-safe continuation on
     /// the next row, walk the continuation rows, joining each into the dispatched
@@ -347,18 +361,18 @@ public enum URLDetector {
     ) -> String {
         var finalURLString = substring
         // Wrapped-URL heuristic: when the match ends at the right
-        // edge of the grid AND the next row starts with URL-safe
-        // characters, soft-wrap is the likely explanation. Walk the
-        // continuation rows, joining each into the parsed URL so the
-        // user can ⌘-click the whole href. BBSnapshot doesn't surface
-        // alacritty's wrap flag today; this heuristic gets ~99% of
-        // long CI/build-output URLs right. A URL can wrap across MANY
-        // rows (a long path/query on a narrow grid), so the walk
-        // continues while each consumed row is filled edge-to-edge and
-        // the security guards below keep holding at every boundary.
+        // edge of the grid AND the row soft-wrapped (see
+        // `rowContinues`) AND the next row starts with URL-safe
+        // characters, the URL continues there. Walk the continuation
+        // rows, joining each into the parsed URL so the user can
+        // ⌘-click the whole href. A URL can wrap across MANY rows (a
+        // long path/query on a narrow grid), so the walk continues
+        // while each consumed row is filled edge-to-edge and the
+        // security guards below keep holding at every boundary.
         // Audit cwd-hyperlink F9 (single-row → multi-row walk).
         if endCol == snapshot.cols - 1,
            row + 1 < snapshot.rows,
+           Self.rowContinues(row, in: snapshot),
            Self.isURLContinuationChar(snapshot.character(at: 0, row: row + 1)),
            let sub = URL(string: substring),
            let subHost = sub.host,
@@ -471,9 +485,12 @@ public enum URLDetector {
                 // grapheme ever spans >1 column.)
                 consumedNextRowPrefix[contRow] = graphemeEndColumn[trimmedLen - 1]
                 // Continue onto the next row only when this row was
-                // consumed in full edge-to-edge with no trailing punct.
-                // A short or punct-trimmed run means the URL ended here.
-                if filledToEdge && trimmedLen == contEnd {
+                // consumed in full edge-to-edge with no trailing punct
+                // and wrapped (a hard newline right after a full row
+                // ends the URL). A short or punct-trimmed run means the
+                // URL ended here.
+                if filledToEdge && trimmedLen == contEnd
+                    && Self.rowContinues(contRow, in: snapshot) {
                     contRow += 1
                 } else {
                     break

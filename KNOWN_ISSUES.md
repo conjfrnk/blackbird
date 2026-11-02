@@ -175,14 +175,37 @@ allowlist entries. Over SSH the remote `TERM` is `xterm-256color` for the
 same reason, so a remote Claude Code loses hyperlinks too.
 
 **A URL that an application hard-wrapped itself opens truncated.**
-`URLDetector`'s wrap-join needs the match to end at the last column AND the
-next row to begin with a URL-safe character. An app that does its own
+`URLDetector`'s wrap-join needs the match to end at the last column, the
+next row to begin with a URL-safe character, AND (on the primary screen) the
+core's soft-wrap bit (`WRAPLINE`) on the row's last cell — the terminal itself
+must have wrapped the row, not a line break ended it. An app that does its own
 wrapping — Claude Code writes each row independently with `CR` + cursor
-motion, and indents continuation rows — satisfies neither, so a plain-text
-URL split across rows resolves to its first-row fragment and ⌘-click
-navigates somewhere shorter than intended. Does NOT affect Claude Code's
-own linkified URLs: those carry OSC 8, and OSC 8 attribution wins over the
-regex detector, with the full href on every row-span.
+motion, and indents continuation rows — fails the first two, and one that
+hard-wraps with an explicit `CR`/`LF` at exactly the last column, unindented,
+fails the third, so a plain-text URL split across rows resolves to its
+first-row fragment and ⌘-click navigates somewhere shorter than intended.
+The soft-wrap gate is deliberate: without it a URL that merely ENDS at the
+last column before a real newline (`printf 'https://…\r\nDone\r\n'`) opened
+the next line's text glued on, under an underline covering only the real URL.
+Does NOT affect Claude Code's own linkified URLs: those carry OSC 8, and
+OSC 8 attribution wins over the regex detector, with the full href on every
+row-span.
+
+**On the alt screen, a URL that ends at the last column still absorbs the next
+line.** tmux, screen and full-screen TUIs (`less`, `vim`, Claude Code's REPL)
+run on the alt screen (`?1049`) and place every row with cursor addressing, so
+a URL they genuinely wrap carries no `WRAPLINE` bit — the same as a URL that
+merely ends at the last column before a hard newline. The two cannot be told
+apart from the grid, so on the alt screen `URLDetector` keeps the old
+edge-plus-URL-safe-leader guess (`rowContinues`), and the original wrong-page
+shape (`printf 'https://example.com/<60 a>\r\nDone\r\n'` on an 80-column grid,
+inside tmux) still reproduces there: ⌘-click / Copy Link use `…aaaaDone` while
+the underline covers only row 0. The host/port/leader guards still apply, so
+this is a wrong-page, not a host-change, risk. Narrowing the fallback would
+break every genuinely wrapped URL inside tmux, which is the common case; the
+real fix needs the multiplexer to mark its wraps. Pinned by
+`URLDetectorHardNewlineWrapJoinBlindTests`
+(`test_altScreen_*`).
 
 **The anchor/href divergence gate can over-block a wrapped bare URL.**
 When Claude Code auto-linkifies a bare URL whose text is the href, and

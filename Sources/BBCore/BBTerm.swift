@@ -953,6 +953,18 @@ public final class BBSnapshot {
         return Character(us)
     }
 
+    /// True when screen row `row` soft-wrapped onto `row + 1`: its text ran out
+    /// of columns, as opposed to being ended by a line break. This is the
+    /// core's `WRAPLINE` bit on the row's last cell. Out-of-range rows are
+    /// `false`. Apps that lay rows out with cursor motion (tmux, TUIs) never
+    /// set it, so callers that must handle them cannot rely on it alone.
+    public func isSoftWrapped(row: Int) -> Bool {
+        guard row >= 0, row < rows, cols > 0,
+              let idx = Self.flatIndex(row: row, col: cols - 1, cols: cols),
+              idx < cellCount else { return false }
+        return handle.pointee.cells[idx].flags & UInt16(WRAPLINE) != 0
+    }
+
     /// Raw cell pointer for bulk iteration by the renderer. Returned pointer
     /// is valid for the lifetime of this BBSnapshot.
     public var cellsPointer: UnsafePointer<BBCell> {
