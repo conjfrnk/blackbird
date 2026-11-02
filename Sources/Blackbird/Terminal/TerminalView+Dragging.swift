@@ -169,10 +169,16 @@ extension TerminalView {
             // crash-log file purely for safe display, where exact glyph
             // fidelity is not a goal — the opposite trade-off from this
             // user-chosen path. Do not re-add VS here for "lockstep".
+            //
+            // ZWNJ (U+200C) and ZWJ (U+200D) are likewise NOT in this set:
+            // a family-emoji filename or a Persian one contains them, and
+            // removing them yields a path that doesn't exist. They can't
+            // reorder text or escape the quotes.
             if v == 0x00AD                          // soft hyphen
                 || v == 0x061C                      // Arabic Letter Mark
                 || v == 0x180E                      // Mongolian Vowel Sep
-                || (v >= 0x200B && v <= 0x200F)     // ZWSP/ZWNJ/ZWJ/LRM/RLM
+                || v == 0x200B                      // ZWSP
+                || v == 0x200E || v == 0x200F       // LRM/RLM
                 || (v >= 0x2028 && v <= 0x202E)     // LS/PS + bidi formatting
                 || v == 0x2060                      // Word Joiner
                 || (v >= 0x2066 && v <= 0x2069)     // bidi isolates

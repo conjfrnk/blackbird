@@ -157,8 +157,8 @@ enum PasteSanitizer {
     ///   1. Bidi reordering (Trojan Source CVE-2021-42574 + follow-ups):
     ///      U+202A-E embedding/override, U+2066-9 isolates, U+200E/F
     ///      directional marks, U+061C ALM, U+180E MVS.
-    ///   2. Zero-width / line-separator smuggling: U+200B/C/D
-    ///      (ZWSP/ZWNJ/ZWJ), U+2060 (Word Joiner), U+FEFF (BOM/ZWNBSP),
+    ///   2. Zero-width / line-separator smuggling: U+200B (ZWSP),
+    ///      U+2060 (Word Joiner), U+FEFF (BOM/ZWNBSP),
     ///      U+00AD (soft hyphen), U+2028 (LS), U+2029 (PS). Some shells/
     ///      REPLs (Python, zsh `bindkey -e` paste-bracket) treat LS/PS
     ///      as line terminators, so a "single-line" paste can sneak in
@@ -180,7 +180,7 @@ enum PasteSanitizer {
     ///   U+00AD  SHY   C2 AD               soft hyphen (2-byte)
     ///   U+061C  ALM   D8 9C               Arabic letter mark (2-byte)
     ///   U+180E  MVS   E1 A0 8E            Mongolian vowel separator (3)
-    ///   U+200B-D ZWSP/ZWNJ/ZWJ E2 80 8B-8D
+    ///   U+200B   ZWSP          E2 80 8B
     ///   U+200E/F LRM/RLM       E2 80 8E/8F
     ///   U+202A-E LRE/RLE/PDF/LRO/RLO E2 80 AA-AE
     ///   U+2028  LS    E2 80 A8            line separator
@@ -191,9 +191,17 @@ enum PasteSanitizer {
     ///   U+E0000-E007F tag block F3 A0 80 80 - F3 A0 81 BF (4-byte)
     ///
     /// These are rare in legitimate text — Unicode's bidi algorithm
-    /// handles Arabic / Hebrew automatically and identifier rendering
-    /// doesn't need ZWJ. Stripping is safer than rendering.
-    /// Audit M3 / M4.
+    /// handles Arabic / Hebrew automatically. Stripping is safer than
+    /// rendering. Audit M3 / M4.
+    ///
+    /// U+200C ZWNJ and U+200D ZWJ (E2 80 8C / E2 80 8D) are deliberately
+    /// NOT stripped: they are content, not noise. ZWJ glues emoji sequences
+    /// (family, technologist, rainbow flag) and selects Indic half-forms;
+    /// ZWNJ is part of Persian / Indic orthography. Stripping them silently
+    /// split every ZWJ emoji into its parts and respelled Persian words on
+    /// copy, paste, OSC 52 and dropped filenames. Like Variation Selectors
+    /// they cannot reorder text or inject a control byte.
+    /// `scrubURLForDisplay` still strips them for chrome surfaces.
     ///
     /// Variation Selectors (VS1-16 U+FE00–FE0F, VS17-256 U+E0100–E01EF)
     /// are deliberately NOT stripped: unlike the bidi / zero-width set
@@ -238,18 +246,19 @@ enum PasteSanitizer {
                     let b2 = p[i + 2]
                     // 3-byte sequences:
                     //   U+180E MVS               (E1 A0 8E)
-                    //   U+200B-F ZWSP/ZWNJ/ZWJ/LRM/RLM (E2 80 8B-8F)
+                    //   U+200B ZWSP, U+200E/F LRM/RLM (E2 80 8B, 8E, 8F)
                     //   U+2028/9 LS/PS           (E2 80 A8/A9)
                     //   U+202A-E embed/override  (E2 80 AA-AE)
                     //   U+2060 WJ                (E2 81 A0)
                     //   U+2066-9 isolates        (E2 81 A6-A9)
                     //   U+FEFF BOM               (EF BB BF)
-                    // (VS1-16, EF B8 80..8F, is deliberately preserved — see
-                    // the doc comment above.)
+                    // (VS1-16, EF B8 80..8F, and ZWNJ/ZWJ, E2 80 8C/8D, are
+                    // deliberately preserved — see the doc comment above.)
                     if b0 == 0xE1, b1 == 0xA0, b2 == 0x8E {
                         matched = 3
                     } else if b0 == 0xE2 {
-                        if b1 == 0x80, (0x8B...0x8F).contains(b2) || (0xA8...0xAE).contains(b2) {
+                        if b1 == 0x80, b2 == 0x8B || b2 == 0x8E || b2 == 0x8F
+                            || (0xA8...0xAE).contains(b2) {
                             matched = 3
                         } else if b1 == 0x81, b2 == 0xA0 || (0xA6...0xA9).contains(b2) {
                             matched = 3
@@ -319,19 +328,21 @@ enum PasteSanitizer {
         bytes = bytes.filter { $0 != 0x09 && $0 != 0x0A && $0 != 0x0D }
         bytes = stripBidiOverrides(bytes)
         // `stripBidiOverrides` deliberately PRESERVES Variation Selectors
-        // (VS1-16 U+FE00–FE0F, VS17-256 U+E0100–E01EF) — they're
-        // legitimate in pasted/dropped *data* (see its doc comment). But
-        // this is a *display* scrubber for the "verify before clicking"
-        // affordance, where exact glyph fidelity is a non-goal and an
-        // invisible scalar riding a host character must not survive into
-        // the tooltip. So strip VS here, matching the display posture of
-        // `DiagnosticFileLoader.stripControlCharacters`. VS only restyle the
-        // preceding glyph and can't reorder a host, so this is
-        // defense-in-depth, not the primary bidi guard above.
+        // (VS1-16 U+FE00–FE0F, VS17-256 U+E0100–E01EF) and ZWNJ/ZWJ
+        // (U+200C/U+200D) — they're legitimate in pasted/dropped *data*
+        // (see its doc comment). But this is a *display* scrubber for the
+        // "verify before clicking" affordance, where exact glyph fidelity
+        // is a non-goal and an invisible scalar riding a host character
+        // must not survive into the tooltip. So strip them here, matching
+        // the display posture of `DiagnosticFileLoader.stripControlCharacters`.
+        // They only restyle/join the neighbouring glyphs and can't reorder
+        // a host, so this is defense-in-depth, not the primary bidi guard
+        // above.
         let scrubbed = String(decoding: bytes, as: UTF8.self)
         return String(scrubbed.unicodeScalars.filter {
             !((0xFE00...0xFE0F).contains($0.value)
-                || (0xE0100...0xE01EF).contains($0.value))
+                || (0xE0100...0xE01EF).contains($0.value)
+                || $0.value == 0x200C || $0.value == 0x200D)
         })
     }
 

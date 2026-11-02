@@ -796,16 +796,15 @@ final class TerminalViewTests: XCTestCase {
         XCTAssertEqual(PasteSanitizer.stripBidiOverrides(ps), Data("ab".utf8))
     }
 
-    /// Zero-width chars (ZWSP/ZWNJ/ZWJ) — homograph + log-injection
-    /// surface. Audit M4.
+    /// Zero-width space — homograph + log-injection surface. Audit M4.
+    /// (ZWNJ/ZWJ U+200C/D are content, not noise: see
+    /// ZeroWidthJoinerPreservationBlindTests.)
     func test_stripBidiOverrides_removesZeroWidthChars() {
-        for cp: UInt8 in [0x8B, 0x8C, 0x8D] {  // U+200B / 200C / 200D
-            let payload = Data([0x61, 0xE2, 0x80, cp, 0x62])
-            XCTAssertEqual(
-                PasteSanitizer.stripBidiOverrides(payload), Data("ab".utf8),
-                "U+200\(String(cp - 0x80, radix: 16, uppercase: true)) (zero-width) must strip"
-            )
-        }
+        let payload = Data([0x61, 0xE2, 0x80, 0x8B, 0x62])  // U+200B
+        XCTAssertEqual(
+            PasteSanitizer.stripBidiOverrides(payload), Data("ab".utf8),
+            "U+200B (zero-width space) must strip"
+        )
     }
 
     func test_stripBidiOverrides_removesWordJoiner() {
@@ -878,7 +877,7 @@ final class TerminalViewTests: XCTestCase {
     }
 
     func test_stripBidiOverrides_attackComboPayload() {
-        // Realistic worst-case: bidi RLO + ZWJ + tag char + soft hyphen
+        // Realistic worst-case: bidi RLO + ZWSP + tag char + soft hyphen
         // all sandwiched into one payload. Must scrub to the bare ASCII
         // "ab". (Variation Selectors are intentionally NOT scrubbed —
         // see the VS-preservation tests above; the anti-false-positive
@@ -886,7 +885,7 @@ final class TerminalViewTests: XCTestCase {
         // DragDropTests.)
         var payload = Data("a".utf8)
         payload.append(contentsOf: [0xE2, 0x80, 0xAE])      // U+202E RLO
-        payload.append(contentsOf: [0xE2, 0x80, 0x8D])      // U+200D ZWJ
+        payload.append(contentsOf: [0xE2, 0x80, 0x8B])      // U+200B ZWSP
         payload.append(contentsOf: [0xF3, 0xA0, 0x81, 0xA1]) // U+E0061 tag 'a'
         payload.append(contentsOf: [0xC2, 0xAD])            // U+00AD SHY
         payload.append(0x62)
