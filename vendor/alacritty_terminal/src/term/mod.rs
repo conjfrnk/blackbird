@@ -41,6 +41,14 @@ pub const MIN_SCREEN_LINES: usize = 1;
 /// Max size of the window title stack.
 const TITLE_STACK_MAX_DEPTH: usize = 4096;
 
+/// Max size in bytes of a window title.
+///
+/// Blackbird fix: upstream stores whatever OSC 0/2 delivers (vte allows up to 8 MiB) and
+/// `push_title` deep-copies it, so 5 bytes of `CSI 22 t` allocated a full copy of the title,
+/// up to `TITLE_STACK_MAX_DEPTH` times (~32 GiB). Capping the title bounds the stack to
+/// `TITLE_STACK_MAX_DEPTH * TITLE_MAX_BYTES` (16 MiB) and the `Event::Title` payload with it.
+const TITLE_MAX_BYTES: usize = 4096;
+
 /// Default semantic escape characters.
 pub const SEMANTIC_ESCAPE_CHARS: &str = ",│`|:\"' ()[]{}<>\t";
 
@@ -2315,7 +2323,17 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
-    fn set_title(&mut self, title: Option<String>) {
+    fn set_title(&mut self, mut title: Option<String>) {
+        if let Some(title) = title.as_mut().filter(|title| title.len() > TITLE_MAX_BYTES) {
+            // `String::truncate` panics off a char boundary, and `floor_char_boundary` is
+            // not stable at our MSRV.
+            let mut end = TITLE_MAX_BYTES;
+            while !title.is_char_boundary(end) {
+                end -= 1;
+            }
+            title.truncate(end);
+        }
+
         trace!("Setting title to '{title:?}'");
 
         self.title.clone_from(&title);
