@@ -64,6 +64,14 @@ final class FindController {
     /// the rescan, used to resume from the equivalent position. Audit
     /// findbar-selection: regex ⌘G swallow + reset.
     var pendingRegexAdvance: (direction: FindBar.Direction, anchor: (line: Int32, startCol: Int)?)?
+    /// A user-started regex scan (typed query, option toggle) owes the viewport
+    /// a reveal of match 1 when it publishes. Controller state, not a per-scan
+    /// argument: the snapshot-driven refresh can start a newer scan before the
+    /// user's publishes, and the stale-ID guard then drops the user's scan, so
+    /// the scan that does publish must inherit the debt. Set when a
+    /// non-preserving regex scan starts; consumed by the publish; cleared by
+    /// anything that abandons the search (reset, timeout, a non-regex search).
+    private var regexRevealOwed = false
 
     /// Track that a find-refresh is pending so concurrent snapshot bursts
     /// collapse to one main-queue dispatch.
@@ -98,6 +106,7 @@ final class FindController {
         findCurrentIndex = 0
         findQuery = ""
         pendingRegexAdvance = nil
+        regexRevealOwed = false
     }
 
     // MARK: - Theming
@@ -160,7 +169,7 @@ final class FindController {
             // Query could have been cleared by the time the dispatch fires
             // (FindBar closed, user cleared the field). Early-return then.
             guard !self.findQuery.isEmpty, self.findBar != nil else { return }
-            self.performSearch(query: self.findQuery)
+            self.performSearch(query: self.findQuery, preservingPosition: true)
         }
     }
 
@@ -416,7 +425,7 @@ final class FindController {
         guard !findQuery.isEmpty else { return }
         guard let snap = view.currentSnapshot else { return }
         if findMatchesSeq != snap.sequenceID {
-            performSearch(query: findQuery)
+            performSearch(query: findQuery, preservingPosition: true)
         }
     }
 
@@ -434,19 +443,35 @@ final class FindController {
         refreshFindMatchesIfStale()
     }
 
-    func performSearch(query: String) {
+    /// `preservingPosition` is for rescans the user didn't ask for (the
+    /// snapshot-driven refresh and the stale-cache rescan in `advanceFind`):
+    /// they keep the cycle index (clamped to the new match count) and the
+    /// viewport where they are. A `highlightCurrentMatch` scroll, a wheel
+    /// scroll or any output publishes a snapshot, which schedules such a
+    /// rescan — resetting to match 1 and re-scrolling there pinned ⌘G to the
+    /// second match and yanked the view back after every scroll step.
+    func performSearch(query: String, preservingPosition: Bool = false) {
         findQuery = query
         // A fresh search supersedes any ⌘G that was deferred behind an
         // in-flight regex rescan (advanceFind re-sets this AFTER calling us,
         // so its own deferral survives; a user-typed query correctly drops it).
+        // A preserving rescan is the same logical search, not a new one: it
+        // carries the deferral over (restored below only if a regex scan
+        // really starts, so a bail-out can't strand it).
+        let carriedAdvance = preservingPosition ? pendingRegexAdvance : nil
         pendingRegexAdvance = nil
+        // A user-driven search also settles any reveal an abandoned regex
+        // scan was owed; the regex branch re-arms it for its own scan.
+        if !preservingPosition { regexRevealOwed = false }
         findMatches.removeAll()
         // Clear the seq stamp now; the substring path below stamps it
         // post-scan, and the regex async path stamps it on the main-queue
         // publish. Leaving an old seq here would let `advanceFind` skip
         // a stale-cache rerun against the new (empty) match set.
         findMatchesSeq = nil
-        findCurrentIndex = 0
+        // Kept (not stashed and restored) when preserving: a second rescan can
+        // start before a regex scan publishes, and must still see the position.
+        if !preservingPosition { findCurrentIndex = 0 }
         guard let session = view.session, let snap = view.currentSnapshot, !query.isEmpty else {
             findBar?.setMatchCount(0, of: 0)
             view.selection = nil
@@ -505,6 +530,10 @@ final class FindController {
             // found, or the timeout will replace it with a "too complex"
             // banner if the scan exceeds 250 ms.
             findBar?.setMatchCount(0, of: 0)
+            pendingRegexAdvance = carriedAdvance
+            // Only a user-driven scan owes the reveal; a preserving scan that
+            // takes over from one inherits the flag it already left set.
+            if !preservingPosition { regexRevealOwed = true }
             runRegexSearchAsync(
                 regex: regex,
                 topLine: topLine,
@@ -587,8 +616,9 @@ final class FindController {
         // checks this before cycling so a snapshot swap between now and
         // ⌘G triggers a re-scan instead of jumping to a stale row.
         findMatchesSeq = snap.sequenceID
+        findCurrentIndex = min(findCurrentIndex, max(findMatches.count - 1, 0))
         findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
-        highlightCurrentMatch()
+        highlightCurrentMatch(scroll: !preservingPosition)
     }
 
     /// Pre-folded needle bytes for the ASCII fast path, or nil when the query
@@ -815,7 +845,11 @@ final class FindController {
     /// with the seq the scan ran against (NOT the live `currentSnapshot`, which
     /// may have moved on); honours a ⌘G that arrived mid-scan
     /// (`pendingRegexAdvance`) by resuming from the user's position instead of
-    /// resetting to match 1; then highlights.
+    /// resetting to match 1; then highlights. A snapshot-driven refresh scan
+    /// (nothing owed: no deferred ⌘G, no `regexRevealOwed`) keeps the clamped
+    /// index and leaves the viewport alone, as in `performSearch`. What was
+    /// owed is read from controller state, so it survives a newer scan taking
+    /// over from the one that incurred it.
     private func publishRegexResults(
         _ matches: [(line: Int32, startCol: Int, endCol: Int)],
         searchID mySearchID: UInt64,
@@ -827,6 +861,9 @@ final class FindController {
         regexSearchCompletedID = mySearchID
         findMatches = matches
         findMatchesSeq = scanSeq
+        // A deferred ⌘G or a user-started search is a user action, so it
+        // scrolls even when a refresh scan is the one publishing.
+        var scroll = true
         if let pending = pendingRegexAdvance {
             pendingRegexAdvance = nil
             findCurrentIndex = resolveResumeIndex(
@@ -834,11 +871,15 @@ final class FindController {
                 direction: pending.direction,
                 in: matches
             )
-        } else {
+        } else if regexRevealOwed {
             findCurrentIndex = 0
+        } else {
+            findCurrentIndex = min(findCurrentIndex, max(matches.count - 1, 0))
+            scroll = false
         }
+        regexRevealOwed = false
         findBar?.setMatchCount(findCurrentIndex, of: findMatches.count)
-        highlightCurrentMatch()
+        highlightCurrentMatch(scroll: scroll)
     }
 
     /// Fired `regexSearchTimeout` after a scan starts. No-op if the scan
@@ -860,6 +901,7 @@ final class FindController {
         // publishes. Mirrors the success path's consume-and-clear.
         // (review: silent-failure-hunter)
         pendingRegexAdvance = nil
+        regexRevealOwed = false
         findBar?.setMatchCount(0, of: 0)
         findBar?.showTransientMessage("Regex too complex")
         view.selection = nil
@@ -892,7 +934,10 @@ final class FindController {
 
     // MARK: - Highlight / scroll
 
-    private func highlightCurrentMatch() {
+    /// `scroll: false` selects the match without moving the viewport, for
+    /// snapshot-driven refreshes (the scroll's own snapshot would schedule
+    /// another refresh, and the user may have scrolled away on purpose).
+    private func highlightCurrentMatch(scroll: Bool = true) {
         guard !findMatches.isEmpty, findCurrentIndex < findMatches.count else {
             view.selection = nil
             return
@@ -903,6 +948,7 @@ final class FindController {
             cursor: BufferPoint(line: m.line, col: m.endCol),
             mode: .character
         )
+        guard scroll else { return }
         // Scroll the match into view. displayOffset is how many lines
         // the viewport is above the live grid; positive delta to scroll()
         // means "show older content" (upward).
