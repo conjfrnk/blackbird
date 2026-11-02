@@ -7,6 +7,32 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-02
+
+### Fixed
+- **Tab pills re-stretch after a display change.** When the window moved to a monitor where it had a different size, or the computer was plugged back into one, the pill strip kept its old width until you switched tabs: pills ran under the traffic lights when the window shrank and left a gap on the left when it grew. macOS relocates every window of a tab group on a display change, background tabs included; a background tab relocated first pushed its frame onto the visible tab, which deliberately ignores its own resize callback during a push, so nothing told its strip the new width. The receiving tab now re-lays out its own strip right after a pushed frame (width only; no native-strip walk). Verified with a real virtual-display unplug and replug on macOS 27.
+- **Settings section selector no longer collapses on macOS 27.** SwiftUI's tab strip came up 0×0 and drew Appearance / Behavior / Updates / Diagnostics on top of each other until the window was resized. The four sections are now chosen with a segmented control at the top of the window (the tab icons are gone).
+- **Opening a tab or window no longer disturbs the others.** The first-show theme refresh re-applied the palette to every existing tab: N extra palette pushes and redraws per ⌘T / ⌘N, and it wiped any OSC 4 / 10 / 11 palette a program in another tab had set. It now touches only the new window.
+- **Blank cells keep their background colour after the glyph atlas fills up.** After 4096+ distinct glyph/style combinations (CJK- or emoji-heavy output), a background-coloured, selected or underlined space could paint in the foreground colour. Glyph-less quads no longer sample the atlas.
+- **Find: a late regex result no longer reappears after you close the bar or edit the query.** A regex scan still in flight when the find bar closed, the query changed or the session was rebound could repopulate matches, select the first one and scroll the viewport after the find UI was gone.
+- **A stream of chunked OSC 99 notifications can no longer grow memory without bound.** Title and body each keep at most 64 KiB while a notification is pending; real notifications (cut to 128 / 1024 characters when shown) are unchanged.
+
+### Performance
+- Output floods are delivered in fewer, larger chunks: the PTY reader coalesces up to 32 KiB per delivery instead of Darwin's ~1 KiB reads (up to ~32× fewer queue hops under a flooding child; no change for interactive use).
+- Pasting a large block into a slow reader drains about twice as fast (1 MiB: ~2.1 s vs ~5.2 s): no per-write memmove of the remainder, and the retry timer is 1 ms while bytes are moving.
+- Copy, copy-on-select, Export Scrollback and large pastes sanitise 7–22× faster on ~10 MiB, and the Paste menu item no longer decodes the whole clipboard on every menu validation.
+- Find: the ASCII substring scan is ~50× faster on a long history, and splitting scrollback rows is ~16× faster.
+- Hyperlinks: link resolution is done once per OSC 8 run instead of per cell, and URL checks skip their regexes when a row or link cannot match.
+- New tabs are cheaper: ASCII glyph lookups use a flat table (58 → 26 ns), atlas textures are zeroed from a shared buffer (atlas init 2.4 → 0.4 ms, renderer init 5.9 → 2.8 ms).
+- The first ⌘, no longer stalls the main thread for 0.4–0.8 s: the monospace font list is built off the main thread at launch.
+- The preference store's persistent domain is read once per defaults-change pass instead of four times.
+
+### Maintenance
+- Interned OSC 8 URIs are stored once, so the 1 MiB intern cap bounds the real bytes (it used to hold two copies), and the Rust core's OSC rate and latch state is consolidated.
+- Developer builds always run the Rust core phase, so editing a core source other than `lib.rs` no longer leaves a stale static library linked.
+- Unused `serde` and `proptest` default features are dropped from the core's dependencies.
+- Internal de-duplication with no behaviour change: tab strip hover / edit-field geometry, tab-order lookup, preferences defaults table, theme contrast maths, grid-resize and session initialisers, renderer cache key, test fakes.
+
 ## [0.9.2] - 2026-10-04
 
 ### Fixed
