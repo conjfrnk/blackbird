@@ -11,6 +11,17 @@ import os
 enum HangReportStore {
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird", category: "watchdog")
 
+    #if DEBUG
+    /// Test seam: when set, `captureHangReport`, `pruneOrphanPartials()` and
+    /// `pruneExcessReports(keep:)` use this directory instead of
+    /// `~/Library/Logs/Blackbird`. `MainThreadWatchdog.install` is a one-shot
+    /// process-wide latch, so a test that arms it at 50 ms leaves it armed for
+    /// every later test in the xctest host; without this, each later stall
+    /// would sample(1) into the developer's real log directory and prune their
+    /// oldest real field reports. Locked because the watchdog thread reads it.
+    static let logDirectoryOverride = OSAllocatedUnfairLock<String?>(initialState: nil)
+    #endif
+
     /// Write a brief hang report to `~/Library/Logs/Blackbird/hang-<wall-time>.txt`.
     /// Shells out to `/usr/bin/sample` with our own PID — that's the
     /// cleanest way to get a symbolicated trace of every thread from
@@ -213,8 +224,15 @@ enum HangReportStore {
     /// on the floor.
     private static func logDirectory() -> String {
         let fm = FileManager.default
-        if let lib = fm.urls(for: .libraryDirectory, in: .userDomainMask).first {
-            let dir = lib.appendingPathComponent("Logs/Blackbird", isDirectory: true)
+        let libraryLogs = fm.urls(for: .libraryDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Logs/Blackbird", isDirectory: true)
+        #if DEBUG
+        let logs = logDirectoryOverride.withLock { $0 }
+            .map { URL(fileURLWithPath: $0, isDirectory: true) } ?? libraryLogs
+        #else
+        let logs = libraryLogs
+        #endif
+        if let dir = logs {
             do {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
                 return dir.path

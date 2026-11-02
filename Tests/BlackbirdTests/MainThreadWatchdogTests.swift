@@ -23,9 +23,26 @@ import Foundation
 ///     without leaking heartbeat threads (the install latch deduplicates).
 final class MainThreadWatchdogTests: XCTestCase {
 
+    /// Where the watchdog writes hang reports for the whole xctest process.
+    /// `install` is a one-shot latch, so the 50 ms threshold
+    /// `test_briefHang_*` arms stays armed for every later test in the host
+    /// and each >=50 ms main-thread stall would otherwise run sample(1) into,
+    /// and prune the oldest reports out of, the developer's real
+    /// `~/Library/Logs/Blackbird`. Redirected before any install.
+    static let scratchLogDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("blackbird-watchdog-tests-\(getpid())", isDirectory: true)
+
     override class func setUp() {
         super.setUp()
         TestHostTermination.shared.register()
+        HangReportStore.logDirectoryOverride.withLock { $0 = scratchLogDirectory.path }
+    }
+
+    override class func tearDown() {
+        // The armed watchdog outlives this class; a later capture recreates
+        // the directory on demand (`HangReportStore.logDirectory`).
+        try? FileManager.default.removeItem(at: scratchLogDirectory)
+        super.tearDown()
     }
 
     // MARK: - Idempotent install
@@ -215,11 +232,7 @@ final class MainThreadWatchdogTests: XCTestCase {
 
         // Snapshot the log dir contents at start.
         let fm = FileManager.default
-        let libraryURLs = fm.urls(for: .libraryDirectory, in: .userDomainMask)
-        guard let library = libraryURLs.first else {
-            throw XCTSkip("user library unavailable")
-        }
-        let logDir = library.appendingPathComponent("Logs/Blackbird", isDirectory: true)
+        let logDir = Self.scratchLogDirectory
         let beforeFiles = (try? fm.contentsOfDirectory(atPath: logDir.path)) ?? []
 
         // Wait 150 ms — main queue responsive throughout (we yield
@@ -263,11 +276,7 @@ final class MainThreadWatchdogTests: XCTestCase {
         MainThreadWatchdog.install(hangThreshold: 0.05, pingInterval: 0.02)
 
         let fm = FileManager.default
-        let libraryURLs = fm.urls(for: .libraryDirectory, in: .userDomainMask)
-        guard let library = libraryURLs.first else {
-            throw XCTSkip("user library unavailable")
-        }
-        let logDir = library.appendingPathComponent("Logs/Blackbird", isDirectory: true)
+        let logDir = Self.scratchLogDirectory
         // Ensure dir exists so we can compare before/after.
         try? fm.createDirectory(at: logDir, withIntermediateDirectories: true)
         let beforeFiles = Set((try? fm.contentsOfDirectory(atPath: logDir.path)) ?? [])
@@ -311,8 +320,7 @@ final class MainThreadWatchdogTests: XCTestCase {
             XCTAssertGreaterThan(size, 0,
                                  "captured file \(fname) is empty — "
                                      + "sample(1) likely failed silently")
-            // Cleanup: leaving capture files in user-Library is rude
-            // for a test. Best-effort delete.
+            // Best-effort delete so the scratch dir doesn't accumulate.
             try? fm.removeItem(atPath: path)
         }
     }
