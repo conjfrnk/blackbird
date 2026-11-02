@@ -16,11 +16,15 @@ const FLAG_RECT: u8 = 0b01;
 /// instead of collapsing `\t` + fill to the lone `\t`. For Find haystacks,
 /// which read string offsets as grid columns.
 const FLAG_KEEP_TAB_FILL: u8 = 0b10;
+/// `flags` bit 2: terminate every row (the last included) with `\r` if it
+/// soft-wrapped onto the next row and `\n` if not, instead of joining rows
+/// with `\n` only at hard breaks. For Find, which rejoins wrapped rows.
+const FLAG_SOFT_WRAP_MARKS: u8 = 0b100;
 
 /// Extract the text in the (possibly rectangular) cell span as UTF-8 bytes.
 /// Returns empty for a degenerate/empty range. The caller wraps the bytes in a
-/// `BBString`. `flags` is `FLAG_RECT | FLAG_KEEP_TAB_FILL`; other bits are
-/// reserved and ignored.
+/// `BBString`. `flags` is `FLAG_RECT | FLAG_KEEP_TAB_FILL | FLAG_SOFT_WRAP_MARKS`;
+/// other bits are reserved and ignored.
 pub(crate) fn extract_text_range(
     bb: &BBTerm,
     start_line: i32,
@@ -97,6 +101,12 @@ pub(crate) fn extract_text_range(
 
     let rectangular = flags & FLAG_RECT != 0;
     let keep_tab_fill = flags & FLAG_KEEP_TAB_FILL != 0;
+    // `FLAG_SOFT_WRAP_MARKS` reports each row's wrap state instead of
+    // dropping it: every row is terminated, '\r' when the row soft-wrapped
+    // and '\n' otherwise. Grid cells never hold a control character, so the
+    // terminator cannot collide with row text. Find uses it to rejoin wrapped
+    // scrollback rows while keeping the 1:1 row mapping.
+    let mark_wraps = flags & FLAG_SOFT_WRAP_MARKS != 0;
     // The per-row branches compare line_i against iter_start /
     // iter_end (the clamped iteration bounds) so callers whose raw
     // s_line/e_line sat outside the grid still get column-respect on
@@ -236,7 +246,8 @@ pub(crate) fn extract_text_range(
         // The flag lives on the row's actual last cell regardless of
         // the selection's column span. Rectangular (box) selection is
         // exempt by design: box copies are row-per-row.
-        let wrapped = !rectangular && row[Column(last_col)].flags.contains(CellFlags::WRAPLINE);
+        let soft_wrapped = row[Column(last_col)].flags.contains(CellFlags::WRAPLINE);
+        let wrapped = !rectangular && soft_wrapped;
 
         // S5-002 second half: a wrapped row is full-width content —
         // its trailing spaces are real characters interior to the
@@ -255,10 +266,14 @@ pub(crate) fn extract_text_range(
             }
         }
 
-        // A '\n' is owed before the NEXT row iff this one wasn't soft-
-        // wrapped. Never consumed after the final row, so the result has no
-        // trailing newline — matching the previous join.
-        newline_pending = !wrapped;
+        if mark_wraps {
+            joined.push(if soft_wrapped { '\r' } else { '\n' });
+        } else {
+            // A '\n' is owed before the NEXT row iff this one wasn't soft-
+            // wrapped. Never consumed after the final row, so the result has
+            // no trailing newline — matching the previous join.
+            newline_pending = !wrapped;
+        }
         line_i += 1;
     }
 

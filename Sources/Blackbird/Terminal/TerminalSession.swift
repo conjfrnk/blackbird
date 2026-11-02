@@ -879,8 +879,10 @@ public final class TerminalSession: ObservableObject {
     /// `bbterm.*` accessors).
     /// `keepTabFill` is for callers that treat a string offset as a grid column
     /// (Find); copy paths leave it off so a tab copies as the lone `\t`.
+    /// `softWrapMarks` terminates every row with `\r` (soft-wrapped) or `\n`.
     public func textRange(
-        from start: BufferPoint, to end: BufferPoint, rectangular: Bool, keepTabFill: Bool = false
+        from start: BufferPoint, to end: BufferPoint, rectangular: Bool,
+        keepTabFill: Bool = false, softWrapMarks: Bool = false
     ) -> String {
         // M-12 sibling: same tripwire rationale as recordPromptStart /
         // scrollToMark / resize. Public method used by selection-copy and
@@ -891,7 +893,8 @@ public final class TerminalSession: ObservableObject {
             bbterm.textRange(
                 startLine: start.line, startCol: start.col,
                 endLine: end.line, endCol: end.col,
-                rectangular: rectangular, keepTabFill: keepTabFill
+                rectangular: rectangular, keepTabFill: keepTabFill,
+                softWrapMarks: softWrapMarks
             ) ?? ""
         }
     }

@@ -1480,8 +1480,13 @@ pub const BB_STRING_MAGIC: u64 = 0xB1AC_5BBD_5721_57E0;
 /// is dropped, so `a<TAB>b` copies as `a\tb`; spaces that were typed (on or
 /// after a stop) are kept. Bit 1 (`2`) set keeps the fill, giving exactly one
 /// output char per grid cell (before wide-char spacer skipping and zero-width
-/// scalars): the find bar passes `3` because it reads string offsets as grid
-/// columns.
+/// scalars): the find bar reads string offsets as grid columns, so it sets it.
+///
+/// Bit 2 (`4`) set reports soft wraps: every line, the last included, is
+/// followed by a terminator, `\r` if it soft-wrapped onto the next line and
+/// `\n` if not (instead of joining lines with `\n` only at hard breaks). The
+/// find bar passes `7` (rectangular, keep the tab fill, report soft wraps) to
+/// rejoin wrapped scrollback rows while keeping a 1:1 row mapping.
 ///
 /// `\0` cells (alacritty's "unrendered" sentinel) are emitted as spaces. Real
 /// spaces come through as-is. Wide-char spacer cells (alacritty's

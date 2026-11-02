@@ -34,6 +34,9 @@ final class FindController {
 
     /// Only `installFindBar()` and the FindBarDelegate close/open path mutate it.
     var findBar: FindBar?
+    /// `line`/`startCol` are where the match starts. A match that runs across a
+    /// soft wrap has an `endCol` of `cols` or more: it counts on from column 0
+    /// of the `line` row, so row `line + endCol / cols` holds the last cell.
     var findMatches: [(line: Int32, startCol: Int, endCol: Int)] = []
     var findCurrentIndex: Int = 0
     var findQuery: String = ""
@@ -177,8 +180,9 @@ final class FindController {
     /// pre-v0.8.1 capture issued one `coreQueue.sync` per line — 100k
     /// round trips per search at the default history, each also waiting
     /// behind queued feed chunks. Rectangular extraction over the full
-    /// width yields exactly one row per '\n' (no wrap joins, no trailing
-    /// trim) so the chunk splits back into lines 1:1.
+    /// width yields exactly one row per terminator (no wrap joins, no
+    /// trailing trim) so the chunk splits back into lines 1:1; the
+    /// terminator is '\r' for a row that soft-wrapped, '\n' otherwise.
     static let scrollbackChunkRows: Int32 = 4096
 
     /// `s` without its trailing run of U+0020 (only spaces: a wide-char
@@ -203,15 +207,21 @@ final class FindController {
     /// char approximation, as before; `keepTabFill` stops a tab's blank fill
     /// being collapsed, which would shift every later match left of its
     /// column). Empty rows are omitted.
+    ///
+    /// One entry per physical row, unless `joinSoftWrapped`: then each run of
+    /// soft-wrapped rows is one entry, so a match can straddle the right edge.
+    /// Its `line` is the run's first row and its map counts columns on from
+    /// that row's column 0 (row `n` of the run starts at `n * cols`).
     func captureRows(
         topLine: Int32,
         bottomLine: Int32,
         cols: Int,
         session: TerminalSession,
-        snap: BBSnapshot?
+        snap: BBSnapshot?,
+        joinSoftWrapped: Bool = false
     ) -> [(line: Int32, hay: String, utf16ToCol: [Int]?)] {
-        var rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)] = []
-        guard bottomLine >= topLine else { return rows }
+        var rows: [PhysicalRow] = []
+        guard bottomLine >= topLine else { return [] }
         rows.reserveCapacity(Int(bottomLine - topLine + 1))
         let offset = snap?.displayOffset ?? 0
         let screenRows = snap?.rows ?? 0
@@ -223,19 +233,19 @@ final class FindController {
             var joined = session.textRange(
                 from: BufferPoint(line: a, col: 0),
                 to:   BufferPoint(line: b, col: max(0, cols - 1)),
-                rectangular: true, keepTabFill: true
+                rectangular: true, keepTabFill: true, softWrapMarks: true
             )
             // Byte-level split: the Character-based `split` + `String(piece)`
             // + trim cost two String allocations and grapheme stepping per
             // row, ~16x slower over a 100k-line scan on the main thread.
-            // Core rows never contain CR, so '\n' bytes and Character
-            // newlines agree.
-            let rowCount = joined.utf8.reduce(1) { $1 == 0x0A ? $0 + 1 : $0 }
+            // Core rows never contain CR or LF, so a terminator byte always
+            // ends a row.
+            let rowCount = joined.utf8.reduce(0) { $1 == 0x0A || $1 == 0x0D ? $0 + 1 : $0 }
             // History can shrink between computing `topLine` and this call
             // (RIS, ⌘K, a reflowing resize); the core then clamps the range
             // and returns fewer rows, and assigning them from `a` would shift
             // every match in the chunk. Fall back to per-row capture, which
-            // can't misattribute.
+            // can't misattribute. It has no wrap flag, so it never joins.
             if rowCount != Int(b - a + 1) {
                 var ln = a
                 while ln <= b {
@@ -244,7 +254,7 @@ final class FindController {
                         to:   BufferPoint(line: ln, col: max(0, cols - 1)),
                         rectangular: true, keepTabFill: true
                     ))
-                    if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil)) }
+                    if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil, softWrapped: false)) }
                     if ln == Int32.max { break }
                     ln += 1
                 }
@@ -254,18 +264,23 @@ final class FindController {
                 var ln = a
                 var start = 0
                 let n = buf.count
-                while start <= n {
+                while start < n {
                     var nl = start
-                    while nl < n && buf[nl] != 0x0A { nl += 1 }
+                    while nl < n && buf[nl] != 0x0A && buf[nl] != 0x0D { nl += 1 }
+                    let softWrapped = nl < n && buf[nl] == 0x0D
                     // Rectangular extraction pads to the full width; drop the
                     // trailing run of spaces so a " " query can't hit padding.
+                    // A row that soft-wrapped is full-width content: its
+                    // trailing spaces sit inside the logical line.
                     var end = nl
-                    while end > start && buf[end - 1] == 0x20 { end -= 1 }
+                    if !(joinSoftWrapped && softWrapped) {
+                        while end > start && buf[end - 1] == 0x20 { end -= 1 }
+                    }
                     if end > start {
                         let hay = String(
                             decoding: UnsafeBufferPointer(rebasing: buf[start..<end]),
                             as: UTF8.self)
-                        rows.append((line: ln, hay: hay, utf16ToCol: nil))
+                        rows.append((line: ln, hay: hay, utf16ToCol: nil, softWrapped: softWrapped))
                     }
                     ln &+= 1
                     start = nl + 1
@@ -287,7 +302,7 @@ final class FindController {
                         to:   BufferPoint(line: ln, col: max(0, cols - 1)),
                         rectangular: true, keepTabFill: true
                     ))
-                    if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil)) }
+                    if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil, softWrapped: false)) }
                     if ln == Int32.max { break }
                     ln += 1
                     continue
@@ -296,10 +311,13 @@ final class FindController {
                     // The cell walker pads to the grid width; trim the trailing
                     // run of spaces (a prefix cut keeps `utf16ToCol` valid for
                     // every remaining index) and skip all-blank rows, matching
-                    // the scrollback chunks.
-                    let hay = Self.trimmingTrailingSpaces(mapped.text)
+                    // the scrollback chunks. Except a soft-wrapped row, whose
+                    // spaces are part of the logical line.
+                    let softWrapped = snap?.isSoftWrapped(row: screenRow) ?? false
+                    let hay = joinSoftWrapped && softWrapped
+                        ? mapped.text : Self.trimmingTrailingSpaces(mapped.text)
                     if !hay.isEmpty {
-                        rows.append((line: ln, hay: hay, utf16ToCol: mapped.utf16ToCol))
+                        rows.append((line: ln, hay: hay, utf16ToCol: mapped.utf16ToCol, softWrapped: softWrapped))
                     }
                 }
             } else {
@@ -312,7 +330,56 @@ final class FindController {
             ln += 1
         }
         if let a = chunkStart { flushChunk(a, bottomLine) }
-        return rows
+        guard joinSoftWrapped else { return rows.map { ($0.line, $0.hay, $0.utf16ToCol) } }
+        return Self.joiningSoftWrapped(rows, cols: cols)
+    }
+
+    /// A captured row plus whether it soft-wrapped onto the next buffer line.
+    private typealias PhysicalRow = (line: Int32, hay: String, utf16ToCol: [Int]?, softWrapped: Bool)
+
+    /// Merge each run of soft-wrapped rows (each flagged row followed by the
+    /// very next buffer line) into one haystack. A row with no map is a
+    /// scrollback row: it gets the legacy one-column-per-Character columns,
+    /// so every merged entry carries a map offset by its row's `n * cols`.
+    private static func joiningSoftWrapped(
+        _ rows: [PhysicalRow], cols: Int
+    ) -> [(line: Int32, hay: String, utf16ToCol: [Int]?)] {
+        var out: [(line: Int32, hay: String, utf16ToCol: [Int]?)] = []
+        out.reserveCapacity(rows.count)
+        var first = 0
+        while first < rows.count {
+            var last = first
+            while rows[last].softWrapped, last + 1 < rows.count,
+                  rows[last + 1].line == rows[last].line &+ 1 {
+                last += 1
+            }
+            if last == first {
+                out.append((rows[first].line, rows[first].hay, rows[first].utf16ToCol))
+                first += 1
+                continue
+            }
+            var hay = ""
+            var map: [Int] = []
+            for k in first...last {
+                let base = (k - first) * cols
+                hay += rows[k].hay
+                if let rowMap = rows[k].utf16ToCol {
+                    // Every entry but the sentinel names a unit of this row.
+                    for col in rowMap.dropLast() { map.append(base + col) }
+                    if k == last { map.append(base + (rowMap.last ?? 0)) }
+                } else {
+                    var col = 0
+                    for ch in rows[k].hay {
+                        for _ in 0..<ch.utf16.count { map.append(base + col) }
+                        col += 1
+                    }
+                    if k == last { map.append(base + col) }
+                }
+            }
+            out.append((rows[first].line, hay, map))
+            first = last + 1
+        }
+        return out
     }
 
     // MARK: - Cycle (⌘G / ⌘⇧G)
@@ -556,7 +623,8 @@ final class FindController {
         // doesn't carry cell info; fall back to `session.textRange` and
         // accept the legacy approximation (one-cell-per-char). Audit H4.
         let captured = captureRows(
-            topLine: topLine, bottomLine: bottomLine, cols: snap.cols, session: session, snap: snap
+            topLine: topLine, bottomLine: bottomLine, cols: snap.cols, session: session, snap: snap,
+            joinSoftWrapped: true
         )
         // ASCII fast path: terminal rows and find queries are overwhelmingly
         // ASCII, and Foundation's `range(of:options:)` costs ~8 us per row.
@@ -566,6 +634,7 @@ final class FindController {
         outer: for row in captured {
             let ln = row.line
             let hay = row.hay
+            let rebaseCols = row.utf16ToCol == nil ? 0 : snap.cols
             if let needle = asciiNeedle,
                let ranges = Self.asciiMatchRanges(
                    hay: hay, needle: needle, caseSensitive: opts.caseSensitive,
@@ -582,7 +651,8 @@ final class FindController {
                         startCol = m.lo
                         endCol = m.hi - 1
                     }
-                    findMatches.append((line: ln, startCol: startCol, endCol: endCol))
+                    findMatches.append(Self.matchStartingOnItsRow(
+                        line: ln, startCol: startCol, endCol: endCol, cols: rebaseCols))
                 }
                 if findMatches.count >= findMatchLimit { break outer }
                 continue
@@ -609,7 +679,8 @@ final class FindController {
                     startCol = hay.distance(from: hay.startIndex, to: r.lowerBound)
                     endCol   = hay.distance(from: hay.startIndex, to: r.upperBound) - 1
                 }
-                findMatches.append((line: ln, startCol: startCol, endCol: endCol))
+                findMatches.append(Self.matchStartingOnItsRow(
+                    line: ln, startCol: startCol, endCol: endCol, cols: rebaseCols))
                 cursor = r.upperBound
                 if findMatches.count >= findMatchLimit { break outer }
             }
@@ -694,6 +765,23 @@ final class FindController {
         return (startCol, endCol)
     }
 
+    /// A match found in a merged soft-wrapped entry has columns counted from
+    /// the entry's first row, so it may start on a later row. Re-base it onto
+    /// the row it starts on; `endCol` stays counted from that row (see
+    /// `findMatches`). Identity for a match inside a single row.
+    ///
+    /// Pass `cols: 0` (identity) for an entry with no `utf16ToCol` map: only
+    /// merged entries carry columns past the row width, while an unmapped
+    /// row's offsets are raw UTF-16 / Character counts that zero-width scalars
+    /// can push past `cols` without the match leaving its row.
+    static func matchStartingOnItsRow(
+        line: Int32, startCol: Int, endCol: Int, cols: Int
+    ) -> (line: Int32, startCol: Int, endCol: Int) {
+        guard cols > 0, startCol >= cols else { return (line, startCol, endCol) }
+        let rows = startCol / cols
+        return (line &+ Int32(clamping: rows), startCol - rows * cols, endCol - rows * cols)
+    }
+
     // MARK: - Async regex scan
 
     /// Hard timeout for an async regex scan. Past this the worker is cancelled
@@ -743,7 +831,7 @@ final class FindController {
         // inner weak capture shadows an implicit strong one in the enclosing
         // closure. Nothing in the worker body needs `self`.
         let workItem = DispatchWorkItem { [weak self] in
-            let matches = Self.scanRegexRows(rows, regex: regex, limit: limit, cancelFlag: cancelFlag)
+            let matches = Self.scanRegexRows(rows, regex: regex, cols: cols, limit: limit, cancelFlag: cancelFlag)
             // If we were cancelled, the timeout already published its banner —
             // don't overwrite it with stale results.
             if cancelFlag.value { return }
@@ -781,7 +869,8 @@ final class FindController {
         let snap = view.currentSnapshot
         let scanSeq = snap?.sequenceID
         let rows = captureRows(
-            topLine: topLine, bottomLine: bottomLine, cols: cols, session: session, snap: snap
+            topLine: topLine, bottomLine: bottomLine, cols: cols, session: session, snap: snap,
+            joinSoftWrapped: true
         )
         return (rows, scanSeq)
     }
@@ -795,12 +884,14 @@ final class FindController {
     private static func scanRegexRows(
         _ rows: [(line: Int32, hay: String, utf16ToCol: [Int]?)],
         regex: NSRegularExpression,
+        cols: Int,
         limit: Int,
         cancelFlag: AtomicFlag
     ) -> [(line: Int32, startCol: Int, endCol: Int)] {
         var matches: [(line: Int32, startCol: Int, endCol: Int)] = []
         for row in rows {
             if cancelFlag.value { break }
+            let rebaseCols = row.utf16ToCol == nil ? 0 : cols
             let ns = row.hay as NSString
             regex.enumerateMatches(
                 in: row.hay,
@@ -822,7 +913,8 @@ final class FindController {
                     startCol = r.location
                     endCol = r.location + r.length - 1
                 }
-                matches.append((line: row.line, startCol: startCol, endCol: endCol))
+                matches.append(matchStartingOnItsRow(
+                    line: row.line, startCol: startCol, endCol: endCol, cols: rebaseCols))
                 if matches.count >= limit { stop.pointee = true }
             }
             if matches.count >= limit { break }
@@ -945,9 +1037,13 @@ final class FindController {
             return
         }
         let m = findMatches[findCurrentIndex]
+        // A match across a soft wrap ends on a later row (`endCol` runs on past
+        // the last column), so the selection spans rows.
+        let cols = view.currentSnapshot?.cols ?? 0
+        let endRows = cols > 0 ? m.endCol / cols : 0
         view.selection = Selection(
             anchor: BufferPoint(line: m.line, col: m.startCol),
-            cursor: BufferPoint(line: m.line, col: m.endCol),
+            cursor: BufferPoint(line: m.line &+ Int32(clamping: endRows), col: m.endCol - endRows * cols),
             mode: .character
         )
         guard scroll else { return }
@@ -1079,7 +1175,7 @@ final class FindController {
         guard !matches.isEmpty else { return }
         guard let snap = effectiveSnapshot() else { return }
         let cursorLine = Int32(snap.cursorRow)
-        let inputLineMatches = matches.filter { $0.line == cursorLine }
+        let inputLineMatches = matches.filter { $0.line == cursorLine && $0.endCol < snap.cols }
 
         let hadOffLine = inputLineMatches.count < matches.count
         if inputLineMatches.isEmpty {
@@ -1187,10 +1283,12 @@ final class FindController {
     }
 
     /// True when the match's buffer line equals the cursor's buffer line, i.e.
-    /// the match is on the live shell input line.
+    /// the match is on the live shell input line, and it ends on that row too:
+    /// the splice counts columns on one row, so a match running on across a
+    /// soft wrap can't be replaced.
     private func isOnLiveInputLine(_ m: (line: Int32, startCol: Int, endCol: Int)) -> Bool {
         guard let snap = effectiveSnapshot() else { return false }
-        return m.line == Int32(snap.cursorRow)
+        return m.line == Int32(snap.cursorRow) && m.endCol < snap.cols
     }
 
     /// The snapshot to use for replace logic: test override when set, else live.

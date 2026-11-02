@@ -465,13 +465,25 @@ public final class BBTerm {
     /// callback). Callers cannot distinguish (a) vs (c) from this return
     /// value alone — wire a `.fatal` handler via `onEvent` if you need to
     /// learn about extraction-time panics. Audit L-9 (2026-04-29).
+    ///
+    /// `softWrapMarks` ends every row, the last included, with a terminator
+    /// instead of joining rows with `\n` at hard breaks only: `\r` if the row
+    /// soft-wrapped onto the next one, `\n` if not. It is independent of
+    /// `rectangular` and `keepTabFill`; the find bar passes all three.
     public func textRange(
         startLine: Int32, startCol: Int,
         endLine: Int32,   endCol: Int,
         rectangular: Bool,
-        keepTabFill: Bool = false
+        keepTabFill: Bool = false,
+        softWrapMarks: Bool = false
     ) -> String? {
         guard let h = handle else { return nil }
+        // Bit set decoded bit by bit in the core: 1 rectangular, 2 keep the
+        // tab fill, 4 report soft wraps (see `bb_term_text_range`).
+        var flags: UInt8 = 0
+        if rectangular { flags |= 0b001 }
+        if keepTabFill { flags |= 0b010 }
+        if softWrapMarks { flags |= 0b100 }
         // `UInt16(col)` traps on negative or > 65535. Selection cols
         // ought to stay in [0, grid.cols-1] ≤ 999, but a scrollback-
         // based selection with `col = -1` (or a caller passing
@@ -481,7 +493,7 @@ public final class BBTerm {
             h,
             startLine, UInt16(clamping: startCol),
             endLine,   UInt16(clamping: endCol),
-            (rectangular ? 0b01 : 0) | (keepTabFill ? 0b10 : 0)
+            flags
         ) else {
             return nil
         }
