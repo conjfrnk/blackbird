@@ -64,7 +64,7 @@ final class ScrollIndicator: NSView {
         layer?.backgroundColor = .clear
         marksContainer.opacity = 0
         layer?.addSublayer(marksContainer)
-        thumbLayer.backgroundColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        thumbLayer.backgroundColor = gridOverlayTint
         thumbLayer.cornerRadius = 2
         thumbLayer.opacity = 0
         layer?.addSublayer(thumbLayer)
@@ -73,6 +73,16 @@ final class ScrollIndicator: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }  // pass-through
+
+    /// Re-tint when the window's appearance flips (the theme pins it) or the
+    /// indicator is added under a window whose appearance differs from the
+    /// app's.
+    override func viewDidChangeEffectiveAppearance() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        thumbLayer.backgroundColor = gridOverlayTint
+        CATransaction.commit()
+    }
 
     /// Update the thumb geometry and visibility from the current snapshot.
     /// Safe to call from the main thread at any cadence.
@@ -251,5 +261,19 @@ final class ScrollIndicator: NSView {
         }
         fadeOutWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.autoHideDelay, execute: item)
+    }
+}
+
+extension NSView {
+    /// Tint for the translucent overlays drawn over the grid (the visual-bell
+    /// flash and the scroll thumb): white on a dark appearance, black on a
+    /// light one. White at 25 % over a near-white light-theme background moves
+    /// each channel by 0-4 levels, i.e. invisible.
+    /// `TerminalView.setWindowAppearance` pins the window's appearance to the
+    /// theme's lightness, so `effectiveAppearance` tracks the theme background,
+    /// not the OS.
+    var gridOverlayTint: CGColor {
+        let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return (isDark ? NSColor.white : NSColor.black).withAlphaComponent(0.25).cgColor
     }
 }

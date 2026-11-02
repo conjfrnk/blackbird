@@ -6,9 +6,10 @@ import Foundation
 /// concerns.
 ///
 /// Two independent bells share the "bell" theme:
-///   - VISUAL: a transparent white `FlashView` overlay pulsed on every shell
-///     BEL (driven by `session.$bellCounter`, de-duped against `lastBellCounter`,
-///     gated on `Preferences.bell == .visual`).
+///   - VISUAL: a translucent `FlashView` overlay (white on dark themes, black
+///     on light ones) pulsed on every shell BEL (driven by
+///     `session.$bellCounter`, de-duped against `lastBellCounter`, gated on
+///     `Preferences.bell == .visual`).
 ///   - AUDIBLE: `NSSound.beep()` for unhandled-key / prompt-nav no-op feedback,
 ///     muted under the test harness (`BB_SUPPRESS_BELL`).
 ///
@@ -23,12 +24,18 @@ final class BellController {
     /// testing so it never swallows mouse events destined for the grid.
     private final class FlashView: NSView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        /// Re-tint when the window's appearance flips (the theme pins it) or
+        /// when `attach(to:)` moves the overlay under its host.
+        override func viewDidChangeEffectiveAppearance() {
+            layer?.backgroundColor = gridOverlayTint
+        }
     }
 
     private let flashView: FlashView = {
         let v = FlashView(frame: .zero)
         v.wantsLayer = true
-        v.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.25).cgColor
+        v.layer?.backgroundColor = v.gridOverlayTint
         v.alphaValue = 0
         return v
     }()
