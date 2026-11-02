@@ -74,7 +74,17 @@ enum ForegroundProcessProbe {
     /// `masterFD`-locked `PTY.classifyForegroundNamespace()` so the fd
     /// lifecycle gate fires; this static is also the test entry point that
     /// pins the BFS without driving a real PTY.
-    static func classify(rootPID: pid_t) -> ForegroundNamespace {
+    ///
+    /// `idleShell`: `rootPID` is the shell itself sitting at its prompt (the
+    /// foreground pgroup IS the shell's). Its direct children in another
+    /// process group are then background jobs (`ssh -N -L … &`, `kubectl
+    /// port-forward … &`) — under job control they cannot own the tty, so the
+    /// OSC 7 the shell just printed is a local path and they must not flip the
+    /// verdict to `.remote`. Children sharing the shell's pgroup (no job
+    /// control) are still walked. Only the root's direct children are
+    /// filtered: deeper pgid filtering would hide a foreground `sshpass ssh` /
+    /// `expect`, whose ssh child sits in its own session.
+    static func classify(rootPID: pid_t, idleShell: Bool = false) -> ForegroundNamespace {
         // BFS through the process tree. `seen` guards against cycles —
         // shouldn't happen in a well-formed UNIX process graph, but a
         // bug in `proc_listpids` returning stale data could otherwise
@@ -125,6 +135,12 @@ enum ForegroundProcessProbe {
         var seen: Set<pid_t> = [rootPID]
         var queue: [pid_t] = []
         for child in rootChildren where !seen.contains(child) {
+            // Fail-closed: a pgid we can't read (`getpgid` ≤ 0) keeps the child
+            // in the walk rather than assuming it is a background job.
+            if idleShell {
+                let pgid = getpgid(child)
+                if pgid > 0, pgid != rootPID { continue }
+            }
             seen.insert(child)
             queue.append(child)
         }

@@ -1355,15 +1355,18 @@ public final class PTY {
     public func classifyForegroundNamespace() -> ForegroundNamespace {
         // F-S5-001: serialise the masterFD read against the read-loop's
         // close, same as `hasForegroundChild` / `foregroundWorkingDirectory`.
-        let rootPID: pid_t? = stateQueue.sync {
+        let target: (root: pid_t, idleShell: Bool)? = stateQueue.sync {
             guard _isRunning else { return nil }
             let fg = tcgetpgrp(masterFD)
-            return fg > 0 ? fg : nil
+            guard fg > 0 else { return nil }
+            // Same test as `hasForegroundChild() == false`: the shell is at
+            // its prompt, so any binary-matching child is a background job.
+            return (fg, fg == getpgid(childPID))
         }
-        guard let root = rootPID else {
+        guard let target else {
             return .unknown(reason: "PTY not running or tcgetpgrp ≤ 0")
         }
-        return ForegroundProcessProbe.classify(rootPID: root)
+        return ForegroundProcessProbe.classify(rootPID: target.root, idleShell: target.idleShell)
     }
 
     /// Send a signal directly to the foreground process group of the terminal.
