@@ -464,6 +464,11 @@ final class TabGroupObserver {
     /// The full refresh still runs at `windowDidEndLiveResize`, so the Bug 5
     /// "refreshTabBar is the every-transition funnel" contract is preserved:
     /// this only skips *within* one gesture.
+    ///
+    /// Also the strip update for a frame pushed by the tab-group fan-out
+    /// (`MainWindowController.applyTabGroupFrame`): that receiver's own resize
+    /// callback is deliberately ignored, no full refresh follows, and only the
+    /// width changed.
     func relayoutTabStripForWidth() {
         guard let window = controller.window,
               lastObservedTabCount > 1,

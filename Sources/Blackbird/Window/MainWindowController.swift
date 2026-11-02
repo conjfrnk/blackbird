@@ -102,7 +102,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     ///     `"BlackbirdMainWindow"` key. That is exactly RCA finding A3.
     ///   - it must not rebuild the tab strip N times per fan-out (O(N²) work
     ///     for a strip nobody is looking at; every member already refreshes on
-    ///     selection change).
+    ///     selection change). The one thing the receiver does do is re-lay out
+    ///     its OWN strip width, in `applyTabGroupFrame` itself — a cheap
+    ///     per-receiver pass, not a rebuild — because this same guard makes it
+    ///     deaf to the resize that would otherwise do it.
     ///   - it must not fan out again from the receiving side.
     private var isApplyingTabGroupFrame = false
 
@@ -774,6 +777,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func windowDidResize(_ notification: Notification) {
         // Our own fan-out echo — not a user resize. See
         // `isApplyingTabGroupFrame` for the two things this guard prevents.
+        // Ignoring it also skips the strip relayout below, so
+        // `applyTabGroupFrame` does that itself (a window-server relocation of
+        // a background tab pushes onto the visible tab).
         guard !isTabGroupFrameEcho() else { return }
         // Pills divide the available titlebar width equally, so resize
         // needs to re-lay them out. Mid-drag only the width can have changed,
@@ -862,6 +868,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// re-asserts the group's canonical frame at selection time (all three
     /// verified with standalone AppKit probes).
     ///
+    /// The receiver re-lays out its OWN pill strip afterwards, because the
+    /// echo guard makes it deaf to the `windowDidResize` that would normally
+    /// do it. That matters for the VISIBLE tab: after a display
+    /// reconfiguration the window server relocates every window of the group,
+    /// background tabs included, and a background tab's relocation fans out
+    /// onto the visible sibling through here. Without the relayout its strip
+    /// kept the pre-push width (window 1686 -> 1512 left the strip at 1609,
+    /// not 1435; first pill under the traffic lights) until a tab switch.
+    ///
     /// Internal rather than private: the sender is a *different* instance of
     /// this class.
     func applyTabGroupFrame(_ frame: NSRect) {
@@ -871,14 +886,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // A background tab draws nothing, so it needs none of the synchronous
         // resize path's "never a frame at the old grid size" guarantee — and
         // `coreQueue.sync` there would make main wait out that session's whole
-        // parse backlog, once per tab, at the instant of mouse-up.
-        guard let view = terminalView else {
+        // parse backlog, once per tab, at the instant of mouse-up. (After a
+        // display relocation the receiver can be the visible tab; it takes the
+        // same non-blocking path.)
+        if let view = terminalView {
+            view.withNonBlockingResizeDelivery {
+                window.setFrame(frame, display: false)
+            }
+        } else {
             window.setFrame(frame, display: false)
-            return
         }
-        view.withNonBlockingResizeDelivery {
-            window.setFrame(frame, display: false)
-        }
+        // Width-only path: no native-strip re-hide walk (it logs an ERROR per
+        // background tab) and no frame save. Posts no resize notification.
+        tabObserver.relayoutTabStripForWidth()
     }
 
     /// True while the user is dragging this window's size — either through
