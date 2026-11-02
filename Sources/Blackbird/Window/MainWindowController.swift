@@ -116,9 +116,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// runloop turns). Without it, those would fan out per animation frame.
     private var pendingSiblingFrameSync: DispatchWorkItem?
 
-    /// Persists the window frame on user-driven move/resize (the explicit-save
-    /// driver AppKit's implicit autosave doesn't fire for this tabbing config),
-    /// with the S5-006 screen-reconfig settle suppression. The move/resize
+    /// Persists the window frame on move/resize (the only writer: the window
+    /// registers no AppKit autosave name — see `makeConfiguredWindow`), with
+    /// the S5-006 screen-reconfig settle suppression. The move/resize
     /// delegate methods + the screen-params handler forward here.
     lazy var framePersistence = WindowFramePersistence(controller: self)
 
@@ -144,7 +144,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     /// User-defaults key every Blackbird main window persists its frame
     /// under. Hoisted to one place so the explicit save / restore drivers
-    /// below and the `setFrameAutosaveName` call in `init` can never drift
+    /// below and the `setFrameUsingName` restore in `init` can never drift
     /// apart — the string IS the storage contract (AppKit prepends
     /// `"NSWindow Frame "` and stores the result in `standardUserDefaults`).
     static let frameAutosaveName: NSWindow.FrameAutosaveName = "BlackbirdMainWindow"
@@ -227,40 +227,34 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // answer in AppDelegate which tells the OS "we have nothing to
         // restore, and that's intentional." Audit main-window F23.
         window.isRestorable = false
-        // Every Blackbird main window registers the autosave name so its
-        // resize / move delegate hooks can update the persisted frame (see
-        // `windowDidResize` / `windowDidMove` below). Only the first window
-        // of a session APPLIES the saved frame at init — later ⌘T / ⌘N
-        // windows keep AppKit's default cascade so they don't stack
-        // exactly on top of the restored window.
-        //
-        // The implicit save-on-resize/move that AppKit normally hooks off
-        // `setFrameAutosaveName` does NOT fire reliably for this window's
-        // combination of `tabbingMode = .preferred`, `tabbingIdentifier`,
-        // `isRestorable = false`, and `isReleasedWhenClosed = false`. The
-        // user-visible bug was "type `exit`, relaunch, window appears at
-        // default size" — resizes never reached defaults. We drive the
-        // save explicitly from `windowDidResize` / `windowDidMove` (see
-        // `saveCurrentFrame` below) so persistence is independent of
-        // AppKit's hook firing, and is captured even when the user does
-        // all their resizing on a window other than the original — the
-        // 2026-05-12 dogfood report that motivated the cross-window save.
-        window.setFrameAutosaveName(Self.frameAutosaveName)
+        // Persistence is explicit-only, and the autosave name is deliberately
+        // NOT registered with `setFrameAutosaveName`. A registered window is
+        // also autosaved by AppKit itself on every move/resize (even in this
+        // tabbing config), and that implicit write bypasses every gate in
+        // `WindowFramePersistence` — so the relocation AppKit performs when
+        // a display is unplugged overwrote the user's saved multi-display
+        // frame. Instead the resize / move delegate hooks drive
+        // `saveCurrentFrame` (see `windowDidResize` / `windowDidMove` below),
+        // which writes with `saveFrame(usingName:)`; the restore below reads
+        // with `setFrameUsingName`. Neither needs the name registered, and
+        // saves are captured even when the user does all their resizing on a
+        // window other than the original — the 2026-05-12 dogfood report that
+        // motivated the cross-window save. Only the first window of a
+        // session APPLIES the saved frame at init — later ⌘T / ⌘N windows
+        // keep AppKit's default cascade so they don't stack exactly on top
+        // of the restored window.
         if autosaveFrame {
-            // TWO-STEP RESTORE:
-            //   1. `setFrameAutosaveName` (above) registers the name (the
-            //      storage contract — AppKit will read/write under
-            //      `"NSWindow Frame <name>"` in standardUserDefaults).
-            //   2. `setFrameUsingName` *applies* the saved frame to this
-            //      window NOW, synchronously. Without this explicit apply,
-            //      `window.frame` below still reflects the constructor's
-            //      default rect on a freshly-init'd NSWindowController-
-            //      backed window, the off-screen-nudge runs against the
-            //      default frame (which always overlaps the primary
-            //      screen), the nudge becomes a no-op, and bug #22 quietly
-            //      regresses for users whose saved frame referenced a
-            //      now-missing display. Driving the apply ourselves keeps
-            //      the nudge meaningful.
+            // `setFrameUsingName` *applies* the saved frame (stored under
+            // `"NSWindow Frame <name>"` in standardUserDefaults) to this
+            // window NOW, synchronously. Without this apply,
+            // `window.frame` below still reflects the constructor's
+            // default rect on a freshly-init'd NSWindowController-
+            // backed window, the off-screen-nudge runs against the
+            // default frame (which always overlaps the primary
+            // screen), the nudge becomes a no-op, and bug #22 quietly
+            // regresses for users whose saved frame referenced a
+            // now-missing display. Driving the apply ourselves keeps
+            // the nudge meaningful.
             window.setFrameUsingName(Self.frameAutosaveName)
             let nudged = nudgeFrameOntoVisibleScreen(
                 window.frame,
@@ -797,11 +791,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         } else {
             tabObserver.refreshTabBar()
         }
-        // AppKit's implicit autosave-on-resize isn't firing for this
-        // window's tabbing config (see init for the full diagnosis), so
-        // drive the save ourselves. Idempotent. ALL windows save — the saved
-        // frame on disk tracks the user's most recent resize regardless of
-        // which window owned it.
+        // The window registers no AppKit autosave name (see
+        // `makeConfiguredWindow`), so drive the save ourselves. Idempotent.
+        // ALL windows save — the saved frame on disk tracks the user's most
+        // recent resize regardless of which window owned it.
         //
         // Skipped during a live drag: `saveFrame(usingName:)` is a synchronous
         // `UserDefaults` write, and every write fans out through SwiftUI's
@@ -815,8 +808,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         scheduleSiblingFrameSync()
     }
 
+    /// Whether the live resize now in flight began with the left button held.
+    /// Captured at its start because the end callback can no longer tell: AppKit
+    /// clears `inLiveResize` and the button is already up by then. A display
+    /// change's relocation is bracketed as a live resize too — with no button
+    /// held — so the bracket alone must not count as proof of a user gesture.
+    private var liveResizeBeganWithButtonDown = false
+
+    func windowWillStartLiveResize(_ notification: Notification) {
+        liveResizeBeganWithButtonDown = (NSEvent.pressedMouseButtons & 1) != 0
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
-        settleAfterResizeGesture()
+        settleAfterResizeGesture(userDriven: liveResizeBeganWithButtonDown)
+        liveResizeBeganWithButtonDown = false
     }
 
     /// End of a resize gesture, from either driver: AppKit's edge/corner drag
@@ -826,13 +831,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// Everything the per-frame path deliberately skipped happens here, once:
     /// the full tab-strip refresh, the frame save, and the push to the group's
     /// background tabs (no debounce — this IS the settle point).
-    func settleAfterResizeGesture() {
+    ///
+    /// - Parameter userDriven: whether the gesture is known to be the user's.
+    ///   The right-drag caller is by construction; `windowDidEndLiveResize`
+    ///   passes whether the live resize began with the button down.
+    func settleAfterResizeGesture(userDriven: Bool = true) {
         tabObserver.refreshTabBar()
-        // `knownUserDriven`: the callback IS the proof. AppKit clears
-        // `inLiveResize` before posting it and the button is already up, so the
-        // usual live signals both read false and the S5-006 screen-reconfig
-        // settle window would otherwise drop the only save of the entire drag.
-        framePersistence.saveCurrentFrame(knownUserDriven: true)
+        // `knownUserDriven`: AppKit clears `inLiveResize` before posting the
+        // end callback and the button is already up, so the usual live
+        // signals both read false and the S5-006 screen-reconfig settle
+        // window would otherwise drop the only save of the entire drag.
+        framePersistence.saveCurrentFrame(knownUserDriven: userDriven)
         pendingSiblingFrameSync?.cancel()
         pendingSiblingFrameSync = nil
         syncFrameToSiblingTabs()
@@ -955,11 +964,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // save (from `windowDidEndLiveResize` / the resize gesture's end)
         // instead of a synchronous `UserDefaults` write per pointer sample.
         guard !isResizingInteractively else { return }
-        // Same rationale as `windowDidResize`: AppKit's implicit
-        // save-on-move hook is silent for this config, so drive it
-        // explicitly. Without this, the user's "drag the window to a
-        // new corner of the screen, type `exit`" workflow loses the
-        // new position on relaunch.
+        // Same rationale as `windowDidResize`: there is no implicit
+        // save-on-move, so drive it explicitly. Without this, the user's
+        // "drag the window to a new corner of the screen, type `exit`"
+        // workflow loses the new position on relaunch.
         framePersistence.saveCurrentFrame()
     }
 

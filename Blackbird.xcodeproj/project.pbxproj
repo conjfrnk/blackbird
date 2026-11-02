@@ -67,6 +67,7 @@
 		2CCAC7178AF5F6BF051F44D1 /* URLDetectorContinuationAndColonGateBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98F9957EF26AF50E4DBE6106 /* URLDetectorContinuationAndColonGateBlindTests.swift */; };
 		2D36CF8A509FBC807D32FFB9 /* FindRefreshCoalescingBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8CDAE1F06200AF8AEA9FA67 /* FindRefreshCoalescingBlindTests.swift */; };
 		2DEE1235B0F51FE9CBB5A200 /* CwdTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B21EB9F8E347FEDA4676CF /* CwdTracker.swift */; };
+		2E2BC978F81CE66CD51F8229 /* DisplayReconfigFrameSaveBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 106B36EC032B71DEE7CCCF63 /* DisplayReconfigFrameSaveBlindTests.swift */; };
 		2E7F030884593AE3C0C4D530 /* ShellIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A5CAF46DFFF60AC3493A641 /* ShellIntegration.swift */; };
 		325A950015185A2BC420ADAD /* MainThreadWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13EEDE788104CDCE7BAF53C /* MainThreadWatchdog.swift */; };
 		3351A944D13ADC6C30FC9F3C /* AlternateScrollWheelBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C629D93A824113D3E5DDE24 /* AlternateScrollWheelBlindTests.swift */; };
@@ -357,6 +358,7 @@
 		0D94AD8A655DA72C5D57ED5E /* DiagnosticReportStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticReportStoreTests.swift; sourceTree = "<group>"; };
 		0DF31065DC87C48754C4E77E /* PromptNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptNavigator.swift; sourceTree = "<group>"; };
 		0E2A52AD38735646D352E5AF /* osc133.fish */ = {isa = PBXFileReference; path = osc133.fish; sourceTree = "<group>"; };
+		106B36EC032B71DEE7CCCF63 /* DisplayReconfigFrameSaveBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayReconfigFrameSaveBlindTests.swift; sourceTree = "<group>"; };
 		11194E0650067380506F53B2 /* BBTermTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermTests.swift; sourceTree = "<group>"; };
 		1178A5B3ED186EDB37EAB9E2 /* osc133.zsh */ = {isa = PBXFileReference; path = osc133.zsh; sourceTree = "<group>"; };
 		12FC75043721CB4B72B4180B /* FindReplaceIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindReplaceIntegrationTests.swift; sourceTree = "<group>"; };
@@ -727,6 +729,7 @@
 				77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */,
 				C52B4DB7F352CF1FCAAB2BBE /* DeferredFeedQueueBlindTests.swift */,
 				0D94AD8A655DA72C5D57ED5E /* DiagnosticReportStoreTests.swift */,
+				106B36EC032B71DEE7CCCF63 /* DisplayReconfigFrameSaveBlindTests.swift */,
 				55708BAFA22EAB8E62D45DF1 /* DragDropTests.swift */,
 				2C4BC270083DECE0D5228E3E /* ExportScrollbackLiveHistoryBlindTests.swift */,
 				D7C664676DD703EF60C54509 /* FeedBudgetBlindTests.swift */,
@@ -1377,6 +1380,7 @@
 				66BDCBF186346C6913023FC5 /* DamageTrackingTests.swift in Sources */,
 				A53C3C5F0C51E3018E923E4A /* DeferredFeedQueueBlindTests.swift in Sources */,
 				67E62A52456063618EA6931D /* DiagnosticReportStoreTests.swift in Sources */,
+				2E2BC978F81CE66CD51F8229 /* DisplayReconfigFrameSaveBlindTests.swift in Sources */,
 				BF8C522F82650E26EE4BDBE7 /* DragDropTests.swift in Sources */,
 				ECE1FE46AFEF002ED0EA0EB8 /* ExportScrollbackLiveHistoryBlindTests.swift in Sources */,
 				750ED943D35AB252A92E8FD6 /* FFIContractAltScrollModeBitsTests.swift in Sources */,

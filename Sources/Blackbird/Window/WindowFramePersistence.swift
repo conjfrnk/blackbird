@@ -2,21 +2,24 @@ import AppKit
 import Foundation
 
 /// Saves a `MainWindowController`'s window frame to the AppKit autosave store on
-/// user-driven move/resize, split out of the controller so the
+/// move/resize, split out of the controller so the
 /// save-gating/screen-reconfig logic is one cohesive concern. The restore side
 /// (off-screen nudging) is the free `nudgeFrameOntoVisibleScreen` functions; the
-/// autosave NAME stays on `MainWindowController` (its window identity, used by
-/// `setFrameAutosaveName`/`setFrameUsingName` in init/restore).
+/// autosave NAME stays on `MainWindowController` (the storage key, used by
+/// `setFrameUsingName`/`saveFrame(usingName:)` in init/restore).
 ///
-/// Why explicit saves: AppKit's implicit autosave-on-move/resize doesn't fire
-/// for this window's tabbing config, so the controller's `windowDidMove` /
-/// `windowDidResize` delegate methods drive `saveCurrentFrame()` here.
+/// Why explicit saves only: the window never registers the autosave name,
+/// because AppKit's implicit autosave-on-move/resize would write a display
+/// change's relocation straight past every gate below. The controller's
+/// `windowDidMove` / `windowDidResize` delegate methods drive
+/// `saveCurrentFrame()` here instead.
 ///
 /// `unowned let controller`: the controller owns this (`lazy var`), so its
 /// lifetime is a strict subset of the controller's. `saveCurrentFrame` runs only
-/// from the move/resize delegate methods and `armScreenReconfigSuppression` only
-/// from the `@objc` screen-params handler — all controller-alive paths, never
-/// deinit — so the back-ref is never read after teardown.
+/// from the move/resize delegate methods, `armScreenReconfigSuppression` only
+/// from the `@objc` screen-params handler, and the deferred commit from a
+/// main-queue block holding this only weakly — all controller-alive paths,
+/// never deinit — so the back-ref is never read after teardown.
 final class WindowFramePersistence {
     unowned let controller: MainWindowController
 
@@ -42,6 +45,17 @@ final class WindowFramePersistence {
     /// single-relocation-arrives-late case.
     private static let screenReconfigSettleInterval: TimeInterval = 5.0
     private var suppressSavesUntil: Date = .distantPast
+
+    /// AppKit posts `didChangeScreenParameters` a few milliseconds AFTER it has
+    /// relocated the windows for a display change (1-7 ms measured on
+    /// macOS 27), so the relocation's own `windowDidMove` / `windowDidResize`
+    /// reaches `saveCurrentFrame` while `suppressSavesUntil` is still unarmed.
+    /// A change that isn't positively user-driven is therefore committed only
+    /// after this quiet period, with the suppression re-checked at commit
+    /// time, so the late notification can still veto it. User-driven changes
+    /// are never delayed.
+    private static let deferredSaveDelay: TimeInterval = 0.3
+    private var pendingDeferredSave: DispatchWorkItem?
 
     /// Suppressed from `windowWillEnterFullScreen` until the transition
     /// resolves OR this deadline passes, whichever comes first.
@@ -92,17 +106,20 @@ final class WindowFramePersistence {
     /// Persist the current window frame, unless suppressed: a show-window is in
     /// progress, a screen-reconfig settle window is active (and the change isn't
     /// positively user-driven), the window is full-screen, or a fullscreen-enter
-    /// transition is in flight.
+    /// transition is in flight. A change that isn't positively user-driven is
+    /// committed after `deferredSaveDelay` rather than at once.
     /// - Parameter knownUserDriven: pass `true` from a callback that is itself
     ///   positive proof of a user gesture, when the usual live signals have
-    ///   already gone. `windowDidEndLiveResize` is exactly that case: AppKit
-    ///   clears `inLiveResize` *before* posting it, and it is driven by the
-    ///   mouse-UP so no button is down — so both disjuncts of
-    ///   `isUserDrivenFrameChange` read false and the S5-006 settle window
-    ///   would silently drop the only save of the whole drag. (Before the
-    ///   end-of-drag save existed, every mid-drag `windowDidResize` bypassed
-    ///   the gate on `inLiveResize`, so the suppression never had a chance to
-    ///   eat the user's resize; it does now.)
+    ///   already gone. The end of a live resize that BEGAN with the button
+    ///   down is exactly that case: AppKit clears `inLiveResize` *before*
+    ///   posting the end callback, and it is driven by the mouse-UP so no
+    ///   button is down — so both disjuncts of `isUserDrivenFrameChange` read
+    ///   false and the S5-006 settle window would silently drop the only save
+    ///   of the whole drag. (Before the end-of-drag save existed, every
+    ///   mid-drag `windowDidResize` bypassed the gate on `inLiveResize`, so
+    ///   the suppression never had a chance to eat the user's resize; it does
+    ///   now.) A display change's relocation is bracketed as a live resize
+    ///   too, but starts with no button held, so it must NOT pass `true`.
     func saveCurrentFrame(knownUserDriven: Bool = false) {
         guard !controller.isPerformingShowWindow else { return }
         guard let win = controller.window else { return }
@@ -124,7 +141,29 @@ final class WindowFramePersistence {
             pointerInWindowFrame: win.frame.contains(NSEvent.mouseLocation),
             inLiveResize: win.inLiveResize
         )
-        guard userDriven || Date() >= suppressSavesUntil else { return }
+        if userDriven {
+            persist(win)
+        } else if Date() >= suppressSavesUntil {
+            scheduleDeferredSave()
+        }
+    }
+
+    /// Debounced: each non-user-driven change restarts the quiet period, and
+    /// the frame written is whatever the window has when it ends.
+    private func scheduleDeferredSave() {
+        pendingDeferredSave?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.commitDeferredSave() }
+        pendingDeferredSave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.deferredSaveDelay, execute: work)
+    }
+
+    private func commitDeferredSave() {
+        pendingDeferredSave = nil
+        guard let win = controller.window, Date() >= suppressSavesUntil else { return }
+        persist(win)
+    }
+
+    private func persist(_ win: NSWindow) {
         guard !win.styleMask.contains(.fullScreen), Date() >= fullScreenEntrySuppressedUntil else { return }
         win.saveFrame(usingName: MainWindowController.frameAutosaveName)
     }
