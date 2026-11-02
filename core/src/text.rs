@@ -157,6 +157,15 @@ pub(crate) fn extract_text_range(
         joined.reserve(col_hi.saturating_sub(col_lo) + 1);
         let mut c = col_lo;
         let mut tab_mode = false;
+        // A span that begins on the right half of a wide glyph (the
+        // trailing spacer) still selects that glyph: back up onto the
+        // leading cell so the skip below doesn't drop it. The end side
+        // needs no such step — a leading cell at `col_hi` already emits.
+        // Only WIDE_CHAR_SPACER: LEADING_WIDE_CHAR_SPACER pads the row's
+        // end and its glyph is on the next row.
+        if c > 0 && row[Column(c)].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            c -= 1;
+        }
         while c <= col_hi {
             let cell = &row[Column(c)];
             // HT stores '\t' in the first cell of its span only and leaves

@@ -233,6 +233,7 @@
 		C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E03399349EE1327FBF8F2F /* Selection.swift */; };
 		C3F2AEC2D293A850F2662F96 /* PromptNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DF31065DC87C48754C4E77E /* PromptNavigator.swift */; };
 		C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */; };
+		C52EC2BDD4C00C4EE06E3562 /* WideGlyphSelectionStartBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4D34704307A82D9EC41596A /* WideGlyphSelectionStartBlindTests.swift */; };
 		C7958A8D3B119E9A37DC7C46 /* CellInstanceLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3064BAFAEEFDB859D8B347F7 /* CellInstanceLayoutTests.swift */; };
 		C8B3ED498D7312A59DE79590 /* TerminalClickSequenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6F462CA0DFC5B38309849C5 /* TerminalClickSequenceTests.swift */; };
 		C947D1F4C754046130B5F56E /* BBTermAdversarialTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79802E11417943B26ABEF4EB /* BBTermAdversarialTests.swift */; };
@@ -525,6 +526,7 @@
 		B1B68195F4161FCEE7A5FB56 /* GlyphAtlasStorageModeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasStorageModeBlindTests.swift; sourceTree = "<group>"; };
 		B25AD58FD2D39C0CF6E82596 /* TabMover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabMover.swift; sourceTree = "<group>"; };
 		B43FD3E696C6005A351C28AF /* SparkleResilienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SparkleResilienceTests.swift; sourceTree = "<group>"; };
+		B4D34704307A82D9EC41596A /* WideGlyphSelectionStartBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WideGlyphSelectionStartBlindTests.swift; sourceTree = "<group>"; };
 		B732AEAD58208C71939BC364 /* BellController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BellController.swift; sourceTree = "<group>"; };
 		B7C7383C0FC6CFF6EA023A47 /* WheelScrollAccumulatorBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WheelScrollAccumulatorBlindTests.swift; sourceTree = "<group>"; };
 		B82D97D61C29250CAA33BDD7 /* SettingsViewLayoutBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewLayoutBlindTests.swift; sourceTree = "<group>"; };
@@ -843,6 +845,7 @@
 				02A66A954FBE1F74FCE73E3F /* URLDetectorRowSubsetBlindTests.swift */,
 				7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */,
 				B7C7383C0FC6CFF6EA023A47 /* WheelScrollAccumulatorBlindTests.swift */,
+				B4D34704307A82D9EC41596A /* WideGlyphSelectionStartBlindTests.swift */,
 				D08926B4D6B1B24BEF14789E /* WindowFrameAutosaveTests.swift */,
 				C4F09C8D4B7B5D585744F5FB /* WindowMultiDisplayNudgeTests.swift */,
 				4B4CECF4880D654BD5CB5BB7 /* WindowOffscreenNudgeTests.swift */,
@@ -1475,6 +1478,7 @@
 				7ACE07558D328D4B0273A975 /* URLDetectorTests.swift in Sources */,
 				1E00E8DABE62B3E809E46702 /* UnseenAttentionBlindTests.swift in Sources */,
 				B9724DA35FE6AD7448AF1FB5 /* WheelScrollAccumulatorBlindTests.swift in Sources */,
+				C52EC2BDD4C00C4EE06E3562 /* WideGlyphSelectionStartBlindTests.swift in Sources */,
 				3ED09BF6E5A9F1B6CCDE8F85 /* WindowFrameAutosaveTests.swift in Sources */,
 				8ACE6DACD35126E9599C3D8B /* WindowMultiDisplayNudgeTests.swift in Sources */,
 				7AD80C7208B9CEDB09EDF9CB /* WindowOffscreenNudgeTests.swift in Sources */,
