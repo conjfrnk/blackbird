@@ -22,6 +22,7 @@
 		0B6D85142353CF96BD4391D9 /* MetalDrawableCountSourcePinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F89FAA17C3055BBE6D0556C1 /* MetalDrawableCountSourcePinTests.swift */; };
 		0E28747FF245ACA6DA71B716 /* MonospaceFontFamiliesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A14ACDB4E0E64E61FFD4773 /* MonospaceFontFamiliesTests.swift */; };
 		10ED4F0567A44DC417CF66AD /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = D1D6B11109581801C6072917 /* AppIcon.icns */; };
+		11A85BB1B88C97F27058B66F /* KittyTerminfoDeletionBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70085016F53D542CFD455D7F /* KittyTerminfoDeletionBlindTests.swift */; };
 		12AB88537876EBE9AA30AE45 /* MainThreadWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C81B55889FCFFCA2A3AF0708 /* MainThreadWatchdogTests.swift */; };
 		136F1669EF1569E1A35DA717 /* PreferencesShellIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E46FD735F05D644F0D1CE /* PreferencesShellIntegrationTests.swift */; };
 		152B7079067935F309BF9246 /* IMEPreeditDismissKeyLeakBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17599E31B2021814E1A09BFA /* IMEPreeditDismissKeyLeakBlindTests.swift */; };
@@ -448,6 +449,7 @@
 		6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+Dragging.swift"; sourceTree = "<group>"; };
 		6DE46FF3DDF1528F3EC9D9AA /* TerminalViewResizeMathTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewResizeMathTests.swift; sourceTree = "<group>"; };
 		6EA5A9A40E642096A6A99805 /* FindCaptureRowsBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindCaptureRowsBlindTests.swift; sourceTree = "<group>"; };
+		70085016F53D542CFD455D7F /* KittyTerminfoDeletionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyTerminfoDeletionBlindTests.swift; sourceTree = "<group>"; };
 		700C66494AF64A4D3E560B29 /* FindCycleSurvivesSnapshotSwapBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindCycleSurvivesSnapshotSwapBlindTests.swift; sourceTree = "<group>"; };
 		71B97CA3B5FEE2E46183763E /* WindowResizeControllerBoundingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowResizeControllerBoundingTests.swift; sourceTree = "<group>"; };
 		720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderExtendedTests.swift; sourceTree = "<group>"; };
@@ -755,6 +757,7 @@
 				68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */,
 				8CB767EEE215AE9308F8984F /* KittyFlag1CtrlOptionBlindTests.swift */,
 				CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */,
+				70085016F53D542CFD455D7F /* KittyTerminfoDeletionBlindTests.swift */,
 				9B99D2970157272D6841E2F5 /* LatencyHarnessTests.swift */,
 				4C1918604B5A7FA5FF34818C /* LatencyProbeTests.swift */,
 				EE61D946FE9C29CBBD1BCDD2 /* LinkClickUnderMouseReportingBlindTests.swift */,
@@ -1393,6 +1396,7 @@
 				20E0EC839350531D064FD050 /* KeychainCouplingTests.swift in Sources */,
 				B4BB53B751F68CE9E03F70B7 /* KittyFlag1CtrlOptionBlindTests.swift in Sources */,
 				FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */,
+				11A85BB1B88C97F27058B66F /* KittyTerminfoDeletionBlindTests.swift in Sources */,
 				D99C39D366CE2D06BF4082EB /* LatencyHarnessTests.swift in Sources */,
 				02007B68AC1EAE3435AF574C /* LatencyProbeTests.swift in Sources */,
 				99BAB7D360EB5354FC267CD5 /* LinkClickUnderMouseReportingBlindTests.swift in Sources */,

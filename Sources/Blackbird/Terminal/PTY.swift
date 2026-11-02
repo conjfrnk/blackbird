@@ -385,8 +385,10 @@ public final class PTY {
         initialWorkingDirectory: String?
     ) throws -> SpawnContext {
         // Resolve TERM before fork. `KittyTerminfo.available` is evaluated
-        // once per process so this is cheap on subsequent spawns.
-        let termValue = KittyTerminfo.available ? "xterm-kitty" : "xterm-256color"
+        // once per process; `availableForSpawn` adds one stat per spawn so a
+        // `~/.terminfo` deleted mid-session is re-provisioned (or falls back)
+        // instead of handing new tabs an unresolvable TERM.
+        let termValue = KittyTerminfo.availableForSpawn() ? "xterm-kitty" : "xterm-256color"
         // Read the bundle version BEFORE fork — after fork we're in a
         // post-fork-pre-exec no-man's-land where complex Foundation calls
         // aren't async-signal-safe. setenv / getenv / chdir are fine.

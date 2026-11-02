@@ -4,7 +4,7 @@ import os
 /// kitty terminfo provisioning — lifted out of `PTY` because installing an
 /// ncurses terminfo entry (shelling out to `/usr/bin/tic` + `/usr/bin/infocmp`)
 /// is not a PTY's job and needs no PTY instance. `PTY.spawn` consults
-/// `KittyTerminfo.available` to decide the child's `TERM`.
+/// `KittyTerminfo.availableForSpawn()` to decide the child's `TERM`.
 ///
 /// Whether `xterm-kitty` is reachable via ncurses terminfo lookup is computed
 /// once per process: we try to install the bundled kitty terminfo to
@@ -19,11 +19,58 @@ enum KittyTerminfo {
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "pty")
 
-    /// Whether `xterm-kitty` is currently reachable via ncurses terminfo
-    /// lookup. Computed once per process (Swift `static let` → `swift_once`).
+    /// Whether `xterm-kitty` was reachable via ncurses terminfo lookup when
+    /// this process first resolved it. A once-per-process, launch-time latch
+    /// (Swift `static let` → `swift_once`): it does NOT track later changes to
+    /// `~/.terminfo`. The per-spawn `TERM` decision is `availableForSpawn()`.
     static let available: Bool = installIfNeeded()
 
-    /// Install the bundled kitty terminfo to `~/.terminfo/x/xterm-kitty`.
+    /// The user terminfo directory `tic -o` installs into. Single source of
+    /// truth for both the install target and the per-spawn existence check.
+    private static var terminfoDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".terminfo", isDirectory: true)
+    }
+
+    /// Serializes the mid-session re-install in `availableForSpawn` so two
+    /// racing spawns never run `tic` against the same target at once.
+    private static let reinstallLock = NSLock()
+
+    /// The `TERM` decision for THIS spawn. `available` is resolved once per
+    /// process, but the entry it vouches for lives in `~/.terminfo`, which
+    /// looks like disposable dotfile data (cleanup, dotfile sync/restore). If
+    /// it vanishes mid-session the macOS system terminfo has no `xterm-kitty`
+    /// to fall back on, so every later tab gets a `TERM` that `tput`, `clear`,
+    /// `less` and curses TUIs all reject with "unknown terminal". Re-stat the
+    /// entry per spawn (one stat on the common path); on a miss re-run the
+    /// install and trust its result, so a failed heal falls back to
+    /// `xterm-256color` for that spawn and is retried on the next. Never
+    /// upgrades a false `available` — the L1 gate stays authoritative. Same
+    /// shape as `ShellIntegration.currentRoot()`.
+    static func availableForSpawn() -> Bool {
+        guard available else { return false }
+        if installedEntryExists() { return true }
+        reinstallLock.lock()
+        defer { reinstallLock.unlock() }
+        // A racing spawn may have re-provisioned while we waited.
+        if installedEntryExists() { return true }
+        logger.error("KittyTerminfo: xterm-kitty entry missing at spawn (deleted mid-session?) — re-installing")
+        let healed = installIfNeeded()
+        logger.error("KittyTerminfo: mid-session re-install \(healed ? "succeeded" : "failed — falling back to xterm-256color for this spawn", privacy: .public)")
+        return healed
+    }
+
+    /// True when `tic`'s output file for `xterm-kitty` is on disk. macOS
+    /// ncurses reads ONLY the hex bucket `78/` (tic's first-letter bucket,
+    /// written as hex on this platform) — a plain `x/xterm-kitty` (e.g. from a
+    /// Linux dotfiles restore) is invisible to it, so it must not count.
+    private static func installedEntryExists() -> Bool {
+        FileManager.default.fileExists(
+            atPath: terminfoDirectory.appendingPathComponent("78/xterm-kitty").path)
+    }
+
+    /// Install the bundled kitty terminfo to `~/.terminfo/78/xterm-kitty`
+    /// (the hex bucket macOS ncurses reads).
     /// Runs *every* launch — an opportunistic `tic -x` overwrites the
     /// target, which is what we want: the bundled source is authoritative.
     /// If an attacker pre-planted a malicious `xterm-kitty` entry (with a
@@ -41,9 +88,8 @@ enum KittyTerminfo {
         else {
             return false
         }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dst = home.appendingPathComponent(".terminfo")
-        // tic with -o writes <dst>/x/xterm-kitty. The directory is created
+        let dst = terminfoDirectory
+        // tic with -o writes <dst>/78/xterm-kitty. The directory is created
         // for us. Swallow stderr — this is opportunistic; any failure just
         // means we fall back to xterm-256color.
         let task = Process()
@@ -57,6 +103,7 @@ enum KittyTerminfo {
             task.waitUntilExit()
             ticStatus = task.terminationStatus
         } catch {
+            logger.error("KittyTerminfo.installIfNeeded: tic failed to launch: \(String(describing: error), privacy: .public)")
             return false
         }
         return decideAvailability(
