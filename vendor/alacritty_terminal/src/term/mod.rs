@@ -1476,7 +1476,25 @@ impl<T: EventListener> Handler for Term<T> {
             return;
         }
 
-        self.set_keyboard_mode(mode.into(), apply);
+        // Blackbird fix: upstream wrote only the live `self.mode` bits, so `CSI = flags u`
+        // was invisible to `CSI ? u` (which answers from the stack top) and was discarded by
+        // the next pop or alt-screen swap (both reload the live bits from the stack top). The
+        // kitty protocol says `=` edits the current top-of-stack entry. Apply it there, then
+        // mirror it into the live bits. An empty stack is the implicit all-zero base entry:
+        // materialise it only when `=` sets something, so `=5u` / `=0u` cycles never grow it.
+        let current = self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE);
+        let new_mode = match apply {
+            KeyboardModesApplyBehavior::Replace => mode,
+            KeyboardModesApplyBehavior::Union => current.union(mode),
+            KeyboardModesApplyBehavior::Difference => current.difference(mode),
+        };
+        match self.keyboard_mode_stack.last_mut() {
+            Some(top) => *top = new_mode,
+            None if !new_mode.is_empty() => self.keyboard_mode_stack.push(new_mode),
+            None => (),
+        }
+
+        self.set_keyboard_mode(new_mode.into(), KeyboardModesApplyBehavior::Replace);
     }
 
     #[inline]
