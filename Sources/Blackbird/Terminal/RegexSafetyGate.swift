@@ -105,20 +105,63 @@ enum RegexSafetyGate {
         // exponential blowup that the pre-fix gate let through because
         // `?` wasn't in the quantCount tally. Treat `?` the same as
         // `+`/`*`/`{`: 6 of them combined is the cap.
-        var quantCount = 0
-        var i = pattern.startIndex
-        while i < pattern.endIndex {
-            let c = pattern[i]
-            if c == "+" || c == "*" || c == "?" {
-                quantCount += 1
-            } else if c == "{" {
+        if repetitionFacts(pattern).quantifiers > 6 { return false }
+        return true
+    }
+
+    /// Worst-case steps ICU may spend in ONE row before the scan must be able
+    /// to interrupt it (~5-25 ms at 40-200 M steps/s).
+    private static let uninterruptibleStepBudget = 1_000_000.0
+
+    /// The longest row (UTF-16 units) the scan may match WITHOUT asking ICU for
+    /// progress callbacks; a longer row needs them so the deadline can stop a
+    /// match already in progress. 0 means every row, `Int.max` means none.
+    ///
+    /// The callbacks make ICU visit every start position through a block, which
+    /// costs ~65% on an ordinary scan, so a scan pays for them only on rows
+    /// where the pattern could run long. Backtracking is exponential with a
+    /// repeated group (`(a|aa){40}`, `(.*)+`) or a back-reference (`(.*)\1`):
+    /// every row. Otherwise k repetition operators cost at most about
+    /// n^(k+1)/(k+1)! steps on an n-unit row (`.*.*.*.*.*x` on 100 columns is
+    /// 10+ s, but on 25 columns it is milliseconds), so a row stays plain
+    /// until that bound passes the budget: an ordinary `\d+\.\d+` or
+    /// `https?://\S+` never pays on a terminal row.
+    static func uninterruptibleRowLimit(for pattern: String) -> Int {
+        let facts = repetitionFacts(pattern)
+        if facts.repeatsGroupOrBackReference || facts.quantifiers > 8 { return 0 }
+        if facts.quantifiers == 0 { return Int.max }
+        var factorial = 1.0
+        for factor in 2...(facts.quantifiers + 1) { factorial *= Double(factor) }
+        let limit = pow(uninterruptibleStepBudget * factorial, 1 / Double(facts.quantifiers + 1))
+        return limit >= Double(Int.max) ? Int.max : Int(limit)
+    }
+
+    /// What the two checks above need from `pattern`: the tally of `+`, `*`,
+    /// `?` and `{`, and whether a group is repeated (`)` then `+`, `*` or `{`)
+    /// or a back-reference (`\1`-`\9`, `\k<name>`) is present. Counts escaped
+    /// metacharacters and bracket-class members too, which only ever errs
+    /// toward "more quantifiers". Walks UTF-8, not `Character`s: a quantifier
+    /// followed by a combining mark is one grapheme and would not be counted.
+    private static func repetitionFacts(_ pattern: String) -> (quantifiers: Int, repeatsGroupOrBackReference: Bool) {
+        var quantifiers = 0
+        var repeatsGroupOrBackReference = false
+        var previous: UInt8 = 0
+        for byte in pattern.utf8 {
+            switch byte {
+            case UInt8(ascii: "+"), UInt8(ascii: "*"), UInt8(ascii: "{"):
                 // Treat any `{` as a possible quantifier; we don't
                 // bother parsing `{n,m}` precisely.
-                quantCount += 1
+                quantifiers += 1
+                if previous == UInt8(ascii: ")") { repeatsGroupOrBackReference = true }
+            case UInt8(ascii: "?"):
+                quantifiers += 1
+            case UInt8(ascii: "1")...UInt8(ascii: "9"), UInt8(ascii: "k"):
+                if previous == UInt8(ascii: "\\") { repeatsGroupOrBackReference = true }
+            default:
+                break
             }
-            i = pattern.index(after: i)
+            previous = byte
         }
-        if quantCount > 6 { return false }
-        return true
+        return (quantifiers, repeatsGroupOrBackReference)
     }
 }

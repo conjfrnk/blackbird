@@ -81,13 +81,28 @@ final class FindController {
     /// Track that a find-refresh is pending so concurrent snapshot bursts
     /// collapse to one main-queue dispatch.
     private var findRefreshPending: Bool = false
-    /// The regex query whose last scan hit the 250 ms deadline. The
-    /// snapshot-driven refresh skips it: re-running a query that just blew its
-    /// deadline on every streamed snapshot would burn up to a deadline's worth
-    /// of CPU per refresh for a result that times out again. Cleared by any
-    /// `performSearch` (a typed query, an option toggle and ⌘G all re-scan) and
-    /// by a scan that publishes.
-    private var regexTimedOutQuery: String?
+    /// A regex query whose scan hit the 250 ms deadline, and the schedule for
+    /// trying it again. Re-running it on every streamed snapshot would burn up
+    /// to a deadline's worth of CPU per refresh for a result that may time out
+    /// again, but a miss is as likely the buffer or the machine at that instant
+    /// as the query, so it is retried, at a growing interval, rather than
+    /// given up on.
+    private struct RegexTimeout {
+        let query: String
+        /// When the current run of consecutive misses began. The wait before
+        /// the next retry is as long as the query has been failing, so it
+        /// doubles with every failed retry.
+        let since: DispatchTime
+        /// The snapshot-driven refresh leaves the query alone until here. A
+        /// retry pushes it past its own deadline so the refreshes that output
+        /// triggers meanwhile don't start overlapping scans of it.
+        var retryAt: DispatchTime
+        /// The banner and selection wipe already ran for this run of misses, so
+        /// a silent retry doesn't repeat them.
+        var announced = false
+    }
+    private var regexTimedOut: RegexTimeout?
+    private static let regexRetryDelayRange: ClosedRange<TimeInterval> = 2.0...60.0
 
     // MARK: - State mutation
 
@@ -181,9 +196,17 @@ final class FindController {
             // Query could have been cleared by the time the dispatch fires
             // (FindBar closed, user cleared the field). Early-return then.
             guard !self.findQuery.isEmpty, self.findBar != nil else { return }
-            // Matches stay at the timeout's "0/0" until the user edits the
-            // query / options or presses ⌘G.
-            guard self.regexTimedOutQuery != self.findQuery else { return }
+            // A query that timed out is left alone until its retry is due
+            // (`armRegexRetry` schedules a refresh for that moment, so nothing
+            // is lost by dropping the ones in between). The retry holds the
+            // refresh off for its own length, so output meanwhile can't start
+            // scans that overlap it.
+            if var timedOut = self.regexTimedOut, timedOut.query == self.findQuery {
+                let now = DispatchTime.now()
+                guard timedOut.retryAt <= now else { return }
+                timedOut.retryAt = now + Self.regexSearchTimeout + Self.refreshCoalesceInterval
+                self.regexTimedOut = timedOut
+            }
             self.performSearch(query: self.findQuery, preservingPosition: true)
         }
     }
@@ -533,7 +556,12 @@ final class FindController {
     /// second match and yanked the view back after every scroll step.
     func performSearch(query: String, preservingPosition: Bool = false) {
         findQuery = query
-        regexTimedOutQuery = nil
+        // A timed-out query stays marked across the rescans that retry it (the
+        // mark carries the backoff); anything else ends the run of misses.
+        if !preservingPosition || regexTimedOut?.query != query { regexTimedOut = nil }
+        // A retry of a timed-out query leaves the label alone: flipping it to
+        // "No matches" on every retry would announce it to VoiceOver each time.
+        let retryingTimedOut = regexTimedOut != nil
         // A fresh search supersedes any ⌘G that was deferred behind an
         // in-flight regex rescan (advanceFind re-sets this AFTER calling us,
         // so its own deferral survives; a user-typed query correctly drops it).
@@ -611,7 +639,7 @@ final class FindController {
             // runs. The async result will overwrite this if matches are
             // found, or the timeout will replace it with a "too complex"
             // banner if the scan exceeds 250 ms.
-            findBar?.setMatchCount(0, of: 0)
+            if !retryingTimedOut { findBar?.setMatchCount(0, of: 0) }
             pendingRegexAdvance = carriedAdvance
             // Only a user-driven scan owes the reveal; a preserving scan that
             // takes over from one inherits the flag it already left set.
@@ -800,8 +828,8 @@ final class FindController {
     /// Hard timeout for an async regex scan. Past this the worker is cancelled
     /// and a "too complex" banner shown. Cancellation is cooperative but also
     /// reaches into a single row's match (`scanRegexRows` asks for progress
-    /// callbacks), so a polynomial-blowup row stops with the deadline instead
-    /// of pinning a core until it finishes.
+    /// callbacks on rows where the pattern can blow up), so a polynomial-blowup
+    /// row stops with the deadline instead of pinning a core until it finishes.
     private static let regexSearchTimeout: TimeInterval = 0.25
 
     /// Runs the regex scan on a background queue with a hard 250 ms
@@ -916,19 +944,24 @@ final class FindController {
     ) -> [(line: Int32, startCol: Int, endCol: Int)] {
         var matches: [(line: Int32, startCol: Int, endCol: Int)] = []
         var callbacks = 0
+        // `.reportProgress` is the only way to interrupt a match already in
+        // progress: without it one polynomial-blowup row (`.*.*.*.*.*x` on an
+        // 80-column line) runs for tens of seconds after the deadline, an
+        // orphaned worker pinning a core. It makes ICU call the block with a
+        // nil result (skipped by the guard below) at every start position,
+        // which taxes a scan by ~65%, so a row asks for it only when the
+        // pattern could run long on a row that wide. The flag read takes a
+        // lock, so poll every 256th call.
+        let plainRowLimit = RegexSafetyGate.uninterruptibleRowLimit(for: regex.pattern)
         for row in rows {
             if cancelFlag.value { break }
             let rebaseCols = row.utf16ToCol == nil ? 0 : cols
             let ns = row.hay as NSString
-            // `.reportProgress` is the only way to interrupt a match already
-            // in progress: without it one polynomial-blowup row (`.*.*.*.*.*x`
-            // on an 80-column line) runs for tens of seconds after the
-            // deadline, an orphaned worker pinning a core. It makes ICU call
-            // the block mid-match with a nil result (skipped by the guard
-            // below). The flag read takes a lock, so poll every 256th call.
+            let matchingOptions: NSRegularExpression.MatchingOptions =
+                ns.length > plainRowLimit ? [.reportProgress] : []
             regex.enumerateMatches(
                 in: row.hay,
-                options: [.reportProgress],
+                options: matchingOptions,
                 range: NSRange(location: 0, length: ns.length)
             ) { result, _, stop in
                 callbacks &+= 1
@@ -991,7 +1024,7 @@ final class FindController {
         guard activeRegexSearchID == mySearchID,
               isRegexScanStillWanted(query: query) else { return }
         regexSearchCompletedID = mySearchID
-        regexTimedOutQuery = nil
+        regexTimedOut = nil
         findMatches = matches
         findMatchesSeq = scanSeq
         // A deferred ⌘G or a user-started search is a user action, so it
@@ -1024,15 +1057,19 @@ final class FindController {
     /// `regexSearchCompletedID == mySearchID` means it fully landed.
     /// A scan still running at the deadline (even a superseded one, which the
     /// banner guard below ignores) marks its query timed out so streamed
-    /// snapshots stop restarting it; a newer scan having already published
-    /// means the query works now, so the mark is skipped.
+    /// snapshots stop restarting it until the retry is due; a newer scan
+    /// having already published means the query works now, so the mark is
+    /// skipped. The banner and the selection wipe belong to a scan someone is
+    /// waiting on (a typed query, an option toggle, ⌘G) or the first miss of a
+    /// query; a retry the output triggered fails silently, instead of wiping
+    /// what the user has selected every time it comes round.
     private func handleRegexTimeout(
         searchID mySearchID: UInt64, query: String, scanFinished: AtomicFlag
     ) {
         if regexSearchCompletedID == mySearchID { return }
         if !scanFinished.value, regexSearchCompletedID < mySearchID,
            isRegexScanStillWanted(query: query) {
-            regexTimedOutQuery = query
+            armRegexRetry(query: query)
         }
         // An abandoned scan (bar closed, query edited / cleared, regex off)
         // must not show a banner or wipe the selection — F30 preserves it.
@@ -1043,11 +1080,36 @@ final class FindController {
         // stranded and can't fire a surprising delayed jump if a later re-run
         // publishes. Mirrors the success path's consume-and-clear.
         // (review: silent-failure-hunter)
+        let userWaiting = pendingRegexAdvance != nil || regexRevealOwed
         pendingRegexAdvance = nil
         regexRevealOwed = false
+        guard userWaiting || regexTimedOut?.announced != true else { return }
+        regexTimedOut?.announced = true
         findBar?.setMatchCount(0, of: 0)
         findBar?.showTransientMessage("Regex too complex")
         view.selection = nil
+    }
+
+    /// Mark `query` timed out and schedule its retry, for the interval it has
+    /// been failing (2 s the first time, then doubling to a minute). A report
+    /// from a scan the refresh superseded lands in the same run of misses and
+    /// only moves the retry a little later. The timer re-arms the refresh
+    /// itself, so a burst of output that ends inside the interval still gets
+    /// its retry, and a refresh that finds the retry not yet due can just drop.
+    private func armRegexRetry(query: String) {
+        let now = DispatchTime.now()
+        let prior = regexTimedOut?.query == query ? regexTimedOut : nil
+        let since = prior?.since ?? now
+        let failingFor = TimeInterval(now.uptimeNanoseconds - since.uptimeNanoseconds) / 1e9
+        let delay = min(max(failingFor, Self.regexRetryDelayRange.lowerBound), Self.regexRetryDelayRange.upperBound)
+        let retryAt = now + delay
+        regexTimedOut = RegexTimeout(
+            query: query, since: since, retryAt: retryAt, announced: prior?.announced ?? false
+        )
+        DispatchQueue.main.asyncAfter(deadline: retryAt) { [weak self] in
+            guard let self, self.regexTimedOut?.query == query else { return }
+            self.scheduleFindRefresh()
+        }
     }
 
     /// Heap-allocated cancellation token between the regex worker and
