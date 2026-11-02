@@ -30,8 +30,9 @@
 //! title-bar proxy icon never appears, and new-tab cwd inheritance via
 //! OSC 7 is dead for fish and for the Apple-provided snippet.
 //!
-//! The machine's own name is read with `gethostname(3)` (the same call the
-//! shells make), so the tests are meaningful on any machine / CI runner.
+//! The machine's own name is what `gethostname(3)` returns (the same call the
+//! shells make); the binary replaces it with a fixed name so the tests do not
+//! depend on the machine / CI runner they run on.
 //!
 //! Cost: each `drive()` creates one 80x24 terminal (1 920 cells), feeds a
 //! few short escape sequences and frees it. Microseconds, a few tens of KiB.
@@ -89,36 +90,31 @@ fn show(payloads: &[Vec<u8>]) -> Vec<String> {
 
 // ---------- this machine's name ------------------------------------
 
-unsafe extern "C" {
-    fn gethostname(name: *mut c_char, len: usize) -> c_int;
+/// The machine name every test here runs on. A CI runner's real hostname is
+/// arbitrary (it may be `localhost`, empty, or contain characters that are
+/// not URL-safe), so this binary REPLACES `gethostname(3)`: the
+/// `#[no_mangle]` function below is linked in front of libc's, and the core's
+/// own `gethostname` call sees exactly this name.
+const MACHINE_NAME: &str = "bb-own-host-test.local";
+
+/// POSIX `gethostname`: copies at most `len - 1` bytes plus a NUL.
+///
+/// # Safety
+/// `name` must point to at least `len` writable bytes, as for libc.
+#[no_mangle]
+pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
+    if name.is_null() || len == 0 {
+        return -1;
+    }
+    let n = MACHINE_NAME.len().min(len - 1);
+    std::ptr::copy_nonoverlapping(MACHINE_NAME.as_ptr(), name as *mut u8, n);
+    *name.add(n) = 0;
+    0
 }
 
 /// The machine's own hostname exactly as shells see it (`gethostname(3)`).
-/// Asserts the preconditions that keep the tests non-vacuous.
 fn own_hostname() -> String {
-    let mut buf = [0u8; 512];
-    let rc = unsafe { gethostname(buf.as_mut_ptr() as *mut c_char, buf.len()) };
-    assert_eq!(rc, 0, "gethostname(3) failed (rc={rc})");
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let name = String::from_utf8(buf[..end].to_vec()).expect("hostname is not UTF-8");
-
-    // Precondition: the hostname must be non-empty and must NOT be a name
-    // the core already accepts, otherwise "accepted" proves nothing.
-    assert!(!name.is_empty(), "gethostname() returned an empty string");
-    assert!(
-        !name.eq_ignore_ascii_case("localhost"),
-        "this machine's hostname is {name:?}; the own-hostname tests would be \
-         vacuous because `localhost` is already an accepted authority"
-    );
-    // Hostnames are RFC 952/1123 labels: no byte here needs percent-escaping
-    // inside a URL authority. If the box has an exotic name the test URL
-    // would be malformed for reasons unrelated to the bug.
-    assert!(
-        name.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_'),
-        "hostname {name:?} contains characters that are not URL-authority safe"
-    );
-    name
+    MACHINE_NAME.to_string()
 }
 
 fn expect_single_cwd(events: &[(u32, Vec<u8>)], what: &str) -> Vec<u8> {

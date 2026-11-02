@@ -2779,6 +2779,17 @@ fn osc7_own_hostname_matching() {
     assert_eq!(strip_own_hostname(b"euler%zz/tmp", own), None);
     // A failed gethostname() yields an empty local name, which matches nothing.
     assert_eq!(strip_own_hostname(b"euler/tmp", b""), None);
+    // The length pre-check must keep the tightest legitimate spelling: a
+    // one-byte name, its `.local` twin, every byte percent-escaped.
+    assert_eq!(strip_own_hostname(b"a.local/tmp", b"a"), Some(&b"/tmp"[..]));
+    assert_eq!(
+        strip_own_hostname(b"%61%2E%6C%6F%63%61%6C/tmp", b"a"),
+        Some(&b"/tmp"[..])
+    );
+    // An authority far longer than any escaping of the name is not it.
+    let mut long = vec![b'a'; 4000];
+    long.extend_from_slice(b"/tmp");
+    assert_eq!(strip_own_hostname(&long, b"euler"), None);
 }
 
 /// Cwd payloads from one `file://<authority>/tmp/x` OSC 7 fed to a fresh

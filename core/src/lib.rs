@@ -221,6 +221,12 @@ pub struct BBTerm {
     /// the shell's own copy goes stale when macOS renames the host. Never
     /// reset (a shell keeps its startup copy through ⌘K).
     pub(crate) startup_hostname: Vec<u8>,
+    /// Budget for the live `gethostname(3)` read OSC 7 makes when an
+    /// authority does not match `startup_hostname`. Separate from
+    /// `osc7_rate`, which rejected sequences must not consume (audit S4-001),
+    /// so a flood of foreign-host sequences still costs at most
+    /// `OSC7_INGEST_PER_SECOND` syscalls a second, not one each.
+    pub(crate) osc7_hostname_rate: EventRateState,
     /// Scanner-side one-shot reject-log latches (OSC 7 / OSC 133). See
     /// `OscLatches`; `bb_term_clear_all` leaves them alone.
     pub(crate) osc_latches: crate::osc::OscLatches,
@@ -435,6 +441,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             prompt_mark_rate: EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW),
             osc7_rate: EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW),
             startup_hostname: crate::osc::local_hostname(),
+            osc7_hostname_rate: EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW),
             osc_latches: crate::osc::OscLatches::default(),
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
@@ -1363,6 +1370,7 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         //      until app relaunch (the 1 MiB byte-cap stayed exhausted).
         bb.prompt_mark_rate = EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW);
         bb.osc7_rate = EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW);
+        bb.osc7_hostname_rate = EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW);
         bb.callback.pty_write_rate.reset();
         bb.callback.reset_event_rates();
 

@@ -35,6 +35,7 @@ macro_rules! osc_scanner {
             prompt_mark_rate: &mut $bb.prompt_mark_rate,
             osc7_rate: &mut $bb.osc7_rate,
             startup_hostname: &$bb.startup_hostname,
+            osc7_hostname_rate: &mut $bb.osc7_hostname_rate,
             terminal_version: &$bb.terminal_version,
         }
     };
@@ -86,6 +87,8 @@ pub(crate) struct OscScanner<'a> {
     /// right after it captured for `$hostname` / `$HOST` / `$HOSTNAME`.
     /// OSC 7 accepts it alongside the current name; see `local_hostname`.
     pub(crate) startup_hostname: &'a [u8],
+    /// Budget for OSC 7's live `gethostname(3)` read; see `BBTerm`.
+    pub(crate) osc7_hostname_rate: &'a mut EventRateState,
     /// App version string for XTVERSION replies (`bb_term_set_terminal_version`).
     pub(crate) terminal_version: &'a str,
 }
@@ -541,8 +544,10 @@ fn osc7_reject(latches: &mut [bool; 9], class: usize, name: &str) {
 /// This machine's `gethostname(3)` name (empty on failure).
 ///
 /// OSC 7 matches an authority against two reads of it: the snapshot
-/// `bb_term_new` stores in `BBTerm::startup_hostname`, and a live read per
-/// foreign-looking authority. A shell reads its own copy once at startup
+/// `bb_term_new` stores in `BBTerm::startup_hostname`, and a live read for an
+/// authority the snapshot does not match (budgeted by
+/// `BBTerm::osc7_hostname_rate`, so a flood of foreign hosts is not a syscall
+/// flood). A shell reads its own copy once at startup
 /// (fish `$hostname`, zsh `$HOST`, bash `$HOSTNAME`) and never refreshes
 /// it, while macOS renames the host at runtime (DHCP, VPN, mDNS conflict,
 /// `scutil --set HostName`). The snapshot, taken just before the shell is
@@ -587,10 +592,14 @@ pub(crate) fn strip_own_hostname<'a>(rest: &'a [u8], local: &[u8]) -> Option<&'a
     }
     let slash = rest.iter().position(|&b| b == b'/')?;
     let (authority, path) = rest.split_at(slash);
+    // Percent-escaping at most triples a byte, so an authority longer than
+    // that cannot be this machine; skip the decode (and its allocation) for
+    // the foreign-host flood, whose authority may run to the URL cap.
+    if local.is_empty() || authority.len() > (local.len() + b".local".len()) * 3 {
+        return None;
+    }
     let authority = percent_decode(authority)?;
-    if local.is_empty()
-        || !without_mdns_suffix(&authority).eq_ignore_ascii_case(without_mdns_suffix(local))
-    {
+    if !without_mdns_suffix(&authority).eq_ignore_ascii_case(without_mdns_suffix(local)) {
         return None;
     }
     Some(path)
@@ -802,9 +811,14 @@ impl OscScanner<'_> {
             strip_prefix_ascii_case_insensitive(rest, b"localhost").filter(|r| r.starts_with(b"/"))
         {
             r // "file://localhost/path" → "/path"
-        } else if let Some(r) = strip_own_hostname(rest, self.startup_hostname)
-            .or_else(|| strip_own_hostname(rest, &local_hostname()))
-        {
+        } else if let Some(r) = strip_own_hostname(rest, self.startup_hostname).or_else(|| {
+            // Rejects consume no `osc7_rate` slot (S4-001), so the live
+            // read has its own budget; past it the host is not verified.
+            if !self.osc7_hostname_rate.allow() {
+                return None;
+            }
+            strip_own_hostname(rest, &local_hostname())
+        }) {
             // "file://<this-machine>/path" → "/path". Checked after the
             // `localhost` form (which a machine named `localhost-foo` does
             // not satisfy: no `/` follows the prefix), snapshot first so
