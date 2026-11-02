@@ -11,6 +11,9 @@ import Foundation
 /// heuristics — but they knock out the textbook cases without false-positiving
 /// on ordinary find queries. The 250 ms background-execution timeout in the
 /// find engine is the real backstop; this is the cheap first line of defence.
+/// Polynomial blowups with no nested quantifier (`.*.*.*.*.*x`, five adjacent
+/// quantifiers) pass the gate on purpose: rejecting them would reject real
+/// queries, so the scan itself is interruptible mid-row instead.
 /// The length cap keeps the find field a "substring with options" UI, not a
 /// regex playground. Audit findbar-selection F2.
 enum RegexSafetyGate {

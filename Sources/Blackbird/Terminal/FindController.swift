@@ -22,7 +22,9 @@ import BBCore
 /// dangles for any reachable call. The async regex closures capture `[weak self]`
 /// (self = this controller) — a publish/timeout that lands after the view (hence
 /// this controller) is gone finds `self == nil` and returns before touching
-/// `view`, exactly as the old `[weak self]` (self = the view) did.
+/// `view`, exactly as the old `[weak self]` (self = the view) did. The one
+/// thing a late timeout still does without `self` is set the scan's
+/// `cancelFlag`, so a worker never outlives its deadline.
 final class FindController {
     unowned let view: TerminalView
 
@@ -79,6 +81,13 @@ final class FindController {
     /// Track that a find-refresh is pending so concurrent snapshot bursts
     /// collapse to one main-queue dispatch.
     private var findRefreshPending: Bool = false
+    /// The regex query whose last scan hit the 250 ms deadline. The
+    /// snapshot-driven refresh skips it: re-running a query that just blew its
+    /// deadline on every streamed snapshot would burn up to a deadline's worth
+    /// of CPU per refresh for a result that times out again. Cleared by any
+    /// `performSearch` (a typed query, an option toggle and ⌘G all re-scan) and
+    /// by a scan that publishes.
+    private var regexTimedOutQuery: String?
 
     // MARK: - State mutation
 
@@ -172,6 +181,9 @@ final class FindController {
             // Query could have been cleared by the time the dispatch fires
             // (FindBar closed, user cleared the field). Early-return then.
             guard !self.findQuery.isEmpty, self.findBar != nil else { return }
+            // Matches stay at the timeout's "0/0" until the user edits the
+            // query / options or presses ⌘G.
+            guard self.regexTimedOutQuery != self.findQuery else { return }
             self.performSearch(query: self.findQuery, preservingPosition: true)
         }
     }
@@ -521,6 +533,7 @@ final class FindController {
     /// second match and yanked the view back after every scroll step.
     func performSearch(query: String, preservingPosition: Bool = false) {
         findQuery = query
+        regexTimedOutQuery = nil
         // A fresh search supersedes any ⌘G that was deferred behind an
         // in-flight regex rescan (advanceFind re-sets this AFTER calling us,
         // so its own deferral survives; a user-typed query correctly drops it).
@@ -785,9 +798,10 @@ final class FindController {
     // MARK: - Async regex scan
 
     /// Hard timeout for an async regex scan. Past this the worker is cancelled
-    /// and a "too complex" banner shown. Cancellation is cooperative — a long
-    /// `enumerateMatches` on a single row still runs to completion, but it
-    /// can't block subsequent rows.
+    /// and a "too complex" banner shown. Cancellation is cooperative but also
+    /// reaches into a single row's match (`scanRegexRows` asks for progress
+    /// callbacks), so a polynomial-blowup row stops with the deadline instead
+    /// of pinning a core until it finishes.
     private static let regexSearchTimeout: TimeInterval = 0.25
 
     /// Runs the regex scan on a background queue with a hard 250 ms
@@ -797,12 +811,11 @@ final class FindController {
     /// dropped via a monotonic search ID.
     ///
     /// The heavy work here is `enumerateMatches` over each row's text;
-    /// observing the cancel flag inside the per-row loop lets the
-    /// timeout actually take effect mid-scan instead of waiting for the
-    /// regex engine to exhaust its backtracking budget on every row.
-    /// Worst-case latency on a single row is still bounded by
-    /// NSRegularExpression's own per-row work, but pre-gating with
-    /// `RegexSafetyGate` keeps that bounded in practice.
+    /// observing the cancel flag between rows and inside each row's match
+    /// lets the timeout actually take effect mid-scan instead of waiting for
+    /// the regex engine to exhaust its backtracking budget. The pre-gate
+    /// (`RegexSafetyGate`) can't catch every polynomial blowup
+    /// (`.*.*.*.*.*x`), so this is what bounds them.
     /// Audit findbar-selection F2.
     private func runRegexSearchAsync(
         regex: NSRegularExpression,
@@ -825,6 +838,10 @@ final class FindController {
         // (reads, off-main) can touch. Per-row checks are racy but harmless:
         // worst case we run one extra row.
         let cancelFlag = AtomicFlag()
+        // Set by the worker when `scanRegexRows` returns, so the timeout can
+        // tell a scan still running at the deadline from one that finished
+        // but was dropped (superseded before its publish).
+        let scanFinished = AtomicFlag()
 
         // Explicit `[weak self]` on the worker too: the nested main-queue
         // hop below re-captures `self` weakly, and Swift 6.4 warns when an
@@ -832,6 +849,7 @@ final class FindController {
         // closure. Nothing in the worker body needs `self`.
         let workItem = DispatchWorkItem { [weak self] in
             let matches = Self.scanRegexRows(rows, regex: regex, cols: cols, limit: limit, cancelFlag: cancelFlag)
+            scanFinished.value = true
             // If we were cancelled, the timeout already published its banner —
             // don't overwrite it with stale results.
             if cancelFlag.value { return }
@@ -846,8 +864,16 @@ final class FindController {
         DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.regexSearchTimeout) { [weak self] in
+            // The deadline owns the cancellation, not `self`: the worker holds
+            // no reference to the controller, so if the view (hence this
+            // controller) is gone by now, a cancel routed through `self` would
+            // never happen and the scan would run on to completion. Set the
+            // flag first; only the banner / timed-out mark need the controller.
+            // (A scan that already published has left its loop, so this is a
+            // no-op for it.)
+            cancelFlag.value = true
             guard let self else { return }
-            self.handleRegexTimeout(searchID: mySearchID, query: scanQuery, cancelFlag: cancelFlag)
+            self.handleRegexTimeout(searchID: mySearchID, query: scanQuery, scanFinished: scanFinished)
         }
     }
 
@@ -878,7 +904,7 @@ final class FindController {
     /// The off-main scan core: run `regex` over each captured row, mapping
     /// match offsets to grid columns (viewport rows via the cell-derived map,
     /// scrollback via the legacy approximation). Pure — no `self`, no shared
-    /// mutable state beyond the cooperative `cancelFlag` it polls per row — so
+    /// mutable state beyond the cooperative `cancelFlag` it polls — so
     /// it's safe on the worker queue and unit-testable in isolation. Stops at
     /// `limit` matches.
     private static func scanRegexRows(
@@ -889,15 +915,27 @@ final class FindController {
         cancelFlag: AtomicFlag
     ) -> [(line: Int32, startCol: Int, endCol: Int)] {
         var matches: [(line: Int32, startCol: Int, endCol: Int)] = []
+        var callbacks = 0
         for row in rows {
             if cancelFlag.value { break }
             let rebaseCols = row.utf16ToCol == nil ? 0 : cols
             let ns = row.hay as NSString
+            // `.reportProgress` is the only way to interrupt a match already
+            // in progress: without it one polynomial-blowup row (`.*.*.*.*.*x`
+            // on an 80-column line) runs for tens of seconds after the
+            // deadline, an orphaned worker pinning a core. It makes ICU call
+            // the block mid-match with a nil result (skipped by the guard
+            // below). The flag read takes a lock, so poll every 256th call.
             regex.enumerateMatches(
                 in: row.hay,
-                options: [],
+                options: [.reportProgress],
                 range: NSRange(location: 0, length: ns.length)
             ) { result, _, stop in
+                callbacks &+= 1
+                if callbacks & 0xFF == 0, cancelFlag.value {
+                    stop.pointee = true
+                    return
+                }
                 guard let r = result?.range, r.length > 0 else { return }
                 let startCol: Int
                 let endCol: Int
@@ -953,6 +991,7 @@ final class FindController {
         guard activeRegexSearchID == mySearchID,
               isRegexScanStillWanted(query: query) else { return }
         regexSearchCompletedID = mySearchID
+        regexTimedOutQuery = nil
         findMatches = matches
         findMatchesSeq = scanSeq
         // A deferred ⌘G or a user-started search is a user action, so it
@@ -976,15 +1015,25 @@ final class FindController {
         highlightCurrentMatch(scroll: scroll)
     }
 
-    /// Fired `regexSearchTimeout` after a scan starts. No-op if the scan
-    /// already published. Otherwise flip the cancel flag so the worker bails
-    /// promptly; then, if this is still the active search, consume any deferred
-    /// ⌘G so it can't fire a surprise delayed jump, and show the "too complex"
-    /// banner. Runs on main — serialised with the success-path publish, so
-    /// observing `regexSearchCompletedID == mySearchID` means it fully landed.
-    private func handleRegexTimeout(searchID mySearchID: UInt64, query: String, cancelFlag: AtomicFlag) {
+    /// Fired `regexSearchTimeout` after a scan starts (the caller has already
+    /// flipped the cancel flag, so the worker bails promptly even when this
+    /// controller is gone). No-op if the scan already published. Otherwise, if
+    /// this is still the active search, consume any deferred ⌘G so it can't
+    /// fire a surprise delayed jump, and show the "too complex" banner. Runs on
+    /// main — serialised with the success-path publish, so observing
+    /// `regexSearchCompletedID == mySearchID` means it fully landed.
+    /// A scan still running at the deadline (even a superseded one, which the
+    /// banner guard below ignores) marks its query timed out so streamed
+    /// snapshots stop restarting it; a newer scan having already published
+    /// means the query works now, so the mark is skipped.
+    private func handleRegexTimeout(
+        searchID mySearchID: UInt64, query: String, scanFinished: AtomicFlag
+    ) {
         if regexSearchCompletedID == mySearchID { return }
-        cancelFlag.value = true
+        if !scanFinished.value, regexSearchCompletedID < mySearchID,
+           isRegexScanStillWanted(query: query) {
+            regexTimedOutQuery = query
+        }
         // An abandoned scan (bar closed, query edited / cleared, regex off)
         // must not show a banner or wipe the selection — F30 preserves it.
         guard activeRegexSearchID == mySearchID,
