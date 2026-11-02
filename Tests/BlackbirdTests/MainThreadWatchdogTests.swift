@@ -23,12 +23,13 @@ import Foundation
 ///     without leaking heartbeat threads (the install latch deduplicates).
 final class MainThreadWatchdogTests: XCTestCase {
 
-    /// Where the watchdog writes hang reports for the whole xctest process.
+    /// Where the watchdog writes hang reports while this class runs.
     /// `install` is a one-shot latch, so the 50 ms threshold
-    /// `test_briefHang_*` arms stays armed for every later test in the host
-    /// and each >=50 ms main-thread stall would otherwise run sample(1) into,
-    /// and prune the oldest reports out of, the developer's real
-    /// `~/Library/Logs/Blackbird`. Redirected before any install.
+    /// `test_briefHang_*` arms would stay armed for every later test in the
+    /// host and each >=50 ms main-thread stall would otherwise run sample(1)
+    /// into, and prune the oldest reports out of, the developer's real
+    /// `~/Library/Logs/Blackbird`. Redirected before any install; the class
+    /// `tearDown` disarms the watchdog and undoes the redirect.
     static let scratchLogDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         .appendingPathComponent("blackbird-watchdog-tests-\(getpid())", isDirectory: true)
 
@@ -39,8 +40,13 @@ final class MainThreadWatchdogTests: XCTestCase {
     }
 
     override class func tearDown() {
-        // The armed watchdog outlives this class; a later capture recreates
-        // the directory on demand (`HangReportStore.logDirectory`).
+        // Order matters. Disarm first, so no new capture can start; an
+        // in-flight sample(1) already resolved its directory and can't reach
+        // the real one. Then un-set the redirect, so nothing later can fall
+        // through to the real log directory; remove the directory last, so
+        // nothing can recreate it.
+        MainThreadWatchdog._disarmForTesting()
+        HangReportStore.logDirectoryOverride.withLock { $0 = nil }
         try? FileManager.default.removeItem(at: scratchLogDirectory)
         super.tearDown()
     }
@@ -172,8 +178,10 @@ final class MainThreadWatchdogTests: XCTestCase {
     /// Pre-flight: filesystem touch. Memory: ~0. Time: <50 ms (one `mkdir`
     /// at most). No `sample(1)` spawn (we don't induce a hang).
     ///
-    /// On a successful install, the watchdog ensures `~/Library/Logs/
-    /// Blackbird/` exists so its later `sample(1)` capture has somewhere
+    /// On a successful install, the watchdog ensures its log directory
+    /// (this class's scratch directory, which `setUp` redirects
+    /// `HangReportStore` to — a test never touches the developer's real one)
+    /// exists so its later `sample(1)` capture has somewhere
     /// to land. Even without inducing a hang, calling `install` should
     /// be sufficient to materialise the directory (or it should be lazy
     /// — created at first capture). We pin the WEAKER invariant: after
@@ -183,14 +191,8 @@ final class MainThreadWatchdogTests: XCTestCase {
     func test_install_logDirectoryReachable() throws {
         MainThreadWatchdog.install(hangThreshold: 60.0, pingInterval: 1.0)
 
-        // Compute the canonical log path. `~/Library/Logs/Blackbird/` is
-        // documented in F-S6-015 as the capture sink.
         let fm = FileManager.default
-        let libraryURLs = fm.urls(for: .libraryDirectory, in: .userDomainMask)
-        guard let library = libraryURLs.first else {
-            return XCTFail("user library directory unavailable in test host")
-        }
-        let logDir = library.appendingPathComponent("Logs/Blackbird", isDirectory: true)
+        let logDir = Self.scratchLogDirectory
 
         // Eager-create check: if the watchdog created it, this passes.
         // Lazy-create check: if it didn't, we attempt creation ourselves

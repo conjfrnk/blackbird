@@ -15,10 +15,11 @@ enum HangReportStore {
     /// Test seam: when set, `captureHangReport`, `pruneOrphanPartials()` and
     /// `pruneExcessReports(keep:)` use this directory instead of
     /// `~/Library/Logs/Blackbird`. `MainThreadWatchdog.install` is a one-shot
-    /// process-wide latch, so a test that arms it at 50 ms leaves it armed for
-    /// every later test in the xctest host; without this, each later stall
-    /// would sample(1) into the developer's real log directory and prune their
-    /// oldest real field reports. Locked because the watchdog thread reads it.
+    /// process-wide latch, so a test that arms it at 50 ms leaves it armed
+    /// until it calls `MainThreadWatchdog._disarmForTesting()`; without this,
+    /// each stall in the meantime would sample(1) into the developer's real
+    /// log directory and prune their oldest real field reports. Un-set it only
+    /// after disarming. Locked because the watchdog thread reads it.
     static let logDirectoryOverride = OSAllocatedUnfairLock<String?>(initialState: nil)
     #endif
 
@@ -33,11 +34,15 @@ enum HangReportStore {
     /// convention (Console.app reads this location automatically),
     /// survives reboots so post-hoc investigation works, and doesn't
     /// race with `/tmp` cleaners on very long sessions.
-    static func captureHangReport(age: Double) {
+    ///
+    /// `directory` is resolved by the caller (`logDirectory()`) so the watchdog
+    /// can make "not disarmed" and "which directory" one atomic decision; the
+    /// prune below trims that same directory.
+    static func captureHangReport(age: Double, directory dir: String) {
         // Keep the count cap honest between launches too: a session with
         // periodic stalls would otherwise grow the directory until the next
         // start.
-        defer { pruneExcessReports(keep: 20) }
+        defer { pruneExcessReports(in: dir, keep: 20) }
         // Audit fix-#21 (2026-05-11): the previous filename used 1-second
         // granularity (`Int(timeIntervalSince1970)`). Two hangs that recover
         // and re-stall within the same wall-clock second produce identical
@@ -49,7 +54,6 @@ enum HangReportStore {
         let tsMs = Int64(now * 1000.0)
         let unique = String(UUID().uuidString.prefix(8))
         let pid = getpid()
-        let dir = logDirectory()
         let file = "\(dir)/hang-\(tsMs)-\(pid)-\(unique).txt"
         // S5-004: sample(1) -file opens with O_TRUNC and writes
         // incrementally over the 2 s window. If Blackbird is force-
@@ -222,7 +226,7 @@ enum HangReportStore {
     /// back to `/tmp` only if the real directory can't be created — a
     /// hang report in `/tmp` is still better than dropping the sample
     /// on the floor.
-    private static func logDirectory() -> String {
+    static func logDirectory() -> String {
         let fm = FileManager.default
         let libraryLogs = fm.urls(for: .libraryDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Logs/Blackbird", isDirectory: true)

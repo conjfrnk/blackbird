@@ -156,13 +156,18 @@ final class MainThreadWatchdogRealLogDirBlindTests: XCTestCase {
 
         let observer = HangCaptureObserver(directory: logDir.path, pid: pid)
         addTeardownBlock {
-            _ = observer.stopAndCollect()
-            // Put back any genuine report the run pruned. (Leftovers of this
-            // process -- files, sample children -- are swept in tearDown().)
-            for name in protectedReports
-            where !fm.fileExists(atPath: logDir.appendingPathComponent(name).path) {
-                try? fm.linkItem(at: backupDir.appendingPathComponent(name),
-                                 to: logDir.appendingPathComponent(name))
+            let observedAtTeardown = observer.stopAndCollect()
+            // Put back a genuine report the run pruned -- but only when THIS
+            // process is the one that can have pruned it (see `pruned` below);
+            // re-creating a report a different process legitimately trimmed
+            // would undo that process's prune. (Leftovers of this process --
+            // files, sample children -- are swept in tearDown().)
+            if !observedAtTeardown.isEmpty {
+                for name in protectedReports
+                where !fm.fileExists(atPath: logDir.appendingPathComponent(name).path) {
+                    try? fm.linkItem(at: backupDir.appendingPathComponent(name),
+                                     to: logDir.appendingPathComponent(name))
+                }
             }
             try? fm.removeItem(at: backupDir)
         }
@@ -210,7 +215,16 @@ final class MainThreadWatchdogRealLogDirBlindTests: XCTestCase {
         }
 
         let observed = observer.stopAndCollect()
-        let pruned = protectedReports.filter {
+        // A report that vanished is attributed to this process only if this
+        // process also aimed a capture at the real directory: the only prune
+        // it can perform (`captureHangReport`'s trailing
+        // `pruneExcessReports`) runs at the end of such a capture, and every
+        // capture is visible to the observer as a `file:`/`sample:` entry.
+        // Other processes -- the developer's own running Blackbird arms a 1 s
+        // watchdog and trims the same directory, and every Blackbird launch
+        // prunes it too -- legitimately delete the oldest reports, and an
+        // existence check alone cannot tell their prune from ours.
+        let pruned: [String] = observed.isEmpty ? [] : protectedReports.filter {
             !fm.fileExists(atPath: logDir.appendingPathComponent($0).path)
         }
 
@@ -229,7 +243,8 @@ final class MainThreadWatchdogRealLogDirBlindTests: XCTestCase {
             pruned, [],
             "\(pruned.count) of \(protectedReports.count) genuine hang reports that "
                 + "existed before the run were pruned out of the real log directory "
-                + "by the test process: \(pruned)"
+                + "by the test process (which also aimed \(observed.count) capture "
+                + "write(s) at it): \(pruned)"
         )
     }
 

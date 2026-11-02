@@ -70,6 +70,33 @@ enum MainThreadWatchdog {
     private static var _installedPingInterval: Double?
     private static var _installedHangThreshold: Double?
 
+    #if DEBUG
+    /// Stop flag of the currently armed watchdog. Set by `install`, raised by
+    /// `_disarmForTesting`.
+    private static var stopCurrent: OSAllocatedUnfairLock<Bool>?
+
+    /// Test seam: undo `install` so a suite that arms the watchdog at a tiny
+    /// threshold doesn't leave it armed for every later test in the xctest
+    /// host. Stops the heartbeat timer and the watchdog thread and re-opens
+    /// the install latch. Once this returns, no capture can START (the watchdog
+    /// thread checks the stop flag and resolves the report directory under one
+    /// lock, which this takes), so a caller may safely un-set
+    /// `HangReportStore.logDirectoryOverride` afterwards. A capture already in
+    /// flight is not waited for (a `sample(1)` of an ASan host can run for
+    /// tens of seconds) -- it keeps the directory it resolved when it started.
+    /// No-op when nothing is armed.
+    internal static func _disarmForTesting() {
+        installLock.lock()
+        let stop = stopCurrent
+        stopCurrent = nil
+        installed = false
+        _installedPingInterval = nil
+        _installedHangThreshold = nil
+        installLock.unlock()
+        stop?.withLock { (stopped: inout Bool) -> Void in stopped = true }
+    }
+    #endif
+
     /// Pure-function clamp helper — extracted from `install(...)` so the
     /// M-22 clamp invariant is testable independently of the install
     /// idempotency latch. Tests assert `_clamp` directly: a clamp-revert
@@ -118,9 +145,22 @@ enum MainThreadWatchdog {
         lastMainHeartbeat.withLock { $0 = CACurrentMediaTime() }
         logger.log("MainThreadWatchdog armed: ping=\(safePing, privacy: .public)s threshold=\(safeThreshold, privacy: .public)s (requested ping=\(pingInterval, privacy: .public)s threshold=\(hangThreshold, privacy: .public)s)")
 
+        // Per-install, so a disarmed watchdog's leftovers can never be
+        // revived by (or interfere with) a later `install`.
+        let stopRequested = OSAllocatedUnfairLock<Bool>(initialState: false)
+        #if DEBUG
+        stopCurrent = stopRequested
+        #endif
+
         // Main-thread heartbeat. Runs on the main runloop; each tick refreshes
         // the timestamp the watchdog thread watches.
-        let timer = Timer(timeInterval: safePing, repeats: true) { _ in
+        let timer = Timer(timeInterval: safePing, repeats: true) { (fired: Timer) -> Void in
+            // A disarmed watchdog's timer retires itself on the thread it was
+            // scheduled on (`invalidate` must be sent from there).
+            if stopRequested.withLock({ $0 }) {
+                fired.invalidate()
+                return
+            }
             lastMainHeartbeat.withLock { $0 = CACurrentMediaTime() }
         }
         // `.common` so the heartbeat keeps ticking under modal + tracking
@@ -134,14 +174,28 @@ enum MainThreadWatchdog {
         let t = Thread {
             while true {
                 Thread.sleep(forTimeInterval: safePing)
+                // After the sleep, before the age check: a disarmed watchdog's
+                // heartbeat stops, which must not read as a hang.
+                if stopRequested.withLock({ $0 }) { return }
                 let now = CACurrentMediaTime()
                 let age = now - lastMainHeartbeat.withLock { $0 }
                 if age >= safeThreshold {
-                    HangReportStore.captureHangReport(age: age)
+                    // The stop check and the report-directory resolution are
+                    // ONE critical section on the stop flag: `_disarmForTesting`
+                    // raises it under the same lock, so once that returns no
+                    // capture can still resolve a directory (and so none can
+                    // read the test-only redirect after it has been un-set).
+                    // `logDirectory()` is a stat on the common path.
+                    let directory: String? = stopRequested.withLock { (stopped: inout Bool) -> String? in
+                        stopped ? nil : HangReportStore.logDirectory()
+                    }
+                    guard let directory else { return }
+                    HangReportStore.captureHangReport(age: age, directory: directory)
                     // Rate-limit: after capturing, wait for main to recover
                     // before capturing again. Otherwise a multi-second hang
                     // produces a capture every pingInterval.
-                    while CACurrentMediaTime() - lastMainHeartbeat.withLock({ $0 }) >= safeThreshold {
+                    while !stopRequested.withLock({ $0 }),
+                          CACurrentMediaTime() - lastMainHeartbeat.withLock({ $0 }) >= safeThreshold {
                         Thread.sleep(forTimeInterval: safePing)
                     }
                 }
