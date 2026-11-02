@@ -497,19 +497,14 @@ extension TerminalView {
             // scrolls back). wheel-down (button 65) = "show newer
             // content" (less advances).
             //
-            // macOS `scrollingDeltaY` is pre-inverted by the system —
-            // it reports the direction the user expects CONTENT to
-            // move, not the raw finger / wheel motion. So:
-            //
-            //   Natural ON  + swipe up → deltaY > 0 (content goes up,
-            //   user wants newer content from below) → button 65.
-            //   Natural OFF + swipe up → deltaY < 0 (content goes
-            //   down, user wants older content from above) → button 64.
-            //
-            // Pre-M7 the mapping was inverted (deltaY > 0 → button 64),
-            // which gave the right answer for Natural ON via wishful
-            // thinking but was backwards for Natural OFF — `less` /
-            // `tmux` scrolled in the wrong direction. Audit M7.
+            // macOS has already applied the Natural-scrolling preference
+            // by the time the event arrives, so `scrollingDeltaY > 0`
+            // always means the viewport moves toward the TOP of the
+            // document (older content) — the very sign the normal branch
+            // below feeds to `session.scroll(delta:)` to enter history.
+            // Hence deltaY > 0 → button 64, deltaY < 0 → button 65, for
+            // both Natural settings. (Audit M7 flipped this on the premise
+            // that positive means "content moves up"; it does not.)
             //
             // One report per CELL HEIGHT of travel (precise devices) or
             // per notch (classic wheel), via the accumulator — not one per
@@ -521,7 +516,7 @@ extension TerminalView {
                 pointsPerLine: Double(metrics.cellHeight),
                 linesPerNotch: 1
             )
-            let button = n > 0 ? 65 : 64
+            let button = n > 0 ? 64 : 65
             for _ in 0..<min(abs(n), Self.maxWheelUnitsPerEvent) {
                 _ = sendMouseEvent(event, button: button, press: true)
             }
@@ -533,7 +528,7 @@ extension TerminalView {
             // into cursor-key presses here (xterm's alternateScroll);
             // alacritty sets 1007 by default and a TUI opts out with
             // `CSI ? 1007 l`. Same direction convention as the report
-            // branch: deltaY > 0 → newer content → ↓.
+            // branch: deltaY > 0 → older content → ↑.
             let n = wheelAccumulator.lines(
                 deltaY: event.scrollingDeltaY,
                 precise: event.hasPreciseScrollingDeltas,
@@ -541,7 +536,7 @@ extension TerminalView {
                 linesPerNotch: 3
             )
             if n != 0 {
-                let key: KeyEncoder.SpecialKey = n > 0 ? .down : .up
+                let key: KeyEncoder.SpecialKey = n > 0 ? .up : .down
                 let one = encoder.encodeSpecial(
                     key,
                     modifiers: [],

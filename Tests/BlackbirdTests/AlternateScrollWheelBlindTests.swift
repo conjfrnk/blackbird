@@ -11,9 +11,10 @@ import BBCore
 /// Contract under test: when the current snapshot's `termMode` has
 /// `.altScreen` AND `.alternateScroll`, and NO mouse-reporting protocol bit
 /// (`.mouseReportClick` / `.mouseMotion` / `.mouseDrag`), a classic wheel
-/// event (`hasPreciseScrollingDeltas == false`) with `scrollingDeltaY == -1`
-/// writes exactly three `ESC [ A` to the session and `+1` writes three
-/// `ESC [ B`. With `.appCursor` the bytes are `ESC O A` / `ESC O B`.
+/// event (`hasPreciseScrollingDeltas == false`) with `scrollingDeltaY == +1`
+/// (viewport toward older content, post Natural-scrolling) writes exactly
+/// three `ESC [ A` to the session and `-1` writes three `ESC [ B`. With
+/// `.appCursor` the bytes are `ESC O A` / `ESC O B`.
 /// Nothing is written when: Option is held; `.alternateScroll` is clear
 /// (the TUI sent `CSI ? 1007 l`); `.altScreen` is clear; or a mouse protocol
 /// is on. A single event never produces more than 64 arrow presses.
@@ -170,29 +171,29 @@ final class AlternateScrollWheelBlindTests: XCTestCase {
     func test_altScreen_wheelUp_sendsThreeCursorUp() throws {
         let rig = try makeRig(feeding: altScreenOnly)
         assertHappyGate(rig.snapshot)
-        rig.view.scrollWheel(with: try wheel(deltaY: -1))
+        rig.view.scrollWheel(with: try wheel(deltaY: 1))
         assertSent(rig.recorder, exactly: 3, of: cursorUp)
     }
 
     func test_altScreen_wheelDown_sendsThreeCursorDown() throws {
         let rig = try makeRig(feeding: altScreenOnly)
         assertHappyGate(rig.snapshot)
-        rig.view.scrollWheel(with: try wheel(deltaY: 1))
+        rig.view.scrollWheel(with: try wheel(deltaY: -1))
         assertSent(rig.recorder, exactly: 3, of: cursorDown)
     }
 
     func test_altScreen_twoNotches_sendsSixArrows() throws {
         let rig = try makeRig(feeding: altScreenOnly)
         assertHappyGate(rig.snapshot)
-        rig.view.scrollWheel(with: try wheel(deltaY: -2))
+        rig.view.scrollWheel(with: try wheel(deltaY: 2))
         assertSent(rig.recorder, exactly: 6, of: cursorUp)
     }
 
     func test_altScreen_successiveEvents_eachSendThree() throws {
         let rig = try makeRig(feeding: altScreenOnly)
         assertHappyGate(rig.snapshot)
-        rig.view.scrollWheel(with: try wheel(deltaY: -1))
         rig.view.scrollWheel(with: try wheel(deltaY: 1))
+        rig.view.scrollWheel(with: try wheel(deltaY: -1))
         let got = chunks(rig.recorder, width: 3)
         XCTAssertEqual(got, Array(repeating: cursorUp, count: 3) + Array(repeating: cursorDown, count: 3),
                        "classic events are stateless: 3 up then 3 down, in order")
@@ -205,14 +206,14 @@ final class AlternateScrollWheelBlindTests: XCTestCase {
         XCTAssertTrue(rig.snapshot.termMode.contains(.appCursor), "precondition: CSI ? 1 h sets DECCKM")
         XCTAssertTrue(rig.snapshot.termMode.contains(.altScreen))
         XCTAssertTrue(rig.snapshot.termMode.contains(.alternateScroll))
-        rig.view.scrollWheel(with: try wheel(deltaY: -1))
+        rig.view.scrollWheel(with: try wheel(deltaY: 1))
         assertSent(rig.recorder, exactly: 3, of: appUp)
     }
 
     func test_altScreen_appCursor_wheelDown_sendsSSthreeB() throws {
         let rig = try makeRig(feeding: altScreenOnly + "\u{1B}[?1h")
         XCTAssertTrue(rig.snapshot.termMode.contains(.appCursor), "precondition: CSI ? 1 h sets DECCKM")
-        rig.view.scrollWheel(with: try wheel(deltaY: 1))
+        rig.view.scrollWheel(with: try wheel(deltaY: -1))
         assertSent(rig.recorder, exactly: 3, of: appDown)
     }
 
@@ -254,7 +255,7 @@ final class AlternateScrollWheelBlindTests: XCTestCase {
         XCTAssertTrue(rig.snapshot.termMode.contains(.alternateScroll))
         XCTAssertFalse(rig.snapshot.termMode.isDisjoint(with: [.mouseReportClick, .mouseMotion, .mouseDrag]),
                        "precondition: CSI ? 1000 h enables a mouse protocol")
-        rig.view.scrollWheel(with: try wheel(deltaY: -1))
+        rig.view.scrollWheel(with: try wheel(deltaY: 1))
         let bytes = [UInt8](rig.recorder.sent)
         XCTAssertFalse(contains(bytes, cursorUp) || contains(bytes, appUp),
                        "with a mouse protocol on, the wheel belongs to the mouse encoder, not alternate scroll: \(hex(bytes))")
@@ -263,7 +264,7 @@ final class AlternateScrollWheelBlindTests: XCTestCase {
     func test_anyEventMotionReporting_sendsNoArrowKeys() throws {
         let rig = try makeRig(feeding: altScreenOnly + "\u{1B}[?1003h\u{1B}[?1006h")
         XCTAssertTrue(rig.snapshot.termMode.contains(.mouseMotion), "precondition: CSI ? 1003 h")
-        rig.view.scrollWheel(with: try wheel(deltaY: 1))
+        rig.view.scrollWheel(with: try wheel(deltaY: -1))
         let bytes = [UInt8](rig.recorder.sent)
         XCTAssertFalse(contains(bytes, cursorDown) || contains(bytes, appDown),
                        "with any-event motion on, no arrow keys: \(hex(bytes))")
@@ -278,7 +279,7 @@ final class AlternateScrollWheelBlindTests: XCTestCase {
         let got = chunks(rig.recorder, width: 3)
         XCTAssertLessThanOrEqual(got.count, 64, "a single event must never send more than 64 arrow presses")
         XCTAssertGreaterThan(got.count, 0, "a huge delta must still send something")
-        for c in got { XCTAssertEqual(c, cursorDown) }
+        for c in got { XCTAssertEqual(c, cursorUp) }
     }
 
     func test_hugeNegativeDelta_capsAtSixtyFourArrows() throws {
@@ -288,7 +289,7 @@ final class AlternateScrollWheelBlindTests: XCTestCase {
         let got = chunks(rig.recorder, width: 3)
         XCTAssertLessThanOrEqual(got.count, 64)
         XCTAssertGreaterThan(got.count, 0)
-        for c in got { XCTAssertEqual(c, cursorUp) }
+        for c in got { XCTAssertEqual(c, cursorDown) }
     }
 
     // MARK: - Helpers

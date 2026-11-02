@@ -22,8 +22,9 @@ public struct WheelScrollAccumulator: Equatable {
     public init() {}
 
     /// Number of lines for this event, signed like `deltaY` (positive =
-    /// the direction AppKit reports as "content moves up", i.e. the user
-    /// wants newer content — xterm button 65 / ↓).
+    /// the viewport moves toward the top of the document, i.e. the user
+    /// wants OLDER content — xterm button 64 / ↑; AppKit has already
+    /// applied the Natural-scrolling preference).
     ///
     /// - Parameters:
     ///   - deltaY: `event.scrollingDeltaY`.
