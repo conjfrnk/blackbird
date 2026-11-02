@@ -10,6 +10,12 @@ use crate::osc::osc_scanner;
 use crate::rate_limit::{COLOR_QUERY_REPLY_PER_SECOND, COLOR_QUERY_REPLY_WINDOW};
 use crate::{BBSyncStatus, BBTerm};
 
+/// A string-introduced function (OSC / DCS / SOS / PM / APC) still open at the
+/// end of this many consecutive parser advances is a sender that never closed
+/// it, not a string cut by a read boundary. A boundary leaves the count at 1.
+/// `bb_term_clear_all` aborts the string at this count.
+pub(crate) const WEDGED_STRING_CHUNKS: u32 = 2;
+
 /// Feed one chunk of PTY bytes through the grid processor + parallel OSC tap.
 ///
 /// # Safety
@@ -102,6 +108,13 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
 /// # Safety
 /// Same single-thread discipline as `process_input`.
 pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
+    // Also owed by every advance: how long the grid parser has sat inside an
+    // OSC / DCS / SOS / PM / APC string. Cheap (one enum compare per chunk).
+    bb.string_state_chunks = if bb.processor.in_string() {
+        bb.string_state_chunks.saturating_add(1)
+    } else {
+        0
+    };
     drain_color_requests(bb);
     bb.callback.flush_suppressed_title();
 }

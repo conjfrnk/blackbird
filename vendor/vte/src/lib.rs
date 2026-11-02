@@ -78,6 +78,20 @@ impl Parser {
         matches!(self.state, State::Ground) && self.partial_utf8_len == 0
     }
 
+    /// Blackbird addition (re-apply on bump): true while the state machine is
+    /// inside a string-introduced function that swallows ordinary text until
+    /// an explicit terminator: OSC, DCS passthrough / ignore, or SOS / PM /
+    /// APC. In these states every byte except CAN, SUB, ESC (and BEL for OSC)
+    /// is consumed without rendering, so a string its sender never closes
+    /// wedges the output. `blackbird_core` uses this to tell a string that is
+    /// merely split across two reads from one that has been left open.
+    pub fn in_string(&self) -> bool {
+        matches!(
+            self.state,
+            State::OscString | State::DcsPassthrough | State::DcsIgnore | State::SosPmApcString
+        )
+    }
+
     /// Create a new Parser
     pub fn new() -> Parser {
         Default::default()

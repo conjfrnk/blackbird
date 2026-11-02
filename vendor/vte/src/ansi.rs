@@ -363,6 +363,27 @@ impl<T: Timeout> Processor<T> {
         self.state.sync_state.buffer.len()
     }
 
+    /// Blackbird addition (re-apply on bump): whether the parser is inside an
+    /// OSC / DCS / SOS / PM / APC string. See `Parser::in_string`.
+    #[inline]
+    pub fn in_string(&self) -> bool {
+        self.parser.in_string()
+    }
+
+    /// Blackbird addition (re-apply on bump): abandon an in-flight
+    /// OSC / DCS / SOS / PM / APC string and return the parser to Ground.
+    /// The pending payload is DISCARDED, never dispatched (an OSC is not
+    /// handed to `osc_dispatch`), and its buffer (up to 8 MiB) is freed.
+    /// Returns whether a string was in flight. Any other state, including a
+    /// CSI or a UTF-8 character split across reads, is left untouched.
+    pub fn abort_string(&mut self) -> bool {
+        if !self.parser.in_string() {
+            return false;
+        }
+        self.parser = crate::Parser::default();
+        true
+    }
+
     /// Process a new byte during a synchronized update.
     ///
     /// Returns the number of bytes processed.

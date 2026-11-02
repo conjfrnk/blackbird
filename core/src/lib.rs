@@ -59,7 +59,7 @@ mod text;
 use callback::*;
 pub use event::{BBEvent, BBEventCb, BBEventKind};
 use guard::{ffi_reentry_blocked, guard_no_term, guard_with_term};
-use input::{flush_sync_update, process_input, sync_status};
+use input::{flush_sync_update, process_input, sync_status, WEDGED_STRING_CHUNKS};
 use rate_limit::*;
 pub use snapshot::{bb_mode, cell_flags, BBCell, BBSnap};
 use snapshot::{extract_mode_with_extras, snapshot, BBSnapOwned};
@@ -153,6 +153,13 @@ pub struct BBTerm {
     pub(crate) poisoned: std::cell::Cell<bool>,
     pub(crate) term: Term<RoutingListener>,
     pub(crate) processor: Processor,
+    /// How many consecutive parser advances (`bb_term_input` chunks and
+    /// sync-flush replays) have ended with `processor` still inside an
+    /// OSC / DCS / SOS / PM / APC string; zero whenever one ended outside
+    /// any. A string split across two reads reads 1 at the chunk boundary; a
+    /// string its sender never closed keeps counting. `bb_term_clear_all`
+    /// uses it to tell the two apart (`WEDGED_STRING_CHUNKS`).
+    pub(crate) string_state_chunks: u32,
     /// Parallel `vte::Parser` that drives `OscScanner` for OSC 7 (cwd) and
     /// OSC 133 (prompt marks). Stateful across `bb_term_input` calls so
     /// fragmented sequences resolve to a single event. Kept separate from
@@ -406,6 +413,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         let bb = Box::new(BBTerm {
             term,
             processor: Processor::new(),
+            string_state_chunks: 0,
             osc_parser: Parser::new(),
             color_queue,
             color_query_enabled: false,
@@ -1194,9 +1202,19 @@ pub unsafe extern "C" fn bb_term_scroll_to_bottom(term: *mut BBTerm) {
 /// top-left. Equivalent to `clear -x` (BSD) / iTerm2's "⌘K" wipe — NOT
 /// what `clear(1)` emits, which is viewport-only (a plain `\x1b[H\x1b[2J`
 /// that leaves scrollback intact). The terminal palette is intentionally
-/// preserved (the user's theme survives ⌘K). All other parser / rate-
-/// limiter / cache state IS reset so a pre-clear adversarial flood
-/// can't degrade the post-clear session — see audit H-3 (2026-04-29).
+/// preserved (the user's theme survives ⌘K). The rate-limiter / cache state
+/// and the parallel OSC / DCS scanner ARE reset so a pre-clear adversarial
+/// flood can't degrade the post-clear session — see audit H-3 (2026-04-29).
+///
+/// The grid parser is deliberately NOT reset, because ⌘K can land between any
+/// two PTY reads: a CSI, a UTF-8 character or a short OSC / DCS / APC string
+/// that the program split across the clear is completed as if the clear had
+/// not been there (no stray tail text, SGR colour kept, OSC 8 link intact).
+/// The one exception is an OSC / DCS / SOS / PM / APC string that has stayed
+/// open across more than one chunk: that is a wedged sender, not a split, and
+/// it is dropped undispatched so output renders again. A string opened in the
+/// very last chunk before the clear is indistinguishable from a split one and
+/// is kept; if it stays open as more output arrives, the next ⌘K drops it.
 ///
 /// # Safety
 /// Same preconditions as `bb_term_input`. Null is a no-op.
@@ -1213,24 +1231,36 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
             return;
         }
         let bb = &mut *term;
-        // A pending DEC 2026 synchronized update swallows THESE bytes too:
-        // `Processor::advance` routes into `advance_sync` while a timeout is
-        // pending, so the clear sequence below would land in the sync buffer
-        // and ⌘K — the user's only manual escape from a tab wedged by an
-        // unterminated BSU — would silently do nothing. Worse, up to 2 MiB of
-        // adversary-controlled bytes would survive the wipe, exactly the
-        // retained-state class audit H-3 enumerates below.
+        // A pending DEC 2026 synchronized update would otherwise stay pending
+        // across the wipe: ⌘K — the user's only manual escape from a tab
+        // wedged by an unterminated BSU — would leave it wedged, and up to
+        // 2 MiB of adversary-controlled bytes would survive the wipe, exactly
+        // the retained-state class audit H-3 enumerates below.
         //
-        // Abort unconditionally FIRST (before the advance, or the clear
-        // itself gets buffered and this fixes nothing). Replay-then-clear
-        // rather than discard is deliberate: the buffered bytes may carry
-        // mode changes (?1049h, DECSTBM, SGR) the running program's later
-        // output depends on, and vte exposes no public buffer-discard. The
-        // 2J/3J immediately below erases whatever the replay drew. No-op when
-        // nothing is pending, so every existing clear_all test is unaffected.
+        // Abort unconditionally FIRST: the replay draws into the grid, so it
+        // has to land before the clear, not after. Replay-then-clear rather
+        // than discard is deliberate: the buffered bytes may carry mode
+        // changes (?1049h, DECSTBM, SGR) the running program's later output
+        // depends on, and vte exposes no public buffer-discard. The clear
+        // below erases whatever the replay drew. No-op when nothing is
+        // pending, so every existing clear_all test is unaffected.
         let _ = flush_sync_update(bb, true);
-        // H = cursor home, 2J = erase display, 3J = erase scrollback.
-        bb.processor.advance(&mut bb.term, b"\x1b[H\x1b[2J\x1b[3J");
+        // Home, erase display, erase scrollback (the handler calls behind
+        // `ESC[H` / `ESC[2J` / `ESC[3J`). Deliberately NOT those bytes pushed
+        // through `bb.processor`: ⌘K lands between arbitrary PTY chunk
+        // boundaries, so the parser may be mid-sequence, and the injected ESC
+        // would abort a pending CSI (its tail then prints as text and its SGR
+        // is lost) or terminate a pending OSC and dispatch it truncated (OSC 8
+        // links a prefix of the URL). Handler calls leave the parser alone, so
+        // a sequence cut by the clear finishes on the cleared screen. The one
+        // thing the ESC did right, ending a string the sender never closed, is
+        // done explicitly below.
+        {
+            use alacritty_terminal::vte::ansi::{ClearMode, Handler};
+            bb.term.goto(0, 0);
+            bb.term.clear_screen(ClearMode::All);
+            bb.term.clear_screen(ClearMode::Saved);
+        }
         // 3J only reaches the ACTIVE grid; with the alt screen up (Claude
         // Code holds it for its whole session) that is the alt grid's empty
         // history, and the primary scrollback returned on exit.
@@ -1241,12 +1271,25 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         {
             bb.term.clear_inactive_history();
         }
+        // A string (OSC / DCS / SOS / PM / APC) that was already open when the
+        // PREVIOUS chunk ended is no read-boundary split: its sender never
+        // closed it, and `bb.processor` would keep swallowing every byte that
+        // is not ESC / CAN / SUB / BEL, so the prompt after the clear would
+        // never render. Worse, the buffered payload (up to 8 MiB) would survive
+        // the wipe and be dispatched with post-clear output as its body (audit
+        // H-3 class). Drop it undispatched. A string opened in the LAST chunk
+        // is kept: it may be a split OSC 8 / title whose tail is still coming.
+        if bb.string_state_chunks >= WEDGED_STRING_CHUNKS && bb.processor.abort_string() {
+            bb.string_state_chunks = 0;
+        }
         // Audit RC-02 + P2-02 — also reset our parallel-parser state and
         // rate-limit windows. Without this, a mid-sequence parser
         // continues into post-clear bytes (most dangerous: a mid-DCS
         // XTGETTCAP that accumulates post-clear bytes into its reply).
-        // The comparable `processor.advance` above only resets alacritty's
-        // grid; our scanner is a separate vte::Parser tracked alongside.
+        // This resets only our scanner, a separate vte::Parser tracked
+        // alongside the grid parser, so a tap-only sequence (OSC 7 / OSC 133 /
+        // XTGETTCAP) cut by the clear is dropped, while the grid parser above
+        // finishes the sequence it was in.
         bb.osc_parser = Parser::new();
         bb.osc_possibly_pending = false;
         // (also zeroes `modify_other_keys`; see H-3 item 3 below)
