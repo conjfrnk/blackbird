@@ -32,8 +32,10 @@ import AppKit
 ///      (`windowWillStartLiveResize` ... `windowDidEndLiveResize`); the
 ///      end-of-live-resize hook is treated as positive proof of a user
 ///      gesture, which bypasses the suppression even when it IS armed.
-///   3. IMPLICIT AUTOSAVE: the window registers the autosave name, so AppKit
-///      itself writes the frame on move/resize, bypassing every Blackbird gate.
+///   3. IMPLICIT AUTOSAVE: a window that registers the autosave name has AppKit
+///      itself write the frame on move/resize, bypassing every Blackbird gate.
+///      The fix keeps the name unregistered (persistence is explicit-only); one
+///      scenario below pins that.
 ///
 /// ## Contract (observable)
 ///
@@ -96,10 +98,6 @@ final class DisplayReconfigFrameSaveBlindTests: XCTestCase {
         let controller: MainWindowController
         let window: NSWindow
         let visibleFrame: NSRect
-        /// True when this window really owns the autosave name (AppKit hands a
-        /// name to ONE window; another parked controller in a full-suite run
-        /// may already hold it).
-        let ownsAutosaveName: Bool
     }
 
     private static var rigStorage: Rig?
@@ -121,15 +119,7 @@ final class DisplayReconfigFrameSaveBlindTests: XCTestCase {
         classOriginalDefaultsValue = UserDefaults.standard.object(forKey: defaultsKey)
     }
 
-    /// The parked window keeps the autosave name for process lifetime, and
-    /// AppKit's implicit autosave writes the window's last (relocated) frame to
-    /// the REAL defaults key after the last test's `tearDown` has already put
-    /// the developer's value back. Release the name first, then restore, so
-    /// the run leaves the key exactly as it found it.
     override class func tearDown() {
-        if let window = rigStorage?.window, window.frameAutosaveName == MainWindowController.frameAutosaveName {
-            window.setFrameAutosaveName("")
-        }
         if let original = classOriginalDefaultsValue {
             UserDefaults.standard.set(original, forKey: defaultsKey)
         } else {
@@ -176,12 +166,7 @@ final class DisplayReconfigFrameSaveBlindTests: XCTestCase {
             Self.rigSkipReason = "no Metal device (CI virtual display): makeForTesting returned nil"
             throw XCTSkip(Self.rigSkipReason)
         }
-        let rig = Rig(
-            controller: controller,
-            window: window,
-            visibleFrame: vis,
-            ownsAutosaveName: window.frameAutosaveName == MainWindowController.frameAutosaveName
-        )
+        let rig = Rig(controller: controller, window: window, visibleFrame: vis)
         Self.rigStorage = rig
         return rig
     }
@@ -318,12 +303,14 @@ final class DisplayReconfigFrameSaveBlindTests: XCTestCase {
     /// A display reconfiguration is announced, then AppKit relocates the
     /// window with a plain (non-live) move + resize. This is the order the
     /// settle-window suppression was written for, so the saved frame must stay
-    /// the user's. AppKit's own implicit autosave (the window registers the
-    /// autosave name) must not sneak the relocated frame in either.
+    /// the user's. AppKit's own implicit autosave must not sneak the relocated
+    /// frame in either, which holds only while the window registers NO autosave
+    /// name (an unregistered name is never written implicitly).
     func test_screenParamsChanged_thenRelocation_doesNotOverwriteSavedFrame() throws {
         let s = try prepareScenario()
-        try XCTSkipUnless(s.rig.ownsAutosaveName,
-            "another live window owns the autosave name; AppKit's implicit autosave cannot be exercised")
+        XCTAssertEqual(s.rig.window.frameAutosaveName, "",
+            "the main window must not register the autosave name: AppKit would then autosave every "
+                + "move/resize itself, past every gate in WindowFramePersistence")
 
         postScreenParametersChanged()
         relocate(s)

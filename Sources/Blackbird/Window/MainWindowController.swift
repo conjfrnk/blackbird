@@ -166,7 +166,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         self.initialWorkingDirectory = initialWorkingDirectory
         // The setup below runs in a LOAD-BEARING order. `makeConfiguredWindow`
         // does all the pre-`super.init` window construction (style mask,
-        // restorable opt-out, autosave-name + two-step restore, tabbing config,
+        // restorable opt-out, saved-frame restore, tabbing config,
         // title visibility — in that exact sequence). After `super.init` the
         // instance-level steps follow in the same order they always did:
         // delegate, screen-params observer, titlebar tab bar, terminal-view
@@ -175,6 +175,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         super.init(window: window)
         window.delegate = self
         installScreenParametersObserver()
+        installTerminationObserver()
         tabObserver.installTitlebarTabBar()
         // No Metal device: `wireTerminalView` left a diagnostic title and
         // `terminalView` nil; bail exactly as the original guard did.
@@ -188,8 +189,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     /// Build and configure the window the controller wraps. Every step here
     /// runs BEFORE `super.init`, so this is `static` (no instance yet). The
-    /// sequence — style/restorable, autosave name, two-step restore (or
-    /// cascade), THEN tabbing config, THEN title visibility — is load-bearing
+    /// sequence — style/restorable, saved-frame restore (or cascade), THEN
+    /// tabbing config, THEN title visibility — is load-bearing
     /// (see the inline ORDER NOTE on the tabbing assignment).
     private static func makeConfiguredWindow(autosaveFrame: Bool) -> TerminalWindow {
         // `.fullSizeContentView` extends the content view (the Metal view) all
@@ -320,6 +321,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+    }
+
+    /// Flush a still-pending deferred frame save at quit: its 0.3 s timer
+    /// cannot outlive the process, so a non-user-driven frame change made just
+    /// before Cmd-Q would otherwise be lost. `AppDelegate.applicationWillTerminate`
+    /// flushes its tracked controllers explicitly too (before it releases
+    /// them, which would drop this observer along with them); this covers any
+    /// controller it does not track.
+    private func installTerminationObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillTerminate(_:)),
+            name: NSApplication.willTerminateNotification,
+            object: nil
+        )
+    }
+
+    @objc private func applicationWillTerminate(_ note: Notification) {
+        framePersistence.flushPendingSave()
     }
 
     /// Resolve the Metal device, build the `TerminalView`, install it as the
@@ -537,6 +557,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     func windowWillClose(_ notification: Notification) {
+        // No UNCONDITIONAL close-time save: the resize / move delegate
+        // hooks already capture the live frame on every user-driven
+        // change, so close is purely redundant in the happy path — and
+        // *harmful* for an untouched ⌘N window whose frame is the
+        // constructor default (800×480). Saving on close would overwrite
+        // the user's previously-persisted size with that default, which
+        // was the 2026-05-12 dogfood-reported regression vector when we
+        // removed the per-window save gate. Only a deferred save that is
+        // already pending (a real, not-yet-committed frame change) is
+        // flushed — its 0.3 s timer would otherwise die with the window.
+        framePersistence.flushPendingSave()
         // Genuine teardown begins. Mark it so a queued deferredAutoClose can't
         // act on a closing window, and cancel the shell-exit sink BEFORE
         // terminateSessions (which publishes exitCode and would otherwise
@@ -547,14 +578,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         selectVisualNeighborIfClosingSelectedTab()
         // Break the strip → window cycle (see `TabStripView.detachTabs`).
         titlebarTabBar?.clearTabs()
-        // No close-time `saveCurrentFrame` here: the resize / move delegate
-        // hooks already capture the live frame on every user-driven
-        // change, so close is purely redundant in the happy path — and
-        // *harmful* for an untouched ⌘N window whose frame is the
-        // constructor default (800×480). Saving on close would overwrite
-        // the user's previously-persisted size with that default, which
-        // was the 2026-05-12 dogfood-reported regression vector when we
-        // removed the per-window save gate.
         terminateSessions()
         onClose?()
     }
@@ -1172,7 +1195,7 @@ func nudgeFrameOntoVisibleScreen(
 }
 
 /// Pure helper used by `MainWindowController.init` to validate the frame
-/// AppKit just restored from `setFrameAutosaveName`. If the saved frame
+/// AppKit just restored via `setFrameUsingName`. If the saved frame
 /// lands mostly off every connected screen — typical after the user
 /// unplugs an external display the window was last positioned on — we
 /// recenter on the first ("main") screen instead of letting AppKit show

@@ -533,6 +533,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let view = controller.terminalView {
                 view.disableSecureEventInputIfHeld()
             }
+            // Persist a frame change still inside its deferred-save quiet
+            // period; the timer dies with the process. Before the
+            // `removeAll()` below releases the controllers.
+            controller.framePersistence.flushPendingSave()
         }
         controllers.forEach { $0.terminateSessions() }
         controllers.removeAll()

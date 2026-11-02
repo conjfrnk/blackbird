@@ -17,7 +17,8 @@ import Foundation
 /// `unowned let controller`: the controller owns this (`lazy var`), so its
 /// lifetime is a strict subset of the controller's. `saveCurrentFrame` runs only
 /// from the move/resize delegate methods, `armScreenReconfigSuppression` only
-/// from the `@objc` screen-params handler, and the deferred commit from a
+/// from the `@objc` screen-params handler, `flushPendingSave` only from
+/// `windowWillClose` / the willTerminate hooks, and the deferred commit from a
 /// main-queue block holding this only weakly — all controller-alive paths,
 /// never deinit — so the back-ref is never read after teardown.
 final class WindowFramePersistence {
@@ -161,6 +162,19 @@ final class WindowFramePersistence {
         pendingDeferredSave = nil
         guard let win = controller.window, Date() >= suppressSavesUntil else { return }
         persist(win)
+    }
+
+    /// Commit a still-pending deferred save NOW. The quiet-period timer cannot
+    /// outlive the window or the process, so a tiling / zoom / programmatic
+    /// frame change followed within `deferredSaveDelay` by a window close or
+    /// Cmd-Q would otherwise never be persisted. The commit's own checks still
+    /// run (a relocation that a late `didChangeScreenParameters` condemned is
+    /// still dropped), and with nothing pending this is a no-op — an untouched
+    /// window's constructor-default frame must never overwrite the saved one.
+    func flushPendingSave() {
+        guard let pending = pendingDeferredSave else { return }
+        pending.cancel()
+        commitDeferredSave()
     }
 
     private func persist(_ win: NSWindow) {
