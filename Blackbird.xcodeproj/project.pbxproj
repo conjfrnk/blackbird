@@ -197,6 +197,7 @@
 		9D0657AA882549B377408EB1 /* URLDetectorBalancedParenBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C6840094DF834E5E45694B5 /* URLDetectorBalancedParenBlindTests.swift */; };
 		9F19C00C0A9328C8DF97E23F /* SelectionAutoscroller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BD18F9A4B904F415752829 /* SelectionAutoscroller.swift */; };
 		9FD5A4ADEA2DE72E73C6CDD6 /* PTYCookedModeUTF8BlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16817B5CAAD606CBCDDDD590 /* PTYCookedModeUTF8BlindTests.swift */; };
+		A12E50D2625432B5F7A3E524 /* OSC52FloodRateCapBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB2C8D2E81024E6331B7FB0 /* OSC52FloodRateCapBlindTests.swift */; };
 		A206185581DBFFAB51678248 /* ShellLineEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76F1C34DADDEA264B9A8AD55 /* ShellLineEditor.swift */; };
 		A24A1DDD3199147984379869 /* DiagnosticReportStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFE45249095A785FB78B5877 /* DiagnosticReportStore.swift */; };
 		A25683CF4210AC620DBBBB72 /* FindBarAltScreenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 952020A922B8A99F336257AD /* FindBarAltScreenTests.swift */; };
@@ -647,6 +648,7 @@
 		F9C2B3AC096BA3AF2FC3BB6C /* KeyEncoderRoundtripProps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderRoundtripProps.swift; sourceTree = "<group>"; };
 		FC0E515FB8692545E4B1FF18 /* HangReportStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HangReportStore.swift; sourceTree = "<group>"; };
 		FD696E3368D938805401E981 /* PTYLifetimeRaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYLifetimeRaceTests.swift; sourceTree = "<group>"; };
+		FEB2C8D2E81024E6331B7FB0 /* OSC52FloodRateCapBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSC52FloodRateCapBlindTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -801,6 +803,7 @@
 				42F0C84C641FACEEE80ACC59 /* NotificationPresenterBlindTests.swift */,
 				5FDB6B6E282A43F32284D1DA /* OpenAtFolderBlindTests.swift */,
 				D2FFB2752B57F80A026ADFD5 /* OSC8PercentGateBlindTests.swift */,
+				FEB2C8D2E81024E6331B7FB0 /* OSC52FloodRateCapBlindTests.swift */,
 				3D54AB14CA514CB4B38F0141 /* OSC133Tests.swift */,
 				CD00933AEBA54394D0D9CE62 /* PaletteInputsEqualityTests.swift */,
 				24EF339ADEC28C63034BC1B3 /* PasteboardSourceTypePinTests.swift */,
@@ -1447,6 +1450,7 @@
 				03419427FB37333FD04C7DE9 /* NotificationAuthRefreshBlindTests.swift in Sources */,
 				98043BEFBCB3E53B90EF0B52 /* NotificationPresenterBlindTests.swift in Sources */,
 				007D6A6B8361AA725ACF9D0A /* OSC133Tests.swift in Sources */,
+				A12E50D2625432B5F7A3E524 /* OSC52FloodRateCapBlindTests.swift in Sources */,
 				E6261C82C5699EA5EF94AFAB /* OSC8PercentGateBlindTests.swift in Sources */,
 				75DC1FFE075EAE377E9450AA /* OpenAtFolderBlindTests.swift in Sources */,
 				9FD5A4ADEA2DE72E73C6CDD6 /* PTYCookedModeUTF8BlindTests.swift in Sources */,

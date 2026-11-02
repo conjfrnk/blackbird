@@ -136,6 +136,13 @@ pub(crate) const BELL_EVENT_PER_SECOND: u32 = 16;
 /// Desktop notifications: a hostile stream must not be able to spam
 /// Notification Center; four per second is far above any real program.
 pub(crate) const NOTIFICATION_EVENT_PER_SECOND: u32 = 4;
+/// OSC 52 clipboard-write cap. Each delivered event costs a main-queue
+/// hop plus an `NSPasteboard` rewrite (~150 us), so `yes $'\e]52;c;YQ==\a'`
+/// (opt-in pref on) queued millions of them and froze main while RSS
+/// climbed ~200 MB/s. Real programs (vim/tmux yank) write about once per
+/// user action. Clipboard is last-writer-wins state, so suppressed writes
+/// coalesce to the latest via `suppressed_osc52` like titles do.
+pub(crate) const OSC52_EVENT_PER_SECOND: u32 = 32;
 pub(crate) const EVENT_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl PtyWriteRateState {

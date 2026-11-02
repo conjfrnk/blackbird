@@ -15,7 +15,7 @@ use crate::event::{BBEvent, BBEventCb, BBEventKind};
 use crate::guard::HandlerInFlightGuard;
 use crate::rate_limit::{
     EventRateState, PtyWriteRateCell, BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW,
-    NOTIFICATION_EVENT_PER_SECOND, TITLE_EVENT_PER_SECOND,
+    NOTIFICATION_EVENT_PER_SECOND, OSC52_EVENT_PER_SECOND, TITLE_EVENT_PER_SECOND,
 };
 use crate::scrub::scrub_title_controls;
 
@@ -67,6 +67,7 @@ pub(crate) struct CallbackCell {
     title_rate: UnsafeCell<EventRateState>,
     bell_rate: UnsafeCell<EventRateState>,
     notification_rate: UnsafeCell<EventRateState>,
+    osc52_rate: UnsafeCell<EventRateState>,
     /// Coalesce-to-latest latch for rate-suppressed titles (review
     /// follow-up to audit S1-002). Title is last-writer-wins state: a
     /// plain drop of the NEWEST title in a burst left the window title
@@ -79,6 +80,10 @@ pub(crate) struct CallbackCell {
     /// rolls — bounding the flood to its cap while preserving
     /// last-writer-wins correctness.
     suppressed_title: UnsafeCell<Option<String>>,
+    /// Same latch for rate-suppressed OSC 52 clipboard writes: the
+    /// clipboard is last-writer-wins, so a burst's final yank must still
+    /// land once the window rolls. Redelivered by `flush_suppressed_osc52`.
+    suppressed_osc52: UnsafeCell<Option<String>>,
     /// One-shot breadcrumb latch for the first suppressed title
     /// (mirrors `osc133_rate_limited_logged`'s stance).
     title_suppressed_logged: UnsafeCell<bool>,
@@ -155,7 +160,12 @@ impl CallbackCell {
                 NOTIFICATION_EVENT_PER_SECOND,
                 EVENT_RATE_WINDOW,
             )),
+            osc52_rate: UnsafeCell::new(EventRateState::new(
+                OSC52_EVENT_PER_SECOND,
+                EVENT_RATE_WINDOW,
+            )),
             suppressed_title: UnsafeCell::new(None),
+            suppressed_osc52: UnsafeCell::new(None),
             title_suppressed_logged: UnsafeCell::new(false),
             notification_suppressed_logged: UnsafeCell::new(false),
             #[cfg(debug_assertions)]
@@ -187,6 +197,10 @@ impl CallbackCell {
         *self.bell_rate.get() = EventRateState::new(BELL_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
         *self.notification_rate.get() =
             EventRateState::new(NOTIFICATION_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
+        *self.osc52_rate.get() = EventRateState::new(OSC52_EVENT_PER_SECOND, EVENT_RATE_WINDOW);
+        // Unlike a stale title, a latched pre-clear clipboard payload must
+        // not land on the user's clipboard after they reset the terminal.
+        *self.suppressed_osc52.get() = None;
     }
 
     /// Re-attempt delivery of a rate-suppressed title (see
@@ -213,6 +227,26 @@ impl CallbackCell {
         });
     }
 
+    /// Re-attempt delivery of a rate-suppressed OSC 52 write (see
+    /// `suppressed_osc52`); same contract as `flush_suppressed_title`.
+    ///
+    /// # Safety
+    /// Caller must ensure no concurrent access.
+    pub(crate) unsafe fn flush_suppressed_osc52(&self) {
+        let pending = {
+            let _busy = self.debug_enter();
+            (*self.suppressed_osc52.get()).take()
+        };
+        let Some(text) = pending else { return };
+        let bytes = text.as_bytes();
+        self.fire(BBEvent {
+            kind: BBEventKind::Osc52Clipboard,
+            payload: bytes.as_ptr(),
+            len: bytes.len(),
+            i32_arg: 0,
+        });
+    }
+
     /// Update the stored callback and context.
     ///
     /// # Safety
@@ -226,11 +260,13 @@ impl CallbackCell {
     ///
     /// `BBEventKind::PtyWrite` events go through the shared rate cap
     /// (audit M1 + H-4); `Title` and `Bell` go through their own caps
-    /// (audit S1-002 — see `TITLE_EVENT_PER_SECOND`). Excess events
-    /// silently drop here. Remaining kinds dispatch unconditionally:
-    /// CwdChanged and PromptMark are rate-gated upstream in the
-    /// OscScanner, Osc52Clipboard is bounded by alacritty's own OSC 52
-    /// handling, and Fatal is one-shot by nature.
+    /// (audit S1-002 — see `TITLE_EVENT_PER_SECOND`), and so do
+    /// `Notification` and `Osc52Clipboard` (the latter coalesces to the
+    /// latest, see `suppressed_osc52`). Excess events silently drop here.
+    /// Remaining kinds dispatch unconditionally: CwdChanged and
+    /// PromptMark are rate-gated upstream in the OscScanner and Fatal is
+    /// one-shot by nature. (alacritty bounds an OSC 52 payload's size and
+    /// validity, not how many arrive, hence the cap above.)
     ///
     /// Drop policy: dropped PtyWrites are silent BY DESIGN. Logging
     /// each drop would itself become a flood-amplifier (the very thing
@@ -304,6 +340,20 @@ impl CallbackCell {
                          engaged — coalescing to latest. One-shot per session."
                     );
                 }
+                return;
+            }
+        }
+        if matches!(event.kind, BBEventKind::Osc52Clipboard) {
+            if (*self.osc52_rate.get()).allow() {
+                // An admitted write supersedes anything latched.
+                *self.suppressed_osc52.get() = None;
+            } else {
+                let bytes = if event.payload.is_null() || event.len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(event.payload, event.len)
+                };
+                *self.suppressed_osc52.get() = Some(String::from_utf8_lossy(bytes).into_owned());
                 return;
             }
         }

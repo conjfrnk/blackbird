@@ -95,8 +95,8 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
 }
 
 /// The tail every parser-advance path owes: resolve deferred OSC 10/11/12
-/// colour-query replies and re-attempt a rate-suppressed title, both outside
-/// any live alacritty borrow.
+/// colour-query replies and re-attempt a rate-suppressed title / OSC 52
+/// write, all outside any live alacritty borrow.
 ///
 /// Shared by `process_input` and `flush_sync_update` — the flush replays
 /// buffered bytes through the SAME handler, so it incurs the same debt. If
@@ -117,6 +117,7 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
     };
     drain_color_requests(bb);
     bb.callback.flush_suppressed_title();
+    bb.callback.flush_suppressed_osc52();
 }
 
 /// Current DEC 2026 synchronized-update state.

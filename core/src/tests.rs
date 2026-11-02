@@ -236,6 +236,105 @@ fn title_flood_coalesces_to_latest() {
     }
 }
 
+/// OSC 52 sibling of `title_flood_coalesces_to_latest`: a clipboard-write
+/// burst over the cap (32/s) must be bounded, and the LATEST suppressed
+/// write must land once the window rolls (clipboard is last-writer-wins).
+/// A `bb_term_clear_all` in between discards the latch instead.
+#[test]
+fn osc52_flood_is_capped_and_coalesces_to_latest() {
+    use std::os::raw::c_void;
+    use std::sync::Mutex;
+
+    struct Sink {
+        writes: Mutex<Vec<String>>,
+    }
+    unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+        if matches!(ev.kind, BBEventKind::Osc52Clipboard) {
+            let sink = &*(ctx as *const Sink);
+            let bytes = std::slice::from_raw_parts(ev.payload, ev.len);
+            sink.writes
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(bytes).into_owned());
+        }
+    }
+    // base64 of a 3-byte text is exactly one quad.
+    fn b64_quad(t: &[u8; 3]) -> String {
+        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let n = (u32::from(t[0]) << 16) | (u32::from(t[1]) << 8) | u32::from(t[2]);
+        (0..4)
+            .map(|k| A[((n >> (18 - 6 * k)) & 63) as usize] as char)
+            .collect()
+    }
+    let burst = |sink: &Sink| unsafe {
+        let term = bb_term_new(40, 5, 100);
+        bb_term_set_osc52_write_enabled(term, 1);
+        bb_term_set_event_cb(term, Some(cb), sink as *const _ as *mut c_void);
+        // 40 distinct writes in one chunk, 8 over the cap.
+        let mut buf = Vec::new();
+        for i in 0..40 {
+            let text = format!("{i:03}");
+            let quad = b64_quad(text.as_bytes().try_into().unwrap());
+            buf.extend_from_slice(format!("\x1b]52;c;{quad}\x07").as_bytes());
+        }
+        bb_term_input(term, buf.as_ptr(), buf.len());
+        {
+            let writes = sink.writes.lock().unwrap();
+            assert!(
+                writes.len() <= 32,
+                "cap must hold within the window; got {}",
+                writes.len()
+            );
+            assert_ne!(
+                writes.last().map(String::as_str),
+                Some("039"),
+                "039 must still be latched, not yet delivered"
+            );
+        }
+        term
+    };
+
+    // Window rolls: the next chunk's flush delivers the newest, once.
+    let sink = Sink {
+        writes: Mutex::new(Vec::new()),
+    };
+    unsafe {
+        let term = burst(&sink);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let plain = b"hello";
+        bb_term_input(term, plain.as_ptr(), plain.len());
+        {
+            let writes = sink.writes.lock().unwrap();
+            assert_eq!(
+                writes.last().map(String::as_str),
+                Some("039"),
+                "latest suppressed write must deliver after the window rolls"
+            );
+            let n = writes.iter().filter(|w| w.as_str() == "039").count();
+            assert_eq!(n, 1, "latched write must deliver exactly once");
+        }
+        bb_term_free(term);
+    }
+
+    // clear_all drops the latch: nothing stale lands afterwards.
+    let sink = Sink {
+        writes: Mutex::new(Vec::new()),
+    };
+    unsafe {
+        let term = burst(&sink);
+        bb_term_clear_all(term);
+        let plain = b"hello";
+        bb_term_input(term, plain.as_ptr(), plain.len());
+        let writes = sink.writes.lock().unwrap();
+        assert!(
+            !writes.iter().any(|w| w == "039"),
+            "a pre-clear latched write must not be delivered after clear_all"
+        );
+        drop(writes);
+        bb_term_free(term);
+    }
+}
+
 /// Verify that scrollback is wired up: after feeding enough newlines to
 /// push lines off-screen the grid's history grows up to the scrollback
 /// limit, confirming `Config::scrolling_history` was applied correctly.
