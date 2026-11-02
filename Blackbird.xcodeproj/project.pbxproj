@@ -105,6 +105,7 @@
 		5C455FD6D14053AA4C1465D4 /* WordDragExtendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D725EB10E49F7689EBC93F3 /* WordDragExtendTests.swift */; };
 		5C4ADF49F205002F4160E1A7 /* ShellIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81D40026AFE0D6FC7C4B29FA /* ShellIntegrationTests.swift */; };
 		5CE494D770F0D5361B6E8993 /* RegexSafetyGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40C5A8C9337C9EB932DA1A60 /* RegexSafetyGate.swift */; };
+		5DF4A2C309952861372616CE /* KeypadApplicationModeBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7936FD8340E39C555EDD95CD /* KeypadApplicationModeBlindTests.swift */; };
 		5E835DC2E5C1FC93CF846CA0 /* KeyEventClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C38502E3AE812D844D18B9A /* KeyEventClassifier.swift */; };
 		5ECD3BBAADD2CBCA23CD599C /* TabOrderCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82EFC0C140D3593E2905D923 /* TabOrderCoordinator.swift */; };
 		5F5CE2167CE572BA4DDA5D01 /* BackgroundOnlyQuadAtlasIsolationBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E32ADF9DD8E05035EAB039F6 /* BackgroundOnlyQuadAtlasIsolationBlindTests.swift */; };
@@ -464,6 +465,7 @@
 		76802601D94186225882DF4A /* WindowResizeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowResizeController.swift; sourceTree = "<group>"; };
 		76F1C34DADDEA264B9A8AD55 /* ShellLineEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellLineEditor.swift; sourceTree = "<group>"; };
 		77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DamageTrackingTests.swift; sourceTree = "<group>"; };
+		7936FD8340E39C555EDD95CD /* KeypadApplicationModeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeypadApplicationModeBlindTests.swift; sourceTree = "<group>"; };
 		79802E11417943B26ABEF4EB /* BBTermAdversarialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BBTermAdversarialTests.swift; sourceTree = "<group>"; };
 		7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetectorTests.swift; sourceTree = "<group>"; };
 		7A9A38590B1165A7DED1CD0B /* PreferencesMigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesMigrationTests.swift; sourceTree = "<group>"; };
@@ -758,6 +760,7 @@
 				5F0FCE2AE0963FDA59307506 /* KeyEncoderProtocolPrecedenceTests.swift */,
 				F9C2B3AC096BA3AF2FC3BB6C /* KeyEncoderRoundtripProps.swift */,
 				68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */,
+				7936FD8340E39C555EDD95CD /* KeypadApplicationModeBlindTests.swift */,
 				8CB767EEE215AE9308F8984F /* KittyFlag1CtrlOptionBlindTests.swift */,
 				CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */,
 				70085016F53D542CFD455D7F /* KittyTerminfoDeletionBlindTests.swift */,
@@ -1398,6 +1401,7 @@
 				DD0B95742A24306E26FCBDB7 /* KeyEncoderRoundtripProps.swift in Sources */,
 				CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */,
 				20E0EC839350531D064FD050 /* KeychainCouplingTests.swift in Sources */,
+				5DF4A2C309952861372616CE /* KeypadApplicationModeBlindTests.swift in Sources */,
 				B4BB53B751F68CE9E03F70B7 /* KittyFlag1CtrlOptionBlindTests.swift in Sources */,
 				FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */,
 				11A85BB1B88C97F27058B66F /* KittyTerminfoDeletionBlindTests.swift in Sources */,

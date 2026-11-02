@@ -2108,7 +2108,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let isContextMenuChord = !hadMarkedText && KeyEventClassifier.isContextMenuKeyChord(
             keyCode: event.keyCode, modifierFlags: event.modifierFlags
         )
-        if !optionMetaChord && !isContextMenuChord {
+        // Under DECPAM a keypad digit / operator must reach `encodeSpecial`'s
+        // SS3 table, but the input context would commit it as plain text. A
+        // live composition still owns the key (CJK IMEs pick candidates with
+        // the keypad digits).
+        let isApplicationKeypadKey = !hasMarkedText() && KeyEventClassifier.isApplicationKeypadKey(
+            event, applicationKeypad: currentSnapshot?.termMode.contains(.appKeypad) ?? false
+        )
+        if !optionMetaChord && !isContextMenuChord && !isApplicationKeypadKey {
             inputContext?.handleEvent(event)
         }
         return hadMarkedText || hasMarkedText() || didInsertTextViaIME

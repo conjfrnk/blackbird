@@ -47,6 +47,21 @@ enum KeyEventClassifier {
             && !modifierFlags.contains(.command)
     }
 
+    /// True for a numeric-keypad digit / operator key (0-9 + - * / . =) while
+    /// the program has application-keypad mode (DECPAM) on. AppKit reports
+    /// these as plain printable text, so the input context commits them via
+    /// `insertText` — which encodes the bare character and never consults
+    /// DECPAM — and `encodeSpecial`'s SS3 sequences (ESC O p..y / k m j o n X)
+    /// are never reached. The caller bypasses the IME for these keys, as for
+    /// the Option-Meta chord. Keypad Enter is excluded: it arrives as
+    /// `doCommand(insertNewline:)`, so it already reaches the encoder.
+    static func isApplicationKeypadKey(_ event: NSEvent, applicationKeypad: Bool) -> Bool {
+        guard applicationKeypad,
+              event.modifierFlags.contains(.numericPad),
+              let key = keypadKey(for: event) else { return false }
+        return key != .kpEnter
+    }
+
     /// Return and keypad Enter. Under Ctrl their raw `characters` are not an
     /// Enter byte (keypad Enter reports ETX, which the legacy control fast path
     /// would send as 0x03 = SIGINT), so the encoder must decide, not that path.
