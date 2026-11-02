@@ -2441,7 +2441,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// so a hostile remote's control / bidi bytes never land in a file
     /// either.
     @objc public func exportScrollback(_ sender: Any?) {
-        guard let session, let snap = currentSnapshot, let window else {
+        guard let session, currentSnapshot != nil, let window else {
             bellController.ring()
             return
         }
@@ -2451,9 +2451,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         panel.allowedContentTypes = [.plainText]
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url, self != nil else { return }
+            // Ask for the whole buffer and let the core clamp to the live
+            // grid at Save time. Bounds taken from a menu-time snapshot go
+            // stale while the sheet is up: output that scrolls into history
+            // meanwhile moves the oldest line above the remembered start, so
+            // the head of the file was silently cut.
             let raw = session.textRange(
-                from: BufferPoint(line: -Int32(clamping: snap.historySize), col: 0),
-                to:   BufferPoint(line: Int32(clamping: snap.rows - 1), col: max(0, snap.cols - 1)),
+                from: BufferPoint(line: .min, col: 0),
+                to:   BufferPoint(line: .max, col: .max),
                 rectangular: false
             )
             let scrubbed = PasteSanitizer.stripBidiOverrides(
