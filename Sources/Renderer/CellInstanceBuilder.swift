@@ -129,6 +129,23 @@ struct CellInstanceBuilder {
             if idx >= cellCount { break }
             let cell = cellsPtr[idx]
 
+            // The spacer right of a WIDE_CHAR is already covered by that
+            // glyph's 2x quad, which paints the leading cell's bg / selection
+            // tint / decorations across both columns (a selection edge that
+            // splits the pair follows the leading cell). Instances draw in
+            // column order with opaque (ONE / ONE_MINUS_SRC_ALPHA) blending,
+            // so a bg quad emitted here lands AFTER the glyph and overpaints
+            // its right half (日 -> E). The one exception is a block cursor
+            // parked on the spacer that is NOT selected: it paints its
+            // cursor-coloured quad (selection wins over the cursor, so a
+            // selected spacer draws no cursor and is skipped like any other).
+            // An orphan spacer (no WIDE_CHAR to its left) falls through.
+            if col > 0,
+               Self.isSpacerCoveredByWideGlyph(cell: cell, leftNeighbor: cellsPtr[idx - 1]) {
+                let cursorOnSpacer = blockCursorCell?.row == row && blockCursorCell?.col == col
+                if !cursorOnSpacer || isSelected(bufferLine, col) { continue }
+            }
+
             let attrs = Self.attributeBits(
                 cell: cell,
                 hoveredLinkID: hoveredID,
@@ -186,7 +203,7 @@ struct CellInstanceBuilder {
     }
 
     /// Pack one resolved cell into the instance buffer: position the quad,
-    /// skip wide-char spacers (unless a highlight must span both halves),
+    /// skip wide-char spacers (unless a leading/orphan spacer needs a highlight),
     /// double the quad for wide glyphs, look the glyph up in the atlas, and
     /// append a `CellInstance` (glyph, accent-only, or bg-only as applicable).
     /// `bg` / `hasBg` are the post-selection / post-cursor effective values.
@@ -201,10 +218,13 @@ struct CellInstanceBuilder {
         let yPx = Float(row) * cellH + topInsetPoints
 
         // WIDE_CHAR_SPACER / LEADING_WIDE_CHAR_SPACER sit to the right of (or
-        // on the wrapped-leading col before) a wide glyph. The wide glyph's 2x
-        // quad already covers this column, so any draw here would overpaint its
-        // right half. Skip unless the selection highlight (or bg/accent) needs
-        // a bg quad — in that case the highlight must span both halves.
+        // on the wrapped-leading col before) a wide glyph. A spacer that
+        // follows its WIDE_CHAR only gets here as the unselected block-cursor
+        // cell (`buildRow` skips every other one: the 2x quad covers the
+        // column; this cursor quad does overpaint the glyph's right half).
+        // The rest have no glyph quad to their left (wrapped-leading or
+        // orphan spacer). Skip unless the selection highlight (or bg/accent)
+        // needs a bg quad.
         let isSpacer = (cell.flags &
             (UInt16(WIDE_CHAR_SPACER) | UInt16(LEADING_WIDE_CHAR_SPACER))) != 0
         if isSpacer {
@@ -391,6 +411,17 @@ struct CellInstanceBuilder {
         }
         bg.w = bgAlpha
         return (fg, bg, hasBg)
+    }
+
+    /// True when `cell` is the `WIDE_CHAR_SPACER` right of a `WIDE_CHAR`
+    /// (`leftNeighbor`): its column is already covered by that glyph's 2x
+    /// quad, so a quad of its own would be drawn after (on top of) the glyph's
+    /// right half. A leading spacer (`LEADING_WIDE_CHAR_SPACER`) or an orphan
+    /// spacer (no `WIDE_CHAR` to its left) has no such quad and is not covered.
+    /// Pure; internal so tests can pin the decision table.
+    static func isSpacerCoveredByWideGlyph(cell: BBCell, leftNeighbor: BBCell) -> Bool {
+        (cell.flags & UInt16(WIDE_CHAR_SPACER)) != 0
+            && (leftNeighbor.flags & UInt16(WIDE_CHAR)) != 0
     }
 
     /// Pure decision: should `buildRow` emit a background quad for this cell?

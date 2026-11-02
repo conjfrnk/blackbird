@@ -5,9 +5,11 @@ import BBCore
 @testable import Blackbird
 
 /// Blind characterization tests for the BACKGROUND-ONLY / ACCENT-ONLY
-/// instances `CellInstanceBuilder.buildRow` emits (a space or a wide-char
-/// spacer that has to paint a bg quad, a selection highlight, or an
-/// underline / strike / link-hover decoration but carries NO glyph).
+/// instances `CellInstanceBuilder.buildRow` emits (a space, or a wide-char
+/// spacer with no wide glyph quad to its left, that has to paint a bg quad, a
+/// selection highlight, or an underline / strike / link-hover decoration but
+/// carries NO glyph). A spacer directly right of a WIDE_CHAR emits nothing:
+/// the glyph's 2x quad already covers its column.
 ///
 /// Contract pinned (must hold before AND after any change that stops those
 /// quads from sampling the mono atlas):
@@ -19,7 +21,8 @@ import BBCore
 ///     deliberately NOT asserted either way here;
 ///   - attrs.y / attrs.w stay 0 and attrs.z is the CSI 58 colour;
 ///   - which cells emit an instance at all, in which column order, and with
-///     which bg colour / quad size, is unchanged;
+///     which bg colour / quad size, is unchanged (apart from the covered
+///     wide-char spacer above, which no longer emits);
 ///   - real glyph instances keep a non-zero uvSize pointing at the atlas
 ///     entry for that scalar and `attrs.x == 0` for a plain glyph (the
 ///     glyph path is untouched).
@@ -252,21 +255,19 @@ final class CellInstanceBackgroundOnlyBlindTests: XCTestCase {
 
     // MARK: - wide characters
 
-    func test_wideCharWithBg_glyphQuadIsDoubleWide_spacerIsGlyphlessSingleCell() throws {
+    func test_wideCharWithBg_emitsOnlyTheDoubleWideGlyphQuad() throws {
         // U+65E5 (wide) with a bg: col 0 = WIDE_CHAR, col 1 = WIDE_CHAR_SPACER.
+        // The 2x glyph quad carries the bg for both halves; a spacer quad
+        // would be drawn after it and overpaint the glyph's right half.
         let h = try makeHarness("\u{1B}[44m\u{65E5}\u{1B}[0m")
         let insts = buildRow(h)
-        XCTAssertEqual(columns(insts, h), [0, 1])
+        XCTAssertEqual(columns(insts, h), [0], "no spacer quad on top of the wide glyph")
         let wide = insts[0]
-        let spacer = insts[1]
         XCTAssertEqual(wide.quadSizePx.x, Float(h.metrics.cellWidth) * 2, accuracy: 1e-4,
                        "wide glyph quad spans two cells")
         XCTAssertGreaterThan(wide.uvSize.x, 0, "wide glyph quad keeps its atlas rect")
         XCTAssertGreaterThan(wide.uvSize.y, 0)
-        XCTAssertEqual(spacer.quadSizePx.x, Float(h.metrics.cellWidth), accuracy: 1e-4)
-        assertNoAtlasRect(spacer, "wide-char spacer with bg")
-        XCTAssertEqual(spacer.attrs.x & lowByte, 0)
-        assertColor(spacer.bgColor, srgb(h.snapshot.cellsPointer[0].bg))
+        assertColor(wide.bgColor, srgb(h.snapshot.cellsPointer[0].bg))
     }
 
     func test_wideCharWithoutBg_unselected_emitsOnlyTheGlyphQuad() throws {
@@ -276,13 +277,13 @@ final class CellInstanceBackgroundOnlyBlindTests: XCTestCase {
         XCTAssertGreaterThan(insts[0].uvSize.x, 0)
     }
 
-    func test_wideCharSelected_spacerIsGlyphlessSelectionQuad() throws {
+    func test_wideCharSelected_doubleWideQuadCarriesTheSelectionTint() throws {
         let h = try makeHarness("\u{65E5}")
         let insts = buildRow(h, selected: { _, col in col <= 1 })
-        XCTAssertEqual(columns(insts, h), [0, 1], "selection spans both halves of a wide glyph")
+        XCTAssertEqual(columns(insts, h), [0], "selection spans both halves via the 2x glyph quad")
+        XCTAssertEqual(insts[0].quadSizePx.x, Float(h.metrics.cellWidth) * 2, accuracy: 1e-4)
         XCTAssertGreaterThan(insts[0].uvSize.x, 0)
-        assertNoAtlasRect(insts[1], "selected wide-char spacer")
-        assertColor(insts[1].bgColor, selectionTint)
+        assertColor(insts[0].bgColor, selectionTint)
     }
 
     // MARK: - ordering over a full row
