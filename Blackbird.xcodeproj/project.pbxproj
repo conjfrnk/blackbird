@@ -88,6 +88,7 @@
 		3CB95DA71929D7AE74C1D819 /* zshenv-bootstrap.zsh in Resources */ = {isa = PBXBuildFile; fileRef = 6197BD16CBBFAD5C7E9421F7 /* zshenv-bootstrap.zsh */; };
 		3D412017DD45A9FC211142AD /* TabStripDragTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50FFCC0C474AB7D65C49224C /* TabStripDragTests.swift */; };
 		3ED09BF6E5A9F1B6CCDE8F85 /* WindowFrameAutosaveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D08926B4D6B1B24BEF14789E /* WindowFrameAutosaveTests.swift */; };
+		3EF5AE53F04F32047CCC4B80 /* GlyphAtlasBlockGlyphYFitBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE379012FEC25AD2E2A641FE /* GlyphAtlasBlockGlyphYFitBlindTests.swift */; };
 		3F5EF0986124D5582479AB45 /* ShellResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 039A47B05AF72C641C338E43 /* ShellResolver.swift */; };
 		405BF1745156AB5C7AF12842 /* KeyEncoderExtendedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 720486E325B569F7E9530D4E /* KeyEncoderExtendedTests.swift */; };
 		42178FFCB62744188D09772F /* DeferredFeedQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46DB9B60EB2FE16FE4F11A15 /* DeferredFeedQueue.swift */; };
@@ -640,6 +641,7 @@
 		DC3BC2585B0C354C6AC61171 /* SyncUpdateWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncUpdateWatchdog.swift; sourceTree = "<group>"; };
 		DC63CD202483C22F3E8DAE71 /* PromptJumpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PromptJumpTests.swift; sourceTree = "<group>"; };
 		DCE4EE07BCC1F913C3E6A081 /* WheelScrollAccumulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WheelScrollAccumulator.swift; sourceTree = "<group>"; };
+		DE379012FEC25AD2E2A641FE /* GlyphAtlasBlockGlyphYFitBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasBlockGlyphYFitBlindTests.swift; sourceTree = "<group>"; };
 		DEDB57DA7466F484DEEE62C9 /* SessionLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLifecycle.swift; sourceTree = "<group>"; };
 		DF8E87FBF674AD466760D74A /* AppKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppKit.framework; path = System/Library/Frameworks/AppKit.framework; sourceTree = SDKROOT; };
 		E0FB33E683481B949C14F9CB /* PreeditOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreeditOverlayView.swift; sourceTree = "<group>"; };
@@ -788,6 +790,7 @@
 				DBC3FD1D0DB7F18AA745387D /* FishPromptStatusBlindTests.swift */,
 				859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */,
 				EF3965715F1DF2021784E790 /* FunctionKeyF13F20Tests.swift */,
+				DE379012FEC25AD2E2A641FE /* GlyphAtlasBlockGlyphYFitBlindTests.swift */,
 				26BA0CAC55ADFCE4A1F02D62 /* GlyphAtlasInvariantTests.swift */,
 				B1B68195F4161FCEE7A5FB56 /* GlyphAtlasStorageModeBlindTests.swift */,
 				31710E3D7CE95A9DEB4BDBD9 /* GlyphAtlasSyntheticTraitsBlindTests.swift */,
@@ -1455,6 +1458,7 @@
 				0B6A6780AE3C153B58045ECA /* FishPromptStatusBlindTests.swift in Sources */,
 				A25F8643DAD775E8251392EC /* FocusEventsTests.swift in Sources */,
 				242064EC63C93D69A922E41C /* FunctionKeyF13F20Tests.swift in Sources */,
+				3EF5AE53F04F32047CCC4B80 /* GlyphAtlasBlockGlyphYFitBlindTests.swift in Sources */,
 				986BA3465A246BA5AAFD097B /* GlyphAtlasInvariantTests.swift in Sources */,
 				E52AB9F08C03E0E5294E9D3D /* GlyphAtlasStorageModeBlindTests.swift in Sources */,
 				B79600DADE144E20F76E29FB /* GlyphAtlasSyntheticTraitsBlindTests.swift in Sources */,
