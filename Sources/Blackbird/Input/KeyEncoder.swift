@@ -871,6 +871,11 @@ public final class KeyEncoder {
         case 0x61...0x7A: return UInt8(v - 0x60)       // a..z    -> 0x01..0x1A
         case 0x20:        return 0x00                  // Ctrl-Space -> NUL
         case 0x3F:        return 0x7F                  // Ctrl-?     -> DEL
+        // AppKit hands Ctrl+Backspace over as DEL (it control-translates
+        // letters but not the Delete key), so without this the chord is
+        // byte-identical to plain Backspace. xterm and kitty's legacy table
+        // swap it to BS so `bindkey '^H' backward-kill-word` can fire.
+        case 0x7F:        return 0x08                  // Ctrl-Backspace -> BS
         // xterm's legacy digit/symbol chords (v0.8.1; these typed the bare
         // character before). Ctrl-1 and Ctrl-9/0 have no C0 mapping in
         // xterm either and stay bare.
