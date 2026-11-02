@@ -168,12 +168,16 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
             if i == cursor_buffer_line && reflow {
                 // Resize cursor's line and reflow the cursor if necessary.
-                let mut target = self.cursor.point.sub(self, Boundary::Cursor, num_wrapped);
+                //
+                // Unclamped: `take_all` emptied the grid, so a clamp would pin a target on the
+                // history row above a cursor on viewport line 0 to (0, 0), stranding the merged
+                // line in history and leaving the emptied row (and a bogus pending wrap) behind.
+                let mut target = self.cursor.point.sub_unclamped(columns, num_wrapped);
 
                 // Clamp to the last column, if no content was reflown with the cursor.
                 if target.column.0 == 0 && row.is_clear() {
                     self.cursor.input_needs_wrap = true;
-                    target = target.sub(self, Boundary::Cursor, 1);
+                    target = target.sub_unclamped(columns, 1);
                 }
                 self.cursor.point.column = target.column;
 

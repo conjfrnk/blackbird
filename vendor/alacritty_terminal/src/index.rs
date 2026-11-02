@@ -62,15 +62,22 @@ impl Point {
     /// Subtract a number of columns from a point.
     #[inline]
     #[must_use = "this returns the result of the operation, without modifying the original"]
-    pub fn sub<D>(mut self, dimensions: &D, boundary: Boundary, rhs: usize) -> Self
+    pub fn sub<D>(self, dimensions: &D, boundary: Boundary, rhs: usize) -> Self
     where
         D: Dimensions,
     {
-        let cols = dimensions.columns();
+        self.sub_unclamped(dimensions.columns(), rhs).grid_clamp(dimensions, boundary)
+    }
+
+    /// Subtract a number of columns from a point, wrapping at `cols`, without clamping the
+    /// result to a grid boundary. The line may end up negative (above the viewport).
+    #[inline]
+    #[must_use = "this returns the result of the operation, without modifying the original"]
+    pub fn sub_unclamped(mut self, cols: usize, rhs: usize) -> Self {
         let line_changes = (rhs + cols - 1).saturating_sub(self.column.0) / cols;
         self.line -= line_changes;
         self.column = Column((cols + self.column.0 - rhs % cols) % cols);
-        self.grid_clamp(dimensions, boundary)
+        self
     }
 
     /// Add a number of columns to a point.
