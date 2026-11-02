@@ -198,7 +198,7 @@ the next spawned shell, never live ones. Implemented in
   shell uses for job control.
 - Closes every inherited fd `[3, _SC_OPEN_MAX)` — clamped at 65 536.
 - Reinstalls the bundled kitty terminfo at every launch so a planted
-  `~/.terminfo/x/xterm-kitty` with hostile capabilities gets
+  `~/.terminfo/78/xterm-kitty` with hostile capabilities gets
   overwritten.
 
 ### Memory and CPU bounds
