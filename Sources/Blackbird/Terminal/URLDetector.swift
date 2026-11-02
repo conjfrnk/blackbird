@@ -30,8 +30,9 @@ public enum URLDetector {
     // drift). No alternation + single-char quantifier preserves linear-time
     // matching; no ReDoS shape introduced. Audit cwd-hyperlink F6.
     //
-    // Trailing punctuation (.,;:]}>'") is trimmed post-match so URLs at
-    // the end of sentences select cleanly.
+    // Trailing punctuation (.,);:]}>'") is trimmed post-match so URLs at
+    // the end of sentences select cleanly; a `)`/`]` that closes a `(`/`[`
+    // inside the URL stays (see `trailingPunctuationCount`).
     private static let regex: NSRegularExpression = {
         let pattern = #"(?i)(?:https?|ftp)://(?:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=]|%[0-9A-Fa-f]{2})+"#
         return try! NSRegularExpression(pattern: pattern)
@@ -53,13 +54,46 @@ public enum URLDetector {
             range: NSRange(location: start, length: nsLine.length - start)
         ) { result, _, stop in
             guard var r = result?.range else { return }
-            while r.length > 0 {
-                let last = nsLine.character(at: r.location + r.length - 1)
-                if ".,);:]}>'\"".utf16.contains(last) { r.length -= 1 } else { break }
-            }
+            // Every trimmed character is ASCII, so UTF-16 units == characters.
+            r.length -= trailingPunctuationCount(in: nsLine.substring(with: r))
             guard r.length > 0 else { return }
             body(r, stop)
         }
+    }
+
+    /// How many trailing characters of `text` (a regex match, or a wrapped URL
+    /// joined so far) are sentence/markup punctuation rather than URL.
+    /// `.,;:}>'"` always are. `)` and `]` are only when no `(` / `[` earlier in
+    /// `text` pairs with them: `…/Rust_(programming_language)` and `http://[::1]`
+    /// keep their closer, `(see https://x.com)` and `[t](https://x.com)` lose
+    /// theirs. Shared by the single-row match and the wrap-join so a wrapped URL
+    /// trims exactly like its unwrapped form.
+    private static func trailingPunctuationCount(in text: String) -> Int {
+        // Openers minus closers; a trailing closer is unmatched while negative.
+        var parens = 0
+        var brackets = 0
+        for u in text.utf16 {
+            switch u {
+            case 0x28: parens += 1      // (
+            case 0x29: parens -= 1      // )
+            case 0x5B: brackets += 1    // [
+            case 0x5D: brackets -= 1    // ]
+            default: break
+            }
+        }
+        var count = 0
+        for u in text.utf16.reversed() {
+            switch u {
+            case 0x29 where parens >= 0, 0x5D where brackets >= 0:
+                return count
+            case 0x29: parens += 1
+            case 0x5D: brackets += 1
+            case _ where ".,;:}>'\"".utf16.contains(u): break
+            default: return count
+            }
+            count += 1
+        }
+        return count
     }
 
     // Bare email → `mailto:` URL detection. Conservative by design:
@@ -378,7 +412,6 @@ public enum URLDetector {
             // matches the visible span; F9 notes that as future work.
             let subPort = sub.port
             let urlStructureLeaders: Set<Character> = ["?", "#", "&", "@", ";", ":"]
-            let trimSet = Set<Character>([".", ",", ";", ":", ")", "]", "}", ">", "'", "\""])
             var accumulated = substring
             var contRow = row + 1
             while contRow < snapshot.rows,
@@ -413,11 +446,12 @@ public enum URLDetector {
                 let filledToEdge = (contEnd == snapshot.cols)
                 // Trim the trailing-punct set so a wrapped URL followed
                 // by ", thanks" on the final row still yields a clean URL.
-                var trimmedLen = continuation.count
-                while trimmedLen > 0 {
-                    let last = continuation[continuation.index(continuation.startIndex, offsetBy: trimmedLen - 1)]
-                    if trimSet.contains(last) { trimmedLen -= 1 } else { break }
-                }
+                // Balance is judged over the whole joined URL, not just this
+                // row: the `(` may sit on an earlier row than its `)`.
+                // (Continuation chars are single-scalar ASCII, so the UTF-16
+                // count equals the Character count.)
+                let trimmedLen = max(0, continuation.count
+                    - trailingPunctuationCount(in: accumulated + continuation))
                 guard trimmedLen > 0 else { break }
                 let trimmed = String(continuation.prefix(trimmedLen))
                 let candidate = accumulated + trimmed
