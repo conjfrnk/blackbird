@@ -2145,7 +2145,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let isApplicationKeypadKey = !hasMarkedText() && KeyEventClassifier.isApplicationKeypadKey(
             event, applicationKeypad: currentSnapshot?.termMode.contains(.appKeypad) ?? false
         )
-        if !optionMetaChord && !isContextMenuChord && !isApplicationKeypadKey {
+        // Shift+Tab has nothing to compose. With Option held (Native-Option
+        // mode) the input context commits its U+0019 through `insertText`,
+        // which would write a raw ^Y instead of letting the encoder send
+        // back-tab. A live composition still owns the key.
+        let isBackTab = !hadMarkedText && KeyEventClassifier.isBackTab(
+            keyCode: event.keyCode, chars: event.characters ?? ""
+        )
+        if !optionMetaChord && !isContextMenuChord && !isApplicationKeypadKey && !isBackTab {
             inputContext?.handleEvent(event)
         }
         return hadMarkedText || hasMarkedText() || didInsertTextViaIME
@@ -2171,6 +2178,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // Ctrl+Return / Ctrl+keypad-Enter: the raw characters aren't an Enter
         // byte (keypad Enter is ETX → SIGINT); the encoder decides instead.
         if KeyEventClassifier.isEnterKey(keyCode: event.keyCode) { return false }
+        // Ctrl+Shift+Tab reports U+0019 (back-tab), which is not a ^Y press;
+        // the encoder maps it back to Tab so it never becomes a raw 0x19.
+        if KeyEventClassifier.isBackTab(
+            keyCode: event.keyCode, chars: event.characters ?? ""
+        ) { return false }
         #if DEBUG
         Self.keyLogger.debug("keyDown: Control modifier detected")
         #endif
@@ -2258,9 +2270,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // source here for every remaining non-special printable — Meta
         // mode still wants the un-Option'd base letter so that Option+E
         // encodes to ESC "e" rather than ESC "´".
-        let chars = KeyEventClassifier.normalizedReturnChars(
+        let chars = KeyEventClassifier.normalizedTabChars(
             keyCode: event.keyCode,
-            chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
+            chars: KeyEventClassifier.normalizedReturnChars(
+                keyCode: event.keyCode,
+                chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
+            )
         )
         // A key with no SpecialKey mapping whose characters are wholly
         // private-use is a function / editing / system key AppKit had no
@@ -2356,9 +2371,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             }
             return
         }
-        let chars = KeyEventClassifier.normalizedReturnChars(
+        let chars = KeyEventClassifier.normalizedTabChars(
             keyCode: event.keyCode,
-            chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
+            chars: KeyEventClassifier.normalizedReturnChars(
+                keyCode: event.keyCode,
+                chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
+            )
         )
         let bytes = encoder.encode(
             chars: chars, modifiers: mods, mode: termMode, eventType: .release

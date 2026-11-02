@@ -8,6 +8,7 @@ import AppKit
 enum KeyEventClassifier {
     private static let returnKeyCode: UInt16 = 36       // kVK_Return
     private static let keypadEnterKeyCode: UInt16 = 76  // kVK_ANSI_KeypadEnter
+    private static let tabKeyCode: UInt16 = 48          // kVK_Tab
 
     /// True when an Option+key event should bypass the IME and be encoded as a
     /// Meta chord (ESC + base char) rather than composed as a dead-key / accent.
@@ -75,6 +76,24 @@ enum KeyEventClassifier {
     /// Every other key, keypad Enter included, keeps its characters.
     static func normalizedReturnChars(keyCode: UInt16, chars: String) -> String {
         keyCode == Self.returnKeyCode ? "\r" : chars
+    }
+
+    /// True for the Tab key when AppKit reports its Shift form: with Shift held
+    /// (alone or with Ctrl / Option) it delivers U+0019 (`NSBackTabCharacter`)
+    /// as both `characters` and `charactersIgnoringModifiers`, never `"\t"`.
+    /// U+0019 is also the C0 byte for Ctrl+Y, so left alone it is sent as ^Y
+    /// (VDSUSP in a cooked-mode job, yank in readline) instead of back-tab.
+    /// Keyed on the physical Tab key so a genuine Ctrl+Y (key code 16) is
+    /// never reinterpreted.
+    static func isBackTab(keyCode: UInt16, chars: String) -> Bool {
+        keyCode == Self.tabKeyCode && chars == "\u{19}"
+    }
+
+    /// Shift+Tab is a Tab (`"\t"` + Shift in the modifiers) to the encoder, so
+    /// it emits `CSI Z` (legacy) or reports codepoint 9 (kitty / modifyOtherKeys).
+    /// Every other key keeps its characters.
+    static func normalizedTabChars(keyCode: UInt16, chars: String) -> String {
+        isBackTab(keyCode: keyCode, chars: chars) ? "\t" : chars
     }
 
     static func specialKey(for event: NSEvent) -> KeyEncoder.SpecialKey? {
