@@ -707,12 +707,19 @@ extension TerminalView {
         // collapse via the max(0, …) clamp below — clicks inside the inset
         // strip report col 0, never a phantom -1.
         let colX = (safeX - TerminalView.horizontalContentInsetPoints) / metrics.cellWidth
-        // Clamp to a sane cell range so oversized coordinates (user
+        // Clamp to the live grid, like xterm and `Selection.bufferPoint`: the
+        // bottom/right inset strips, the sub-cell remainder and a drag past the
+        // window edge all map past the last cell, and a TUI must never be told
+        // about a column/row that isn't on its screen. Rows here are
+        // viewport-relative, so `displayOffset` doesn't enter. With no snapshot
+        // yet, fall back to a sane range so oversized coordinates (user
         // scrolled the window off the right edge of a 200k-col display)
         // don't overflow Int32 when MouseReportEncoder.encode stringifies them.
         // Division of a finite by a positive cellWidth/Height is finite,
         // so no second isFinite check is needed.
-        let maxCol = 10_000, maxRow = 10_000
+        let snap = currentSnapshot
+        let maxCol: Int = snap.map { max(0, $0.cols - 1) } ?? 10_000
+        let maxRow: Int = snap.map { max(0, $0.rows - 1) } ?? 10_000
         let col = max(0, min(maxCol, Int(colX)))
         let row = max(0, min(maxRow, Int(rowY)))
         // xterm folds Shift (4) and Ctrl (16) into the button code of every
