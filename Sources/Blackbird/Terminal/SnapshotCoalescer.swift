@@ -158,6 +158,10 @@ final class SnapshotCoalescer {
             // Placed BEFORE the snapshot guard so a nil snapshot can't skip
             // the arm.
             session.syncUpdateWatchdog.armIfNeeded()
+            // Same tail, same reason: a burst that left an OSC 52 write held
+            // back by the rate cap needs a timer, since no further input may
+            // ever arrive to flush it. Also before the snapshot guard.
+            session.osc52TrailingFlush.armIfNeeded()
             guard let snap = session.bbterm.snapshot() else { return }
             self.snapshotsTakenCount += 1
             self.publishPendingSnapshot(snap)

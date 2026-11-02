@@ -375,6 +375,20 @@ public final class BBTerm {
         return bb_term_flush_sync_update(h, force ? 1 : 0) != 0
     }
 
+    /// Re-attempt delivery of an OSC 52 clipboard write the core's rate cap
+    /// held back (coalesced to the latest). Delivery arrives through the
+    /// event handler as `.osc52Clipboard`, exactly as from `input`.
+    ///
+    /// Returns the seconds until the cap's window rolls while a write is still
+    /// held back (call again after that long), `nil` when nothing is held back
+    /// or it was just delivered. Calling early is harmless.
+    @discardableResult
+    public func flushSuppressedOsc52() -> TimeInterval? {
+        guard let h = handle else { return nil }
+        let nanos = bb_term_flush_suppressed_osc52(h)
+        return nanos == 0 ? nil : TimeInterval(nanos) / 1_000_000_000
+    }
+
     /// Compute the focus-event escape for the given focus state, gated on
     /// mode 1004 being active. Returns `nil` when the TUI hasn't requested
     /// focus events — sending those bytes unconditionally would be

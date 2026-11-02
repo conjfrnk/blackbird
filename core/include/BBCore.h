@@ -857,6 +857,30 @@ uint8_t bb_term_is_poisoned(const struct BBTerm *term);
 uint8_t bb_term_flush_sync_update(struct BBTerm *term, uint8_t force);
 
 /**
+ * Re-attempt delivery of an OSC 52 clipboard write the 32/s rate cap held
+ * back (coalesced to the latest), without needing more PTY input.
+ *
+ * `bb_term_input` only retries a held-back write at the end of the NEXT
+ * chunk, so after a burst and silence the write would sit until some later
+ * output (a prompt redraw, minutes on) and then replace whatever the user
+ * copied in the meantime. The embedder calls this from a timer instead.
+ *
+ * Returns `0` when nothing is held back (including: the write was just
+ * delivered through the registered callback as an `Osc52Clipboard` event).
+ * Otherwise returns the nanoseconds until the cap's window rolls and the
+ * write can be delivered; call again after that long. Early calls are
+ * harmless: they deliver nothing and return the remaining time.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null returns `0`.
+ *
+ * Panics inside this function are caught by `catch_unwind` and delivered as a
+ * `BBEventKind::Fatal` event to the registered callback. The function returns
+ * `0` as the fallback value.
+ */
+uint64_t bb_term_flush_suppressed_osc52(struct BBTerm *term);
+
+/**
  * Report whether the snapshot's damage set is "full" (all rows need a
  * redraw — scroll, insert-mode, viewport scrollback change). When true,
  * the renderer must treat every row as damaged regardless of

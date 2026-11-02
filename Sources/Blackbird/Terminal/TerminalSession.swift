@@ -339,6 +339,12 @@ public final class TerminalSession: ObservableObject {
     /// can arm it from the burst tail; only this session assigns it.
     private(set) var syncUpdateWatchdog: SyncUpdateWatchdog!
 
+    /// Timer-driven delivery of an OSC 52 write the core's rate cap held back
+    /// (otherwise it waits for the next input chunk and can clobber a newer
+    /// user copy). Same coreQueue-confined `armed` latch discipline and arming
+    /// site as `syncUpdateWatchdog`.
+    private(set) var osc52TrailingFlush: Osc52TrailingFlush!
+
     public static func start(
         shell: String,
         arguments: [String],
@@ -402,6 +408,7 @@ public final class TerminalSession: ObservableObject {
         self.focusEmitter = FocusEmitter(session: self)
         self.resizeController = ResizeController(session: self)
         self.syncUpdateWatchdog = SyncUpdateWatchdog(session: self)
+        self.osc52TrailingFlush = Osc52TrailingFlush(session: self)
         wire()
     }
 

@@ -122,6 +122,7 @@
 		634C2FC6047F0DC32157ED31 /* FindController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F898FCB057ABD93D67AD8855 /* FindController.swift */; };
 		64F21BE1DB0B98056AA10448 /* LocaleEnvironmentBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCA577F9308A6FEF5C80E95D /* LocaleEnvironmentBlindTests.swift */; };
 		650493A92BD8EA000173236C /* HoverCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 674D4AA52A316FEE51641A8D /* HoverCoordinator.swift */; };
+		663AAEE271F4F1AC375D7D4C /* Osc52TrailingFlush.swift in Sources */ = {isa = PBXBuildFile; fileRef = 671CC862D9C0BAB54FCDD3F5 /* Osc52TrailingFlush.swift */; };
 		66BA74F1B9C360509735339C /* TabFrameSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFCC5AACE4D64E4AD46841D7 /* TabFrameSync.swift */; };
 		66BDCBF186346C6913023FC5 /* DamageTrackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */; };
 		6712478AF6230C8A2C0D37BA /* AddTabButtonClickSequenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F91574A2EBEBDBB782A884B2 /* AddTabButtonClickSequenceTests.swift */; };
@@ -142,6 +143,7 @@
 		6EF45785D6A1AAA933C589E1 /* osc133.bash in Resources */ = {isa = PBXBuildFile; fileRef = 2F96C43E82A34FB57CB37965 /* osc133.bash */; };
 		6F09DCCD4E07AC02B155E857 /* TabMover.swift in Sources */ = {isa = PBXBuildFile; fileRef = B25AD58FD2D39C0CF6E82596 /* TabMover.swift */; };
 		7283733C5721EA5163CB93E7 /* TabRenameActivationClickTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAC5CB11822F6A62A448C3FE /* TabRenameActivationClickTests.swift */; };
+		7374638DDA0C132620A7E343 /* OSC52CoalescedTrailingFlushBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 632A45A3BF4BEFFE2C3D5DD9 /* OSC52CoalescedTrailingFlushBlindTests.swift */; };
 		7386DF40D48E9E676E64A55E /* MultiTabConcurrentSoakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E79964F4FADD416B72D5FF32 /* MultiTabConcurrentSoakTests.swift */; };
 		7462C02E74143E52FD628DA5 /* PTY.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5995252272D652667DB2D2D9 /* PTY.swift */; };
 		74A496E5869C511131A3E629 /* InsertHelpKeyBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52F655E8F0D2980077D4CD2B /* InsertHelpKeyBlindTests.swift */; };
@@ -469,10 +471,12 @@
 		5FF7774133BC836284BDAC66 /* NativeTabStripHiderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTabStripHiderTests.swift; sourceTree = "<group>"; };
 		6160AD20DD99CBE80ABC5C40 /* AccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityTests.swift; sourceTree = "<group>"; };
 		6197BD16CBBFAD5C7E9421F7 /* zshenv-bootstrap.zsh */ = {isa = PBXFileReference; path = "zshenv-bootstrap.zsh"; sourceTree = "<group>"; };
+		632A45A3BF4BEFFE2C3D5DD9 /* OSC52CoalescedTrailingFlushBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSC52CoalescedTrailingFlushBlindTests.swift; sourceTree = "<group>"; };
 		635D5B4F5764D6C5264A1761 /* BashPromptCommandStatusBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BashPromptCommandStatusBlindTests.swift; sourceTree = "<group>"; };
 		651F356486780383B32074DA /* SyncPresentationBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPresentationBlindTests.swift; sourceTree = "<group>"; };
 		652F3910146BA23469557490 /* AppDelegate+Menu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppDelegate+Menu.swift"; sourceTree = "<group>"; };
 		6674F348ADE914C0EEBB0E90 /* TestHostSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHostSupport.swift; sourceTree = "<group>"; };
+		671CC862D9C0BAB54FCDD3F5 /* Osc52TrailingFlush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Osc52TrailingFlush.swift; sourceTree = "<group>"; };
 		673FE2E71DCD08F9286D5C60 /* kitty.terminfo */ = {isa = PBXFileReference; path = kitty.terminfo; sourceTree = "<group>"; };
 		674D4AA52A316FEE51641A8D /* HoverCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoverCoordinator.swift; sourceTree = "<group>"; };
 		68A18CB3A639D37DF4820940 /* SyncUpdateWatchdogArmingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncUpdateWatchdogArmingTests.swift; sourceTree = "<group>"; };
@@ -845,6 +849,7 @@
 				42F0C84C641FACEEE80ACC59 /* NotificationPresenterBlindTests.swift */,
 				5FDB6B6E282A43F32284D1DA /* OpenAtFolderBlindTests.swift */,
 				D2FFB2752B57F80A026ADFD5 /* OSC8PercentGateBlindTests.swift */,
+				632A45A3BF4BEFFE2C3D5DD9 /* OSC52CoalescedTrailingFlushBlindTests.swift */,
 				FEB2C8D2E81024E6331B7FB0 /* OSC52FloodRateCapBlindTests.swift */,
 				3D54AB14CA514CB4B38F0141 /* OSC133Tests.swift */,
 				CD00933AEBA54394D0D9CE62 /* PaletteInputsEqualityTests.swift */,
@@ -1020,6 +1025,7 @@
 				868219E4125224A25BACB9CF /* LocaleEnvironment.swift */,
 				189F9BFCE6B0F46BED00E135 /* MouseReportEncoder.swift */,
 				2E8CF6A327FF6AF427167BFA /* NotificationPresenter.swift */,
+				671CC862D9C0BAB54FCDD3F5 /* Osc52TrailingFlush.swift */,
 				D693342F786778DDD13B44A3 /* PaletteApplier.swift */,
 				8B9FC36E18F7230ED943F1A0 /* PasteSanitizer.swift */,
 				C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */,
@@ -1324,6 +1330,7 @@
 				84E2B2AB3E81BD6EB1195FEF /* MouseReportEncoder.swift in Sources */,
 				EB1B99FE4ED4AAB9385037BE /* NativeTabStripHider.swift in Sources */,
 				01B793D05544900E310E06ED /* NotificationPresenter.swift in Sources */,
+				663AAEE271F4F1AC375D7D4C /* Osc52TrailingFlush.swift in Sources */,
 				7462C02E74143E52FD628DA5 /* PTY.swift in Sources */,
 				162027B2B7BBFE94009A8BB0 /* PaletteApplier.swift in Sources */,
 				0A38D6D97FCE22C1211E33E3 /* PasteSanitizer.swift in Sources */,
@@ -1507,6 +1514,7 @@
 				03419427FB37333FD04C7DE9 /* NotificationAuthRefreshBlindTests.swift in Sources */,
 				98043BEFBCB3E53B90EF0B52 /* NotificationPresenterBlindTests.swift in Sources */,
 				007D6A6B8361AA725ACF9D0A /* OSC133Tests.swift in Sources */,
+				7374638DDA0C132620A7E343 /* OSC52CoalescedTrailingFlushBlindTests.swift in Sources */,
 				A12E50D2625432B5F7A3E524 /* OSC52FloodRateCapBlindTests.swift in Sources */,
 				E6261C82C5699EA5EF94AFAB /* OSC8PercentGateBlindTests.swift in Sources */,
 				75DC1FFE075EAE377E9450AA /* OpenAtFolderBlindTests.swift in Sources */,

@@ -335,6 +335,80 @@ fn osc52_flood_is_capped_and_coalesces_to_latest() {
     }
 }
 
+/// `bb_term_flush_suppressed_osc52` is the embedder's timer hook for the
+/// OSC 52 latch: with the window still saturated it reports the time left and
+/// neither delivers nor disturbs the latch; once that time has passed it
+/// delivers the newest held-back write exactly once, with no further input.
+#[test]
+fn osc52_trailing_flush_delivers_latest_without_further_input() {
+    use std::os::raw::c_void;
+    use std::sync::Mutex;
+
+    struct Sink {
+        writes: Mutex<Vec<String>>,
+    }
+    unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+        if matches!(ev.kind, BBEventKind::Osc52Clipboard) {
+            let sink = &*(ctx as *const Sink);
+            let bytes = std::slice::from_raw_parts(ev.payload, ev.len);
+            sink.writes
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(bytes).into_owned());
+        }
+    }
+    let sink = Sink {
+        writes: Mutex::new(Vec::new()),
+    };
+    let writes = |sink: &Sink| sink.writes.lock().unwrap().clone();
+    unsafe {
+        let term = bb_term_new(40, 5, 100);
+        bb_term_set_osc52_write_enabled(term, 1);
+        bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+
+        assert_eq!(
+            bb_term_flush_suppressed_osc52(term),
+            0,
+            "nothing held back yet"
+        );
+        assert_eq!(bb_term_flush_suppressed_osc52(std::ptr::null_mut()), 0);
+
+        // 33 x "abc" then "xyz": 32 pass the cap, "xyz" ends up latched.
+        let mut buf = Vec::new();
+        for _ in 0..33 {
+            buf.extend_from_slice(b"\x1b]52;c;YWJj\x07");
+        }
+        buf.extend_from_slice(b"\x1b]52;c;eHl6\x07");
+        bb_term_input(term, buf.as_ptr(), buf.len());
+        assert_eq!(writes(&sink).len(), 32, "the cap admits 32 per window");
+
+        // Window still saturated: report the wait, deliver nothing.
+        let wait = bb_term_flush_suppressed_osc52(term);
+        assert!(
+            (1..=1_000_000_000).contains(&wait),
+            "wait must be within the 1 s window; got {wait} ns"
+        );
+        assert_eq!(writes(&sink).len(), 32, "an early flush must not deliver");
+
+        // After the reported wait the same call delivers the newest write.
+        std::thread::sleep(
+            std::time::Duration::from_nanos(wait) + std::time::Duration::from_millis(50),
+        );
+        assert_eq!(bb_term_flush_suppressed_osc52(term), 0);
+        let delivered = writes(&sink);
+        assert_eq!(delivered.len(), 33);
+        assert_eq!(delivered.last().map(String::as_str), Some("xyz"));
+
+        // Exactly once: nothing is left to deliver on a later call or input.
+        assert_eq!(bb_term_flush_suppressed_osc52(term), 0);
+        let plain = b"hello";
+        bb_term_input(term, plain.as_ptr(), plain.len());
+        assert_eq!(writes(&sink).len(), 33, "latched write must deliver once");
+
+        bb_term_free(term);
+    }
+}
+
 /// Verify that scrollback is wired up: after feeding enough newlines to
 /// push lines off-screen the grid's history grows up to the scrollback
 /// limit, confirming `Config::scrolling_history` was applied correctly.

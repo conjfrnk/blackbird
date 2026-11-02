@@ -82,7 +82,11 @@ pub(crate) struct CallbackCell {
     suppressed_title: UnsafeCell<Option<String>>,
     /// Same latch for rate-suppressed OSC 52 clipboard writes: the
     /// clipboard is last-writer-wins, so a burst's final yank must still
-    /// land once the window rolls. Redelivered by `flush_suppressed_osc52`.
+    /// land once the window rolls. Redelivered by `flush_suppressed_osc52`,
+    /// which the Swift side also drives from a timer
+    /// (`bb_term_flush_suppressed_osc52`): unlike a title, a write that
+    /// waited for the next input chunk could land minutes later and
+    /// overwrite whatever the user copied in the meantime.
     suppressed_osc52: UnsafeCell<Option<String>>,
     /// One-shot breadcrumb latch for the first suppressed title
     /// (mirrors `osc133_rate_limited_logged`'s stance).
@@ -230,14 +234,25 @@ impl CallbackCell {
     /// Re-attempt delivery of a rate-suppressed OSC 52 write (see
     /// `suppressed_osc52`); same contract as `flush_suppressed_title`.
     ///
+    /// Returns how long until the cap's window rolls while a write is still
+    /// held back (so the caller can schedule a trailing flush), `None` once
+    /// nothing is held back. The latch is left untouched while the window is
+    /// saturated: re-firing would only re-clone the payload into the latch
+    /// on every chunk of a flood.
+    ///
     /// # Safety
     /// Caller must ensure no concurrent access.
-    pub(crate) unsafe fn flush_suppressed_osc52(&self) {
+    pub(crate) unsafe fn flush_suppressed_osc52(&self) -> Option<std::time::Duration> {
         let pending = {
             let _busy = self.debug_enter();
+            // Nothing held back: nothing to deliver, nothing to wait for.
+            (*self.suppressed_osc52.get()).as_ref()?;
+            if let Some(wait) = (*self.osc52_rate.get()).retry_after() {
+                return Some(wait);
+            }
             (*self.suppressed_osc52.get()).take()
         };
-        let Some(text) = pending else { return };
+        let text = pending?;
         let bytes = text.as_bytes();
         self.fire(BBEvent {
             kind: BBEventKind::Osc52Clipboard,
@@ -245,6 +260,7 @@ impl CallbackCell {
             len: bytes.len(),
             i32_arg: 0,
         });
+        None
     }
 
     /// Update the stored callback and context.

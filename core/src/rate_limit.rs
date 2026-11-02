@@ -110,6 +110,17 @@ impl EventRateState {
         self.window_count += 1;
         true
     }
+
+    /// How long until `allow()` would admit again, or `None` if it would
+    /// admit right now. A pure read: unlike `allow()` it neither rolls the
+    /// window nor spends budget, so a caller can ask without side effects.
+    pub(crate) fn retry_after(&self) -> Option<std::time::Duration> {
+        let elapsed = std::time::Instant::now().duration_since(self.window_start);
+        if elapsed >= self.window || self.window_count < self.cap {
+            return None;
+        }
+        Some(self.window - elapsed)
+    }
 }
 
 /// Title-event cap (audit S1-002). Every `Event::Title`/`Event::Bell`
