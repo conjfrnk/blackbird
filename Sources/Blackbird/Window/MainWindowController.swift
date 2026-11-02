@@ -512,6 +512,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
+                // A core failure ends the child too, but the exit is ours, not
+                // the shell's: the sheet's Close Tab / Keep Open choice owns
+                // whether the window goes away. Auto-closing here would turn
+                // Keep Open into a close the moment the sheet is dismissed.
+                guard self.session?.coreFailureMessage == nil else { return }
                 self.sessionLifecycle.deferredAutoCloseIfNeeded()
             }
     }
@@ -635,9 +640,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     /// The core panicked: the session has already been torn down (its
-    /// child ended). Say so and offer Close Tab — before v0.8.1 the only
-    /// signal was a title prefix the pill truncated to "[fatal] core pa…"
-    /// while keystrokes kept reaching a child nobody could see.
+    /// child ended). Say so and offer Close Tab or Keep Open — before v0.8.1
+    /// the only signal was a title prefix the pill truncated to
+    /// "[fatal] core pa…" while keystrokes kept reaching a child nobody could
+    /// see.
     func presentCoreFailure(_ message: String) {
         guard let window else { return }
         let alert = NSAlert()
@@ -647,10 +653,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         alert.addButton(withTitle: "Close Tab")
         alert.addButton(withTitle: "Keep Open")
         alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let window = self?.window else { return }
-            Self.bypassCloseConfirm = true
-            defer { Self.bypassCloseConfirm = false }
-            window.performClose(nil)
+            guard response == .alertFirstButtonReturn else { return }
+            // The sheet is still attached inside this handler, so a direct
+            // `performClose` is a no-op; wait for it to detach, then close.
+            // The session is already terminated, so no close-confirm applies.
+            self?.sessionLifecycle.deferredAutoCloseIfNeeded()
         }
     }
 
