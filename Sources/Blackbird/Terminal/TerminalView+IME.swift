@@ -269,24 +269,21 @@ extension TerminalView: NSTextInputClient {
     /// keyDown → encoder path handles it a few lines later with the actual
     /// event (correct modifiers, kitty disambiguation, Option-as-Meta, etc.).
     /// Leaving this empty WAS the fix for the printable-key selectors, but
-    /// two exceptions need real handling (audit terminal-ime F3):
+    /// one exception needs real handling (audit terminal-ime F3):
     /// - `cancelOperation:` fires on Esc during an active composition; the
     ///   IME expects "abort the preedit" not "encode Esc". Clear the
     ///   composition so the user can re-start input without the stale
     ///   marked text showing through.
-    /// - `complete:` fires on some layouts for Fn-key accessibility
-    ///   completion; let NSResponder's default run so VoiceOver users
-    ///   still get the standard chain. Likewise `noop:` is a safe pass.
+    ///
+    /// `noop:` (Ctrl+C/Z/U/W/S/G, F1-F20) and `complete:` (F5, Opt+Esc) are
+    /// absorbed too. Nothing in the responder chain implements either, so
+    /// forwarding them makes `NSResponder` run off the end of the chain and
+    /// play the system alert on those very common terminal keys.
     public override func doCommand(by selector: Selector) {
         if selector == #selector(NSResponder.cancelOperation(_:)),
            composition != nil {
             inputContext?.discardMarkedText()
             unmarkText()
-            return
-        }
-        if selector == NSSelectorFromString("complete:") ||
-           selector == NSSelectorFromString("noop:") {
-            super.doCommand(by: selector)
             return
         }
         // Everything else: absorb silently. keyDown has already routed
