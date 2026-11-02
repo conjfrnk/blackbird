@@ -1071,15 +1071,43 @@ public final class PTY {
     /// True while a drain retry is scheduled on `writeQueue`; avoids
     /// stacking redundant timers. Accessed only on `writeQueue`.
     private var pendingDrainScheduled = false
-    /// One-shot latch for the overflow log. Accessed only on `writeQueue`.
+    /// One-shot-per-episode latch for the overflow log: set on the first
+    /// dropped write, cleared when the backlog fully drains. Accessed only
+    /// on `writeQueue`.
     private var pendingOverflowLogged = false
-    /// Cap on buffered-but-undelivered bytes. A stopped child means the
-    /// user pasted into a wedged program; 4 MiB absorbs any realistic
-    /// paste while bounding memory if a script floods writes at a
-    /// never-reading child. Excess NEW bytes are dropped with a log —
-    /// preserving the oldest bytes keeps the stream prefix coherent for
-    /// when the child resumes.
-    private static let pendingWriteCap = 4 * 1024 * 1024
+    /// Cap on the buffered-but-undelivered BACKLOG, i.e. on every
+    /// undelivered byte except the one oversized write described below. A
+    /// stopped child means the user pasted into a wedged program; the cap
+    /// bounds memory if a script floods writes at a never-reading child.
+    ///
+    /// It gates whether a write is admitted, never how much of one write
+    /// is kept: a write is accepted whole or dropped whole. Truncating a
+    /// single write would cut a paste mid-frame and lose the
+    /// bracketed-paste end marker (and could split a UTF-8 scalar). A
+    /// write larger than the room left (a big paste) is therefore
+    /// admitted whole as the single "exempt" write and does NOT count
+    /// against the cap, so keystrokes, Ctrl-C, focus reports and query
+    /// replies typed while it drains queue FIFO behind it instead of
+    /// being dropped until the paste empties. Worst case memory is cap +
+    /// one exempt write + one write, and the exempt write's bytes are
+    /// already resident in the caller. A second oversized write while one
+    /// is still draining is dropped whole. Dropping NEW writes (not old
+    /// bytes) keeps the stream prefix coherent for when the child resumes.
+    private static let pendingBacklogCap = 4 * 1024 * 1024
+    /// Length of the in-flight exempt write (see `pendingBacklogCap`);
+    /// 0 when none. Accessed only on `writeQueue`.
+    private var exemptWriteLength = 0
+    /// Bytes appended behind the exempt write. They sit at the tail of the
+    /// FIFO, so the exempt write's undelivered share is whatever remains
+    /// ahead of them. Accessed only on `writeQueue`.
+    private var bytesBehindExemptWrite = 0
+    /// Undelivered bytes of the exempt write: `pendingCount` minus the
+    /// bytes behind it, clamped to its length (older backlog ahead of it
+    /// is still counted by the cap). Accessed only on `writeQueue`.
+    private var exemptBacklog: Int {
+        guard exemptWriteLength > 0 else { return 0 }
+        return max(0, min(exemptWriteLength, pendingCount - bytesBehindExemptWrite))
+    }
     /// Drain retry cadence. Only ticks while bytes are pending against a
     /// full kernel queue, so there is no idle cost. A wedged/stopped child
     /// (the last tick moved nothing) polls at the slow interval; a child
@@ -1091,22 +1119,31 @@ public final class PTY {
     private static let pendingDrainProgressInterval: DispatchTimeInterval = .milliseconds(1)
 
     /// Queue/deliver bytes. Caller MUST hold writeQueue. Appends to the
-    /// pending buffer (capped) then flushes as much as the kernel will
-    /// take; any remainder stays buffered with a drain retry scheduled.
+    /// pending buffer (all-or-nothing, see `pendingBacklogCap`) then
+    /// flushes as much as the kernel will take; any remainder stays
+    /// buffered with a drain retry scheduled.
     private func sendLocked(_ data: Data) {
-        let room = Self.pendingWriteCap - pendingCount
+        if exemptBacklog == 0 {
+            // The exempt write (if any) is fully delivered; forget it.
+            exemptWriteLength = 0
+            bytesBehindExemptWrite = 0
+        }
+        let counted = pendingCount - exemptBacklog
+        let room = Self.pendingBacklogCap - counted
         if data.count <= room {
             pendingWrite.append(data)
-        } else {
-            if room > 0 {
-                pendingWrite.append(data.prefix(room))
-            }
-            if !pendingOverflowLogged {
-                pendingOverflowLogged = true
-                Self.logger.error(
-                    "PTY.write pending buffer full (\(Self.pendingWriteCap, privacy: .public) bytes) — child not reading; dropping \(data.count - max(room, 0), privacy: .public) newest bytes (one-shot log)"
-                )
-            }
+            if exemptWriteLength > 0 { bytesBehindExemptWrite += data.count }
+        } else if room > 0 && exemptWriteLength == 0 {
+            // Oversized (a big paste) but the backlog has room: keep it
+            // whole and exempt from the cap.
+            pendingWrite.append(data)
+            exemptWriteLength = data.count
+            bytesBehindExemptWrite = 0
+        } else if !pendingOverflowLogged {
+            pendingOverflowLogged = true
+            Self.logger.error(
+                "PTY.write backlog full (\(Self.pendingBacklogCap, privacy: .public) byte cap; child not reading or still draining an earlier large write) — dropping \(data.count, privacy: .public) byte write (one-shot log per backlog)"
+            )
         }
         flushPendingLocked()
     }
@@ -1128,6 +1165,7 @@ public final class PTY {
                 if pendingHead == pendingWrite.count {
                     pendingWrite.removeAll()
                     pendingHead = 0
+                    pendingOverflowLogged = false
                 } else if pendingHead >= pendingWrite.count / 2 {
                     pendingWrite.removeSubrange(0..<pendingHead)
                     pendingHead = 0
@@ -1163,6 +1201,8 @@ public final class PTY {
     private func discardPendingLocked() {
         pendingWrite.removeAll()
         pendingHead = 0
+        exemptWriteLength = 0
+        bytesBehindExemptWrite = 0
     }
 
     /// Schedule one drain retry on writeQueue. Caller MUST hold
