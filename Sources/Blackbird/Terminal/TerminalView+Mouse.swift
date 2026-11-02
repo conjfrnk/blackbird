@@ -120,7 +120,7 @@ extension TerminalView {
         // This is deliberately NOT gated on `mouseReportingEnabled()`. ⌘ has no
         // representation in the xterm mouse protocol (modifier bits are
         // shift=4, meta=8, ctrl=16 — no super bit) and `MouseReportEncoder`
-        // never encodes modifier bits at all, so a TUI receives a ⌘-click as an
+        // has nothing to encode for it, so a TUI receives a ⌘-click as an
         // ordinary click and can never have acted on the ⌘. Gating on mouse
         // reporting therefore bought nothing and cost everything: Claude Code
         // holds DEC 1000/1002/1003/1006 for its entire REPL session, so every
@@ -715,12 +715,21 @@ extension TerminalView {
         let maxCol = 10_000, maxRow = 10_000
         let col = max(0, min(maxCol, Int(colX)))
         let row = max(0, min(maxRow, Int(rowY)))
+        // xterm folds Shift (4) and Ctrl (16) into the button code of every
+        // report; without them a TUI can't tell <S-LeftMouse>, <C-RightMouse>
+        // (macOS delivers Ctrl+click as rightMouseDown, `.control` still set)
+        // or <C-ScrollWheel> from the plain gesture. Meta (8) never appears:
+        // ⌥ is the reporting bypass at every call site, and ⌘ has no bit.
+        var modifiers = 0
+        if event.modifierFlags.contains(.shift) { modifiers |= 4 }
+        if event.modifierFlags.contains(.control) { modifiers |= 16 }
         guard let bytes = MouseReportEncoder.encode(
             sgr: sgrMouseEnabled(),
             button: button,
             press: press,
             col: col,
-            row: row
+            row: row,
+            modifiers: modifiers
         ) else { return false }
         // Route through the shared `sendToSession` seam rather than
         // `session.send` directly so the DEBUG `ptyRecorderForTests` recorder

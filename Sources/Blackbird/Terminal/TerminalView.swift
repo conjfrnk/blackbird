@@ -350,7 +350,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// emitted for the press, the drag, or the release, and no selection
     /// starts. ⌘ has no representation in the xterm mouse protocol (the
     /// modifier bits are shift=4, meta=8, ctrl=16 — there is no super bit) and
-    /// `MouseReportEncoder` never sets modifier bits at all, so a TUI could
+    /// `MouseReportEncoder` has nothing to encode for it, so a TUI could
     /// never have distinguished this from a plain click: swallowing it costs
     /// the TUI nothing it could have acted on.
     struct PendingLinkClick {

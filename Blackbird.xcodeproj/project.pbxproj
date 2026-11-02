@@ -246,6 +246,7 @@
 		BE90225730C6A9120DC277C1 /* IMEShiftCarryKittyBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6D780E7A098ADAE1C36A69 /* IMEShiftCarryKittyBlindTests.swift */; };
 		BEDFD81053CAA882A7D18BD1 /* SSHWrapperZshTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 852BB594752BAFE6133308DE /* SSHWrapperZshTests.swift */; };
 		BF0ADDAAD252C3F8D7FD3F79 /* CellInstance.swift in Sources */ = {isa = PBXBuildFile; fileRef = C735D6264882444369074ACB /* CellInstance.swift */; };
+		BF64BF3CCFD0A73D84570C3A /* MouseModifierBitsReportBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F44BCC051E30204C47A3C9A4 /* MouseModifierBitsReportBlindTests.swift */; };
 		BF8C522F82650E26EE4BDBE7 /* DragDropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55708BAFA22EAB8E62D45DF1 /* DragDropTests.swift */; };
 		C03CA13BDF54F8280BFC75CB /* CwdTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89B63611281711C31CDD3303 /* CwdTests.swift */; };
 		C069AA35BA0D585A12C68B98 /* TerminalView+Dragging.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BDF151A54556B421310E358 /* TerminalView+Dragging.swift */; };
@@ -654,6 +655,7 @@
 		F28B81E7D43F3CC0B8F88998 /* TabStripMouseFocusYieldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabStripMouseFocusYieldTests.swift; sourceTree = "<group>"; };
 		F296A4AD26E54D873DAE0873 /* UnseenAttentionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnseenAttentionBlindTests.swift; sourceTree = "<group>"; };
 		F415301ACCAC93A1183403F3 /* BlinkRebuildRowsBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlinkRebuildRowsBlindTests.swift; sourceTree = "<group>"; };
+		F44BCC051E30204C47A3C9A4 /* MouseModifierBitsReportBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseModifierBitsReportBlindTests.swift; sourceTree = "<group>"; };
 		F455C591EC38A7B3955CD5B8 /* FindBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBar.swift; sourceTree = "<group>"; };
 		F6E5A7334CC3AE3CF31E5967 /* TerminalSessionSnapshotCoalescingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionSnapshotCoalescingTests.swift; sourceTree = "<group>"; };
 		F6FFC8DF25E1EF99FD344488 /* ssh.bash */ = {isa = PBXFileReference; path = ssh.bash; sourceTree = "<group>"; };
@@ -820,6 +822,7 @@
 				24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */,
 				1A14ACDB4E0E64E61FFD4773 /* MonospaceFontFamiliesTests.swift */,
 				9959E3BB61D8228703D58C58 /* MouseInsetMappingTests.swift */,
+				F44BCC051E30204C47A3C9A4 /* MouseModifierBitsReportBlindTests.swift */,
 				B1E3C896FBC321B63C6CED31 /* MouseSideButtonReportingBlindTests.swift */,
 				E79964F4FADD416B72D5FF32 /* MultiTabConcurrentSoakTests.swift */,
 				5FF7774133BC836284BDAC66 /* NativeTabStripHiderTests.swift */,
@@ -1477,6 +1480,7 @@
 				ED812F94FE464AE1F4E86007 /* MetalRendererTests.swift in Sources */,
 				0E28747FF245ACA6DA71B716 /* MonospaceFontFamiliesTests.swift in Sources */,
 				B3F09FD0F183D209DB5A8A25 /* MouseInsetMappingTests.swift in Sources */,
+				BF64BF3CCFD0A73D84570C3A /* MouseModifierBitsReportBlindTests.swift in Sources */,
 				7FEFBE99B80C15B77A5A135C /* MouseSideButtonReportingBlindTests.swift in Sources */,
 				7386DF40D48E9E676E64A55E /* MultiTabConcurrentSoakTests.swift in Sources */,
 				F2562B65EE50C4189D77B765 /* NativeTabStripHiderTests.swift in Sources */,
