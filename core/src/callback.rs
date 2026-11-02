@@ -345,9 +345,10 @@ impl CallbackCell {
 /// Parked `Event::ColorRequest` events. Alacritty fires these from inside
 /// `term.dynamic_color_sequence`, which holds `&mut Term`; we can't re-borrow
 /// the term to read the palette from the listener. Instead the listener
-/// pushes `(index, formatter)` pairs here, and `bb_term_input` drains the
-/// queue after `processor.advance` returns (releasing the mutable borrow),
-/// resolves the palette value, calls the formatter, and fires a PtyWrite.
+/// pushes `(index, current, formatter)` entries here, and `bb_term_input`
+/// drains the queue after `processor.advance` returns (releasing the mutable
+/// borrow), resolves the theme fallback, calls the formatter, and fires a
+/// PtyWrite.
 ///
 /// # DoS backstop
 /// `push` is hard-capped at `COLOR_REQUEST_QUEUE_CAP` entries. A hostile
@@ -381,6 +382,10 @@ pub(crate) const COLOR_REQUEST_QUEUE_CAP: usize = 256;
 
 pub(crate) struct ColorRequestEntry {
     pub(crate) index: usize,
+    /// The program-set value of the slot when the query was parsed, not
+    /// when it is drained: a set/reset later in the same chunk must not
+    /// change this reply. `None` falls back to the theme / built-in default.
+    pub(crate) current: Option<Rgb>,
     pub(crate) formatter: Arc<dyn Fn(Rgb) -> String + Sync + Send>,
 }
 
@@ -550,19 +555,23 @@ impl EventListener for RoutingListener {
                         i32_arg: 0,
                     });
                 }
-                Event::ColorRequest(index, formatter) => {
+                Event::ColorRequest(index, current, formatter) => {
                     // Defer — we're inside alacritty's &mut Term borrow via
                     // dynamic_color_sequence, so the palette isn't readable
                     // from here. `bb_term_input` drains this queue right
-                    // after processor.advance returns, reads the palette,
-                    // calls the formatter, and emits PtyWrite.
+                    // after processor.advance returns, resolves the theme
+                    // fallback, calls the formatter, and emits PtyWrite.
+                    // `current` was captured at query time by the vendored
+                    // handler so the drain doesn't re-read a later palette.
                     // push() is `bool`-returning for DoS capping; we ignore
                     // the drop signal here — the listener can't replywrite
                     // anyway, and the one-shot log inside push() surfaces
                     // the hostile case for diagnostics.
-                    let _ = self
-                        .color_queue
-                        .push(ColorRequestEntry { index, formatter });
+                    let _ = self.color_queue.push(ColorRequestEntry {
+                        index,
+                        current,
+                        formatter,
+                    });
                 }
                 // `ResetTitle` fires from `pop_title` (XTWINOPS 23) when the
                 // saved title was `None` — i.e. nvim's save/restore in a

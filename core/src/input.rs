@@ -186,7 +186,8 @@ pub(crate) unsafe fn flush_sync_update(bb: &mut BBTerm, force: bool) -> bool {
 /// Resolve every pending OSC 10/11/12 response and emit it as a PtyWrite
 /// event. Called after every `processor.advance` in `bb_term_input`
 /// returns — at that point we're no longer inside alacritty's `&mut Term`
-/// borrow, so the palette is readable.
+/// borrow. Each entry carries its colour as of the query, so draining late
+/// does not change the answer.
 ///
 /// # Safety
 /// Caller must ensure single-threaded access to `bb.color_queue` and
@@ -203,8 +204,7 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
     if !bb.color_query_enabled {
         return;
     }
-    let palette = bb.term.colors();
-    // `palette` is alacritty's fixed-width `Colors` table. Its length is a
+    // `theme_colors` is alacritty's fixed-width `Colors` table. Its length is a
     // public `COUNT` constant (269 today — 256 indexed + 13 named). The
     // `Index` impl panics on out-of-bounds, so bound-check first. A
     // direct index was sound for every value the current alacritty/vte
@@ -226,16 +226,21 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
             continue;
         }
 
+        // `entry.current` is the program's override as of the query, captured
+        // by the vendored `dynamic_color_sequence`. Re-reading
+        // `bb.term.colors()` here would see the END of the chunk, so a set or
+        // OSC 104/110-112 reset after the query in the same read would change
+        // the reply.
         let slot: Option<alacritty_terminal::vte::ansi::Rgb> =
             if entry.index < alacritty_terminal::term::color::COUNT {
-                palette[entry.index].or(bb.theme_colors[entry.index])
+                entry.current.or(bb.theme_colors[entry.index])
             } else {
                 None
             };
-        // palette[idx] is Option<Rgb>. None means no program has
-        // overridden this slot (or it was reset): use the host's theme,
-        // then a sensible default so we still reply rather than leaving
-        // the TUI timing out.
+        // `current` is Option<Rgb>. None means no program had overridden
+        // this slot (or it was reset): use the host's theme, then a
+        // sensible default so we still reply rather than leaving the TUI
+        // timing out.
         let rgb = slot.unwrap_or_else(|| palette_default_rgb(entry.index));
         let reply = (entry.formatter)(rgb);
         // The `reply` String owns its bytes for the duration of this

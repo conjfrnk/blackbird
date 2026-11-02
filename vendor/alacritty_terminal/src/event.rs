@@ -34,7 +34,12 @@ pub enum Event {
     ///
     /// The attached function is a formatter which will correctly transform the RGB color into the
     /// expected escape sequence format.
-    ColorRequest(usize, Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>),
+    ///
+    /// Blackbird fork change (re-apply on bump): the second field is the program-set value of
+    /// the slot at the moment the query was parsed. Upstream carries no colour, so a consumer
+    /// that resolves the request after the input chunk sees colour changes that follow the
+    /// query in the byte stream.
+    ColorRequest(usize, Option<Rgb>, Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>),
 
     /// Write some text to the PTY.
     PtyWrite(String),
@@ -64,7 +69,7 @@ impl Debug for Event {
             Event::ClipboardStore(ty, text) => write!(f, "ClipboardStore({ty:?}, {text})"),
             Event::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
             Event::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),
-            Event::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
+            Event::ColorRequest(index, _, _) => write!(f, "ColorRequest({index})"),
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
             Event::Title(title) => write!(f, "Title({title})"),
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),

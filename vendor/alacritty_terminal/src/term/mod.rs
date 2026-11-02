@@ -1793,8 +1793,12 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Requested write of escape sequence for color code {prefix}: color[{index}]");
 
         let terminator = terminator.to_owned();
+        // Blackbird fix (re-apply on bump): capture the slot now. The consumer answers after the
+        // whole input chunk has been parsed, so a later set/reset in the same chunk would
+        // otherwise change this reply. `index` is at most 258 (vte bounds it), as in `set_color`.
         self.event_proxy.send_event(Event::ColorRequest(
             index,
+            self.colors[index],
             Arc::new(move |color| {
                 format!(
                     "\x1b]{};rgb:{1:02x}{1:02x}/{2:02x}{2:02x}/{3:02x}{3:02x}{4}",

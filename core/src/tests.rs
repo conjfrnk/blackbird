@@ -88,12 +88,14 @@ fn color_request_queue_push_caps_entries() {
         for _ in 0..COLOR_REQUEST_QUEUE_CAP {
             assert!(q.push(ColorRequestEntry {
                 index: 0,
+                current: None,
                 formatter: Arc::clone(&fmt),
             }));
         }
         // One past the cap must be refused.
         assert!(!q.push(ColorRequestEntry {
             index: 0,
+            current: None,
             formatter: Arc::clone(&fmt),
         }));
         let drained = q.drain();
@@ -101,6 +103,7 @@ fn color_request_queue_push_caps_entries() {
         // After draining the latch resets and a new push goes through.
         assert!(q.push(ColorRequestEntry {
             index: 0,
+            current: None,
             formatter: Arc::clone(&fmt),
         }));
     }
@@ -2466,6 +2469,7 @@ fn routing_listener_arc_survives_bbterm_drop() {
         let fmt: Arc<dyn Fn(Rgb) -> String + Sync + Send> = Arc::new(|_rgb| String::new());
         assert!(queue_arc.push(ColorRequestEntry {
             index: 0,
+            current: None,
             formatter: fmt,
         }));
         assert_eq!(queue_arc.len(), 1);
