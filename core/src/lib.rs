@@ -216,6 +216,11 @@ pub struct BBTerm {
     /// `OSC7_INGEST_PER_SECOND`. Persisted across `bb_term_input` calls — same
     /// rationale as `prompt_mark_rate`.
     pub(crate) osc7_rate: EventRateState,
+    /// `gethostname(3)` read in `bb_term_new`, just before the host spawns
+    /// the shell. OSC 7 accepts it as "this machine" next to the live name:
+    /// the shell's own copy goes stale when macOS renames the host. Never
+    /// reset (a shell keeps its startup copy through ⌘K).
+    pub(crate) startup_hostname: Vec<u8>,
     /// Scanner-side one-shot reject-log latches (OSC 7 / OSC 133). See
     /// `OscLatches`; `bb_term_clear_all` leaves them alone.
     pub(crate) osc_latches: crate::osc::OscLatches,
@@ -429,6 +434,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc8_intern_cap_logged: false,
             prompt_mark_rate: EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW),
             osc7_rate: EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW),
+            startup_hostname: crate::osc::local_hostname(),
             osc_latches: crate::osc::OscLatches::default(),
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,

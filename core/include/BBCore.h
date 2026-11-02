@@ -185,7 +185,10 @@ enum BBEventKind
   /**
    * New in 2026-04-17 gaps plan. Payload: UTF-8 bytes of the local
    * filesystem path decoded from an OSC 7 `file://` URL. Only emitted
-   * when scheme is `file` and authority is empty or `localhost`.
+   * when scheme is `file` and authority is empty, `localhost`, or this
+   * machine's own hostname (`gethostname(3)`, as of `bb_term_new` or
+   * now, ignoring an mDNS `.local` suffix) — fish and the Apple / VTE /
+   * kitty / WezTerm / Ghostty snippets all embed it.
    *
    * OSC 7 is not parsed by `alacritty_terminal` 0.26 / `vte` 0.15 —
    * the sequence falls through vte's `osc_dispatch` unhandled branch.

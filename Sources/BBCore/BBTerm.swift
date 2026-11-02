@@ -68,7 +68,8 @@ public final class BBTerm {
         /// Shell-emitted working-directory change via OSC 7. Payload is a
         /// decoded, local filesystem path (no `file://` prefix). Fires only
         /// when the Rust core validates scheme == file and host in {empty,
-        /// localhost}; matches spec §4.1.
+        /// localhost, this machine's own hostname}; spec §4.1 plus the
+        /// `file://$hostname/...` form fish and Apple's snippets emit.
         case cwdChanged(String)
         /// Shell-emitted OSC 133 prompt/command mark. `kind` is one of
         /// A/B/C/D (prompt start / command start / command output /

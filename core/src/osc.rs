@@ -34,6 +34,7 @@ macro_rules! osc_scanner {
             latches: &mut $bb.osc_latches,
             prompt_mark_rate: &mut $bb.prompt_mark_rate,
             osc7_rate: &mut $bb.osc7_rate,
+            startup_hostname: &$bb.startup_hostname,
             terminal_version: &$bb.terminal_version,
         }
     };
@@ -81,6 +82,10 @@ pub(crate) struct OscScanner<'a> {
     /// M-7 — `classifyForegroundNamespace()` proc_listpids amplification).
     /// Same threading reason as `prompt_mark_rate`.
     pub(crate) osc7_rate: &'a mut EventRateState,
+    /// `gethostname(3)` as of `bb_term_new`, i.e. what the shell spawned
+    /// right after it captured for `$hostname` / `$HOST` / `$HOSTNAME`.
+    /// OSC 7 accepts it alongside the current name; see `local_hostname`.
+    pub(crate) startup_hostname: &'a [u8],
     /// App version string for XTVERSION replies (`bb_term_set_terminal_version`).
     pub(crate) terminal_version: &'a str,
 }
@@ -153,7 +158,7 @@ pub(crate) struct OscLatches {
     /// reborn shells in the same tab) silently dropped the same
     /// reject. Per-instance flags restore one-shot-per-session log
     /// semantics without re-introducing log flood.
-    pub(crate) osc7_reject: [bool; 8],
+    pub(crate) osc7_reject: [bool; 9],
     /// OSC 133 D non-digit / over-long reject path (audit L1 + reviewer
     /// follow-up). Same per-instance / one-shot rule as `osc7_reject`
     /// but only one class so a single bool suffices.
@@ -512,6 +517,7 @@ const OSC7_REJECT_CONTROL: usize = 4;
 const OSC7_REJECT_BIDI: usize = 5;
 const OSC7_REJECT_NON_ABSOLUTE: usize = 6;
 const OSC7_REJECT_TRAVERSAL: usize = 7;
+const OSC7_REJECT_HOST: usize = 8;
 /// Per-class one-shot latches. Audit follow-up (2026-04-29): the eight
 /// silent `return` paths in `handle_osc7` made an attacker / shell-misbehaving
 /// regression invisible. One-shot per class so a sustained flood doesn't
@@ -524,12 +530,70 @@ const OSC7_REJECT_TRAVERSAL: usize = 7;
 /// that hits one class on tab 1 lost the breadcrumb on tabs 2..N.
 /// Per-instance bool flags restore one-shot-per-tab semantics without
 /// re-introducing log floods.
-fn osc7_reject(latches: &mut [bool; 8], class: usize, name: &str) {
+fn osc7_reject(latches: &mut [bool; 9], class: usize, name: &str) {
     if let Some(slot) = latches.get_mut(class) {
         if once(slot) {
             eprintln!("[blackbird_core] OSC 7 rejected ({})", name);
         }
     }
+}
+
+/// This machine's `gethostname(3)` name (empty on failure).
+///
+/// OSC 7 matches an authority against two reads of it: the snapshot
+/// `bb_term_new` stores in `BBTerm::startup_hostname`, and a live read per
+/// foreign-looking authority. A shell reads its own copy once at startup
+/// (fish `$hostname`, zsh `$HOST`, bash `$HOSTNAME`) and never refreshes
+/// it, while macOS renames the host at runtime (DHCP, VPN, mDNS conflict,
+/// `scutil --set HostName`). The snapshot, taken just before the shell is
+/// spawned, keeps matching what that shell prints after a rename; the live
+/// read covers shells started after one. A process-lifetime cache would
+/// cover neither.
+pub(crate) fn local_hostname() -> Vec<u8> {
+    // Declared here, not at module level, so cbindgen (which exports
+    // module-level `extern "C"` declarations) keeps it out of BBCore.h.
+    unsafe extern "C" {
+        fn gethostname(name: *mut std::os::raw::c_char, len: usize) -> std::os::raw::c_int;
+    }
+    // Last byte stays NUL even if the name is truncated.
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is valid for `buf.len() - 1` writable bytes.
+    let rc = unsafe { gethostname(buf.as_mut_ptr().cast(), buf.len() - 1) };
+    if rc != 0 {
+        return Vec::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf[..end].to_vec()
+}
+
+/// `rest` is the text after `file://`. When its authority names `local`
+/// (case-insensitive, percent-decoded, and ignoring an mDNS `.local`
+/// suffix on either side), return the path part including its leading `/`.
+///
+/// fish prints `file://$hostname/pwd` on every `cd` and prompt, and the
+/// Apple Terminal / VTE / kitty / WezTerm / Ghostty snippets do the same,
+/// so rejecting the machine's own name drops the cwd of every such shell.
+/// The core can't tell a remote shell's cwd from a local one by name alone,
+/// which is why other hostnames are still rejected; the Swift side's
+/// foreground-process-tree gate is the real remote check. The `.local`
+/// tolerance covers macOS flipping `gethostname()` between `foo` and
+/// `foo.local` after the shell captured its own copy.
+pub(crate) fn strip_own_hostname<'a>(rest: &'a [u8], local: &[u8]) -> Option<&'a [u8]> {
+    fn without_mdns_suffix(host: &[u8]) -> &[u8] {
+        match host.len().checked_sub(6) {
+            Some(n) if n > 0 && host[n..].eq_ignore_ascii_case(b".local") => &host[..n],
+            _ => host,
+        }
+    }
+    let slash = rest.iter().position(|&b| b == b'/')?;
+    let (authority, path) = rest.split_at(slash);
+    let authority = percent_decode(authority)?;
+    if local.is_empty()
+        || !without_mdns_suffix(&authority).eq_ignore_ascii_case(without_mdns_suffix(local))
+    {
+        return None;
+    }
+    Some(path)
 }
 
 /// Length caps for notification text, in chars. Notification Center
@@ -721,7 +785,8 @@ impl OscScanner<'_> {
         // L-20's length cap (above) and the M-7 proc_listpids gate (below)
         // both remain enforced.
 
-        // Accept only `file://` with an empty or `localhost` authority.
+        // Accept only `file://` with an empty, `localhost` or this-machine
+        // authority.
         // Audit fix-#08 (2026-05-21): RFC 3986 §3.1 / §3.2.2 define
         // scheme and host as case-insensitive. Match the literal prefix
         // case-insensitively so shell emitters that produce `FILE://`,
@@ -733,13 +798,22 @@ impl OscScanner<'_> {
         };
         let path_bytes: &[u8] = if rest.starts_with(b"/") {
             rest // "file:///path" → "/path"
-        } else if let Some(r) = strip_prefix_ascii_case_insensitive(rest, b"localhost") {
-            if !r.starts_with(b"/") {
-                return;
-            }
+        } else if let Some(r) =
+            strip_prefix_ascii_case_insensitive(rest, b"localhost").filter(|r| r.starts_with(b"/"))
+        {
             r // "file://localhost/path" → "/path"
+        } else if let Some(r) = strip_own_hostname(rest, self.startup_hostname)
+            .or_else(|| strip_own_hostname(rest, &local_hostname()))
+        {
+            // "file://<this-machine>/path" → "/path". Checked after the
+            // `localhost` form (which a machine named `localhost-foo` does
+            // not satisfy: no `/` follows the prefix), snapshot first so
+            // the common case costs no syscall.
+            r
         } else {
-            return; // non-local host
+            // Another machine's cwd, a malformed authority, or no path.
+            osc7_reject(&mut self.latches.osc7_reject, OSC7_REJECT_HOST, "host");
+            return;
         };
 
         let Some(decoded) = percent_decode(path_bytes) else {

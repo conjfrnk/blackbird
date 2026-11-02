@@ -2,7 +2,7 @@ use super::*;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::vte::ansi::{Handler, Rgb};
 
-use crate::osc::OSC7_URL_MAX;
+use crate::osc::{strip_own_hostname, OSC7_URL_MAX};
 use crate::rate_limit::PTY_WRITE_REPLY_BURST;
 use crate::scrub::scrub_title_controls;
 
@@ -2671,6 +2671,105 @@ fn osc7_accepts_legitimate_path() {
         .find(|(k, _)| *k == BBEventKind::CwdChanged as u32)
         .expect("expected CwdChanged event for a clean absolute path");
     assert_eq!(&cwd.1, b"/Users/foo/proj");
+}
+
+/// An OSC 7 authority naming this machine yields the path; any other
+/// host, a missing path or an empty local name does not. The `.local`
+/// (mDNS) suffix is ignored on either side and percent-escapes in the
+/// authority are decoded, as fish's `string escape --style=url` emits.
+#[test]
+fn osc7_own_hostname_matching() {
+    let own = b"euler";
+    assert_eq!(
+        strip_own_hostname(b"euler/tmp/x", own),
+        Some(&b"/tmp/x"[..])
+    );
+    assert_eq!(strip_own_hostname(b"EULER/tmp", own), Some(&b"/tmp"[..]));
+    assert_eq!(
+        strip_own_hostname(b"euler.local/tmp", own),
+        Some(&b"/tmp"[..])
+    );
+    assert_eq!(
+        strip_own_hostname(b"euler/tmp", b"Euler.LOCAL"),
+        Some(&b"/tmp"[..])
+    );
+    assert_eq!(
+        strip_own_hostname(b"Connor%27s-Mac/tmp", b"Connor's-Mac"),
+        Some(&b"/tmp"[..])
+    );
+    // Foreign hosts, prefixes/suffixes of the local name, no path.
+    assert_eq!(strip_own_hostname(b"other/tmp", own), None);
+    assert_eq!(strip_own_hostname(b"euler2/tmp", own), None);
+    assert_eq!(strip_own_hostname(b"euler.example.com/tmp", own), None);
+    assert_eq!(strip_own_hostname(b"euler", own), None);
+    assert_eq!(strip_own_hostname(b"euler%zz/tmp", own), None);
+    // A failed gethostname() yields an empty local name, which matches nothing.
+    assert_eq!(strip_own_hostname(b"euler/tmp", b""), None);
+}
+
+/// Cwd payloads from one `file://<authority>/tmp/x` OSC 7 fed to a fresh
+/// terminal whose startup hostname snapshot is overridden to `startup`.
+fn osc7_cwds_with_startup_host(startup: &[u8], authority: &str) -> Vec<Vec<u8>> {
+    use std::os::raw::c_void;
+    use std::sync::Mutex;
+
+    unsafe extern "C" fn cb(ev: BBEvent, ctx: *mut c_void) {
+        if ev.kind == BBEventKind::CwdChanged {
+            let sink = &*(ctx as *const Mutex<Vec<Vec<u8>>>);
+            let path = std::slice::from_raw_parts(ev.payload, ev.len).to_vec();
+            sink.lock().unwrap().push(path);
+        }
+    }
+
+    let sink: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+    let seq = format!("\x1b]7;file://{authority}/tmp/x\x07");
+    unsafe {
+        let term = bb_term_new(80, 24, 1000);
+        (*term).startup_hostname = startup.to_vec();
+        bb_term_set_event_cb(term, Some(cb), &sink as *const _ as *mut c_void);
+        bb_term_input(term, seq.as_ptr(), seq.len());
+        bb_term_free(term);
+    }
+    sink.into_inner().unwrap()
+}
+
+/// A shell reads its hostname once at startup and keeps printing it after
+/// macOS renames the host. The name `bb_term_new` snapshotted must keep
+/// matching, the current name must too (a shell started after the rename),
+/// and a third name must not.
+#[test]
+fn osc7_startup_hostname_snapshot_matches_alongside_live_name() {
+    let before_rename = b"old-name.example.com";
+    assert_eq!(
+        osc7_cwds_with_startup_host(before_rename, "old-name.example.com"),
+        vec![b"/tmp/x".to_vec()],
+        "the hostname captured at bb_term_new must outlive a rename"
+    );
+    assert!(
+        osc7_cwds_with_startup_host(before_rename, "third-name.example.com").is_empty(),
+        "a name that is neither the snapshot nor the live name is another machine"
+    );
+    let live = crate::osc::local_hostname();
+    if !live.is_empty() && !live.eq_ignore_ascii_case(b"localhost") {
+        let live = String::from_utf8_lossy(&live).into_owned();
+        assert_eq!(
+            osc7_cwds_with_startup_host(before_rename, &live),
+            vec![b"/tmp/x".to_vec()],
+            "the live gethostname() must still match next to the snapshot"
+        );
+    }
+}
+
+/// `localhost` is matched as a prefix, so an authority that merely starts
+/// with it must fall through to the own-hostname check rather than being
+/// rejected outright.
+#[test]
+fn osc7_own_hostname_starting_with_localhost_is_accepted() {
+    assert_eq!(
+        osc7_cwds_with_startup_host(b"localhost-dev", "localhost-dev"),
+        vec![b"/tmp/x".to_vec()]
+    );
+    assert!(osc7_cwds_with_startup_host(b"other", "localhost-dev").is_empty());
 }
 
 /// Audit M-7 (2026-04-29): a hostile remote streaming OSC 7s in a
