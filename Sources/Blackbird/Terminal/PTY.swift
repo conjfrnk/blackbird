@@ -529,6 +529,22 @@ public final class PTY {
         signal(SIGWINCH, SIG_DFL)
         signal(SIGTSTP, SIG_DFL)
 
+        // Turn on IUTF8 on top of the TTYDEF defaults forkpty gave us. Without
+        // it the canonical-mode line discipline erases one BYTE per Backspace,
+        // so a program doing a cooked-mode read (`cat`, Python `input()`
+        // without readline, Go/Rust stdin line readers) is left with a stray
+        // lead byte after the user backspaces over é / CJK / emoji and gets
+        // invalid UTF-8, while the echo still looks right. Set here, before
+        // exec, so it is in place before the shell starts and can save/restore
+        // it (a parent-side tcsetattr after forkpty races a fast-starting
+        // shell). tcgetattr/tcsetattr are async-signal-safe. Best effort: on
+        // failure the child just keeps the defaults.
+        var tio = termios()
+        if tcgetattr(STDIN_FILENO, &tio) == 0 {
+            tio.c_iflag |= tcflag_t(IUTF8)
+            _ = tcsetattr(STDIN_FILENO, TCSANOW, &tio)
+        }
+
         // Close every inherited fd above stderr. forkpty has already rebound
         // stdin/stdout/stderr to the slave pty; anything else the parent app
         // had open (Metal device libraries, font files, XPC mach ports backed
