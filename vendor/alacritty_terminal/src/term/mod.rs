@@ -1910,8 +1910,10 @@ impl<T: EventListener> Handler for Term<T> {
             ansi::ClearMode::Above => {
                 let cursor = self.grid.cursor.point;
 
-                // If clearing more than one line.
-                if cursor.line > 1 {
+                // Blackbird fix: upstream guarded this with `cursor.line > 1`, which skipped
+                // the row above the cursor when the cursor sits on screen row 2 (`CSI 2;5H
+                // CSI 1 J` left row 1 untouched). `..Line(1)` already clears just row 0.
+                if cursor.line > 0 {
                     // Fully clear all lines before the current line.
                     self.grid.reset_region(..cursor.line);
                 }
