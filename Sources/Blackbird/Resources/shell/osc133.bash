@@ -31,13 +31,50 @@ __bb_osc133_b() { printf '\e]133;B\e\\'; }
 __bb_osc133_c() { printf '\e]133;C\e\\'; }
 __bb_osc133_d() { printf '\e]133;D;%s\e\\' "${__BB_LAST_EXIT:-0}"; }
 
+# Sets $? to $1 (`return` is illegal in a top-level eval).
+__bb_osc133_ret() { return "$1"; }
+
 # Capture the exit code of the *last user-run* command before PROMPT_COMMAND
 # mangles $?. The trick: PROMPT_COMMAND runs just before the next prompt
 # renders, so $? at its entry is the command's exit code.
+#
+# The emits below clobber $? and PIPESTATUS, which the user's own
+# PROMPT_COMMAND (the `[1]`-in-PS1 idiom) reads on entry, and returning
+# from a function flattens PIPESTATUS to one element. So the hook also
+# publishes __BB_PC_RESTORE, a statement that re-creates both; the chained
+# string below evals it in the same list as the user's command, because
+# only a pipeline still live in that list keeps its stages.
+#
+# The hook itself always returns 0, and a restore that recreates a failure
+# ends in `&& :`: a failing command that is not last in an `&&` list leaves
+# the list's status as its own but is exempt from `set -e` and from the
+# user's ERR trap, so re-raising the status can't kill an errexit shell at
+# the prompt or fire the trap a second time. (Status 0 needs no guard, and
+# `&& :` would flatten PIPESTATUS there, so it is added only for s != 0.)
 __bb_osc133_prompt() {
-    __BB_LAST_EXIT=$?
+    # One `local`: $? and PIPESTATUS must both be read before any
+    # assignment here resets them.
+    local s=$? p=("${PIPESTATUS[@]}") i
+    __BB_LAST_EXIT=$s
     __bb_osc133_d
     __bb_osc133_a
+    # Re-running the stages reproduces $? too (the last stage, or the
+    # rightmost failure under pipefail) — except under `!` negation, which
+    # matches neither: fall back to $? alone.
+    local w=${p[${#p[@]} - 1]}
+    if [[ -o pipefail ]]; then
+        for i in "${p[@]}"; do (( i )) && w=$i; done
+    fi
+    if (( ${#p[@]} > 1 && s == w )); then
+        __BB_PC_RESTORE="(exit ${p[0]})"
+        for (( i = 1; i < ${#p[@]}; i++ )); do
+            __BB_PC_RESTORE+=" | (exit ${p[i]})"
+        done
+    else
+        __BB_PC_RESTORE="__bb_osc133_ret $s"
+    fi
+    (( s )) && __BB_PC_RESTORE+=" && :"
+    __BB_PC_RESTORE+="; "
 }
 
 # Bash's PS0 is expanded just AFTER reading a command and just BEFORE executing
@@ -51,15 +88,25 @@ PS0="$(printf '\e]133;C\e\\\\')${PS0:-}"
 
 # Hook PROMPT_COMMAND so D+A fire at prompt time. Preserve the user's
 # existing PROMPT_COMMAND by chaining.
-if [[ -z "${PROMPT_COMMAND:-}" ]]; then
+if [[ "${PROMPT_COMMAND[*]:-}" == *__bb_osc133_prompt* ]]; then
+    # Already hooked: PROMPT_COMMAND is exported, so a nested shell (`bash`,
+    # `exec bash`, a tmux window) inherits the parent's wrapped chain while
+    # the double-source guard above is not exported and sourcing runs again.
+    # Wrapping a wrapper would make the chain eval itself without end.
+    :
+elif [[ -z "${PROMPT_COMMAND:-}" ]]; then
     PROMPT_COMMAND=__bb_osc133_prompt
 else
-    # If the user already has PROMPT_COMMAND as an array (bash 5.1+), append.
-    # Otherwise prefix to the string form. Both preserve the user's intent.
+    # If the user already has PROMPT_COMMAND as an array (bash 5.1+), append
+    # (their elements still run first, with the real $?). Otherwise run the
+    # hook first and the user's string after it, behind the restore step.
+    # The user's text is embedded in the string (shell-quoted, so eval gets
+    # it back verbatim) rather than parked in a side variable: PROMPT_COMMAND
+    # is what gets exported, so the chain stays complete in a nested shell.
     if declare -p PROMPT_COMMAND 2>/dev/null | grep -q 'declare -a'; then
         PROMPT_COMMAND+=(__bb_osc133_prompt)
     else
-        PROMPT_COMMAND="__bb_osc133_prompt; ${PROMPT_COMMAND}"
+        PROMPT_COMMAND='__bb_osc133_prompt; eval "$__BB_PC_RESTORE" '"$(printf %q "$PROMPT_COMMAND")"
     fi
 fi
 
