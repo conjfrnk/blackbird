@@ -199,8 +199,11 @@ final class PTYLargePasteBlindTests: XCTestCase {
     /// Index of the first differing byte, or -1 when `a` and `b` are equal.
     private func firstMismatch(_ a: Data, _ b: Data) -> Int {
         let n = min(a.count, b.count)
-        let idx: Int? = a.withUnsafeBytes { pa in
-            b.withUnsafeBytes { pb in
+        // Explicit closure types: the macOS 26 SDK's compiler cannot infer
+        // which withUnsafeBytes overload `pa`/`pb` come from ("ambiguous use
+        // of subscript"); the macOS 27 SDK's can.
+        let idx: Int? = a.withUnsafeBytes { (pa: UnsafeRawBufferPointer) -> Int? in
+            b.withUnsafeBytes { (pb: UnsafeRawBufferPointer) -> Int? in
                 for i in 0..<n where pa[i] != pb[i] { return i }
                 return nil
             }
