@@ -13,7 +13,24 @@ function __bb_load_integration --on-event fish_prompt
     if status is-interactive
         and test "$TERM_PROGRAM" = Blackbird
         and set -q BB_SHELL_INTEGRATION_DIR
-        test -r "$BB_SHELL_INTEGRATION_DIR/osc133.fish"; and source "$BB_SHELL_INTEGRATION_DIR/osc133.fish"
+        if test -r "$BB_SHELL_INTEGRATION_DIR/osc133.fish"
+            set -q __bb_osc133_loaded
+            set -l was_loaded $status
+            source "$BB_SHELL_INTEGRATION_DIR/osc133.fish"
+            # Handlers osc133.fish just defined first fire at the NEXT
+            # prompt, so announce this one here (A only: no command has
+            # run, so no D). Skipped when fish itself already emits a
+            # native A (the fish >= 4 `mark-prompt` feature is on; probed
+            # as a feature, not by version, because users can disable it
+            # via fish_features=no-mark-prompt; the probe is non-zero on
+            # fish 3, where the feature does not exist) and when a manual
+            # source from config.fish already hooked this prompt.
+            if test $was_loaded -ne 0
+                and not status test-feature mark-prompt
+                and functions -q __bb_osc133_a
+                __bb_osc133_a
+            end
+        end
         test -r "$BB_SHELL_INTEGRATION_DIR/ssh.fish"; and source "$BB_SHELL_INTEGRATION_DIR/ssh.fish"
     end
 end

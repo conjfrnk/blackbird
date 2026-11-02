@@ -22,7 +22,17 @@ if [[ -o interactive && "$TERM_PROGRAM" == "Blackbird" && -n "${BB_SHELL_INTEGRA
     # One-shot: remove ourselves first so a failing source can't loop.
     precmd_functions=(${precmd_functions:#__bb_load_integration})
     local dir="${BB_SHELL_INTEGRATION_DIR-}"
-    [[ -r "$dir/osc133.zsh" ]] && builtin source "$dir/osc133.zsh"
+    if [[ -r "$dir/osc133.zsh" ]]; then
+      local __bb_was_loaded=${+__BB_OSC133_LOADED}
+      builtin source "$dir/osc133.zsh"
+      # zsh iterates a copy of precmd_functions, so the hook osc133.zsh just
+      # appended first fires at the SECOND prompt. Announce the first one
+      # here (A only: no command has run, so no D). A manual source from
+      # .zshrc already registered its hook ahead of this prompt: skip.
+      if (( ! __bb_was_loaded && $+functions[__bb_osc133_a] )); then
+        __bb_osc133_a
+      fi
+    fi
     [[ -r "$dir/ssh.zsh"    ]] && builtin source "$dir/ssh.zsh"
     builtin unfunction __bb_load_integration 2>/dev/null
     return 0
