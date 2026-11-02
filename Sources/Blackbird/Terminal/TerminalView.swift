@@ -395,6 +395,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// press — the same asymmetry the ⌥-bypass family fixed for right-click.
     var didReportMouseDown = false
 
+    /// Right-button twin of `didReportMouseDown`: `rightMouseDragged` reports
+    /// motion only for a gesture whose press actually reached the TUI.
+    var didReportRightMouseDown = false
+
     /// Drives edge-autoscroll while the user drags a selection past the
     /// top/bottom of the viewport. AppKit only delivers `mouseDragged` on
     /// pointer motion, so a user holding the pointer stationary past the edge

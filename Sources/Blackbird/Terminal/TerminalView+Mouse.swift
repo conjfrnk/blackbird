@@ -284,6 +284,9 @@ extension TerminalView {
     }
 
     public override func rightMouseDown(with event: NSEvent) {
+        // Every mousedown starts a fresh gesture (see `mouseDown`).
+        didReportRightMouseDown = false
+        lastReportedDragCell = nil
         // Configured resize modifier (default ⌘) + right-drag → resize the
         // window from the corner nearest the click. Matches the borderless-
         // window idiom from apps like iTerm2 and VS Code: modifier-drag moves,
@@ -312,7 +315,7 @@ extension TerminalView {
             super.rightMouseDown(with: event)
             return
         }
-        sendMouseEvent(event, button: 2, press: true)
+        didReportRightMouseDown = sendMouseEvent(event, button: 2, press: true)
     }
 
     public override func rightMouseDragged(with event: NSEvent) {
@@ -356,6 +359,16 @@ extension TerminalView {
             }
             return
         }
+        // AppKit delivers a right-button (and Ctrl+left) drag as
+        // `rightMouseDragged` and never as `mouseMoved`, so this is the only
+        // place a DEC 1002 / 1003 TUI can get motion for it: without it the
+        // TUI saw the press and the release with nothing between, and the
+        // 1003 hover stream froze for the length of the drag. Only for a press
+        // that was actually reported (the left-button rule, `mouseDragged`).
+        if didReportRightMouseDown {
+            reportDragMotionIfNeeded(for: event, button: 2)
+            return
+        }
         super.rightMouseDragged(with: event)
     }
 
@@ -381,6 +394,7 @@ extension TerminalView {
             }
             return
         }
+        didReportRightMouseDown = false
         let optionHeld = event.modifierFlags.contains(.option)
         guard mouseReportingEnabled() && !optionHeld, session != nil else {
             super.rightMouseUp(with: event)
@@ -621,18 +635,25 @@ extension TerminalView {
         }
         if selectionController.handleDrag(with: event) { return }
         // No selection in progress — forward to PTY if the app asked for
-        // motion/drag reporting. Deduped on the cell, like the DEC 1003
-        // no-button motion path (`reportPointerMotionIfNeeded`): AppKit
-        // delivers a dragged event per pointer sample (up to the display's
-        // refresh rate), and a TUI that repaints per report — Claude Code
-        // repaints its whole UI — turns that into a self-inflicted flood.
-        // ⌥ escapes reporting here exactly as it does for press/release.
+        // motion/drag reporting.
         // `didReportMouseDown`: motion-with-button-held only makes sense to a
         // TUI that saw the press. It may not have — the X10 fallback encoder
         // refuses coordinates past column 223 — and reporting the drag anyway
         // hands it motion for a button it never saw go down.
-        guard didReportMouseDown,
-              !event.modifierFlags.contains(.option),
+        guard didReportMouseDown else { return }
+        reportDragMotionIfNeeded(for: event, button: 0)
+    }
+
+    /// Button-held motion report (xterm `Cb = button + 32`) for DEC 1002 / 1003,
+    /// shared by the left and right drag handlers; the caller has already
+    /// established that the press was reported. Deduped on the cell, like the
+    /// DEC 1003 no-button motion path (`reportPointerMotionIfNeeded`): AppKit
+    /// delivers a dragged event per pointer sample (up to the display's refresh
+    /// rate), and a TUI that repaints per report — Claude Code repaints its
+    /// whole UI — turns that into a self-inflicted flood. ⌥ escapes reporting
+    /// here exactly as it does for press/release.
+    private func reportDragMotionIfNeeded(for event: NSEvent, button: Int) {
+        guard !event.modifierFlags.contains(.option),
               let mode = currentSnapshot?.termMode,
               mode.contains(.mouseMotion) || mode.contains(.mouseDrag),
               session != nil
@@ -658,7 +679,7 @@ extension TerminalView {
             guard lastReportedDragCell != cell else { return }
         }
         lastReportedDragCell = cell
-        sendMouseEvent(event, button: 32, press: true)
+        sendMouseEvent(event, button: button + 32, press: true)
     }
 
     func bufferPointFromEvent(_ event: NSEvent) -> BufferPoint {

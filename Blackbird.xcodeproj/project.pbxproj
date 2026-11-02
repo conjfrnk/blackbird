@@ -154,6 +154,7 @@
 		7ACE07558D328D4B0273A975 /* URLDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A921C459460CFF77B3D1127 /* URLDetectorTests.swift */; };
 		7AD80C7208B9CEDB09EDF9CB /* WindowOffscreenNudgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B4CECF4880D654BD5CB5BB7 /* WindowOffscreenNudgeTests.swift */; };
 		7BACEACA83D3F47078E3B121 /* LatencyProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B359BBCEB85D55F2981EDD /* LatencyProbe.swift */; };
+		7C4784B0C82B1075AC5E6940 /* MouseRightDragReportBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 876A712E6BBE258265C7D953 /* MouseRightDragReportBlindTests.swift */; };
 		7D6A312595E2EDA4CC6F574D /* TabResizeFanoutBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9B348536E063859D3D278C8 /* TabResizeFanoutBlindTests.swift */; };
 		7EF890F5A6A35115DDDFBE4B /* MenuValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F72D7CF594F8484A75DF835 /* MenuValidationTests.swift */; };
 		7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */; };
@@ -517,6 +518,7 @@
 		852BB594752BAFE6133308DE /* SSHWrapperZshTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHWrapperZshTests.swift; sourceTree = "<group>"; };
 		859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusEventsTests.swift; sourceTree = "<group>"; };
 		868219E4125224A25BACB9CF /* LocaleEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocaleEnvironment.swift; sourceTree = "<group>"; };
+		876A712E6BBE258265C7D953 /* MouseRightDragReportBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseRightDragReportBlindTests.swift; sourceTree = "<group>"; };
 		89B311FC4D039B0A3F679D9F /* RebuildRowsDecisionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RebuildRowsDecisionBlindTests.swift; sourceTree = "<group>"; };
 		89B63611281711C31CDD3303 /* CwdTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdTests.swift; sourceTree = "<group>"; };
 		8AD55FBF1CE4D7EC25020FC1 /* CellInstanceDimLightThemeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstanceDimLightThemeBlindTests.swift; sourceTree = "<group>"; };
@@ -826,6 +828,7 @@
 				9959E3BB61D8228703D58C58 /* MouseInsetMappingTests.swift */,
 				F44BCC051E30204C47A3C9A4 /* MouseModifierBitsReportBlindTests.swift */,
 				134C89ADDAF5CED390B5E09D /* MouseReportGridClampBlindTests.swift */,
+				876A712E6BBE258265C7D953 /* MouseRightDragReportBlindTests.swift */,
 				B1E3C896FBC321B63C6CED31 /* MouseSideButtonReportingBlindTests.swift */,
 				E79964F4FADD416B72D5FF32 /* MultiTabConcurrentSoakTests.swift */,
 				5FF7774133BC836284BDAC66 /* NativeTabStripHiderTests.swift */,
@@ -1485,6 +1488,7 @@
 				B3F09FD0F183D209DB5A8A25 /* MouseInsetMappingTests.swift in Sources */,
 				BF64BF3CCFD0A73D84570C3A /* MouseModifierBitsReportBlindTests.swift in Sources */,
 				3955806C0FC1297B94B7885E /* MouseReportGridClampBlindTests.swift in Sources */,
+				7C4784B0C82B1075AC5E6940 /* MouseRightDragReportBlindTests.swift in Sources */,
 				7FEFBE99B80C15B77A5A135C /* MouseSideButtonReportingBlindTests.swift in Sources */,
 				7386DF40D48E9E676E64A55E /* MultiTabConcurrentSoakTests.swift in Sources */,
 				F2562B65EE50C4189D77B765 /* NativeTabStripHiderTests.swift in Sources */,
