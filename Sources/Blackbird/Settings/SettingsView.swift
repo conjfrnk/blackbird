@@ -88,29 +88,78 @@ public struct SettingsView: View {
     // need and reads wrong at a glance.
     @ObservedObject private var prefs = Preferences.shared
 
+    /// The Settings sections, in strip order.
+    private enum Pane: String, CaseIterable, Identifiable {
+        case appearance = "Appearance"
+        case behavior = "Behavior"
+        case updates = "Updates"
+        case diagnostics = "Diagnostics"
+
+        var id: String { rawValue }
+    }
+
+    @State private var pane: Pane = .appearance
+
     public init() {}
 
     public var body: some View {
-        tabs.frame(minWidth: 520, minHeight: 520)
+        sections.frame(minWidth: 520, minHeight: 520)
     }
 
+    // A segmented `Picker` + content switch, deliberately NOT SwiftUI's
+    // `TabView`. On macOS 27 the AppKit-backed `TabView` leaves its
+    // `NSTabViewSegmentedControl` at 0×0 after the first layout pass — all
+    // four labels draw on top of each other in a tiny box ("DiB…") until
+    // something changes the view's bounds (a window resize). Proven with a
+    // standalone harness: the 0×0 strip is independent of this window's
+    // chrome (`fullSizeContentView`, transparent titlebar, the blur
+    // wrapper), and `needsLayout` / `invalidateIntrinsicContentSize` /
+    // re-showing the window do not recover it — only a bounds change does.
+    // The segmented `Picker` sizes itself on first layout. Content is
+    // switched lazily (only the selected pane is built), as `TabView` did.
+    //
+    // The `.frame(maxHeight: .infinity, alignment: .top)` pins the strip to
+    // the top: short panes (Updates, the empty Diagnostics state) would
+    // otherwise let the VStack shrink-wrap and center vertically in the
+    // window, floating the strip mid-window.
+    //
     // `.containerBackground(for: .window)` is macOS 15+. On older systems
     // the NSVisualEffectView installed behind the hosting controller
     // (see SettingsWindowController) already shows through any non-
     // opaque SwiftUI layers, so the guard is purely to adopt the
     // explicit-clear-window API when available.
     @ViewBuilder
-    private var tabs: some View {
-        let base = TabView {
-            appearanceTab.tabItem  { Label("Appearance",  systemImage: "paintpalette") }
-            behaviorTab.tabItem    { Label("Behavior",    systemImage: "keyboard") }
-            updatesTab.tabItem     { Label("Updates",     systemImage: "arrow.down.circle") }
-            DiagnosticsView().tabItem { Label("Diagnostics", systemImage: "stethoscope") }
+    private var sections: some View {
+        let base = VStack(spacing: 0) {
+            Picker("Section", selection: $pane) {
+                ForEach(Pane.allCases) { pane in
+                    Text(pane.rawValue).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .padding(.top, 4)
+            .padding(.bottom, 8)
+
+            paneContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         if #available(macOS 15.0, *) {
             base.containerBackground(.clear, for: .window)
         } else {
             base
+        }
+    }
+
+    @ViewBuilder
+    private var paneContent: some View {
+        switch pane {
+        case .appearance: appearanceTab
+        case .behavior: behaviorTab
+        case .updates: updatesTab
+        case .diagnostics: DiagnosticsView()
         }
     }
 
