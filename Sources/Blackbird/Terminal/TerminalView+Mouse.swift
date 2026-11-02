@@ -396,10 +396,17 @@ extension TerminalView {
     // without these hooks the event never reaches the shell. Mirrors the
     // left/right handlers: ⌥ escapes reporting so the user can still
     // paste locally over a TUI. Audit terminal-view-2 F9.
+    //
+    // AppKit delivers every non-left/right button (the mouse Back/Forward
+    // thumb buttons are `buttonNumber` 3 and 4) as `otherMouse*`; only
+    // `buttonNumber` 2 is the middle button. The protocol has no name for
+    // the others (and X10/normal encoding can't carry codes past 223), so
+    // they fall through to `super` instead of reaching a TUI as a
+    // middle-click (vim pastes a register, tmux pastes its buffer).
 
     public override func otherMouseDown(with event: NSEvent) {
         let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, session != nil else {
+        guard event.buttonNumber == 2, mouseReportingEnabled() && !optionHeld, session != nil else {
             super.otherMouseDown(with: event)
             return
         }
@@ -408,7 +415,7 @@ extension TerminalView {
 
     public override func otherMouseDragged(with event: NSEvent) {
         let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, session != nil,
+        guard event.buttonNumber == 2, mouseReportingEnabled() && !optionHeld, session != nil,
               anyEventMouseEnabled() || dragReportingEnabled() else {
             super.otherMouseDragged(with: event)
             return
@@ -419,7 +426,7 @@ extension TerminalView {
 
     public override func otherMouseUp(with event: NSEvent) {
         let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, session != nil else {
+        guard event.buttonNumber == 2, mouseReportingEnabled() && !optionHeld, session != nil else {
             super.otherMouseUp(with: event)
             return
         }

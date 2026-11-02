@@ -149,6 +149,7 @@
 		7D6A312595E2EDA4CC6F574D /* TabResizeFanoutBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9B348536E063859D3D278C8 /* TabResizeFanoutBlindTests.swift */; };
 		7EF890F5A6A35115DDDFBE4B /* MenuValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F72D7CF594F8484A75DF835 /* MenuValidationTests.swift */; };
 		7FC927994239E8A7F777B53F /* SettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */; };
+		7FEFBE99B80C15B77A5A135C /* MouseSideButtonReportingBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E3C896FBC321B63C6CED31 /* MouseSideButtonReportingBlindTests.swift */; };
 		80C0D0D70170C602FEF10D53 /* PromptJumpTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC63CD202483C22F3E8DAE71 /* PromptJumpTests.swift */; };
 		80FE06E1A9846123A1218F5D /* MetalRendererInsetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A877407E1A0FFA4E178DC6B /* MetalRendererInsetTests.swift */; };
 		81109D6E4B033C7DB52C9AF7 /* ssh.bash in Resources */ = {isa = PBXBuildFile; fileRef = F6FFC8DF25E1EF99FD344488 /* ssh.bash */; };
@@ -540,6 +541,7 @@
 		B07A32BEBADF4A5789EFDCC8 /* FirstResponderRestoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstResponderRestoreTests.swift; sourceTree = "<group>"; };
 		B1B34A090CDCF6336E4C1B31 /* ShellResolverBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellResolverBlindTests.swift; sourceTree = "<group>"; };
 		B1B68195F4161FCEE7A5FB56 /* GlyphAtlasStorageModeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasStorageModeBlindTests.swift; sourceTree = "<group>"; };
+		B1E3C896FBC321B63C6CED31 /* MouseSideButtonReportingBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseSideButtonReportingBlindTests.swift; sourceTree = "<group>"; };
 		B25AD58FD2D39C0CF6E82596 /* TabMover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabMover.swift; sourceTree = "<group>"; };
 		B43FD3E696C6005A351C28AF /* SparkleResilienceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SparkleResilienceTests.swift; sourceTree = "<group>"; };
 		B4D34704307A82D9EC41596A /* WideGlyphSelectionStartBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WideGlyphSelectionStartBlindTests.swift; sourceTree = "<group>"; };
@@ -782,6 +784,7 @@
 				24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */,
 				1A14ACDB4E0E64E61FFD4773 /* MonospaceFontFamiliesTests.swift */,
 				9959E3BB61D8228703D58C58 /* MouseInsetMappingTests.swift */,
+				B1E3C896FBC321B63C6CED31 /* MouseSideButtonReportingBlindTests.swift */,
 				E79964F4FADD416B72D5FF32 /* MultiTabConcurrentSoakTests.swift */,
 				5FF7774133BC836284BDAC66 /* NativeTabStripHiderTests.swift */,
 				CBE50317421F1A0C4805B683 /* NormalScrollAccumulationBlindTests.swift */,
@@ -1424,6 +1427,7 @@
 				ED812F94FE464AE1F4E86007 /* MetalRendererTests.swift in Sources */,
 				0E28747FF245ACA6DA71B716 /* MonospaceFontFamiliesTests.swift in Sources */,
 				B3F09FD0F183D209DB5A8A25 /* MouseInsetMappingTests.swift in Sources */,
+				7FEFBE99B80C15B77A5A135C /* MouseSideButtonReportingBlindTests.swift in Sources */,
 				7386DF40D48E9E676E64A55E /* MultiTabConcurrentSoakTests.swift in Sources */,
 				F2562B65EE50C4189D77B765 /* NativeTabStripHiderTests.swift in Sources */,
 				5171C533B2589D177D3CE953 /* NormalScrollAccumulationBlindTests.swift in Sources */,
