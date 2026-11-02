@@ -78,19 +78,35 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
         return;
     }
     // Chunk contains ESC — may open a new OSC that terminates in a
-    // later chunk. Set the latch so subsequent ESC-free chunks still
-    // reach the parser.
-    // Drive the parallel OSC parser whole-chunk: it watches for OSC 7,
-    // OSC 133, and the modify-other-keys CSI. None of those need byte-
-    // precise dispatch positions, so a single `advance` is enough. The
-    // latch is then set only if the tap parser is still mid-sequence at
-    // the chunk boundary (see the ESC-free branch above).
-    {
-        let mut osc = osc_scanner!(bb);
-        bb.osc_parser.advance(&mut osc, slice);
+    // later chunk, so the latch is refreshed from the tap parser's state
+    // after each advance below (see the ESC-free branch above).
+    //
+    // Replies leave through three paths: the tap fires XTVERSION / DECRQSS
+    // / XTGETTCAP the moment it dispatches them, alacritty fires DA / DSR /
+    // CPR inline, and OSC 4/10/11/12 answers wait in `color_queue` for the
+    // drain. Run whole-chunk, the wire order is tap, processor, colour
+    // whatever order the queries were written in, so a DA1 / CPR sentinel
+    // overtakes the answers it trails. Advance both parsers in lock-step
+    // instead, cutting before every ESC (each sequence starts at one, so a
+    // segment holds at most one query), and drain after each segment. Both
+    // parsers are streaming, so a cut anywhere, even between the ESC and
+    // the `\` of an ST, is invisible to them. Bytes inside a DEC 2026
+    // synchronized update are replayed whole when it closes, so replies
+    // queued there keep the old order.
+    let mut start = 0;
+    while start < slice.len() {
+        let end = memchr::memchr(0x1B, &slice[start + 1..])
+            .map_or(slice.len(), |next_esc| start + 1 + next_esc);
+        let segment = &slice[start..end];
+        {
+            let mut osc = osc_scanner!(bb);
+            bb.osc_parser.advance(&mut osc, segment);
+        }
+        bb.osc_possibly_pending = !bb.osc_parser.is_ground();
+        bb.processor.advance(&mut bb.term, segment);
+        drain_color_requests(bb);
+        start = end;
     }
-    bb.osc_possibly_pending = !bb.osc_parser.is_ground();
-    bb.processor.advance(&mut bb.term, slice);
     finish_advance(bb);
 }
 
