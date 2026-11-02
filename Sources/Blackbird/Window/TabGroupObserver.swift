@@ -192,9 +192,15 @@ final class TabGroupObserver {
     /// there. KVO fires on the mutating thread — `NSWindowTabGroup` mutates
     /// on main — and the handlers touch AppKit views, so each trips a
     /// `dispatchPrecondition(.onQueue(.main))` rather than risk an off-main
-    /// layout assertion (audit L-2). Called synchronously (no main.async) so
-    /// the native strip is hidden in the same transaction as AppKit's insert
-    /// — the async wrappers used to add a one-tick flash on ⌘T.
+    /// layout assertion (audit L-2). The HANDLERS run synchronously (no
+    /// main.async) so a group change hides the native strip in the same
+    /// transaction as AppKit's insert — async wrappers used to add a one-tick
+    /// flash on ⌘T. The INSTALL itself is never inline with a group mutation:
+    /// `installTitlebarTabBar` installs from an async block, and the
+    /// `refreshTabBar` retry for a window that has just JOINED a group defers
+    /// it one runloop turn (see the comment there: installing
+    /// mid-`addTabbedWindow` leaks the joining window), so such a window has
+    /// no group observers for that turn.
     private func installTabGroupKVO(_ group: NSWindowTabGroup) {
         // KVO callbacks fire on the thread that mutated the observed
         // property. `NSWindowTabGroup` mutates on main, so these blocks
@@ -411,8 +417,29 @@ final class TabGroupObserver {
         // AppDelegate.refreshAllTabBars on add/remove) now re-attempts to
         // install observers, so once the group exists every controller
         // ends up subscribed and selection KVO fires for all of them.
+        //
+        // Deferred one runloop turn, NOT installed inline: a joining ⌘T
+        // window reaches this from inside the `\.windows` KVO callback that
+        // AppKit fires mid-`addTabbedWindow`, and registering new observers
+        // on the group while it is still being mutated leaves the joining
+        // NSWindow over-retained — after close its TerminalView, Metal
+        // renderer and atlas (~3-4 MB RSS + ~5 MB GPU) stayed alive for the
+        // rest of the process. For that one turn this window has no
+        // `isTabBarVisible` / `selectedWindow` observer, so the native strip
+        // is hidden by the SYNCHRONOUS `hideNativeTabStrip()` at the top of
+        // this refresh, and the deferred block re-runs it right after
+        // subscribing to cover a re-show that landed in the unobserved gap.
+        // The guards re-check at fire time (the window may have closed, or
+        // another refresh may already have subscribed).
         if tabGroupObservers.isEmpty, window.tabGroup != nil {
-            observeTabGroup()
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.tabGroupObservers.isEmpty,
+                      !self.controller.isClosing,
+                      self.controller.window?.tabGroup != nil else { return }
+                self.observeTabGroup()
+                self.hideNativeTabStrip()
+            }
         }
         let tabCount = window.tabGroup?.windows.count ?? 1
         lastObservedTabCount = tabCount
