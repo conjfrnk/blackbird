@@ -222,6 +222,7 @@
 		A00B974CC210D6DF0B342936 /* DeferredFrameSaveFlushBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2A7E646D02B5E5B2F492A70 /* DeferredFrameSaveFlushBlindTests.swift */; };
 		A12E50D2625432B5F7A3E524 /* OSC52FloodRateCapBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB2C8D2E81024E6331B7FB0 /* OSC52FloodRateCapBlindTests.swift */; };
 		A206185581DBFFAB51678248 /* ShellLineEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76F1C34DADDEA264B9A8AD55 /* ShellLineEditor.swift */; };
+		A232181955CEF83DA98B7D9A /* WideGlyphSelectionHighlightBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D6DCE9F2E73793C1E6E99DB /* WideGlyphSelectionHighlightBlindTests.swift */; };
 		A24A1DDD3199147984379869 /* DiagnosticReportStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFE45249095A785FB78B5877 /* DiagnosticReportStore.swift */; };
 		A25683CF4210AC620DBBBB72 /* FindBarAltScreenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 952020A922B8A99F336257AD /* FindBarAltScreenTests.swift */; };
 		A25F8643DAD775E8251392EC /* FocusEventsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */; };
@@ -426,6 +427,7 @@
 		29B3E82A4501BBC90AF74B61 /* KittyKeyRepeatEventTypeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyKeyRepeatEventTypeBlindTests.swift; sourceTree = "<group>"; };
 		2B23446ADB6651910E08359F /* GlyphBitmapCacheEvictionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphBitmapCacheEvictionBlindTests.swift; sourceTree = "<group>"; };
 		2C4BC270083DECE0D5228E3E /* ExportScrollbackLiveHistoryBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportScrollbackLiveHistoryBlindTests.swift; sourceTree = "<group>"; };
+		2D6DCE9F2E73793C1E6E99DB /* WideGlyphSelectionHighlightBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WideGlyphSelectionHighlightBlindTests.swift; sourceTree = "<group>"; };
 		2E8CF6A327FF6AF427167BFA /* NotificationPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPresenter.swift; sourceTree = "<group>"; };
 		2F96C43E82A34FB57CB37965 /* osc133.bash */ = {isa = PBXFileReference; path = osc133.bash; sourceTree = "<group>"; };
 		3005731945C943A451CB4DDF /* TerminalNotificationEventBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalNotificationEventBlindTests.swift; sourceTree = "<group>"; };
@@ -996,6 +998,7 @@
 				A48775E8F6E1A34E39438E20 /* WheelDirectionBlindTests.swift */,
 				B7C7383C0FC6CFF6EA023A47 /* WheelScrollAccumulatorBlindTests.swift */,
 				5409F5949E857E92B387DF11 /* WideGlyphCursorGeometryBlindTests.swift */,
+				2D6DCE9F2E73793C1E6E99DB /* WideGlyphSelectionHighlightBlindTests.swift */,
 				B4D34704307A82D9EC41596A /* WideGlyphSelectionStartBlindTests.swift */,
 				57A9C6712AB2DA807FA6B96C /* WideGlyphSpacerOverpaintBlindTests.swift */,
 				D08926B4D6B1B24BEF14789E /* WindowFrameAutosaveTests.swift */,
@@ -1681,6 +1684,7 @@
 				A6973AD46B5CE82880AC17BE /* WheelDirectionBlindTests.swift in Sources */,
 				B9724DA35FE6AD7448AF1FB5 /* WheelScrollAccumulatorBlindTests.swift in Sources */,
 				A2B72B95CE8647EDA858E6DC /* WideGlyphCursorGeometryBlindTests.swift in Sources */,
+				A232181955CEF83DA98B7D9A /* WideGlyphSelectionHighlightBlindTests.swift in Sources */,
 				C52EC2BDD4C00C4EE06E3562 /* WideGlyphSelectionStartBlindTests.swift in Sources */,
 				B962BB0148A0E2A709A42193 /* WideGlyphSpacerOverpaintBlindTests.swift in Sources */,
 				3ED09BF6E5A9F1B6CCDE8F85 /* WindowFrameAutosaveTests.swift in Sources */,

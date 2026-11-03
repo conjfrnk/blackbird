@@ -168,7 +168,14 @@ struct CellInstanceBuilder {
             var fg = resolved.fg
             let hasBg = resolved.hasBg
 
+            // A selection that starts on the right half of a wide glyph (its
+            // spacer) already copies the glyph (`extract_text_range` backs up
+            // onto the leading cell), and the spacer's own quad is skipped
+            // above, so the leading cell's 2x quad must carry the tint too.
             let selected = isSelected(bufferLine, col)
+                || ((cell.flags & UInt16(WIDE_CHAR)) != 0
+                    && col + 1 < cols
+                    && isSelected(bufferLine, col + 1))
             var effectiveBg = selected ? selectionTint : resolved.bg
             var effectiveHasBg = selected ? true : hasBg
             if selected, Self.contrastRatio(fg, selectionTint) < Self.minSelectedContrast {
