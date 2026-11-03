@@ -7,6 +7,173 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
+Post-0.9.3 bug-hunt sweep: one commit per bug, found by repeated multi-agent hunts and fixed with tests written without sight of the fix.
+
+### Fixed
+- **vt:** Region scroll with a top margin below row 0 no longer pushes display_offset past history.
+- **vt:** Cap window titles at 4 KiB so CSI 22 t cannot stack full copies of an 8 MiB title.
+- **vt:** Cap zero-width scalars per cell at 32 so CSI 65535 b cannot grow one cell without bound.
+- **core:** OSC 104/110/111/112 reset returns to the pushed theme instead of the xterm defaults.
+- **vt:** DCH with a count past the right margin no longer erases text left of the cursor.
+- **find:** Keep the cycle position and viewport when a snapshot swap re-runs the search.
+- **ime:** Stop doCommand(by:) forwarding noop:/complete: to super, which rings the system alert.
+- **ime:** Esc or Backspace that ends a preedit no longer also reaches the PTY; Backspace edits dead keys.
+- **links:** Keep a closing paren or bracket that balances an opener inside the URL.
+- **pty:** Deliver a write over 4 MiB whole, not truncated (big pastes lost ESC[201~).
+- **clipboard:** Keep ZWJ and ZWNJ through copy, paste, OSC 52 and drops (emoji, Persian, Indic).
+- **shell-integration:** Fish prompt wrapper no longer resets $status/$pipestatus (lost [1]).
+- **shell-integration:** Bash hook no longer zeroes $?/PIPESTATUS for the user's PROMPT_COMMAND.
+- **copy:** A tab copies as the lone TAB, not TAB plus its blank fill.
+- **copy:** Last selected row no longer carries the grid's blank padding.
+- **core:** Clear-all (Cmd-K) no longer corrupts an escape sequence split across the clear.
+- **vt:** OSC 4/10/11/12 colour query reply is the colour at query time, not at end of chunk.
+- **vt:** A lone VS16 or U+20E3 at column 0 no longer erases the cell under the cursor.
+- **tabs:** Defer the group-KVO re-subscribe a turn so a closed Cmd-T tab is released.
+- **window:** Core-failure sheet's Keep Open no longer closes the window anyway.
+- **selection:** A drag that starts on the right half of a wide glyph keeps that glyph.
+- **selection:** A vertical window resize drops the selection instead of keeping stale coordinates.
+- **selection:** A pointer in the bottom strip while scrolled back no longer selects an unseen line.
+- **renderer:** Stop the spacer bg quad overpainting the right half of wide glyphs.
+- **pty:** Set IUTF8 so backspacing a multibyte char in cooked input erases it whole.
+- **pty:** A background ssh/kubectl/docker job no longer freezes the OSC 7 cwd (stale new-tab dir).
+- **pty:** Re-check the xterm-kitty terminfo entry per spawn (deleting ~/.terminfo broke new tabs).
+- **input:** Map the Insert key (macOS Help, keyCode 114) so it sends CSI 2 ~ instead of nothing.
+- **input:** Keypad digits and operators now honor application-keypad mode (DECPAM).
+- **input:** Report key auto-repeat as kitty event type 2 when flag 2 is set.
+- **mouse:** Back/Forward side buttons no longer reach a TUI as a middle-click.
+- **shell-integration:** Announce the first prompt with an OSC 133;A so it is a jump target.
+- **mouse:** Wheel toward older content reports button 64 / Up arrow, not 65 / Down (was inverted).
+- **export:** Export Scrollback keeps the oldest lines printed while the save sheet is open.
+- **notifications:** A denied permission is re-read on the next post instead of sticking until relaunch.
+- **clipboard:** Cap OSC 52 write events at 32/s and coalesce to the latest (flood froze main, grew RSS).
+- **vt:** CSI 1 J with the cursor on screen row 2 now erases the row above it.
+- **vt:** Replies inside one input chunk leave in query order, not tap/processor/colour order.
+- **vt:** OSC 8 hyperlink URI/id are capped and budgeted, not retained 1:1 with bytes sent.
+- **vt:** OSC 7 file://<this-machine-hostname>/path now fires CwdChanged, not only empty/localhost.
+- **vt:** Kitty CSI = flags u now edits the stack top, so CSI ? u and pop/alt-swap agree with it.
+- **vt:** Column-shrink reflow keeps the cursor past a wrapped wide glyph, not on its spacer.
+- **links:** A URL ending at the last column before a hard newline no longer absorbs the next line.
+- **find:** A match that straddles a soft-wrapped row boundary is now found.
+- **window:** A display unplug no longer overwrites the saved multi-display window frame.
+- **theme:** Non-palette changes no longer re-push the palette over program-set OSC colours.
+- **window:** A pending deferred frame save is flushed on window close and on quit.
+- **drop:** A backslash in a dropped filename no longer breaks the shell quoting under fish.
+- **renderer:** Glyph atlas caches narrow and wide entries of one scalar separately (stretched emoji).
+- **renderer:** SGR 2 (dim) fades fg toward the cell bg, not black (was more contrasty on light themes).
+- **keys:** Ctrl+Backspace sends BS (0x08), not DEL (0x7f), in legacy mode (was identical to Backspace).
+- **mouse:** Reports carry Shift/Ctrl modifier bits (Shift+click reached the TUI as a plain click).
+- **mouse:** Reports clamp to the grid (bottom/right padding reported row rows+1 / col cols+1).
+- **mouse:** Right-button drag reports motion under DEC 1002/1003 (press and release had nothing between).
+- **keys:** Kitty flag 2 reports Alt+key releases and drops releases of Cmd shortcuts the TUI never saw.
+- **find:** Regex scan stops mid-row at its 250 ms deadline; a timed-out query is not re-run on output.
+- **clipboard:** A coalesced OSC 52 write is delivered by a timer, not the next PTY chunk.
+- **find:** A timed-out regex query is retried with backoff; the progress hook is sampled per row.
+- **renderer:** Block and box glyphs are Y-fitted to the cell, so stacked rows no longer leave stripes.
+- **renderer:** The cursor covers a whole wide glyph; one on the spacer is drawn on the leading cell.
+- **bell:** The visual flash and the scroll thumb are tinted for light themes, not white-on-white.
+- **cwd:** OSC 7 gate no longer trusts background jobs; a dropped report makes new tabs read the live cwd.
+- **keys:** Kitty flags 1/8 win over application keypad (DECPAM) for keypad digits and operators.
+- **renderer:** Box-line Y-fit keeps horizontal strokes at natural thickness; the fit is cached per font.
+- **vt:** OSC 7 foreign-host rejects no longer cost a gethostname(); own-host tests ignore the runner name.
+- **vt:** OSC 8 hyperlink live-byte budget now logs its refusal, charges capacity, and is tested.
+- **vt:** An ESC-ended unterminated OSC colour query replies in order; sync-update residual documented.
+- **vt:** SGR 8 (conceal) reaches the snapshot as a HIDDEN cell flag and the renderer skips the glyph.
+- **notifications:** An undetermined permission status is re-asked, not latched as a denial.
+- **window:** A custom Shell that dies at startup falls back to the login shell instead of quitting.
+- **window:** The "Couldn't start shell" alert names the failure instead of an opaque Cocoa string.
+- **locale:** LANG follows the system language, not the app-localised Locale.current.
+- **window:** The child shell's $SHELL names the program the tab runs, not the launcher's stale value.
+- **title:** Clearing a rename or popping a program title reverts the tab to the shell name.
+- **find:** Wrapped runs are searched in bounded pieces; cross-wrap matches scroll fully into view.
+- **copy:** Cmd-C, Services and copy-on-select read the highlighted rows, not rows below them.
+- **prompts:** OSC 133 A marks are stamped with the cursor position at parse time, not a later snapshot.
+- **input:** Shift+Tab and Ctrl+Shift+Tab are sent as back-tab (CSI Z), not 0x19 (^Y).
+- **renderer:** A selection starting on the right half of a wide glyph now tints the glyph it copies.
+- **zsh:** Shell integration loads under ksh_arrays, ignorebraces, cshjunkiequotes, noprompt_percent.
+- **a11y:** AccessibilityString(for:) no longer traps on Int overflow for a range like {1, Int.max}.
+- **menus:** TerminalView now conforms to NSMenuItemValidation, so its menu validation actually runs.
+- **reflow:** Widening after a narrow no longer strands a top-row line in scrollback.
+- **grid:** Widening a row after a background fill no longer leaves ghost coloured cells.
+- **xtgettcap:** Answer from the bundled kitty.terminfo; Setulc was wrong and most caps read unsupported.
+- **vte:** DEC graphics under ESC ( 0 now draws the ACS arrows and block (+ , - . 0).
+- **keys:** Kitty release ledger clears on focus loss, skips IME presses, keeps press modifiers.
+- **mouse:** Right/middle release mirrors the press; stale resize latch can't eat a drag; Shift+wheel.
+- **renderer:** Colour emoji are fitted to their cell slot instead of clipped by it.
+- **mouse:** DEC 1005 reports send UTF-8 coordinates instead of raw 8-bit bytes.
+- **vt:** ZWJ sequences and skin-tone modifiers advance the cursor 2 columns, matching string-width.
+- **vt:** OSC 8 budget refusal log no longer promises Cmd-K frees links; an over-long id= is cut.
+- **tabs:** Pill context menu Rename on a background tab edits in the visible strip.
+- **settings:** Diagnostics list reloads when Settings is reopened, not only on first appear.
+- **cwd:** Cmd-T falls back to the shell's own cwd when the foreground leader's cwd is unreadable.
+- **core:** Panic file:line and every Rust breadcrumb reach the unified log under category "core".
+- **a11y:** VoiceOver range-for-index covers both UTF-16 units of an emoji or astral character.
+- **core:** The OSC 8 budget and colour-reply cap breadcrumbs go to the unified log too.
+- **links:** A mailto link can no longer add a second recipient behind %40 or a comma.
+- **links:** URLs with a non-ASCII path or query are detected whole, not cut at the first such character.
+- **ime:** Preedit cell widths come from the Rust grid's width table, not a drifting Swift range list.
+- **copy:** Cmd-C, Services and copy-on-select reads no longer consume the core's damage.
+- **menus:** Edit > Find > Find... (cmd-F) stays enabled while the find field has focus.
+- **tabs:** Closing the selected tab now lands on its visual neighbour again.
+- **tabs:** Merge All Windows now resizes the merged background tabs and their PTYs right away.
+- **window:** First launch with no saved frame now centres the main window instead of pinning it to y=0.
+- **settings:** Bell = Off plus program notifications off now silences the BEL Dock bounce and tab dot.
+- **input:** Modified F3 sends CSI 13;<mod>~, not CSI 1;<mod>R (which is a cursor-position report).
+- **services:** Look Up on a huge selection no longer builds a multi-megabyte popover label.
+- **prompt-ring:** Fish >= 4 repaints no longer add duplicate prompt jump targets.
+- **ssh-wrapper:** `ssh -G host` in kitty mode no longer counts as a terminfo install.
+- **find:** Matches scrolled to under the opaque find bar are now revealed below it.
+- **tooltip:** Link hover tooltip is now clamped to the screen instead of hanging off the edge.
+- **tab-strip:** Pill strip no longer runs under the traffic lights in narrow windows.
+- **ime:** Preedit width of an emoji plus a skin-tone modifier is 2 cells, as the grid now advances.
+- **fonts:** Narrow fallback glyphs wider than the cell are fitted into the slot, not cut at its edge.
+- **vt:** Emoji cluster join shares one previous-cell lookup; its guards are pinned by tests.
+- **vt:** OSC 8 refusal-log tests can now fail; the log names which screen an erase frees.
+- **vt:** Colour-query cap docs name the DEC 2026 live bound; the reply gate is tumbling and logs.
+- **resize:** A font-size step queued behind a coalesced window resize no longer lands after it.
+- **vt:** Alt-screen column shrink no longer leaves a WIDE_CHAR head in the last column.
+- **links:** Mailto raw '#', decoded '?&=%' and subject-smuggled headers can no longer add a recipient.
+- **find:** Viewport find and VoiceOver text no longer drop combining marks, VS16, ZWJ or Thai marks.
+- **find:** A non-ASCII query no longer scans every scrollback row through Foundation on the main thread.
+- **ime:** Shift+keypad-Enter no longer sends ETX (Ctrl+C); Ctrl+Option chords keep Ctrl and Meta.
+- **input:** Kitty flag 2 keypad keys now report their release, so a held keypad key no longer looks stuck.
+- **ime:** Preedit overlay now follows the cursor when output, a paste echo or a resize reflow moves it.
+- **pty:** Ctrl-C after a 1 KiB+ multi-line paste now interrupts a program that is not reading.
+- **pty:** A large paste or drop now drains at the child's read speed, not one timer tick per KiB.
+- **paste:** A non-bracketed multi-line paste now sends CR per line break, so macOS nano keeps its lines.
+- **tab-strip:** Pills keep a readable minimum width, page when they overflow, and show a title tooltip.
+- **find-bar:** Narrow bars no longer clip Replace All or run the counter under the close button.
+- **ime:** Preedit overlay now wraps at the right edge instead of running past the window.
+- **find-bar:** Esc and Return now work from the Replace field, and Shift-Tab moves focus.
+- **find-bar:** Caret, close and counter now carry VoiceOver labels, and regex/case state is exposed.
+- **title:** OSC titles and notifications keep ZWNJ/ZWJ/variation selectors, lossy UTF-8.
+
+### Maintenance
+- **tests:** Annotate PTYLargePasteBlindTests' withUnsafeBytes closures so the macOS 26 compiler accepts them.
+- **cask:** Zap the xterm-kitty terminfo where macOS tic really installs it (78/, not x/).
+- **tests:** Gate BackgroundedRemoteJobCwdBlindTests behind BB_RUN_FLAKY_PTY_TESTS like the other real-shell PTY suites.
+- **tests:** The suite's 50 ms watchdog no longer samples into or prunes the real ~/Library/Logs/Blackbird.
+- **tests:** RegexFindWorkerCPULeakBlindTests counts a thread as leaked only if it also burned CPU.
+- **vendor:** Post-v0.9.3 alacritty patches carry re-apply markers; set_keyboard_mode unshadowed.
+- **tests:** The watchdog suite disarms its 50 ms watchdog and undoes its log redirect on teardown.
+- **tests:** Every URL wrap-join guard is now pinned by a fixture that actually reaches it.
+- **tests:** KittyTerminfoDeletionBlindTests no longer moves the developer's real ~/.terminfo entry.
+- **tests:** Gate OSC7BackgroundJobTrustBlindTests behind BB_RUN_FLAKY_PTY_TESTS like its fake-ssh sibling.
+- **tests:** Five resize-clamp tests no longer skip on every host (estimator counted lazy scrollback).
+- **docs:** KNOWN_ISSUES explains why xterm-kitty is unknown after sudo -i / su -.
+- **app:** The XCTest host no longer quits when its last window closes.
+- **tests:** LookUpLargeSelectionBlindTests skip where the host raises no Look Up popover.
+- **tests:** TooltipScreenClampBlindTests skip when the screen is too small to host a long tooltip right of the pointer.
+- **tests:** The fully-visible-match control keeps the match clear of the find bar.
+- **tests:** Unit-test host gets its own bundle id so runs stop writing the developer's real defaults.
+- **dependabot:** No swift PRs that can never go green, no cargo PRs above the 1.85 MSRV.
+- **homebrew:** The cask loads from a tap and its livecheck agrees with its version.
+- **license:** The app bundle now ships the Apache-2.0, MIT and font notices it incorporates.
+- **ci:** The STRESS, window-lifecycle and soak gated tests run in a job again.
+- **tests:** Pin that Esc cancelling a preedit, or a composing key, sends no kitty release without a press.
+- **tests:** The locale suite no longer writes AppleLanguages/AppleLocale into the real app domain.
+- **tests:** ThirdPartyLicenseNoticesBlindTests finds the app bundle under the test host's own bundle id.
+- **tests:** IMEPreeditReanchorBlindTests sizes its view to the 80-column grid it displays.
+
 ## [0.9.3] - 2026-11-02
 
 ### Fixed
