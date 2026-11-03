@@ -58,7 +58,7 @@ protocol contracts those apps depend on are pinned by automated tests:
 
 | Contract                                | Pin location                                                        |
 |-----------------------------------------|---------------------------------------------------------------------|
-| XTGETTCAP `TN`/`Co`/`RGB`/`Smulx`/`Setulc` | `core/tests/xtgettcap.rs` — Rust-side hex-byte assertions.        |
+| XTGETTCAP `TN`/`Co`/`RGB`/`Smulx`/`Setulc` + every bundled-terminfo cap | `core/tests/xtgettcap.rs` (hex-byte assertions), `core/tests/xtgettcap_terminfo_parity_blind.rs` (terminfo parity). |
 | modifyOtherKeys `CSI 27;<mod>;<cp>~`     | `Tests/BlackbirdTests/KeyEncoderAdversarialTests.swift`             |
 | Kitty / mOK / legacy precedence          | `Tests/BlackbirdTests/KeyEncoderProtocolPrecedenceTests.swift`      |
 | Kitty keyboard flags 1 / 2 / 8 / 16 †    | `Tests/BlackbirdTests/KittyKeyboardProtocolTests.swift`             |

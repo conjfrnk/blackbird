@@ -52,9 +52,9 @@ unsafe extern "C" fn on_event(ev: blackbird_core::BBEvent, _ctx: *mut std::ffi::
 /// - OSC 52 ; c ; ? — clipboard read; should NEVER reply (pinned by
 ///   `tests/osc52_readback.rs`). Including it here verifies the
 ///   "no-reply" path stays sound under storm.
-/// - XTGETTCAP `5463` ("Tc" — not in `XTGETTCAP_TABLE`) — exercises
-///   the unknown-cap reply branch in `build_xtgettcap_reply`
-///   (`core/src/lib.rs:939-946`); also threads the
+/// - XTGETTCAP `5858` ("XX" — in neither `XTGETTCAP_TABLE` nor the
+///   bundled terminfo) — exercises the unknown-cap reply branch in
+///   `build_xtgettcap_reply` (`core/src/osc.rs`); also threads the
 ///   `dispatch_xtgettcap` direct-fire site through `pty_write_rate`.
 /// - DECRQM private mode 9001 — `CSI ? 9001 $ p`; alacritty replies
 ///   "not recognized" via the standard PtyWrite path.
@@ -71,7 +71,7 @@ const FRAGMENTS: &[&[u8]] = &[
     b"\x1b]52;c;?\x07",         // OSC 52 clipboard read (should NOT reply)
     b"\x1b[>c",                 // DA2 (Secondary Device Attributes)
     b"\x1b[5n",                 // DSR status report
-    b"\x1bP+q5463\x1b\\",       // XTGETTCAP — "Tc" cap, unknown branch
+    b"\x1bP+q5858\x1b\\",       // XTGETTCAP — "XX" cap, unknown branch
     b"\x1b[?9001$p",            // DECRQM private mode 9001
     b"\x1b[8t",                 // XTWINOPS sub-op 8
 ];

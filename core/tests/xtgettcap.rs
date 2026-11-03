@@ -190,26 +190,18 @@ fn xtgettcap_smulx_returns_expected_hex() {
 
 #[test]
 fn xtgettcap_setulc_returns_expected_hex() {
-    // Setulc terminfo value: "\x1B[58:2::%p1%{65536}%/%d:%p2%{256}%/%d:%p3%d%;m"
-    // Byte-by-byte (46 bytes total):
-    //   \x1B = 1B     [  = 5B     5  = 35     8  = 38     :  = 3A
-    //   2    = 32     :  = 3A     :  = 3A     %  = 25     p  = 70
-    //   1    = 31     %  = 25     {  = 7B     6  = 36     5  = 35
-    //   5    = 35     3  = 33     6  = 36     }  = 7D     %  = 25
-    //   /    = 2F     %  = 25     d  = 64     :  = 3A     %  = 25
-    //   p    = 70     2  = 32     %  = 25     {  = 7B     2  = 32
-    //   5    = 35     6  = 36     }  = 7D     %  = 25     /  = 2F
-    //   %    = 25     d  = 64     :  = 3A     %  = 25     p  = 70
-    //   3    = 33     %  = 25     d  = 64     %  = 25     ;  = 3B
-    //   m    = 6D
-    // Concatenated (92 hex chars):
-    //   1B5B35383A323A3A257031257B36353533367D252F25643A257032257B3235367D252F25643A2570332564253B6D
+    // Setulc is the bundled terminfo's single-parameter form: ONE packed
+    // 0xRRGGBB in %p1, split with /65536, /256&255 and &255. (It used to be
+    // `...%p1%{65536}%/%d:%p2%{256}%/%d:%p3%d...`, which no calling
+    // convention evaluates to the right colour; see
+    // `xtgettcap_terminfo_parity_blind.rs` for the evaluated behaviour.)
+    let value: &[u8] = b"\x1b[58:2:%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m";
     let writes = run(b"\x1bP+q536574756C63\x1b\\");
     let joined: Vec<u8> = writes.into_iter().flatten().collect();
-    let expected_hex =
-        b"1B5B35383A323A3A257031257B36353533367D252F25643A257032257B3235367D252F25643A2570332564253B6D";
     let mut expected = b"\x1bP1+r536574756C63=".to_vec();
-    expected.extend_from_slice(expected_hex);
+    for b in value {
+        expected.extend_from_slice(format!("{b:02X}").as_bytes());
+    }
     expected.extend_from_slice(b"\x1b\\");
     assert_eq!(joined, expected, "Setulc value hex must be pinned");
 }

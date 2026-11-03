@@ -5,6 +5,9 @@
 //! mutation path (Part I §8). Moved out of the monolith verbatim
 //! (REFACTOR.md Wave 1); behavior unchanged.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::{Params, Perform};
 
@@ -465,14 +468,24 @@ fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
     let is_valid_hex = !cap_hex.is_empty()
         && cap_hex.len() % 2 == 0
         && cap_hex.iter().all(|b| b.is_ascii_hexdigit());
-    match (is_valid_hex, find_cap_value(cap_hex)) {
-        (true, Some(value_hex)) => {
-            // DCS 1 + r <cap>=<value> ST
-            let mut v = Vec::with_capacity(cap_hex.len() + value_hex.len() + 8);
+    // Only look up well-formed hex: an invalid token is answered without
+    // touching the index, so a storm of garbage tokens costs nothing here.
+    let found = if is_valid_hex {
+        find_cap_value(cap_hex)
+    } else {
+        None
+    };
+    match (is_valid_hex, found) {
+        (true, Some(answer)) => {
+            // DCS 1 + r <cap>=<value> ST; a boolean has no value, so
+            // DCS 1 + r <cap> ST.
+            let mut v = Vec::with_capacity(cap_hex.len() + 8);
             v.extend_from_slice(b"\x1bP1+r");
             v.extend_from_slice(cap_hex);
-            v.push(b'=');
-            v.extend_from_slice(value_hex);
+            if let CapAnswer::Value(value_hex) = answer {
+                v.push(b'=');
+                v.extend_from_slice(value_hex);
+            }
             v.extend_from_slice(b"\x1b\\");
             v
         }
@@ -491,26 +504,175 @@ fn build_xtgettcap_reply(cap_hex: &[u8]) -> Vec<u8> {
     }
 }
 
-/// ASCII-case-insensitive lookup against `XTGETTCAP_TABLE`. Cap hex is
-/// canonically uppercase, but tolerate lowercase defensively — some
-/// ncurses builds lowercase hex when emitting `tput`-style queries.
-fn find_cap_value(cap_hex: &[u8]) -> Option<&'static [u8]> {
-    for (key, value) in XTGETTCAP_TABLE {
-        if cap_hex.eq_ignore_ascii_case(key) {
-            return Some(value);
-        }
-    }
-    None
+/// What an XTGETTCAP lookup found. Values are hex-encoded, as on the wire.
+enum CapAnswer {
+    /// A boolean capability: asserted, carries no value.
+    Flag,
+    /// A string capability's un-evaluated terminfo bytes (`%p1`-style
+    /// escapes are left for the caller's tparm).
+    Value(Vec<u8>),
 }
 
-/// Kitty XTGETTCAP capabilities Blackbird claims. Each row is
-/// (hex-encoded cap name, hex-encoded terminfo-compiled value).
+/// The terminfo source `TERM=xterm-kitty` resolves to (the app compiles this
+/// same file with `tic`). XTGETTCAP answers from it so a TUI that trusts the
+/// query over terminfo cannot see a different capability set.
+static KITTY_TERMINFO: &str =
+    include_str!("../../Sources/Blackbird/Resources/Terminfo/kitty.terminfo");
+
+/// Every capability XTGETTCAP can answer, keyed by the decoded capability
+/// name. Built once, on the first query (see [`cap_index`]).
+struct CapIndex {
+    caps: HashMap<Vec<u8>, CapAnswer>,
+    /// Longest name in `caps`, in bytes: a longer query cannot match.
+    max_name_len: usize,
+}
+
+/// The process-wide [`CapIndex`]. A query is attacker-controlled (a remote
+/// can send ~1300 caps per DCS), so each lookup must stay O(1): re-scanning
+/// the terminfo text per cap would make the `PtyWrite` rate cap bound the
+/// replies but not the work done to build them.
+fn cap_index() -> &'static CapIndex {
+    static INDEX: OnceLock<CapIndex> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut caps = terminfo_caps();
+        // `XTGETTCAP_TABLE` rows are Blackbird's own answers and win over
+        // the terminfo's. Their keys are canonical hex, so `unhex` is total.
+        for (key, value) in XTGETTCAP_TABLE {
+            if let (Some(name), Some(value)) = (unhex(key), unhex(value)) {
+                caps.insert(name, CapAnswer::Value(hex_upper(&value)));
+            }
+        }
+        let max_name_len = caps.keys().map(Vec::len).max().unwrap_or(0);
+        CapIndex { caps, max_name_len }
+    })
+}
+
+/// Look `cap_hex` up in [`cap_index`]. The cap hex is matched
+/// ASCII-case-insensitively (it is decoded first): it is canonically
+/// uppercase, but some ncurses builds lowercase hex when emitting
+/// `tput`-style queries.
+fn find_cap_value(cap_hex: &[u8]) -> Option<&'static CapAnswer> {
+    let index = cap_index();
+    // A token longer than any known name cannot match: reject it before
+    // decoding so an oversized token costs O(1), not O(its length).
+    if cap_hex.len() > index.max_name_len * 2 {
+        return None;
+    }
+    index.caps.get(unhex(cap_hex)?.as_slice())
+}
+
+/// Decode a hex string; `None` when it is odd-length or not pure hex.
+fn unhex(hex: &[u8]) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let nibble = |b: u8| char::from(b).to_digit(16).map(|d| d as u8);
+    hex.chunks_exact(2)
+        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        .collect()
+}
+
+/// Parse every boolean / string capability of `KITTY_TERMINFO` into a map
+/// keyed by capability name. Numeric capabilities (`colors#256`, ...) are not
+/// answered: `Co` is the one XTGETTCAP count and it deliberately differs from
+/// the file, see `XTGETTCAP_TABLE`. A string using an escape
+/// [`unescape_terminfo`] does not know is left out, so it reads as
+/// unsupported instead of being answered wrongly. The first definition of a
+/// name wins, as it did when the text was scanned per query.
+fn terminfo_caps() -> HashMap<Vec<u8>, CapAnswer> {
+    let mut caps = HashMap::new();
+    // One capability per line, each indented and ending in `,`; the
+    // unindented first line is the `name|description,` header.
+    for line in KITTY_TERMINFO.lines() {
+        if !line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some(entry) = line.trim().strip_suffix(',') else {
+            continue;
+        };
+        let name_len = entry
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(entry.len());
+        let (cap, rest) = entry.split_at(name_len);
+        let answer = match rest.strip_prefix('=') {
+            Some(raw) => match unescape_terminfo(raw) {
+                Some(bytes) => CapAnswer::Value(hex_upper(&bytes)),
+                None => continue,
+            },
+            None if rest.is_empty() => CapAnswer::Flag,
+            None => continue,
+        };
+        caps.entry(cap.as_bytes().to_vec()).or_insert(answer);
+    }
+    caps
+}
+
+/// Upper-case hex encoding, two digits per byte.
+fn hex_upper(bytes: &[u8]) -> Vec<u8> {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(DIGITS[usize::from(b >> 4)]);
+        out.push(DIGITS[usize::from(b & 0x0F)]);
+    }
+    out
+}
+
+/// Terminfo-source string escapes (`\E`, `\007`, `^G`, `\s`, `\,`, ...) to
+/// the bytes a compiled entry holds. `%` sequences and `$<..>` padding stay
+/// as written. `None` on an escape this file does not use, so such a
+/// capability reads as unsupported instead of being answered wrongly.
+fn unescape_terminfo(raw: &str) -> Option<Vec<u8>> {
+    let b = raw.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                i += 1;
+                match *b.get(i)? {
+                    b'E' | b'e' => out.push(0x1B),
+                    b'n' | b'l' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0C),
+                    b's' => out.push(b' '),
+                    e @ (b'^' | b'\\' | b',' | b':') => out.push(e),
+                    b'0'..=b'7' => {
+                        let mut v: u32 = 0;
+                        let mut digits = 0;
+                        while digits < 3 && i < b.len() && (b'0'..=b'7').contains(&b[i]) {
+                            v = v * 8 + u32::from(b[i] - b'0');
+                            i += 1;
+                            digits += 1;
+                        }
+                        out.push(u8::try_from(v).ok()?);
+                        continue; // `i` is already past the digits
+                    }
+                    _ => return None,
+                }
+                i += 1;
+            }
+            b'^' => {
+                i += 1;
+                let c = *b.get(i)?;
+                out.push(if c == b'?' { 0x7F } else { c & 0x1F });
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// XTGETTCAP answers that are Blackbird's own rather than the bundled
+/// terminfo's; `cap_index` lets them override the terminfo. Each row is
+/// (hex-encoded cap name, hex-encoded value).
 ///
-/// Values are the bytes of the terminfo string, hex-encoded upper-case.
-/// `\E` in terminfo source is ESC (0x1B), not a literal `\`+`E`, so the
-/// hex is `1B` in those positions.
-///
-/// Claimed caps (why each matters):
 /// - TN     = "xterm-kitty"  — the terminal identity string some TUIs
 ///   key on to enable advanced protocols.
 /// - Co     = "16777216"     — color count. Pre-LOW-sweep this was
@@ -520,16 +682,17 @@ fn find_cap_value(cap_hex: &[u8]) -> Option<&'static [u8]> {
 ///   ranger, some neovim plugins) fell back to 256-color paths.
 ///   Audit NEW-DF-004.
 /// - RGB    = "8"             — truecolor bits per channel.
-/// - Smulx  = "\E[4:%p1%dm"   — styled underline select (SGR 4:n).
-/// - Setulc = "\E[58:2::%p1%{65536}%/%d:%p2%{256}%/%d:%p3%d%;m"
-///   — RGB underline color (SGR 58:2:R:G:B).
 ///
-/// Smulx/Setulc together are what nvim probes before emitting colored
-/// undercurl (`spellbad`, LSP diagnostics). Getting both right is the
-/// whole point of claiming xterm-kitty.
+/// Every other boolean / string capability (`Smulx`, `Setulc`, `Su`, `Tc`,
+/// `Ms`, `Sync`, ...) is answered from `KITTY_TERMINFO`, the single source
+/// of truth for `TERM=xterm-kitty`. A second hand-copied table drifted:
+/// its `Setulc` was wrong under any calling convention. nvim probes
+/// `Smulx`/`Setulc` before emitting coloured undercurl (`spellbad`, LSP
+/// diagnostics).
 ///
-/// Test `core/tests/xtgettcap.rs::xtgettcap_smulx_returns_expected_hex`
-/// and `..._setulc_returns_expected_hex` pin these exact hex strings.
+/// `core/tests/xtgettcap.rs` pins the rows below and the `Smulx`/`Setulc`
+/// strings; `core/tests/xtgettcap_terminfo_parity_blind.rs` checks every
+/// terminfo capability.
 static XTGETTCAP_TABLE: &[(&[u8], &[u8])] = &[
     // TN     = "TN"     → 544E        value "xterm-kitty"  → 787465726D2D6B69747479
     (b"544E", b"787465726D2D6B69747479"),
@@ -537,16 +700,6 @@ static XTGETTCAP_TABLE: &[(&[u8], &[u8])] = &[
     (b"436F", b"3136373737323136"),
     // RGB    = "RGB"    → 524742      value "8"            → 38
     (b"524742", b"38"),
-    // Smulx  = "Smulx"  → 536D756C78  value "\x1B[4:%p1%dm"
-    //                                 → 1B5B343A25703125646D
-    (b"536D756C78", b"1B5B343A25703125646D"),
-    // Setulc = "Setulc" → 536574756C63
-    //                                 value "\x1B[58:2::%p1%{65536}%/%d:%p2%{256}%/%d:%p3%d%;m"
-    //                                 → see test for byte-by-byte derivation
-    (
-        b"536574756C63",
-        b"1B5B35383A323A3A257031257B36353533367D252F25643A257032257B3235367D252F25643A2570332564253B6D",
-    ),
 ];
 
 /// Reject-class indices for `osc7_reject` — keep stable so the per-class
