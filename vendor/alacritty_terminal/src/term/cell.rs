@@ -40,7 +40,9 @@ bitflags! {
 /// Counter for hyperlinks without explicit ID.
 static HYPERLINK_ID_SUFFIX: AtomicU32 = AtomicU32::new(0);
 
-/// Max zero-width scalars kept on one cell (see `Cell::push_zerowidth`).
+/// Max zero-width scalars kept on one cell.
+///
+/// Blackbird fix (re-apply on bump): see `Cell::push_zerowidth`, which enforces it.
 const ZEROWIDTH_MAX: usize = 32;
 
 /// Max bytes of URI kept for one hyperlink. Matches `OSC8_URI_MAX` in blackbird_core's
@@ -51,6 +53,8 @@ const HYPERLINK_URI_MAX: usize = 4096;
 const HYPERLINK_ID_MAX: usize = 256;
 
 /// Max bytes of hyperlink data one terminal keeps alive across grid and scrollback.
+///
+/// Blackbird fix (re-apply on bump): see `Hyperlink::bounded`, which enforces it.
 pub(crate) const HYPERLINK_LIVE_MAX: usize = 32 * 1024 * 1024;
 
 /// Bookkeeping charged per hyperlink on top of its strings (Arc header, two `String` headers,
@@ -129,6 +133,9 @@ impl From<Hyperlink> for VteHyperlink {
     }
 }
 
+/// Blackbird fix (re-apply on bump): `live` charges the link to the terminal's hyperlink byte
+/// budget (see `Hyperlink::bounded`), so `PartialEq`/`Eq`/`Hash` are written by hand over
+/// `(id, uri)` instead of derived, and `Drop` credits the budget back.
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 struct HyperlinkInner {

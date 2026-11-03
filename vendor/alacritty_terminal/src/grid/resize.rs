@@ -296,9 +296,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     let wide_char = mem::replace(&mut row[Column(columns - 1)], spacer);
                     wrapped.insert(0, wide_char);
 
-                    // The wrapped part now starts one cell earlier (at the glyph) than the
-                    // `columns` offset the cursor reflow below assumes. Without this a cursor
-                    // past the margin lands on the glyph's spacer and the next write erases it.
+                    // Blackbird fix (re-apply on bump): the wrapped part now starts one cell
+                    // earlier (at the glyph) than the `columns` offset the cursor reflow below
+                    // assumes. Without this a cursor past the margin lands on the glyph's
+                    // spacer and the next write erases it.
                     let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
                     if i == cursor_buffer_line && self.cursor.point.column >= columns {
                         self.cursor.point.column += 1;

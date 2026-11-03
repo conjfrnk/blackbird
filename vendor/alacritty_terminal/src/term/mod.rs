@@ -44,10 +44,10 @@ const TITLE_STACK_MAX_DEPTH: usize = 4096;
 
 /// Max size in bytes of a window title.
 ///
-/// Blackbird fix: upstream stores whatever OSC 0/2 delivers (vte allows up to 8 MiB) and
-/// `push_title` deep-copies it, so 5 bytes of `CSI 22 t` allocated a full copy of the title,
-/// up to `TITLE_STACK_MAX_DEPTH` times (~32 GiB). Capping the title bounds the stack to
-/// `TITLE_STACK_MAX_DEPTH * TITLE_MAX_BYTES` (16 MiB) and the `Event::Title` payload with it.
+/// Blackbird fix (re-apply on bump): upstream stores whatever OSC 0/2 delivers (vte allows up
+/// to 8 MiB) and `push_title` deep-copies it, so 5 bytes of `CSI 22 t` allocated a full copy of
+/// the title, up to `TITLE_STACK_MAX_DEPTH` times (~32 GiB). Capping the title bounds the stack
+/// to `TITLE_STACK_MAX_DEPTH * TITLE_MAX_BYTES` (16 MiB) and the `Event::Title` payload with it.
 const TITLE_MAX_BYTES: usize = 4096;
 
 /// Default semantic escape characters.
@@ -334,21 +334,24 @@ pub struct Term<T> {
     /// Information about damaged cells.
     damage: TermDamageState,
 
-    /// BLACKBIRD PATCH: cursor position directly after the last glyph `input`
-    /// wrote, or `None` once that adjacency can no longer be trusted (scroll,
-    /// resize, screen swap). A VS16 / U+20E3 promotes the cell left of the
+    /// Blackbird fix (re-apply on bump): cursor position directly after the last
+    /// glyph `input` wrote, or `None` once that adjacency can no longer be trusted
+    /// (scroll, resize, screen swap). A VS16 / U+20E3 promotes the cell left of the
     /// cursor to a wide glyph only while the cursor still sits exactly here;
     /// any cursor move (CR, CUF, CUP, BS, HT, ...) takes it elsewhere, so the
     /// left neighbour is then not "the base just written".
     glyph_end: Option<Point>,
 
-    /// Bytes held by live hyperlinks in both grids, enforcing `Hyperlink::bounded`'s budget.
+    /// Blackbird fix (re-apply on bump): bytes held by live hyperlinks in both grids,
+    /// enforcing `Hyperlink::bounded`'s budget.
     hyperlink_live: Arc<AtomicUsize>,
 
-    /// Byte budget for `hyperlink_live`; `HYPERLINK_LIVE_MAX` unless `set_hyperlink_live_max`.
+    /// Blackbird fix (re-apply on bump): byte budget for `hyperlink_live`;
+    /// `HYPERLINK_LIVE_MAX` unless `set_hyperlink_live_max`.
     hyperlink_live_max: usize,
 
-    /// A link was refused for want of budget since `take_hyperlink_over_budget` last ran.
+    /// Blackbird fix (re-apply on bump): a link was refused for want of budget since
+    /// `take_hyperlink_over_budget` last ran.
     hyperlink_over_budget: bool,
 
     /// Config directly for the terminal.
@@ -467,6 +470,7 @@ impl<T> Term<T> {
             selection: Default::default(),
             title: Default::default(),
             mode: Default::default(),
+            // Blackbird fix (re-apply on bump): `glyph_end` and the three OSC 8 budget fields.
             glyph_end: None,
             hyperlink_live: Default::default(),
             hyperlink_live_max: cell::HYPERLINK_LIVE_MAX,
@@ -757,6 +761,7 @@ impl<T> Term<T> {
 
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
 
+        // Blackbird fix (re-apply on bump): a resize invalidates `glyph_end`, which see.
         self.glyph_end = None;
 
         // Move vi mode cursor with the content.
@@ -819,10 +824,11 @@ impl<T> Term<T> {
         mem::swap(&mut self.keyboard_mode_stack, &mut self.inactive_keyboard_mode_stack);
         let keyboard_mode =
             self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE).into();
-        self.set_keyboard_mode(keyboard_mode, KeyboardModesApplyBehavior::Replace);
+        self.set_live_keyboard_mode(keyboard_mode, KeyboardModesApplyBehavior::Replace);
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
         self.mode ^= TermMode::ALT_SCREEN;
+        // Blackbird fix (re-apply on bump): a screen swap invalidates `glyph_end`, which see.
         self.glyph_end = None;
         self.selection = None;
         self.mark_fully_damaged();
@@ -836,6 +842,8 @@ impl<T> Term<T> {
     fn scroll_down_relative(&mut self, origin: Line, mut lines: usize) {
         trace!("Scrolling down relative: origin={origin}, lines={lines}");
 
+        // Blackbird fix (re-apply on bump): a scroll invalidates `glyph_end`, which see.
+        // The cursor keeps its Point while the cells under and left of it change.
         self.glyph_end = None;
 
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
@@ -866,6 +874,8 @@ impl<T> Term<T> {
     fn scroll_up_relative(&mut self, origin: Line, mut lines: usize) {
         trace!("Scrolling up relative: origin={origin}, lines={lines}");
 
+        // Blackbird fix (re-apply on bump): a scroll invalidates `glyph_end`, which see.
+        // The cursor keeps its Point while the cells under and left of it change.
         self.glyph_end = None;
 
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
@@ -1123,8 +1133,14 @@ impl<T> Term<T> {
         self.damage.damage_point(point);
     }
 
+    /// Blackbird fix (re-apply on bump): renamed from upstream's `set_keyboard_mode`, which is
+    /// also the name of `Handler::set_keyboard_mode`. Inside `impl Handler for Term<T>` a call
+    /// `self.set_keyboard_mode(..)` picks the inherent method before the trait one, so the
+    /// Handler method forwarding to "itself" avoided infinite recursion only through that
+    /// resolution priority. `Handler::set_keyboard_mode` now works out the new bits against
+    /// the stack top and always passes `Replace` here, so the other two arms go unused.
     #[inline]
-    fn set_keyboard_mode(&mut self, mode: TermMode, apply: KeyboardModesApplyBehavior) {
+    fn set_live_keyboard_mode(&mut self, mode: TermMode, apply: KeyboardModesApplyBehavior) {
         let active_mode = self.mode & TermMode::KITTY_KEYBOARD_PROTOCOL;
         self.mode &= !TermMode::KITTY_KEYBOARD_PROTOCOL;
         let new_mode = match apply {
@@ -1178,7 +1194,7 @@ impl<T: EventListener> Handler for Term<T> {
                 column.0 = column.saturating_sub(1);
             }
 
-            // BLACKBIRD PATCH (emoji-presentation / keycap width parity).
+            // Blackbird fix (re-apply on bump): emoji-presentation / keycap width parity.
             // A text-default symbol (per-scalar width 1) followed by VS16
             // (U+FE0F) or the keycap combiner (U+20E3) is an emoji-presentation
             // sequence that `string-width` — and therefore Ink / Claude Code's
@@ -1481,7 +1497,7 @@ impl<T: EventListener> Handler for Term<T> {
         }
 
         self.keyboard_mode_stack.push(mode);
-        self.set_keyboard_mode(mode.into(), KeyboardModesApplyBehavior::Replace);
+        self.set_live_keyboard_mode(mode.into(), KeyboardModesApplyBehavior::Replace);
     }
 
     #[inline]
@@ -1496,7 +1512,7 @@ impl<T: EventListener> Handler for Term<T> {
 
         // Reload active mode.
         let mode = self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE);
-        self.set_keyboard_mode(mode.into(), KeyboardModesApplyBehavior::Replace);
+        self.set_live_keyboard_mode(mode.into(), KeyboardModesApplyBehavior::Replace);
     }
 
     #[inline]
@@ -1505,12 +1521,13 @@ impl<T: EventListener> Handler for Term<T> {
             return;
         }
 
-        // Blackbird fix: upstream wrote only the live `self.mode` bits, so `CSI = flags u`
-        // was invisible to `CSI ? u` (which answers from the stack top) and was discarded by
-        // the next pop or alt-screen swap (both reload the live bits from the stack top). The
-        // kitty protocol says `=` edits the current top-of-stack entry. Apply it there, then
-        // mirror it into the live bits. An empty stack is the implicit all-zero base entry:
-        // materialise it only when `=` sets something, so `=5u` / `=0u` cycles never grow it.
+        // Blackbird fix (re-apply on bump): upstream wrote only the live `self.mode` bits, so
+        // `CSI = flags u` was invisible to `CSI ? u` (which answers from the stack top) and was
+        // discarded by the next pop or alt-screen swap (both reload the live bits from the stack
+        // top). The kitty protocol says `=` edits the current top-of-stack entry. Apply it
+        // there, then mirror it into the live bits. An empty stack is the implicit all-zero base
+        // entry: materialise it only when `=` sets something, so `=5u` / `=0u` cycles never grow
+        // it.
         let current = self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE);
         let new_mode = match apply {
             KeyboardModesApplyBehavior::Replace => mode,
@@ -1523,7 +1540,7 @@ impl<T: EventListener> Handler for Term<T> {
             None => (),
         }
 
-        self.set_keyboard_mode(new_mode.into(), KeyboardModesApplyBehavior::Replace);
+        self.set_live_keyboard_mode(new_mode.into(), KeyboardModesApplyBehavior::Replace);
     }
 
     #[inline]
@@ -1738,10 +1755,10 @@ impl<T: EventListener> Handler for Term<T> {
         let cursor = &self.grid.cursor;
         let bg = cursor.template.bg;
 
-        // Blackbird fix: upstream clamped `count` to the row width only, so with
-        // `count > columns - start` the final clear (`row[columns - count..]`) began
-        // left of the cursor and blanked cells DCH must never touch (`CSI 9999 P`
-        // wiped the whole row). Clamp to the cells at/after the cursor, as xterm does.
+        // Blackbird fix (re-apply on bump): upstream clamped `count` to the row width only,
+        // so with `count > columns - start` the final clear (`row[columns - count..]`) began
+        // left of the cursor and blanked cells DCH must never touch (`CSI 9999 P` wiped the
+        // whole row). Clamp to the cells at/after the cursor, as xterm does.
         let start = cursor.point.column.0;
         let count = cmp::min(count, columns - start);
 
@@ -1962,9 +1979,10 @@ impl<T: EventListener> Handler for Term<T> {
             ansi::ClearMode::Above => {
                 let cursor = self.grid.cursor.point;
 
-                // Blackbird fix: upstream guarded this with `cursor.line > 1`, which skipped
-                // the row above the cursor when the cursor sits on screen row 2 (`CSI 2;5H
-                // CSI 1 J` left row 1 untouched). `..Line(1)` already clears just row 0.
+                // Blackbird fix (re-apply on bump): upstream guarded this with
+                // `cursor.line > 1`, which skipped the row above the cursor when the cursor
+                // sits on screen row 2 (`CSI 2;5H CSI 1 J` left row 1 untouched).
+                // `..Line(1)` already clears just row 0.
                 if cursor.line > 0 {
                     // Fully clear all lines before the current line.
                     self.grid.reset_region(..cursor.line);
@@ -2080,7 +2098,8 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
         trace!("Setting hyperlink: {hyperlink:?}");
-        // Blackbird fix: an over-long or over-budget link becomes "no link", closing any open one.
+        // Blackbird fix (re-apply on bump): an over-long or over-budget link becomes "no link",
+        // closing any open one.
         let hyperlink = hyperlink.and_then(|link| {
             match cell::Hyperlink::bounded(link, &self.hyperlink_live, self.hyperlink_live_max) {
                 Ok(link) => Some(link),
@@ -2437,6 +2456,7 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn set_title(&mut self, mut title: Option<String>) {
+        // Blackbird fix (re-apply on bump): cap the title at `TITLE_MAX_BYTES`, which see.
         if let Some(title) = title.as_mut().filter(|title| title.len() > TITLE_MAX_BYTES) {
             // `String::truncate` panics off a char boundary, and `floor_char_boundary` is
             // not stable at our MSRV.

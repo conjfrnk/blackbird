@@ -283,10 +283,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         if region.start == 0 {
             // Update display offset when not pinned to active area.
             //
-            // Blackbird fork fix (VT-3): this used to run for every region. A
-            // region with a top margin below row 0 adds nothing to history, so
-            // bumping the offset pushed it past `history_size()`, which blanks
-            // the viewport's top rows and eventually panics `display_iter`.
+            // Blackbird fork fix (re-apply on bump) (VT-3): this used to run
+            // for every region. A region with a top margin below row 0 adds
+            // nothing to history, so bumping the offset pushed it past
+            // `history_size()`, which blanks the viewport's top rows and
+            // eventually panics `display_iter`.
             if self.display_offset != 0 {
                 self.display_offset = min(self.display_offset + positions, self.max_scroll_limit);
             }
