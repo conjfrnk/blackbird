@@ -2526,10 +2526,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         selection = Selection(anchor: top, cursor: bot, mode: .character)
     }
 
+    /// Kept for system-originated `performFindPanelAction:` sends; the Edit >
+    /// Find > Find… item targets `showFindBar(_:)` instead.
     @objc public func performFindPanelAction(_ sender: Any?) {
-        // Cocoa's Edit > Find submenu maps ⌘F to this selector.
+        showFindBar(sender)
+    }
+
+    /// ⌘F (Edit → Find → Find…): open the bar and focus the query field with
+    /// its text selected, so a repeat ⌘F with focus already in the bar (or in
+    /// the replace field) re-selects the query like Safari / Terminal.app.
+    @objc public func showFindBar(_ sender: Any?) {
         if findController.findBar == nil { findController.installFindBar() }
-        findController.findBar?.focus()
+        findController.findBar?.focusAndSelectQuery()
     }
 
     /// ⌘E (Edit → Find → Use Selection for Find): the standard macOS item.

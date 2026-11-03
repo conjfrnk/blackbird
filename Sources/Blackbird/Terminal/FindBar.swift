@@ -353,6 +353,14 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     public func focus() { window?.makeFirstResponder(field) }
 
+    /// ⌘F: focus the query field and select all of it. `makeFirstResponder`
+    /// alone is a no-op when the field editor already has focus, which would
+    /// leave the caret where it was instead of re-selecting the query.
+    public func focusAndSelectQuery() {
+        focus()
+        field.currentEditor()?.selectAll(nil)
+    }
+
     /// Seed the query field (Edit → Find → Use Selection for Find, ⌘E) and
     /// run the search as if the user had typed it.
     public func setQuery(_ query: String) {

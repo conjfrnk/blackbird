@@ -31,7 +31,8 @@ extension TerminalView: NSMenuItemValidation {
             // O(1) per validation pass instead of a full copy + UTF-8
             // decode on main; `paste(_:)` does the real read.
             return session != nil && NSPasteboard.general.availableType(from: [.string]) != nil
-        case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
+        case #selector(performFindPanelAction(_:)),
+             #selector(showFindBar(_:)):               return currentSnapshot != nil
         case #selector(performFindNextAction(_:)),
              #selector(performFindPreviousAction(_:)):
             // Gate on an ACTIVE search, not on a non-empty match cache. A regex

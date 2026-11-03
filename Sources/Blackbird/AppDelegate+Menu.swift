@@ -175,9 +175,13 @@ extension AppDelegate {
         // not raw key events (those are filtered as ⌘-prefixed at keyDown
         // and handed to super).
         let findSubmenu = NSMenu(title: "Find")
+        // Not `performFindPanelAction:` — NSTextView (the field editor that
+        // is first responder while the find or replace field has focus)
+        // implements that one, so it became the target and greyed ⌘F out.
+        // `showFindBar:` is implemented by no AppKit responder.
         findSubmenu.addItem(
             withTitle: "Find…",
-            action: #selector(TerminalView.performFindPanelAction(_:)),
+            action: #selector(TerminalView.showFindBar(_:)),
             keyEquivalent: "f"
         )
         let findNext = NSMenuItem(
