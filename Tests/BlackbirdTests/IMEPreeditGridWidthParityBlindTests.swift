@@ -233,8 +233,8 @@ final class IMEPreeditGridWidthParityBlindTests: XCTestCase {
         }
     }
 
-    /// The one deliberate deviation: an emoji ZWJ sequence is drawn as a single
-    /// 2-cell glyph (modifiers included), where the grid lays out each scalar.
+    /// An emoji ZWJ sequence is drawn as a single 2-cell glyph (modifiers
+    /// included), and the grid advances the cursor the same 2 cells.
     func test_cellWidth_emojiZwjSequenceIsOneGlyphWideDespiteGridSum() throws {
         let womanTechnologist = "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}"
         XCTAssertEqual(CellWidth.terminalCellWidth(of: womanTechnologist), 2,

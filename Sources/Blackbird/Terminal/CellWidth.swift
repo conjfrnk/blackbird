@@ -39,29 +39,35 @@ enum CellWidth {
     /// composition update which is too slow for per-keystroke refreshes.
     ///
     /// Walks `Character` (grapheme clusters) rather than the flat scalar stream
-    /// so it can keep one deliberate deviation from the grid, and only for
-    /// EMOJI ZWJ sequences: 👨‍👩‍👧 (or 👩🏽‍💻, with a skin-tone modifier the grid
-    /// also gives 2 cells) is one grapheme that renders as one wide glyph, so it
-    /// counts 2 cells, the widest scalar's width, not the 2+0+2+0+2=6 the grid
-    /// lays out. A ZWJ in any other script (a Devanagari `क्‍ष` conjunct) is not
-    /// a one-glyph emoji sequence, so those graphemes keep the plain per-scalar
-    /// sum the grid uses.
+    /// so it can mirror the grid's emoji-cluster rule: an Emoji_Modifier
+    /// (skin-tone swatch) after its base rides on the base's cell, and an emoji
+    /// ZWJ sequence 👨‍👩‍👧 (or 👩🏽‍💻) is one wide glyph, so each counts 2 cells,
+    /// the widest scalar's width, as the grid advances the cursor. A ZWJ in any
+    /// other script (a Devanagari `क्‍ष` conjunct) is not a one-glyph emoji
+    /// sequence, so those graphemes keep the plain per-scalar sum the grid uses.
     static func terminalCellWidth(of string: String) -> Int {
         var total = 0
         for grapheme in string {
             var sum = 0
             var widest = 0
             var promotesToWide = false
+            var isFirstScalar = true
             for scalar in grapheme.unicodeScalars {
-                let scalarWidth = width(for: scalar)
+                // An Emoji_Modifier after its base rides on the base's cell
+                // (the grid gives it width 0); one that starts the grapheme is
+                // a standalone wide swatch.
+                let isModifierOnBase = !isFirstScalar && Self.isEmojiModifier(scalar)
+                let scalarWidth = isModifierOnBase ? 0 : width(for: scalar)
+                isFirstScalar = false
                 sum += scalarWidth
                 widest = max(widest, scalarWidth)
                 // VS-16 (U+FE0F) forces the preceding base into emoji
-                // presentation, and U+20E3 builds keycap sequences
-                // (`#️⃣`, `1️⃣`). Neither base scalar is wide on its own
-                // (U+2764, U+0023, …) but the rendered grapheme occupies
-                // two cells. Don't let the per-scalar widths miss them.
-                if scalar.value == 0xFE0F || scalar.value == 0x20E3 {
+                // presentation, U+20E3 builds keycap sequences (`#️⃣`, `1️⃣`),
+                // and a skin-tone modifier widens a narrow pictographic base
+                // (`✌🏽`). None of those bases is wide on its own (U+2764,
+                // U+0023, U+270C, …) but the rendered grapheme occupies two
+                // cells. Don't let the per-scalar widths miss them.
+                if scalar.value == 0xFE0F || scalar.value == 0x20E3 || isModifierOnBase {
                     promotesToWide = true
                 }
             }
@@ -74,6 +80,11 @@ enum CellWidth {
             total += cells
         }
         return total
+    }
+
+    /// The five Fitzpatrick skin-tone swatches (Emoji_Modifier), U+1F3FB..U+1F3FF.
+    private static func isEmojiModifier(_ scalar: UnicodeScalar) -> Bool {
+        (0x1F3FB...0x1F3FF).contains(scalar.value)
     }
 
     /// True when `grapheme` joins an emoji with a ZWJ (U+200D): such a sequence
