@@ -280,6 +280,7 @@
 		AED5790E98A2F6F32023CAB5 /* PixelGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */; };
 		AED697821DF433FFA6BAE0ED /* GlyphBitmapCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAAC9FD6558B761F250337E /* GlyphBitmapCache.swift */; };
 		AF6C1B0BBC848BBC8F9D93FB /* CloseConfirmBypassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F0A6FE616DD35FA222B8D0F /* CloseConfirmBypassTests.swift */; };
+		B0349AFC3965E2F1A08E6313 /* FindCounterStabilityBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7ECECA10D4CA2718E4309E08 /* FindCounterStabilityBlindTests.swift */; };
 		B143C3C8D2AFE0D75E447211 /* ShiftTabBackTabBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED9EEEBC5195FBAC5F07B867 /* ShiftTabBackTabBlindTests.swift */; };
 		B1F2474E0C0EFC05653AB161 /* MergeAllWindowsBackgroundTabResizeBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44972142095638AB8C1E1C67 /* MergeAllWindowsBackgroundTabResizeBlindTests.swift */; };
 		B32AD133C43D40C2D8D04386 /* IMEOrphanReleaseKittyBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27721B6F32B02E36F3FB7A00 /* IMEOrphanReleaseKittyBlindTests.swift */; };
@@ -628,6 +629,7 @@
 		7CC2349BAF9EB4C640D5A38F /* TerminalView+Mouse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+Mouse.swift"; sourceTree = "<group>"; };
 		7D7B0B3810C2076ABD9FB7F6 /* HyperlinkResolverParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HyperlinkResolverParityTests.swift; sourceTree = "<group>"; };
 		7E89D1DD6E00807B5D171DFE /* DroppedPathShellQuoteBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DroppedPathShellQuoteBlindTests.swift; sourceTree = "<group>"; };
+		7ECECA10D4CA2718E4309E08 /* FindCounterStabilityBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindCounterStabilityBlindTests.swift; sourceTree = "<group>"; };
 		7F7745D136E17DBC270E74F3 /* ThemeManagerRefreshOwnerBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManagerRefreshOwnerBlindTests.swift; sourceTree = "<group>"; };
 		7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYTests.swift; sourceTree = "<group>"; };
 		80465C3C6E1F097986690630 /* WindowResizeControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowResizeControllerTests.swift; sourceTree = "<group>"; };
@@ -948,6 +950,7 @@
 				C2215352FADE00C2471C9175 /* FindBarThemeTests.swift */,
 				7A233489320F986819D9668B /* FindCaptureOneFrameTests.swift */,
 				6EA5A9A40E642096A6A99805 /* FindCaptureRowsBlindTests.swift */,
+				7ECECA10D4CA2718E4309E08 /* FindCounterStabilityBlindTests.swift */,
 				700C66494AF64A4D3E560B29 /* FindCycleSurvivesSnapshotSwapBlindTests.swift */,
 				2008954F76AA7987FDB636FD /* FindMatchRevealBelowBarBlindTests.swift */,
 				80658BFD68D76771BDEC3456 /* FindMenuWhileFindFieldFocusedBlindTests.swift */,
@@ -1696,6 +1699,7 @@
 				D6237259ED506C0A59DF8077 /* FindBarThemeTests.swift in Sources */,
 				2496AFD2AA95631BABFE97BE /* FindCaptureOneFrameTests.swift in Sources */,
 				F12C8BA147BF04E7F1068152 /* FindCaptureRowsBlindTests.swift in Sources */,
+				B0349AFC3965E2F1A08E6313 /* FindCounterStabilityBlindTests.swift in Sources */,
 				38FBC04853C51549762F18B4 /* FindCycleSurvivesSnapshotSwapBlindTests.swift in Sources */,
 				8895FA7D1EA5EDCDF66DEA93 /* FindMatchRevealBelowBarBlindTests.swift in Sources */,
 				777C49E23548F78A92489015 /* FindMenuWhileFindFieldFocusedBlindTests.swift in Sources */,

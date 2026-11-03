@@ -106,17 +106,19 @@ final class FindController {
 
     // MARK: - State mutation
 
-    /// Drop the cached match set and reset the cycle index + label to "0/0".
+    /// Drop the cached match set and reset the cycle index + blank the label.
     /// The Replace paths call this after a splice edits the live input line,
     /// so find-next can't scroll to a now-stale coordinate. Deliberately does
     /// NOT touch `findQuery` or `pendingRegexAdvance` — the query is still
     /// active (a re-run follows) and any deferred ⌘G is consumed on its own
-    /// scan's publish/timeout, not here.
+    /// scan's publish/timeout, not here. The label is blanked, not set to
+    /// "No matches": the re-run owes the real count, and announcing "No
+    /// matches" in between would be a claim the search never made.
     func clearMatches() {
         findMatches.removeAll()
         findMatchesSeq = nil
         findCurrentIndex = 0
-        findBar?.setMatchCount(0, of: 0)
+        findBar?.clearMatchLabel()
     }
 
     /// Wipe ALL match state, including the query and any deferred ⌘G. Used by
@@ -720,9 +722,6 @@ final class FindController {
         // A timed-out query stays marked across the rescans that retry it (the
         // mark carries the backoff); anything else ends the run of misses.
         if !preservingPosition || regexTimedOut?.query != query { regexTimedOut = nil }
-        // A retry of a timed-out query leaves the label alone: flipping it to
-        // "No matches" on every retry would announce it to VoiceOver each time.
-        let retryingTimedOut = regexTimedOut != nil
         // A fresh search supersedes any ⌘G that was deferred behind an
         // in-flight regex rescan (advanceFind re-sets this AFTER calling us,
         // so its own deferral survives; a user-typed query correctly drops it).
@@ -744,7 +743,8 @@ final class FindController {
         // start before a regex scan publishes, and must still see the position.
         if !preservingPosition { findCurrentIndex = 0 }
         guard let session = view.session, let snap = view.currentSnapshot, !query.isEmpty else {
-            findBar?.setMatchCount(0, of: 0)
+            // Nothing was searched (an empty query is not "no matches").
+            findBar?.clearMatchLabel()
             view.selection = nil
             return
         }
@@ -779,7 +779,8 @@ final class FindController {
             //       timeout API.
             // Audit findbar-selection F2.
             guard RegexSafetyGate.isReasonable(query) else {
-                findBar?.setMatchCount(0, of: 0)
+                // The banner replaces the label itself; a "No matches" write
+                // first would be announced as a claim the search never made.
                 findBar?.showTransientMessage("Regex too complex")
                 view.selection = nil
                 return
@@ -787,20 +788,25 @@ final class FindController {
             var regexOpts: NSRegularExpression.Options = []
             if !opts.caseSensitive { regexOpts.insert(.caseInsensitive) }
             guard let regex = try? NSRegularExpression(pattern: query, options: regexOpts) else {
-                // Invalid pattern — show 0 matches, no crash. Surface a
-                // transient banner so "0/0" doesn't look identical to
-                // "valid pattern with no hits" (SFH-006).
-                findBar?.setMatchCount(0, of: 0)
+                // Invalid pattern — no matches, no crash. Surface a transient
+                // banner so the counter doesn't look identical to "valid
+                // pattern with no hits" (SFH-006). The banner replaces the
+                // label itself: a "No matches" write first would be announced
+                // on every snapshot-driven refresh while output streams.
                 findBar?.showTransientMessage("Invalid regex pattern")
                 view.selection = nil
                 return
             }
-            // Reflect the cleared-match state in the label immediately
-            // so users get a visible response while the background scan
-            // runs. The async result will overwrite this if matches are
-            // found, or the timeout will replace it with a "too complex"
-            // banner if the scan exceeds 250 ms.
-            if !retryingTimedOut { findBar?.setMatchCount(0, of: 0) }
+            // A user-driven scan blanks a stale count (or banner) so there is
+            // a visible response while the background scan runs; the async
+            // result will overwrite it, or the timeout will replace it with
+            // a "too complex" banner if the scan exceeds 250 ms. A standing
+            // "No matches" is kept, so a query that keeps matching nothing
+            // doesn't blink (and re-announce) on every keystroke. A
+            // preserving rescan leaves the label alone until it publishes:
+            // writing "No matches" here would flip "n / m" -> "No matches"
+            // -> "n / m" (announced each time) on every snapshot swap.
+            if !preservingPosition { findBar?.clearMatchLabel(keepingNoMatches: true) }
             pendingRegexAdvance = carriedAdvance
             // Only a user-driven scan owes the reveal; a preserving scan that
             // takes over from one inherits the flag it already left set.
@@ -1273,7 +1279,6 @@ final class FindController {
         regexRevealOwed = false
         guard userWaiting || regexTimedOut?.announced != true else { return }
         regexTimedOut?.announced = true
-        findBar?.setMatchCount(0, of: 0)
         findBar?.showTransientMessage("Regex too complex")
         view.selection = nil
     }

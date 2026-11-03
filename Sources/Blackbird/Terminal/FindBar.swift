@@ -479,21 +479,27 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     /// Audit findbar-selection F6.
     private var transientMessageToken: UInt64 = 0
 
+    private static let noMatchesText = "No matches"
+
     public func setMatchCount(_ current: Int, of total: Int) {
         // Bump the token so any pending `showTransientMessage` clear
         // doesn't wipe this newly-written match count on its 2 s timer.
         // Audit findbar-selection F6.
         transientMessageToken &+= 1
-        let text = total == 0 ? "No matches" : "\(current + 1) / \(total)"
+        let text = total == 0 ? FindBar.noMatchesText : "\(current + 1) / \(total)"
         // Skip the AppKit round-trip (and the VoiceOver announcement)
         // when nothing actually changed — the search path re-publishes
         // the same count whenever the snapshot sequence ticks, even if
         // the content didn't move.
         guard matchLabel.stringValue != text else { return }
         matchLabel.stringValue = text
-        // Post an announcement so VoiceOver surfaces the new count
-        // immediately; without it the user has to explicitly rotor-focus
-        // the label. Matches Terminal.app / Safari's find-bar behaviour.
+        announce(text)
+    }
+
+    /// Post an announcement so VoiceOver surfaces a label change immediately;
+    /// without it the user has to explicitly rotor-focus the label. Matches
+    /// Terminal.app / Safari's find-bar behaviour.
+    private func announce(_ text: String) {
         NSAccessibility.post(
             element: matchLabel as Any,
             notification: .announcementRequested,
@@ -502,6 +508,19 @@ public final class FindBar: NSView, NSTextFieldDelegate {
                 .priority: NSAccessibilityPriorityLevel.medium.rawValue,
             ]
         )
+    }
+
+    /// Blank the counter without an announcement, for "no result to report"
+    /// (empty query, a Replace awaiting its re-run, or a user-driven regex scan
+    /// still in flight). Writing "No matches" for those would be spoken as a
+    /// claim the search never made. `keepingNoMatches` leaves a standing
+    /// "No matches" in place (the scan that follows would only write it back,
+    /// and announce it again).
+    public func clearMatchLabel(keepingNoMatches: Bool = false) {
+        transientMessageToken &+= 1
+        if keepingNoMatches && matchLabel.stringValue == FindBar.noMatchesText { return }
+        guard !matchLabel.stringValue.isEmpty else { return }
+        matchLabel.stringValue = ""
     }
 
     /// Fires the replace-current delegate callback with the current replacement
@@ -536,11 +555,16 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     /// Shows a transient status message in the match label, auto-clearing after
     /// 2 seconds. Used by the replace path to surface
-    /// "Only input-line matches can be replaced" without a modal alert.
+    /// "Only input-line matches can be replaced" without a modal alert, and by
+    /// the find path for "Invalid regex pattern" / "Regex too complex". The
+    /// message is announced to VoiceOver when it changes the label, so a banner
+    /// the snapshot-driven refresh re-shows while it is still up is spoken once.
     public func showTransientMessage(_ message: String) {
         transientMessageToken &+= 1
         let myToken = transientMessageToken
+        let changed = matchLabel.stringValue != message
         matchLabel.stringValue = message
+        if changed { announce(message) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }
             // Only clear when this scheduling is the most recent one. If
