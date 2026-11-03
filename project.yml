@@ -72,6 +72,17 @@ targets:
         buildPhase: resources
       - path: Sources/Blackbird/Resources/AppIcon.icns
         buildPhase: resources
+      # Apache-2.0 (alacritty_terminal), MIT (Sparkle, vte, the Rust crates),
+      # the Hack / Bitstream Vera font licenses and the licenses of the Nerd
+      # Fonts symbol glyph sets inside the font (MIT, SIL OFL 1.1, CC BY 4.0,
+      # Apache-2.0) all require their text to travel with the binary; the DMG
+      # carries nothing else. ThirdPartyLicenseNoticesBlindTests fails if the
+      # Apache-2.0, Sparkle or Hack/Vera sections of THIRD_PARTY_NOTICES.txt
+      # stop shipping; the other sections and LICENSE are not pinned by it.
+      - path: LICENSE
+        buildPhase: resources
+      - path: THIRD_PARTY_NOTICES.txt
+        buildPhase: resources
       - path: Sources/Blackbird/Resources/shell/osc133.bash
         buildPhase: resources
       - path: Sources/Blackbird/Resources/shell/osc133.fish

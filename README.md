@@ -106,4 +106,4 @@ Known polish items deliberately deferred: [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md).
 
 ## License
 
-MIT.
+MIT for Blackbird's own code ([`LICENSE`](LICENSE)). The terminal core links Apache-2.0 and MIT code (`alacritty_terminal`, `vte`, a few Rust crates), and the app bundles Sparkle and the Hack Nerd Font (including its Nerd Fonts symbol glyph sets: Font Awesome, Codicons, Weather Icons and others); their license texts are in [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt), which also ships in the app at `Contents/Resources/`.
