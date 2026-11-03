@@ -165,6 +165,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // against the OLD value and cache them under whatever
             // identity gets stamped next.
             a11yCache.invalidate()
+            scheduleAccessibilityValueChanged()
             // Find-match coordinates are relative to the buffer at the time
             // performSearch ran. Any snapshot swap may have scrolled history,
             // wrapped lines, or overwritten matched rows; the controller reruns
@@ -2959,6 +2960,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     }
 
     var a11yCache = A11yCache()
+
+    /// True while exactly one `.valueChanged` post is queued (see
+    /// `scheduleAccessibilityValueChanged`). Main-thread only.
+    var a11yValueChangedPending = false
 
     #if DEBUG
     /// Headless constructor for tests. Uses the system Metal device so the

@@ -5,10 +5,11 @@ import BBCore
 
 /// NSAccessibility overrides for `TerminalView`. Kept in a focused
 /// extension file so the a11y contract stays visible in one place:
-/// role (.textArea when bare, container when the find bar is installed),
-/// label ("Terminal"), value (snapshot grid joined with newlines), and
-/// the line/character/range accessors VoiceOver uses to navigate by
-/// line / word / character.
+/// role (.textArea, always an element; the find bar rides along as a child
+/// when installed), label ("Terminal"), value (snapshot grid joined with
+/// newlines), the line/character/range accessors VoiceOver uses to navigate
+/// by line / word / character, and the throttled `.valueChanged` post that
+/// tells VoiceOver the grid text moved.
 ///
 /// The stored state (`a11yCache` and the DEBUG-only
 /// `a11ySnapshotOverride`) lives on the class body; see
@@ -29,14 +30,12 @@ import BBCore
 extension TerminalView {
 
     public override func isAccessibilityElement() -> Bool {
-        // When the find bar is installed, declaring ourselves a leaf would
-        // hide its text fields and buttons from VoiceOver entirely — AppKit
-        // stops descending into subviews of an accessibility-leaf parent.
-        // Become a container in that mode; `accessibilityChildren()` below
-        // exposes the find bar (and every other subview) so VO can reach
-        // them. When the bar is absent, keep the leaf behaviour so VO
-        // focus lands on a single "Terminal" element.
-        findController.findBar == nil
+        // Always an element, find bar or not: a container-mode view is
+        // skipped by AppKit, which takes the grid text (our value and the
+        // line/character accessors) out of the tree and leaves a VoiceOver
+        // user who opens find able to hear "n of m" but not read the match.
+        // The bar stays reachable through `accessibilityChildren()` below.
+        true
     }
 
     public override func accessibilityRole() -> NSAccessibility.Role? {
@@ -54,10 +53,7 @@ extension TerminalView {
     }
 
     public override func accessibilityChildren() -> [Any]? {
-        // Only meaningful when we're in container mode (find bar visible).
-        // AppKit ignores `accessibilityChildren()` on a leaf, but returning
-        // the default (super) here keeps behaviour symmetric in case a
-        // future tool inspects the value directly.
+        // Only the find bar needs exposing; without one, keep the default.
         guard let bar = findController.findBar else { return super.accessibilityChildren() }
         // Order matters for VO navigation: bar on top visually, every
         // other subview below. Covers drop-highlight / bell flash / scroll
@@ -90,6 +86,27 @@ extension TerminalView {
         // value-keyed `lineOffsets` (+ bumps the recompute counter) together.
         a11yCache.store(value: computed, identity: identity)
         return computed
+    }
+
+    /// Coalescing window for `.valueChanged` posts. Each post makes VoiceOver
+    /// re-read the grid, so a streaming build log must not post at the
+    /// snapshot publish rate; a quarter second keeps new output audible
+    /// without flooding speech or the main thread.
+    static let valueChangedCoalesceInterval: TimeInterval = 0.25
+
+    /// Tell assistive clients the grid text changed. Called from
+    /// `currentSnapshot.didSet`; AppKit never posts for a custom view, so
+    /// without this VoiceOver is not told about new output or a viewport
+    /// move until the user re-queries the element. AppKit drops the post
+    /// when no assistive client is observing, so no VoiceOver gate is needed.
+    func scheduleAccessibilityValueChanged() {
+        guard !a11yValueChangedPending else { return }
+        a11yValueChangedPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.valueChangedCoalesceInterval) { [weak self] in
+            guard let self else { return }
+            self.a11yValueChangedPending = false
+            NSAccessibility.post(element: self, notification: .valueChanged)
+        }
     }
 
     /// `accessibilityValue()` coalesced to a `String`. The
