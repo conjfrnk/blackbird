@@ -41,9 +41,25 @@ pub(crate) fn is_bidi_or_invisible_scalar(c: char) -> bool {
     )
 }
 
+/// True for the invisible scalars that are part of how text is SPELLED
+/// rather than a way to reorder or hide it: ZWNJ/ZWJ (U+200C/U+200D) and
+/// the variation selectors (U+FE00..=U+FE0F, U+E0100..=U+E01EF). Emoji
+/// (`U+26A0 U+FE0F`, ZWJ families) and Persian / Indic words depend on
+/// them; stripping them changes the title's orthography and shaping.
+/// Deliberately NOT part of `is_bidi_or_invisible_scalar`'s contract: OSC
+/// 7 / 8 / 133 keep rejecting them (the Swift parity test pins that set).
+fn is_joiner_or_variation_selector(c: char) -> bool {
+    matches!(c as u32,
+        0x200C | 0x200D
+        | 0xFE00..=0xFE0F
+        | 0xE0100..=0xE01EF
+    )
+}
+
 /// Strip C0 controls (U+0000..=U+001F), DEL (U+007F), C1 controls
-/// (U+0080..=U+009F), AND bidi-control / invisible scalars from an OSC
-/// 0/1/2 window-title payload.
+/// (U+0080..=U+009F), AND bidi-control / invisible scalars (except ZWNJ,
+/// ZWJ and variation selectors, which are content) from an OSC 0/1/2
+/// window-title or OSC 9/777 notification payload.
 ///
 /// Bug #18: a hostile stream sets the title to `before\x1b[31mafter`;
 /// downstream loggers / accessibility consumers misinterpret the embedded
@@ -76,7 +92,7 @@ pub(crate) fn scrub_title_controls(s: &str) -> String {
         if is_c0 || is_del || is_c1 {
             continue;
         }
-        if is_bidi_or_invisible_scalar(c) {
+        if is_bidi_or_invisible_scalar(c) && !is_joiner_or_variation_selector(c) {
             continue;
         }
         out.push(c);

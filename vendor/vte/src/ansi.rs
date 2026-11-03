@@ -1379,10 +1379,14 @@ where
             // Set window title.
             b"0" | b"2" => {
                 if params.len() >= 2 {
+                    // Blackbird patch (re-apply on bump): decode lossily. Upstream
+                    // `flat_map(str::from_utf8)` drops every `;` segment holding an
+                    // invalid byte, so `caf\xe9` set an empty title and cleared the
+                    // previous one. Keep the text, U+FFFD in place of the bad byte.
                     let title = params[1..]
                         .iter()
-                        .flat_map(|x| str::from_utf8(x))
-                        .collect::<Vec<&str>>()
+                        .map(|x| String::from_utf8_lossy(x))
+                        .collect::<Vec<_>>()
                         .join(";")
                         .trim()
                         .to_owned();

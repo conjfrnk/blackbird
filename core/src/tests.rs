@@ -3348,16 +3348,18 @@ fn scrub_title_controls_strips_bidi_and_invisible() {
     assert_eq!(scrub_title_controls("a\u{2066}b\u{2069}c"), "abc");
     // U+200E LRM, U+200F RLM.
     assert_eq!(scrub_title_controls("\u{200E}a\u{200F}b"), "ab");
-    // U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ.
-    assert_eq!(scrub_title_controls("a\u{200B}b\u{200C}c\u{200D}d"), "abcd");
+    // U+200B ZWSP goes; U+200C ZWNJ and U+200D ZWJ are spelling (Persian,
+    // Indic, emoji sequences) and stay.
+    assert_eq!(
+        scrub_title_controls("a\u{200B}b\u{200C}c\u{200D}d"),
+        "ab\u{200C}c\u{200D}d"
+    );
     // U+FEFF BOM.
     assert_eq!(scrub_title_controls("\u{FEFF}hello"), "hello");
-    // Variation selectors (U+FE0F is the emoji presentation selector;
-    // very common — but in the title path we strip it because it's an
-    // invisible payload-shape codepoint that can be abused for spoofing.
-    // The renderer never sees it from the title path; emoji titles
-    // collapse to the base codepoint).
-    assert_eq!(scrub_title_controls("a\u{FE0F}b"), "ab");
+    // Variation selectors only pick a glyph presentation (U+FE0F is the
+    // emoji one), they cannot reorder text, so emoji titles keep them.
+    assert_eq!(scrub_title_controls("a\u{FE0F}b"), "a\u{FE0F}b");
+    assert_eq!(scrub_title_controls("a\u{E0100}b"), "a\u{E0100}b");
     // Tag block (E0000..E007F).
     assert_eq!(scrub_title_controls("a\u{E0041}b"), "ab");
     // Non-bidi scalars stay put.

@@ -39,6 +39,8 @@ alacritty_terminal = { path = "vendor/alacritty_terminal" }
 # bound — a memory DoS; (2) parser-state byte-drop across feed split
 # boundaries. A third deviation: the DEC special-graphics charset
 # (`StandardCharset::map`) also maps `+ , - . 0` to the ACS arrows and block
-# that the bundled xterm-kitty `acsc` advertises. Re-vendor from the registry
-# + re-apply the patches on any bump.
+# that the bundled xterm-kitty `acsc` advertises. A fourth: the OSC 0/2 title
+# is decoded with `String::from_utf8_lossy` per segment, so a non-UTF-8 byte
+# becomes U+FFFD instead of dropping its whole `;` segment. Re-vendor from the
+# registry + re-apply the patches on any bump.
 vte = { path = "vendor/vte" }

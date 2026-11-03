@@ -820,7 +820,8 @@ impl OscScanner<'_> {
 
     /// Scrub + cap one notification field. Lossy UTF-8 so a hostile
     /// stream can't make the scrub itself fail; `scrub_title_controls`
-    /// drops C0/C1/bidi/invisible scalars.
+    /// drops C0/C1/bidi/invisible scalars (ZWNJ, ZWJ and variation
+    /// selectors stay: they are part of emoji and Persian/Indic spelling).
     fn notification_field(bytes: &[u8], max_chars: usize) -> String {
         let s = String::from_utf8_lossy(bytes);
         // The scrub drops every C0 scalar, newline included, which glued a
