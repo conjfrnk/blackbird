@@ -1,10 +1,10 @@
 import Foundation
 
-/// Pure xterm mouse-report wire encoder (SGR 1006 + X10 fallback), lifted
-/// out of `TerminalView` so the branches that matter for correctness — SGR
-/// vs X10, press/release, wheel/motion, the 223-column X10 limit — are
-/// unit-testable without synthesizing NSEvents (REFACTOR.md Area 3: pin the
-/// already-pure `encodeMouseReport`).
+/// Pure xterm mouse-report wire encoder (SGR 1006, UTF-8 1005 + X10
+/// fallback), lifted out of `TerminalView` so the branches that matter for
+/// correctness — SGR vs UTF-8 vs X10, press/release, wheel/motion, the
+/// 223-column X10 limit — are unit-testable without synthesizing NSEvents
+/// (REFACTOR.md Area 3: pin the already-pure `encodeMouseReport`).
 enum MouseReportEncoder {
     /// Pure encoder for xterm mouse reports — extracted so the branches that
     /// matter for correctness (SGR 1006 vs X10 fallback, press/release,
@@ -23,16 +23,22 @@ enum MouseReportEncoder {
     ///   tells `<S-LeftMouse>` / `<C-RightMouse>` / `<C-ScrollWheelUp>` from
     ///   the plain gesture. In X10 they are applied after the release
     ///   substitution, so a modified release is `3 | modifiers`.
+    /// - `utf8`: true when the app enabled UTF-8 extended mouse reporting
+    ///   (mode 1005) without SGR. SGR wins if both are passed. The report
+    ///   keeps the X10 shape, but each coordinate is sent as the UTF-8
+    ///   encoding of `n + 32` (1-based `n`), so positions past 94 become two
+    ///   bytes instead of a lone 0x80-0xFF byte a UTF-8 consumer rejects.
     ///
     /// Returns `nil` when X10 can't represent the position (cols/rows
-    /// beyond 223). SGR has no such limit.
+    /// beyond 223), or UTF-8 can't (beyond 2015). SGR has no such limit.
     static func encode(
         sgr: Bool,
         button: Int,
         press: Bool,
         col: Int,
         row: Int,
-        modifiers: Int = 0
+        modifiers: Int = 0,
+        utf8: Bool = false
     ) -> Data? {
         // Defensive guards — callers today pass 0…65 for button and
         // clamp col/row to 10 000, but a future caller outside the
@@ -50,10 +56,27 @@ enum MouseReportEncoder {
             let seq = "\u{1B}[<\(button | modifiers);\(col + 1);\(row + 1)\(finalChar)"
             return Data(seq.utf8)
         }
-        // X10/normal: ESC [ M cb cx cy (6-byte, cx/cy capped at 223).
-        guard col < 223, row < 223 else { return nil }
         let cbButton = press ? button : 3
         let cb = UInt8((cbButton | modifiers) + 32)
+        if utf8 {
+            // DEC 1005: ESC [ M cb cx cy with cx/cy UTF-8 scalars (1 byte up
+            // to 94, 2 bytes to the 2047 code-point ceiling). cb stays one
+            // raw byte, as in xterm; it is < 128 for every real caller.
+            guard col < 2015, row < 2015 else { return nil }
+            var out: [UInt8] = [0x1B, 0x5B, 0x4D, cb]
+            for n in [col, row] {
+                let cp = n + 33
+                if cp < 0x80 {
+                    out.append(UInt8(cp))
+                } else {
+                    out.append(UInt8(0xC0 | (cp >> 6)))
+                    out.append(UInt8(0x80 | (cp & 0x3F)))
+                }
+            }
+            return Data(out)
+        }
+        // X10/normal: ESC [ M cb cx cy (6-byte, cx/cy capped at 223).
+        guard col < 223, row < 223 else { return nil }
         let cx = UInt8(col + 33)
         let cy = UInt8(row + 33)
         return Data([0x1B, 0x5B, 0x4D, cb, cx, cy])

@@ -49,6 +49,10 @@ extension TerminalView {
         currentSnapshot?.termMode.contains(.sgrMouse) ?? false
     }
 
+    func utf8MouseEnabled() -> Bool {
+        currentSnapshot?.termMode.contains(.utf8Mouse) ?? false
+    }
+
     /// One mousedown this view actually received.
     ///
     /// `NSEvent.clickCount` counts the SYSTEM's click sequence, not this
@@ -779,7 +783,8 @@ extension TerminalView {
             press: press,
             col: col,
             row: row,
-            modifiers: modifiers
+            modifiers: modifiers,
+            utf8: utf8MouseEnabled()
         ) else { return false }
         // Route through the shared `sendToSession` seam rather than
         // `session.send` directly so the DEBUG `ptyRecorderForTests` recorder
