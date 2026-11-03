@@ -2012,8 +2012,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 // A bell while the user is elsewhere bounces the Dock icon
                 // and dots the tab (Claude Code's `terminal_bell` channel is
                 // a BEL; through v0.8.0 it produced at most a flash nobody
-                // was looking at).
-                if counter > 0, self.attentionNeeded() {
+                // was looking at). Skipped only when the user has silenced
+                // both controls that speak for a bell: Bell = Off and
+                // "Show notifications from programs" off.
+                let prefs = Preferences.shared
+                if counter > 0, prefs.bell != .off || prefs.programNotifications,
+                   self.attentionNeeded() {
                     NSApp.requestUserAttention(.informationalRequest)
                     self.markTabUnseenAttention()
                 }

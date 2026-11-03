@@ -296,7 +296,7 @@ public struct SettingsView: View {
             } header: {
                 Text("Terminal")
             } footer: {
-                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs. Shell integration adds prompt marks and the ssh terminfo fix for zsh and fish without touching your rc files. Shell: leave empty to run your account's login shell, or give the absolute path of another program. Scrollback applies to new sessions (the core caps at 200,000). Notifications: programs that emit OSC 9, OSC 777 or kitty OSC 99 (and a bell while you're in another tab or app) reach Notification Center and dot the tab. Changes apply to new sessions.")
+                SettingsChrome.footer("Hold the chosen modifier and drag the terminal — or a tab — to move the window; right-drag to resize. A plain tab drag reorders the tabs. Shell integration adds prompt marks and the ssh terminfo fix for zsh and fish without touching your rc files. Shell: leave empty to run your account's login shell, or give the absolute path of another program. Scrollback applies to new sessions (the core caps at 200,000). Notifications: programs that emit OSC 9, OSC 777 or kitty OSC 99 reach Notification Center and dot the tab. A bell while you're in another tab or app bounces the Dock icon and dots the tab, unless Bell is Off and program notifications are off. Changes apply to new sessions.")
             }
 
             Section {
