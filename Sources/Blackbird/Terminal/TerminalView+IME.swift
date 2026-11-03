@@ -145,8 +145,8 @@ extension TerminalView: NSTextInputClient {
         actualRange: NSRangePointer?
     ) -> NSRect {
         // Base anchor: the cursor cell in local view coords. Used directly
-        // for the empty / no-composition / out-of-range cases, and as the
-        // left-edge origin for the per-clause offset math below.
+        // for the empty / no-composition / out-of-range cases; a sub-range
+        // is anchored on the preedit's own (possibly wrapped) layout below.
         let cellRect = cursorCellRectInView()
         let cellWidth = metrics.cellWidth
 
@@ -187,20 +187,20 @@ extension TerminalView: NSTextInputClient {
         // length is wrong — an astral-plane emoji (😀 = 2 UTF-16 units,
         // 1 or 2 cells depending on wide-glyph status) would otherwise
         // place the candidate popover two cells to the right of where
-        // the emoji renders (F-S5-012). Convert both the leading offset
-        // AND the span width through `terminalCellWidth` so the mapping
-        // stays grapheme-aware. `characterIndex(for:)` already walks
-        // cells the same way.
-        let plain = c.attributedText.string as NSString
-        let leadingSubstring = plain.substring(with: NSRange(location: 0, length: clamped.location))
-        let spanSubstring = plain.substring(with: clamped)
-        let leadingCells = CellWidth.terminalCellWidth(of: leadingSubstring)
-        let spanCells = max(1, CellWidth.terminalCellWidth(of: spanSubstring))
+        // the emoji renders (F-S5-012). The layout converts both the
+        // leading offset AND the span width through `terminalCellWidth`
+        // so the mapping stays grapheme-aware, and follows the preedit
+        // where it wraps at the right edge so the popover tracks the
+        // visible text. `characterIndex(for:)` walks cells the same way.
+        let placement = preeditPlacement(of: c.attributedText.string)
+        let at = placement.layout.cell(atUTF16: clamped.location)
+        let spanCells = max(1, placement.layout.cells(of: clamped, onLine: at.line))
+        let anchor = cellRectInView(row: placement.firstRow + at.line, col: at.col)
         let offsetRect = NSRect(
-            x: cellRect.minX + CGFloat(leadingCells) * cellWidth,
-            y: cellRect.minY,
+            x: anchor.minX,
+            y: anchor.minY,
             width: CGFloat(spanCells) * cellWidth,
-            height: cellRect.height
+            height: anchor.height
         )
         return toScreen(offsetRect)
     }
@@ -219,13 +219,21 @@ extension TerminalView: NSTextInputClient {
             return NSNotFound
         }
         let local = convert(localWindow, from: nil)
-        let cellRect = cursorCellRectInView()
         let cw = max(metrics.cellWidth, 1)
-        // Offset relative to the composition's leading edge in CELLS,
+        // A wrapped preedit spans several lines: pick the one under `point`
+        // (a single-line composition always resolves to line 0). Clamped
+        // before the `Int(Double)` cast like `dx` below.
+        let placement = preeditPlacement(of: composition.attributedText.string)
+        let layout = placement.layout
+        let yFromTop = (bounds.height - local.y).sanitizedPixel - titlebarOnlyTopInset
+        let hitRow = Int(max(0, yFromTop) / max(metrics.cellHeight, 1))
+        let lineIndex = max(0, min(layout.lines.count - 1, hitRow - placement.firstRow))
+        let line = layout.lines[lineIndex]
+        // Offset relative to the line's leading edge in CELLS,
         // then map to a UTF-16 index by accumulating cellWidth per
         // grapheme from the composition string.
-        let dx = local.x - cellRect.minX
-        guard dx >= 0 else { return 0 }   // rejects negatives and NaN
+        let dx = local.x - cellOriginPx(row: 0, col: line.startCol).x
+        guard dx >= 0 else { return line.range.location }   // rejects negatives and NaN
         // Clamp a finite-but-absurd (or +Infinity) dx before the
         // `Int(Double)` cast. `point` arrives straight from an external
         // NSTextInputClient caller (an input method, an assistive tool
@@ -247,22 +255,11 @@ extension TerminalView: NSTextInputClient {
         // (base + VS16 / keycap, e.g. ⚠️) counts as 2 cells, matching where the
         // grid actually draws it. (A previous per-scalar `.max()` here counted
         // ⚠️ as 1 cell, anchoring the caret a cell off — KNOWN_ISSUES "IME caret
-        // width model divergence".)
-        var consumed = 0
-        var utf16Index = 0
-        for cluster in composition.attributedText.string {
-            let clusterCells = CellWidth.terminalCellWidth(of: String(cluster))
-            if consumed + clusterCells > cellOffset {
-                return utf16Index
-            }
-            consumed += clusterCells
-            utf16Index += String(cluster).utf16.count
-        }
-        // Past the composition's end → clamp to the LAST VALID INSERTION
-        // POINT (= length, AppKit convention), not length-1 which would
-        // place the caret one UTF-16 unit before the end of an astral
-        // grapheme.
-        return composition.attributedText.length
+        // width model divergence".) Past the line's end → clamp to the LAST VALID
+        // INSERTION POINT (= length on the last line, AppKit convention), not
+        // length-1 which would place the caret one UTF-16 unit before the end
+        // of an astral grapheme.
+        return layout.utf16Index(onLine: lineIndex, atCellOffset: cellOffset)
     }
 
     /// NSTextInputClient routes editing keys that aren't printable through
@@ -326,22 +323,26 @@ extension TerminalView: NSTextInputClient {
     /// placing the cursor). Feeds `firstRect(forCharacterRange:…)` so the
     /// IME candidate window anchors under the composition.
     func cursorCellRectInView() -> NSRect {
-        let cw = metrics.cellWidth
-        let ch = metrics.cellHeight
-        let row: Int
-        let col: Int
+        let cursor = cursorCellInView()
+        return cellRectInView(row: cursor.row, col: cursor.col)
+    }
+
+    /// The cursor's (row, col) as the IME anchors it — the snapshot's, or the
+    /// test override.
+    func cursorCellInView() -> (row: Int, col: Int) {
         #if DEBUG
         if let test = cursorOverrideForTests {
-            row = test.row
-            col = test.col
-        } else {
-            row = cursorRowInView()
-            col = cursorColInView()
+            return (row: test.row, col: test.col)
         }
-        #else
-        row = cursorRowInView()
-        col = cursorColInView()
         #endif
+        return (row: cursorRowInView(), col: cursorColInView())
+    }
+
+    /// View-local rectangle of grid cell `(row, col)`, in the same coordinate
+    /// space as `cursorCellRectInView()`.
+    func cellRectInView(row: Int, col: Int) -> NSRect {
+        let cw = metrics.cellWidth
+        let ch = metrics.cellHeight
         // Route through the cell↔view single-source-of-truth helper so
         // the inset (horizontal + titlebar) can never drift between this
         // anchor and the renderer's drawn cursor.
@@ -367,6 +368,23 @@ extension TerminalView: NSTextInputClient {
         return max(0, min(snap.cols - 1, snap.cursorCol))
     }
 
+    /// `text` laid out from the cursor cell, wrapped to the visible grid
+    /// (derived from the view's bounds, the area that is actually shown, so
+    /// it also holds mid-resize before the snapshot catches up), and the grid
+    /// row its first line sits on. A preedit taller than the rows below the
+    /// cursor slides up so its last line stays on screen.
+    func preeditPlacement(of text: String) -> (layout: PreeditLayout, firstRow: Int) {
+        let usable = Self.usableViewSize(
+            forBounds: bounds.size,
+            titlebarTopInset: titlebarOnlyTopInset,
+            metrics: metrics
+        )
+        let grid = metrics.grid(forPixelSize: usable)
+        let cursor = cursorCellInView()
+        let layout = PreeditLayout(text: text, startCol: cursor.col, cols: grid.cols, maxLines: grid.rows)
+        return (layout, max(0, min(cursor.row, grid.rows - layout.lines.count)))
+    }
+
     /// Reposition the preedit overlay subview against the current composition.
     /// Creates it lazily on first use; removes it entirely when composition
     /// ends so idle sessions keep a clean view hierarchy.
@@ -389,23 +407,22 @@ extension TerminalView: NSTextInputClient {
             needsDisplay = true
             return
         }
-        let cellRect = cursorCellRectInView()
         // Width in cells, not graphemes. `String.count` counts grapheme
         // clusters, but CJK + wide emoji occupy TWO terminal cells per
         // grapheme — under-sizing by 50% leaves the theme-bg fill
         // bleeding through the right half of every wide glyph. Audit
-        // terminal-ime F4. Walk the composition's scalars and weight
-        // each by its East Asian Width so the overlay matches what
-        // the grid will paint.
-        let cellCount = CellWidth.terminalCellWidth(
-            of: composition.attributedText.string
-        )
-        let width = max(metrics.cellWidth, metrics.cellWidth * CGFloat(cellCount))
+        // terminal-ime F4. The layout weighs each grapheme by its East
+        // Asian Width so the overlay matches what the grid will paint,
+        // and wraps it at the right edge so it can't run out of the view.
+        let placement = preeditPlacement(of: composition.attributedText.string)
+        let layout = placement.layout
+        let height = metrics.cellHeight * CGFloat(layout.lines.count)
+        let origin = cellOriginPx(row: placement.firstRow, col: layout.leftCol)
         let frame = NSRect(
-            x: cellRect.origin.x,
-            y: cellRect.origin.y,
-            width: width,
-            height: cellRect.height
+            x: origin.x,
+            y: max(0, bounds.height - origin.y - height),
+            width: metrics.cellWidth * CGFloat(layout.widthCells),
+            height: height
         )
         let overlay: PreeditOverlayView
         if let existing = preeditOverlay {
@@ -419,6 +436,7 @@ extension TerminalView: NSTextInputClient {
         overlay.frame = frame
         overlay.update(
             text: composition.attributedText,
+            layout: layout,
             cellSize: NSSize(width: metrics.cellWidth, height: metrics.cellHeight),
             font: metrics.font,
             foreground: Self.nsColor(fromRgb: themeDefaultFgRgb),
