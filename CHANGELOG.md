@@ -7,7 +7,21 @@ distributed under the [MIT license](https://opensource.org/license/MIT).
 
 ## [Unreleased]
 
-Post-0.9.3 bug-hunt sweep: one commit per bug, found by repeated multi-agent hunts and fixed with tests written without sight of the fix.
+## [0.9.4] - 2026-11-03
+
+A bug-hunt release: about 170 fixes, each one commit with a regression test written without sight of the fix.
+
+### Highlights
+- **Keyboard:** Shift+Tab is back-tab (was ^Y); Shift+keypad-Enter no longer sends Ctrl+C; modified F3, Ctrl+Backspace, the Insert key and keypad keys in application-keypad mode now send what programs expect; kitty keyboard release/repeat events pair correctly (focus loss, IME, keypad, Alt chords).
+- **Paste and drag-drop:** a paste over 4 MiB is delivered whole, Ctrl-C works while a large paste drains, large pastes drain at the program's read speed, and a multi-line paste into non-bracketed programs such as macOS nano keeps its lines.
+- **Mouse:** wheel direction, Shift/Ctrl modifier bits, grid clamping, right/middle-button release and drag reporting, DEC 1005 UTF-8 coordinates, and the Back/Forward side buttons no longer click a TUI.
+- **Terminal core:** emoji, skin-tone and ZWJ clusters advance the cursor like string-width; reflow and resize no longer leave stray lines or coloured ghost cells; wide-glyph erase/insert/delete fixes; DEC graphics; correct reply order and values for colour queries and XTGETTCAP; hard caps on titles, hyperlinks, zero-width marks and OSC 52 floods so hostile output cannot exhaust memory.
+- **Rendering:** box-drawing and block glyphs stack without stripes, colour emoji and wide-glyph cursors are no longer clipped, fallback glyphs such as the tool-result connector keep their ink, dim text fades toward the cell background, and the bell flash is visible on light themes.
+- **Find, selection, copy and links:** matches across soft-wrapped rows are found and revealed below the find bar; copy keeps tabs and drops grid padding; mailto links cannot smuggle a second recipient; non-ASCII URLs are detected whole.
+- **Tabs and windows:** an unedited inline rename no longer freezes a tab's title; closing the selected tab lands on its neighbour; Merge All Windows resizes the merged tabs; narrow windows keep the pill strip clear of the traffic lights; the first launch centres the window; unplugging a display no longer overwrites the saved frame.
+- **Shell integration:** fish and bash prompt hooks preserve `$status` / `$?`; the first prompt is a jump target; fish repaints no longer add duplicate prompt marks; zsh integration loads under unusual options.
+- **Performance:** a tab's title update no longer rebuilds every sibling tab's pill strip, and non-ASCII scrollback find no longer scans every row on the main thread.
+- **Tests and CI:** the unit-test host has its own bundle id so test runs stop writing your real preferences, and previously gated stress, window-lifecycle and soak tests now run in CI.
 
 ### Fixed
 - **vt:** Region scroll with a top margin below row 0 no longer pushes display_offset past history.
@@ -146,6 +160,12 @@ Post-0.9.3 bug-hunt sweep: one commit per bug, found by repeated multi-agent hun
 - **find-bar:** Esc and Return now work from the Replace field, and Shift-Tab moves focus.
 - **find-bar:** Caret, close and counter now carry VoiceOver labels, and regex/case state is exposed.
 - **title:** OSC titles and notifications keep ZWNJ/ZWJ/variation selectors, lossy UTF-8.
+- **renderer:** Box diagonals, arcs and dashed verticals get one Y-stretch, not the banded fit.
+- **vt:** Erase, delete and insert on a wide glyph's spacer no longer leave a lone WIDE_CHAR.
+- **a11y:** Grid text stays in the VoiceOver tree while find is open, and output posts valueChanged.
+- **find-bar:** Regex refresh no longer flips the counter to "No matches", empty query reads blank.
+- **rename:** An unedited inline rename no longer pins the tab's auto title as an override.
+- **tab-strip:** A title event no longer rebuilds every sibling tab's pill strip (O(N^2) on main).
 
 ### Maintenance
 - **tests:** Annotate PTYLargePasteBlindTests' withUnsafeBytes closures so the macOS 26 compiler accepts them.
@@ -173,6 +193,10 @@ Post-0.9.3 bug-hunt sweep: one commit per bug, found by repeated multi-agent hun
 - **tests:** The locale suite no longer writes AppleLanguages/AppleLocale into the real app domain.
 - **tests:** ThirdPartyLicenseNoticesBlindTests finds the app bundle under the test host's own bundle id.
 - **tests:** IMEPreeditReanchorBlindTests sizes its view to the 80-column grid it displays.
+- **ci:** The four CloseSelectedTabNeighbor lifecycle tests join the nightly window-lifecycle step.
+- **tests:** The dependabot rig copies LICENSE and THIRD_PARTY_NOTICES.txt, which project.yml now bundles.
+- **tests:** The palette-churn stress budgets are 6 s, not 2 s.
+- **tests:** PasteNewlineEnterBlindTests builds its expected bytes piecewise so the Xcode 16 compiler accepts it.
 
 ## [0.9.3] - 2026-11-02
 
