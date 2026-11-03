@@ -171,7 +171,7 @@ final class DragDropTests: XCTestCase {
     // wraps in single quotes but does NOT remove embedded controls;
     // the post-quote `pasteText` pipeline whitelists 0x0A / 0x0D as
     // legitimate paste (correct for user-typed paste from pbpaste-
-    // style flows) and `convertLoneCRToLF` preserves the LF, so a
+    // style flows) and `convertLFToCR` turns the LF into an Enter, so a
     // drop of `/tmp/x\nrm -rf ~` reaches the shell as Enter →
     // arbitrary command execution.
     //
@@ -205,8 +205,8 @@ final class DragDropTests: XCTestCase {
     }
 
     /// Symmetric to the LF case: a CR byte (0x0D) embedded in a dropped
-    /// URL path would survive `shellQuote`, then be turned into LF by
-    /// `convertLoneCRToLF` in the non-bracketed paste path — same RCE.
+    /// URL path would survive `shellQuote`, then reach the shell as Enter
+    /// through the non-bracketed paste path — same RCE.
     /// Strip CR for the same reason and at the same layer.
     func test_drop_stripsEmbeddedCR_fromPath() throws {
         let view = try XCTUnwrap(TerminalView.makeHeadlessForTests())

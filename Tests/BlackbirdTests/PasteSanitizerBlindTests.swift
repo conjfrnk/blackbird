@@ -3,7 +3,7 @@ import XCTest
 
 /// Characterization tests for `PasteSanitizer`'s byte transforms
 /// (normalizePasteLineEndings, sanitizePasteControls, stripBidiOverrides,
-/// convertLoneCRToLF, sanitizeBracketedPaste). These are security-critical
+/// convertLFToCR, sanitizeBracketedPaste). These are security-critical
 /// (paste injection / Trojan Source), and the contract is "Data in, Data out,
 /// byte-for-byte identical to the documented rules" for every possible input,
 /// including truncated multi-byte leads at the end, `Data` slices whose
@@ -32,33 +32,33 @@ final class PasteSanitizerBlindTests: XCTestCase {
         return whole[padBefore..<(padBefore + bytes.count)]
     }
 
-    // MARK: - convertLoneCRToLF
+    // MARK: - convertLFToCR
 
-    func testConvertLoneCR_emptyAndClean() {
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(Data()), Data())
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(d([0x61, 0x0A, 0x62])), d([0x61, 0x0A, 0x62]))
+    func testConvertLFToCR_emptyAndClean() {
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(Data()), Data())
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(d([0x61, 0x0D, 0x62])), d([0x61, 0x0D, 0x62]))
     }
 
-    func testConvertLoneCR_replacesEveryCR() {
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(d([0x0D])), d([0x0A]))
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(d([0x61, 0x0D, 0x62, 0x0D])),
-                       d([0x61, 0x0A, 0x62, 0x0A]))
+    func testConvertLFToCR_replacesEveryLF() {
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(d([0x0A])), d([0x0D]))
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(d([0x61, 0x0A, 0x62, 0x0A])),
+                       d([0x61, 0x0D, 0x62, 0x0D]))
         // CRLF is NOT collapsed here: each byte is mapped independently.
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(d([0x0D, 0x0A])), d([0x0A, 0x0A]))
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(d([0x0D, 0x0D, 0x0D])), d([0x0A, 0x0A, 0x0A]))
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(d([0x0D, 0x0A])), d([0x0D, 0x0D]))
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(d([0x0A, 0x0A, 0x0A])), d([0x0D, 0x0D, 0x0D]))
     }
 
-    func testConvertLoneCR_leavesMultibyteUntouched() {
-        let s = Array("┌─┐\r│x│\r".utf8)
-        let expected = Array("┌─┐\n│x│\n".utf8)
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(d(s)), d(expected))
+    func testConvertLFToCR_leavesMultibyteUntouched() {
+        let s = Array("┌─┐\n│x│\n".utf8)
+        let expected = Array("┌─┐\r│x│\r".utf8)
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(d(s)), d(expected))
     }
 
-    func testConvertLoneCR_slice() {
-        let input = slice([0x61, 0x0D, 0x62])
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(input), d([0x61, 0x0A, 0x62]))
+    func testConvertLFToCR_slice() {
+        let input = slice([0x61, 0x0A, 0x62])
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(input), d([0x61, 0x0D, 0x62]))
         let clean = slice([0x61, 0x62])
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(clean), d([0x61, 0x62]))
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(clean), d([0x61, 0x62]))
     }
 
     // MARK: - normalizePasteLineEndings
@@ -322,23 +322,23 @@ final class PasteSanitizerBlindTests: XCTestCase {
         XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(whole[2...]), d([0x5B, 0x32, 0x30, 0x31, 0x7E]))
     }
 
-    // MARK: - Pipeline order (normalize -> controls -> bidi [-> bracketed | loneCR])
+    // MARK: - Pipeline order (normalize -> controls -> bidi [-> bracketed | LF->CR])
 
     private func pipeline(_ x: Data, bracketed: Bool) -> Data {
         let a = PasteSanitizer.normalizePasteLineEndings(x)
         let b = PasteSanitizer.sanitizePasteControls(a)
         let c = PasteSanitizer.stripBidiOverrides(b)
-        return bracketed ? PasteSanitizer.sanitizeBracketedPaste(c) : PasteSanitizer.convertLoneCRToLF(c)
+        return bracketed ? PasteSanitizer.sanitizeBracketedPaste(c) : PasteSanitizer.convertLFToCR(c)
     }
 
     func testPipeline_documentedEndToEnd() {
-        // CRLF -> LF; ESC -> space; ZWSP stripped; lone CR -> LF when not bracketed.
+        // CRLF -> LF; ESC -> space; ZWSP stripped; LF -> CR when not bracketed (a lone CR stays).
         let input = d([0x61, 0x0D, 0x0A, 0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E,
                        0xE2, 0x80, 0x8B, 0x62, 0x0D, 0x63])
         XCTAssertEqual(pipeline(input, bracketed: true),
                        d([0x61, 0x0A, 0x20, 0x5B, 0x32, 0x30, 0x31, 0x7E, 0x62, 0x0D, 0x63]))
         XCTAssertEqual(pipeline(input, bracketed: false),
-                       d([0x61, 0x0A, 0x20, 0x5B, 0x32, 0x30, 0x31, 0x7E, 0x62, 0x0A, 0x63]))
+                       d([0x61, 0x0D, 0x20, 0x5B, 0x32, 0x30, 0x31, 0x7E, 0x62, 0x0D, 0x63]))
     }
 
     func testPipeline_c1ReplacementDoesNotFormBidiMatch() {
@@ -361,7 +361,8 @@ final class PasteSanitizerBlindTests: XCTestCase {
         XCTAssertEqual(PasteSanitizer.sanitizePasteControls(input), input)
         XCTAssertEqual(PasteSanitizer.stripBidiOverrides(input), input)
         XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(input), input)
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(input), input)
+        // Not a pass-through: every LF in the fixture becomes CR.
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(input), d(RefPaste.lfToCR(bytes)))
     }
 
     func testLargeTranscriptTextMatchesOracle() {
@@ -386,7 +387,7 @@ final class PasteSanitizerBlindTests: XCTestCase {
         XCTAssertEqual(PasteSanitizer.sanitizePasteControls(input), d(RefPaste.controls(bytes)))
         XCTAssertEqual(PasteSanitizer.stripBidiOverrides(input), d(RefPaste.bidi(bytes)))
         XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(input), d(RefPaste.bracketed(bytes)))
-        XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(input), d(RefPaste.loneCR(bytes)))
+        XCTAssertEqual(PasteSanitizer.convertLFToCR(input), d(RefPaste.lfToCR(bytes)))
         XCTAssertEqual(pipeline(input, bracketed: true), d(RefPaste.pipeline(bytes, bracketed: true)))
         XCTAssertEqual(pipeline(input, bracketed: false), d(RefPaste.pipeline(bytes, bracketed: false)))
     }
@@ -455,8 +456,8 @@ final class PasteSanitizerBlindTests: XCTestCase {
                                d(RefPaste.bidi(bytes)), "bidi \(tag)")
                 XCTAssertEqual(PasteSanitizer.sanitizeBracketedPaste(input),
                                d(RefPaste.bracketed(bytes)), "bracketed \(tag)")
-                XCTAssertEqual(PasteSanitizer.convertLoneCRToLF(input),
-                               d(RefPaste.loneCR(bytes)), "loneCR \(tag)")
+                XCTAssertEqual(PasteSanitizer.convertLFToCR(input),
+                               d(RefPaste.lfToCR(bytes)), "lfToCR \(tag)")
                 XCTAssertEqual(pipeline(input, bracketed: true),
                                d(RefPaste.pipeline(bytes, bracketed: true)), "pipeline-b \(tag)")
                 XCTAssertEqual(pipeline(input, bracketed: false),
@@ -499,8 +500,8 @@ final class PasteSanitizerBlindTests: XCTestCase {
 /// Intentionally written with explicit bounds checks (`i + n <= count`) and no
 /// shared code with `PasteSanitizer`.
 private enum RefPaste {
-    static func loneCR(_ x: [UInt8]) -> [UInt8] {
-        x.map { $0 == 0x0D ? 0x0A : $0 }
+    static func lfToCR(_ x: [UInt8]) -> [UInt8] {
+        x.map { $0 == 0x0A ? 0x0D : $0 }
     }
 
     static func normalize(_ x: [UInt8]) -> [UInt8] {
@@ -584,7 +585,7 @@ private enum RefPaste {
 
     static func pipeline(_ x: [UInt8], bracketed useBracketed: Bool) -> [UInt8] {
         let c = bidi(controls(normalize(x)))
-        return useBracketed ? bracketed(c) : loneCR(c)
+        return useBracketed ? bracketed(c) : lfToCR(c)
     }
 }
 

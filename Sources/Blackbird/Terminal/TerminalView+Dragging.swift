@@ -123,8 +123,8 @@ extension TerminalView {
     /// but the LF byte survives the wrap unchanged. Downstream,
     /// `pasteText` runs `sanitizePasteControls`, which **whitelists
     /// 0x0A** as legitimate paste content (correct for user-typed
-    /// paste from `pbpaste`-style flows). `convertLoneCRToLF`
-    /// preserves the LF, the shell sees Enter, and the bytes after
+    /// paste from `pbpaste`-style flows). `convertLFToCR`
+    /// turns the LF into CR, the shell sees Enter, and the bytes after
     /// the newline execute as a fresh command. One drag → arbitrary
     /// command execution.
     ///

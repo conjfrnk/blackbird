@@ -67,17 +67,16 @@ extension TerminalView {
             session.send(wrapped)
             return
         }
-        // Audit L19. Non-bracketed paste of multi-line content sends LF
-        // bytes that the shell treats as Enter — each line executes
+        // Audit L19. Non-bracketed paste of multi-line content sends line
+        // breaks that the shell treats as Enter — each line executes
         // immediately. A hostile clipboard with `\nrm -rf ~/Desktop\n`
         // is the textbook paste-jacking primitive. Bracketed paste
         // (handled above) protects modern TUIs; this guard catches the
         // unprotected case at a bare shell prompt. Opt-in: default off
         // preserves the long-standing terminal behaviour.
         // Gate also matches lone CR (0x0D): a clipboard like
-        // `foo\rbar\rbaz` slips past LF detection but the
-        // `convertLoneCRToLF(bytes)` call below turns each `\r` into
-        // `\n`, executing each fragment as its own command. Same
+        // `foo\rbar\rbaz` slips past LF detection but a lone CR is Enter
+        // too, executing each fragment as its own command. Same
         // injection class as LF — keep the warning symmetric.
         if Preferences.shared.confirmMultiLinePaste,
            bytes.contains(0x0A) || bytes.contains(0x0D) {
@@ -94,15 +93,14 @@ extension TerminalView {
             let response = alert.runModal()
             guard response == .alertFirstButtonReturn else { return }
         }
-        // L4: when the foreground process is in raw / ICRNL-off mode
-        // (vim, less, fzf, most TUIs), a lone CR survives to the
-        // shell as `\r` and triggers Enter — same injection class as
-        // a raw LF from a hostile clipboard. `normalizePasteLineEndings`
-        // intentionally leaves lone CR alone (some apps want it as
-        // Enter), but bracketed paste protects via the markers; the
-        // non-bracketed branch is the exposed surface, so we override
-        // that prior decision here only.
-        session.send(PasteSanitizer.convertLoneCRToLF(bytes))
+        // Every line break goes out as CR, what Return sends and what
+        // xterm / alacritty / kitty paste. An earlier L4 pass sent LF
+        // instead, but that bought no protection (a lone CR and an LF
+        // are both Enter for readline / ZLE / fish, and the confirm gate
+        // above already treats them alike) while breaking raw-mode
+        // programs that bind only CR to Enter: the macOS built-in nano
+        // (Pico) reads ^J as Justify and merged the pasted lines.
+        session.send(PasteSanitizer.convertLFToCR(bytes))
     }
 
 

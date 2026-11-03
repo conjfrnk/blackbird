@@ -30,7 +30,7 @@ Blackbird is a macOS-only terminal emulator. Its attack surface is:
 Every paste runs through `normalizePasteLineEndings` →
 `sanitizePasteControls` → `stripBidiOverrides` →
 `sanitizeBracketedPaste` (when the foreground app has enabled
-bracketed paste) → `convertLoneCRToLF` before reaching the PTY. The
+bracketed paste) → `convertLFToCR` before reaching the PTY. The
 scrub functions live in `Sources/Blackbird/Terminal/PasteSanitizer.swift`
 and are driven from `TerminalView+Paste.swift`. Tests in
 `Tests/BlackbirdTests/TerminalViewTests.swift` (`test_sanitize*`,

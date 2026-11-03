@@ -7,7 +7,7 @@ import Foundation
 /// are view-independent and security-critical, so they belong in one
 /// fuzz/unit-testable type rather than welded to a 3,000-line view. The
 /// pipeline order is load-bearing (normalize → control-scrub → bidi-strip, then
-/// bracketed vs lone-CR); Variation Selectors are stripped only from *display*
+/// bracketed vs LF→CR); Variation Selectors are stripped only from *display*
 /// (scrubURLForDisplay), never from paste/drop bytes.
 enum PasteSanitizer {
     /// Finish a copy-on-first-hit rewrite: if no hit was recorded the input is
@@ -36,20 +36,28 @@ enum PasteSanitizer {
         out.append(contentsOf: UnsafeRawBufferPointer(rebasing: p[runStart..<i]))
     }
 
-    /// Replace every standalone CR (0x0D) with LF (0x0A). CR-LF pairs are
-    /// already collapsed to LF by `normalizePasteLineEndings`, so any CR
-    /// reaching this function is a lone CR. Audit L4.
+    /// Replace every LF (0x0A) with CR (0x0D), the byte a keyboard Return
+    /// sends and what xterm / alacritty / kitty deliver for each line break of
+    /// a non-bracketed paste. CR-LF pairs are already collapsed to LF by
+    /// `normalizePasteLineEndings`, so each line break is one LF (or one lone
+    /// CR, which stays as is) and comes out as exactly one CR.
+    ///
+    /// Why CR and not LF: a raw-mode program without bracketed paste that
+    /// binds only CR to Enter (macOS's built-in `/usr/bin/nano`, UW Pico, where
+    /// ^J is Justify) merges the lines of an LF paste into one paragraph.
+    /// Cooked-mode programs are unaffected, since ICRNL maps the CR back to NL,
+    /// and readline / ZLE / fish take CR as Enter just as they take LF.
     ///
     /// Like every transform below, this scans `withUnsafeBytes` with integer
     /// indices (Data's per-byte `index(after:)` / `append` is ~20x slower) and
     /// returns `input` untouched when nothing needs rewriting.
-    static func convertLoneCRToLF(_ input: Data) -> Data {
-        guard input.contains(0x0D) else { return input }
+    static func convertLFToCR(_ input: Data) -> Data {
+        guard input.contains(0x0A) else { return input }
         return input.withUnsafeBytes { (p: UnsafeRawBufferPointer) -> Data in
             var out = [UInt8]()
             out.reserveCapacity(p.count)
             for b in p {
-                out.append(b == 0x0D ? 0x0A : b)
+                out.append(b == 0x0A ? 0x0D : b)
             }
             return Data(out)
         }

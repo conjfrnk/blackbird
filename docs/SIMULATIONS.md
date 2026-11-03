@@ -1310,7 +1310,7 @@ Part 9 precisely because it *is* headless-reachable.
 6. M5 ascii-only reflow conservation.
 7. W5 sanitizer unit gauntlet with the embedded-`201~` payload
    (PasteSanitizer already exists as pure static functions on Data —
-   convertLoneCRToLF, sanitizePasteControls, stripBidiOverrides, … — so this
+   convertLFToCR, sanitizePasteControls, stripBidiOverrides, … — so this
    is direct unit driving; Phase 0 touches zero app code).
 8. D7 width sweep vs unicode-width alone; commit the golden matrix.
 9. C9 clock-usage audit table.
