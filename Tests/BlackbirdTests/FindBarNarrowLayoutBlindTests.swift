@@ -108,7 +108,11 @@ final class FindBarNarrowLayoutBlindTests: XCTestCase {
         var items: [Item] = []
         var editable: [Item] = []
         for control in controls {
-            let rect = bar.convert(control.bounds, from: control)
+            // The control's alignment rect, not its frame: a push button's frame
+            // carries a few points of invisible bezel shadow on each side
+            // (macOS 15), and the layout constraints (and what the user sees)
+            // are in alignment-rect terms.
+            let rect = bar.convert(control.alignmentRect(forFrame: control.bounds), from: control)
             if let button = control as? NSButton {
                 let title = buttonTitle(button)
                 let role: String
