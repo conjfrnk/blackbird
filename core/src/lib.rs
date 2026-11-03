@@ -1780,6 +1780,24 @@ pub extern "C" fn bb_is_bidi_or_invisible_scalar(scalar: u32) -> bool {
     }
 }
 
+/// FFI: how many grid cells `Term::input` gives `scalar` when printed: 0 for
+/// zero-width marks, joiners and variation selectors (they attach to the
+/// previous cell), 1, or 2 for wide glyphs. Control characters and invalid code
+/// points (surrogates / out of range) are never printed, so they report 0.
+/// The single source of truth Swift's IME preedit width model
+/// (`CellWidth.width(for:)`) reads, so its overlay and candidate anchor cannot
+/// drift from where the grid lays the committed text.
+#[no_mangle]
+pub extern "C" fn bb_scalar_cell_width(scalar: u32) -> u8 {
+    use unicode_width::UnicodeWidthChar;
+    match char::from_u32(scalar).and_then(|c| c.width()) {
+        // `Term::input` treats any width other than 0 or 1 as a wide glyph
+        // (2 cells); unicode-width reports U+FDFD as 3.
+        Some(width) => width.min(2) as u8,
+        None => 0,
+    }
+}
+
 /// Test-only: force a panic inside the FFI boundary to verify Fatal event delivery.
 ///
 /// # Safety

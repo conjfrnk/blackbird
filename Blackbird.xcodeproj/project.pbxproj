@@ -203,6 +203,7 @@
 		910EC6595D9DD4E59F7ED0ED /* ChildShellEnvironmentBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40532A7CD1F75446A16B1529 /* ChildShellEnvironmentBlindTests.swift */; };
 		91497F92ABED24A383320845 /* TerminalSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */; };
 		9247E4DBBBBA64139260858C /* CellInstanceBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0E2CD4DCD085F5C47CA901B /* CellInstanceBuilder.swift */; };
+		928A54991DCAACA5959741B7 /* IMEPreeditGridWidthParityBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C4DC1B5312B813F1F69DBA0 /* IMEPreeditGridWidthParityBlindTests.swift */; };
 		92B08E10BCF3923F92AA994B /* PTYTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FABDC2C54EABEB75AD8E091 /* PTYTests.swift */; };
 		92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */; };
 		92F85478B5B065F702AD717B /* MetalDeviceSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14E5F5AA20D171CAD16112AD /* MetalDeviceSelection.swift */; };
@@ -492,6 +493,7 @@
 		4A5CAF46DFFF60AC3493A641 /* ShellIntegration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellIntegration.swift; sourceTree = "<group>"; };
 		4B4CECF4880D654BD5CB5BB7 /* WindowOffscreenNudgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowOffscreenNudgeTests.swift; sourceTree = "<group>"; };
 		4C1918604B5A7FA5FF34818C /* LatencyProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyProbeTests.swift; sourceTree = "<group>"; };
+		4C4DC1B5312B813F1F69DBA0 /* IMEPreeditGridWidthParityBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEPreeditGridWidthParityBlindTests.swift; sourceTree = "<group>"; };
 		4C6840094DF834E5E45694B5 /* URLDetectorBalancedParenBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetectorBalancedParenBlindTests.swift; sourceTree = "<group>"; };
 		4E560FE25E1C2DA526BA7DE0 /* URLDetectorReDoSTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLDetectorReDoSTests.swift; sourceTree = "<group>"; };
 		4EC02EBECC88454DC42A0233 /* PreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesTests.swift; sourceTree = "<group>"; };
@@ -893,6 +895,7 @@
 				3A247C40FF45C4C560F42B73 /* IMECursorRectInsetTests.swift */,
 				C7D41B7AB4C224EF793857BD /* IMEDoCommandNoAlertBlindTests.swift */,
 				17599E31B2021814E1A09BFA /* IMEPreeditDismissKeyLeakBlindTests.swift */,
+				4C4DC1B5312B813F1F69DBA0 /* IMEPreeditGridWidthParityBlindTests.swift */,
 				5C6D780E7A098ADAE1C36A69 /* IMEShiftCarryKittyBlindTests.swift */,
 				8CFAD8B88865C349CC141C65 /* IMETests.swift */,
 				A8C36192F62C6E40A498D70D /* InlineRenameTests.swift */,
@@ -1596,6 +1599,7 @@
 				21A104F2557A80C8BEA1FD6E /* IMECursorRectInsetTests.swift in Sources */,
 				F1133F0CBC3203B385B9EE74 /* IMEDoCommandNoAlertBlindTests.swift in Sources */,
 				152B7079067935F309BF9246 /* IMEPreeditDismissKeyLeakBlindTests.swift in Sources */,
+				928A54991DCAACA5959741B7 /* IMEPreeditGridWidthParityBlindTests.swift in Sources */,
 				BE90225730C6A9120DC277C1 /* IMEShiftCarryKittyBlindTests.swift in Sources */,
 				8743B171BF258DCAF8182762 /* IMETests.swift in Sources */,
 				D11FFB45DC5CBDA09AE1868E /* IdleFrameThrottleBlindTests.swift in Sources */,

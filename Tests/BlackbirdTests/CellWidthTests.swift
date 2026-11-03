@@ -11,7 +11,8 @@ import XCTest
 ///   - `width(for:)`  — per-scalar East-Asian-Width classification (0/1/2).
 ///   - `terminalCellWidth(of:)` — per-grapheme accumulation, including the
 ///     VS16 (U+FE0F) / U+20E3 keycap promotion and the ZWJ-cluster rule that a
-///     multi-scalar emoji grapheme counts as ONE wide glyph, not the sum.
+///     multi-scalar EMOJI ZWJ grapheme counts as ONE wide glyph, not the sum
+///     (non-emoji ZWJ conjuncts keep the grid's per-scalar sum).
 final class CellWidthTests: XCTestCase {
 
     // MARK: - width(for:) — scalar level
@@ -108,6 +109,45 @@ final class CellWidthTests: XCTestCase {
         // man + ZWJ + woman + ZWJ + girl
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
         XCTAssertEqual(CellWidth.terminalCellWidth(of: family), 2)
+    }
+
+    /// A skin-tone modifier is itself a 2-cell scalar in the grid, but inside an
+    /// emoji ZWJ sequence the whole grapheme is still ONE 2-cell glyph:
+    /// woman + medium skin tone + ZWJ + laptop is 2, not 2+2+0+2 = 6 and not
+    /// "skip the scalar after the ZWJ" = 4.
+    func testStringWidth_zwjEmojiWithSkinToneModifierIsTwo() {
+        let womanTechnologist = "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}" // 👩🏽‍💻
+        XCTAssertEqual(CellWidth.terminalCellWidth(of: womanTechnologist), 2)
+    }
+
+    /// Two modifiers and two ZWJs (woman light + handshake + man medium-light)
+    /// still collapse to one 2-cell glyph.
+    func testStringWidth_zwjEmojiWithTwoModifiersIsTwo() {
+        let couple = "\u{1F469}\u{1F3FB}\u{200D}\u{1F91D}\u{200D}\u{1F468}\u{1F3FC}" // 👩🏻‍🤝‍👨🏼
+        XCTAssertEqual(CellWidth.terminalCellWidth(of: couple), 2)
+    }
+
+    /// ZWJ sequences whose base is a text-default symbol + VS16 (❤️‍🔥, 🏋️‍♀️)
+    /// are one 2-cell glyph too.
+    func testStringWidth_zwjEmojiWithVariationSelectorsIsTwo() {
+        let heartOnFire = "\u{2764}\u{FE0F}\u{200D}\u{1F525}"      // ❤️‍🔥
+        let womanLifting = "\u{1F3CB}\u{FE0F}\u{200D}\u{2640}\u{FE0F}" // 🏋️‍♀️
+        XCTAssertEqual(CellWidth.terminalCellWidth(of: heartOnFire), 2)
+        XCTAssertEqual(CellWidth.terminalCellWidth(of: womanLifting), 2)
+    }
+
+    /// The ZWJ collapse is for emoji only. A Devanagari conjunct with an
+    /// explicit ZWJ (ka + virama + ZWJ + ssa) is two spacing consonants in the
+    /// grid (1 + 0 + 0 + 1), exactly like the same text without the ZWJ.
+    func testStringWidth_devanagariZwjConjunctIsTwoLikeWithoutZwj() {
+        XCTAssertEqual(CellWidth.terminalCellWidth(of: "\u{0915}\u{094D}\u{200D}\u{0937}"), 2)
+        XCTAssertEqual(CellWidth.terminalCellWidth(of: "\u{0915}\u{094D}\u{0937}"), 2)
+    }
+
+    /// A ZWJ after an ASCII digit/`#` is not an emoji sequence: the sum stands.
+    func testStringWidth_zwjAfterAsciiIsNotCollapsed() {
+        XCTAssertEqual(CellWidth.terminalCellWidth(of: "1\u{200D}"), 1)
+        XCTAssertEqual(CellWidth.terminalCellWidth(of: "a\u{200D}\u{4E00}"), 3)
     }
 
     // MARK: - accumulation across multiple graphemes

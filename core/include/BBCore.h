@@ -1147,6 +1147,17 @@ void bb_string_release(struct BBString *s);
  */
 bool bb_is_bidi_or_invisible_scalar(uint32_t scalar);
 
+/**
+ * FFI: how many grid cells `Term::input` gives `scalar` when printed: 0 for
+ * zero-width marks, joiners and variation selectors (they attach to the
+ * previous cell), 1, or 2 for wide glyphs. Control characters and invalid code
+ * points (surrogates / out of range) are never printed, so they report 0.
+ * The single source of truth Swift's IME preedit width model
+ * (`CellWidth.width(for:)`) reads, so its overlay and candidate anchor cannot
+ * drift from where the grid lays the committed text.
+ */
+uint8_t bb_scalar_cell_width(uint32_t scalar);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

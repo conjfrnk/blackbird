@@ -1,15 +1,18 @@
 import Foundation
+import BBCore
 
 /// Swift-side terminal-cell width model for *strings that aren't in the grid yet*.
 ///
-/// This is a deliberate, isolated parallel to the Rust core's width logic — not
-/// an accidental duplicate. The core resolves width during VT parsing and only
-/// ever exposes it as an already-applied, per-cell `WIDE_CHAR` flag on cells
-/// that are physically in the grid; there is no `string -> width` entry point on
-/// the FFI surface (`Sources/BBCore`). The IME preedit overlay needs to size and
-/// anchor composing text BEFORE any of it has been committed to the PTY or laid
-/// into the grid, so it can't ask the core. Hence a self-contained string→width
-/// model lives here on the Swift side.
+/// The IME preedit overlay needs to size and anchor composing text BEFORE any of
+/// it has been committed to the PTY or laid into the grid, so it can't ask the
+/// grid; this walks the string itself. What a single scalar occupies is NOT
+/// decided here: `width(for:)` reads the core's own per-scalar width
+/// (`bb_scalar_cell_width`, the lookup `Term::input` sizes each printed char
+/// with), so the preedit and the committed text cannot disagree about a symbol,
+/// emoji or mark. (A hand-written Swift range list once did, for ~15k scalars:
+/// `⭐` `✅` `✨` counted 1 cell where the grid gives 2, text-default pictographs
+/// like `🌡` counted 2 where the grid gives 1.) The string-level policy below is
+/// all that lives on the Swift side.
 ///
 /// Keeping it in its own named, unit-tested namespace (rather than inlined inside
 /// the `+IME` extension, where it was graded a parallel-width-model smell) means
@@ -27,79 +30,74 @@ import Foundation
 /// what keeps the overlay aligned with the grid.
 enum CellWidth {
 
-    /// Approximate terminal-cell width of a string. Each grapheme cluster
-    /// contributes 1 cell for ASCII/Latin/Cyrillic, 2 cells for CJK
-    /// ideographs and wide emoji, 0 cells for combining marks or
-    /// zero-width joiners. Good enough for preedit overlay sizing;
-    /// exact glyph metrics would require a CoreText pass per composition
-    /// update which is too slow for per-keystroke refreshes.
+    /// Approximate terminal-cell width of a string, as the grid will lay it out
+    /// once committed: each grapheme cluster is the sum of its scalars' cell
+    /// widths (a combining mark or variation selector contributes 0; a spacing
+    /// vowel sign such as Devanagari `ि` or Thai `ำ` gets its own cell, which
+    /// is why a `Character` is not one cell). Good enough for preedit overlay
+    /// sizing; exact glyph metrics would require a CoreText pass per
+    /// composition update which is too slow for per-keystroke refreshes.
     ///
-    /// Walks `Character` (grapheme clusters), not `UnicodeScalar` — a ZWJ
-    /// sequence like 👨‍👩‍👧 is one grapheme that renders as one wide
-    /// glyph, so it must count as 2 cells, not 2+0+2+0+2=6. Per-grapheme
-    /// we take the max scalar width (ignoring ZWJ / VS / combiners which
-    /// would otherwise mask the real width-contributing scalar).
+    /// Walks `Character` (grapheme clusters) rather than the flat scalar stream
+    /// so it can keep one deliberate deviation from the grid, and only for
+    /// EMOJI ZWJ sequences: 👨‍👩‍👧 (or 👩🏽‍💻, with a skin-tone modifier the grid
+    /// also gives 2 cells) is one grapheme that renders as one wide glyph, so it
+    /// counts 2 cells, the widest scalar's width, not the 2+0+2+0+2=6 the grid
+    /// lays out. A ZWJ in any other script (a Devanagari `क्‍ष` conjunct) is not
+    /// a one-glyph emoji sequence, so those graphemes keep the plain per-scalar
+    /// sum the grid uses.
     static func terminalCellWidth(of string: String) -> Int {
         var total = 0
         for grapheme in string {
+            var sum = 0
             var widest = 0
             var promotesToWide = false
             for scalar in grapheme.unicodeScalars {
-                widest = max(widest, width(for: scalar))
+                let scalarWidth = width(for: scalar)
+                sum += scalarWidth
+                widest = max(widest, scalarWidth)
                 // VS-16 (U+FE0F) forces the preceding base into emoji
                 // presentation, and U+20E3 builds keycap sequences
-                // (`#️⃣`, `1️⃣`). Neither base scalar is in our wide
-                // ranges (U+2764, U+0023, …) but the rendered grapheme
-                // occupies two cells. Don't let the per-scalar table
-                // miss them.
+                // (`#️⃣`, `1️⃣`). Neither base scalar is wide on its own
+                // (U+2764, U+0023, …) but the rendered grapheme occupies
+                // two cells. Don't let the per-scalar widths miss them.
                 if scalar.value == 0xFE0F || scalar.value == 0x20E3 {
                     promotesToWide = true
                 }
             }
-            if promotesToWide && widest < 2 {
-                widest = 2
+            var cells = isEmojiZWJSequence(grapheme) ? widest : sum
+            if promotesToWide && cells < 2 {
+                cells = 2
             }
             // A grapheme that's purely zero-width (e.g. an isolated
             // combining mark) still occupies no cells.
-            total += widest
+            total += cells
         }
         return total
     }
 
-    /// Rough cell-width classification for a single scalar. Based on
-    /// Unicode's East Asian Width property plus the emoji / symbol
-    /// ranges that terminal emulators conventionally treat as wide.
+    /// True when `grapheme` joins an emoji with a ZWJ (U+200D): such a sequence
+    /// is drawn as ONE glyph. The emoji check is what keeps ZWJ conjuncts in
+    /// other scripts (Devanagari `क्‍ष`), which the grid lays out scalar by
+    /// scalar, out of the collapse. ASCII is skipped because `#`, `*` and the
+    /// digits carry the Emoji property only as keycap bases.
+    private static func isEmojiZWJSequence(_ grapheme: Character) -> Bool {
+        var hasZWJ = false
+        var hasEmoji = false
+        for scalar in grapheme.unicodeScalars {
+            if scalar.value == 0x200D {
+                hasZWJ = true
+            } else if scalar.value > 0x7F && scalar.properties.isEmoji {
+                hasEmoji = true
+            }
+        }
+        return hasZWJ && hasEmoji
+    }
+
+    /// Cells the core's grid gives a single printed scalar: 0 (combining marks,
+    /// ZWJ, variation selectors, controls), 1, or 2 (East Asian Wide /
+    /// Emoji_Presentation).
     static func width(for scalar: UnicodeScalar) -> Int {
-        let v = scalar.value
-        // Combining marks / zero-width joiners / VS16 etc. → 0 cells.
-        if (0x0300...0x036F).contains(v)   // Combining Diacriticals
-            || (0x200B...0x200F).contains(v) // ZW* + bidi marks
-            || (0xFE00...0xFE0F).contains(v) // Variation Selectors 1-16
-            || v == 0x200D                   // ZWJ
-            || (0xFE20...0xFE2F).contains(v) // Combining Half Marks
-        {
-            return 0
-        }
-        // Common wide ranges. Covers the cases users actually hit at
-        // Blackbird's prompt: CJK ideographs, Hangul syllables,
-        // fullwidth forms, wide emoji.
-        if (0x1100...0x115F).contains(v)    // Hangul Jamo
-            || (0x2E80...0x303E).contains(v) // CJK Radicals + Kangxi
-            || (0x3041...0x33FF).contains(v) // Hiragana + Katakana + CJK Symbols
-            || (0x3400...0x4DBF).contains(v) // CJK Ext A
-            || (0x4E00...0x9FFF).contains(v) // CJK Unified Ideographs
-            || (0xA000...0xA4CF).contains(v) // Yi
-            || (0xAC00...0xD7A3).contains(v) // Hangul Syllables
-            || (0xF900...0xFAFF).contains(v) // CJK Compatibility Ideographs
-            || (0xFE30...0xFE4F).contains(v) // CJK Compatibility Forms
-            || (0xFF00...0xFF60).contains(v) // Fullwidth Forms
-            || (0xFFE0...0xFFE6).contains(v) // Fullwidth signs
-            || (0x1F300...0x1F9FF).contains(v) // Misc symbols + emoji
-            || (0x20000...0x2FFFD).contains(v) // CJK Ext B/C/D/E
-            || (0x30000...0x3FFFD).contains(v) // CJK Ext G
-        {
-            return 2
-        }
-        return 1
+        Int(bb_scalar_cell_width(scalar.value))
     }
 }

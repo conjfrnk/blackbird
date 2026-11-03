@@ -120,6 +120,7 @@ dependencies = [
  "alacritty_terminal",
  "cbindgen",
  "memchr",
+ "unicode-width",
 ]
 
 [[package]]

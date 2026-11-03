@@ -20,6 +20,10 @@ alacritty_terminal = { version = "=0.26.0", default-features = false }
 # SIMD byte search for the `ESC[2J` augmentation fast path in bb_term_input.
 # Already transitively in the tree (alacritty uses it), so no new weight.
 memchr = "2"
+# Same crate (and requirement) alacritty_terminal's `Term::input` sizes each
+# printed char with; `bb_scalar_cell_width` exposes it so Swift never keeps a
+# parallel width table. One version in the lockfile, so the two cannot drift.
+unicode-width = "0.2.0"
 
 [build-dependencies]
 # cbindgen patch-pinned so a 0.27.x → 0.28 bump doesn't silently reshape
