@@ -60,6 +60,16 @@ final class OSC7BackgroundJobTrustBlindTests: XCTestCase {
         TestHostTermination.shared.register()
     }
 
+    /// Real-shell tests on the same fake-`ssh` rig as BackgroundedRemoteJobCwdBlindTests:
+    /// on the macOS 15 CI image the backgrounded job is never seen exec'ing the
+    /// fake binary ("precondition: background job ... must have exec'd the fake
+    /// 'ssh' binary"), so the suite is opt-in (BB_RUN_FLAKY_PTY_TESTS=1) like
+    /// the other PTY shell-spawn suites.
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        try PTYTests.skipIfFlakyOnCI()
+    }
+
     // MARK: - Rig
 
     private struct Workspace {
