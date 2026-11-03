@@ -196,14 +196,18 @@ extension TerminalView {
         return lo
     }
 
-    /// Range of a single character at `index`. Used by VO's "speak under
-    /// cursor" pass.
+    /// Range of the composed character containing `index`. Used by VO's
+    /// "speak under cursor" pass. `index` is a UTF-16 unit, so an astral
+    /// scalar (emoji, CJK Ext-B) spans two units: a fixed length of 1 split
+    /// the pair and `accessibilityString(for:)` decoded each half to U+FFFD.
+    /// Same contract as NSTextView (AppKit: "Composed character range for
+    /// the provided index"); a low-surrogate index maps back to the pair start.
     public override func accessibilityRange(for index: Int) -> NSRange {
-        let count = accessibilityNumberOfCharacters()
-        guard index >= 0, index < count else {
+        let value = currentA11yValue() as NSString
+        guard index >= 0, index < value.length else {
             return NSRange(location: NSNotFound, length: 0)
         }
-        return NSRange(location: index, length: 1)
+        return value.rangeOfComposedCharacterSequence(at: index)
     }
 
     /// Screen-space frame for a character range. v0.2 ships the
