@@ -1234,6 +1234,15 @@ impl StandardCharset {
         match self {
             StandardCharset::Ascii => c,
             StandardCharset::SpecialCharacterAndLineDrawing => match c {
+                // Blackbird patch: arrows and solid block. The bundled
+                // xterm-kitty `acsc` (and kitty's own table) advertises
+                // `++,,--..00`, so ncurses sends these ASCII bytes under
+                // `ESC ( 0` expecting glyphs; upstream maps only 0x5F-0x7E.
+                '+' => '\u{2192}', // ACS_RARROW
+                ',' => '\u{2190}', // ACS_LARROW
+                '-' => '\u{2191}', // ACS_UARROW
+                '.' => '\u{2193}', // ACS_DARROW
+                '0' => '\u{2588}', // ACS_BLOCK
                 '_' => ' ',
                 '`' => '◆',
                 'a' => '▒',
