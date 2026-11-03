@@ -63,6 +63,18 @@ enum OSC8URLPolicy {
     /// its "host" part is the local address, handled by `isMailtoSafe`.
     private static let hostRequiredSchemes: Set<String> = ["http", "https"]
 
+    /// Scalars `isMailtoSafe` refuses in the percent-DECODED `mailto:`
+    /// envelope: recipient separators and header/escape delimiters.
+    private static let mailtoEnvelopeSeparators: Set<Unicode.Scalar> =
+        [",", ";", "?", "&", "=", "%"]
+
+    /// Scalars `isMailtoSafe` refuses in the percent-DECODED value of the one
+    /// allowed `subject` item: header/pair delimiters (`&` `;` `=`) and `%`
+    /// (a second decoding round). `,` and `?` stay legal in a subject
+    /// ("Hello, world", "What%3F").
+    private static let mailtoSubjectValueSeparators: Set<Unicode.Scalar> =
+        ["&", ";", "=", "%"]
+
     /// Decide whether an OSC 8 URL is safe to hand to `NSWorkspace`.
     /// Rejects URLs with no scheme (malformed / relative), a scheme
     /// outside the allowlist, or a `mailto:` URL carrying headers that
@@ -616,7 +628,29 @@ enum OSC8URLPolicy {
         // Character-level count while the mail client still splits on the
         // scalar.
         guard let envelope = mailtoEnvelope(url) else { return false }
-        for scalar in envelope.unicodeScalars where scalar == "," || scalar == ";" {
+        // RFC 6068 writes a literal `#` as `%23`, so a raw one is outside the
+        // grammar and everything behind it is unspecified. URLComponents and
+        // the envelope cut both drop that tail, but a mail client is free to
+        // keep scanning it for addresses
+        // (`mailto:v@example.com#,evil@x.com`). Refuse rather than guess.
+        if url.absoluteString.utf8.contains(0x23) { return false }
+        // Likewise RFC 6068's `qchar` has no `?`: a second raw `?` inside the
+        // query is outside the grammar and a lenient client may restart header
+        // parsing there (`?subject=hi?bcc=evil@x.com`).
+        let rawURLString: String = url.absoluteString
+        if let firstQuestion = rawURLString.firstIndex(of: "?"),
+           rawURLString[rawURLString.index(after: firstQuestion)...].contains("?") {
+            return false
+        }
+        // `,` `;` split recipients, `?` `&` `=` open or continue a header
+        // block and `%` starts a second decoding round. The envelope is one
+        // plain address, so none belongs in it, literal or hidden behind a
+        // `%XX` escape (`mailto:v%3Fbcc=evil@x.com` decodes to
+        // `v?bcc=evil@x.com`): a client that decodes before it splits would
+        // address somebody else.
+        if envelope.unicodeScalars.contains(where: { (s: Unicode.Scalar) -> Bool in
+            mailtoEnvelopeSeparators.contains(s)
+        }) {
             return false
         }
         if atSignCount(in: envelope) > 1 { return false }
@@ -640,7 +674,23 @@ enum OSC8URLPolicy {
         // allowlist exists to prevent. With the empty-items case already
         // handled above, a safe non-empty query is exactly one subject item.
         // (cc/bcc/reply-to/body/X-* remain rejected: they fail this check.)
-        return items.count == 1 && items[0].name.lowercased() == "subject"
+        guard items.count == 1, items[0].name.lowercased() == "subject" else {
+            return false
+        }
+        // The one allowed item is still free text, and `queryItems` has
+        // already percent-decoded it once. A decoded `&` `;` `=` would let a
+        // client that decodes before it splits see a second header
+        // (`subject=hi%26bcc%3Devil%40x.com` -> `hi&bcc=evil@x.com`), and a
+        // decoded `%` means a further decoding round exposes one
+        // (`subject=hi%2526bcc%253Devil@x.com`). Same fail-closed rule as the
+        // envelope.
+        if let value = items[0].value,
+           value.unicodeScalars.contains(where: { (s: Unicode.Scalar) -> Bool in
+               mailtoSubjectValueSeparators.contains(s)
+           }) {
+            return false
+        }
+        return true
     }
 
     /// Return the percent-decoded substring between `mailto:` and the
