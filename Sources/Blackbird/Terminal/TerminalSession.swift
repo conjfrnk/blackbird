@@ -386,8 +386,18 @@ public final class TerminalSession: ObservableObject {
         return s
     }
 
-    public enum SessionError: Error {
+    /// `LocalizedError` for the same reason as `PTY.Error`: the failure alert
+    /// prints `localizedDescription`, which is an opaque Cocoa placeholder
+    /// for a bare enum.
+    public enum SessionError: Error, LocalizedError {
         case coreInitFailed
+
+        public var errorDescription: String? {
+            switch self {
+            case .coreInitFailed:
+                return "The terminal engine failed to initialize."
+            }
+        }
     }
 
     /// Shared by `start()` and the DEBUG headless factory (`pty == nil`).

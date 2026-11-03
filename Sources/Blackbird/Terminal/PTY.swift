@@ -20,8 +20,20 @@ public final class PTY {
         }
     }
 
-    public enum Error: Swift.Error {
+    /// `LocalizedError` so the "Couldn't start shell" alert (which prints
+    /// `localizedDescription`) names the errno; a bare enum bridges to
+    /// "The operation couldn't be completed. (Blackbird.PTY.Error error 0.)",
+    /// which cannot tell a process/pty limit from a broken shell.
+    public enum Error: Swift.Error, LocalizedError {
         case forkFailed(errno: Int32)
+
+        public var errorDescription: String? {
+            switch self {
+            case .forkFailed(let code):
+                return "Couldn't create the shell process or its terminal: "
+                    + "\(String(cString: strerror(code))) (errno \(code))."
+            }
+        }
     }
 
     /// Lock guarding `_onBytes` / `_onExit` (audit S2-001). The previous
