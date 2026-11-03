@@ -11,8 +11,12 @@ import BBCore
 /// the standard Copy / Paste. `validateMenuItem` enables/disables the app
 /// menu's edit / find / prompt-nav / font items against the live selection,
 /// snapshot, session, and match state.
-extension TerminalView {
+extension TerminalView: NSMenuItemValidation {
 
+    // The conformance is what exposes this to AppKit: a plain Swift method is
+    // not @objc, so NSMenu's `respondsToSelector:validateMenuItem:` check
+    // failed and every item targeting the view was merely auto-enabled (the
+    // gating and the find-mode checkmarks below never ran).
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(copy(_:)):                      return selection != nil
@@ -28,8 +32,18 @@ extension TerminalView {
             // decode on main; `paste(_:)` does the real read.
             return session != nil && NSPasteboard.general.availableType(from: [.string]) != nil
         case #selector(performFindPanelAction(_:)):    return currentSnapshot != nil
-        case #selector(performFindNextAction(_:)):     return !findController.findMatches.isEmpty
-        case #selector(performFindPreviousAction(_:)): return !findController.findMatches.isEmpty
+        case #selector(performFindNextAction(_:)),
+             #selector(performFindPreviousAction(_:)):
+            // Gate on an ACTIVE search, not on a non-empty match cache. A regex
+            // rescan empties `findMatches` synchronously and republishes from a
+            // background scan (up to its 250 ms deadline) on every streamed
+            // snapshot, and `advanceFind` defers a ⌘G pressed in that gap via
+            // `pendingRegexAdvance`. A substring query can likewise be stale-
+            // empty until `advanceFind`'s `refreshFindMatchesIfStale` re-scans.
+            // Disabling the item here would stop the key before `advanceFind`
+            // ever ran and lose the keystroke.
+            let find = findController
+            return !find.findMatches.isEmpty || (find.findBar != nil && !find.findQuery.isEmpty)
         case #selector(toggleFindCaseSensitive(_:)):
             item.state = (findController.findBar?.options.caseSensitive == true) ? .on : .off
             return currentSnapshot != nil
@@ -40,7 +54,9 @@ extension TerminalView {
         case #selector(jumpToPreviousPrompt(_:)),
              #selector(jumpToNextPrompt(_:)):
             // Same pattern: disabling until OSC 133 marks exist is more
-            // honest than beeping on every press.
+            // honest in the menu. (A disabled ⌘ chord falls through to
+            // `keyDown`, which hands it to `super` and ends in the standard
+            // unhandled-key beep, so the keyboard path still beeps.)
             return (session?.promptMarks.isEmpty == false)
         case #selector(increaseFontSize(_:)),
              #selector(decreaseFontSize(_:)),

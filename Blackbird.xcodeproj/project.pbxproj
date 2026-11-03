@@ -297,6 +297,7 @@
 		CE133743E0EFED8541FF6F67 /* ClipboardWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15D892A64706ABFA04AB29A /* ClipboardWriter.swift */; };
 		CF0EE533E046C0D4A14E9B12 /* ShellStartFailureAlertErrnoBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CC9CCF5B5488B2D75DA4DC /* ShellStartFailureAlertErrnoBlindTests.swift */; };
 		CF57C6703459084B76F2A1E4 /* KeyEncoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */; };
+		D00967E546B2A57FCBC6B235 /* TerminalViewMenuValidationBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E5B868D4F5850A96DF7361A /* TerminalViewMenuValidationBlindTests.swift */; };
 		D11FFB45DC5CBDA09AE1868E /* IdleFrameThrottleBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D4ABA8AB135382B56C31469 /* IdleFrameThrottleBlindTests.swift */; };
 		D12A6AD02ED25F1BDEA72EE4 /* PreferencesDefaultsChangeBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95C0BBBA77FA353D4E7F2EE2 /* PreferencesDefaultsChangeBlindTests.swift */; };
 		D1FEF4E4B1C0A3E1776D98D6 /* CustomShellDiesAtStartupBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD1207947EB310E24B3FEAE4 /* CustomShellDiesAtStartupBlindTests.swift */; };
@@ -431,6 +432,7 @@
 		2B23446ADB6651910E08359F /* GlyphBitmapCacheEvictionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphBitmapCacheEvictionBlindTests.swift; sourceTree = "<group>"; };
 		2C4BC270083DECE0D5228E3E /* ExportScrollbackLiveHistoryBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportScrollbackLiveHistoryBlindTests.swift; sourceTree = "<group>"; };
 		2D6DCE9F2E73793C1E6E99DB /* WideGlyphSelectionHighlightBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WideGlyphSelectionHighlightBlindTests.swift; sourceTree = "<group>"; };
+		2E5B868D4F5850A96DF7361A /* TerminalViewMenuValidationBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewMenuValidationBlindTests.swift; sourceTree = "<group>"; };
 		2E8CF6A327FF6AF427167BFA /* NotificationPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPresenter.swift; sourceTree = "<group>"; };
 		2F96C43E82A34FB57CB37965 /* osc133.bash */ = {isa = PBXFileReference; path = osc133.bash; sourceTree = "<group>"; };
 		3005731945C943A451CB4DDF /* TerminalNotificationEventBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalNotificationEventBlindTests.swift; sourceTree = "<group>"; };
@@ -986,6 +988,7 @@
 				F1DDB1629DDD9220FEB526BA /* TerminalSessionFeedBackpressureBlindTests.swift */,
 				F6E5A7334CC3AE3CF31E5967 /* TerminalSessionSnapshotCoalescingTests.swift */,
 				5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */,
+				2E5B868D4F5850A96DF7361A /* TerminalViewMenuValidationBlindTests.swift */,
 				6DE46FF3DDF1528F3EC9D9AA /* TerminalViewResizeMathTests.swift */,
 				75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */,
 				A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */,
@@ -1675,6 +1678,7 @@
 				1BD5087C83C08144447DF09D /* TerminalSessionFeedBackpressureBlindTests.swift in Sources */,
 				C9CCB5B7E6FAF4206321306E /* TerminalSessionSnapshotCoalescingTests.swift in Sources */,
 				91497F92ABED24A383320845 /* TerminalSessionTests.swift in Sources */,
+				D00967E546B2A57FCBC6B235 /* TerminalViewMenuValidationBlindTests.swift in Sources */,
 				22C8A17B1D4330FCB77C3803 /* TerminalViewResizeMathTests.swift in Sources */,
 				92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */,
 				F8C99250E001E2D862D19244 /* TestHostTermination.swift in Sources */,
