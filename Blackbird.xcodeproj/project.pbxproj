@@ -277,6 +277,7 @@
 		C0E7576F6FEFA79EE23B36B9 /* SyncUpdateWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC3BC2585B0C354C6AC61171 /* SyncUpdateWatchdog.swift */; };
 		C2C41E73AC253720AB8CF31F /* Selection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00E03399349EE1327FBF8F2F /* Selection.swift */; };
 		C3F2AEC2D293A850F2662F96 /* PromptNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DF31065DC87C48754C4E77E /* PromptNavigator.swift */; };
+		C4C15C78B38754E076576D1E /* PillRenameBackgroundTabBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B87F64AD1253D1F76877C6C /* PillRenameBackgroundTabBlindTests.swift */; };
 		C5015142AAA1DBD6F68B87A7 /* ScrollIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AD53A2CCAB9D77F7886F30C /* ScrollIndicator.swift */; };
 		C52EC2BDD4C00C4EE06E3562 /* WideGlyphSelectionStartBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4D34704307A82D9EC41596A /* WideGlyphSelectionStartBlindTests.swift */; };
 		C5B3ACB41EC7F8E5CA0072C3 /* FindWrappedRunBoundBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7BA6DC06F2933631DCBFC7F /* FindWrappedRunBoundBlindTests.swift */; };
@@ -436,6 +437,7 @@
 		291265177FC694F905FFDC57 /* PTYLargePasteBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PTYLargePasteBlindTests.swift; sourceTree = "<group>"; };
 		29B3E82A4501BBC90AF74B61 /* KittyKeyRepeatEventTypeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyKeyRepeatEventTypeBlindTests.swift; sourceTree = "<group>"; };
 		2B23446ADB6651910E08359F /* GlyphBitmapCacheEvictionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphBitmapCacheEvictionBlindTests.swift; sourceTree = "<group>"; };
+		2B87F64AD1253D1F76877C6C /* PillRenameBackgroundTabBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PillRenameBackgroundTabBlindTests.swift; sourceTree = "<group>"; };
 		2C4BC270083DECE0D5228E3E /* ExportScrollbackLiveHistoryBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportScrollbackLiveHistoryBlindTests.swift; sourceTree = "<group>"; };
 		2D6DCE9F2E73793C1E6E99DB /* WideGlyphSelectionHighlightBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WideGlyphSelectionHighlightBlindTests.swift; sourceTree = "<group>"; };
 		2E5B868D4F5850A96DF7361A /* TerminalViewMenuValidationBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewMenuValidationBlindTests.swift; sourceTree = "<group>"; };
@@ -933,6 +935,7 @@
 				24EF339ADEC28C63034BC1B3 /* PasteboardSourceTypePinTests.swift */,
 				AE8A774084AD3DC41640CED5 /* PasteSanitizerBlindTests.swift */,
 				8191EAD1F24770D243E214D0 /* PerViewTextSizeTests.swift */,
+				2B87F64AD1253D1F76877C6C /* PillRenameBackgroundTabBlindTests.swift */,
 				75958A436602CA4AC201A620 /* PowerAwareRenderingTests.swift */,
 				F7EBD4A52B5D2F862E778207 /* PreferencesAdversarialTests.swift */,
 				95C0BBBA77FA353D4E7F2EE2 /* PreferencesDefaultsChangeBlindTests.swift */,
@@ -1632,6 +1635,7 @@
 				75214E26B054D9C9FE470B2A /* PasteSanitizerBlindTests.swift in Sources */,
 				29670EE2E871498BCFF179AB /* PasteboardSourceTypePinTests.swift in Sources */,
 				1703D6B09044C0CA9D6FA76B /* PerViewTextSizeTests.swift in Sources */,
+				C4C15C78B38754E076576D1E /* PillRenameBackgroundTabBlindTests.swift in Sources */,
 				7A9DA91C3A625A4B30BF8810 /* PowerAwareRenderingTests.swift in Sources */,
 				8C9D6C544154F57BC6FA5631 /* PreferencesAdversarialTests.swift in Sources */,
 				D12A6AD02ED25F1BDEA72EE4 /* PreferencesDefaultsChangeBlindTests.swift in Sources */,

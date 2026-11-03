@@ -1566,12 +1566,12 @@ final class TabStripView: NSView {
 
     // MARK: - Context menu (right-click to rename)
 
-    /// Build a per-pill context menu on right-click. Rename / Reset items
-    /// target the right-clicked window's `MainWindowController`
-    /// explicitly so the responder chain's state at the moment the menu
-    /// fires (which may lag key-window transitions on slow machines or
-    /// under tests) can't mis-route the action to a different window's
-    /// controller. Audit titlebar-tabs F15.
+    /// Build a per-pill context menu on right-click. The Reset item targets
+    /// the right-clicked window's `MainWindowController` explicitly (Rename
+    /// targets this strip, see below) so the responder chain's state at the
+    /// moment the menu fires (which may lag key-window transitions on slow
+    /// machines or under tests) can't mis-route the action to a different
+    /// window's controller. Audit titlebar-tabs F15.
     override func menu(for event: NSEvent) -> NSMenu? {
         let p = convert(event.locationInWindow, from: nil)
         // Hit-test against pillFrames. Falling outside a pill (e.g. over the
@@ -1607,12 +1607,18 @@ final class TabStripView: NSView {
         // they wouldn't fire usefully.
         let session = controller?.session
         if session != nil {
+            // Targets THIS strip, not the pill's controller: for a
+            // background tab the controller's own strip lives in an
+            // ordered-out window, so the editor opened there is invisible
+            // and a later tab-list change commits its untouched text as a
+            // permanent title override. This strip is the one on screen.
             let rename = NSMenuItem(
                 title: "Rename…",
-                action: #selector(MainWindowController.renameActiveTab(_:)),
+                action: #selector(renamePillFromMenu(_:)),
                 keyEquivalent: ""
             )
-            rename.target = controller
+            rename.target = self
+            rename.representedObject = targetWindow
             menu.addItem(rename)
         }
 
@@ -1647,6 +1653,16 @@ final class TabStripView: NSView {
         menu.addItem(close)
 
         return menu
+    }
+
+    /// "Rename…" from the pill context menu: edit the right-clicked pill
+    /// inline in this strip. Resolves the index from `tabs` at fire time, so
+    /// a list change while the menu was open just drops the request.
+    @objc private func renamePillFromMenu(_ sender: NSMenuItem) {
+        guard let window = sender.representedObject as? NSWindow,
+              let idx = tabs.firstIndex(where: { $0 === window })
+        else { return }
+        beginEditing(pillIndex: idx)
     }
 
     /// The "Move Tab to New Window" / "Move Tab to Window ▸" section of the
