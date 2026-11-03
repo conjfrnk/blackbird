@@ -464,7 +464,7 @@ extension TerminalView: NSTextInputClient {
     /// can't synthesise reliably; this lets `IMETests` assert that a
     /// preedit buffer is cleared without booting a full windowed host.
     func _testOnly_simulateWindowResignKey() {
-        discardCompositionOnResignKey()
+        discardKeyboardStateOnResignKey()
     }
     #endif
 

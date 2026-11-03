@@ -214,12 +214,23 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     var pendingInsertTextModifiers: KeyEncoder.Modifiers?
     /// `isARepeat` of that same `keyDown`; the `insertText` path can't see it.
     var pendingInsertTextIsRepeat = false
-    /// `keyCode`s whose `keyDown` got past the ⌘ / no-session early returns
-    /// (so the TUI was given a chance to see the press). `keyUp` forwards a
-    /// release only for these; a ⌘ shortcut's key-up arrives with `.command`
-    /// already lifted when the user releases ⌘ first, and would otherwise
-    /// look like a plain key release the TUI never saw go down.
-    private var forwardedKeyDownCodes = Set<UInt16>()
+    /// What a forwarded `keyDown` told the TUI: the modifiers it carried and
+    /// the base characters (`charactersIgnoringModifiers`) it was encoded from.
+    private struct ForwardedKeyDown {
+        let modifiers: KeyEncoder.Modifiers
+        let chars: String
+    }
+    /// `keyCode` → the first (non-repeat) `keyDown` of each key the TUI was
+    /// given a chance to see (past the ⌘ / no-session early returns and the
+    /// IME). `keyUp` forwards a release only for these, encoded from the PRESS's
+    /// modifiers and characters, never the key-up event's own: a ⌘ shortcut's
+    /// key-up arrives with `.command` already lifted when the user releases ⌘
+    /// first and would otherwise look like a plain key release the TUI never saw
+    /// go down, and a key-up whose Option/Shift changed since the press would
+    /// otherwise be reported with the wrong modifier field or, for a shifted US
+    /// symbol, a different key code. Auto-repeats never overwrite an entry.
+    /// Dropped when focus leaves (`forgetForwardedKeyDowns`).
+    private var forwardedKeyDowns: [UInt16: ForwardedKeyDown] = [:]
     /// Wheel-delta → line accumulator for the mouse-report and DEC 1007
     /// alternate-scroll paths (see `scrollWheel`). Reset on `mouseExited`.
     var wheelAccumulator = WheelScrollAccumulator()
@@ -825,6 +836,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     public required init(coder: NSCoder) { fatalError("not supported") }
 
     public override var acceptsFirstResponder: Bool { true }
+
+    public override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { forgetForwardedKeyDowns() }
+        return resigned
+    }
 
     /// NSView's default returns `true` when the view is non-opaque — and our
     /// MTKView is non-opaque whenever the user enables translucency, so by
@@ -1457,9 +1474,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             // responsibility.
             self?.disableSecureEventInputIfHeld()
             // Tear down any in-flight IME composition so a stale preedit
-            // can't commit into the next-focused terminal on Cmd-Tab. See
-            // `discardCompositionOnResignKey()` for the rationale.
-            self?.discardCompositionOnResignKey()
+            // can't commit into the next-focused terminal on Cmd-Tab, and
+            // forget held keys whose key-ups go elsewhere. See
+            // `discardKeyboardStateOnResignKey()`.
+            self?.discardKeyboardStateOnResignKey()
             // Wipe modifier + hover state so a missed ⌘-release during
             // focus loss (flagsChanged fires only for the key window)
             // doesn't leave a stale ⌘-hover highlight painted into the
@@ -2043,6 +2061,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // enforces the spec's ⌘C/⌃C strict separation: ⌃C always sends 0x03
         // (via KeyEncoder's control path), ⌘C is never re-encoded as 'c'.
         if event.modifierFlags.contains(.command) {
+            // A fresh (non-repeat) press of a key still on the ledger means its
+            // key-up was lost; this shortcut's key-up must not be paired with
+            // that earlier press.
+            if !event.isARepeat { forwardedKeyDowns.removeValue(forKey: event.keyCode) }
             super.keyDown(with: event)
             return
         }
@@ -2054,8 +2076,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             super.keyDown(with: event)
             return
         }
-
-        forwardedKeyDownCodes.insert(event.keyCode)
 
         // Stamp the keystroke entry point for the input→pixel latency probe.
         // No-op unless BB_LATENCY_PROBE=1. Placed after the ⌘ / no-session
@@ -2077,7 +2097,27 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
         // IME arbitration first; if the composition absorbed the keystroke
         // (preedit visible or a grapheme committed via insertText) we're done.
-        if routeKeyDownThroughIME(event) { return }
+        // A key that belongs to a composition (pending going in or still
+        // pending) never reaches the TUI, so it owes no release; a plain
+        // printable committed through insertText is the key's own press and
+        // does.
+        let wasComposing = hasMarkedText()
+        let imeAbsorbed = routeKeyDownThroughIME(event)
+        // Only the press records: an auto-repeat is stamped with whatever
+        // modifiers are down NOW (Option lifted mid-hold), which would
+        // overwrite the ones the TUI was told. A repeat with no entry (the
+        // press was never seen here) still records, as the TUI is given it.
+        if !(wasComposing || hasMarkedText()),
+           !event.isARepeat || forwardedKeyDowns[event.keyCode] == nil {
+            forwardedKeyDowns[event.keyCode] = ForwardedKeyDown(
+                modifiers: KeyEncoder.Modifiers(event: event),
+                chars: KeyEventClassifier.normalizedReturnChars(
+                    keyCode: event.keyCode,
+                    chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
+                )
+            )
+        }
+        if imeAbsorbed { return }
 
         // Control-byte fast path (Ctrl+letter → raw 0x01-0x1A); returns true
         // when it wrote the byte directly, false to fall through to the encoder.
@@ -2320,15 +2360,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// post-keystroke traffic we synthesise ourselves. Audit key-encoder F1
     /// (partial — flag 2 of the four progressive-enhancement flags).
     public override func keyUp(with event: NSEvent) {
-        let pressWasForwarded = forwardedKeyDownCodes.remove(event.keyCode) != nil
+        let press = forwardedKeyDowns.removeValue(forKey: event.keyCode)
         // `session != nil` rather than a binding: the release bytes go out
         // through `sendToSession`, so nothing here needs the session itself —
         // this is purely "is there anywhere to send".
         guard session != nil else {
-            super.keyUp(with: event)
-            return
-        }
-        if event.modifierFlags.contains(.command) {
             super.keyUp(with: event)
             return
         }
@@ -2342,12 +2378,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // A release without a forwarded press is an app shortcut's key-up
         // (⌘C, ⌘↑ with ⌘ lifted first, or a key-down the menu consumed before
         // it reached the view). The TUI never saw the press, so it gets no
-        // release either.
-        guard pressWasForwarded else {
+        // release either. The key-up's own `.command` flag does not decide it:
+        // with a forwarded press on the ledger (⌘ went down while the key was
+        // held) the TUI is still owed its release; without one it isn't.
+        guard let press else {
             super.keyUp(with: event)
             return
         }
-        let mods = KeyEncoder.Modifiers(event: event)
+        // The PRESS's modifiers and characters, not this event's: with Option
+        // lifted before the letter the key-up reads as a plain release, but
+        // the TUI was told `CSI 97;3u` and pairs on `CSI 97;3:3u`; with Shift
+        // pressed after a `2` the key-up reads `@`, a different key code.
+        let mods = press.modifiers
         if let special = KeyEventClassifier.specialKey(for: event) {
             // F-S3-005: arrows / nav / F-keys DO have flag-2 release events in
             // the Kitty spec — `CSI <n> ; <mod>:3 <final>`. encodeSpecial emits
@@ -2373,10 +2415,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         }
         let chars = KeyEventClassifier.normalizedTabChars(
             keyCode: event.keyCode,
-            chars: KeyEventClassifier.normalizedReturnChars(
-                keyCode: event.keyCode,
-                chars: event.charactersIgnoringModifiers ?? event.characters ?? ""
-            )
+            chars: press.chars
         )
         let bytes = encoder.encode(
             chars: chars, modifiers: mods, mode: termMode, eventType: .release
@@ -2386,6 +2425,25 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         } else {
             super.keyUp(with: event)
         }
+    }
+
+    /// Keyboard-state teardown for a window that stops being key: drop an
+    /// in-flight IME composition (`discardCompositionOnResignKey`) and the
+    /// forwarded-press ledger (`forgetForwardedKeyDowns`). One body shared by
+    /// the `didResignKey` observer and `_testOnly_simulateWindowResignKey`, so
+    /// the test seam cannot drift from production.
+    func discardKeyboardStateOnResignKey() {
+        discardCompositionOnResignKey()
+        forgetForwardedKeyDowns()
+    }
+
+    /// Forget the presses the TUI was given. Called when focus leaves (first
+    /// responder or key window): the matching key-ups go to another app /
+    /// window, so an entry left behind would pair with an unrelated later
+    /// key-up of the same physical key (a ⌘ shortcut's, typically) and report
+    /// a release for a press the TUI never saw.
+    private func forgetForwardedKeyDowns() {
+        forwardedKeyDowns.removeAll()
     }
 
     /// Resolve a font from the preferences value. `name` can be either:
