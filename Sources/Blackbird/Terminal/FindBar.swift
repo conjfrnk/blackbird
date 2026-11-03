@@ -105,6 +105,33 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     /// 32 pt when collapsed, 60 pt when the replace row is expanded.
     public var preferredHeight: CGFloat { isReplaceVisible ? 60 : 32 }
 
+    // MARK: - Width priorities
+
+    /// Squeeze order when the bar is narrower than its natural width. Every
+    /// width constraint gets a DISTINCT priority: two equal-priority
+    /// constraints competing for the same shortfall are resolved arbitrarily
+    /// by the solver, so which control collapsed would depend on the bar's
+    /// resize history. Lowest priority gives way first:
+    ///
+    ///     400  find field's preferred 220 pt        shrinks first
+    ///     440  match counter / banner               truncates (tail)
+    ///     450  Replace button                       clips, then hides (see `layout()`)
+    ///     470  find/replace field's 60 pt floor     shrinks below 60 only for Replace All
+    ///     480  Replace All button                   clips only below the hard floor
+    ///     490  find/replace field's hard floor      never narrower than this
+    ///
+    /// Replace All is the last button to give way because it is the only
+    /// route to replace-all (Replace has ⌘⌥E). Everything must stay below
+    /// `windowSizeStayPut` (500), which holds the bar's own width: above it
+    /// the layout engine stretches the bar's frame instead of squeezing the
+    /// contents.
+    private static let fieldPreferredPriority = NSLayoutConstraint.Priority(rawValue: 400)
+    private static let matchLabelPriority = NSLayoutConstraint.Priority(rawValue: 440)
+    private static let replaceButtonPriority = NSLayoutConstraint.Priority(rawValue: 450)
+    private static let fieldSoftFloorPriority = NSLayoutConstraint.Priority(rawValue: 470)
+    private static let replaceAllButtonPriority = NSLayoutConstraint.Priority(rawValue: 480)
+    private static let fieldHardFloorPriority = NSLayoutConstraint.Priority(rawValue: 490)
+
     // MARK: - Dynamic layout constraints
 
     /// Active only while the replace row is **hidden** (collapsed state).
@@ -142,6 +169,12 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         // read as a plain string; with it the screen reader announces
         // "Find results: 3 of 12" when the text updates.
         matchLabel.setAccessibilityLabel("Find results")
+        // Truncate instead of running under the close button when the bar is
+        // too narrow for the count / a transient banner (see the width
+        // priorities in the constraint block below). The full text stays in
+        // `stringValue`, which is what VoiceOver reads.
+        matchLabel.lineBreakMode = .byTruncatingTail
+        matchLabel.setContentCompressionResistancePriority(Self.matchLabelPriority, for: .horizontal)
 
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.bezelStyle = .inline
@@ -166,6 +199,10 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         replaceAllButton.target = self
         replaceAllButton.action = #selector(replaceAll)
 
+        // Clip rather than stretch the bar (see the width priorities above).
+        replaceButton.setContentCompressionResistancePriority(Self.replaceButtonPriority, for: .horizontal)
+        replaceAllButton.setContentCompressionResistancePriority(Self.replaceAllButtonPriority, for: .horizontal)
+
         addSubview(caretButton)
         addSubview(field)
         addSubview(matchLabel)
@@ -174,6 +211,23 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         addSubview(replaceButton)
         addSubview(replaceAllButton)
 
+        // The bar spans the terminal view, which can be far narrower than the
+        // controls' natural width. The find field is the flexible control: it
+        // prefers 220 pt and gives way to a 60 pt floor first, then the
+        // counter / banner truncates and Replace clips (see the width
+        // priorities above). Only on a bar too narrow for a 60 pt field plus
+        // Replace All does the field shrink below 60, down to a hard floor, so
+        // Replace All stays whole and on the bar down to the window's minimum
+        // width. The field's default compression resistance (750) is lowered
+        // so a long query can't out-vote those priorities.
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let fieldPreferredWidth = field.widthAnchor.constraint(equalToConstant: 220)
+        fieldPreferredWidth.priority = Self.fieldPreferredPriority
+        let fieldSoftFloorWidth = field.widthAnchor.constraint(greaterThanOrEqualToConstant: 60)
+        fieldSoftFloorWidth.priority = Self.fieldSoftFloorPriority
+        let fieldHardFloorWidth = field.widthAnchor.constraint(greaterThanOrEqualToConstant: 32)
+        fieldHardFloorWidth.priority = Self.fieldHardFloorPriority
+
         // ── Permanent constraints (always active) ──────────────────────────
         NSLayoutConstraint.activate([
             // caret
@@ -181,9 +235,13 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             caretButton.widthAnchor.constraint(equalToConstant: 16),
             // find field
             field.leadingAnchor.constraint(equalTo: caretButton.trailingAnchor, constant: 4),
-            field.widthAnchor.constraint(equalToConstant: 220),
-            // match label
+            fieldPreferredWidth,
+            fieldSoftFloorWidth,
+            fieldHardFloorWidth,
+            // match label (never under the close button; truncates once the
+            // field is at its floor)
             matchLabel.leadingAnchor.constraint(equalTo: field.trailingAnchor, constant: 10),
+            matchLabel.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -6),
             // close button
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             // replace field (same x as find field, same width)
@@ -220,6 +278,11 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             replaceField.topAnchor.constraint(equalTo: topAnchor, constant: 36),
             replaceButton.topAnchor.constraint(equalTo: topAnchor, constant: 36),
             replaceAllButton.topAnchor.constraint(equalTo: topAnchor, constant: 36),
+            // Replace All ends on the bar, so Replace, then the shared
+            // find/replace field width, shrink to make room. Expanded-only:
+            // hidden views still take part in layout, and a collapsed bar
+            // must not give up field width to buttons it isn't showing.
+            replaceAllButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
         ]
 
         // Start in collapsed state.
@@ -230,6 +293,20 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     }
 
     public required init?(coder: NSCoder) { fatalError() }
+
+    // MARK: - Layout
+
+    /// Replace (current) is the first button to give way on a narrow bar. A
+    /// button squeezed below its title width is a clipped sliver, so once the
+    /// layout can't give it the full title it is hidden instead (⌘⌥E still
+    /// replaces the current match). Hidden views keep their constraints, so
+    /// the pass is idempotent: it reads frames and never changes them.
+    public override func layout() {
+        super.layout()
+        let fits = replaceButton.frame.width + 0.5 >= replaceButton.intrinsicContentSize.width
+        let shouldHide = !isReplaceVisible || !fits
+        if replaceButton.isHidden != shouldHide { replaceButton.isHidden = shouldHide }
+    }
 
     // MARK: - Theming
 
