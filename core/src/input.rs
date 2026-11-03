@@ -163,14 +163,23 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
     // The grid refuses an OSC 8 link past its live-byte budget by printing the
     // text unattributed. Take the flag on every advance so it never goes
     // stale, and log only the first: a flood refuses one link per row.
+    //
+    // What an erase frees depends on WHICH SCREEN holds the links, not on how
+    // many rows the grid keeps: `Grid::clear_history` truncates, so the rows an
+    // erase reaches are released at once. `osc8_refusal_log_truth_blind.rs`
+    // measures each case and reads every clause below that names a remedy as a
+    // claim about the screen holding the links, which it checks against the
+    // measurement; keep them in step (a changed claim also needs the test's
+    // `SHIPPED_LOG` fixture updated).
     if bb.term.take_hyperlink_over_budget() && crate::osc::once(&mut bb.osc8_live_cap_logged) {
         breadcrumb!(
             "[blackbird_core] OSC 8 hyperlink live-byte budget exhausted — new hyperlinks \
              are refused (printed without a link) until the cells holding links are \
-             overwritten or scroll out of the retained scrollback. Erasing the screen frees \
-             them only if the rows holding them are actually released: a plain erase \
-             (ESC[2J, ESC[3J) does not reach the other screen's rows, and ⌘K \
-             (bb_term_clear_all) does not reach the shell's visible rows while the alternate \
+             overwritten or scroll out of the retained scrollback. Erasing the screen \
+             and then its scrollback (ESC[2J, ESC[3J) frees the links held by the \
+             screen that is showing, but a plain erase does not reach the other \
+             screen's rows; ⌘K (bb_term_clear_all) also frees the other screen's \
+             links, but it does not reach the shell's visible rows while the alternate \
              screen is up. Symptom: 'links stopped working'. One-shot per session."
         );
     }

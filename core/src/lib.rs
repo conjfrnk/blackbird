@@ -291,11 +291,13 @@ pub struct BBTerm {
     /// live-byte budget on retained hyperlink strings (`HYPERLINK_LIVE_MAX`,
     /// vendored alacritty_terminal). Past it the grid refuses every new link
     /// until the cells holding links are overwritten, scroll out of the
-    /// retained scrollback, or are erased with their rows actually released
-    /// (⌘K reaches both grids' history and the active screen, not the shell's
-    /// visible rows while the alt screen is up), so cells print with no
-    /// attribution and nothing says why. Re-armed by `bb_term_clear_all`,
-    /// like `osc8_intern_cap_logged`.
+    /// retained scrollback, or are erased (`Grid::clear_history` truncates, so
+    /// the rows an erase reaches are released at once). A plain erase reaches
+    /// only the screen that is showing; ⌘K also erases both grids' history
+    /// and, with the primary screen up, the alt grid's visible cells too, but
+    /// not the shell's visible rows while the alt screen is up. Cells print
+    /// with no attribution and nothing says why. Re-armed by
+    /// `bb_term_clear_all`, like `osc8_intern_cap_logged`.
     pub(crate) osc8_live_cap_logged: bool,
 }
 

@@ -108,17 +108,17 @@ impl Hyperlink {
         if uri.len() > HYPERLINK_URI_MAX {
             return Err(HyperlinkRefused::TooLong);
         }
-        // Copy the prefix rather than `truncate`: the cost charged below is the capacity, and
-        // truncating in place would keep (and bill) the whole oversized allocation.
-        let id = id.map(|id| {
-            if id.len() <= HYPERLINK_ID_MAX {
-                return id;
+        // Cut in place: `HyperlinkInner::new` copies the id (`to_string`), and the cost charged
+        // below is that copy's capacity, so the oversized original is neither kept nor billed.
+        let id = id.map(|mut id| {
+            if id.len() > HYPERLINK_ID_MAX {
+                let mut cut = HYPERLINK_ID_MAX;
+                while !id.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                id.truncate(cut);
             }
-            let mut cut = HYPERLINK_ID_MAX;
-            while !id.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            id[..cut].to_owned()
+            id
         });
 
         let mut inner = HyperlinkInner::new(id, uri);
