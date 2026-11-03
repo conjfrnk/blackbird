@@ -48,8 +48,8 @@ public final class SessionTitleState: ObservableObject {
 
     /// The title to display in the window / tab bar. Override wins when set;
     /// otherwise the shell-reported OSC title; otherwise `nil` so the
-    /// TerminalView sink keeps the current `window.title` (which the window
-    /// controller seeds with the shell basename at session start). Returning
+    /// TerminalView sink shows its `defaultTitle` (the shell basename the
+    /// window controller seeds at session start). Returning
     /// a literal "Terminal" placeholder here used to overwrite the
     /// shell-basename seed the moment a user cleared their rename override
     /// in a session whose shell hadn't emitted OSC 0/2 yet — bare bash/zsh
@@ -91,9 +91,8 @@ public final class SessionTitleState: ObservableObject {
     /// pipeline. UI observes via Combine (`TerminalView.$title.sink` on
     /// `session.titleState`); there's no notification channel — Combine is
     /// canonical. Callers on any thread hop to main if needed. A nil value
-    /// means "no real title to set" — the sink falls back to the current
-    /// window.title (shell basename) instead of overwriting it with a
-    /// placeholder.
+    /// means "no real title to set" — the sink falls back to the view's
+    /// `defaultTitle` (shell basename) instead of a placeholder.
     ///
     /// Audit L6: when called off main, recompute `displayTitle` INSIDE
     /// the main-async block rather than capturing a snapshot before the

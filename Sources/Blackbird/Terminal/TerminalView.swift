@@ -98,6 +98,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         didSet { subscribeToSession() }
     }
 
+    /// The title the tab shows when neither a rename nor an OSC 0/2 title is
+    /// active (the shell basename, set by `MainWindowController.startSession`).
+    /// Kept apart from `window.title` because that gets overwritten by every
+    /// rename / program title, so it can't be the thing a clear reverts to.
+    var defaultTitle: String?
+
     public let renderer: MetalRenderer
     public private(set) var metrics: CellMetrics
     public private(set) var encoder: KeyEncoder = {
@@ -1964,9 +1970,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 // Tab labels in AppKit's native tab group mirror window.title,
                 // so one write covers both the titlebar and the tab. When the
                 // shell hasn't emitted OSC 0/2 yet (stock zsh/bash until the
-                // user configures precmd), fall back to the session's default
-                // (shell basename) set by MainWindowController.
-                let fallback = self.window?.title ?? "Blackbird"
+                // user configures precmd), or a rename / XTWINOPS pop just
+                // cleared the title, fall back to the default (shell
+                // basename) set by MainWindowController. `window.title` is
+                // only the last resort: by now it holds the title being
+                // cleared.
+                let fallback = self.defaultTitle ?? self.window?.title ?? "Blackbird"
                 let useTitle = title?.isEmpty == false ? title : fallback
                 self.window?.title = useTitle ?? "Blackbird"
             }

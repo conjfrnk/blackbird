@@ -484,8 +484,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let shell = resolved.path
         // Seed a useful default title (shell basename) so tabs aren't all
         // "Blackbird" before the shell emits OSC 0/2. The TerminalView
-        // subscriber will replace this the moment the shell sets its own.
-        window?.title = (shell as NSString).lastPathComponent
+        // subscriber will replace this the moment the shell sets its own,
+        // and returns to it (`defaultTitle`) when a rename or program title
+        // is cleared.
+        let defaultTitle = (shell as NSString).lastPathComponent
+        window?.title = defaultTitle
+        view.defaultTitle = defaultTitle
         do {
             let s = try sessionLifecycle.makeSession(
                 shell: shell,
