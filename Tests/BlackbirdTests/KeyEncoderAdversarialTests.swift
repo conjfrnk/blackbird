@@ -265,13 +265,14 @@ final class KeyEncoderAdversarialTests: XCTestCase {
     /// branch fails fast and informatively.
     func test_allSpecials_withShift_haveModifierEncoding() {
         let enc = KeyEncoder()
-        // (key, expected Shift output). For arrows / Home/End / F1-F4
-        // it's `ESC[1;2<final>`; for F5-F12 / PageUp/Down / Insert /
-        // Delete it's `ESC[<num>;2~`.
+        // (key, expected Shift output). For arrows / Home/End / F1/F2/F4
+        // it's `ESC[1;2<final>`; for F3 / F5-F12 / PageUp/Down / Insert /
+        // Delete it's `ESC[<num>;2~` (F3 is `ESC[13;2~`: `ESC[1;2R` would
+        // read as a cursor-position report).
         let arrowFinal: [(KeyEncoder.SpecialKey, UInt8)] = [
             (.up, 0x41), (.down, 0x42), (.right, 0x43), (.left, 0x44),
             (.home, 0x48), (.end, 0x46),
-            (.f1, 0x50), (.f2, 0x51), (.f3, 0x52), (.f4, 0x53),
+            (.f1, 0x50), (.f2, 0x51), (.f4, 0x53),
         ]
         for (key, final) in arrowFinal {
             let expected = Data([0x1B, 0x5B, 0x31, 0x3B, 0x32, final]) // ESC [ 1 ; 2 <final>
@@ -282,6 +283,7 @@ final class KeyEncoderAdversarialTests: XCTestCase {
         let tildeNum: [(KeyEncoder.SpecialKey, String)] = [
             (.insert, "2"), (.delete, "3"),
             (.pageUp, "5"), (.pageDown, "6"),
+            (.f3, "13"),
             (.f5, "15"), (.f6, "17"), (.f7, "18"), (.f8, "19"),
             (.f9, "20"), (.f10, "21"), (.f11, "23"), (.f12, "24"),
         ]

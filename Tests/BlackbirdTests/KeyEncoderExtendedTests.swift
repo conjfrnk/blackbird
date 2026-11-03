@@ -291,7 +291,7 @@ final class KeyEncoderExtendedTests: XCTestCase {
         return Data(bytes)
     }
 
-    // F1..F4 — `CSI 1 ; M <final>` (final = P/Q/R/S).
+    // F1..F4 — `CSI 1 ; M <final>` (final = P/Q/S; F3 is `CSI 13 ; M ~`).
 
     func test_f1_withModifiers_csiOneForm() {
         let enc = KeyEncoder()
@@ -318,8 +318,10 @@ final class KeyEncoderExtendedTests: XCTestCase {
                        csiOneLetter(final: 0x50, mod: 6))
         XCTAssertEqual(enc.encodeSpecial(.f2, modifiers: [.shift, .control]),
                        csiOneLetter(final: 0x51, mod: 6))
+        // F3 is the exception: `CSI 1;m R` collides with a cursor-position
+        // report, so it is `CSI 13;m ~` (kitty protocol + xterm-kitty kf39).
         XCTAssertEqual(enc.encodeSpecial(.f3, modifiers: [.shift, .control]),
-                       csiOneLetter(final: 0x52, mod: 6))
+                       csiTilde(num: "13", mod: 6))
         XCTAssertEqual(enc.encodeSpecial(.f4, modifiers: [.shift, .control]),
                        csiOneLetter(final: 0x53, mod: 6))
     }

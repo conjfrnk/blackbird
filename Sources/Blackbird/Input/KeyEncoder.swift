@@ -617,8 +617,8 @@ public final class KeyEncoder {
     ///   vim, nvim, less, and most full-screen TUIs set this.
     /// CSI-parameter shape `(lead, terminator)` for the special keys that have
     /// one — i.e. those encoded as `CSI <lead> [; <mod>[:<event>]] <terminator>`
-    /// (arrows/Home/End/F1–F4 use a final letter terminator; nav + F5–F12 use
-    /// `~`). Used to encode Kitty flag-2 release/repeat events without
+    /// (arrows/Home/End/F1/F2/F4 use a final letter terminator; nav + F3 +
+    /// F5–F12 use `~`). Used to encode Kitty flag-2 release/repeat events without
     /// duplicating the press switch's selection logic, so press encoding stays
     /// byte-identical. Keypad (DECPAM / SS3) keys have no such form → nil.
     private static func csiParamShape(for key: SpecialKey) -> (lead: String, term: UInt8)? {
@@ -631,7 +631,12 @@ public final class KeyEncoder {
         case .end:      return ("1", 0x46)   // F
         case .f1:       return ("1", 0x50)   // P
         case .f2:       return ("1", 0x51)   // Q
-        case .f3:       return ("1", 0x52)   // R
+        // F3 is the one F1–F4 key that is NOT `CSI 1 ; <mod> R`: that form is
+        // byte-identical to a cursor-position report (`CSI <row> ; <col> R`),
+        // so kitty's protocol and the bundled xterm-kitty terminfo
+        // (kf15/kf27/kf39/kf51/kf63) use `CSI 13 ; <mod> ~`. Unmodified F3
+        // stays SS3 R (see `csiParamPress`).
+        case .f3:       return ("13", 0x7E)
         case .f4:       return ("1", 0x53)   // S
         case .pageUp:   return ("5", 0x7E)   // ~
         case .pageDown: return ("6", 0x7E)
@@ -689,9 +694,13 @@ public final class KeyEncoder {
             return applicationCursorKeys
                 ? Data([0x1B, 0x4F, shape.term])
                 : Data([0x1B, 0x5B, shape.term])
-        case .f1, .f2, .f3, .f4:
-            // SS3 <term> (ESC O P/Q/R/S) — always, regardless of DECCKM.
+        case .f1, .f2, .f4:
+            // SS3 <term> (ESC O P/Q/S) — always, regardless of DECCKM.
             return Data([0x1B, 0x4F, shape.term])
+        case .f3:
+            // SS3 R. Not `shape.term`: F3's CSI shape is `13 ~` (see
+            // `csiParamShape`), so its SS3 final is spelled out.
+            return Data([0x1B, 0x4F, 0x52])
         default:
             // Nav + F5–F12 keep the numeric lead: CSI <lead> <term>.
             return Data([0x1B, 0x5B]) + Data(shape.lead.utf8) + Data([shape.term])
