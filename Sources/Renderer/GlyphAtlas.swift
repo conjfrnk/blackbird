@@ -1180,6 +1180,37 @@ public final class GlyphAtlas {
             foreground: nil
         )
         ctx.textPosition = CGPoint(x: 0, y: metrics.descent)
+
+        // Apple Color Emoji ignores the cell: at 13 pt the picture is ~16 pt
+        // square whatever the font's advance. Drawn 1:1 it overflows even a
+        // 2-cell slot by ~1 pt (top and right), and a width-1 pictograph or
+        // regional indicator (the core only widens VS16 / keycap sequences)
+        // keeps just its left half. Uniformly shrink the picture's measured
+        // ink to fit the slot and centre it; a picture that already sits
+        // inside the slot is drawn unscaled and unmoved, as before.
+        //
+        // The ink is MEASURED from a scratch render, not taken from
+        // CTLineGetImageBounds: for regional indicators that box is ~13 pt
+        // square and offset right of the real ~11 pt tile, which fitted the
+        // wrong rectangle and still clipped the tile's left edge.
+        let slotPx = CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h))
+        if let inkPx = measureColorInk(
+            of: line, slotWidthPx: w, slotHeightPx: h, baselineY: metrics.descent,
+            space: cs, bitmapInfo: bitmapInfo
+        ) {
+            let fit: CGFloat = min(1, slotPx.width / inkPx.width, slotPx.height / inkPx.height)
+            if fit < 1 || !slotPx.contains(inkPx) {
+                var tx = slotPx.midX - fit * inkPx.midX
+                var ty = slotPx.midY - fit * inkPx.midY
+                if fit == 1 {
+                    // Unscaled: keep the bitmap strike on whole pixels (crisp).
+                    tx = tx.rounded()
+                    ty = ty.rounded()
+                }
+                ctx.translateBy(x: tx / scale, y: ty / scale)
+                ctx.scaleBy(x: fit, y: fit)
+            }
+        }
         CTLineDraw(line, ctx)
 
         // Cache the rasterised bytes (bgra8, bytesPerRow = w*4) BEFORE the
@@ -1193,6 +1224,59 @@ public final class GlyphAtlas {
             resolveTarget: { self.ensureRealColorTexture() ? self.colorTexture : nil },
             at: origin
         )
+    }
+
+    /// Tight pixel bounds of the visible ink `line` draws at `baselineY`
+    /// (`ctx.textPosition.y`, in points) inside a `w`×`h` px slot, in slot
+    /// pixel coordinates (origin bottom-left, y up; may extend outside
+    /// `0...w` / `0...h`). Renders once into a scratch canvas padded by
+    /// `max(w, h)` px on every side, so a picture that overflows the slot
+    /// is measured whole, and takes the alpha bounding box (>= 8/255, so
+    /// faint antialiasing halos don't inflate it). `nil` when the scratch
+    /// context can't be made or nothing visible was drawn; callers then
+    /// draw unfitted. Cost: one extra CoreText draw per colour glyph that
+    /// misses `GlyphBitmapCache`; scratch is ~(w+2m)·(h+2m)·4 bytes
+    /// (about 30 KB at 13 pt, well under 1 MB at 48 pt).
+    private func measureColorInk(
+        of line: CTLine, slotWidthPx w: Int, slotHeightPx h: Int, baselineY: CGFloat,
+        space: CGColorSpace, bitmapInfo: UInt32
+    ) -> CGRect? {
+        let margin = max(w, h)
+        let cw = w + 2 * margin
+        let ch = h + 2 * margin
+        guard let scratch = makeBitmapContext(
+            width: cw, height: ch, bytesPerRow: cw * 4, space: space, bitmapInfo: bitmapInfo
+        ), let data = scratch.data else { return nil }
+        scratch.clear(CGRect(x: 0, y: 0, width: cw, height: ch))
+        scratch.setShouldAntialias(true)
+        scratch.setAllowsFontSmoothing(true)
+        scratch.scaleBy(x: scale, y: scale)
+        // Whole-pixel shift, so the glyph rasterises exactly as it will in the slot.
+        scratch.translateBy(x: CGFloat(margin) / scale, y: CGFloat(margin) / scale)
+        scratch.textMatrix = .identity
+        scratch.textPosition = CGPoint(x: 0, y: baselineY)
+        CTLineDraw(line, scratch)
+
+        let px = data.assumingMemoryBound(to: UInt8.self)
+        let minAlpha: UInt8 = 8
+        var minCol = Int.max, maxCol = Int.min, minRow = Int.max, maxRow = Int.min
+        for row in 0..<ch {
+            let rowBase = row * cw * 4
+            for col in 0..<cw where px[rowBase + col * 4 + 3] >= minAlpha {
+                minCol = min(minCol, col)
+                maxCol = max(maxCol, col)
+                minRow = min(minRow, row)
+                maxRow = max(maxRow, row)
+            }
+        }
+        guard maxCol >= minCol, maxRow >= minRow else { return nil }
+        // Bitmap row 0 is the TOP of the canvas; flip to y-up slot coordinates.
+        let x0 = minCol - margin
+        let x1 = maxCol + 1 - margin
+        let y0 = ch - (maxRow + 1) - margin
+        let y1 = ch - minRow - margin
+        return CGRect(
+            x: CGFloat(x0), y: CGFloat(y0), width: CGFloat(x1 - x0), height: CGFloat(y1 - y0))
     }
 
     /// Pre-populate the atlas with glyphs the first real frame is almost
