@@ -65,6 +65,11 @@ public final class PromptNavigator {
         /// Grid row (0 = top of the live grid) at the moment the prompt
         /// was emitted.
         public let gridRow: Int
+        /// Absolute line number (monotonic scroll counter + grid row); equal
+        /// values are the same screen line.
+        fileprivate var absoluteRow: UInt64 {
+            linesScrolled &+ UInt64(clamping: gridRow)
+        }
     }
 
     /// The owning session. `unowned` because the session strongly owns this
@@ -158,7 +163,17 @@ public final class PromptNavigator {
         // and this main drain; don't mutate promptMarks on a session whose
         // consumers are tearing down.
         if session.isTerminatedLocked() { return }
-        session.promptMarks.append(PromptMark(linesScrolled: linesScrolled, gridRow: gridRow))
+        let mark = PromptMark(linesScrolled: linesScrolled, gridRow: gridRow)
+        // fish >= 4 re-emits its native A on every repaint (Ctrl-L, vi-mode
+        // toggle, `commandline -f repaint`), and doubles ours. A repaint of the
+        // newest prompt lands on the same absolute row, so it is not a new jump
+        // target. Compare absolute rows, not struct equality, so the same row
+        // stamped against a different scroll origin still counts as the same.
+        if let last = session.promptMarks.last, last.absoluteRow == mark.absoluteRow {
+            promptCursor = nil
+            return
+        }
+        session.promptMarks.append(mark)
         if session.promptMarks.count > Self.promptMarkCap {
             session.promptMarks.removeFirst(session.promptMarks.count - Self.promptMarkCap)
         }

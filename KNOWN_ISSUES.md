@@ -65,13 +65,16 @@ double every mark.** fish 4.0 added native shell integration (A/B/C/D,
 some with parameters like `A;click_events=1`, which the core accepts —
 the payload slot is only validated for D). With Blackbird's osc133.fish
 also loaded, the core receives each mark twice per prompt cycle;
-consumers tolerate it (B/C/D are last-wins on `lastPromptMark`), but the
-doubled A registers two prompt-ring entries per prompt, so ⌘[ visits
-each fish prompt twice. Pre-existing since v0.6.0 (the doubling predates
-the v0.6.2 B-wrap). Remedy sketch: early-return in osc133.fish when
-`$version` major ≥ 4 (native coverage wins; keep the file for fish 3.x)
-— deferred because it inverts the fish test expectations and the fish-3.x
-`functions -c` autoload path is unverified on the dev machine.
+consumers tolerate it (B/C/D are last-wins on `lastPromptMark`). The
+doubled A used to register two prompt-ring entries per prompt; the ring
+now drops an A that lands on the same absolute row as the newest entry,
+which also absorbs fish's repaint-driven A (Ctrl-L, vi-mode toggle,
+`commandline -f repaint`). Pre-existing since v0.6.0 (the doubling
+predates the v0.6.2 B-wrap). Remedy sketch for the remaining doubled
+B/C/D: early-return in osc133.fish when `$version` major ≥ 4 (native
+coverage wins; keep the file for fish 3.x) — deferred because it inverts
+the fish test expectations and the fish-3.x `functions -c` autoload path
+is unverified on the dev machine.
 
 **`funcsave fish_prompt` while integrated persists Blackbird's prompt
 wrapper, not your prompt.** The fish B-mark wrap copies your
