@@ -58,10 +58,10 @@
 #      until frames present, and asserts max sample > 0.5 ms (real
 #      frame latency, not the synthetic harness's ~0 µs floor).
 #      Canonical real-world keypress→pixel latency measurement.
-#   9. The seven BB_RUN_WINDOW_LIFECYCLE_TESTS=1 real-window tests (F-S6-001
+#   9. The eleven BB_RUN_WINDOW_LIFECYCLE_TESTS=1 real-window tests (F-S6-001
 #      dock zombie, tabbingMode revert, band-click tab hijack, pill
 #      accessibility frames, close-confirm bypass, core-failure keep-open,
-#      joined-tab release) — each in its OWN xcodebuild process, because
+#      joined-tab release, close-selected-tab neighbour x4) — each in its OWN xcodebuild process, because
 #      two real windows / merged tab groups in one xctest host crash it.
 #
 # Env-propagation hazard (load-bearing — read this before editing)
@@ -499,10 +499,11 @@ jobs:
           echo "::notice::Soak sentinel OK - all soak tests emitted 'passed' markers."
 
       - name: xcodebuild test - window-lifecycle tests, one process each
-        # BB_RUN_WINDOW_LIFECYCLE_TESTS gates seven real-window tests
+        # BB_RUN_WINDOW_LIFECYCLE_TESTS gates eleven real-window tests
         # (MainWindowControllerLifetimeTests x4 incl. the F-S6-001
         # dock-zombie regression, CloseConfirmBypassTests,
-        # CoreFailureKeepOpenBlindTests, JoinedTabCloseReleaseBlindTests).
+        # CoreFailureKeepOpenBlindTests, JoinedTabCloseReleaseBlindTests,
+        # CloseSelectedTabNeighborBlindTests x4).
         # They are gated, and so ran in no job, because several real
         # windows / merged tab groups in ONE xctest process crash the
         # host: a close() on a merged window poisons a deferred
@@ -512,7 +513,7 @@ jobs:
         # above or into ci.yml's whole-suite run.
         #
         # Runs even when the soak step above failed (a soak flake or RSS
-        # drift must not also drop the seven lifecycle runs for the night);
+        # drift must not also drop the eleven lifecycle runs for the night);
         # only a cancelled workflow skips it.
         #
         # Same TEST_RUNNER_ env-propagation and ASan-off build settings as
@@ -529,7 +530,7 @@ jobs:
         #     limitations that test throws XCTSkip for). Any other skip
         #     reason - the env-gate message (TEST_RUNNER_ propagation
         #     broken), a reworded XCTSkip, a skip added later - fails;
-        #   * at least one of the seven must actually pass, so "all seven
+        #   * at least one of the eleven must actually pass, so "all eleven
         #     skipped on a runner limitation" cannot go green;
         #   * every allow-listed skip is surfaced as a ::warning:: and in
         #     the step summary, with a passed / skipped tally.
@@ -547,6 +548,10 @@ jobs:
             CloseConfirmBypassTests/test_windowShouldClose_bypassBranch
             CoreFailureKeepOpenBlindTests/test_keepOpenOnCoreFailureSheet_leavesTheWindowOpen
             JoinedTabCloseReleaseBlindTests/test_tabJoinedViaAddTabbedWindow_isFullyReleasedAfterClose
+            CloseSelectedTabNeighborBlindTests/test_closingSelectedMiddleTab_selectsRightNeighbour
+            CloseSelectedTabNeighborBlindTests/test_closingSelectedTab_afterDragReorder_selectsVisualNotArrivalNeighbour
+            CloseSelectedTabNeighborBlindTests/test_closingSelectedLastPill_afterDragReorder_selectsLeftVisualNeighbour
+            CloseSelectedTabNeighborBlindTests/test_closingSelectedLastTab_selectsLeftNeighbour_control
           )
 
           # ERE of the skip reasons (matched at the START of the reason, after
@@ -566,6 +571,11 @@ jobs:
                 echo "no Metal device|headless xctest host did not honor miniaturize" ;;
               test_tabJoinedViaAddTabbedWindow_isFullyReleasedAfterClose)
                 echo "no Metal device|xctest host refused the headless addTabbedWindow merge|even a bare TerminalWindow that joined a group|xctest host did not merge the controller's window" ;;
+              test_closingSelectedMiddleTab_selectsRightNeighbour | \
+              test_closingSelectedTab_afterDragReorder_selectsVisualNotArrivalNeighbour | \
+              test_closingSelectedLastPill_afterDragReorder_selectsLeftVisualNeighbour | \
+              test_closingSelectedLastTab_selectsLeftNeighbour_control)
+                echo "no Metal device|xctest host refused the headless addTabbedWindow merge" ;;
               *) echo "" ;;
             esac
           }
