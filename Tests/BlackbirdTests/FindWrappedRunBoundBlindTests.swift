@@ -564,11 +564,14 @@ final class FindWrappedRunBoundBlindTests: XCTestCase {
     /// A match that is already fully visible must not move the viewport.
     func test_control_matchAlreadyFullyVisible_viewportDoesNotMove() throws {
         let fx = try makeScrollFixture(logical: Self.needleLogical, wrappedRows: 2)
-        let offset = 2 - Int(fx.firstLine)   // start row on screen row 2, continuation on row 3
+        // Start row on screen row 3, continuation on row 4: the find bar paints
+        // over the top rows of this 6-row grid (up to three, depending on the
+        // host's cell height), and a match under it is not "fully visible".
+        let offset = 3 - Int(fx.firstLine)
         scrollViewport(fx, toOffset: offset)
         let before = trimmedVisibleRows(fx.rig)
-        XCTAssertEqual(Array(before.dropFirst(2).prefix(2)), fx.rowTexts,
-                       "precondition: both rows of the wrapped line are visible on screen rows 2-3; visible=\(before)")
+        XCTAssertEqual(Array(before.dropFirst(3).prefix(2)), fx.rowTexts,
+                       "precondition: both rows of the wrapped line are visible on screen rows 3-4; visible=\(before)")
 
         try typeQuery(fx.rig, "needle", regex: false)
 
