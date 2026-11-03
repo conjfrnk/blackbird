@@ -247,7 +247,12 @@ final class PasteNewlineEnterBlindTests: XCTestCase {
     /// after every line) and not LF.
     func test_nonBracketedPaste_crlfText_deliversOneCRPerLineBreak() throws {
         let text = "one\r\ntwo\r\n\r\nthree"
-        let expected = Array("one".utf8) + [Self.cr] + Array("two".utf8) + [Self.cr, Self.cr] + Array("three".utf8)
+        var expected: [UInt8] = []
+        expected += Array("one".utf8)
+        expected.append(Self.cr)
+        expected += Array("two".utf8)
+        expected += [Self.cr, Self.cr]
+        expected += Array("three".utf8)
 
         // CRLF is two clipboard bytes and one delivered byte; the buggy path
         // (CRLF -> LF) is the same length as the correct one.
@@ -261,8 +266,17 @@ final class PasteNewlineEnterBlindTests: XCTestCase {
     /// a TAB that is not a line break and must pass through untouched.
     func test_nonBracketedPaste_mixedBreaksAndTab_allBreaksBecomeCRAndTabSurvives() throws {
         let text = "x\ty\rz\nw\n"
-        let expected = Array("x".utf8) + [0x09] + Array("y".utf8) + [Self.cr]
-            + Array("z".utf8) + [Self.cr] + Array("w".utf8) + [Self.cr]
+        // Built piecewise: one long `+` chain of array literals exceeds the
+        // type-checker budget of the Xcode 16 compiler (macos-15 CI leg).
+        var expected: [UInt8] = []
+        expected += Array("x".utf8)
+        expected.append(0x09)
+        expected += Array("y".utf8)
+        expected.append(Self.cr)
+        expected += Array("z".utf8)
+        expected.append(Self.cr)
+        expected += Array("w".utf8)
+        expected.append(Self.cr)
         XCTAssertEqual(expected.count, text.utf8.count, "fixture: one byte per original byte")
 
         let received = try pasteNonBracketed(text, expectedCount: expected.count)
