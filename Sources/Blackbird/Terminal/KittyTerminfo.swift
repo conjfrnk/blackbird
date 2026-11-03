@@ -13,6 +13,13 @@ import os
 /// tmux 3.3+) negotiate the keyboard protocol and Shift+Enter actually produces
 /// `ESC[13;2u` instead of bare `\r`. When false we fall back to
 /// `xterm-256color` — legacy but universally understood.
+///
+/// Known limitation: the entry lives only under THIS user's `~/.terminfo`, so
+/// a login shell for another account (`sudo -i`, `su -`, `sudo -u X -i`,
+/// `login`) inherits `TERM=xterm-kitty` but resets `HOME` and can't resolve
+/// it ("unknown terminal type"). Switching `TERM` per sudo was tried and was
+/// not safe; it is documented, with workarounds, in KNOWN_ISSUES.md under
+/// "`xterm-kitty` is unknown after `sudo -i` / `su -`".
 enum KittyTerminfo {
     /// Shares `PTY`'s `os.Logger` subsystem/category so terminfo diagnostics
     /// keep landing under the same `pty` category they always have.

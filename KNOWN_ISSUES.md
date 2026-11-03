@@ -92,6 +92,50 @@ an unset `default-terminal`), string-sniffing TUIs drop styling inside
 tmux under EVERY outer terminal, Blackbird included. Remedy is one line
 of tmux config: `set -g default-terminal "tmux-256color"`.
 
+## `xterm-kitty` is unknown after `sudo -i` / `su -` (another account's HOME)
+
+**Symptom:** In a Blackbird tab, `sudo -i`, `sudo su -`, `su -`,
+`sudo -u other -i` or `login` starts a shell where `clear`, `tput`, `less`,
+`vim` and every other curses tool fail: `'xterm-kitty': unknown terminal
+type.` (`clear`), `tput: unknown terminal "xterm-kitty"`, vim's `E558:
+Terminal entry not found in terminfo`.
+
+**Why:** Every tab gets `TERM=xterm-kitty`, and that only resolves because
+Blackbird installs its bundled kitty terminfo into the launching user's
+`~/.terminfo` (`78/xterm-kitty`). macOS's system terminfo
+(`/usr/share/terminfo`) has no `xterm-kitty`, and nothing exports
+`TERMINFO` / `TERMINFO_DIRS`. `sudo -i` and `su -` keep `TERM`
+(sudoers(5): "The DISPLAY, PATH and TERM variables remain unchanged") but
+reset `HOME` to the target account's; `login` likewise carries `TERM` over
+into the target account's shell. ncurses then looks in `/var/root/.terminfo`
+(or the other user's `~/.terminfo`) and finds no entry.
+
+**Not affected:** the launching user's own shells and tabs, including
+nested shells, and `ssh`: the ssh wrapper defaults the remote `TERM` to
+`xterm-256color` (see "Remote TERM" above).
+
+**Workarounds** (any one):
+
+- Pick a `TERM` every account can resolve before switching:
+  `export TERM=xterm-256color` and then `sudo -i`, or in one go
+  `sudo TERM=xterm-256color -i` / `TERM=xterm-256color su -`. Inside an
+  already-open elevated shell, `export TERM=xterm-256color` fixes that shell.
+- For a single command rather than a login shell, `sudo -E command` runs it
+  with your own environment, `HOME` included, so it still finds your
+  `~/.terminfo` (needs sudoers permission to preserve the environment).
+  It does nothing for `sudo -i` / `su -`, which always reset `HOME`.
+- Install the entry for the other account from the bundled source, e.g.
+  `sudo -u other tic -x -o ~other/.terminfo /Applications/Blackbird.app/Contents/Resources/kitty.terminfo`
+  (`~root` for root). The app never updates that copy.
+
+**Why it is documented, not fixed:** the kitty `TERM` is what gives
+Shift+Enter and the kitty-gated OSC 8 links (see "OSC 8 emission depends on
+`TERM` containing `kitty`" below), so falling back to `xterm-256color` for
+every tab is not an option, and switching `TERM` per `sudo` / `su` call was
+tried and was not safe. Pointing `TERMINFO` at the user's directory does not
+work either: `sudo -i` discards it, and honouring it would have the other
+account read terminfo from a directory the launching user can write.
+
 ## Move Tab to Window — minimized and fullscreen windows aren't offered
 
 **Symptom:** The tab-pill context menu's "Move Tab to Window ▸" submenu omits minimized (Dock) windows and fullscreen windows; with only one other window and it minimized, the submenu is absent entirely. The submenu is also absent while the *source* window is fullscreen.
