@@ -41,6 +41,30 @@ public final class BBTerm {
         subsystem: "dev.conjfrnk.blackbird",
         category: "bbterm"
     )
+    /// Unified-log channel for the Rust core: its breadcrumbs, the `file:line`
+    /// of a caught panic, and the Fatal message itself. The core-failure dialog
+    /// (`MainWindowController.presentCoreFailure`) sends the user to this
+    /// category, so it must stay named "core".
+    fileprivate static let coreLogger = Logger(
+        subsystem: "dev.conjfrnk.blackbird",
+        category: "core"
+    )
+    /// Routes the core's diagnostics to `coreLogger`. They used to go only to
+    /// stderr, which is /dev/null for an app launched from Finder / Dock, so
+    /// the panic location and every breadcrumb were lost. `.public` because
+    /// the default redaction would replace the whole message with `<private>`.
+    private static let coreLogSink: @convention(c) (UnsafePointer<UInt8>?, UInt) -> Void = { msg, len in
+        guard let msg, len > 0 else { return }
+        let buf = UnsafeBufferPointer(start: msg, count: Int(len))
+        let text = String(decoding: buf, as: UTF8.self)
+        BBTerm.coreLogger.notice("\(text, privacy: .public)")
+    }
+    /// Process-wide and set-once on the Rust side; the lazy `static let`
+    /// makes the registration happen exactly once, before the first
+    /// `bb_term_new` (so its dim-clamp breadcrumb is captured too).
+    private static let installCoreLogSink: Void = {
+        bb_set_log_cb(BBTerm.coreLogSink)
+    }()
     /// One-shot latch: fires the dim-clamp warning at most once per
     /// process. Audit follow-up (2026-04-29).
     fileprivate static let didLogDimClamp = OSAllocatedUnfairLock(initialState: false)
@@ -134,6 +158,7 @@ public final class BBTerm {
                 }
             }
         }
+        Self.installCoreLogSink
         guard let ptr = bb_term_new(size.cols, size.rows, scrollback) else { return nil }
         self.handle = ptr
 
@@ -641,7 +666,12 @@ public final class BBTerm {
                 handler(.notification(title: "", body: joined))
             }
         case EventKind.fatal:
-            handler(.fatal(Self.string(from: ev)))
+            let message = Self.string(from: ev)
+            // The core-failure dialog tells the user the details are in
+            // category "core". Logged here, on the core queue, so the entry
+            // lands even if the session's main-queue hop is delayed.
+            Self.coreLogger.fault("core panic: \(message, privacy: .public)")
+            handler(.fatal(message))
         default:
             // Audit L-3 (2026-04-29): unknown event kind means the
             // Rust enum gained a variant the Swift switch doesn't

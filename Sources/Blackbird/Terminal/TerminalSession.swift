@@ -1332,7 +1332,8 @@ public final class TerminalSession: ObservableObject {
             }
         case .fatal(let msg):
             // Surface as a title prefix for visibility — the unified
-            // log carries the full message via os.Logger, but a title
+            // log (category "core", written by BBTerm.dispatch) carries
+            // the full message and the panic's file:line, but a title
             // prefix is the only diagnostic surface most users
             // notice. Fatal must display regardless of any user-set
             // override AND must not let a stale override resurface

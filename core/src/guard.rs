@@ -8,9 +8,10 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Once;
 
+use crate::diag::breadcrumb;
 use crate::{BBEvent, BBEventKind, BBTerm};
 
-fn payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -197,7 +198,7 @@ pub(crate) fn ffi_reentry_blocked(entry: &str) -> bool {
         } else {
             "event handler"
         };
-        eprintln!(
+        breadcrumb!(
             "[blackbird_core] {entry} called from inside {path} — \
              dropping re-entrant call to avoid &mut Term alias. Audit H-5/fix-#09."
         );

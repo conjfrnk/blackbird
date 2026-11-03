@@ -11,6 +11,7 @@ use std::sync::Arc;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::vte::ansi::Rgb;
 
+use crate::diag::breadcrumb;
 use crate::event::{BBEvent, BBEventCb, BBEventKind};
 use crate::guard::HandlerInFlightGuard;
 use crate::rate_limit::{
@@ -355,7 +356,7 @@ impl CallbackCell {
                 *self.suppressed_title.get() = Some(String::from_utf8_lossy(bytes).into_owned());
                 if !*self.title_suppressed_logged.get() {
                     *self.title_suppressed_logged.get() = true;
-                    eprintln!(
+                    breadcrumb!(
                         "[blackbird_core] Title event rate cap ({TITLE_EVENT_PER_SECOND}/s) \
                          engaged — coalescing to latest. One-shot per session."
                     );
@@ -385,7 +386,7 @@ impl CallbackCell {
         {
             if !*self.notification_suppressed_logged.get() {
                 *self.notification_suppressed_logged.get() = true;
-                eprintln!(
+                breadcrumb!(
                     "[blackbird_core] notification rate cap ({NOTIFICATION_EVENT_PER_SECOND}/s) hit; further notifications this second dropped (logged once)"
                 );
             }
@@ -500,7 +501,7 @@ impl ColorRequestQueue {
             let logged = &mut *self.cap_hit_logged.get();
             if !*logged {
                 *logged = true;
-                eprintln!(
+                breadcrumb!(
                     "blackbird_core: ColorRequestQueue hit cap ({COLOR_REQUEST_QUEUE_CAP}); \
                      further OSC 4/10/11/12 queries before the next drain dropped"
                 );

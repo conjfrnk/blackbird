@@ -14,6 +14,7 @@ use alacritty_terminal::term::cell::{Flags as CellFlags, Hyperlink};
 use alacritty_terminal::term::TermMode;
 
 use crate::color::color_to_rgb;
+use crate::diag::breadcrumb;
 use crate::scrub::contains_bidi_or_invisible;
 use crate::{BBTerm, UriKey, UNDERLINE_COLOR_UNSET};
 
@@ -597,7 +598,7 @@ fn intern_osc8_links(
             // long session (~16 400 distinct 64-byte URIs) and only
             // `bb_term_clear_all` clears the cache.
             if crate::osc::once(&mut bb.osc8_intern_cap_logged) {
-                eprintln!(
+                breadcrumb!(
                     "[blackbird_core] OSC 8 URI intern budget ({} bytes) exhausted — \
                      attribution silently dropped for every NEW hyperlink from now on. \
                      Symptom: 'links stopped working'. Cleared by ⌘K (bb_term_clear_all). \
@@ -791,7 +792,7 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
     // ceiling during phase 1, log exactly once per BBTerm session.
     // Mutating bb here is sound because the grid borrow ended above.
     if osc8_id_exhausted_this_snapshot && crate::osc::once(&mut bb.osc8_id_exhaustion_logged) {
-        eprintln!(
+        breadcrumb!(
             "[blackbird_core] OSC 8 link-id cap (u16) saturated for this snapshot — \
                  attribution silently dropped on cells past 65 534 distinct URIs. \
                  Symptom: 'links stopped working'. One-shot per session."

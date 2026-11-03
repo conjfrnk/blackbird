@@ -319,6 +319,7 @@
 		DBE214BAC67988F5EC51612C /* NotificationUndeterminedAuthBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AEB45EA52FFBE9B147D5D9B /* NotificationUndeterminedAuthBlindTests.swift */; };
 		DBE34E7B92C81F99CCE11087 /* SingleCharWordSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9599B2B84D847BCB281BDE97 /* SingleCharWordSelectionTests.swift */; };
 		DD0B95742A24306E26FCBDB7 /* KeyEncoderRoundtripProps.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9C2B3AC096BA3AF2FC3BB6C /* KeyEncoderRoundtripProps.swift */; };
+		DD6A2E3417274B4957967389 /* CorePanicLoggingBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F92022862D9D26A0E6A7C56 /* CorePanicLoggingBlindTests.swift */; };
 		DFF84049846D6175C420DD37 /* FeedYieldBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 464B60F423EF4E3C274C134B /* FeedYieldBlindTests.swift */; };
 		E0427FD820478B3CE1DDA54B /* PTYLargePasteBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 291265177FC694F905FFDC57 /* PTYLargePasteBlindTests.swift */; };
 		E05C1AF142C74AF9E8FB302E /* SingleSessionSteadyStateLeakTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 924DCF3EFC76DBFCD0250EBB /* SingleSessionSteadyStateLeakTests.swift */; };
@@ -445,6 +446,7 @@
 		2D6DCE9F2E73793C1E6E99DB /* WideGlyphSelectionHighlightBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WideGlyphSelectionHighlightBlindTests.swift; sourceTree = "<group>"; };
 		2E5B868D4F5850A96DF7361A /* TerminalViewMenuValidationBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalViewMenuValidationBlindTests.swift; sourceTree = "<group>"; };
 		2E8CF6A327FF6AF427167BFA /* NotificationPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPresenter.swift; sourceTree = "<group>"; };
+		2F92022862D9D26A0E6A7C56 /* CorePanicLoggingBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorePanicLoggingBlindTests.swift; sourceTree = "<group>"; };
 		2F96C43E82A34FB57CB37965 /* osc133.bash */ = {isa = PBXFileReference; path = osc133.bash; sourceTree = "<group>"; };
 		3005731945C943A451CB4DDF /* TerminalNotificationEventBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalNotificationEventBlindTests.swift; sourceTree = "<group>"; };
 		3064BAFAEEFDB859D8B347F7 /* CellInstanceLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstanceLayoutTests.swift; sourceTree = "<group>"; };
@@ -820,6 +822,7 @@
 				EC725A156FE7ADFC09F5E184 /* ColorEmojiCellFitBlindTests.swift */,
 				B9E8515AA898D1920D776674 /* CopyStaleDisplayedFrameBlindTests.swift */,
 				822F2DD415A64C834F092B70 /* CoreFailureKeepOpenBlindTests.swift */,
+				2F92022862D9D26A0E6A7C56 /* CorePanicLoggingBlindTests.swift */,
 				CCAD48790A923A8A32E6B815 /* CtrlBackspaceBlindTests.swift */,
 				CDC45D10937FCD45486B74B6 /* CtrlEnterKeyTests.swift */,
 				34BBC64F7AC3CB3CE971A1DF /* CursorShapeTests.swift */,
@@ -1518,6 +1521,7 @@
 				9D7F4EB798721E0DB96B6C3F /* ColorEmojiCellFitBlindTests.swift in Sources */,
 				C6D9053A33D9D92F04C31C4F /* CopyStaleDisplayedFrameBlindTests.swift in Sources */,
 				6A6AC39D963C48979C0AF5BC /* CoreFailureKeepOpenBlindTests.swift in Sources */,
+				DD6A2E3417274B4957967389 /* CorePanicLoggingBlindTests.swift in Sources */,
 				8C8BBB6533559DC671E27AE1 /* CtrlBackspaceBlindTests.swift in Sources */,
 				6ADF6F7C0755A956DB0EF678 /* CtrlEnterKeyTests.swift in Sources */,
 				838612ABE0367B712E2888B7 /* CursorShapeTests.swift in Sources */,

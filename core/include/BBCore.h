@@ -694,6 +694,28 @@ struct BBResizeResult bb_term_resize2(struct BBTerm *term, uint16_t cols, uint16
 void bb_term_set_event_cb(struct BBTerm *term, void (*cb)(struct BBEvent, void*), void *ctx);
 
 /**
+ * Register the process-wide diagnostic sink for the core's one-shot
+ * breadcrumbs (OSC 8 intern budget, rate caps, OSC 133 / 7 rejects, dim
+ * clamp, handler re-entry) and for the `file:line` of any core panic.
+ * Without a sink these go to stderr, which is `/dev/null` for an app
+ * launched from Finder / Dock.
+ *
+ * `cb` receives a UTF-8 message (not NUL-terminated, never empty) valid only
+ * for the duration of the call. It may run on any thread that drives the
+ * core, including from inside an event callback, so it must not call any
+ * `bb_term_*` function. Call before the first `bb_term_new` so that
+ * function's own breadcrumb is captured.
+ *
+ * Process-wide and set-once: the first non-null registration wins and also
+ * chains a panic hook ahead of the existing one; later calls are no-ops.
+ * Passing null is a no-op.
+ *
+ * # Safety
+ * `cb` must stay valid for the life of the process.
+ */
+void bb_set_log_cb(void (*cb)(const uint8_t*, uintptr_t));
+
+/**
  * Take an immutable snapshot of the current grid state.
  *
  * # Safety

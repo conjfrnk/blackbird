@@ -12,6 +12,7 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::{Params, Perform};
 
 use crate::callback::{CallbackCell, RoutingListener};
+use crate::diag::breadcrumb;
 use crate::event::{BBEvent, BBEventKind};
 use crate::rate_limit::{EventRateState, PROMPT_MARK_PER_SECOND};
 use crate::scrub::{
@@ -216,7 +217,7 @@ pub(crate) struct OscLatches {
 }
 
 /// One-shot latch: returns `true` exactly once per flag (the first call),
-/// `false` afterwards. Callers keep their own `eprintln!` so the message is
+/// `false` afterwards. Callers keep their own `breadcrumb!` so the message is
 /// only formatted on the first hit.
 #[inline]
 pub(crate) fn once(flag: &mut bool) -> bool {
@@ -729,7 +730,7 @@ const OSC7_REJECT_HOST: usize = 8;
 fn osc7_reject(latches: &mut [bool; 9], class: usize, name: &str) {
     if let Some(slot) = latches.get_mut(class) {
         if once(slot) {
-            eprintln!("[blackbird_core] OSC 7 rejected ({})", name);
+            breadcrumb!("[blackbird_core] OSC 7 rejected ({})", name);
         }
     }
 }
@@ -1213,7 +1214,7 @@ impl OscScanner<'_> {
             // per session (same one-shot stance as the sibling reject
             // latches above/below).
             if once(&mut self.latches.osc133_rate_limited) {
-                eprintln!(
+                breadcrumb!(
                     "[blackbird_core] OSC 133 prompt-mark rate cap ({PROMPT_MARK_PER_SECOND}/s) \
                      engaged — dropping excess marks. One-shot per session."
                 );
@@ -1229,7 +1230,7 @@ impl OscScanner<'_> {
         // truncate: reject it instead of delivering a bogus 16-digit prefix.
         if exit_code_bytes.len() > 16 {
             if once(&mut self.latches.osc133_d_nondigit) {
-                eprintln!("[blackbird_core] OSC 133 D rejected (exit code longer than 16 bytes)");
+                breadcrumb!("[blackbird_core] OSC 133 D rejected (exit code longer than 16 bytes)");
             }
             return;
         }
@@ -1252,7 +1253,7 @@ impl OscScanner<'_> {
             // breadcrumb; subsequent rejects stay silent so a flood
             // can't drown the log.
             if once(&mut self.latches.osc133_d_nondigit) {
-                eprintln!("[blackbird_core] OSC 133 D rejected (non-digit payload)");
+                breadcrumb!("[blackbird_core] OSC 133 D rejected (non-digit payload)");
             }
             return;
         }
@@ -1295,7 +1296,7 @@ impl OscScanner<'_> {
                 // rejects on this instance stay silent so a flood can't drown
                 // the log.
                 if once(&mut self.latches.osc133_abc_tainted) {
-                    eprintln!(
+                    breadcrumb!(
                         "[blackbird_core] OSC 133 A/B/C rejected (control/bidi/non-UTF-8 payload)"
                     );
                 }

@@ -47,6 +47,7 @@ impl Dimensions for TermSize {
 
 mod callback;
 mod color;
+mod diag;
 mod event;
 mod guard;
 mod input;
@@ -57,6 +58,7 @@ mod snapshot;
 mod text;
 
 use callback::*;
+use diag::breadcrumb;
 pub use event::{BBEvent, BBEventCb, BBEventKind};
 use guard::{ffi_reentry_blocked, guard_no_term, guard_with_term};
 use input::{flush_sync_update, process_input, sync_status, WEDGED_STRING_CHUNKS};
@@ -392,7 +394,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
         // whose own clamp regresses) that feed out-of-envelope dims.
         if clamped_cols != cols || clamped_rows != rows {
             DIM_CLAMP_LOGGED.call_once(|| {
-                eprintln!(
+                breadcrumb!(
                     "[blackbird_core] dim clamp engaged in bb_term_new: requested=({}, {}) clamped=({}, {}) bounds=[{}, {}]",
                     cols, rows, clamped_cols, clamped_rows, MIN_DIM, MAX_DIM
                 );
@@ -694,7 +696,7 @@ pub unsafe extern "C" fn bb_term_resize2(
         // regardless of which entry point trips first.
         if clamped_flag {
             DIM_CLAMP_LOGGED.call_once(|| {
-                eprintln!(
+                breadcrumb!(
                     "[blackbird_core] dim clamp engaged in bb_term_resize2: requested=({}, {}) clamped=({}, {}) bounds=[{}, {}]",
                     cols, rows, applied_cols, applied_rows, MIN_DIM, MAX_DIM
                 );
@@ -748,6 +750,33 @@ pub unsafe extern "C" fn bb_term_set_event_cb(
             return;
         }
         (*term).callback.set(cb, ctx);
+    })
+}
+
+/// Register the process-wide diagnostic sink for the core's one-shot
+/// breadcrumbs (OSC 8 intern budget, rate caps, OSC 133 / 7 rejects, dim
+/// clamp, handler re-entry) and for the `file:line` of any core panic.
+/// Without a sink these go to stderr, which is `/dev/null` for an app
+/// launched from Finder / Dock.
+///
+/// `cb` receives a UTF-8 message (not NUL-terminated, never empty) valid only
+/// for the duration of the call. It may run on any thread that drives the
+/// core, including from inside an event callback, so it must not call any
+/// `bb_term_*` function. Call before the first `bb_term_new` so that
+/// function's own breadcrumb is captured.
+///
+/// Process-wide and set-once: the first non-null registration wins and also
+/// chains a panic hook ahead of the existing one; later calls are no-ops.
+/// Passing null is a no-op.
+///
+/// # Safety
+/// `cb` must stay valid for the life of the process.
+#[no_mangle]
+pub unsafe extern "C" fn bb_set_log_cb(cb: Option<unsafe extern "C" fn(*const u8, usize)>) {
+    guard_no_term((), || {
+        if let Some(cb) = cb {
+            diag::install(cb);
+        }
     })
 }
 
@@ -1714,12 +1743,13 @@ pub unsafe extern "C" fn bb_string_release(s: *mut BBString) {
                 // Zero magic => already released (double-free or lost CAS
                 // race). Any other value => wild/uninitialized pointer.
                 // Either way, don't touch the owned parts. Logging through
-                // eprintln! is acceptable: this is a development-side
+                // breadcrumb! is acceptable: this is a development-side
                 // signal, not a hot path.
-                eprintln!(
+                breadcrumb!(
                     "bb_string_release: magic mismatch (got {:#x}, expected {:#x}); \
                      refusing to free possibly-invalid BBString",
-                    found, BB_STRING_MAGIC
+                    found,
+                    BB_STRING_MAGIC
                 );
                 return;
             }
