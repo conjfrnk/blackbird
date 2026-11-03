@@ -113,7 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var externalTabActionObserver: NSObjectProtocol?
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        // The XCTest host outlives every window a test creates: a test that
+        // orders out its window and the popover AppKit raised from it leaves
+        // zero visible windows, and quitting there kills the host between
+        // tests (xcodebuild then fails whichever test runs next).
+        !isUnderTest
     }
 
     /// ⌘Q goes through here before any window-close notification fires. Show a
@@ -301,14 +305,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// start/finish; this monitor exits only after 300 s with no heartbeat — a
     /// genuinely hung or abandoned host.
     private func startTestHostIfUnderTest() -> Bool {
-        let underTest =
-            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        guard isUnderTest else { return false }
+        TestHostActivityMonitor.shared.start()
+        return true
+    }
+
+    private var isUnderTest: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
             || ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] != nil
             || ProcessInfo.processInfo.environment["XCTestBundlePath"] != nil
             || NSClassFromString("XCTestCase") != nil
-        guard underTest else { return false }
-        TestHostActivityMonitor.shared.start()
-        return true
     }
 
     /// Warm up subsystems the first window needs, before we build the menu /
