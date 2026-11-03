@@ -58,10 +58,15 @@ impl<T: Default> Row<T> {
     /// Increase the number of columns in the row.
     #[inline]
     pub fn grow(&mut self, columns: usize) {
-        if self.inner.len() >= columns {
+        let old_len = self.inner.len();
+        if old_len >= columns {
             return;
         }
 
+        // Local fix (upstream omits it): the appended default cells may differ from the old last
+        // cell (a BCE-filled row has `occ == 0` but a coloured tail). Cover the old cells so
+        // `reset` doesn't judge the row by its new default tail and leave the old prefix behind.
+        self.occ = max(self.occ, old_len);
         self.inner.resize_with(columns, T::default);
     }
 
