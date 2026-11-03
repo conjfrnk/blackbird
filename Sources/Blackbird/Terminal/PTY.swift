@@ -784,8 +784,8 @@ public final class PTY {
         // park behind it: app-wide beachball, unrecoverable via ⌘W
         // because teardown also needs the main thread. Non-blocking
         // writes return EAGAIN instead; the remainder lands in
-        // `pendingWrite` and drains on a bounded retry cadence. The read
-        // loop compensates by parking in poll(POLLIN) on EAGAIN rather
+        // `pendingWrite` and drains when the master becomes writable. The
+        // read loop compensates by parking in poll(POLLIN) on EAGAIN rather
         // than spinning.
         let fdFlags = Darwin.fcntl(masterFD, F_GETFL, 0)
         if fdFlags < 0 || Darwin.fcntl(masterFD, F_SETFL, fdFlags | O_NONBLOCK) < 0 {
@@ -956,7 +956,14 @@ public final class PTY {
         // or by terminate() on a condition-false exit), so every NOT-yet-
         // started write will short-circuit and this sync just waits for an
         // in-flight Darwin.write (if any) to return.
-        self.writeQueue.sync { }
+        //
+        // An armed drain source is cancelled in the same block, and the
+        // group wait below holds the close until libdispatch has run its
+        // cancel handler (i.e. unregistered the fd): a write source must
+        // not outlive the descriptor it watches, or a recycled fd number
+        // could collide with it.
+        self.writeQueue.sync { self.cancelDrainSourceLocked() }
+        self.drainSourceLive.wait()
         // The read queue is the sole owner of masterFD's close. Doing it
         // here avoids a double-close / fd-reuse race against terminate()
         // calling close() on another thread. The stateQueue sync serialises
@@ -1133,14 +1140,13 @@ public final class PTY {
     private var pendingHead = 0
     /// Undelivered byte count (`pendingWrite` minus the delivered prefix).
     private var pendingCount: Int { pendingWrite.count - pendingHead }
-    /// True when the last `flushPendingLocked` moved at least one byte
-    /// before the kernel pushed back — i.e. the child is reading, just
-    /// slower than we write. Selects the drain cadence. Accessed only on
-    /// `writeQueue`.
-    private var pendingFlushMadeProgress = false
-    /// True while a drain retry is scheduled on `writeQueue`; avoids
-    /// stacking redundant timers. Accessed only on `writeQueue`.
-    private var pendingDrainScheduled = false
+    /// One-shot write source armed while bytes are pending against a full
+    /// kernel queue; non-nil also means "a drain is already scheduled".
+    /// Accessed only on `writeQueue`.
+    private var drainSource: DispatchSourceWrite?
+    /// Entered when a drain source is created, left by its cancel handler,
+    /// so teardown can wait until the fd is unregistered before closing it.
+    private let drainSourceLive = DispatchGroup()
     /// One-shot-per-episode latch for the overflow log: set on the first
     /// dropped write, cleared when the backlog fully drains. Accessed only
     /// on `writeQueue`.
@@ -1178,20 +1184,11 @@ public final class PTY {
         guard exemptWriteLength > 0 else { return 0 }
         return max(0, min(exemptWriteLength, pendingCount - bytesBehindExemptWrite))
     }
-    /// Drain retry cadence. Only ticks while bytes are pending against a
-    /// full kernel queue, so there is no idle cost. A wedged/stopped child
-    /// (the last tick moved nothing) polls at the slow interval; a child
-    /// that is reading but slower than us (a paste into `cat` or any
-    /// canonical-mode reader: the kernel tty input queue takes only ~1 KiB
-    /// at a time) retries at the fast one so a large paste is not capped
-    /// at one queue-full per 10 ms.
-    private static let pendingDrainInterval: DispatchTimeInterval = .milliseconds(10)
-    private static let pendingDrainProgressInterval: DispatchTimeInterval = .milliseconds(1)
 
     /// Queue/deliver bytes. Caller MUST hold writeQueue. Appends to the
     /// pending buffer (all-or-nothing, see `pendingBacklogCap`) then
     /// flushes as much as the kernel will take; any remainder stays
-    /// buffered with a drain retry scheduled.
+    /// buffered with a drain scheduled for when the pty is writable.
     private func sendLocked(_ data: Data) {
         if exemptBacklog == 0 {
             // The exempt write (if any) is fully delivered; forget it.
@@ -1222,7 +1219,6 @@ public final class PTY {
     /// MUST hold writeQueue.
     private func flushPendingLocked() {
         let fd = self.masterFD
-        pendingFlushMadeProgress = false
         while pendingCount > 0 {
             let head = pendingHead
             let written: Int = pendingWrite.withUnsafeBytes { raw -> Int in
@@ -1230,7 +1226,6 @@ public final class PTY {
                 return Darwin.write(fd, base + head, raw.count - head)
             }
             if written > 0 {
-                pendingFlushMadeProgress = true
                 pendingHead += written
                 if pendingHead == pendingWrite.count {
                     pendingWrite.removeAll()
@@ -1245,9 +1240,9 @@ public final class PTY {
             if errno == EINTR { continue }
             if errno == EAGAIN || errno == EWOULDBLOCK {
                 // Kernel tty queue full (child not reading). Keep the
-                // remainder and retry on a bounded cadence — the write
-                // queue task RETURNS here, which is the entire point of
-                // audit S1-001: no caller ever parks behind a full tty.
+                // remainder and resume when the pty is writable again — the
+                // write queue task RETURNS here, which is the entire point
+                // of audit S1-001: no caller ever parks behind a full tty.
                 scheduleDrainLocked()
                 return
             }
@@ -1275,28 +1270,46 @@ public final class PTY {
         bytesBehindExemptWrite = 0
     }
 
-    /// Schedule one drain retry on writeQueue. Caller MUST hold
-    /// writeQueue. Teardown safety: the retry re-checks
-    /// `shouldKeepRunning()` before touching the fd, and the read-loop
-    /// teardown's `markStopped → writeQueue.sync {} → close(fd)`
-    /// sequence guarantees a retry firing after close observes the
-    /// stopped state and bails without writing.
+    /// Arm a one-shot write source that resumes the drain as soon as the pty
+    /// accepts bytes again. Caller MUST hold writeQueue.
+    ///
+    /// Event-driven rather than a retry timer: the kernel tty input queue
+    /// takes only ~1 KiB at a time, so a timer moved ~1 KiB per ~1.7 ms
+    /// tick (~0.6 MiB/s, seconds for a few-MiB paste into `cat` or a raw
+    /// reader) however fast the child read. The source is level-triggered,
+    /// so room that appears before it registers still fires it, and a child
+    /// that stopped reading costs no wakeups at all.
+    ///
+    /// Teardown safety: the handler re-checks `shouldKeepRunning()` before
+    /// touching the fd, and the read-loop teardown cancels the source and
+    /// waits for its cancel handler before `close(fd)` (see
+    /// `teardownAndReap`).
     private func scheduleDrainLocked() {
-        guard !pendingDrainScheduled else { return }
-        pendingDrainScheduled = true
-        let interval =
-            pendingFlushMadeProgress ? Self.pendingDrainProgressInterval : Self.pendingDrainInterval
-        writeQueue.asyncAfter(deadline: .now() + interval) { [weak self] in
+        guard drainSource == nil else { return }
+        let source = DispatchSource.makeWriteSource(fileDescriptor: masterFD, queue: writeQueue)
+        let live = drainSourceLive
+        live.enter()
+        source.setEventHandler { [weak self] in
             guard let self else { return }
-            self.pendingDrainScheduled = false
+            // One-shot: a writable pty fires continuously, so disarm before
+            // flushing; an EAGAIN inside the flush arms a fresh source.
+            self.cancelDrainSourceLocked()
             guard self.shouldKeepRunning() else {
                 self.discardPendingLocked()
                 return
             }
             self.flushPendingLocked()
         }
+        source.setCancelHandler { live.leave() }
+        drainSource = source
+        source.resume()
     }
 
+    /// Disarm the drain source, if any. Caller MUST hold writeQueue.
+    private func cancelDrainSourceLocked() {
+        drainSource?.cancel()
+        drainSource = nil
+    }
 
     /// True when the tty has a foreground process group distinct from our
     /// child (the shell). This means `command-running` — useful for the
