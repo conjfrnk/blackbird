@@ -41,7 +41,9 @@ __bb_ssh_dest() {
 
 # True (0) when the invocation must NOT pre-flight a terminfo install:
 # argv carries an operand after the destination (a remote command), or a
-# session mode with no interactive terminal (-N -f -W -O). Option
+# session mode with no interactive terminal (-N -f -W -O), or -G (dumps
+# the config and exits 0 without connecting — an "install" run with it
+# would succeed vacuously and cache the host as provisioned). Option
 # clusters are walked left-to-right: the FIRST arg-taking letter decides
 # — last char of the token ⇒ the arg is the NEXT token (consume it); not
 # last ⇒ the arg is ATTACHED inside this token (consume nothing). The
@@ -64,7 +66,7 @@ __bb_ssh_has_remote_command() {
       len=${#a}
       for (( j = 1; j < len; j++ )); do
         c="${a:j:1}"
-        if [[ "NfWO" == *"$c"* ]]; then
+        if [[ "NfWOG" == *"$c"* ]]; then
           return 0
         fi
         if [[ "$opts_with_arg" == *"$c"* ]]; then

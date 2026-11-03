@@ -40,12 +40,15 @@ if not set -q __BB_SSH_WRAPPER_LOADED
         # True (0) when the invocation must NOT pre-flight a terminfo
         # install: argv carries an operand after the destination (a
         # remote command), or a session mode with no interactive
-        # terminal (-N -f -W -O). Option clusters are walked
-        # left-to-right: the FIRST arg-taking letter decides — last
-        # char of the token ⇒ the arg is the NEXT token (consume it);
-        # not last ⇒ the arg is ATTACHED in this token (consume
-        # nothing). The old last-char-only check misread attached forms
-        # like `-oStrictHostKeyChecking=no` and swallowed the
+        # terminal (-N -f -W -O), or -G (dumps the config and exits 0
+        # without connecting — an "install" run with it would succeed
+        # vacuously and cache the host as provisioned). Option
+        # clusters are walked left-to-right: the FIRST arg-taking
+        # letter decides — last char of the token ⇒ the arg is the
+        # NEXT token (consume it); not last ⇒ the arg is ATTACHED in
+        # this token (consume nothing). The old last-char-only check
+        # misread attached forms like
+        # `-oStrictHostKeyChecking=no` and swallowed the
         # destination, appending `tic -x -` to the user's remote
         # command. `contains` compares exactly — no glob hazards from
         # attached values holding * or ?.
@@ -77,7 +80,7 @@ if not set -q __BB_SSH_WRAPPER_LOADED
                         set -l len (count $chars)
                         for j in (seq 2 $len)
                             set -l c $chars[$j]
-                            if contains -- "$c" N f W O
+                            if contains -- "$c" N f W O G
                                 return 0
                             end
                             if contains -- "$c" B b c D E e F I i J L l m O o P p Q R S W w

@@ -382,6 +382,7 @@
 		F816DB935D868931D236E114 /* InlineRenameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C36192F62C6E40A498D70D /* InlineRenameTests.swift */; };
 		F8C99250E001E2D862D19244 /* TestHostTermination.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */; };
 		F977657E7B8C250F42E245CD /* KittyTerminfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF2E535DE7BB1D225E2F58E2 /* KittyTerminfo.swift */; };
+		FA77836958D8976A2FD21BAF /* SSHWrapperDumpConfigBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D52C01128FB3C3B14627DCC /* SSHWrapperDumpConfigBlindTests.swift */; };
 		FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */; };
 		FD5DE68BB9B019C77F983EC0 /* SettingsViewLayoutBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B82D97D61C29250CAA33BDD7 /* SettingsViewLayoutBlindTests.swift */; };
 		FE2DBB21AD9C81867C32FA25 /* TabOrderCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 355144D52D6A74BDCBCF87A0 /* TabOrderCoordinatorTests.swift */; };
@@ -534,6 +535,7 @@
 		5C6D780E7A098ADAE1C36A69 /* IMEShiftCarryKittyBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEShiftCarryKittyBlindTests.swift; sourceTree = "<group>"; };
 		5CB9CD1FCEE937985E58C176 /* TerminalSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionTests.swift; sourceTree = "<group>"; };
 		5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+IME.swift"; sourceTree = "<group>"; };
+		5D52C01128FB3C3B14627DCC /* SSHWrapperDumpConfigBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHWrapperDumpConfigBlindTests.swift; sourceTree = "<group>"; };
 		5D9D7647442BB05D133B610D /* FirstLaunchWindowPlacementBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLaunchWindowPlacementBlindTests.swift; sourceTree = "<group>"; };
 		5F0FCE2AE0963FDA59307506 /* KeyEncoderProtocolPrecedenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderProtocolPrecedenceTests.swift; sourceTree = "<group>"; };
 		5F1A2FAB955E9F8F0D144D2C /* FeedBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedBudget.swift; sourceTree = "<group>"; };
@@ -1031,6 +1033,7 @@
 				6B8663C860AF68F9A6D150F8 /* SparkleAlertOverrideTests.swift */,
 				A736C87052F3EA6B75723A15 /* SparkleOnLatestVersionBlindTests.swift */,
 				B43FD3E696C6005A351C28AF /* SparkleResilienceTests.swift */,
+				5D52C01128FB3C3B14627DCC /* SSHWrapperDumpConfigBlindTests.swift */,
 				F965F8D2D8CC896DFE628DEF /* SSHWrapperPortsTests.swift */,
 				852BB594752BAFE6133308DE /* SSHWrapperZshTests.swift */,
 				845E2991E45987A3A4CE6E9A /* StartupLatencyBenchTests.swift */,
@@ -1724,6 +1727,7 @@
 				3885D21B82906E631BD354A3 /* RebuildRowsDecisionBlindTests.swift in Sources */,
 				2EBC2A46B34F8E26A9196A31 /* RegexFindWorkerCPULeakBlindTests.swift in Sources */,
 				D1FED59F4C493C4632F125CD /* ResizeClampBudgetSkipBlindTests.swift in Sources */,
+				FA77836958D8976A2FD21BAF /* SSHWrapperDumpConfigBlindTests.swift in Sources */,
 				90B3D86F792DB747A2CE8C80 /* SSHWrapperPortsTests.swift in Sources */,
 				BEDFD81053CAA882A7D18BD1 /* SSHWrapperZshTests.swift in Sources */,
 				8D2FC7C9CFFA0771032085C5 /* ScrollIndicatorBlindTests.swift in Sources */,
