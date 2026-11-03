@@ -18,7 +18,7 @@ use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
-use crate::term::cell::{Cell, Flags, LineLength};
+use crate::term::cell::{Cell, Flags, LineLength, ZEROWIDTH_MAX};
 use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::vte::ansi::{
@@ -140,6 +140,27 @@ pub fn point_to_viewport(display_offset: usize, point: Point) -> Option<Point<us
 pub fn viewport_to_point(display_offset: usize, point: Point<usize>) -> Point {
     let line = Line(point.line as i32) - display_offset;
     Point::new(line, point.column)
+}
+
+/// Blackbird fix (re-apply on bump): coarse superset of Extended_Pictographic over the blocks
+/// emoji ZWJ / modifier sequences draw from (Arrows, Misc Symbols + Dingbats, the U+2B1B /
+/// U+2B50 squares and stars, and the whole astral emoji range). The over-approximation (it
+/// also covers e.g. U+1F200 enclosed ideographs) is harmless: `Term::joins_emoji_cluster` also
+/// requires a pictograph base directly before the cursor and a ZWJ or modifier link.
+#[inline]
+fn is_pictographic(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2190}'..='\u{21FF}' | '\u{2600}'..='\u{27BF}' | '\u{2B00}'..='\u{2BFF}'
+            | '\u{1F000}'..='\u{1FAFF}'
+    )
+}
+
+/// Blackbird addition (re-apply on bump): Emoji_Modifier, the five Fitzpatrick skin-tone
+/// swatches U+1F3FB..=U+1F3FF.
+#[inline]
+fn is_emoji_modifier(c: char) -> bool {
+    matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1125,6 +1146,130 @@ impl<T> Term<T> {
         cursor_cell.extra = extra;
     }
 
+    /// Blackbird fix (re-apply on bump): whether the glyph at `column` (the cell `input` attaches
+    /// zero-width marks to) may be retroactively widened to a native wide glyph by
+    /// `widen_prev_glyph`. This is the guard of the VS16 / keycap promotion, shared with
+    /// `joins_emoji_cluster` so a skin-tone modifier is only treated as zero-width when the
+    /// widening will really happen.
+    ///
+    /// Only when the cursor is still directly after the glyph `input` wrote last (`glyph_end`),
+    /// so the cell left of it really is the base and the spacer lands on a cell nothing has
+    /// claimed; otherwise a stray mark after CR / CUP / CUF / BS / HT would promote whatever
+    /// neighbour the cursor happens to sit beside and the spacer write would erase the cell
+    /// under the cursor. Also only when the base sits before the right margin
+    /// (`!input_needs_wrap` means the cursor advanced to base+1, so there is room for the
+    /// spacer), the base actually carries a glyph, and it isn't already wide. The rare
+    /// exact-last-column case is intentionally left at width 1 rather than retroactively moving
+    /// the glyph across a line wrap.
+    ///
+    /// At column 0 there is no previous cell: `saturating_sub` leaves `column` on the cell UNDER
+    /// the cursor (reachable even with a matching `glyph_end` on a 1-column grid after CR), so
+    /// that case is excluded too. INSERT mode (IRM) shifts cells right by the glyph width when
+    /// the base is written; a retroactive promotion can't re-shift for the extra column without
+    /// clobbering an already-shifted cell, so the base stays at width 1 in insert mode (a rare
+    /// combination, TUIs position directly rather than insert).
+    #[inline]
+    fn can_widen_prev_glyph(&self, column: Column) -> bool {
+        let point = self.grid.cursor.point;
+        let cell = &self.grid[point.line][column];
+        !self.grid.cursor.input_needs_wrap
+            && point.column.0 > 0
+            && self.glyph_end == Some(point)
+            && !self.mode.contains(TermMode::INSERT)
+            && cell.c != ' '
+            && !cell.flags.intersects(
+                Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
+            )
+    }
+
+    /// Blackbird fix (re-apply on bump): emoji-presentation / keycap / skin-tone width parity.
+    /// A text-default symbol (per-scalar width 1) followed by VS16 (U+FE0F), the keycap combiner
+    /// (U+20E3) or an Emoji_Modifier is an emoji sequence that `string-width`, and therefore
+    /// Ink / Claude Code's inline-redraw row arithmetic, measures as 2 columns. alacritty's
+    /// per-scalar `c.width()` left the base at 1, so without this the grid is one column
+    /// narrower than the program believes and the prompt redraw drifts a row (eats a line /
+    /// leaves a blank). Promote the base in place to a NATIVE wide glyph (WIDE_CHAR + trailing
+    /// spacer) so cursor, selection, reflow and text extraction all use alacritty's existing
+    /// wide-cell machinery and stay consistent. Callers check `can_widen_prev_glyph(column)`.
+    ///
+    /// WIDE_CHAR is ORed onto the already-written base instead of rewriting it through
+    /// `write_at_cursor`: this preserves the base's fg/bg and, crucially, its `extra` Arc, which
+    /// the caller's `push_zerowidth` needs to attach the mark. Safe because SGR state cannot
+    /// change between a base scalar and the mark that immediately follows it in the same input
+    /// stream, so the base already carries the template the native width-2 path would have
+    /// applied. The spacer goes in the cell the cursor currently occupies (base + 1), mirroring
+    /// the native width-2 path, then the cursor advances past it.
+    #[inline]
+    fn widen_prev_glyph(&mut self, column: Column) {
+        let columns = self.columns();
+        let line = self.grid.cursor.point.line;
+        self.grid[line][column].flags.insert(Flags::WIDE_CHAR);
+        self.grid.cursor.template.flags.insert(Flags::WIDE_CHAR_SPACER);
+        self.write_at_cursor(' ');
+        self.grid.cursor.template.flags.remove(Flags::WIDE_CHAR_SPACER);
+        if self.grid.cursor.point.column.0 + 1 < columns {
+            self.grid.cursor.point.column += 1;
+        } else {
+            self.grid.cursor.input_needs_wrap = true;
+        }
+        self.glyph_end = Some(self.grid.cursor.point);
+    }
+
+    /// Blackbird fix (re-apply on bump): emoji-cluster width parity, the ZWJ / skin-tone sibling
+    /// of the VS16 promotion in `input`. True when `c` continues the emoji cluster whose
+    /// pictograph base the cursor sits directly after: an Emoji_Modifier (skin tone) after an
+    /// emoji, or a pictograph after a ZWJ stored on that base. `string-width` (Ink / Claude
+    /// Code) measures the whole cluster as 2 columns; per-scalar widths laid a ZWJ sequence out
+    /// as 4-6 and the cursor-relative redraw drifted rows. `input` then treats `c` as
+    /// zero-width, so it rides on the base cell's zerowidth list (copy keeps it; the glyph
+    /// still draws as the base).
+    ///
+    /// A text-default base (U+270C, U+1F3CB: width 1, no VS16 because the modifier replaces it)
+    /// followed by a modifier is joined too, and `input` widens it in place first, exactly as
+    /// for VS16. That needs the same `can_widen_prev_glyph` room, so the exact-last-column and
+    /// INSERT-mode cases keep the modifier as a standalone glyph. A ZWJ after a narrow base
+    /// (U+2764 ZWJ U+1F525) is left at its per-scalar width.
+    ///
+    /// Same guards as the VS16 promotion: the cursor must still be where the last glyph ended
+    /// (`glyph_end`), so a modifier after CR / CUP / CUF never glues onto whatever neighbour the
+    /// cursor happens to sit beside. The base must be a pictograph, so a modifier after ASCII or
+    /// CJK stays a standalone glyph (as in `string-width`). A base whose zerowidth list is full
+    /// (`ZEROWIDTH_MAX`) joins nothing: `push_zerowidth` would drop `c`, swallowing a visible
+    /// emoji without advancing the cursor.
+    #[inline]
+    fn joins_emoji_cluster(&self, c: char) -> bool {
+        if !is_pictographic(c) {
+            return false;
+        }
+        let point = self.grid.cursor.point;
+        let needs_wrap = self.grid.cursor.input_needs_wrap;
+        if self.glyph_end != Some(point) || (point.column.0 == 0 && !needs_wrap) {
+            return false;
+        }
+        // Previous cell, exactly as the zero-width branch of `input` resolves it.
+        let mut column = point.column;
+        if !needs_wrap {
+            column.0 -= 1;
+        }
+        let row = &self.grid[point.line];
+        if row[column].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            column.0 = column.saturating_sub(1);
+        }
+        let base = &row[column];
+        if !is_pictographic(base.c) {
+            return false;
+        }
+        let marks = base.zerowidth().unwrap_or(&[]);
+        if marks.len() >= ZEROWIDTH_MAX {
+            return false;
+        }
+        if base.flags.contains(Flags::WIDE_CHAR) {
+            is_emoji_modifier(c) || marks.last() == Some(&'\u{200D}')
+        } else {
+            is_emoji_modifier(c) && self.can_widen_prev_glyph(column)
+        }
+    }
+
     #[inline]
     fn damage_cursor(&mut self) {
         // The normal cursor coordinates are always in viewport.
@@ -1176,6 +1321,9 @@ impl<T: EventListener> Handler for Term<T> {
     fn input(&mut self, c: char) {
         // Number of cells the char will occupy.
         let width = match c.width() {
+            // Blackbird fix (re-apply on bump): a skin-tone modifier or the pictograph after a
+            // ZWJ continues the previous emoji's cluster and takes no cell of its own.
+            Some(_) if self.joins_emoji_cluster(c) => 0,
             Some(width) => width,
             None => return,
         };
@@ -1194,71 +1342,16 @@ impl<T: EventListener> Handler for Term<T> {
                 column.0 = column.saturating_sub(1);
             }
 
-            // Blackbird fix (re-apply on bump): emoji-presentation / keycap width parity.
-            // A text-default symbol (per-scalar width 1) followed by VS16
-            // (U+FE0F) or the keycap combiner (U+20E3) is an emoji-presentation
-            // sequence that `string-width` — and therefore Ink / Claude Code's
-            // inline-redraw row arithmetic — measures as 2 columns. alacritty's
-            // per-scalar `c.width()` left the base at 1, so without this the
-            // grid is one column narrower than the program believes and the
-            // prompt redraw drifts a row (eats a line / leaves a blank). Promote
-            // the base in place to a NATIVE wide glyph (WIDE_CHAR + trailing
-            // spacer) so cursor, selection, reflow and text extraction all use
-            // alacritty's existing wide-cell machinery and stay consistent.
-            //
-            // Only when the cursor is still directly after the glyph `input`
-            // wrote last (`glyph_end`), so the cell left of it really is the
-            // base and the spacer below lands on a cell nothing has claimed;
-            // otherwise a stray mark after CR / CUP / CUF / BS / HT would
-            // promote whatever neighbour the cursor happens to sit beside and
-            // the spacer write would erase the cell under the cursor. Also only
-            // when the base sits before the right margin (`!input_needs_wrap`
-            // means the cursor advanced to base+1, so there is room for the
-            // spacer), the base actually carries a glyph, and it isn't already
-            // wide. The rare exact-last-column case is intentionally left at
-            // width 1 rather than retroactively moving the glyph across a line
-            // wrap. Re-apply this patch on any alacritty_terminal bump.
-            //
-            // At column 0 there is no previous cell: `saturating_sub` leaves
-            // `column` on the cell UNDER the cursor (reachable even with a
-            // matching `glyph_end` on a 1-column grid after CR), so that case
-            // is excluded too. Such a mark falls through to push_zerowidth.
-            if matches!(c, '\u{FE0F}' | '\u{20E3}')
-                && !self.grid.cursor.input_needs_wrap
-                && self.grid.cursor.point.column.0 > 0
-                && self.glyph_end == Some(self.grid.cursor.point)
-                // INSERT mode (IRM) shifts cells right by the glyph width when
-                // the base is written; a retroactive promotion can't re-shift
-                // for the extra column without clobbering an already-shifted
-                // cell, so leave the base at width 1 in insert mode (a rare
-                // combination — TUIs position directly rather than insert).
-                && !self.mode.contains(TermMode::INSERT)
-                && self.grid[line][column].c != ' '
-                && !self.grid[line][column].flags.intersects(
-                    Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
-                )
+            // Blackbird fix (re-apply on bump): emoji-presentation / keycap / skin-tone width
+            // parity. VS16 (U+FE0F), the keycap combiner (U+20E3) and an Emoji_Modifier that
+            // `joins_emoji_cluster` admitted widen a width-1 base to the 2 columns `string-width`
+            // measures; see `can_widen_prev_glyph` for the guards and `widen_prev_glyph` for the
+            // promotion. Re-apply this patch on any alacritty_terminal bump. A mark the guards
+            // refuse falls through to push_zerowidth.
+            if (matches!(c, '\u{FE0F}' | '\u{20E3}') || is_emoji_modifier(c))
+                && self.can_widen_prev_glyph(column)
             {
-                let columns = self.columns();
-                // OR WIDE_CHAR directly onto the already-written base instead of
-                // rewriting it through write_at_cursor: this preserves the
-                // base's fg/bg and — crucially — its `extra` Arc, which the
-                // push_zerowidth below needs to attach the VS16. Safe because
-                // SGR state cannot change between a base scalar and the VS16 /
-                // keycap mark that immediately follows it in the same input
-                // stream, so the base already carries the template the native
-                // width-2 path would have applied.
-                self.grid[line][column].flags.insert(Flags::WIDE_CHAR);
-                // Spacer in the cell the cursor currently occupies (base + 1),
-                // mirroring the native width-2 path, then advance past it.
-                self.grid.cursor.template.flags.insert(Flags::WIDE_CHAR_SPACER);
-                self.write_at_cursor(' ');
-                self.grid.cursor.template.flags.remove(Flags::WIDE_CHAR_SPACER);
-                if self.grid.cursor.point.column.0 + 1 < columns {
-                    self.grid.cursor.point.column += 1;
-                } else {
-                    self.grid.cursor.input_needs_wrap = true;
-                }
-                self.glyph_end = Some(self.grid.cursor.point);
+                self.widen_prev_glyph(column);
             }
 
             self.grid[line][column].push_zerowidth(c);

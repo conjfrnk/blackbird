@@ -41,6 +41,10 @@
 //!                                 invalidation points `Term::resize`,
 //!                                 `Term::swap_alt`, `Term::scroll_down_relative`,
 //!                                 `Term::scroll_up_relative` (term/mod.rs)
+//!   emoji ZWJ / skin-tone width . `is_pictographic`, `is_emoji_modifier`,
+//!                                 `Term::can_widen_prev_glyph`, `Term::widen_prev_glyph`,
+//!                                 `Term::joins_emoji_cluster` (term/mod.rs) and the
+//!                                 `Handler::input` call sites
 //!
 //! Rig preconditions (so a green run cannot mean "looked at nothing"):
 //! every site must resolve to exactly one item (its enclosing scope is also
@@ -540,6 +544,44 @@ fn vs16_at_column_zero_fix_carries_reapply_marker() {
                 file: TERM,
                 scope: Some(TERM_IMPL),
                 needle: "fn scroll_up_relative",
+            },
+        ],
+    );
+}
+
+#[test]
+fn emoji_cluster_width_fix_carries_reapply_marker() {
+    // ZWJ sequences and skin-tone modifiers advance the cursor by the width of
+    // the whole cluster (2 columns, as `string-width` measures it), not the sum
+    // of their parts. Every helper that makes up the fix keeps its own marker,
+    // and `Handler::input` (which calls them) is covered by the VS16 test above.
+    assert_patch_marked(
+        "emoji ZWJ / skin-tone cluster width",
+        &[
+            Site {
+                file: TERM,
+                scope: None,
+                needle: "fn is_pictographic",
+            },
+            Site {
+                file: TERM,
+                scope: None,
+                needle: "fn is_emoji_modifier",
+            },
+            Site {
+                file: TERM,
+                scope: Some(TERM_IMPL),
+                needle: "fn can_widen_prev_glyph",
+            },
+            Site {
+                file: TERM,
+                scope: Some(TERM_IMPL),
+                needle: "fn widen_prev_glyph",
+            },
+            Site {
+                file: TERM,
+                scope: Some(TERM_IMPL),
+                needle: "fn joins_emoji_cluster",
             },
         ],
     );

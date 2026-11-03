@@ -43,7 +43,7 @@ static HYPERLINK_ID_SUFFIX: AtomicU32 = AtomicU32::new(0);
 /// Max zero-width scalars kept on one cell.
 ///
 /// Blackbird fix (re-apply on bump): see `Cell::push_zerowidth`, which enforces it.
-const ZEROWIDTH_MAX: usize = 32;
+pub(crate) const ZEROWIDTH_MAX: usize = 32;
 
 /// Max bytes of URI kept for one hyperlink. Matches `OSC8_URI_MAX` in blackbird_core's
 /// snapshot, which never surfaces a longer one as a link.

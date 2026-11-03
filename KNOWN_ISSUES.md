@@ -125,6 +125,8 @@ The flash is documented rather than fixed. If Apple ships a suppression API in a
 
 Not supported: ZWJ sequences like 👨‍👩‍👧 (family) still render as the base 👨 scalar because atlas keys are single `UnicodeScalar`. Proper grapheme-cluster keying is future work — a rare enough case that it stayed out of v1.
 
+The cursor advance does match `string-width` (what Ink / Claude Code measure with): a ZWJ sequence or an emoji plus skin-tone modifier is one 2-cell glyph, and the ZWJ, modifier and joined emoji ride on the base cell's zerowidth list, so copy returns the whole sequence. A skin-toned 👍🏽 therefore draws as the plain 👍. A text-default (width-1) base such as ✌ or 🏋 followed by a skin-tone modifier is widened in place first, the same way a VS16 base is. Not covered: a text-default base followed by a ZWJ with no VS16 and no modifier (❤‍🔥) still advances by the per-scalar sum (3 cells vs `string-width`'s 2), and a narrow base already sitting in the last column (✌ at column 80, then 🏽) keeps the modifier as a standalone glyph on the next row, like the VS16 last-column case.
+
 ## Ctrl+Space never reaches the terminal while macOS's input-source shortcut is on
 
 macOS reserves Ctrl+Space (and Ctrl+Shift+Space) for "Select the previous
