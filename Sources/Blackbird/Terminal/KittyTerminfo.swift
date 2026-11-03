@@ -25,10 +25,24 @@ enum KittyTerminfo {
     /// `~/.terminfo`. The per-spawn `TERM` decision is `availableForSpawn()`.
     static let available: Bool = installIfNeeded()
 
+    #if DEBUG
+    /// Test seam — redirects the install target and the per-spawn existence
+    /// check away from the real `~/.terminfo`. A test that must DELETE the
+    /// entry to exercise the mid-session heal has to do it in a scratch home:
+    /// every live `TERM=xterm-kitty` tab on the machine resolves through the
+    /// real file. (`homeDirectoryForCurrentUser` ignores `$HOME`, so
+    /// redirecting `$HOME` alone cannot do this.) Nil in production; tests set
+    /// and clear it on the main thread while no spawn is in flight.
+    static var terminfoDirectoryOverrideForTesting: URL?
+    #endif
+
     /// The user terminfo directory `tic -o` installs into. Single source of
     /// truth for both the install target and the per-spawn existence check.
     private static var terminfoDirectory: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        #if DEBUG
+        if let override = terminfoDirectoryOverrideForTesting { return override }
+        #endif
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".terminfo", isDirectory: true)
     }
 

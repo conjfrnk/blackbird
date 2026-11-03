@@ -24,11 +24,16 @@ import Foundation
 /// files in a private temp directory, the `TERM` and `HOME` it was handed and
 /// the exit status (and stderr) of `infocmp "$TERM"`, `tput cols` and `clear`.
 /// Reading the files back makes the oracle exactly what the real ncurses
-/// tools in the child said, not what the app believes. The "delete" step
-/// moves the installed `xterm-kitty` file(s) out of `$HOME/.terminfo` into a
-/// backup directory; tearDown puts them back if the app did not already
-/// re-create them, so a developer's real `~/.terminfo` ends the test as it
-/// began. After the move the test itself runs `/usr/bin/infocmp xterm-kitty`
+/// tools in the child said, not what the app believes. The deletion test runs
+/// against a SCRATCH home, never the developer's real one (every live
+/// `TERM=xterm-kitty` tab resolves through the real `~/.terminfo/78/xterm-kitty`,
+/// so hiding it even briefly breaks `clear`/`tput`/`less` everywhere):
+/// `KittyTerminfo.terminfoDirectoryOverrideForTesting` points the app's
+/// install and per-spawn check at `<scratch>/.terminfo`, and the child and the
+/// test's own `infocmp` oracle get `HOME=<scratch>` so ncurses looks there.
+/// The "delete" step moves the scratch `xterm-kitty` file(s) into a backup
+/// directory; tearDown puts them back if the app did not already re-create
+/// them. After the move the test itself runs `/usr/bin/infocmp xterm-kitty`
 /// (no PTY, no app code) and requires it to FAIL, which proves the deletion
 /// genuinely makes the name unresolvable rather than leaving the test
 /// vacuous.
@@ -56,6 +61,8 @@ final class KittyTerminfoDeletionBlindTests: XCTestCase {
     private var scratchDirectories: [URL] = []
 
     override func tearDown() {
+        KittyTerminfo.terminfoDirectoryOverrideForTesting = nil
+        isolatedHome = nil
         for dir in scratchDirectories { try? FileManager.default.removeItem(at: dir) }
         scratchDirectories.removeAll()
         super.tearDown()
@@ -116,7 +123,7 @@ final class KittyTerminfoDeletionBlindTests: XCTestCase {
         let pty = try PTY.spawn(
             executable: "/bin/sh",
             arguments: ["-c", Self.childScript, "sh", dir.path],
-            envOverrides: [:],
+            envOverrides: isolatedHome.map { (home: URL) -> [String: String] in ["HOME": home.path] } ?? [:],
             size: .init(cols: 80, rows: 24)
         )
         let exited = expectation(description: "child exited")
@@ -154,6 +161,11 @@ final class KittyTerminfoDeletionBlindTests: XCTestCase {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/infocmp")
         task.arguments = [name]
+        if let isolatedHome = isolatedHome {
+            task.environment = ProcessInfo.processInfo.environment.merging(
+                ["HOME": isolatedHome.path]
+            ) { (_: String, new: String) -> String in new }
+        }
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         try task.run()
@@ -163,8 +175,28 @@ final class KittyTerminfoDeletionBlindTests: XCTestCase {
 
     // MARK: - Delete + restore of the installed entry
 
+    /// Scratch home set by `isolateTerminfoHome()`; nil means the real home.
+    private var isolatedHome: URL?
+
     private var homePath: String {
-        ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+        isolatedHome?.path ?? ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
+    }
+
+    /// Redirects the app's terminfo directory, the child's `HOME` and the
+    /// oracle's `HOME` to a fresh scratch home and provisions its
+    /// `.terminfo/78/xterm-kitty`, so the deletion test never moves or
+    /// rewrites the developer's real entry. Call AFTER `KittyTerminfo.available`
+    /// has resolved: that latch is a once-per-process decision about the real
+    /// home and must not be taken (or poisoned) against the scratch one.
+    private func isolateTerminfoHome() throws {
+        let home = try makeScratchDirectory()
+        isolatedHome = home
+        KittyTerminfo.terminfoDirectoryOverrideForTesting =
+            home.appendingPathComponent(".terminfo", isDirectory: true)
+        // The scratch entry is missing, so this is the app's own heal path
+        // installing it into the scratch directory.
+        XCTAssertTrue(KittyTerminfo.availableForSpawn(),
+                      "precondition: the bundled kitty terminfo must install into the scratch home \(home.path)")
     }
 
     /// Every installed `xterm-kitty` file under `$HOME/.terminfo/<dir>/`.
@@ -233,6 +265,7 @@ final class KittyTerminfoDeletionBlindTests: XCTestCase {
     func testNewShellAfterEntryDeleted_TermIsResolvableByNcurses() throws {
         XCTAssertTrue(KittyTerminfo.available,
                       "precondition: bundled kitty terminfo installed, tic ok, infocmp ok")
+        try isolateTerminfoHome()
         XCTAssertFalse(installedKittyEntries().isEmpty,
                        "precondition: an installed xterm-kitty entry under \(homePath)/.terminfo to delete")
 
