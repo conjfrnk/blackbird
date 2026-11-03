@@ -2394,8 +2394,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public func copy(_ sender: Any?) {
         guard let sel = selection, let session, let snap = currentSnapshot else { return }
-        let (start, end) = sel.copyRange(cols: snap.cols)
-        let raw = session.textRange(from: start, to: end, rectangular: sel.mode == .rectangular)
+        let raw = session.selectedText(sel, displayedIn: snap)
         guard !raw.isEmpty else { return }
         // Cap + scrub before writing. A compromised remote can spam the
         // scrollback with bidi-override + C0 payloads; if the user

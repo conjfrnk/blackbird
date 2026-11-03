@@ -923,6 +923,35 @@ public final class TerminalSession: ObservableObject {
         }
     }
 
+    /// Text of `sel`, whose endpoints are in the frame of `displayed` (the
+    /// snapshot the view is showing; `SelectionReconciler` keeps them there).
+    /// The core is routinely ahead of that snapshot — output parsed since the
+    /// last publish, or a busy main thread — and every line it has scrolled
+    /// since moves the content at `Line(i)` to `Line(i-1)`, so reading the
+    /// live grid with the displayed frame's coordinates copies text BELOW
+    /// the highlight. The reconcile runs inside the same `coreQueue` block as
+    /// the read, so nothing can scroll in between, and applies the render
+    /// path's own rules: a selection they drop (resize, alt-screen toggle,
+    /// history clear, scrolled past retention) yields "" rather than text
+    /// from cells it no longer names. The snapshot is only read for its
+    /// frame; taking it drains the core's damage set, which the renderer
+    /// already handles as a coalesced-snapshot gap (full rebuild).
+    func selectedText(_ sel: Selection, displayedIn displayed: BBSnapshot) -> String {
+        return performUserAction { () -> String in
+            guard let live = bbterm.snapshot() else { return "" }
+            let reconciled = SelectionReconciler.reconciled(
+                selection: sel, wordDragAnchor: nil, prev: displayed, next: live
+            )
+            guard let current = reconciled.selection else { return "" }
+            let (start, end) = current.copyRange(cols: live.cols)
+            return bbterm.textRange(
+                startLine: start.line, startCol: start.col,
+                endLine: end.line, endCol: end.col,
+                rectangular: current.mode == .rectangular
+            ) ?? ""
+        }
+    }
+
     public func terminate() {
         // Wake a read loop parked on the feed budget BEFORE tearing the
         // PTY down, or `pty.terminate()`'s join would wait on a thread
