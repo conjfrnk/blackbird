@@ -322,6 +322,7 @@
 		E206E42DC5999C9802F8EAF7 /* TabTitleRevertToShellNameBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62EC0FBF0223CACDBD51AC85 /* TabTitleRevertToShellNameBlindTests.swift */; };
 		E22A717B7F1512B8FE851EC5 /* TabPillFramePushBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4088186839A8E430A534895 /* TabPillFramePushBlindTests.swift */; };
 		E2DA3A0049E566F9B9C133AA /* FindBarAdversarialTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68CAFA8323F8AFCE7D4C52C9 /* FindBarAdversarialTests.swift */; };
+		E2E1DF8297FEA4FC6472CEDB /* MouseButtonParityBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5E0CC13C5195272843A6F61 /* MouseButtonParityBlindTests.swift */; };
 		E4A64F722504E7660313F106 /* TestHostSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6674F348ADE914C0EEBB0E90 /* TestHostSupport.swift */; };
 		E4D4AC286368487A8C50C345 /* RSSProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56F60C9EE0A9886FAAAC6E4A /* RSSProbe.swift */; };
 		E4DA4ACE49EE0D3113E8955D /* HyperlinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9400CC161B796E22A62232EE /* HyperlinkTests.swift */; };
@@ -603,6 +604,7 @@
 		A3B21EB9F8E347FEDA4676CF /* CwdTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CwdTracker.swift; sourceTree = "<group>"; };
 		A48775E8F6E1A34E39438E20 /* WheelDirectionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WheelDirectionBlindTests.swift; sourceTree = "<group>"; };
 		A593F1C330636A1A636EBF96 /* TooltipController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TooltipController.swift; sourceTree = "<group>"; };
+		A5E0CC13C5195272843A6F61 /* MouseButtonParityBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseButtonParityBlindTests.swift; sourceTree = "<group>"; };
 		A63A76F263480E65000641F6 /* TerminalView+Hover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+Hover.swift"; sourceTree = "<group>"; };
 		A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHostTermination.swift; sourceTree = "<group>"; };
 		A736C87052F3EA6B75723A15 /* SparkleOnLatestVersionBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SparkleOnLatestVersionBlindTests.swift; sourceTree = "<group>"; };
@@ -901,6 +903,7 @@
 				3A877407E1A0FFA4E178DC6B /* MetalRendererInsetTests.swift */,
 				24BE6BE640FB073494B1FB33 /* MetalRendererTests.swift */,
 				1A14ACDB4E0E64E61FFD4773 /* MonospaceFontFamiliesTests.swift */,
+				A5E0CC13C5195272843A6F61 /* MouseButtonParityBlindTests.swift */,
 				9959E3BB61D8228703D58C58 /* MouseInsetMappingTests.swift */,
 				F44BCC051E30204C47A3C9A4 /* MouseModifierBitsReportBlindTests.swift */,
 				134C89ADDAF5CED390B5E09D /* MouseReportGridClampBlindTests.swift */,
@@ -1592,6 +1595,7 @@
 				80FE06E1A9846123A1218F5D /* MetalRendererInsetTests.swift in Sources */,
 				ED812F94FE464AE1F4E86007 /* MetalRendererTests.swift in Sources */,
 				0E28747FF245ACA6DA71B716 /* MonospaceFontFamiliesTests.swift in Sources */,
+				E2E1DF8297FEA4FC6472CEDB /* MouseButtonParityBlindTests.swift in Sources */,
 				B3F09FD0F183D209DB5A8A25 /* MouseInsetMappingTests.swift in Sources */,
 				BF64BF3CCFD0A73D84570C3A /* MouseModifierBitsReportBlindTests.swift in Sources */,
 				3955806C0FC1297B94B7885E /* MouseReportGridClampBlindTests.swift in Sources */,

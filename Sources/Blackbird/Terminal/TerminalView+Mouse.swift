@@ -287,6 +287,13 @@ extension TerminalView {
         // Every mousedown starts a fresh gesture (see `mouseDown`).
         didReportRightMouseDown = false
         lastReportedDragCell = nil
+        // Also drop a resize context latched by a modifier-right-drag whose
+        // `rightMouseUp` never arrived (app deactivated mid-drag; there is no
+        // rightMouseCancelled). Left in place it sits ahead of the report
+        // branch in `rightMouseDragged` and swallows this gesture's drag.
+        if windowResizeController.end() {
+            endSynchronousResizePresentation()
+        }
         // Configured resize modifier (default ⌘) + right-drag → resize the
         // window from the corner nearest the click. Matches the borderless-
         // window idiom from apps like iTerm2 and VS Code: modifier-drag moves,
@@ -394,12 +401,15 @@ extension TerminalView {
             }
             return
         }
-        didReportRightMouseDown = false
-        let optionHeld = event.modifierFlags.contains(.option)
-        guard mouseReportingEnabled() && !optionHeld, session != nil else {
+        // Mirror what rightMouseDown DID, like `mouseUp`. Re-deriving the
+        // predicate here orphaned the press when the TUI turned mouse mode off
+        // or ⌥ went down mid-gesture, and emitted a release for a press that
+        // was never reported.
+        guard didReportRightMouseDown else {
             super.rightMouseUp(with: event)
             return
         }
+        didReportRightMouseDown = false
         sendMouseEvent(event, button: 2, press: false)
     }
 
@@ -419,31 +429,38 @@ extension TerminalView {
     // middle-click (vim pastes a register, tmux pastes its buffer).
 
     public override func otherMouseDown(with event: NSEvent) {
+        // Every middle mousedown starts a fresh gesture (see `mouseDown`).
+        // Other buttons leave a held middle button's state alone.
+        if event.buttonNumber == 2 {
+            didReportMiddleMouseDown = false
+            lastReportedDragCell = nil
+        }
         let optionHeld = event.modifierFlags.contains(.option)
         guard event.buttonNumber == 2, mouseReportingEnabled() && !optionHeld, session != nil else {
             super.otherMouseDown(with: event)
             return
         }
-        sendMouseEvent(event, button: 1, press: true)
+        didReportMiddleMouseDown = sendMouseEvent(event, button: 1, press: true)
     }
 
     public override func otherMouseDragged(with event: NSEvent) {
-        let optionHeld = event.modifierFlags.contains(.option)
-        guard event.buttonNumber == 2, mouseReportingEnabled() && !optionHeld, session != nil,
-              anyEventMouseEnabled() || dragReportingEnabled() else {
-            super.otherMouseDragged(with: event)
+        // Same policy as the left and right drags: motion only for a press
+        // that was actually reported, one report per newly entered cell, and
+        // only under 1002 / 1003 (all in `reportDragMotionIfNeeded`).
+        if event.buttonNumber == 2, didReportMiddleMouseDown {
+            reportDragMotionIfNeeded(for: event, button: 1)
             return
         }
-        // xterm motion reporting: button + 32 for drag-with-button-held.
-        sendMouseEvent(event, button: 1 + 32, press: true)
+        super.otherMouseDragged(with: event)
     }
 
     public override func otherMouseUp(with event: NSEvent) {
-        let optionHeld = event.modifierFlags.contains(.option)
-        guard event.buttonNumber == 2, mouseReportingEnabled() && !optionHeld, session != nil else {
+        // Mirror what otherMouseDown DID (see `rightMouseUp`).
+        guard event.buttonNumber == 2, didReportMiddleMouseDown else {
             super.otherMouseUp(with: event)
             return
         }
+        didReportMiddleMouseDown = false
         sendMouseEvent(event, button: 1, press: false)
     }
 
@@ -474,11 +491,6 @@ extension TerminalView {
         }
         lastReportedMotionCell = BBXYPoint(col: col, row: screenRow)
         sendMouseEvent(event, button: 35, press: true)
-    }
-
-    private func dragReportingEnabled() -> Bool {
-        guard let mode = currentSnapshot?.termMode else { return false }
-        return mode.contains(.mouseDrag)
     }
 
     // The window-resize gesture state + frame math live in
@@ -524,8 +536,18 @@ extension TerminalView {
             // per notch (classic wheel), via the accumulator — not one per
             // NSEvent. A trackpad flick with momentum used to fire dozens
             // of reports, each a 3-line step in less/vim/tmux.
+            //
+            // Shift turns a classic-wheel notch into a HORIZONTAL one
+            // (`scrollingDeltaX`, deltaY 0, sign preserved), so reading only
+            // deltaY dropped every <S-ScrollWheelUp/Down> a real mouse sends.
+            // Take the notch from X when Y is empty under Shift; the Shift bit
+            // itself is added by `sendMouseEvent`.
+            var wheelDelta = event.scrollingDeltaY
+            if wheelDelta == 0, event.modifierFlags.contains(.shift) {
+                wheelDelta = event.scrollingDeltaX
+            }
             let n = wheelAccumulator.lines(
-                deltaY: event.scrollingDeltaY,
+                deltaY: wheelDelta,
                 precise: event.hasPreciseScrollingDeltas,
                 pointsPerLine: Double(metrics.cellHeight),
                 linesPerNotch: 1
@@ -645,7 +667,7 @@ extension TerminalView {
     }
 
     /// Button-held motion report (xterm `Cb = button + 32`) for DEC 1002 / 1003,
-    /// shared by the left and right drag handlers; the caller has already
+    /// shared by the left, right and middle drag handlers; the caller has already
     /// established that the press was reported. Deduped on the cell, like the
     /// DEC 1003 no-button motion path (`reportPointerMotionIfNeeded`): AppKit
     /// delivers a dragged event per pointer sample (up to the display's refresh

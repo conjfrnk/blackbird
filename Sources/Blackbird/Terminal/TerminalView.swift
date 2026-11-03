@@ -422,6 +422,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// motion only for a gesture whose press actually reached the TUI.
     var didReportRightMouseDown = false
 
+    /// Middle-button twin of `didReportMouseDown`, for the same two jobs:
+    /// `otherMouseDragged` reports motion only for a press that reached the
+    /// TUI, and `otherMouseUp` mirrors the press instead of re-deriving it.
+    var didReportMiddleMouseDown = false
+
     /// Drives edge-autoscroll while the user drags a selection past the
     /// top/bottom of the viewport. AppKit only delivers `mouseDragged` on
     /// pointer motion, so a user holding the pointer stationary past the edge
