@@ -117,10 +117,12 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
     }
 }
 
-/// Equal-width pill strip with a trailing `+` button. Each pill shows its
-/// window title; hovering reveals an `×` close button on the left of the
-/// pill. Designed to live inside an `NSTitlebarAccessoryViewController`.
-final class TabStripView: NSView {
+/// Equal-width pill strip (down to `minPillWidth`, then paging with the
+/// selection) with a trailing `+` button. Each pill shows its window title
+/// and, on hover, its full title as a tooltip; hovering also reveals an `×`
+/// close button on the left of the pill. Designed to live inside an
+/// `NSTitlebarAccessoryViewController`.
+final class TabStripView: NSView, NSViewToolTipOwner {
 
     /// Full titlebar-row height. The grid's top inset is computed from
     /// the style-mask-derived titlebar height (not `safeAreaInsets`), so
@@ -166,8 +168,27 @@ final class TabStripView: NSView {
     // strip's live layout. The strip remains the single writer.
     fileprivate weak var selectedTab: NSWindow?
     private var totalWidth: CGFloat = 0
+    /// One frame per tab. While the row pages, the frames of tabs outside
+    /// `visiblePillRange` sit at virtual positions off the page (later ones
+    /// parked past the strip's trailing edge); nothing but a visible pill is
+    /// ever painted, hit-tested, or exposed to accessibility.
     fileprivate var pillFrames: [CGRect] = []
     fileprivate var addButtonFrame: CGRect = .zero
+    /// Indices of the pills currently on screen: every pill unless the row is
+    /// paging (see `TabStripLayout.pillRow`).
+    fileprivate var visiblePillRange: Range<Int> = 0 ..< 0
+    /// The page-button slots flanking the visible pills while the row pages;
+    /// `.zero` when the whole row fits. A slot is reserved on both sides of
+    /// every page (so the pills never shift between pages) but only drawn when
+    /// there is a page to go to.
+    fileprivate var leadingPageFrame: CGRect = .zero
+    fileprivate var trailingPageFrame: CGRect = .zero
+
+    /// Which way a page button turns the row.
+    enum PageDirection: Equatable {
+        case earlier
+        case later
+    }
 
     // MARK: - Hoisted collaborators
     //
@@ -243,6 +264,9 @@ final class TabStripView: NSView {
     /// Cursor over the trailing `+` button.
     fileprivate var hoveredAdd = false
     private var trackingArea: NSTrackingArea?
+    /// Rects last registered as tooltip areas, so `layoutPills` (which runs on
+    /// every title change and live-resize tick) only re-registers on a change.
+    private var toolTipRects: [CGRect] = []
 
     /// Pill index currently holding keyboard focus, or `nil` when the
     /// strip itself is first responder with no specific pill focused.
@@ -302,8 +326,11 @@ final class TabStripView: NSView {
         if let sub = super.hitTest(point), sub !== self { return sub }
         let local = convert(point, from: superview)
         if NSPointInRect(local, addButtonFrame) { return self }
-        for rect in pillFrames where NSPointInRect(local, rect) { return self }
-        return nil
+        // Both page-button slots are claimed even when the button isn't drawn
+        // (nothing to page to): a second click of a quick double-click on one
+        // must not fall through to the titlebar and zoom the window.
+        if pageDirection(at: local) != nil { return self }
+        return pillIndex(at: local) != nil ? self : nil
     }
 
     /// Drop every window reference the strip holds. `tabs` is a STRONG
@@ -320,6 +347,9 @@ final class TabStripView: NSView {
         tabs = []
         selectedTab = nil
         pillFrames = []
+        visiblePillRange = 0 ..< 0
+        leadingPageFrame = .zero
+        trailingPageFrame = .zero
         focusedPill = nil
         clearHover()
         tabAccessibility.invalidateCache()
@@ -430,6 +460,12 @@ final class TabStripView: NSView {
     private static let addButtonWidth: CGFloat = 22
     private static let pillSpacing: CGFloat = 2
     private static let trailingInset: CGFloat = 4
+    /// Narrowest a pill may get before the row pages instead. Equal division
+    /// left each title region under 20 pt at 20-30 tabs (blank titles) and the
+    /// rename field a sliver. 80 pt keeps ~8 characters in the title region.
+    private static let minPillWidth: CGFloat = 80
+    /// Width of each page-button slot flanking a paging row.
+    private static let pageSlotWidth: CGFloat = 14
     fileprivate static let titleFont = NSFont.systemFont(ofSize: 12, weight: .regular)
 
     private static let pillHeight: CGFloat = 24
@@ -502,13 +538,72 @@ final class TabStripView: NSView {
         // (see `classifyPillDrag` → `.windowMove`), and single-tab windows skip
         // the strip entirely so their titlebar stays bare and draggable.
         let available = max(0, totalWidth - trail - addW - gap)
-        let pillW = available / CGFloat(n)
-        var x: CGFloat = 0
-        for _ in 0..<n {
-            pillFrames.append(NSRect(x: x, y: y, width: max(0, pillW - gap / 2), height: h))
-            x += pillW
+        // Equal split, but never below `minPillWidth`: past that the row pages
+        // (whole pills between two page buttons, the page holding the selected
+        // tab) instead of shrinking the pills into blank stubs. See
+        // `TabStripLayout.pillRow` for why paging rather than scrolling.
+        let selectedIndex = tabs.firstIndex(where: { (t: NSWindow) -> Bool in t === selectedTab })
+        let row = TabStripLayout.pillRow(available: available,
+                                         count: n,
+                                         selectedIndex: selectedIndex,
+                                         minPillWidth: Self.minPillWidth,
+                                         edgeSlotWidth: Self.pageSlotWidth)
+        // Pills outside the page keep virtual frames at the same pitch: the
+        // earlier ones continue leftward from the first visible pill (their
+        // midpoints are always left of the strip), and the later ones are
+        // parked at or beyond the strip's trailing edge, so none of them can
+        // sit over the trailing page slot or the `+` and be mistaken for a
+        // pill on screen. The first visible pill starts after the leading
+        // page slot.
+        var x = row.edgeSlotWidth - CGFloat(row.firstVisible) * row.slotWidth
+        for i in 0..<n {
+            if row.isPaged, i == row.visibleRange.upperBound { x = max(x, totalWidth) }
+            pillFrames.append(NSRect(x: x, y: y, width: max(0, row.slotWidth - gap / 2), height: h))
+            x += row.slotWidth
         }
-        addButtonFrame = NSRect(x: x + gap, y: y, width: addW, height: h)
+        visiblePillRange = row.visibleRange
+        if row.isPaged {
+            leadingPageFrame = NSRect(x: 0, y: y, width: row.edgeSlotWidth, height: h)
+            trailingPageFrame = NSRect(x: available - row.edgeSlotWidth, y: y,
+                                       width: row.edgeSlotWidth, height: h)
+        } else {
+            leadingPageFrame = .zero
+            trailingPageFrame = .zero
+        }
+        // The `+` stays pinned at the trailing edge whatever the page.
+        addButtonFrame = NSRect(x: (row.isPaged ? available : x) + gap, y: y, width: addW, height: h)
+        refreshToolTips()
+    }
+
+    // MARK: - Tooltips
+
+    /// One tooltip rect per visible pill (and per page button that has a page
+    /// to turn to), answered by `view(_:stringForToolTip:point:userData:)`.
+    /// Titles are truncated on the pill itself, so this is where a long or
+    /// crowded title can be read in full.
+    private func refreshToolTips() {
+        var rects: [CGRect] = visiblePillRange.compactMap { (i: Int) -> CGRect? in
+            i < pillFrames.count ? pillFrames[i] : nil
+        }
+        if canPage(.earlier) { rects.append(leadingPageFrame) }
+        if canPage(.later) { rects.append(trailingPageFrame) }
+        guard rects != toolTipRects else { return }
+        removeAllToolTips()
+        for r in rects {
+            addToolTip(r, owner: self, userData: nil)
+        }
+        toolTipRects = rects
+    }
+
+    /// Resolved lazily from the point, so an OSC title change needs no
+    /// re-registration.
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag,
+              point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        if let direction = pageDirection(at: point), canPage(direction) {
+            return pageButtonLabel(direction)
+        }
+        guard let i = pillIndex(at: point), i < tabs.count else { return "" }
+        return Self.displayTitle(tabs[i].title)
     }
 
     // MARK: - Inline editing (delegated to TabRenameController)
@@ -579,6 +674,24 @@ final class TabStripView: NSView {
     /// Lets a test pass realistic geometry into the static
     /// `computeIntermediateIndex` helper without re-deriving it.
     var pillFramesForTesting: [CGRect] { pillFrames }
+    /// Test hook — the pills currently on screen (every pill unless the row
+    /// is paging).
+    var visiblePillRangeForTesting: Range<Int> { visiblePillRange }
+    /// Test hook — the `‹` / `›` page-button slots (`.zero` when the row does
+    /// not page).
+    var pageButtonFramesForTesting: (earlier: CGRect, later: CGRect) {
+        (leadingPageFrame, trailingPageFrame)
+    }
+    /// Test hook — the tooltip a hover at `point` (strip coordinates) would
+    /// show, or `nil` when no tooltip rect is registered there. Asks the same
+    /// rects and owner callback AppKit does, without reaching into private
+    /// `NSToolTip` state.
+    func toolTipForTesting(at point: NSPoint) -> String? {
+        guard toolTipRects.contains(where: { (r: CGRect) -> Bool in NSPointInRect(point, r) }) else {
+            return nil
+        }
+        return view(self, stringForToolTip: 0, point: point, userData: nil)
+    }
     /// Test hook — the trailing `+` button frame, so the strip's trailing
     /// layout (the `+` sits flush after the last pill, with no reserved drag
     /// gutter) is assertable without exposing the private `addButtonFrame`.
@@ -619,7 +732,8 @@ final class TabStripView: NSView {
         let drawOrder = Self.pillDrawOrder(count: tabs.count,
                                            draggedOriginalIndex: activeDrag?.originalIndex)
 
-        for i in drawOrder where i < tabs.count && i < pillFrames.count {
+        // Only the current page is painted; the rest of the row is virtual.
+        for i in drawOrder where visiblePillRange.contains(i) && i < tabs.count && i < pillFrames.count {
             let (rect, isDraggedPill) = pillRect(for: i, activeDrag: activeDrag)
             let w = tabs[i]
             let isSelected = w === selectedTab
@@ -634,6 +748,7 @@ final class TabStripView: NSView {
                      palette: palette)
         }
 
+        drawPageButtons(ctx: ctx, palette: palette)
         drawAddButton(ctx: ctx, palette: palette)
     }
 
@@ -751,8 +866,7 @@ final class TabStripView: NSView {
         // this tab while the user was elsewhere. Accent-coloured, 6 pt,
         // tucked into the pill's trailing edge; cleared when the tab is
         // next selected.
-        if !isSelected,
-           (w.windowController as? MainWindowController)?.hasUnseenAttention == true {
+        if showsUnseenAttention(w) {
             let d: CGFloat = 6
             let dot = NSRect(x: rect.maxX - d - 6, y: rect.midY - d / 2, width: d, height: d)
             ctx.addPath(NSBezierPath(ovalIn: dot).cgPath)
@@ -772,6 +886,41 @@ final class TabStripView: NSView {
             ctx.setStrokeColor(NSColor.controlAccentColor.cgColor)
             ctx.setLineWidth(2)
             ctx.strokePath()
+        }
+    }
+
+    /// `true` when `w` is a background tab that a bell or program notification
+    /// reached while the user was elsewhere (cleared when it is next selected).
+    private func showsUnseenAttention(_ w: NSWindow) -> Bool {
+        w !== selectedTab
+            && (w.windowController as? MainWindowController)?.hasUnseenAttention == true
+    }
+
+    /// The `‹` / `›` buttons that turn the row while it pages. Each is drawn
+    /// only when there is a page to turn to, and carries the same accent dot a
+    /// pill does when a tab hidden that way needs attention, so a background
+    /// tab on another page is not silently lost.
+    private func drawPageButtons(ctx: CGContext, palette: PillPalette) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 15, weight: .medium),
+            .foregroundColor: palette.textColor,
+        ]
+        let buttons: [(PageDirection, CGRect, String)] = [
+            (.earlier, leadingPageFrame, "\u{2039}"),
+            (.later, trailingPageFrame, "\u{203A}"),
+        ]
+        for (direction, frame, glyph) in buttons where canPage(direction) {
+            let s = NSAttributedString(string: glyph, attributes: attrs)
+            let size = s.size()
+            s.draw(at: NSPoint(x: frame.midX - size.width / 2,
+                               y: frame.midY - size.height / 2 + 1))
+            if hasHiddenAttention(direction) {
+                let d: CGFloat = 5
+                let dot = NSRect(x: frame.midX - d / 2, y: frame.minY + 2, width: d, height: d)
+                ctx.addPath(NSBezierPath(ovalIn: dot).cgPath)
+                ctx.setFillColor(NSColor.controlAccentColor.cgColor)
+                ctx.fillPath()
+            }
         }
     }
 
@@ -858,6 +1007,8 @@ final class TabStripView: NSView {
     enum ClickTarget: Equatable {
         case pill(Int)
         case addButton
+        /// One of the two page buttons flanking a paging row.
+        case pageButton(PageDirection)
     }
 
     /// One mousedown delivered to SOME strip in this process.
@@ -976,10 +1127,70 @@ final class TabStripView: NSView {
     static var lastMouseDownForTesting: ClickSequenceMark? { lastMouseDown }
     #endif
 
-    /// Index of the pill whose frame contains `p`, or `nil` for the `+`
-    /// button and the bare strip regions between pills.
+    /// Index of the on-screen pill whose frame contains `p`, or `nil` for the
+    /// `+` button, the page buttons, and the bare strip regions between pills.
+    /// Pills on other pages have frames too, but are never hit.
     private func pillIndex(at p: CGPoint) -> Int? {
-        pillFrames.firstIndex { NSPointInRect(p, $0) }
+        visiblePillRange.first(where: { (i: Int) -> Bool in
+            i < pillFrames.count && NSPointInRect(p, pillFrames[i])
+        })
+    }
+
+    /// Which page-button slot `p` is in, or `nil`. Answers for a slot whether
+    /// or not its button is drawn; `canPage` says whether pressing it does
+    /// anything.
+    private func pageDirection(at p: CGPoint) -> PageDirection? {
+        if NSPointInRect(p, leadingPageFrame) { return .earlier }
+        if NSPointInRect(p, trailingPageFrame) { return .later }
+        return nil
+    }
+
+    /// `true` when pills exist on a page before / after the visible one.
+    fileprivate func canPage(_ direction: PageDirection) -> Bool {
+        switch direction {
+        case .earlier: return visiblePillRange.lowerBound > 0
+        case .later: return visiblePillRange.upperBound < tabs.count
+        }
+    }
+
+    /// Tabs hidden on the page(s) in `direction`.
+    private func hiddenPillRange(_ direction: PageDirection) -> Range<Int> {
+        switch direction {
+        case .earlier: return 0 ..< min(visiblePillRange.lowerBound, tabs.count)
+        case .later: return min(visiblePillRange.upperBound, tabs.count) ..< tabs.count
+        }
+    }
+
+    /// A background tab off-screen is only visible through its attention dot,
+    /// so the page button toward it has to show one too.
+    private func hasHiddenAttention(_ direction: PageDirection) -> Bool {
+        hiddenPillRange(direction).contains(where: { (i: Int) -> Bool in
+            showsUnseenAttention(tabs[i])
+        })
+    }
+
+    /// Tooltip / VoiceOver text of the page button.
+    fileprivate func pageButtonLabel(_ direction: PageDirection) -> String {
+        let base = direction == .earlier ? "Show earlier tabs" : "Show later tabs"
+        return hasHiddenAttention(direction) ? base + " (a tab needs attention)" : base
+    }
+
+    /// Turn the row one page by selecting the tab next to the visible page: the
+    /// page is a function of the selection, so selecting is how it turns. Fired
+    /// from the page button; a no-op past the first / last page.
+    fileprivate func page(_ direction: PageDirection) {
+        guard canPage(direction) else { return }
+        let target = direction == .earlier ? visiblePillRange.lowerBound - 1 : visiblePillRange.upperBound
+        guard target >= 0, target < tabs.count else { return }
+        onSelectWindow?(tabs[target])
+    }
+
+    /// What a mousedown at `p` landed on.
+    private func clickTarget(at p: CGPoint) -> ClickTarget? {
+        if let i = pillIndex(at: p) { return .pill(i) }
+        if NSPointInRect(p, addButtonFrame) { return .addButton }
+        if let direction = pageDirection(at: p) { return .pageButton(direction) }
+        return nil
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -990,8 +1201,7 @@ final class TabStripView: NSView {
         // concerned", which is what every gate below actually wants — the raw
         // system count keeps rising across an activating click no strip ever
         // received. See `ClickSequenceMark`.
-        let target: ClickTarget? = pillIndex(at: p).map { .pill($0) }
-            ?? (NSPointInRect(p, addButtonFrame) ? .addButton : nil)
+        let target = clickTarget(at: p)
         let clicks: Int
         // Hoisted out of the branch so the rename gate below reads THIS
         // click's value directly, rather than fishing it back out of
@@ -1078,6 +1288,15 @@ final class TabStripView: NSView {
             }
             return
         }
+        if let direction = pageDirection(at: p) {
+            // Same first-click-only rule as `+`: a double-click turns one page,
+            // not two, and the second click is swallowed here rather than
+            // falling through to the titlebar (which would zoom the window).
+            if clicks == 1 {
+                page(direction)
+            }
+            return
+        }
         if beginRenameOnDoubleClick(p, clicks: clicks, wasSelected: wasSelected) { return }
         handlePillClick(p, event: event, clicks: clicks)
     }
@@ -1135,8 +1354,9 @@ final class TabStripView: NSView {
     /// pill being renamed elsewhere — there we select now to keep the
     /// click-to-switch contract.
     private func handlePillClick(_ p: CGPoint, event: NSEvent, clicks: Int) {
-        for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
+        if let i = pillIndex(at: p) {
             guard i < tabs.count else { return }
+            let rect = pillFrames[i]
             // Only honour a close click when the user is actually hovered on
             // the × — otherwise a stationary click near the leading edge of a
             // pill would quietly close it even though the × wasn't visible to
@@ -1419,16 +1639,37 @@ final class TabStripView: NSView {
         // if the tab list shrank since it was last set (P6, RCA
         // docs/rca-tab-behaviors-2026-07-01.md); `max(0, current - 1)`
         // alone only protects the lower bound.
-        let current = min(focusedPill ?? 0, tabs.count - 1)
-        focusedPill = max(0, current - 1)
+        //
+        // Clamped to the visible page as well: focus must never rest on a pill
+        // that isn't painted, or Delete / Return would act on a tab the user
+        // can't see. Moving past the page's edge stops there (the page buttons
+        // and the tab-switching shortcuts turn the page).
+        let current = clampToVisiblePills(focusedPill ?? 0)
+        focusedPill = clampToVisiblePills(current - 1)
         needsDisplay = true
     }
 
     override func moveRight(_ sender: Any?) {
         guard !tabs.isEmpty else { return }
-        let current = focusedPill ?? 0
-        focusedPill = min(tabs.count - 1, current + 1)
+        let current = clampToVisiblePills(focusedPill ?? 0)
+        focusedPill = clampToVisiblePills(current + 1)
         needsDisplay = true
+    }
+
+    /// `i` pulled into the pills on screen (and into `tabs`).
+    fileprivate func clampToVisiblePills(_ i: Int) -> Int {
+        let last = min(visiblePillRange.upperBound, tabs.count) - 1
+        let first = min(visiblePillRange.lowerBound, max(0, last))
+        return max(first, min(last, i))
+    }
+
+    /// The keyboard-focused pill, but only while it is actually on screen: the
+    /// page can turn under a still-set `focusedPill` (the selection moved to
+    /// another page), and Delete / Return must not act on a tab the user can't
+    /// see.
+    private var focusedVisiblePill: Int? {
+        guard let i = focusedPill, i < tabs.count, visiblePillRange.contains(i) else { return nil }
+        return i
     }
 
     override func insertNewline(_ sender: Any?) {
@@ -1448,7 +1689,7 @@ final class TabStripView: NSView {
     }
 
     override func deleteBackward(_ sender: Any?) {
-        guard let idx = focusedPill, idx < tabs.count else { return }
+        guard let idx = focusedVisiblePill else { return }
         // `onCloseWindow?` routes through `performClose(nil)` which
         // synchronously fires `windowWillClose` → `terminateSessions` →
         // `refreshAllTabBars`, mutating `self.tabs` (and `focusedPill`
@@ -1468,7 +1709,7 @@ final class TabStripView: NSView {
     }
 
     private func activateFocusedPill() {
-        guard let idx = focusedPill, idx < tabs.count else { return }
+        guard let idx = focusedVisiblePill else { return }
         onSelectWindow?(tabs[idx])
     }
 
@@ -1514,16 +1755,13 @@ final class TabStripView: NSView {
         clearHover()
         if NSPointInRect(p, addButtonFrame) {
             hoveredAdd = true
-        } else {
-            for (i, rect) in pillFrames.enumerated() where NSPointInRect(p, rect) {
-                hoveredPill = i
-                // Don't arm the close hotspot for the pill under edit —
-                // the `×` isn't drawn there and honouring a close click
-                // would toss the field and kill the session.
-                hoveredClose = tabRenameController.editingPill != i
-                    && NSPointInRect(p, closeHotspot(in: rect))
-                break
-            }
+        } else if let i = pillIndex(at: p) {
+            hoveredPill = i
+            // Don't arm the close hotspot for the pill under edit —
+            // the `×` isn't drawn there and honouring a close click
+            // would toss the field and kill the session.
+            hoveredClose = tabRenameController.editingPill != i
+                && NSPointInRect(p, closeHotspot(in: pillFrames[i]))
         }
         if prevPill != hoveredPill || prevClose != hoveredClose || prevAdd != hoveredAdd {
             needsDisplay = true
@@ -1578,7 +1816,7 @@ final class TabStripView: NSView {
         // `+` button or the empty trailing region) yields no contextual menu —
         // there's no tab to target.
         guard
-            let idx = pillFrames.firstIndex(where: { NSPointInRect(p, $0) }),
+            let idx = pillIndex(at: p),
             idx < tabs.count
         else { return nil }
 
@@ -2004,13 +2242,16 @@ private final class TabDragController {
             // `computeIntermediateIndex` can't compute a meaningful slot
             // without a positive pill pitch. Hold the dragged pill at
             // its original slot rather than yanking it to slot 0.
-            let newIndex = TabStripView.computeIntermediateIndex(
+            // Clamped to the page on screen: the slots past its edges have
+            // virtual frames the user can't see, and a reorder is never carried
+            // across pages (the selection would leave its own page).
+            let newIndex = view.clampToVisiblePills(TabStripView.computeIntermediateIndex(
                 cursorX: p.x,
                 downOffsetX: state.downOffsetX,
                 count: view.tabs.count,
                 pillFrames: view.pillFrames,
                 fallback: state.originalIndex
-            )
+            ))
             state.cursorX = p.x
             state.currentIndex = newIndex
             phase = .dragging(state)
@@ -2331,10 +2572,29 @@ private final class TabStripAccessibility {
     /// always equal the current title). Audit titlebar-tabs F5.
     private var lastAppliedTitles: [String] = []
 
-    /// The child element list `accessibilityChildren()` returns: the per-pill
-    /// buttons followed by the "New Tab" button.
+    /// The child element list `accessibilityChildren()` returns: the on-screen
+    /// pills' buttons, the page buttons flanking them while the row pages, then
+    /// the "New Tab" button. Pills on other pages are left out: their frames
+    /// are virtual, so VoiceOver would report and highlight rects outside the
+    /// strip. The page buttons are how it reaches them.
     func children() -> [NSAccessibilityElement] {
-        var out = pillElements()
+        let pills = pillElements()
+        var earlier: [NSAccessibilityElement] = []
+        var later: [NSAccessibilityElement] = []
+        for (direction, element) in pageElements() {
+            if direction == .earlier {
+                earlier.append(element)
+            } else {
+                later.append(element)
+            }
+        }
+        var visiblePills: [NSAccessibilityElement] = []
+        for i in view.visiblePillRange where i < pills.count {
+            visiblePills.append(pills[i])
+        }
+        var out: [NSAccessibilityElement] = earlier
+        out.append(contentsOf: visiblePills)
+        out.append(contentsOf: later)
         out.append(makeAddButtonElement())
         return out
     }
@@ -2349,7 +2609,7 @@ private final class TabStripAccessibility {
             let changed = TabStripView.changedTitleIndices(previous: lastAppliedTitles, current: current)
             if !changed.isEmpty {
                 let pills = pillElements()
-                for i in changed where i < pills.count {
+                for i in changed where i < pills.count && view.visiblePillRange.contains(i) {
                     NSAccessibility.post(element: pills[i], notification: .valueChanged)
                 }
             }
@@ -2359,7 +2619,31 @@ private final class TabStripAccessibility {
 
     /// Pill frames are about to change → cached elements (which embed a frame)
     /// are stale; rebuild lazily on next access.
-    func invalidateCache() { cachedPillElements = nil }
+    func invalidateCache() {
+        cachedPillElements = nil
+        cachedPageElements = nil
+    }
+
+    /// Cached for the same reason as the pill elements; one per page button
+    /// that currently has a page to turn to.
+    private var cachedPageElements: [(TabStripView.PageDirection, NSAccessibilityElement)]?
+
+    private func pageElements() -> [(TabStripView.PageDirection, NSAccessibilityElement)] {
+        if let cached = cachedPageElements { return cached }
+        var built: [(TabStripView.PageDirection, NSAccessibilityElement)] = []
+        for direction in [TabStripView.PageDirection.earlier, TabStripView.PageDirection.later]
+        where view.canPage(direction) {
+            let element = BBPageButtonAccessibilityElement(
+                parent: view,
+                frame: direction == .earlier ? view.leadingPageFrame : view.trailingPageFrame,
+                label: view.pageButtonLabel(direction),
+                onPress: { [weak view] in view?.page(direction) }
+            )
+            built.append((direction, element))
+        }
+        cachedPageElements = built
+        return built
+    }
 
     private func pillElements() -> [NSAccessibilityElement] {
         if let cached = cachedPillElements { return cached }
@@ -2481,6 +2765,26 @@ final class BBTabPillAccessibilityElement: BBFrameTrackingAccessibilityElement {
             self?.onClose()
             return true
         }]
+    }
+}
+
+/// Accessibility proxy for one of the page buttons flanking a paging pill row.
+/// Role=.button; its press turns the row one page.
+final class BBPageButtonAccessibilityElement: BBFrameTrackingAccessibilityElement {
+    private let label: String
+    private let onPress: () -> Void
+
+    init(parent: NSView, frame: NSRect, label: String, onPress: @escaping () -> Void) {
+        self.label = label
+        self.onPress = onPress
+        super.init(parent: parent, frame: frame, role: .button)
+    }
+
+    override func accessibilityLabel() -> String? { label }
+
+    override func accessibilityPerformPress() -> Bool {
+        onPress()
+        return true
     }
 }
 

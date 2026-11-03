@@ -23,6 +23,63 @@ enum TabStripLayout {
          width: max(0, pill.width - (closeWidth + titleHorizontalInset)))
     }
 
+    /// How the pill row is laid out in a given width.
+    struct PillRow: Equatable {
+        /// Distance between the leading edges of adjacent pills (the pill's
+        /// width plus the inter-pill spacing).
+        let slotWidth: CGFloat
+        /// Index of the first pill that is on screen.
+        let firstVisible: Int
+        /// How many pills are on screen.
+        let visibleCount: Int
+        /// Width of each of the two page-button slots that flank the visible
+        /// pills while the row pages; 0 when the whole row fits.
+        let edgeSlotWidth: CGFloat
+
+        var visibleRange: Range<Int> { firstVisible ..< firstVisible + visibleCount }
+        var isPaged: Bool { edgeSlotWidth > 0 }
+    }
+
+    /// Lay `count` pills into `available` points.
+    ///
+    /// The pills split the width equally while each keeps at least
+    /// `minPillWidth`. Past that the row PAGES instead of shrinking the pills
+    /// into blank stubs: whole pills fill the space between two
+    /// `edgeSlotWidth` page-button slots, and the page shown is the one that
+    /// holds `selectedIndex`.
+    ///
+    /// Paging, not scrolling, is deliberate. The page is a pure function of the
+    /// selection, so every window's strip in a tab group agrees without any
+    /// shared scroll state. And because the pages are disjoint with no partly
+    /// visible pills, selecting a pill that is on screen can never change the
+    /// page: the row stays put under a stationary cursor, so the second click
+    /// of a double-click lands on the same pill as the first.
+    ///
+    /// A strip too narrow for two such pages' worth of pills skips the floor
+    /// (paging one legible pill at a time is worse than a cramped equal split).
+    static func pillRow(available: CGFloat,
+                        count: Int,
+                        selectedIndex: Int?,
+                        minPillWidth: CGFloat,
+                        edgeSlotWidth: CGFloat) -> PillRow {
+        let n = max(1, count)
+        let equal = available / CGFloat(n)
+        let pagedSpan = available - 2 * edgeSlotWidth
+        guard equal < minPillWidth, pagedSpan >= 2 * minPillWidth else {
+            return PillRow(slotWidth: equal, firstVisible: 0, visibleCount: n, edgeSlotWidth: 0)
+        }
+        // `equal < minPillWidth` means `n` exceeds `available / minPillWidth`,
+        // so the `n` bound never binds; it only keeps an absurd width from
+        // overflowing `Int`.
+        let perPage = max(1, Int(min(pagedSpan / minPillWidth, CGFloat(n))))
+        let selected = min(max(selectedIndex ?? 0, 0), n - 1)
+        let first = selected / perPage * perPage
+        return PillRow(slotWidth: pagedSpan / CGFloat(perPage),
+                       firstVisible: first,
+                       visibleCount: min(perPage, n - first),
+                       edgeSlotWidth: edgeSlotWidth)
+    }
+
     /// Vertical origin of the pills inside a strip of `stripHeight`.
     ///
     /// The pills' midline should sit on the traffic lights' midline, and where
