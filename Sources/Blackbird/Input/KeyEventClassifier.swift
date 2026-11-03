@@ -70,6 +70,37 @@ enum KeyEventClassifier {
         keyCode == Self.returnKeyCode || keyCode == Self.keypadEnterKeyCode
     }
 
+    /// True for a chord the input context would commit through `insertText`
+    /// (which carries no modifiers) instead of routing to a command, so the
+    /// caller skips the IME and lets the encoder frame the key:
+    ///
+    /// - Ctrl+Option + ANY key. AppKit commits the key's raw control character
+    ///   (Ctrl+Option+Return/Tab/Esc -> CR / TAB / ESC, Ctrl+Option+letter ->
+    ///   its C0 byte, `charactersIgnoringModifiers` still the letter) or a
+    ///   bare space for Space, with Ctrl and Meta dropped: M-C-k degrades to
+    ///   C-k, Ctrl+Option+c writes a bare 0x03, kitty flag 1 gets the plain
+    ///   key instead of `CSI <cp>;7u`. Only f / b reach `doCommand`
+    ///   (moveWordForward: / moveWordBackward:). A dead-key composition uses
+    ///   Option without Ctrl, so a Ctrl+Option chord never composes.
+    /// - Return / keypad Enter with Shift (alone, or with Ctrl / Option).
+    ///   Keypad Enter reports ETX (U+0003) as its characters, which `insertText`
+    ///   writes as a literal Ctrl+C / SIGINT. Shift+Return does reach
+    ///   `doCommand(insertNewline:)`, so skipping the IME is harmless there.
+    ///   Plain, Ctrl-only and Option-only Enter keep their IME path (they
+    ///   arrive as `doCommand`).
+    ///
+    /// Never true with ⌘ held (an app shortcut that never reaches the IME hop).
+    /// Keyed on the physical key, like `isBackTab`; the caller still lets a
+    /// live composition own the key.
+    static func isNonComposableControlChord(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        guard !modifierFlags.contains(.command) else { return false }
+        if modifierFlags.contains([.control, .option]) { return true }
+        return isEnterKey(keyCode: keyCode) && modifierFlags.contains(.shift)
+    }
+
     /// The Return key is always Enter (`"\r"`) to the encoder, whatever
     /// character Cocoa derives for it under Ctrl (Ctrl+Return can surface as
     /// LF), so the kitty Enter mapping (`CSI 13 ; <mod> u`) always applies.

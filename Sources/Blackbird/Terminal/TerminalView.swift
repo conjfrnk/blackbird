@@ -2158,9 +2158,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// handleEvent's setMarkedText/insertText consumes the event and the
     /// encoder's Meta path is never reached, breaking M-e/M-i/M-u/M-n and every
     /// other Option+letter in Meta mode. Matches Terminal.app / iTerm2. A keypad
-    /// digit / operator under DECPAM skips the IME too (see the inline note).
-    /// Ctrl/⌘ chords and other non-Option input (CJK/Korean IME) keep the
-    /// normal IME path.
+    /// digit / operator under DECPAM, Ctrl+Return, Shift+Tab, Shift+keypad-Enter
+    /// and every Ctrl+Option chord skip the IME too (see the inline notes).
+    /// Other Ctrl chords and non-Option input (CJK/Korean IME) keep the normal
+    /// IME path.
     private func routeKeyDownThroughIME(_ event: NSEvent) -> Bool {
         didInsertTextViaIME = false
         // Every plain printable reaches the encoder through
@@ -2201,7 +2202,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let isBackTab = !hadMarkedText && KeyEventClassifier.isBackTab(
             keyCode: event.keyCode, chars: event.characters ?? ""
         )
-        if !optionMetaChord && !isContextMenuChord && !isApplicationKeypadKey && !isBackTab {
+        // Shift+keypad-Enter and every Ctrl+Option chord (Return / Tab / Esc /
+        // Space / letters) have nothing to compose, yet the input context
+        // commits their raw control character via `insertText` with no
+        // modifiers: keypad Enter's U+0003 would reach the PTY as Ctrl+C, the
+        // rest with Ctrl / Meta dropped (M-C-k as C-k). Let the encoder frame
+        // them. A live composition still owns the key.
+        let isNonComposableChord = !hadMarkedText && KeyEventClassifier.isNonComposableControlChord(
+            keyCode: event.keyCode, modifierFlags: event.modifierFlags
+        )
+        if !optionMetaChord && !isContextMenuChord && !isApplicationKeypadKey && !isBackTab
+            && !isNonComposableChord {
             inputContext?.handleEvent(event)
         }
         return hadMarkedText || hasMarkedText() || didInsertTextViaIME
