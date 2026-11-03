@@ -830,8 +830,16 @@ final class FindController {
         // ASCII fast path: terminal rows and find queries are overwhelmingly
         // ASCII, and Foundation's `range(of:options:)` costs ~8 us per row.
         // Pre-fold the needle once; any non-ASCII (or CR-bearing) query or
-        // row falls through to the Foundation loop below, unchanged.
+        // row falls through to the Foundation loop below (a non-ASCII query
+        // first drops the rows it cannot match: `rowFilter`).
         let asciiNeedle = Self.asciiNeedle(query: query, caseSensitive: opts.caseSensitive)
+        // The converse: a non-ASCII needle that no ASCII text can equal (é, 日本,
+        // an emoji) cannot match a row that holds no text related to it, and
+        // nearly every row is one (pure ASCII, box-drawing). Without this skip
+        // each costs 5-17 us of Foundation case-folding on the main thread
+        // (1-2 s at the default history, redone by every snapshot refresh
+        // while output streams). Nil when the query is ineligible.
+        var rowFilter = NonASCIIRowFilter(query: query)
         outer: for var row in captured {
             let ln = row.line
             let hay = row.hay
@@ -860,6 +868,7 @@ final class FindController {
                 if findMatches.count >= findMatchLimit { break outer }
                 continue
             }
+            if rowFilter?.mayMatch(hay) == false { continue }
             var cursor = hay.startIndex
             while let r = hay.range(of: query, options: stringOptions, range: cursor..<hay.endIndex) {
                 let startCol: Int
