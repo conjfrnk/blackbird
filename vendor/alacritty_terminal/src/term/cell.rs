@@ -49,7 +49,7 @@ pub(crate) const ZEROWIDTH_MAX: usize = 32;
 /// snapshot, which never surfaces a longer one as a link.
 const HYPERLINK_URI_MAX: usize = 4096;
 
-/// Max bytes of `id=` kept for one hyperlink.
+/// Max bytes of `id=` kept for one hyperlink; a longer id is cut to this, not refused.
 const HYPERLINK_ID_MAX: usize = 256;
 
 /// Max bytes of hyperlink data one terminal keeps alive across grid and scrollback.
@@ -62,7 +62,7 @@ pub(crate) const HYPERLINK_LIVE_MAX: usize = 32 * 1024 * 1024;
 const HYPERLINK_FIXED_COST: usize = 128;
 
 /// Why `Hyperlink::bounded` refused a link. The two are told apart because only `OverBudget`
-/// persists: one over-long link is a single bad sequence, but past the budget every later link
+/// persists: one over-long URI is a single bad sequence, but past the budget every later link
 /// is refused too, which is the "links stopped working" report the caller leaves a breadcrumb for.
 pub(crate) enum HyperlinkRefused {
     TooLong,
@@ -94,20 +94,32 @@ impl Hyperlink {
     /// Blackbird fix (re-apply on bump): upstream stores whatever OSC 8 delivers (vte allows
     /// 8 MiB for the URI and for `id=`), and every cell written under the link shares that one
     /// allocation, so each row pinned its own full-size copy until it left the scrollback and
-    /// retention tracked the bytes sent, 1:1. A URI or id past its cap is refused, and so is any
+    /// retention tracked the bytes sent, 1:1. A URI past its cap is refused, and so is any
     /// link that would take `live` (the terminal's running total, released as links drop) past
     /// `limit`, `HYPERLINK_LIVE_MAX` unless the terminal was configured otherwise; the latter
-    /// also covers many distinct links just under the caps.
+    /// also covers many distinct links just under the caps. An id past its cap is cut instead:
+    /// nothing in this crate reads it, so dropping the link for it would lose a usable link.
     pub(crate) fn bounded(
         link: VteHyperlink,
         live: &Arc<AtomicUsize>,
         limit: usize,
     ) -> Result<Self, HyperlinkRefused> {
         let VteHyperlink { id, uri } = link;
-        let id_len = id.as_ref().map_or(0, String::len);
-        if uri.len() > HYPERLINK_URI_MAX || id_len > HYPERLINK_ID_MAX {
+        if uri.len() > HYPERLINK_URI_MAX {
             return Err(HyperlinkRefused::TooLong);
         }
+        // Copy the prefix rather than `truncate`: the cost charged below is the capacity, and
+        // truncating in place would keep (and bill) the whole oversized allocation.
+        let id = id.map(|id| {
+            if id.len() <= HYPERLINK_ID_MAX {
+                return id;
+            }
+            let mut cut = HYPERLINK_ID_MAX;
+            while !id.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            id[..cut].to_owned()
+        });
 
         let mut inner = HyperlinkInner::new(id, uri);
         let cost = inner.cost();

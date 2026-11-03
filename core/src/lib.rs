@@ -288,8 +288,10 @@ pub struct BBTerm {
     /// One-shot latch for the third OSC 8 silent-drop path: the per-terminal
     /// live-byte budget on retained hyperlink strings (`HYPERLINK_LIVE_MAX`,
     /// vendored alacritty_terminal). Past it the grid refuses every new link
-    /// until rows holding links are erased or scroll out (the grid frees a
-    /// scrolled-out row up to ~1000 scrolls later), so cells print with no
+    /// until the cells holding links are overwritten, scroll out of the
+    /// retained scrollback, or are erased with their rows actually released
+    /// (⌘K reaches both grids' history and the active screen, not the shell's
+    /// visible rows while the alt screen is up), so cells print with no
     /// attribution and nothing says why. Re-armed by `bb_term_clear_all`,
     /// like `osc8_intern_cap_logged`.
     pub(crate) osc8_live_cap_logged: bool,
@@ -1422,7 +1424,7 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         // …and re-arm the intern-cap breadcrumb. Its message tells the user
         // ⌘K is the recovery, so a session that exhausts the budget a second
         // time after clearing must be able to say so. The live-byte budget's
-        // breadcrumb names ⌘K too.
+        // breadcrumb names ⌘K too, with the cases where it does not free links.
         bb.osc8_intern_cap_logged = false;
         bb.osc8_live_cap_logged = false;
         bb.uri_cache_bytes = 0;

@@ -165,10 +165,12 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
     if bb.term.take_hyperlink_over_budget() && crate::osc::once(&mut bb.osc8_live_cap_logged) {
         eprintln!(
             "[blackbird_core] OSC 8 hyperlink live-byte budget exhausted — new hyperlinks \
-             are refused (printed without a link) until the rows holding links are erased \
-             (⌘K, bb_term_clear_all) or have scrolled out of scrollback (the grid keeps a \
-             row for up to ~1000 more scrolls after that). Symptom: 'links stopped working'. \
-             One-shot per session."
+             are refused (printed without a link) until the cells holding links are \
+             overwritten or scroll out of the retained scrollback. Erasing the screen frees \
+             them only if the rows holding them are actually released: a plain erase \
+             (ESC[2J, ESC[3J) does not reach the other screen's rows, and ⌘K \
+             (bb_term_clear_all) does not reach the shell's visible rows while the alternate \
+             screen is up. Symptom: 'links stopped working'. One-shot per session."
         );
     }
 }

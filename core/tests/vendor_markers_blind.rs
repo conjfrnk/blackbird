@@ -34,7 +34,9 @@
 //!   DCH clamp ................... `Handler::delete_chars`
 //!   ED 1 fix .................... `Handler::clear_screen`
 //!   OSC 8 live-byte budget ...... `HYPERLINK_LIVE_MAX`, `HyperlinkInner`,
-//!                                 `Handler::set_hyperlink`
+//!                                 `Handler::set_hyperlink`, and the `Term` fields
+//!                                 `hyperlink_live`, `hyperlink_live_max`,
+//!                                 `hyperlink_over_budget` (declaration and initialiser)
 //!   kitty `CSI = flags ; mode u`  `Handler::set_keyboard_mode`
 //!   reflow cursor / wide char ... `Grid::shrink_columns`           (grid/resize.rs)
 //!   VS16 at column 0 ............ `Handler::input`, plus the four `glyph_end`
@@ -483,6 +485,49 @@ fn osc8_budget_carries_reapply_marker() {
             },
         ],
     );
+}
+
+/// The `Term` fields behind the OSC 8 budget. A field is not an item `Site` can resolve (its
+/// declaration and its `Term::new` initialiser share a name), so each of the two lines is
+/// checked directly: a marker on it or in the contiguous non-blank lines above it.
+#[test]
+fn osc8_budget_term_fields_carry_reapply_marker() {
+    let lines = load(TERM);
+    for field in [
+        "hyperlink_live",
+        "hyperlink_live_max",
+        "hyperlink_over_budget",
+    ] {
+        let sites: Vec<usize> = (0..lines.len())
+            .filter(|&i| {
+                lines[i]
+                    .trim_start()
+                    .strip_prefix(field)
+                    .is_some_and(|tail| tail.starts_with(':'))
+            })
+            .collect();
+        assert_eq!(
+            sites.len(),
+            2,
+            "{TERM}: expected `{field}` once in `struct Term` and once in its initialiser, \
+             found 1-based lines {:?}",
+            sites.iter().map(|i| i + 1).collect::<Vec<usize>>()
+        );
+        for item in sites {
+            let mut start = item;
+            while start > 0 && !lines[start - 1].trim().is_empty() {
+                start -= 1;
+            }
+            assert!(
+                lines[start..=item].iter().any(|l| is_marker(l)),
+                "{TERM}:{} `{field}` has no `Blackbird fix (re-apply on bump)` comment in its \
+                 attached block (lines {}-{}), so a re-vendor would drop the OSC 8 budget silently",
+                item + 1,
+                start + 1,
+                item + 1
+            );
+        }
+    }
 }
 
 #[test]
