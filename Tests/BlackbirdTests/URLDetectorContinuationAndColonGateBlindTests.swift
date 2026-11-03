@@ -8,7 +8,10 @@ import XCTest
 ///     URL that ends at the right edge joins the URL if (and only if) it is
 ///     one of `A-Z a-z 0-9 - . _ ~ : / ? # [ ] @ ! $ & ' ( ) * + , ; = %`.
 ///     Every member of that set must still join; printable ASCII just outside
-///     it (`" < > \ ^ ` { | }` and space) and non-ASCII scalars must not.
+///     it (`" < > \ ^ ` { | }` and space) and non-ASCII punctuation, symbols
+///     and separators must not. Non-ASCII letters, marks and numbers join
+///     like the single-row regex accepts them (bug uni-4; see
+///     `URLDetectorNonASCIIWrapTests`).
 ///  2. Scheme gating. A row with no `:` can never hold an `http(s)://` /
 ///     `ftp://` URL, but still yields bare-email `mailto:` matches. Rows with
 ///     a scheme `:` are detected exactly as before, and wrapped-URL joins at
@@ -68,15 +71,17 @@ final class URLDetectorContinuationAndColonGateBlindTests: XCTestCase {
     private let leaderStoppers: Set<Character> = ["?", "#", "&", "@", ";", ":"]
 
     /// Printable ASCII and a few non-ASCII scalars outside the alphabet.
-    /// Each is a single scalar occupying exactly one cell.
+    /// Each is a single scalar occupying exactly one cell. Non-ASCII letters
+    /// (e-acute, u-umlaut, Greek delta) used to be listed here; they now belong
+    /// to the alphabet (uni-4) and are covered by `URLDetectorNonASCIIWrapTests`.
     private let outsideAlphabet: [Character] = [
         " ", "\"", "<", ">", "\\", "^", "`", "{", "|", "}",
-        "\u{00E9}",  // e-acute
-        "\u{00FC}",  // u-umlaut
         "\u{00B7}",  // middle dot
         "\u{2013}",  // en dash
         "\u{00A0}",  // no-break space
-        "\u{0394}",  // Greek capital delta
+        "\u{20AC}",  // euro sign (currency symbol)
+        "\u{00A9}",  // copyright sign (other symbol)
+        "\u{00AB}",  // left guillemet (initial punctuation)
     ]
 
     private let head = "https://example.com/"   // exactly 20 cols

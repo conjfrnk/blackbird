@@ -27,14 +27,51 @@ public enum URLDetector {
     // literal and `URL(string:)` either rejected (span displayed but no
     // URL opened — OK) or normalised by inserting extra chars (the span
     // displayed fewer cells than were actually clicked open — UI/trust
-    // drift). No alternation + single-char quantifier preserves linear-time
-    // matching; no ReDoS shape introduced. Audit cwd-hyperlink F6.
+    // drift). Every quantified atom is a single character (or `%HH`) from a
+    // set that is disjoint from the next atom, with no nested quantifier, so
+    // matching stays linear-time; no ReDoS shape introduced. Audit
+    // cwd-hyperlink F6.
+    //
+    // Non-ASCII letters, marks and numbers (`\p{L}\p{M}\p{N}`) are accepted in
+    // the path, query and fragment (everything from the first `/`, `?` or `#`
+    // after the scheme), so an IRI like `…/wiki/Bücher`, `?q=café` or
+    // `…/wiki/日本` is one match instead of ending at the first non-ASCII
+    // scalar and opening a truncated page. `URL(string:)` percent-encodes them
+    // (macOS 14+). The AUTHORITY (userinfo, host, port) stays ASCII-only: a
+    // match can never carry a non-ASCII host, and a URL printed with prose
+    // glued straight onto the host (`访问https://github.com中文`) keeps its
+    // clean host link. Whitespace, symbols, punctuation (including fullwidth
+    // `，。（）`), bidi/invisible format scalars and the invisible Hangul filler
+    // letters (U+115F U+1160 U+3164 U+FFA0) all stay terminators.
+    //
+    // Known trade-off: prose written directly after the path with no space or
+    // punctuation (`詳細はhttps://example.com/docs/を参照してください`) is absorbed
+    // into the URL. `/wiki/日本` and `/docs/を参照` cannot be told apart without
+    // a language model; other terminals' link detectors accept the same
+    // trade-off. Fullwidth punctuation or a space ends the match as before.
+    //
+    // Combining scalars that the core folds into the previous cell are never
+    // exported to the grid, so a decomposed (NFD) IRI reads without its accents.
     //
     // Trailing punctuation (.,);:]}>'") is trimmed post-match so URLs at
     // the end of sentences select cleanly; a `)`/`]` that closes a `(`/`[`
     // inside the URL stays (see `trailingPunctuationCount`).
+    //
+    // The wrapped-URL join walks the same alphabet through `isURLBodyScalar`,
+    // its twin; `URLDetectorNonASCIIWrapTests` pins the two together.
     private static let regex: NSRegularExpression = {
-        let pattern = #"(?i)(?:https?|ftp)://(?:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=]|%[0-9A-Fa-f]{2})+"#
+        let percentEscape: String = "%[0-9A-Fa-f]{2}"
+        // Authority atoms: ASCII only and no `/ ? #`, so it ends at the path.
+        var authorityAtom: String = #"(?:[A-Za-z0-9\-._~:@!$&'()*+,;=\[\]]|"#
+        authorityAtom += percentEscape + ")"
+        // Path/query/fragment atoms: the ASCII set plus non-ASCII L/M/N, minus
+        // the invisible Hangul fillers.
+        var bodyAtom: String = #"(?:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=]"#
+        bodyAtom += #"|(?![\x{115F}\x{1160}\x{3164}\x{FFA0}])[\p{L}\p{M}\p{N}]|"#
+        bodyAtom += percentEscape + ")"
+        let rest: String = "[/?#]" + bodyAtom + "*"
+        var pattern: String = "(?i)(?:https?|ftp)://(?:"
+        pattern += authorityAtom + "+(?:" + rest + ")?|" + rest + ")"
         return try! NSRegularExpression(pattern: pattern)
     }()
 
@@ -139,28 +176,57 @@ public enum URLDetector {
         return try! NSRegularExpression(pattern: pattern)
     }()
 
-    /// Heuristic: does the cell at `col` on `row` hold a character that's
-    /// valid inside a URL? Mirrors the regex character class minus the
-    /// scheme — used to reconstruct soft-wrapped URLs (F9). Returns false
-    /// for blank/out-of-range cells so we only join rows that visually
-    /// continue into the next row's leftmost column.
-    private static func isURLContinuationChar(_ ch: Character?) -> Bool {
+    /// Heuristic: is `ch` valid inside a URL's path/query/fragment? Mirrors the
+    /// regex's body alphabet (the ASCII set, non-ASCII letters/marks/numbers
+    /// minus the invisible Hangul fillers, and a bare `%`) -- used to
+    /// reconstruct soft-wrapped URLs (F9). Returns false for nil (blank /
+    /// out-of-range) cells so we only join rows that visually continue into
+    /// the next row's leftmost column. Internal so the regex-parity test can
+    /// reach it.
+    static func isURLContinuationChar(_ ch: Character?) -> Bool {
         guard let ch else { return false }
-        // Pure scalar switch over the same 85-member set the old per-call
-        // `CharacterSet(charactersIn:)` held (A-Z a-z 0-9 and
-        // `-._~:/?#[]@!$&'()*+,;=%`); no per-call allocation. `allSatisfy`
-        // keeps the old semantics: any non-member scalar (including the
-        // extra scalars of a multi-scalar grapheme) rejects.
-        return ch.unicodeScalars.allSatisfy { scalar in
-            switch scalar {
-            case "A"..."Z", "a"..."z", "0"..."9",
-                 "-", ".", "_", "~", ":", "/", "?", "#", "[", "]", "@",
-                 "!", "$", "&", "'", "(", ")", "*", "+", ",", ";", "=", "%":
+        // `allSatisfy` keeps the old semantics: any non-member scalar
+        // (including the extra scalars of a multi-scalar grapheme) rejects.
+        return ch.unicodeScalars.allSatisfy { (scalar: Unicode.Scalar) -> Bool in
+            Self.isURLBodyScalar(scalar)
+        }
+    }
+
+    /// One scalar of the body alphabet. The 85 ASCII members are a pure scalar
+    /// switch (no per-call allocation); non-ASCII scalars are admitted by
+    /// general category, matching the regex's `\p{L}\p{M}\p{N}`.
+    private static func isURLBodyScalar(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar {
+        case "A"..."Z", "a"..."z", "0"..."9",
+             "-", ".", "_", "~", ":", "/", "?", "#", "[", "]", "@",
+             "!", "$", "&", "'", "(", ")", "*", "+", ",", ";", "=", "%":
+            return true
+        case "\u{115F}", "\u{1160}", "\u{3164}", "\u{FFA0}":
+            // Invisible Hangul filler letters (category Lo) -- a URL must not
+            // carry scalars the user cannot see.
+            return false
+        default:
+            switch scalar.properties.generalCategory {
+            case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter,
+                 .modifierLetter, .otherLetter,
+                 .nonspacingMark, .spacingMark, .enclosingMark,
+                 .decimalNumber, .letterNumber, .otherNumber:
                 return true
             default:
                 return false
             }
         }
+    }
+
+    /// Whether the cell at (`col`, `row`) is the `LEADING_WIDE_CHAR_SPACER` pad:
+    /// the blank last column of a row left over when a wide glyph did not fit
+    /// and wrapped. `cellKind` reports it as `.spacer`, like the trailing half of
+    /// a wide glyph, but it belongs to the NEXT row's first glyph.
+    private static func isLeadingWideSpacer(col: Int, row: Int, snapshot: BBSnapshot) -> Bool {
+        guard col >= 0, row >= 0, col < snapshot.cols, row < snapshot.rows else { return false }
+        let idx = row * snapshot.cols + col
+        guard idx < snapshot.cellCount else { return false }
+        return snapshot.cellsPointer[idx].flags & UInt16(LEADING_WIDE_CHAR_SPACER) != 0
     }
 
     /// Scan every visible row of `snapshot`. Returns matches whose `line`
@@ -195,6 +261,11 @@ public enum URLDetector {
             var utf16ToCol: [Int] = []  // index: UTF-16 offset, value: column
             utf16ToCol.reserveCapacity(snapshot.cols)
             for col in 0..<snapshot.cols {
+                // `character(at:)` reads a wide glyph's trailing spacer cell
+                // back as " ", which would end a URL at every CJK character.
+                // The glyph's leading cell already maps its UTF-16 units to the
+                // right column, so the spacer contributes nothing.
+                if snapshot.cellKind(at: col, row: row) == .spacer { continue }
                 let ch = snapshot.character(at: col, row: row) ?? " "
                 // Take the width from the incoming grapheme rather than by
                 // differencing `line.utf16.count` before and after the
@@ -244,11 +315,28 @@ public enum URLDetector {
                     let startIdx = min(max(0, r.location), utf16ToCol.count - 1)
                     let endIdx = min(r.location + r.length - 1, utf16ToCol.count - 1)
                     let startCol = utf16ToCol[startIdx]
-                    let endCol = utf16ToCol[endIdx]
+                    var endCol = utf16ToCol[endIdx]
+                    var reachesRightEdge = endCol == snapshot.cols - 1
+                    if endCol + 1 < snapshot.cols,
+                       snapshot.cellKind(at: endCol + 1, row: row) == .spacer {
+                        if Self.isLeadingWideSpacer(col: endCol + 1, row: row, snapshot: snapshot) {
+                            // The next wide glyph did not fit and wrapped, so
+                            // the URL may continue there. The pad is blank:
+                            // keep the underline on the last real cell, but
+                            // arm the wrap join.
+                            reachesRightEdge = true
+                        } else {
+                            // A URL ending in a wide glyph maps to its leading
+                            // cell; extend over the glyph's own spacer so the
+                            // underline and hit-test cover the whole glyph.
+                            endCol += 1
+                            reachesRightEdge = endCol == snapshot.cols - 1
+                        }
+                    }
                     let finalURLString = Self.wrapJoinedURL(
                         firstRowSubstring: substring,
                         row: row,
-                        endCol: endCol,
+                        reachesRightEdge: reachesRightEdge,
                         snapshot: snapshot,
                         consumedNextRowPrefix: &consumedNextRowPrefix
                     )
@@ -350,12 +438,13 @@ public enum URLDetector {
     /// when the URL doesn't wrap. Records the consumed leading columns of each
     /// joined row in `consumedNextRowPrefix` so the per-row scan doesn't
     /// double-emit the continuation fragment. The visible highlight stays clamped
-    /// to the first row (the caller's `endCol` is already `cols - 1` in the wrap
-    /// case, per the `endCol == snapshot.cols - 1` gate below).
+    /// to the first row. `reachesRightEdge` is the caller's verdict that the
+    /// match ends in the row's last column (or in the column before a wrapped
+    /// wide glyph's blank pad).
     private static func wrapJoinedURL(
         firstRowSubstring substring: String,
         row: Int,
-        endCol: Int,
+        reachesRightEdge: Bool,
         snapshot: BBSnapshot,
         consumedNextRowPrefix: inout [Int: Int]
     ) -> String {
@@ -370,7 +459,7 @@ public enum URLDetector {
         // while each consumed row is filled edge-to-edge and the
         // security guards below keep holding at every boundary.
         // Audit cwd-hyperlink F9 (single-row → multi-row walk).
-        if endCol == snapshot.cols - 1,
+        if reachesRightEdge,
            row + 1 < snapshot.rows,
            Self.rowContinues(row, in: snapshot),
            Self.isURLContinuationChar(snapshot.character(at: 0, row: row + 1)),
@@ -430,66 +519,65 @@ public enum URLDetector {
             var contRow = row + 1
             while contRow < snapshot.rows,
                   Self.isURLContinuationChar(snapshot.character(at: 0, row: contRow)) {
-                // Leading continuation run on `contRow`.
-                var contEnd = 0
-                while contEnd < snapshot.cols,
-                      Self.isURLContinuationChar(snapshot.character(at: contEnd, row: contRow)) {
-                    contEnd += 1
-                }
-                // Build the continuation text, tracking how many
-                // COLUMNS each grapheme consumes so the dedup prefix
-                // recorded below is in column units (what the row's own
-                // scan skips), not grapheme-count units. They coincide
-                // today (isURLContinuationChar admits only single-scalar
-                // ASCII: one cell == one grapheme == one column), but
-                // recording a grapheme count as a column index is a
-                // latent unit confusion that would mis-skip if a wide /
-                // non-BMP continuation char ever landed here. Audit
+                // Leading continuation run on `contRow`, walked cell by cell.
+                // Each entry is one URL character and the column just past
+                // everything it owns: a wide glyph's trailing spacer cell is
+                // folded into its glyph (`character(at:)` would read it back
+                // as " " and end the run), and the end-of-row pad ahead of a
+                // wrapped wide glyph is folded into the last real character.
+                // Recording COLUMNS keeps the dedup prefix below in the units
+                // the row's own scan skips, not grapheme-count units. Audit
                 // S3-004.
-                var continuation = ""
-                var graphemeEndColumn: [Int] = []
-                for c in 0..<contEnd {
-                    if let ch = snapshot.character(at: c, row: contRow) {
-                        continuation.append(ch)
-                        graphemeEndColumn.append(c + 1)
+                var run: [(ch: Character, endColumn: Int)] = []
+                var col = 0
+                runWalk: while col < snapshot.cols {
+                    switch snapshot.cellKind(at: col, row: contRow) {
+                    case .character(let ch) where Self.isURLContinuationChar(ch):
+                        run.append((ch: ch, endColumn: col + 1))
+                    case .spacer where !run.isEmpty:
+                        run[run.count - 1].endColumn = col + 1
+                    default:
+                        break runWalk
                     }
+                    col += 1
                 }
+                var continuation = ""
+                for entry in run { continuation.append(entry.ch) }
                 // Whether this run reaches the row's right edge (filled
                 // edge-to-edge) decides whether the URL plausibly
                 // continues onto the NEXT row.
-                let filledToEdge = (contEnd == snapshot.cols)
+                let filledToEdge = (col == snapshot.cols)
                 // Trim the trailing-punct set so a wrapped URL followed
                 // by ", thanks" on the final row still yields a clean URL.
                 // Balance is judged over the whole joined URL, not just this
                 // row: the `(` may sit on an earlier row than its `)`.
-                // (Continuation chars are single-scalar ASCII, so the UTF-16
-                // count equals the Character count.)
-                let trimmedLen = max(0, continuation.count
+                // The trimmed characters are ASCII punctuation, one cell and
+                // one UTF-16 unit each, so the unit count is a count of
+                // trailing run entries.
+                let trimmedLen = max(0, run.count
                     - trailingPunctuationCount(in: accumulated + continuation))
                 guard trimmedLen > 0 else { break }
-                let trimmed = String(continuation.prefix(trimmedLen))
+                var trimmed = ""
+                for entry in run.prefix(trimmedLen) { trimmed.append(entry.ch) }
                 let candidate = accumulated + trimmed
                 guard let joined = URL(string: candidate),
                       joined.host == subHost,
                       joined.port == subPort,
-                      let firstContChar = trimmed.first,
-                      !urlStructureLeaders.contains(firstContChar) else { break }
+                      !urlStructureLeaders.contains(run[0].ch) else { break }
                 // Commit this row into the URL.
                 accumulated = candidate
                 finalURLString = candidate
                 // Record how many leading COLUMNS of this row were
                 // consumed so its own scan skips exactly those cells
-                // and doesn't double-emit the fragment. (graphemeEnd-
-                // Column[k] = columns consumed through grapheme k;
-                // equals trimmedLen today but stays correct if a
-                // grapheme ever spans >1 column.)
-                consumedNextRowPrefix[contRow] = graphemeEndColumn[trimmedLen - 1]
+                // and doesn't double-emit the fragment. A wide glyph spans
+                // two columns, so this is not `trimmedLen`.
+                consumedNextRowPrefix[contRow] = run[trimmedLen - 1].endColumn
                 // Continue onto the next row only when this row was
                 // consumed in full edge-to-edge with no trailing punct
                 // and wrapped (a hard newline right after a full row
                 // ends the URL). A short or punct-trimmed run means the
                 // URL ended here.
-                if filledToEdge && trimmedLen == contEnd
+                if filledToEdge && trimmedLen == run.count
                     && Self.rowContinues(contRow, in: snapshot) {
                     contRow += 1
                 } else {
