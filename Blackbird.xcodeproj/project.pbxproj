@@ -213,6 +213,7 @@
 		9B8CC12154E6A79FDE647943 /* KittyKeyRepeatEventTypeBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29B3E82A4501BBC90AF74B61 /* KittyKeyRepeatEventTypeBlindTests.swift */; };
 		9CBDD8951EDFFDD16224C33C /* IMEAstralRectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20D4A2742422F440F7C65BB5 /* IMEAstralRectTests.swift */; };
 		9D0657AA882549B377408EB1 /* URLDetectorBalancedParenBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C6840094DF834E5E45694B5 /* URLDetectorBalancedParenBlindTests.swift */; };
+		9EC3B3F7ED6213D4D6FCDBFB /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB14510DCA7F03B6DDEDD18 /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift */; };
 		9F19C00C0A9328C8DF97E23F /* SelectionAutoscroller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BD18F9A4B904F415752829 /* SelectionAutoscroller.swift */; };
 		9FD5A4ADEA2DE72E73C6CDD6 /* PTYCookedModeUTF8BlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16817B5CAAD606CBCDDDD590 /* PTYCookedModeUTF8BlindTests.swift */; };
 		A00B974CC210D6DF0B342936 /* DeferredFrameSaveFlushBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2A7E646D02B5E5B2F492A70 /* DeferredFrameSaveFlushBlindTests.swift */; };
@@ -620,6 +621,7 @@
 		C9B348536E063859D3D278C8 /* TabResizeFanoutBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabResizeFanoutBlindTests.swift; sourceTree = "<group>"; };
 		C9E38BAB38899CD10A229243 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		CA48BC361DD9FDF58015FED6 /* KeyEncoderAdversarialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderAdversarialTests.swift; sourceTree = "<group>"; };
+		CAB14510DCA7F03B6DDEDD18 /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasBoxGlyphStrokeFitBlindTests.swift; sourceTree = "<group>"; };
 		CBE50317421F1A0C4805B683 /* NormalScrollAccumulationBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NormalScrollAccumulationBlindTests.swift; sourceTree = "<group>"; };
 		CCA577F9308A6FEF5C80E95D /* LocaleEnvironmentBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocaleEnvironmentBlindTests.swift; sourceTree = "<group>"; };
 		CCAD48790A923A8A32E6B815 /* CtrlBackspaceBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CtrlBackspaceBlindTests.swift; sourceTree = "<group>"; };
@@ -799,6 +801,7 @@
 				859E53A8005E3A9B9C92DF29 /* FocusEventsTests.swift */,
 				EF3965715F1DF2021784E790 /* FunctionKeyF13F20Tests.swift */,
 				DE379012FEC25AD2E2A641FE /* GlyphAtlasBlockGlyphYFitBlindTests.swift */,
+				CAB14510DCA7F03B6DDEDD18 /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift */,
 				26BA0CAC55ADFCE4A1F02D62 /* GlyphAtlasInvariantTests.swift */,
 				B1B68195F4161FCEE7A5FB56 /* GlyphAtlasStorageModeBlindTests.swift */,
 				31710E3D7CE95A9DEB4BDBD9 /* GlyphAtlasSyntheticTraitsBlindTests.swift */,
@@ -1471,6 +1474,7 @@
 				A25F8643DAD775E8251392EC /* FocusEventsTests.swift in Sources */,
 				242064EC63C93D69A922E41C /* FunctionKeyF13F20Tests.swift in Sources */,
 				3EF5AE53F04F32047CCC4B80 /* GlyphAtlasBlockGlyphYFitBlindTests.swift in Sources */,
+				9EC3B3F7ED6213D4D6FCDBFB /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift in Sources */,
 				986BA3465A246BA5AAFD097B /* GlyphAtlasInvariantTests.swift in Sources */,
 				E52AB9F08C03E0E5294E9D3D /* GlyphAtlasStorageModeBlindTests.swift in Sources */,
 				B79600DADE144E20F76E29FB /* GlyphAtlasSyntheticTraitsBlindTests.swift in Sources */,

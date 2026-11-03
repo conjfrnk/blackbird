@@ -164,6 +164,10 @@ public final class GlyphAtlas {
     /// synthesises them (stroke for bold, shear for italic) the way
     /// Terminal.app and iTerm2 do instead of silently drawing regular.
     private var syntheticStyles: [Style: (bold: Bool, italic: Bool)] = [:]
+    /// Vertical-fit plans (see `verticalFit`), measured once per
+    /// (style, fit kind, drawing font) and reused by every later glyph of
+    /// that kind. An empty plan means the font has no usable reference glyph.
+    private var verticalFits: [FitKey: [FitPiece]] = [:]
 
     /// Which parts of `style` must be synthesised at draw time.
     func syntheticTraits(for style: Style) -> (bold: Bool, italic: Bool) {
@@ -998,25 +1002,24 @@ public final class GlyphAtlas {
         // width exactly, and Y so the font's full-height glyph fills the
         // cell height (see `VerticalFit`). Applied ONLY to the
         // cell-fill ranges so normal text keeps its natural advance.
-        var baselineY = metrics.descent
+        var xScale: CGFloat = 1
+        var pieces = [FitPiece(rows: nil, yScale: 1, baselineY: metrics.descent)]
         if Self.isCellFillCharacter(scalar) {
-            var xScale: CGFloat = 1
             let typographicWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
             if typographicWidth > 0 {
                 xScale = metrics.cellWidth / typographicWidth
             }
-            var yScale: CGFloat = 1
             if let fit = VerticalFit(scalar),
-               let extent = cellFillVerticalExtent(for: scalar, fit: fit, style: style)
+               let fitted = verticalFit(for: scalar, fit: fit, style: style)
             {
                 // Stretch so the reference ink spans exactly the slot
                 // (`h` px), then drop the baseline so its bottom sits on the
                 // slot's bottom edge. Menlo's █ stops ~2 pt short of the
                 // cell top and Monaco's is 59% of the cell, which left a
-                // stripe between every pair of stacked rows.
-                yScale = fit.scale(
-                    referenceHeight: extent.max - extent.min, cellHeight: CGFloat(h) / scale)
-                baselineY = -extent.min
+                // stripe between every pair of stacked rows. Box lines may
+                // come back as three slices (`bandedFit`) so ─ keeps its
+                // thickness; each is drawn below with its own Y scale.
+                pieces = fitted
                 // CG floors the glyph origin to a whole device pixel by
                 // default; that alone drops the top row of a cell-height
                 // glyph to ~80% coverage at 1x. Keep the fitted origin exact.
@@ -1029,7 +1032,6 @@ public final class GlyphAtlas {
                     ctx.setShouldSmoothFonts(false)
                 }
             }
-            ctx.scaleBy(x: xScale, y: yScale)
         } else if !wide && Self.isNerdFontIconRange(scalar) {
             // Nerd-font private-use-area icons (powerline separators,
             // devicons, seti-icons, octicons) are drawn in many
@@ -1046,8 +1048,7 @@ public final class GlyphAtlas {
             // wider than the cell (avoid squishing normal-advance
             // icons). `* 1.05` matches the "noticeable clip" floor.
             if typographicWidth > metrics.cellWidth * 1.05 {
-                let xScale = metrics.cellWidth / typographicWidth
-                ctx.scaleBy(x: xScale, y: 1)
+                xScale = metrics.cellWidth / typographicWidth
             }
         }
 
@@ -1064,8 +1065,18 @@ public final class GlyphAtlas {
             ctx.setStrokeColor(gray: 1, alpha: 1)
             ctx.setLineWidth(max(0.5, metrics.font.pointSize / 28))
         }
-        ctx.textPosition = CGPoint(x: 0, y: baselineY)
-        CTLineDraw(line, ctx)
+        for piece in pieces {
+            ctx.saveGState()
+            if let rows = piece.rows {
+                ctx.clip(to: CGRect(
+                    x: 0, y: rows.lowerBound,
+                    width: CGFloat(w) / scale, height: rows.upperBound - rows.lowerBound))
+            }
+            ctx.scaleBy(x: xScale, y: piece.yScale)
+            ctx.textPosition = CGPoint(x: 0, y: piece.baselineY)
+            CTLineDraw(line, ctx)
+            ctx.restoreGState()
+        }
 
         return commitRasterized(
             ctx, cacheKey: cacheKey, w: w, h: h, bytesPerRow: w,
@@ -1217,9 +1228,10 @@ public final class GlyphAtlas {
     }
 
     /// How a cell-fill scalar is stretched vertically so stacked rows tile.
-    /// The stretch is one uniform Y-affine that maps a *reference* glyph's
-    /// ink extent onto the cell height; every other glyph of the range rides
-    /// along with the same transform.
+    /// The stretch maps a *reference* glyph's ink extent onto the cell
+    /// height; every other glyph of the range rides along with the same
+    /// plan. `.solidBlock` uses one uniform Y-affine; `.boxLine` uses the
+    /// three-slice `bandedFit` so horizontal strokes keep their thickness.
     private enum VerticalFit {
         /// U+2580-2590 and U+2594-259F (halves, eighths, quadrants): fitted
         /// to U+2588 FULL BLOCK. Always applied — even a font whose █ is
@@ -1227,12 +1239,12 @@ public final class GlyphAtlas {
         /// at 1x has a ~20%-coverage top row without it). Smoothing is off.
         case solidBlock
         /// U+2500-257F: fitted to U+2502 LIGHT VERTICAL, but only ever
-        /// stretched, never shrunk. The stretch thickens horizontal strokes
-        /// by the same factor, so a font whose │ already spans (or overshoots)
-        /// the cell (Hack, Menlo, the system mono font) keeps its stroke
-        /// weight and is merely re-anchored to the exact slot; a font like
-        /// Monaco (│ ~65% of the cell) trades heavier ─ for │ that joins
-        /// across rows.
+        /// stretched, never shrunk. A font whose │ already spans (or
+        /// overshoots) the cell (Hack) is merely re-anchored to the exact
+        /// slot. A font like Monaco (│ ~65% of the cell) is stretched only
+        /// above and below the band its horizontal strokes occupy, so the
+        /// verticals still join across rows while ─ keeps the thickness the
+        /// font drew it with (`bandedFit`).
         case boxLine
 
         /// `nil` for scalars that are not vertically fitted. The ░▒▓ dither
@@ -1267,35 +1279,148 @@ public final class GlyphAtlas {
         }
     }
 
-    /// Vertical ink extent, relative to the baseline, of the reference glyph
-    /// (`fit.referenceCharacter`) that must span the whole cell height.
-    /// Measured in the font CoreText actually draws `scalar` with — Monaco
-    /// lacks ▀/▄ and falls back to Menlo, whose glyphs need Menlo's █, not
-    /// Monaco's. `nil` (glyph drawn unfitted, with a debug log) when that
-    /// font has no usable reference glyph.
-    private func cellFillVerticalExtent(
+    /// One vertical slice of a fitted cell-fill glyph: draw the glyph with
+    /// `yScale` and the baseline at `baselineY` (both in the scaled space,
+    /// like `ctx.textPosition`), clipped to `rows` (cell points from the
+    /// bottom; nil = the whole cell).
+    private struct FitPiece {
+        let rows: ClosedRange<CGFloat>?
+        let yScale: CGFloat
+        let baselineY: CGFloat
+    }
+
+    /// Identity of a fit measurement. `fallbackFont` is the PostScript name of
+    /// the cascade font that draws the scalar, nil when the styled font does.
+    private struct FitKey: Hashable {
+        let style: Style
+        let fit: VerticalFit
+        let fallbackFont: String?
+    }
+
+    /// The slices that fit `scalar` to the cell height, or nil (glyph drawn
+    /// unfitted) when the font that draws it has no usable reference glyph.
+    /// Measured in that font — Monaco lacks ▀/▄ and falls back to Menlo, whose
+    /// glyphs need Menlo's █, not Monaco's — and cached per (style, fit,
+    /// font), so a box-drawing run costs one measurement, not one per glyph.
+    private func verticalFit(
         for scalar: UnicodeScalar, fit: VerticalFit, style: Style
-    ) -> (min: CGFloat, max: CGFloat)? {
-        let str = Self.glyphString(scalar, emojiPresentation: false) as NSString
-        let drawFont = CTFontCreateForString(
-            styledFont(for: style) as CTFont, str as CFString,
-            CFRange(location: 0, length: str.length)
-        )
-        var character = fit.referenceCharacter
-        var glyph = CGGlyph()
-        guard CTFontGetGlyphsForCharacters(drawFont, &character, &glyph, 1), glyph != 0
-        else {
+    ) -> [FitPiece]? {
+        guard var probe = UniChar(exactly: scalar.value) else { return nil }
+        let styled = styledFont(for: style) as CTFont
+        var probeGlyph = CGGlyph()
+        let drawFont: CTFont
+        let fallbackFont: String?
+        if CTFontGetGlyphsForCharacters(styled, &probe, &probeGlyph, 1), probeGlyph != 0 {
+            drawFont = styled
+            fallbackFont = nil
+        } else {
+            let str = Self.glyphString(scalar, emojiPresentation: false) as NSString
+            drawFont = CTFontCreateForString(
+                styled, str as CFString, CFRange(location: 0, length: str.length))
+            fallbackFont = CTFontCopyPostScriptName(drawFont) as String
+        }
+        let key = FitKey(style: style, fit: fit, fallbackFont: fallbackFont)
+        let plan: [FitPiece]
+        if let cached = verticalFits[key] {
+            plan = cached
+        } else {
+            plan = measureVerticalFit(in: drawFont, fit: fit, scalar: scalar)
+            verticalFits[key] = plan
+        }
+        return plan.isEmpty ? nil : plan
+    }
+
+    private func measureVerticalFit(
+        in font: CTFont, fit: VerticalFit, scalar: UnicodeScalar
+    ) -> [FitPiece] {
+        guard let reference = Self.inkExtent(of: fit.referenceCharacter, in: font) else {
             // Do not borrow another font's █/│: its cell geometry differs, so
             // a guessed fit can misplace the glyph worse than no fit.
             Self.logger.debug(
-                "GlyphAtlas: no U+\(String(format: "%04X", character), privacy: .public) reference in \(CTFontCopyPostScriptName(drawFont) as String, privacy: .public); U+\(String(format: "%04X", scalar.value), privacy: .public) is drawn without a vertical fit"
+                "GlyphAtlas: no U+\(String(format: "%04X", fit.referenceCharacter), privacy: .public) reference in \(CTFontCopyPostScriptName(font) as String, privacy: .public); U+\(String(format: "%04X", scalar.value), privacy: .public) is drawn without a vertical fit"
             )
-            return nil
+            return []
         }
+        let cellHeight = CGFloat(cellPxHeight) / scale
+        let yScale = fit.scale(
+            referenceHeight: reference.max - reference.min, cellHeight: cellHeight)
+        if fit == .boxLine, yScale > 1,
+           let banded = bandedFit(
+               reference: reference, strokes: Self.horizontalStrokeBand(in: font),
+               yScale: yScale, cellHeight: cellHeight)
+        {
+            return banded
+        }
+        return [FitPiece(rows: nil, yScale: yScale, baselineY: -reference.min)]
+    }
+
+    /// The same stretch as the uniform fit, but only above and below the band
+    /// of the horizontal strokes. Stretching the whole glyph by `yScale` makes
+    /// every ─ and every horizontal arm `yScale` times thicker (Monaco's are
+    /// 1.5x), while a vertical stroke looks the same however far it is
+    /// stretched. The middle slice keeps the strokes' own thickness and sits
+    /// where the uniform stretch would centre them; the outer slices run
+    /// from its (pixel-aligned, so seamless) edges to the cell edges. Nil when
+    /// the font has no horizontal strokes or the band leaves no room to
+    /// stretch, which falls back to the uniform fit.
+    private func bandedFit(
+        reference: (min: CGFloat, max: CGFloat), strokes: (min: CGFloat, max: CGFloat)?,
+        yScale: CGFloat, cellHeight: CGFloat
+    ) -> [FitPiece]? {
+        guard let strokes = strokes else { return nil }
+        let center = (strokes.min + strokes.max) / 2
+        let shift = yScale * (center - reference.min) - center
+        // One device pixel of margin keeps the strokes' anti-aliased fringe
+        // inside the unscaled slice.
+        let margin = 1 / scale
+        let lower = floor((strokes.min + shift - margin) * scale) / scale
+        let upper = ceil((strokes.max + shift + margin) * scale) / scale
+        let lowerGlyph = lower - shift
+        let upperGlyph = upper - shift
+        guard lower > 0, upper < cellHeight,
+              lowerGlyph > reference.min, upperGlyph < reference.max
+        else { return nil }
+        let below = lower / (lowerGlyph - reference.min)
+        let above = (cellHeight - upper) / (reference.max - upperGlyph)
+        return [
+            FitPiece(rows: 0...lower, yScale: below, baselineY: lower / below - lowerGlyph),
+            FitPiece(rows: lower...upper, yScale: 1, baselineY: shift),
+            FitPiece(rows: upper...cellHeight, yScale: above, baselineY: upper / above - upperGlyph),
+        ]
+    }
+
+    /// Vertical ink extent, relative to the baseline, of `character` in
+    /// `font`; nil when the font lacks the glyph or it has no ink.
+    private static func inkExtent(
+        of character: UniChar, in font: CTFont
+    ) -> (min: CGFloat, max: CGFloat)? {
+        var character = character
+        var glyph = CGGlyph()
+        guard CTFontGetGlyphsForCharacters(font, &character, &glyph, 1), glyph != 0
+        else { return nil }
         var bounds = CGRect.zero
-        CTFontGetBoundingRectsForGlyphs(drawFont, .horizontal, &glyph, &bounds, 1)
+        CTFontGetBoundingRectsForGlyphs(font, .horizontal, &glyph, &bounds, 1)
         guard bounds.height > 0, bounds.minY.isFinite, bounds.maxY.isFinite else { return nil }
         return (bounds.minY, bounds.maxY)
+    }
+
+    /// Vertical span covered by the horizontal strokes of the box-drawing
+    /// set: the union of ─, ━ and ═ (the thickest). Every other glyph's
+    /// horizontal arms lie inside it.
+    private static func horizontalStrokeBand(
+        in font: CTFont
+    ) -> (min: CGFloat, max: CGFloat)? {
+        var band: (min: CGFloat, max: CGFloat)?
+        let strokes: [UniChar] = [0x2500, 0x2501, 0x2550]
+        for character in strokes {
+            guard let extent = inkExtent(of: character, in: font) else { continue }
+            if let known = band {
+                band = (Swift.min(known.min, extent.min), Swift.max(known.max, extent.max))
+            } else {
+                band = extent
+            }
+        }
+        return band
     }
 
     /// True for Unicode ranges where the glyph is *designed* to tile with its
