@@ -257,7 +257,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // regresses for users whose saved frame referenced a
             // now-missing display. Driving the apply ourselves keeps
             // the nudge meaningful.
-            window.setFrameUsingName(Self.frameAutosaveName)
+            //
+            // It returns false when nothing is saved (every new install). The
+            // constructor's (0, 0) origin then stands and the window opens
+            // flush to the bottom edge of the screen — the nudge below judges
+            // that frame reachable and leaves it alone, and `showWindow`'s
+            // cascade does not move a first window. Centre it instead, like
+            // Settings. A restored frame is never re-centred.
+            if !window.setFrameUsingName(Self.frameAutosaveName) {
+                window.center()
+            }
             let nudged = nudgeFrameOntoVisibleScreen(
                 window.frame,
                 against: NSScreen.screens
@@ -283,7 +292,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                     window.setFrame(nudged, display: false)
                 }
             } else {
+                // Nothing saved yet: centre for the same reason as the
+                // restore branch above (otherwise it opens at y == 0).
                 window.setContentSize(rect.size)
+                window.center()
             }
         }
         // Group all terminal windows into a shared tab bar. .preferred means
