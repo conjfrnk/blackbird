@@ -124,6 +124,15 @@ final class TabGroupObserver {
         return reservation > 20 ? reservation : Self.trafficLightsReservationFallback
     }
 
+    /// Width of the pill strip: the window's width less the traffic-light
+    /// reservation. Deliberately NO minimum. The accessory is `.right`-anchored,
+    /// so a strip wider than the room beside the lights overflows leftward and
+    /// its first pill is drawn under the buttons (and off the window below
+    /// ~200 pt). `layoutPills` already shrinks pills to whatever width it gets.
+    private func tabStripWidth(forWindowWidth windowWidth: CGFloat) -> CGFloat {
+        max(0, windowWidth - trafficLightsReservation())
+    }
+
     // MARK: - Titlebar-integrated tab bar
 
     /// Attach the custom tab pill strip as a titlebar accessory, and hide
@@ -472,12 +481,9 @@ final class TabGroupObserver {
             // avoids stacking 'zsh' twice.
             window.titleVisibility = .hidden
             // Single source of truth for titlebar accessory width math —
-            // the tab bar VC just consumes what we give it. `200` floor
-            // keeps narrow windows rendering at least something legible
-            // in the strip.
-            let total = window.frame.width
-            let available = max(200, total - trafficLightsReservation())
-            controller.titlebarTabBar?.refresh(availableWidth: available)
+            // the tab bar VC just consumes what we give it.
+            controller.titlebarTabBar?.refresh(
+                availableWidth: tabStripWidth(forWindowWidth: window.frame.width))
         }
     }
 
@@ -500,8 +506,7 @@ final class TabGroupObserver {
         guard let window = controller.window,
               lastObservedTabCount > 1,
               let bar = controller.titlebarTabBar else { return }
-        let available = max(200, window.frame.width - trafficLightsReservation())
-        bar.refresh(availableWidth: available)
+        bar.refresh(availableWidth: tabStripWidth(forWindowWidth: window.frame.width))
     }
 
     /// Like `refreshTabBar()`, but only runs when the tab-group identity

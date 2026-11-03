@@ -35,10 +35,11 @@ import AppKit
 ///
 ///   - the window really is at `newFrame`;
 ///   - the pill strip is laid out for the NEW width:
-///     `strip.width == max(200, window.frame.width - trafficLightsReservation)`;
+///     `strip.width == max(0, window.frame.width - trafficLightsReservation)`;
 ///   - this holds growing and shrinking, for the group's selected tab and for a
 ///     background tab, across a shrink-then-grow replug round trip, and at the
-///     200 pt floor;
+///     widths below the former 200 pt strip floor (no minimum any more: a strip
+///     wider than the room beside the lights put the first pill under them);
 ///   - a push of the frame the window already has (or one that only relocates
 ///     it) leaves the strip correct and neither crashes nor recurses;
 ///
@@ -73,8 +74,10 @@ final class TabPillFramePushBlindTests: XCTestCase {
 
     /// Every scenario starts from this frame (600 x 300).
     private static let baseFrame = NSRect(x: 120, y: 120, width: 600, height: 300)
-    /// The strip's documented minimum width.
-    private static let stripFloor: CGFloat = 200
+    /// The strip's former minimum width. There is no floor any more (it pushed
+    /// the first pill under the traffic lights); this is only the threshold
+    /// below which a window counts as narrow, and the rig's laid-out sanity bound.
+    private static let formerStripFloor: CGFloat = 200
     private static let accuracy: CGFloat = 0.5
 
     // MARK: - The single parked rig
@@ -85,8 +88,8 @@ final class TabPillFramePushBlindTests: XCTestCase {
         let stubs: [NSWindow]
         let group: NSWindowTabGroup
         /// `window.frame.width - strip.width` measured at the base frame on
-        /// the production refresh path (the strip is not at the 200 pt floor
-        /// there, so the difference is exactly the traffic-light reservation).
+        /// the production refresh path (the strip is wider than the former 200 pt
+        /// floor there, so the difference is exactly the traffic-light reservation).
         let reservation: CGFloat
     }
 
@@ -171,7 +174,7 @@ final class TabPillFramePushBlindTests: XCTestCase {
         // A traffic-light cluster reserves roughly 75 pt; anything wildly
         // different means the strip is not laid out at all (host quirk), and
         // every later assertion would be meaningless.
-        guard strip.frame.width > Self.stripFloor, reservation > 40, reservation < 140 else {
+        guard strip.frame.width > Self.formerStripFloor, reservation > 40, reservation < 140 else {
             Self.rigSkipReason = "pill strip not laid out in this headless host "
                 + "(window width \(window.frame.width), strip width \(strip.frame.width))"
             throw XCTSkip(Self.rigSkipReason)
@@ -239,14 +242,14 @@ final class TabPillFramePushBlindTests: XCTestCase {
             file: file, line: line)
     }
 
-    /// The core contract: strip width == max(200, window width - reservation).
+    /// The core contract: strip width == max(0, window width - reservation).
     private func assertStripTracksWindow(_ rig: Rig, _ what: String,
                                          file: StaticString = #filePath, line: UInt = #line) {
         let windowWidth = rig.window.frame.width
-        let expected = max(Self.stripFloor, windowWidth - rig.reservation)
+        let expected = max(0, windowWidth - rig.reservation)
         let actual = stripWidth(rig)
         XCTAssertEqual(actual, expected, accuracy: Self.accuracy,
-            "\(what): strip width is \(actual), expected max(\(Self.stripFloor), "
+            "\(what): strip width is \(actual), expected max(0, "
                 + "\(windowWidth) - \(rig.reservation)) = \(expected); "
                 + "stale by \(actual - expected) pt (window frame \(rig.window.frame))",
             file: file, line: line)
@@ -318,33 +321,35 @@ final class TabPillFramePushBlindTests: XCTestCase {
         ])
     }
 
-    // MARK: - 200 pt floor
+    // MARK: - Narrow windows (no strip floor)
 
-    /// A window narrower than `200 + reservation` must clamp the strip at 200
-    /// (not go negative / collapse), and coming back out must un-clamp it.
-    func test_pushBelowFloor_stripClampsToTwoHundred_thenRecovers() throws {
+    /// A window narrower than `200 + reservation` must shrink the strip to the
+    /// room beside the lights (not clamp it at the former 200 pt floor, which
+    /// overflowed leftward under the traffic lights), and coming back out must
+    /// restore the full width.
+    func test_pushBelowFormerFloor_stripShrinksToRoomBesideLights_thenRecovers() throws {
         for controllerIsSelected in [true, false] {
             let rig = try prepare(controllerIsSelected: controllerIsSelected)
-            // Narrowest width the window will accept, plus a hair; it must
-            // still sit below `200 + reservation` for the floor to apply.
-            let narrow = max(230, ceil(rig.window.minSize.width) + 2)
-            try XCTSkipIf(narrow - rig.reservation >= Self.stripFloor,
-                "window minimum width \(rig.window.minSize.width) is too large to reach "
-                    + "the 200 pt strip floor (reservation \(rig.reservation))")
+            // Below `200 + reservation` (the former floor's reach). Not derived
+            // from `minSize`: a programmatic frame push is not clamped to it,
+            // and in this rig `minSize` is ~396 pt, so deriving it from there
+            // made the test skip itself.
+            let narrow: CGFloat = 230
             let mode = controllerIsSelected ? "selected tab" : "background tab"
 
             let tight = NSRect(x: 200, y: 120, width: narrow, height: 300)
             rig.controller.applyTabGroupFrame(tight)
             assertWindowFrame(rig.window, equals: tight, "[\(mode)] push below floor")
-            XCTAssertLessThan(rig.window.frame.width - rig.reservation, Self.stripFloor,
-                "test precondition: raw width budget must be under the floor")
-            assertStripTracksWindow(rig, "[\(mode)] strip right after push below the floor")
-            XCTAssertEqual(stripWidth(rig), Self.stripFloor, accuracy: Self.accuracy,
-                "[\(mode)] strip must clamp to exactly \(Self.stripFloor) at window width \(narrow)")
+            XCTAssertLessThan(rig.window.frame.width - rig.reservation, Self.formerStripFloor,
+                "test precondition: raw width budget must be under the former floor")
+            assertStripTracksWindow(rig, "[\(mode)] strip right after push below the former floor")
+            XCTAssertEqual(stripWidth(rig), narrow - rig.reservation, accuracy: Self.accuracy,
+                "[\(mode)] strip must shrink to the room beside the lights, not clamp to "
+                    + "\(Self.formerStripFloor), at window width \(narrow)")
 
             rig.controller.applyTabGroupFrame(Self.baseFrame)
             assertWindowFrame(rig.window, equals: Self.baseFrame, "[\(mode)] push back out")
-            assertStripTracksWindow(rig, "[\(mode)] strip right after growing back out of the floor")
+            assertStripTracksWindow(rig, "[\(mode)] strip right after growing back out of the narrow window")
         }
     }
 
