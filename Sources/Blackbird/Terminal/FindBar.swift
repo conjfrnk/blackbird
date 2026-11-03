@@ -311,7 +311,11 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     /// the pass is idempotent: it reads frames and never changes them.
     public override func layout() {
         super.layout()
-        let fits = replaceButton.frame.width + 0.5 >= replaceButton.intrinsicContentSize.width
+        // Alignment-rect width, like `intrinsicContentSize`: on macOS 14/15 a push
+        // button's frame carries ~7 pt of invisible bezel shadow per side, so the
+        // frame width alone would call a button up to 14 pt too narrow "full".
+        let replaceWidth = replaceButton.alignmentRect(forFrame: replaceButton.frame).width
+        let fits = replaceWidth + 0.5 >= replaceButton.intrinsicContentSize.width
         let shouldHide = !isReplaceVisible || !fits
         if replaceButton.isHidden != shouldHide { replaceButton.isHidden = shouldHide }
     }
