@@ -153,6 +153,11 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         caretButton.font = .systemFont(ofSize: 11)
         caretButton.target = self
         caretButton.action = #selector(toggleReplaceRow)
+        // The glyph buttons (here and `closeButton`) are labelled on their
+        // CELL: AppKit exposes the NSButtonCell, not the NSButton view, to the
+        // accessibility tree, so a view-level label never reaches VoiceOver
+        // (which would otherwise read the glyph's Unicode name).
+        caretButton.cell?.setAccessibilityLabel("Show replace")
 
         field.placeholderString = "Find"
         field.delegate = self
@@ -167,8 +172,9 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         // VoiceOver reads the count out when the query changes (Terminal.app
         // and Safari both do this). Without a label the `NSTextField` is
         // read as a plain string; with it the screen reader announces
-        // "Find results: 3 of 12" when the text updates.
-        matchLabel.setAccessibilityLabel("Find results")
+        // "Find results: 3 of 12" when the text updates. Set on the cell, the
+        // element the tree actually exposes (see `caretButton`).
+        matchLabel.cell?.setAccessibilityLabel("Find results")
         // Truncate instead of running under the close button when the bar is
         // too narrow for the count / a transient banner (see the width
         // priorities in the constraint block below). The full text stays in
@@ -181,6 +187,7 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         closeButton.isBordered = false
         closeButton.target = self
         closeButton.action = #selector(closeAction)
+        closeButton.cell?.setAccessibilityLabel("Close find bar")
 
         // ── Replace row ────────────────────────────────────────────────────
         replaceField.placeholderString = "Replace"
@@ -368,6 +375,13 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     /// placeholder in muted foreground, pre-theme bars keep the plain
     /// system placeholder.
     private func applyPlaceholders() {
+        // The placeholder is the only on-bar record of the regex / Aa flags
+        // and disappears once a query is typed, so mirror them into the
+        // field's accessibility help, which stays put (nil when both are off).
+        var modes: [String] = []
+        if options.regex { modes.append("Regular expression") }
+        if options.caseSensitive { modes.append("Case sensitive") }
+        field.cell?.setAccessibilityHelp(modes.isEmpty ? nil : modes.joined(separator: ", "))
         guard let scheme else {
             field.placeholderString = placeholderString()
             return
@@ -556,6 +570,7 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             replaceButton.isHidden    = false
             replaceAllButton.isHidden = false
             caretButton.title = "▾"
+            caretButton.cell?.setAccessibilityLabel("Hide replace")
         } else {
             NSLayoutConstraint.deactivate(expandedConstraints)
             NSLayoutConstraint.activate(collapsedConstraints)
@@ -563,6 +578,7 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             replaceButton.isHidden    = true
             replaceAllButton.isHidden = true
             caretButton.title = "▸"
+            caretButton.cell?.setAccessibilityLabel("Show replace")
         }
         // Assigning a plain `title` resets the button to system title
         // color — re-tint from the theme so the ▸/▾ swap doesn't strip it.

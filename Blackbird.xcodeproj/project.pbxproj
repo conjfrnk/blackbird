@@ -299,6 +299,7 @@
 		B9724DA35FE6AD7448AF1FB5 /* WheelScrollAccumulatorBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C7383C0FC6CFF6EA023A47 /* WheelScrollAccumulatorBlindTests.swift */; };
 		B981BD9355FB20A180A2C161 /* SelectionBottomEdgeScrolledBackBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D497765F7CFE24B37104D4A8 /* SelectionBottomEdgeScrolledBackBlindTests.swift */; };
 		BBA1DA3A9F5187C89BABCAF7 /* TooltipController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A593F1C330636A1A636EBF96 /* TooltipController.swift */; };
+		BCC2D9436E07F0FB7346C7F8 /* FindBarAccessibilityBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E5C6F0B36C2C672FA2DDC4A /* FindBarAccessibilityBlindTests.swift */; };
 		BD4D63111AD3250BC3552962 /* TerminalWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = D727BC0719379E00E823F705 /* TerminalWindow.swift */; };
 		BD9DFA4CCAD8CC3074E535BB /* BufferPointTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B671ECA2BD417DF4532B282 /* BufferPointTests.swift */; };
 		BE90225730C6A9120DC277C1 /* IMEShiftCarryKittyBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6D780E7A098ADAE1C36A69 /* IMEShiftCarryKittyBlindTests.swift */; };
@@ -574,6 +575,7 @@
 		5D5278B19C2A3F488F683065 /* TerminalView+IME.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+IME.swift"; sourceTree = "<group>"; };
 		5D52C01128FB3C3B14627DCC /* SSHWrapperDumpConfigBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHWrapperDumpConfigBlindTests.swift; sourceTree = "<group>"; };
 		5D9D7647442BB05D133B610D /* FirstLaunchWindowPlacementBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstLaunchWindowPlacementBlindTests.swift; sourceTree = "<group>"; };
+		5E5C6F0B36C2C672FA2DDC4A /* FindBarAccessibilityBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarAccessibilityBlindTests.swift; sourceTree = "<group>"; };
 		5F0FCE2AE0963FDA59307506 /* KeyEncoderProtocolPrecedenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyEncoderProtocolPrecedenceTests.swift; sourceTree = "<group>"; };
 		5F1A2FAB955E9F8F0D144D2C /* FeedBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedBudget.swift; sourceTree = "<group>"; };
 		5FDB6B6E282A43F32284D1DA /* OpenAtFolderBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAtFolderBlindTests.swift; sourceTree = "<group>"; };
@@ -932,6 +934,7 @@
 				BB3C7810A773BC630983BD5F /* FFIContractAltScrollModeBitsTests.swift */,
 				C1F50B661E4AB6164DAC55FD /* FFIContractTests.swift */,
 				82F6CC97AE0CDED90ECD165D /* FindAsciiFastPathBlindTests.swift */,
+				5E5C6F0B36C2C672FA2DDC4A /* FindBarAccessibilityBlindTests.swift */,
 				68CAFA8323F8AFCE7D4C52C9 /* FindBarAdversarialTests.swift */,
 				952020A922B8A99F336257AD /* FindBarAltScreenTests.swift */,
 				06A8F455F7BA7A1A2C8D374A /* FindBarColorSchemeTests.swift */,
@@ -1677,6 +1680,7 @@
 				942C60194A3EA633FAE18178 /* FeedBudgetBlindTests.swift in Sources */,
 				DFF84049846D6175C420DD37 /* FeedYieldBlindTests.swift in Sources */,
 				4EF72DEC45FF7A4A4381B9C7 /* FindAsciiFastPathBlindTests.swift in Sources */,
+				BCC2D9436E07F0FB7346C7F8 /* FindBarAccessibilityBlindTests.swift in Sources */,
 				E2DA3A0049E566F9B9C133AA /* FindBarAdversarialTests.swift in Sources */,
 				A25683CF4210AC620DBBBB72 /* FindBarAltScreenTests.swift in Sources */,
 				69797374E601F579F67EF1A6 /* FindBarColorSchemeTests.swift in Sources */,
