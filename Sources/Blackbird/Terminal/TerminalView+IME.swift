@@ -371,12 +371,15 @@ extension TerminalView: NSTextInputClient {
     /// Creates it lazily on first use; removes it entirely when composition
     /// ends so idle sessions keep a clean view hierarchy.
     ///
-    /// Called from four places:
+    /// Called from five places:
     ///   - `setMarkedText` / `unmarkText` / `insertText` (composition state
     ///     changed),
     ///   - `layout()` in `TerminalView` (bounds changed — keeps the overlay
     ///     anchored to the cursor cell while the user resizes the window
     ///     mid-composition),
+    ///   - `render(snapshot:)` (the cursor cell moved under a pending
+    ///     preedit — output, paste echo, or a resize's reflow snapshot,
+    ///     which arrives after `layout()` has already run),
     ///   - `applyTheme(_:)` (palette swap — repaints the overlay in the new
     ///     theme fg/bg without waiting for the next IME callback).
     func refreshPreeditOverlay() {

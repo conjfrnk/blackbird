@@ -1312,7 +1312,18 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             selection = result.selection
             selectionController.wordDragAnchorWord = result.wordDragAnchor
         }
+        // The preedit overlay is a subview pinned to the cursor cell, so a
+        // snapshot that moves the cursor (PTY output, a pasted block echoing,
+        // the reflow snapshot that lands after a column resize's layout())
+        // would leave it painted, opaque, over real output until the next IME
+        // callback. Compare the cell rect across the swap rather than
+        // refreshing unconditionally: a streaming TUI that leaves the cursor
+        // put shouldn't rebuild the overlay on every frame.
+        let preeditAnchor: NSRect? = composition != nil ? cursorCellRectInView() : nil
         self.currentSnapshot = snapshot
+        if let preeditAnchor, cursorCellRectInView() != preeditAnchor {
+            refreshPreeditOverlay()
+        }
         // The grid just changed under a pointer that didn't move: re-resolve
         // every hover affordance against the new snapshot. Both halves need it.
         //
