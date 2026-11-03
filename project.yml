@@ -14,6 +14,19 @@ options:
   createIntermediateGroups: true
   generateEmptyDirectories: true
 
+# UnitTest is Debug for every purpose except one: the Blackbird target's bundle
+# id (see the target's `configs:` below). The xctest bundle is hosted INSIDE
+# Blackbird.app, so the host's UserDefaults.standard (and Preferences.shared,
+# and AppKit's window-frame autosave) IS the app's own domain; a test run under
+# the shipping id writes the developer's real settings and, because the suites
+# snapshot/restore, makes any value leaked by an aborted run permanent. The
+# scheme's test action selects this config so every entry point (Cmd-U,
+# scripts/test.sh, CI, the nightlies) is isolated without per-invocation flags.
+configs:
+  Debug: debug
+  Release: release
+  UnitTest: debug
+
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
@@ -191,6 +204,12 @@ targets:
         CODE_SIGN_STYLE: Manual
         DEVELOPMENT_TEAM: F2B95Q4CT8
         CODE_SIGN_IDENTITY: "Developer ID Application"
+      configs:
+        UnitTest:
+          # Test-host-only id: isolates the preferences domain (see `configs:`
+          # at the top). Preferences.persistentDomainName derives from
+          # Bundle.main.bundleIdentifier, so the whole stack follows.
+          PRODUCT_BUNDLE_IDENTIFIER: dev.conjfrnk.blackbird.xctest
     dependencies:
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
@@ -223,7 +242,7 @@ schemes:
         Blackbird: all
         BlackbirdTests: [test]
     test:
-      config: Debug
+      config: UnitTest
       targets: [BlackbirdTests]
       gatherCoverageData: false
       disableMainThreadChecker: false

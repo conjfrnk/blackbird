@@ -162,6 +162,7 @@
 		75921C029DE1D639C0AE6A8D /* OSC7BackgroundJobTrustBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4E3D17753045411705CBBA6 /* OSC7BackgroundJobTrustBlindTests.swift */; };
 		75A83189C87A7BEE8AF1076D /* FindBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F455C591EC38A7B3955CD5B8 /* FindBar.swift */; };
 		75DC1FFE075EAE377E9450AA /* OpenAtFolderBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FDB6B6E282A43F32284D1DA /* OpenAtFolderBlindTests.swift */; };
+		76DF37B5FC3828B2AFAED6A3 /* TestDefaultsIsolationBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75D4E869BC721EEE6E1A2EFD /* TestDefaultsIsolationBlindTests.swift */; };
 		777C49E23548F78A92489015 /* FindMenuWhileFindFieldFocusedBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80658BFD68D76771BDEC3456 /* FindMenuWhileFindFieldFocusedBlindTests.swift */; };
 		7849DEE8A0065721883B426D /* TitlebarTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 002A862CFC149DF32E992C50 /* TitlebarTabBar.swift */; };
 		7A3A23D344C6391A9FD40E7D /* URLDetectorWrapGuardsReachedBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A37A17F8F0ED891A8516ACE3 /* URLDetectorWrapGuardsReachedBlindTests.swift */; };
@@ -575,6 +576,7 @@
 		75958A436602CA4AC201A620 /* PowerAwareRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerAwareRenderingTests.swift; sourceTree = "<group>"; };
 		75AB9CBF3BFA745DBCE92E2E /* GlyphAtlas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlas.swift; sourceTree = "<group>"; };
 		75BC4C2BEFC624A932A5F8FC /* JoinedTabCloseReleaseBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinedTabCloseReleaseBlindTests.swift; sourceTree = "<group>"; };
+		75D4E869BC721EEE6E1A2EFD /* TestDefaultsIsolationBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestDefaultsIsolationBlindTests.swift; sourceTree = "<group>"; };
 		76802601D94186225882DF4A /* WindowResizeController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowResizeController.swift; sourceTree = "<group>"; };
 		76F1C34DADDEA264B9A8AD55 /* ShellLineEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellLineEditor.swift; sourceTree = "<group>"; };
 		77390CC6055EA47FDFACEEBB /* DamageTrackingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DamageTrackingTests.swift; sourceTree = "<group>"; };
@@ -1075,6 +1077,7 @@
 				2E5B868D4F5850A96DF7361A /* TerminalViewMenuValidationBlindTests.swift */,
 				6DE46FF3DDF1528F3EC9D9AA /* TerminalViewResizeMathTests.swift */,
 				75821FDE8BBAF87624A156DB /* TerminalViewTests.swift */,
+				75D4E869BC721EEE6E1A2EFD /* TestDefaultsIsolationBlindTests.swift */,
 				A6BAB6E633ABF12C1E00FB74 /* TestHostTermination.swift */,
 				846A3D2CC7F3764F4BD6610C /* ThemeManagerBlindTests.swift */,
 				7F7745D136E17DBC270E74F3 /* ThemeManagerRefreshOwnerBlindTests.swift */,
@@ -1794,6 +1797,7 @@
 				D00967E546B2A57FCBC6B235 /* TerminalViewMenuValidationBlindTests.swift in Sources */,
 				22C8A17B1D4330FCB77C3803 /* TerminalViewResizeMathTests.swift in Sources */,
 				92D78BEBB308E52C0B98EBEE /* TerminalViewTests.swift in Sources */,
+				76DF37B5FC3828B2AFAED6A3 /* TestDefaultsIsolationBlindTests.swift in Sources */,
 				F8C99250E001E2D862D19244 /* TestHostTermination.swift in Sources */,
 				AEA0781C3AD2FB9599F76FFB /* ThemeManagerBlindTests.swift in Sources */,
 				F6A7C61FEB2DD46AA2C98EF2 /* ThemeManagerRefreshOwnerBlindTests.swift in Sources */,
@@ -1841,6 +1845,101 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		276CC273A44135DC32A4CDF0 /* UnitTest */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_REQUIRED = NO;
+				CODE_SIGN_IDENTITY = "";
+				COMBINE_HIDPI_IMAGES = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/core/include",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/core/target/universal/release",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.conjfrnk.BlackbirdTests;
+				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = (
+					"$(SRCROOT)/Sources/BBCore",
+				);
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blackbird.app/Contents/MacOS/Blackbird";
+			};
+			name = UnitTest;
+		};
+		33D4809BD4126F1A7E18AE3C /* UnitTest */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = "arm64 x86_64";
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_VERSION = 5.9;
+			};
+			name = UnitTest;
+		};
 		44510D91C7AD6AC1B997C99D /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -2051,6 +2150,33 @@
 			};
 			name = Debug;
 		};
+		E3DF8F5A96A42290FF4C88AD /* UnitTest */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = F2B95Q4CT8;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/core/include",
+				);
+				INFOPLIST_FILE = Sources/Blackbird/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/core/target/universal/release",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.conjfrnk.blackbird.xctest;
+				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = (
+					"$(SRCROOT)/Sources/BBCore",
+				);
+			};
+			name = UnitTest;
+		};
 		FAC57750ECDD36F4BB6B571D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -2086,6 +2212,7 @@
 			buildConfigurations = (
 				DBE4AA85A4A217EEBA44972C /* Debug */,
 				44510D91C7AD6AC1B997C99D /* Release */,
+				33D4809BD4126F1A7E18AE3C /* UnitTest */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
@@ -2095,6 +2222,7 @@
 			buildConfigurations = (
 				FAC57750ECDD36F4BB6B571D /* Debug */,
 				BC75E09B1485EEE0BC0EBCB8 /* Release */,
+				E3DF8F5A96A42290FF4C88AD /* UnitTest */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
@@ -2104,6 +2232,7 @@
 			buildConfigurations = (
 				586E260B439C3DA7E8BF859C /* Debug */,
 				89BDFE7BCEE3DCAF56832E2C /* Release */,
+				276CC273A44135DC32A4CDF0 /* UnitTest */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

@@ -42,14 +42,14 @@ final class PreferencesTests: XCTestCase {
     /// Regression for swift-tests-prefs F3: if a test crashes between
     /// `setUp` and `tearDown`, the last tampered value stays in the
     /// shared UserDefaults.standard suite on disk — polluting the
-    /// developer's own prefs and the next test-run's baseline. A
-    /// class-level tearDown re-synchronises the saved-known-good baseline
-    /// at the end of the whole class run, so even a mid-class crash only
-    /// leaks one test's worth of pollution (the one that crashed), not
-    /// all subsequent tests' cumulative damage. A true fix (suiteName
-    /// UserDefaults) would require a production-side testability
-    /// refactor the audit rules out; this is the belt-and-braces
-    /// middle ground.
+    /// next test-run's baseline. A class-level tearDown re-synchronises
+    /// the saved-known-good baseline at the end of the whole class run,
+    /// so even a mid-class crash only leaks one test's worth of pollution
+    /// (the one that crashed), not all subsequent tests' cumulative
+    /// damage. The disk state is the throwaway
+    /// `dev.conjfrnk.blackbird.xctest` domain, not the developer's real
+    /// prefs: the scheme's `UnitTest` config (project.yml) gives the test
+    /// host its own bundle id (TSI-4), so no suiteName refactor was needed.
     override class func tearDown() {
         // `synchronize()` is deprecated on modern macOS but still forces
         // an immediate commit, which matters here — the test host may
