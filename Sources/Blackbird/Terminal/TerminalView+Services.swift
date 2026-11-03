@@ -76,7 +76,7 @@ extension TerminalView {
         // to AppKit's default behaviour (dictionary / None).
         let text: String? = {
             if let sel = selectedStringForServices(), !sel.isEmpty {
-                return sel
+                return TerminalView.lookUpPreviewText(sel)
             }
             // The hovered href, already policy-checked and resolved against the
             // snapshot that is on screen. Previously this re-resolved
@@ -131,6 +131,32 @@ extension TerminalView {
             return vc
         }()
         popover.show(relativeTo: anchor, of: self, preferredEdge: .maxY)
+    }
+
+    /// The part of a selection the Look Up popover can actually show.
+    /// `NSTextField.maximumNumberOfLines` is not honoured for text containing
+    /// hard newlines, so handing the label the whole selection typesets every
+    /// selected line synchronously (~1.4 s for ⌘A over 100k lines of
+    /// scrollback) and sizes the popover to the selection instead of a
+    /// 6-line preview. Scans from the head only, so the cost is O(preview)
+    /// however large `text` is. The character cap also covers a soft-wrapped
+    /// logical line, which `textRange` joins into one huge line.
+    static func lookUpPreviewText(
+        _ text: String, maxLines: Int = 6, maxCharacters: Int = 2_000
+    ) -> String {
+        var lines = 1
+        var characters = 0
+        var index = text.startIndex
+        while index < text.endIndex {
+            if text[index].isNewline {
+                lines += 1
+                if lines > maxLines { return String(text[..<index]) + "\n…" }
+            }
+            characters += 1
+            if characters > maxCharacters { return String(text[..<index]) + "…" }
+            index = text.index(after: index)
+        }
+        return text
     }
 
     /// Selection → String without the clipboard scrubbing step. Services
