@@ -1073,7 +1073,47 @@ public final class PTY {
         writeQueue.sync {
             guard self.shouldKeepRunning() else { return }
             self.sendLocked(data)
+            if data.count == 1, self.pendingCount > 0, let byte = data.first,
+               self.isSignalCharacterLocked(byte) {
+                self.interruptPastBacklogLocked(data)
+            }
         }
+    }
+
+    /// True when the line discipline would turn `byte` into a signal right
+    /// now (ISIG on and the byte is VINTR / VQUIT / VSUSP) rather than queue
+    /// it as data. Caller MUST hold writeQueue.
+    private func isSignalCharacterLocked(_ byte: UInt8) -> Bool {
+        var attrs = termios()
+        guard tcgetattr(masterFD, &attrs) == 0,
+              attrs.c_lflag & tcflag_t(ISIG) != 0 else { return false }
+        let signalSlots: [Int] = [Int(VINTR), Int(VQUIT), Int(VSUSP)]
+        return withUnsafeBytes(of: attrs.c_cc) { (cc: UnsafeRawBufferPointer) -> Bool in
+            signalSlots.contains { (slot: Int) -> Bool in cc[slot] == byte }
+        }
+    }
+
+    /// Deliver an interrupt character the kernel refused (it is still queued
+    /// behind a backlog). macOS's pty master refuses EVERY write, ^C
+    /// included, once the tty input queue holds ~1 KiB behind a complete
+    /// line (a multi-line paste into `sleep` / `make`, bracketed paste being
+    /// off while a command runs), so the byte would otherwise wait in
+    /// `pendingWrite` until the program finally reads and the user could not
+    /// interrupt it. A real terminal's line discipline flushes typed-ahead
+    /// input when it sees the signal character, so do the same: drop the
+    /// backlog, empty the kernel input queue to make room, then write the
+    /// byte again so the kernel still does the echo and the signal itself.
+    /// Caller MUST hold writeQueue.
+    private func interruptPastBacklogLocked(_ data: Data) {
+        discardPendingLocked()
+        var flushRead = FREAD
+        if ioctl(masterFD, TIOCFLUSH, &flushRead) < 0 {
+            let savedErrno = errno
+            Self.logger.error(
+                "PTY.interruptPastBacklog: TIOCFLUSH failed errno=\(savedErrno, privacy: .public) fd=\(self.masterFD, privacy: .public)"
+            )
+        }
+        sendLocked(data)
     }
 
     // MARK: Pending-write buffering (audit S1-001)
