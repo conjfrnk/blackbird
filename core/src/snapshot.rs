@@ -240,6 +240,37 @@ unsafe impl Send for BBSnap {}
 // cells_owned's heap buffer which is never reallocated after construction.
 unsafe impl Sync for BBSnap {}
 
+/// Zero-width scalars (combining marks, VS16, ZWJ, Thai/Indic vowel signs,
+/// conjoining jamo) per cell, kept sparse. `BBCell::ch` holds only a cell's base
+/// scalar, so a consumer that reads text cell by cell (Find's viewport rows,
+/// VoiceOver) would otherwise drop them while the copy path and scrollback keep
+/// them. Runs are ordered by cell index (`display_iter` is row-major), so a
+/// lookup is a binary search; text with no marks allocates nothing.
+#[derive(Default)]
+pub(crate) struct ZeroWidthTable {
+    /// `(cell index, range into scalars)`, ascending by cell index.
+    runs: Vec<(usize, std::ops::Range<usize>)>,
+    scalars: Vec<u32>,
+}
+
+impl ZeroWidthTable {
+    pub(crate) fn push(&mut self, cell: usize, marks: &[char]) {
+        if marks.is_empty() {
+            return;
+        }
+        let start = self.scalars.len();
+        self.scalars.extend(marks.iter().map(|&m| m as u32));
+        self.runs.push((cell, start..self.scalars.len()));
+    }
+
+    pub(crate) fn at(&self, cell: usize) -> &[u32] {
+        match self.runs.binary_search_by_key(&cell, |(c, _)| *c) {
+            Ok(i) => &self.scalars[self.runs[i].1.clone()],
+            Err(_) => &[],
+        }
+    }
+}
+
 /// Private heap owner for a snapshot. `snap` is the first field so that a
 /// `*const BBSnap` == `*const BBSnapOwned` via a simple cast, enabling the
 /// public C API to hand out `*const BBSnap` while retaining full ownership here.
@@ -257,6 +288,8 @@ pub(crate) struct BBSnapOwned {
     /// handed out by `bb_snap_link_url` is stable for the snapshot's lifetime
     /// because the Arc's pointee never moves.
     pub(crate) links: Vec<Arc<std::ffi::CStr>>,
+    /// Per-cell zero-width scalars; read via `bb_snap_zerowidth_at`.
+    pub(crate) zerowidth: ZeroWidthTable,
     /// Rows whose content changed between this snapshot and the previous.
     /// Extracted from alacritty's `Term::damage()` before the grid read, then
     /// the term's damage is reset so each snapshot reports deltas.
@@ -291,6 +324,7 @@ impl BBSnapOwned {
         cursor_shape: u8,
         cells: Vec<BBCell>,
         links: Vec<Arc<std::ffi::CStr>>,
+        zerowidth: ZeroWidthTable,
         damaged_rows: Vec<u16>,
         damage_full: bool,
     ) -> Box<BBSnapOwned> {
@@ -316,6 +350,7 @@ impl BBSnapOwned {
             rc: AtomicUsize::new(1),
             cells_owned: cells,
             links,
+            zerowidth,
             damaged_rows,
             damage_full,
         });
@@ -754,6 +789,7 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
     // snapshot). Updated only on linked cells so an unlinked cell between two
     // cells of one run doesn't break the memo.
     let mut last_link: Option<(Hyperlink, u16)> = None;
+    let mut zerowidth = ZeroWidthTable::default();
     for indexed in grid.display_iter() {
         // OSC 8 link id (phase 1: dedup within this snapshot).
         let link_id = match indexed.cell.hyperlink() {
@@ -790,6 +826,7 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
             if zw.contains(&'\u{FE0F}') {
                 flags |= cell_flags::EMOJI_PRESENTATION;
             }
+            zerowidth.push(cells.len(), zw);
         }
         cells.push(BBCell {
             ch: indexed.c as u32,
@@ -878,6 +915,7 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
         cursor_shape,
         cells,
         links,
+        zerowidth,
         damaged_rows,
         damage_full,
     );

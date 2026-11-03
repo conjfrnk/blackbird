@@ -968,9 +968,20 @@ final class FindController {
     /// regex (`runRegexSearchAsync`) paths — keeping them from drifting on the
     /// wide-char / non-BMP column math (H4/H5). Scrollback rows use the legacy
     /// approximation at the call sites, not this.
+    ///
+    /// A match may end between a cell's base scalar and the zero-width scalars
+    /// (combining marks, VS16, ...) that share its column: a regex stops on a
+    /// code point, not a cell. Those trailing units belong to the last matched
+    /// cell, so `hi` first advances past them to the next cell's first unit
+    /// (or the sentinel); otherwise `endCol` lands one cell short.
     static func mapUTF16RangeToCols(lo: Int, hi: Int, utf16ToCol: [Int]) -> (startCol: Int, endCol: Int) {
         let loIdx = max(0, min(lo, utf16ToCol.count - 1))
-        let hiIdx = max(loIdx, min(hi, utf16ToCol.count - 1))
+        var hiIdx = max(loIdx, min(hi, utf16ToCol.count - 1))
+        if hiIdx > loIdx {
+            while hiIdx < utf16ToCol.count - 1, utf16ToCol[hiIdx] == utf16ToCol[hiIdx - 1] {
+                hiIdx += 1
+            }
+        }
         let startCol = utf16ToCol[loIdx]
         let endCol = max(startCol, utf16ToCol[hiIdx] - 1)
         return (startCol, endCol)

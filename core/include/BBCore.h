@@ -826,6 +826,30 @@ uint32_t bb_snap_link_id_at(const struct BBSnap *snap, uint16_t row, uint16_t co
 const char *bb_snap_link_url(const struct BBSnap *snap, uint32_t link_id);
 
 /**
+ * Copy the zero-width scalars (combining marks, VS16, ZWJ, Thai/Indic vowel
+ * signs, conjoining jamo) of the snapshot cell at `(row, col)` into the
+ * caller's buffer. `BBCell.ch` carries only the cell's base scalar; these
+ * follow it, in the order they were printed (at most 32 per cell).
+ *
+ * Returns the TOTAL number of scalars (which may exceed `out_cap`); at most
+ * `min(total, out_cap)` are written. Passing `out = null` probes the count
+ * without writing. Returns 0 when `snap` is null, `(row, col)` is outside the
+ * grid, or the cell has none (the overwhelmingly common case).
+ *
+ * # Safety
+ * - `snap` must be a pointer from `bb_term_take_snapshot` or retained from one
+ * - `out` must either be null OR point to at least `out_cap * 4` bytes of
+ *   writable memory. No u32 alignment is required (byte-wise copy, as in
+ *   `bb_snap_damage_rows`).
+ * - Safe to call from any thread (the table is immutable post-construction).
+ */
+uintptr_t bb_snap_zerowidth_at(const struct BBSnap *snap,
+                               uint16_t row,
+                               uint16_t col,
+                               uint32_t *out,
+                               uintptr_t out_cap);
+
+/**
  * Toggle OSC 10 / 11 / 12 `?` reply behaviour. Disabled by default so
  * a hostile remote can't round-trip the palette back into the PTY
  * (mitigates the zsh-vi-mode command-injection class). Pass `1` to

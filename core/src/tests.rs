@@ -2297,6 +2297,47 @@ fn clear_all_drains_uri_cache_even_with_live_snapshots() {
     }
 }
 
+/// `BBCell.ch` carries only a cell's base scalar; `bb_snap_zerowidth_at` is the
+/// snapshot's channel for the combining marks / VS16 behind it (Find's viewport
+/// rows and VoiceOver read text cell by cell and would otherwise drop them).
+/// Pins the count-probe + truncation contract shared with `bb_snap_damage_rows`.
+#[test]
+fn snap_zerowidth_at_returns_marks_with_probe_and_truncation() {
+    unsafe {
+        let term = bb_term_new(10, 2, 0);
+        // col 0: 'e' + U+0301 + U+0302; col 1: plain 'a'; col 2..: heart + VS16.
+        let input = "e\u{301}\u{302}a\u{2764}\u{FE0F}";
+        bb_term_input(term, input.as_ptr(), input.len());
+        let snap = bb_term_take_snapshot(term);
+        assert!(!snap.is_null());
+
+        let mut out = [0u32; 4];
+        assert_eq!(bb_snap_zerowidth_at(snap, 0, 0, out.as_mut_ptr(), 4), 2);
+        assert_eq!(&out[..2], &[0x301, 0x302]);
+        assert_eq!(bb_snap_zerowidth_at(snap, 0, 2, out.as_mut_ptr(), 4), 1);
+        assert_eq!(out[0], 0xFE0F);
+
+        // Count probe: null out writes nothing and still reports the total.
+        assert_eq!(bb_snap_zerowidth_at(snap, 0, 0, std::ptr::null_mut(), 0), 2);
+        // Truncation: total is reported, only `out_cap` scalars are written.
+        let mut one = [0u32; 2];
+        assert_eq!(bb_snap_zerowidth_at(snap, 0, 0, one.as_mut_ptr(), 1), 2);
+        assert_eq!(one, [0x301, 0]);
+
+        // No marks, out of range, null snapshot: 0.
+        assert_eq!(bb_snap_zerowidth_at(snap, 0, 1, out.as_mut_ptr(), 4), 0);
+        assert_eq!(bb_snap_zerowidth_at(snap, 2, 0, out.as_mut_ptr(), 4), 0);
+        assert_eq!(bb_snap_zerowidth_at(snap, 0, 10, out.as_mut_ptr(), 4), 0);
+        assert_eq!(
+            bb_snap_zerowidth_at(std::ptr::null(), 0, 0, out.as_mut_ptr(), 4),
+            0
+        );
+
+        bb_snap_release(snap);
+        bb_term_free(term);
+    }
+}
+
 /// Regression for rust-core-2 F10: OSC 52 clipboard-store no longer
 /// fires an `Osc52Clipboard` event by default. alacritty's `Osc52`
 /// config is `Disabled`, so the `Event::ClipboardStore` path is gated

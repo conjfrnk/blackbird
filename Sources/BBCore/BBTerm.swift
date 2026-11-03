@@ -907,6 +907,22 @@ public final class BBSnapshot {
         return .character(Character(us))
     }
 
+    /// Zero-width scalars (combining marks, VS16, ZWJ, Thai/Indic vowel signs,
+    /// jamo) the core holds on the cell at `(col, row)`, in print order. A
+    /// cell's `ch` is only its base scalar, so a walker that builds text cell
+    /// by cell appends these after it to match the copy path and scrollback.
+    /// Empty for almost every cell: one FFI call that returns 0.
+    fileprivate func zeroWidthScalars(col: Int, row: Int) -> [Unicode.Scalar] {
+        guard col >= 0, row >= 0, col < cols, row < rows else { return [] }
+        let total = Int(bb_snap_zerowidth_at(handle, UInt16(row), UInt16(col), nil, 0))
+        guard total > 0 else { return [] }
+        var raw = [UInt32](repeating: 0, count: total)
+        let written: Int = raw.withUnsafeMutableBufferPointer { (buf: inout UnsafeMutableBufferPointer<UInt32>) -> Int in
+            Int(bb_snap_zerowidth_at(handle, UInt16(row), UInt16(col), buf.baseAddress, UInt(total)))
+        }
+        return raw.prefix(min(written, total)).compactMap { (v: UInt32) -> Unicode.Scalar? in Unicode.Scalar(v) }
+    }
+
     /// Compute `row * cols + col` with overflow detection. Returns
     /// `nil` when either the multiply or the add would wrap a signed
     /// `Int`. Defence-in-depth helper for cell-array indexing
@@ -930,6 +946,10 @@ public final class BBSnapshot {
     /// cells) or a non-BMP scalar (2 UTF-16 units, 1 char, 2 cells for
     /// emoji) produces an off-by-N column report on every match after
     /// it on the same row.
+    ///
+    /// A cell's zero-width scalars (combining marks, VS16, ZWJ, ...) follow
+    /// its base character in `text` and map to the base cell's column, so the
+    /// text equals the copy path's and a query pasted from it matches.
     ///
     /// `utf16ToCol` has length `text.utf16.count + 1`; the trailing
     /// sentinel is the column IMMEDIATELY AFTER the last painted
@@ -962,6 +982,14 @@ public final class BBSnapshot {
                     utf16ToCol.append(c)
                 }
                 text.append(ch)
+                // Zero-width scalars ride on the base cell: same column per
+                // UTF-16 unit, so a match ending on one still maps back.
+                for z in zeroWidthScalars(col: c, row: row) {
+                    for _ in 0..<z.utf16.count {
+                        utf16ToCol.append(c)
+                    }
+                    text.unicodeScalars.append(z)
+                }
                 sentinel = next
                 c = next
             case .spacer:
@@ -1169,15 +1197,16 @@ public protocol A11ySnapshotSource: AnyObject {
 extension BBSnapshot: A11ySnapshotSource {
     /// Visible rows as text, one String per row. Skips wide-glyph spacer
     /// cells so each wide character (CJK, wide emoji) contributes exactly
-    /// one scalar to the row's text.
+    /// one scalar to the row's text. A cell's zero-width scalars (combining
+    /// marks, VS16, ZWJ, ...) follow its base scalar, as in the copy path.
     public func visibleRowsAsText() -> [String] {
         var out: [String] = []
         out.reserveCapacity(rows)
         let cellsPtr = cellsPointer
         let cellLen = cellCount
         for r in 0..<rows {
-            var chars: [Character] = []
-            chars.reserveCapacity(cols)
+            var line = ""
+            line.reserveCapacity(cols)
             for c in 0..<cols {
                 // Audit L-19 / EC-9 (2026-04-29): overflow-safe flat
                 // index. Today bounded by `MAX_DIM`, so the multiply
@@ -1194,14 +1223,17 @@ extension BBSnapshot: A11ySnapshotSource {
                 // preserved for screen readers navigating by character.
                 switch Self.classify(cellsPtr[idx]) {
                 case .character(let ch):
-                    chars.append(ch)
+                    line.append(ch)
+                    for z in zeroWidthScalars(col: c, row: r) {
+                        line.unicodeScalars.append(z)
+                    }
                 case .spacer:
                     continue   // wide-glyph tail, already painted by the leading cell
                 case .empty, .invalid:
-                    chars.append(" ")
+                    line.append(" ")
                 }
             }
-            out.append(String(chars))
+            out.append(line)
         }
         return out
     }
