@@ -184,6 +184,7 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
         // ── Replace row ────────────────────────────────────────────────────
         replaceField.placeholderString = "Replace"
+        replaceField.delegate = self
         replaceField.focusRingType = .none
         replaceField.isBezeled = true
         replaceField.bezelStyle = .roundedBezel
@@ -604,6 +605,9 @@ public final class FindBar: NSView, NSTextFieldDelegate {
     private var searchDebounceTimer: Timer?
 
     public func controlTextDidChange(_ notification: Notification) {
+        // The Replace field shares this delegate (for Esc / Return); typing a
+        // replacement must not re-run the search.
+        if (notification.object as? NSTextField) === replaceField { return }
         searchDebounceTimer?.invalidate()
         let query = field.stringValue
         // Empty query → fire immediately so the cleared-match state surfaces
@@ -631,13 +635,52 @@ public final class FindBar: NSView, NSTextFieldDelegate {
             delegate?.findBarDidClose(self)
             return true
         case #selector(NSResponder.insertNewline(_:)):
-            delegate?.findBar(self, didAdvance: .forward)
-            return true
-        case #selector(NSResponder.insertBacktab(_:)):
-            delegate?.findBar(self, didAdvance: .backward)
+            if control === replaceField {
+                // Return commits the Replace field, like the Replace button.
+                requestReplace(.current)
+            } else {
+                // Shift-Return steps to the previous match. Shift-Tab is
+                // deliberately NOT handled (default case): it is the standard
+                // backward-focus gesture, so AppKit moves focus.
+                var backward = false
+                if let event = NSApp.currentEvent, event.type == .keyDown {
+                    backward = event.modifierFlags.contains(.shift)
+                }
+                delegate?.findBar(self, didAdvance: backward ? .backward : .forward)
+            }
             return true
         default:
             return false
+        }
+    }
+
+    // MARK: - Bar-level keyboard contract
+
+    /// Esc dismisses the bar from ANY control in it. The text fields reach
+    /// this through their delegate (`control(_:textView:doCommandBy:)`); a
+    /// focused button (caret, close, Replace, Replace All — reachable with
+    /// Full Keyboard Access) has no field editor, so the key arrives here via
+    /// `keyDown(with:)` or the responder-chain `cancelOperation:`.
+    public override func cancelOperation(_ sender: Any?) {
+        delegate?.findBarDidClose(self)
+    }
+
+    private static let escapeKeyCode: UInt16 = 53
+    private static let returnKeyCode: UInt16 = 36
+    private static let keypadEnterKeyCode: UInt16 = 76
+
+    /// A key that no control in the bar handled lands here on its way up to
+    /// the TerminalView, whose `keyDown` would encode it into the PTY. Esc
+    /// closes the bar; Return / Enter are swallowed so a stray CR can never
+    /// reach the shell (and run the command line being edited).
+    public override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case FindBar.escapeKeyCode:
+            cancelOperation(nil)
+        case FindBar.returnKeyCode, FindBar.keypadEnterKeyCode:
+            break
+        default:
+            super.keyDown(with: event)
         }
     }
 

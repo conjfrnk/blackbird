@@ -346,6 +346,7 @@
 		D3FEE747D19D317F71EB45BD /* DiagnosticFileLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FEB5E2E24B725264B21AB43 /* DiagnosticFileLoader.swift */; };
 		D6237259ED506C0A59DF8077 /* FindBarThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2215352FADE00C2471C9175 /* FindBarThemeTests.swift */; };
 		D647B933C8453D8B4C5E8877 /* WindowResizeControllerBoundingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71B97CA3B5FEE2E46183763E /* WindowResizeControllerBoundingTests.swift */; };
+		D807376E0D53CDC6C385E4FA /* FindBarKeyboardBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 825257D060E2A146B39267F6 /* FindBarKeyboardBlindTests.swift */; };
 		D99C39D366CE2D06BF4082EB /* LatencyHarnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B99D2970157272D6841E2F5 /* LatencyHarnessTests.swift */; };
 		D99D052FA12920F1D87383C7 /* SlotAllocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F705FA59707185BB95178264 /* SlotAllocatorTests.swift */; };
 		DA92E08EEE11AD711420DDF2 /* MetalDeviceSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDBE067E31FBB9F8651F3C50 /* MetalDeviceSelectionTests.swift */; };
@@ -631,6 +632,7 @@
 		81D40026AFE0D6FC7C4B29FA /* ShellIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellIntegrationTests.swift; sourceTree = "<group>"; };
 		822F2DD415A64C834F092B70 /* CoreFailureKeepOpenBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreFailureKeepOpenBlindTests.swift; sourceTree = "<group>"; };
 		823C5356C3AE7F47C40378B8 /* NarrowWindowTabStripTrafficLightBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarrowWindowTabStripTrafficLightBlindTests.swift; sourceTree = "<group>"; };
+		825257D060E2A146B39267F6 /* FindBarKeyboardBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarKeyboardBlindTests.swift; sourceTree = "<group>"; };
 		82C57C6702E92EB2488AC798 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		82EFC0C140D3593E2905D923 /* TabOrderCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabOrderCoordinator.swift; sourceTree = "<group>"; };
 		82F6CC97AE0CDED90ECD165D /* FindAsciiFastPathBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindAsciiFastPathBlindTests.swift; sourceTree = "<group>"; };
@@ -933,6 +935,7 @@
 				68CAFA8323F8AFCE7D4C52C9 /* FindBarAdversarialTests.swift */,
 				952020A922B8A99F336257AD /* FindBarAltScreenTests.swift */,
 				06A8F455F7BA7A1A2C8D374A /* FindBarColorSchemeTests.swift */,
+				825257D060E2A146B39267F6 /* FindBarKeyboardBlindTests.swift */,
 				26EDFF166602362A81D6C4C0 /* FindBarNarrowLayoutBlindTests.swift */,
 				D5AF4F844A7BAA90FB92C475 /* FindBarReplaceTests.swift */,
 				C2215352FADE00C2471C9175 /* FindBarThemeTests.swift */,
@@ -1677,6 +1680,7 @@
 				E2DA3A0049E566F9B9C133AA /* FindBarAdversarialTests.swift in Sources */,
 				A25683CF4210AC620DBBBB72 /* FindBarAltScreenTests.swift in Sources */,
 				69797374E601F579F67EF1A6 /* FindBarColorSchemeTests.swift in Sources */,
+				D807376E0D53CDC6C385E4FA /* FindBarKeyboardBlindTests.swift in Sources */,
 				C378655E3EF879B670EFED40 /* FindBarNarrowLayoutBlindTests.swift in Sources */,
 				E5A9050474676254C3FB3554 /* FindBarReplaceTests.swift in Sources */,
 				D6237259ED506C0A59DF8077 /* FindBarThemeTests.swift in Sources */,
