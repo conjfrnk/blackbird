@@ -51,11 +51,19 @@ const HYPERLINK_URI_MAX: usize = 4096;
 const HYPERLINK_ID_MAX: usize = 256;
 
 /// Max bytes of hyperlink data one terminal keeps alive across grid and scrollback.
-const HYPERLINK_LIVE_MAX: usize = 32 * 1024 * 1024;
+pub(crate) const HYPERLINK_LIVE_MAX: usize = 32 * 1024 * 1024;
 
 /// Bookkeeping charged per hyperlink on top of its strings (Arc header, two `String` headers,
 /// allocator rounding), so links with tiny URIs cannot slip under `HYPERLINK_LIVE_MAX`.
 const HYPERLINK_FIXED_COST: usize = 128;
+
+/// Why `Hyperlink::bounded` refused a link. The two are told apart because only `OverBudget`
+/// persists: one over-long link is a single bad sequence, but past the budget every later link
+/// is refused too, which is the "links stopped working" report the caller leaves a breadcrumb for.
+pub(crate) enum HyperlinkRefused {
+    TooLong,
+    OverBudget,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -77,30 +85,35 @@ impl Hyperlink {
         &self.inner.uri
     }
 
-    /// Build a link charged against `live`, or `None` (no link) when it must not be kept.
+    /// Build a link charged against `live`, or say why it must not be kept (no link).
     ///
     /// Blackbird fix (re-apply on bump): upstream stores whatever OSC 8 delivers (vte allows
     /// 8 MiB for the URI and for `id=`), and every cell written under the link shares that one
     /// allocation, so each row pinned its own full-size copy until it left the scrollback and
     /// retention tracked the bytes sent, 1:1. A URI or id past its cap is refused, and so is any
     /// link that would take `live` (the terminal's running total, released as links drop) past
-    /// `HYPERLINK_LIVE_MAX`; the latter also covers many distinct links just under the caps.
-    pub fn bounded(link: VteHyperlink, live: &Arc<AtomicUsize>) -> Option<Self> {
+    /// `limit`, `HYPERLINK_LIVE_MAX` unless the terminal was configured otherwise; the latter
+    /// also covers many distinct links just under the caps.
+    pub(crate) fn bounded(
+        link: VteHyperlink,
+        live: &Arc<AtomicUsize>,
+        limit: usize,
+    ) -> Result<Self, HyperlinkRefused> {
         let VteHyperlink { id, uri } = link;
         let id_len = id.as_ref().map_or(0, String::len);
         if uri.len() > HYPERLINK_URI_MAX || id_len > HYPERLINK_ID_MAX {
-            return None;
+            return Err(HyperlinkRefused::TooLong);
         }
 
         let mut inner = HyperlinkInner::new(id, uri);
         let cost = inner.cost();
-        if live.load(Ordering::Relaxed) + cost > HYPERLINK_LIVE_MAX {
-            return None;
+        if live.load(Ordering::Relaxed) + cost > limit {
+            return Err(HyperlinkRefused::OverBudget);
         }
         live.fetch_add(cost, Ordering::Relaxed);
-        inner.live = Some(Arc::clone(live));
+        inner.live = Some((Arc::clone(live), cost));
 
-        Some(Self { inner: Arc::new(inner) })
+        Ok(Self { inner: Arc::new(inner) })
     }
 }
 
@@ -125,9 +138,10 @@ struct HyperlinkInner {
     /// Resource identifier of the hyperlink.
     uri: String,
 
-    /// Terminal-wide byte total this link is charged to, credited back on drop.
+    /// Terminal-wide byte total this link is charged to, and the bytes charged, credited back
+    /// on drop.
     #[cfg_attr(feature = "serde", serde(skip))]
-    live: Option<Arc<AtomicUsize>>,
+    live: Option<(Arc<AtomicUsize>, usize)>,
 }
 
 // Identity is `(id, uri)`; the accounting handle is not part of it.
@@ -148,8 +162,8 @@ impl Hash for HyperlinkInner {
 
 impl Drop for HyperlinkInner {
     fn drop(&mut self) {
-        if let Some(live) = &self.live {
-            live.fetch_sub(self.cost(), Ordering::Relaxed);
+        if let Some((live, charged)) = &self.live {
+            live.fetch_sub(*charged, Ordering::Relaxed);
         }
     }
 }
@@ -169,8 +183,12 @@ impl HyperlinkInner {
     }
 
     /// Bytes charged against the terminal's hyperlink budget.
+    ///
+    /// Capacity, not length: vte rebuilds a URI containing `;` with `push`/`push_str`, which
+    /// leaves the `String` holding up to twice the bytes it uses, and the allocation is what
+    /// stays resident.
     fn cost(&self) -> usize {
-        HYPERLINK_FIXED_COST + self.id.len() + self.uri.len()
+        HYPERLINK_FIXED_COST + self.id.capacity() + self.uri.capacity()
     }
 }
 

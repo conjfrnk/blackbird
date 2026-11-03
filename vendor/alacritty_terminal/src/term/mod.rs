@@ -345,6 +345,12 @@ pub struct Term<T> {
     /// Bytes held by live hyperlinks in both grids, enforcing `Hyperlink::bounded`'s budget.
     hyperlink_live: Arc<AtomicUsize>,
 
+    /// Byte budget for `hyperlink_live`; `HYPERLINK_LIVE_MAX` unless `set_hyperlink_live_max`.
+    hyperlink_live_max: usize,
+
+    /// A link was refused for want of budget since `take_hyperlink_over_budget` last ran.
+    hyperlink_over_budget: bool,
+
     /// Config directly for the terminal.
     config: Config,
 }
@@ -463,6 +469,8 @@ impl<T> Term<T> {
             mode: Default::default(),
             glyph_end: None,
             hyperlink_live: Default::default(),
+            hyperlink_live_max: cell::HYPERLINK_LIVE_MAX,
+            hyperlink_over_budget: false,
         }
     }
 
@@ -527,12 +535,33 @@ impl<T> Term<T> {
         self.config.osc52 = osc52;
     }
 
-    /// Blackbird addition (re-apply on bump): drop the INACTIVE grid's
-    /// scrollback. `ESC [ 3 J` clears only the active grid's history, so a
-    /// "clear scrollback" issued while the alt screen is active (⌘K inside
-    /// a TUI) left the primary scrollback intact and it came back on exit.
-    pub fn clear_inactive_history(&mut self) {
+    /// Blackbird addition (re-apply on bump): erase what the INACTIVE grid holds.
+    /// `ESC [ 3 J` clears only the active grid's history, so a "clear scrollback"
+    /// issued while the alt screen is active (⌘K inside a TUI) left the primary
+    /// scrollback intact and it came back on exit. With the primary screen up, the
+    /// inactive grid is the alt screen, and a TUI that left it (`?1049l`) leaves its
+    /// cells, and the OSC 8 links on them, there until the next `?1049h`; those are
+    /// erased too so the hyperlink byte budget gets them back. With the alt screen
+    /// up, the inactive grid's visible rows are the shell's screen and stay.
+    pub fn clear_inactive_grid(&mut self) {
         self.inactive_grid.clear_history();
+        if !self.mode.contains(TermMode::ALT_SCREEN) {
+            self.inactive_grid.reset_region(..);
+        }
+    }
+
+    /// Blackbird addition (re-apply on bump): lower the hyperlink byte budget so a test can
+    /// exhaust it with a few KiB instead of 32 MiB. Links already held stay charged.
+    #[doc(hidden)]
+    pub fn set_hyperlink_live_max(&mut self, limit: usize) {
+        self.hyperlink_live_max = limit;
+    }
+
+    /// Blackbird addition (re-apply on bump): whether the hyperlink byte budget refused a link
+    /// since the last call, clearing the flag. The embedder logs the first one; the grid itself
+    /// only shows that links have stopped getting attributed.
+    pub fn take_hyperlink_over_budget(&mut self) -> bool {
+        mem::take(&mut self.hyperlink_over_budget)
     }
 
     /// Blackbird addition (re-apply on bump): read-only view of the tab-stop
@@ -2052,8 +2081,16 @@ impl<T: EventListener> Handler for Term<T> {
     fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
         trace!("Setting hyperlink: {hyperlink:?}");
         // Blackbird fix: an over-long or over-budget link becomes "no link", closing any open one.
-        let live = &self.hyperlink_live;
-        let hyperlink = hyperlink.and_then(|link| cell::Hyperlink::bounded(link, live));
+        let hyperlink = hyperlink.and_then(|link| {
+            match cell::Hyperlink::bounded(link, &self.hyperlink_live, self.hyperlink_live_max) {
+                Ok(link) => Some(link),
+                Err(cell::HyperlinkRefused::TooLong) => None,
+                Err(cell::HyperlinkRefused::OverBudget) => {
+                    self.hyperlink_over_budget = true;
+                    None
+                },
+            }
+        });
         self.grid.cursor.template.set_hyperlink(hyperlink);
     }
 

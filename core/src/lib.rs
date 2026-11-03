@@ -281,6 +281,14 @@ pub struct BBTerm {
     /// unresolvable; the id-exhaustion path it sits next to has had one since
     /// audit S2-014.
     pub(crate) osc8_intern_cap_logged: bool,
+    /// One-shot latch for the third OSC 8 silent-drop path: the per-terminal
+    /// live-byte budget on retained hyperlink strings (`HYPERLINK_LIVE_MAX`,
+    /// vendored alacritty_terminal). Past it the grid refuses every new link
+    /// until rows holding links are erased or scroll out (the grid frees a
+    /// scrolled-out row up to ~1000 scrolls later), so cells print with no
+    /// attribution and nothing says why. Re-armed by `bb_term_clear_all`,
+    /// like `osc8_intern_cap_logged`.
+    pub(crate) osc8_live_cap_logged: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +446,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             uri_cache_bytes: 0,
             osc8_id_exhaustion_logged: false,
             osc8_intern_cap_logged: false,
+            osc8_live_cap_logged: false,
             prompt_mark_rate: EventRateState::new(PROMPT_MARK_PER_SECOND, PROMPT_MARK_WINDOW),
             osc7_rate: EventRateState::new(OSC7_INGEST_PER_SECOND, OSC7_INGEST_WINDOW),
             startup_hostname: crate::osc::local_hostname(),
@@ -1316,14 +1325,11 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         }
         // 3J only reaches the ACTIVE grid; with the alt screen up (Claude
         // Code holds it for its whole session) that is the alt grid's empty
-        // history, and the primary scrollback returned on exit.
-        if bb
-            .term
-            .mode()
-            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
-        {
-            bb.term.clear_inactive_history();
-        }
+        // history, and the primary scrollback returned on exit. With the
+        // primary screen up, the other grid is the alt screen: whatever a TUI
+        // left on it after `?1049l` stays charged to the OSC 8 byte budget
+        // until the next `?1049h`, so it is erased too.
+        bb.term.clear_inactive_grid();
         // A string (OSC / DCS / SOS / PM / APC) that was already open when the
         // PREVIOUS chunk ended is no read-boundary split: its sender never
         // closed it, and `bb.processor` would keep swallowing every byte that
@@ -1409,8 +1415,10 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         bb.uri_cstr_cache.clear();
         // …and re-arm the intern-cap breadcrumb. Its message tells the user
         // ⌘K is the recovery, so a session that exhausts the budget a second
-        // time after clearing must be able to say so.
+        // time after clearing must be able to say so. The live-byte budget's
+        // breadcrumb names ⌘K too.
         bb.osc8_intern_cap_logged = false;
+        bb.osc8_live_cap_logged = false;
         bb.uri_cache_bytes = 0;
     })
 }

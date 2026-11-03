@@ -134,6 +134,18 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
     drain_color_requests(bb);
     bb.callback.flush_suppressed_title();
     bb.callback.flush_suppressed_osc52();
+    // The grid refuses an OSC 8 link past its live-byte budget by printing the
+    // text unattributed. Take the flag on every advance so it never goes
+    // stale, and log only the first: a flood refuses one link per row.
+    if bb.term.take_hyperlink_over_budget() && crate::osc::once(&mut bb.osc8_live_cap_logged) {
+        eprintln!(
+            "[blackbird_core] OSC 8 hyperlink live-byte budget exhausted — new hyperlinks \
+             are refused (printed without a link) until the rows holding links are erased \
+             (⌘K, bb_term_clear_all) or have scrolled out of scrollback (the grid keeps a \
+             row for up to ~1000 more scrolls after that). Symptom: 'links stopped working'. \
+             One-shot per session."
+        );
+    }
 }
 
 /// Current DEC 2026 synchronized-update state.

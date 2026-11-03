@@ -3491,3 +3491,266 @@ fn uri_key_borrow_lookup_agrees_with_stored_hash() {
     assert!(std::sync::Arc::ptr_eq(hit.arc(), &arc));
     assert!(!set.contains(b"https://k.test/b".as_slice()));
 }
+
+// ---------------------------------------------------------------------------
+// OSC 8 live-byte budget. The vendored grid refuses a link once the hyperlink
+// strings it retains pass `HYPERLINK_LIVE_MAX` (32 MiB); these tests lower that
+// limit to a few KiB through `Term::set_hyperlink_live_max` so the budget is
+// reached by a handful of links instead of tens of MiB of input.
+// ---------------------------------------------------------------------------
+
+/// A 20-column terminal whose hyperlink budget is `limit` bytes.
+unsafe fn osc8_budget_term(limit: usize, rows: u16, scrollback: u32) -> *mut BBTerm {
+    let term = bb_term_new(20, rows, scrollback);
+    assert!(!term.is_null());
+    (*term).term.set_hyperlink_live_max(limit);
+    term
+}
+
+unsafe fn osc8_feed(term: *mut BBTerm, bytes: &[u8]) {
+    bb_term_input(term, bytes.as_ptr(), bytes.len());
+}
+
+/// One closed, one-cell link `x`. The explicit one-byte `id=` keeps the charged
+/// strings the same size for every link (a generated id is not).
+fn osc8_cell(uri: &str) -> Vec<u8> {
+    let mut v = b"\x1b]8;id=k;".to_vec();
+    v.extend_from_slice(uri.as_bytes());
+    v.extend_from_slice(b"\x1b\\x\x1b]8;;\x1b\\");
+    v
+}
+
+/// A distinct `len`-byte URI; every `semi_every`-th byte is `;` (0 = none).
+fn osc8_uri(tag: usize, len: usize, semi_every: usize) -> String {
+    let mut uri = format!("https://b.test/{tag:03}/");
+    while uri.len() < len {
+        let semicolon = semi_every > 0 && uri.len() % semi_every == semi_every - 1;
+        uri.push(if semicolon { ';' } else { 'a' });
+    }
+    uri
+}
+
+/// Whether the cell at (`row`, 0) of the viewport carries link attribution.
+unsafe fn osc8_linked(term: *mut BBTerm, row: u16) -> bool {
+    let snap = bb_term_take_snapshot(term);
+    let id = bb_snap_link_id_at(snap, row, 0);
+    bb_snap_release(snap);
+    id != 0
+}
+
+/// Links fed one per row (no scrolling) into a fresh terminal with a `limit`-byte
+/// budget; returns how many kept their attribution.
+fn osc8_links_kept(limit: usize, count: usize, uri_len: usize, semi_every: usize) -> usize {
+    unsafe {
+        let term = osc8_budget_term(limit, count as u16 + 1, 0);
+        for i in 0..count {
+            osc8_feed(term, &osc8_cell(&osc8_uri(i, uri_len, semi_every)));
+            osc8_feed(term, b"\r\n");
+        }
+        let kept = (0..count as u16).filter(|&r| osc8_linked(term, r)).count();
+        bb_term_free(term);
+        kept
+    }
+}
+
+/// Past the budget the newest links lose their attribution, the oldest keep it.
+#[test]
+fn osc8_live_budget_refuses_links_past_the_limit() {
+    unsafe {
+        // ~430 bytes each against 1000: room for two, not three.
+        let term = osc8_budget_term(1000, 8, 0);
+        for i in 0..6 {
+            osc8_feed(term, &osc8_cell(&osc8_uri(i, 300, 0)));
+            osc8_feed(term, b"\r\n");
+        }
+        let linked: Vec<bool> = (0..6).map(|r| osc8_linked(term, r)).collect();
+        assert_eq!(
+            linked,
+            [true, true, false, false, false, false],
+            "the first links fill the budget, every later one is refused"
+        );
+        bb_term_free(term);
+    }
+}
+
+/// The budget charges what the strings really hold. A URI with `;` is rebuilt by
+/// the parser through `push`/`push_str` and keeps spare capacity, so the same
+/// number of bytes costs more than a `;`-free URI of that length.
+#[test]
+fn osc8_live_budget_charges_capacity_not_length() {
+    let plain = osc8_links_kept(2000, 4, 600, 0);
+    let with_semicolons = osc8_links_kept(2000, 4, 600, 150);
+    assert_eq!(
+        plain, 2,
+        "rig: two 600-byte links fit in 2000 bytes, three do not"
+    );
+    assert!(
+        with_semicolons < plain,
+        "600-byte URIs holding ';' pin more heap than their length, so fewer fit: \
+         plain={plain} with_semicolons={with_semicolons}"
+    );
+}
+
+/// The first refusal sets the one-shot latch; ⌘K re-arms it. A link refused for
+/// being over-long is a single bad sequence and does not count as exhaustion.
+#[test]
+fn osc8_live_budget_exhaustion_sets_the_breadcrumb_latch_once_and_clear_all_rearms_it() {
+    unsafe {
+        let term = osc8_budget_term(1000, 8, 0);
+        osc8_feed(term, &osc8_cell(&osc8_uri(0, 5000, 0)));
+        assert!(
+            !(*term).osc8_live_cap_logged,
+            "an over-long URI is not budget exhaustion"
+        );
+        osc8_feed(term, &osc8_cell(&osc8_uri(1, 300, 0)));
+        osc8_feed(term, &osc8_cell(&osc8_uri(2, 300, 0)));
+        assert!(
+            !(*term).osc8_live_cap_logged,
+            "nothing is logged while the budget still has room"
+        );
+        osc8_feed(term, &osc8_cell(&osc8_uri(3, 300, 0)));
+        assert!(
+            (*term).osc8_live_cap_logged,
+            "the first refusal must be logged"
+        );
+
+        bb_term_clear_all(term);
+        assert!(
+            !(*term).osc8_live_cap_logged,
+            "⌘K frees the links and re-arms the breadcrumb"
+        );
+        assert_osc8_budget_recovered(term, "clear_all");
+        bb_term_free(term);
+    }
+}
+
+/// Probe after credit: a link bigger than any filler is attributed again.
+unsafe fn assert_osc8_budget_recovered(term: *mut BBTerm, name: &str) {
+    osc8_feed(term, b"\x1b[H");
+    osc8_feed(term, &osc8_cell(&osc8_uri(900, 300, 0)));
+    assert!(
+        osc8_linked(term, 0),
+        "{name}: the budget must be credited back once the holders are gone"
+    );
+}
+
+/// Credit when rows leave the scrollback ring.
+#[test]
+fn osc8_live_budget_is_credited_when_rows_scroll_out_of_history() {
+    unsafe {
+        let term = osc8_budget_term(1000, 4, 4);
+        for i in 0..2 {
+            osc8_feed(term, &osc8_cell(&osc8_uri(i, 300, 0)));
+            osc8_feed(term, b"\r\n");
+        }
+        osc8_feed(term, &osc8_cell(&osc8_uri(2, 300, 0)));
+        assert!(!osc8_linked(term, 2), "rig: the budget is spent");
+
+        // alacritty's row ring keeps rows that left the window (up to
+        // `MAX_CACHE_SIZE` = 1000 of them) untouched until it wraps around to
+        // them, so the links go only once the ring has turned over.
+        osc8_feed(term, &b"\r\n".repeat(1100));
+        assert_osc8_budget_recovered(term, "scroll-out");
+        bb_term_free(term);
+    }
+}
+
+/// Credit when scrollback is erased (`ED 3`).
+#[test]
+fn osc8_live_budget_is_credited_when_scrollback_is_erased() {
+    unsafe {
+        let term = osc8_budget_term(1000, 4, 2000);
+        for i in 0..2 {
+            osc8_feed(term, &osc8_cell(&osc8_uri(i, 300, 0)));
+            osc8_feed(term, b"\r\n");
+        }
+        osc8_feed(term, &osc8_cell(&osc8_uri(2, 300, 0)));
+        assert!(!osc8_linked(term, 2), "rig: the budget is spent");
+
+        // Push the link rows into history, then erase it. 1500 rows is past the
+        // ring's 1000-row spare threshold, the case the grid always freed; the
+        // short-history case is `..._by_clear_all_with_a_short_history`.
+        osc8_feed(term, &b"\r\n".repeat(1500));
+        osc8_feed(term, b"\x1b[3J");
+        assert_osc8_budget_recovered(term, "ed3");
+        bb_term_free(term);
+    }
+}
+
+/// Two links fill a 1000-byte budget (~430 bytes each) and the third is refused.
+unsafe fn osc8_spend_budget(term: *mut BBTerm) {
+    for i in 0..3 {
+        osc8_feed(term, &osc8_cell(&osc8_uri(i, 300, 0)));
+        osc8_feed(term, b"\r\n");
+    }
+    assert!(
+        (*term).osc8_live_cap_logged,
+        "rig: the third link was refused for want of budget"
+    );
+}
+
+/// ⌘K with a short scrollback. The ring keeps rows an erase leaves behind unless
+/// more than 1000 are spare, so a few dozen rows of history kept their links.
+#[test]
+fn osc8_live_budget_is_credited_by_clear_all_with_a_short_history() {
+    unsafe {
+        let term = osc8_budget_term(1000, 4, 50);
+        osc8_spend_budget(term);
+        osc8_feed(term, &b"\r\n".repeat(8));
+        bb_term_clear_all(term);
+        assert_osc8_budget_recovered(term, "clear_all with history");
+        bb_term_free(term);
+    }
+}
+
+/// ⌘K on the primary screen after a TUI left the alt screen: its cells, and the
+/// links on them, stayed on the inactive grid until the next `?1049h`.
+#[test]
+fn osc8_live_budget_is_credited_by_clear_all_for_links_left_on_the_alt_screen() {
+    unsafe {
+        let term = osc8_budget_term(1000, 4, 0);
+        osc8_feed(term, b"\x1b[?1049h");
+        osc8_spend_budget(term);
+        osc8_feed(term, b"\x1b[?1049l");
+        bb_term_clear_all(term);
+        assert_osc8_budget_recovered(term, "clear_all after ?1049l");
+        bb_term_free(term);
+    }
+}
+
+/// ⌘K inside a TUI also erases the primary scrollback (the inactive grid).
+#[test]
+fn osc8_live_budget_is_credited_by_clear_all_for_primary_history_under_the_alt_screen() {
+    unsafe {
+        let term = osc8_budget_term(1000, 4, 50);
+        osc8_spend_budget(term);
+        osc8_feed(term, &b"\r\n".repeat(8));
+        osc8_feed(term, b"\x1b[?1049h");
+        bb_term_clear_all(term);
+        assert_osc8_budget_recovered(term, "clear_all on the alt screen");
+        bb_term_free(term);
+    }
+}
+
+/// Credit when linked cells are overwritten in place: many more links than the
+/// budget holds pass through the same cells without ever exhausting it.
+#[test]
+fn osc8_live_budget_is_credited_when_cells_are_overwritten() {
+    unsafe {
+        let term = osc8_budget_term(1000, 4, 0);
+        for i in 0..10 {
+            osc8_feed(term, b"\x1b[H");
+            osc8_feed(term, &osc8_cell(&osc8_uri(i, 300, 0)));
+            assert!(
+                osc8_linked(term, 0),
+                "round {i}: the link must be attributed"
+            );
+            osc8_feed(term, b"\x1b[Ho");
+            assert!(
+                !osc8_linked(term, 0),
+                "round {i}: plain text clears the attribution"
+            );
+        }
+        bb_term_free(term);
+    }
+}
