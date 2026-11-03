@@ -345,11 +345,14 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
     // surface can emit, but future widenings must not panic into
     // `BBEventKind::Fatal` (rust-core-2 F2).
     for entry in entries {
-        // Bug #17 sliding-window gate: cap PtyWrite replies at
-        // COLOR_QUERY_REPLY_PER_SECOND across the rolling
-        // COLOR_QUERY_REPLY_WINDOW. The ColorRequestQueue cap only bounds
-        // one drain (one ESC-delimited segment), so this window is what
-        // bounds a flood of separate queries, in one chunk or across many.
+        // Bug #17 tumbling-window gate: cap PtyWrite replies at
+        // COLOR_QUERY_REPLY_PER_SECOND per COLOR_QUERY_REPLY_WINDOW (the
+        // count resets wholesale when the window rolls). The
+        // ColorRequestQueue cap only bounds one drain interval: one
+        // ESC-delimited segment outside a DEC 2026 synchronized update, where
+        // it is just a backstop, or the whole replayed buffer inside one,
+        // where it is the live bound. So this window is what bounds a flood
+        // of separate queries, in one chunk or across many.
         let now = std::time::Instant::now();
         if now.duration_since(bb.color_query_reply_window_start) >= COLOR_QUERY_REPLY_WINDOW {
             bb.color_query_reply_window_start = now;

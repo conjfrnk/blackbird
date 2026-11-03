@@ -421,17 +421,26 @@ impl CallbackCell {
 /// borrow), resolves the theme fallback, calls the formatter, and fires a
 /// PtyWrite.
 ///
-/// # DoS backstop
+/// # DoS bound
 /// `push` is hard-capped at `COLOR_REQUEST_QUEUE_CAP` entries between two
-/// drains. `process_input` drains after every ESC-delimited segment, so the
-/// cap bounds one segment, not a whole `bb_term_input` chunk: it keeps a
-/// single sequence from forcing an unbounded number of `Arc<dyn Fn>`
-/// trait-object allocations, inconsistent with the 4 KiB `xtgettcap_buf`
-/// cap already defending the sibling DCS path (rust-core-1 F1). (vte keeps
-/// at most 16 OSC params, so one OSC 4 queues at most 7 entries and this is
-/// a backstop; 256 still covers any legitimate probe.) A flood of separate
-/// sequences is bounded by the sliding-window reply gate in
-/// `drain_color_requests`, which logs its first drop per window.
+/// drains: it keeps a flood from forcing an unbounded number of
+/// `Arc<dyn Fn>` trait-object allocations, inconsistent with the 4 KiB
+/// `xtgettcap_buf` cap already defending the sibling DCS path (rust-core-1
+/// F1). What one drain interval spans depends on the stream:
+/// - Outside a DEC 2026 synchronized update `process_input` drains after
+///   every ESC-delimited segment, so the cap bounds one segment, not a whole
+///   `bb_term_input` chunk. (vte keeps at most 16 OSC params, so one OSC 4
+///   queues at most 7 entries and the cap is only a backstop there; 256
+///   still covers any legitimate probe.)
+/// - Inside a synchronized update vte withholds every byte until the update
+///   ends, then replays the whole buffer in one advance with no drain
+///   between queries. The whole replayed buffer is one drain interval, so
+///   the cap is the live bound there: at most 256 entries queue and the
+///   rest are dropped with one breadcrumb.
+///
+/// A flood across many segments, replays or chunks is bounded by the
+/// tumbling-window reply gate in `drain_color_requests`, which logs its
+/// first drop per window.
 ///
 /// # Thread-safety contract
 /// Same as `CallbackCell` — mutually-exclusive access under the BBTerm
@@ -488,9 +497,9 @@ impl ColorRequestQueue {
         DebugBusyGuard(std::marker::PhantomData)
     }
 
-    /// Append an entry, dropping silently when the queue is already at
-    /// `COLOR_REQUEST_QUEUE_CAP`. Returns `true` when the entry was
-    /// accepted.
+    /// Append an entry, dropping it (with one breadcrumb per drain interval)
+    /// when the queue is already at `COLOR_REQUEST_QUEUE_CAP`. Returns
+    /// `true` when the entry was accepted.
     ///
     /// # Safety
     /// Caller must ensure no concurrent access.

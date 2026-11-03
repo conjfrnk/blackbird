@@ -232,14 +232,17 @@ pub struct BBTerm {
     /// Scanner-side one-shot reject-log latches (OSC 7 / OSC 133). See
     /// `OscLatches`; `bb_term_clear_all` leaves them alone.
     pub(crate) osc_latches: crate::osc::OscLatches,
-    /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
-    /// `ColorRequestQueue` cap bounds one drain interval (an ESC-delimited
-    /// segment), not a chunk, and a hostile stream can fan queries across
-    /// many segments and chunks. Gating each `PtyWrite` reply in
-    /// `drain_color_requests` by this 1-second window with
+    /// OSC 10/11/12 color-query reply tumbling-window state (bug #17). The
+    /// `ColorRequestQueue` cap bounds one drain interval, not a chunk: an
+    /// ESC-delimited segment outside a DEC 2026 synchronized update (where
+    /// the cap is only a backstop), the whole replayed buffer inside one
+    /// (where it is the live bound). A hostile stream can still fan queries
+    /// across many segments, replays and chunks. Gating each `PtyWrite`
+    /// reply in `drain_color_requests` by this 1-second window with
     /// `COLOR_QUERY_REPLY_PER_SECOND` cap makes the rate limit total, not
-    /// per-call. Persisted across `bb_term_input` calls for the same reason
-    /// as `prompt_mark_rate`.
+    /// per-call. Tumbling: the count resets wholesale when the window
+    /// rolls. Persisted across `bb_term_input` calls for the same reason as
+    /// `prompt_mark_rate`.
     pub(crate) color_query_reply_window_start: std::time::Instant,
     pub(crate) color_query_reply_window_count: u32,
     /// One-shot-per-window latch for the breadcrumb logged when the gate

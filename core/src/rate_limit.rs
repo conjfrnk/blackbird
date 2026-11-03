@@ -214,13 +214,15 @@ pub(crate) const PROMPT_MARK_PER_SECOND: u32 = 240;
 pub(crate) const PROMPT_MARK_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// OSC 10/11/12 color-query reply rate limit (audit synthesis bug #17).
-/// `ColorRequestQueue::push` caps at 256 entries between two drains (one
-/// ESC-delimited segment), so a hostile shell can send many separate queries,
-/// in one chunk or across many, and amplify replies through the PTY. This
-/// sliding-window cap bounds that using the same pattern as the prompt-mark
-/// limiter (`EventRateState`). 32/sec is generous (legitimate apps probe at
-/// most a handful per second); excess replies are dropped, logging only the
-/// first drop per window.
+/// `ColorRequestQueue::push` caps at 256 entries between two drains: one
+/// ESC-delimited segment outside a DEC 2026 synchronized update (there the
+/// cap is only a backstop), the whole replayed buffer inside one (there it
+/// is the live bound). Either way a hostile shell can send many queries, in
+/// one chunk or across many, and amplify replies through the PTY. This
+/// tumbling-window cap (it resets wholesale when the window rolls, like
+/// `EventRateState`, the prompt-mark limiter's pattern) bounds that. 32/sec
+/// is generous (legitimate apps probe at most a handful per second); excess
+/// replies are dropped, logging only the first drop per window.
 pub(crate) const COLOR_QUERY_REPLY_PER_SECOND: u32 = 32;
 pub(crate) const COLOR_QUERY_REPLY_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
