@@ -26,14 +26,18 @@ typeset -g __BB_OSC133_LOADED=1
 
 # Emit escape bytes. zsh's %{ ... %} tells the line editor "zero-width
 # content" so PS1 width tracking stays correct.
-__bb_osc133_a() { print -n '\e]133;A\e\\' }
-__bb_osc133_b() { print -n '\e]133;B\e\\' }
-__bb_osc133_c() { print -n '\e]133;C\e\\' }
-__bb_osc133_d() { print -n "\e]133;D;${1:-0}\e\\" }
+# One-line bodies keep the `;` before `}`: under IGNORE_BRACES or
+# IGNORE_CLOSE_BRACES (also set by `emulate sh|ksh`) a `}` is only a
+# terminator in command position, and this file is sourced under whatever
+# options the user's .zshrc left on.
+__bb_osc133_a() { print -n '\e]133;A\e\\'; }
+__bb_osc133_b() { print -n '\e]133;B\e\\'; }
+__bb_osc133_c() { print -n '\e]133;C\e\\'; }
+__bb_osc133_d() { print -n "\e]133;D;${1:-0}\e\\"; }
 
 # preexec hook fires just before a user command runs — emit C (cmd output).
 # precmd hook fires just before the next prompt renders — emit D + A.
-__bb_osc133_cmd_start()   { __bb_osc133_c }
+__bb_osc133_cmd_start()   { __bb_osc133_c; }
 __bb_osc133_before_prompt() {
     local last_exit=$?
     __bb_osc133_d "$last_exit"
@@ -51,4 +55,10 @@ preexec_functions+=(__bb_osc133_cmd_start)
 # a $(...) substitution here would need PROMPT_SUBST, which stock zsh
 # leaves OFF, so auto-injected sessions would render the un-expanded
 # `$(...)` text in every prompt instead of emitting the mark.
-PS1="${PS1}%{"$'\e]133;B\e\\'"%}"
+# With PROMPT_PERCENT off `%{ %}` is not interpreted and would print as
+# literal junk, so the mark goes in bare (zle counts its bytes as columns).
+if [[ -o prompt_percent ]]; then
+  PS1="${PS1}%{"$'\e]133;B\e\\'"%}"
+else
+  PS1="${PS1}"$'\e]133;B\e\\'
+fi

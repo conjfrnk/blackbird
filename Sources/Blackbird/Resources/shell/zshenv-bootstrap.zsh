@@ -19,6 +19,11 @@ fi
 if [[ -o interactive && "$TERM_PROGRAM" == "Blackbird" && -n "${BB_SHELL_INTEGRATION_DIR-}" ]]; then
   typeset -ga precmd_functions
   __bb_load_integration() {
+    # Runs at the first precmd, under whatever options .zshrc left on.
+    # ksh_arrays (also set by `emulate sh|ksh`) makes `$arr` its first element
+    # only, which would truncate precmd_functions below. LOCAL_OPTIONS
+    # restores the user's setting on return.
+    setopt localoptions noksharrays
     # One-shot: remove ourselves first so a failing source can't loop.
     precmd_functions=(${precmd_functions:#__bb_load_integration})
     local dir="${BB_SHELL_INTEGRATION_DIR-}"
@@ -29,7 +34,7 @@ if [[ -o interactive && "$TERM_PROGRAM" == "Blackbird" && -n "${BB_SHELL_INTEGRA
       # appended first fires at the SECOND prompt. Announce the first one
       # here (A only: no command has run, so no D). A manual source from
       # .zshrc already registered its hook ahead of this prompt: skip.
-      if (( ! __bb_was_loaded && $+functions[__bb_osc133_a] )); then
+      if (( ! __bb_was_loaded && ${+functions[__bb_osc133_a]} )); then
         __bb_osc133_a
       fi
     fi

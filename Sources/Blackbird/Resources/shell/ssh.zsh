@@ -25,11 +25,9 @@ __bb_ssh_cache_file() {
 # blocks, ProxyJump). Fails (non-zero) when ssh can't parse the argv.
 __bb_ssh_dest() {
   emulate -L zsh
-  command ssh -G "$@" 2>/dev/null | command awk '
-    $1 == "user"     && u == "" { u = $2 }
-    $1 == "hostname" && h == "" { h = $2 }
-    $1 == "port"     && p == "" { p = $2 }
-    END { if (h == "") exit 1; print u "@" h ":" p }'
+  # The awk program stays on ONE line: CSH_JUNKIE_QUOTES (a user setopt, and
+  # this file is sourced under it) makes a quote spanning lines a parse error.
+  command ssh -G "$@" 2>/dev/null | command awk '$1 == "user" && u == "" { u = $2 }; $1 == "hostname" && h == "" { h = $2 }; $1 == "port" && p == "" { p = $2 }; END { if (h == "") exit 1; print u "@" h ":" p }'
 }
 
 # True (0) when the invocation must NOT pre-flight a terminfo install:
