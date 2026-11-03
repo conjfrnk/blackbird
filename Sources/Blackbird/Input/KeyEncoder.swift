@@ -776,11 +776,13 @@ public final class KeyEncoder {
     /// `ESC =`), emit `SS3 <final>` per xterm's keypad map:
     ///   0…9 → ESC O p…y;  + → ESC O k;  − → ESC O m;  * → ESC O j;
     ///   / → ESC O o;  . → ESC O n;  = → ESC O X;  Enter → ESC O M.
-    /// Otherwise (DECPAM off) a keypad key is just its plain character, so route
-    /// it through `encode(chars:)` — the same path a top-row digit takes —
-    /// instead of emitting a bare byte that silently drops modifiers. That makes
-    /// Option-as-Meta (ESC prefix), Kitty disambiguation / flag-8, and xterm
-    /// modifyOtherKeys framing all apply to keypad keys too (audit S3S-002).
+    /// Otherwise (DECPAM off, or the program pushed kitty flag 1 / 8, which wins
+    /// over DECPAM like it does over modifyOtherKeys) a keypad key is just its
+    /// plain character, so route it through `encode(chars:)` — the same path a
+    /// top-row digit takes — instead of emitting a bare byte that silently drops
+    /// modifiers. That makes Option-as-Meta (ESC prefix), Kitty disambiguation /
+    /// flag-8, and xterm modifyOtherKeys framing all apply to keypad keys too
+    /// (audit S3S-002).
     /// With no modifiers and no protocol mode the result is the same bare legacy
     /// byte as before (kp5 → 0x35, kpEnter → CR 0x0D), so the fast path is
     /// unchanged.
@@ -813,7 +815,13 @@ public final class KeyEncoder {
             default: return 0x70
             }
         }()
-        if applicationKeypad {
+        // Flag 1 (disambiguate) / flag 8 (report all keys) ask for keys as
+        // kitty escape codes, which includes the keypad; DECPAM's legacy SS3
+        // table is for programs that did not opt in. Flags 2 / 4 / 16 only
+        // decorate keys already sent that way, so they leave DECPAM alone.
+        let kittyOwnsKeypad = mode.contains(.disambiguateEscCodes)
+            || mode.contains(.reportAllKeysAsEsc)
+        if applicationKeypad && !kittyOwnsKeypad {
             // SS3 <final> — ESC O <final>
             return Data([0x1B, 0x4F, final])
         }

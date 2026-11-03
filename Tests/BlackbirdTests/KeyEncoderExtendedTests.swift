@@ -514,17 +514,14 @@ final class KeyEncoderExtendedTests: XCTestCase {
         )
     }
 
-    // MARK: - F4. appKeypad mode — pin current no-op behaviour
+    // MARK: - F4. appKeypad mode — no-op for `encode(chars:)`
 
     /// `BBTermMode.appKeypad` (bit 2, DECKPAM via `ESC =`) is tracked in the
-    /// core mode bitfield but the encoder does not consume it today. Pin
-    /// today's behaviour so any future DECKPAM implementation has to update
-    /// these assertions deliberately rather than silently affect printable
-    /// digit / operator keys.
-    ///
-    /// There is no `SpecialKey.kp*` case in the encoder — AppKit delivers
-    /// numeric keypad presses as plain digit characters through `encode()`,
-    /// which is the path these tests exercise.
+    /// core mode bitfield but `encode(chars:)` never consumes it; DECKPAM only
+    /// rewrites the `SpecialKey.kp*` keys routed through `encodeSpecial` (see
+    /// the DECPAM section below), and kitty flag 1 / 8 take precedence over
+    /// even that. Pin that so a printable digit / operator keeps encoding the
+    /// same whether or not the mode bit is set.
     func test_appKeypad_modeBit_doesNotAlterPlainDigits() {
         let enc = KeyEncoder()
         let kp: BBTermMode = [.appKeypad]

@@ -2099,8 +2099,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// preedit, and Option+a sends ESC 'a' instead of inserting "å" — otherwise
     /// handleEvent's setMarkedText/insertText consumes the event and the
     /// encoder's Meta path is never reached, breaking M-e/M-i/M-u/M-n and every
-    /// other Option+letter in Meta mode. Matches Terminal.app / iTerm2. Ctrl/⌘
-    /// chords and non-Option input (CJK/Korean IME) keep the normal IME path.
+    /// other Option+letter in Meta mode. Matches Terminal.app / iTerm2. A keypad
+    /// digit / operator under DECPAM skips the IME too (see the inline note).
+    /// Ctrl/⌘ chords and other non-Option input (CJK/Korean IME) keep the
+    /// normal IME path.
     private func routeKeyDownThroughIME(_ event: NSEvent) -> Bool {
         didInsertTextViaIME = false
         // Every plain printable reaches the encoder through
@@ -2126,10 +2128,11 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         let isContextMenuChord = !hadMarkedText && KeyEventClassifier.isContextMenuKeyChord(
             keyCode: event.keyCode, modifierFlags: event.modifierFlags
         )
-        // Under DECPAM a keypad digit / operator must reach `encodeSpecial`'s
-        // SS3 table, but the input context would commit it as plain text. A
-        // live composition still owns the key (CJK IMEs pick candidates with
-        // the keypad digits).
+        // Under DECPAM a keypad digit / operator must reach `encodeSpecial`
+        // (SS3 table, or the kitty form when the program pushed flag 1 / 8),
+        // but the input context would commit it as plain text. A live
+        // composition still owns the key (CJK IMEs pick candidates with the
+        // keypad digits).
         let isApplicationKeypadKey = !hasMarkedText() && KeyEventClassifier.isApplicationKeypadKey(
             event, applicationKeypad: currentSnapshot?.termMode.contains(.appKeypad) ?? false
         )
