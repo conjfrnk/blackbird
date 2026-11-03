@@ -2022,8 +2022,14 @@ public final class TerminalView: MTKView, MTKViewDelegate {
                 // only the last resort: by now it holds the title being
                 // cleared.
                 let fallback = self.defaultTitle ?? self.window?.title ?? "Blackbird"
-                let useTitle = title?.isEmpty == false ? title : fallback
-                self.window?.title = useTitle ?? "Blackbird"
+                let useTitle = (title?.isEmpty == false ? title : fallback) ?? "Blackbird"
+                // Skip an unchanged title: `NSWindow.title` KVO fires on every
+                // write, even an identical one, and each fire rebuilds the tab
+                // pill strips. Shells and TUIs re-send the same OSC 0/2 on
+                // every prompt or status tick.
+                if self.window?.title != useTitle {
+                    self.window?.title = useTitle
+                }
             }
             .store(in: &cancellables)
 

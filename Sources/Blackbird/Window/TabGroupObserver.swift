@@ -342,6 +342,12 @@ final class TabGroupObserver {
                     let theirGroup = senderWindow.tabGroup,
                     myGroup === theirGroup
                 else { return }
+                // Only the selected tab's strip is on screen. Refreshing every
+                // sibling made one title event cost O(tabs) strip rebuilds of
+                // O(tabs) pills each. A background strip catches up when its
+                // tab is selected: the `selectedWindow` KVO refreshes every
+                // controller in the group.
+                guard myGroup.selectedWindow === myWindow else { return }
                 self.refreshTabBar()
             }
             controller.titleBroadcastObserver = tok
