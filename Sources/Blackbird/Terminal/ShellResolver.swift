@@ -58,8 +58,27 @@ enum ShellResolver {
         // non-shell would reject it. Those run with no arguments (still
         // interactive on a tty) rather than fail to start.
         let name = (path as NSString).lastPathComponent
-        let posixLike: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh"]
-        return posixLike.contains(name) ? ["-il"] : []
+        return posixLikeShells.contains(name) ? ["-il"] : []
+    }
+
+    private static let posixLikeShells: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh", "mksh"]
+
+    /// Shells that run with no launch arguments (see `launchArguments`) but
+    /// are still shells, so `$SHELL` may name them.
+    private static let otherShells: Set<String> = ["tcsh", "csh", "nu", "elvish", "xonsh"]
+
+    /// Env a NEW session's child needs so `$SHELL` names the program it runs.
+    /// We exec the shell directly (no `login(1)`, which exports
+    /// `SHELL=<shell it execs>`), so the child otherwise keeps whatever the
+    /// launcher had: usually `/bin/zsh` from the login session, stale after
+    /// `chsh` and wrong whenever Settings → Shell picks another shell. tmux's
+    /// `default-shell`, vim's `'shell'` and `sudo -s` read it. A non-shell
+    /// program named in Settings (`/usr/bin/top`) is left alone: exporting it
+    /// would make those tools try to run it as a shell.
+    static func environmentOverrides(for path: String, loginShell: String?) -> [String: String] {
+        let name = (path as NSString).lastPathComponent
+        let isShell = path == loginShell || posixLikeShells.contains(name) || otherShells.contains(name)
+        return isShell ? ["SHELL": path] : [:]
     }
 
     /// `access(path, X_OK)` on a regular file.

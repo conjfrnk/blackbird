@@ -83,6 +83,10 @@ final class SessionLifecycle {
             ),
             uniquingKeysWith: { current, _ in current }
         )
+        env.merge(
+            ShellResolver.environmentOverrides(for: shell, loginShell: ShellResolver.loginShellFromPasswd()),
+            uniquingKeysWith: { current, _ in current }
+        )
         return try TerminalSession.start(
             shell: shell,
             arguments: ShellResolver.launchArguments(for: shell),  // -il for shells only
