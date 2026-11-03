@@ -148,14 +148,15 @@ enum OSC8URLPolicy {
     ///
     /// Algorithm (intentionally version-agnostic):
     ///  1. Build the mailto envelope (`mailto:` stripped, query/fragment
-    ///     stripped) via `mailtoEnvelope(fromAbsoluteString:)`.
+    ///     stripped, percent-decoded) via `mailtoEnvelope(fromAbsoluteString:)`.
     ///  2. Fail closed when the envelope contains more than one `@`
     ///     (RFC 6068 multi-recipient mailto — no canonical domain).
     ///  3. Split on the single `@` and return the lowercased right
     ///     side, or nil when the right side is empty.
     private static func mailtoDomain(fromAbsoluteString s: String) -> String? {
-        let envelope = mailtoEnvelope(fromAbsoluteString: s)
-        if envelope.isEmpty { return nil }
+        guard let envelope = mailtoEnvelope(fromAbsoluteString: s), !envelope.isEmpty else {
+            return nil
+        }
         // Pass-3 fail-closed: RFC 6068 allows multi-recipient mailto
         // (`mailto:user@safe.com,b@evil.com`). Picking last via
         // `lastIndex(of: "@")` silently selects evil.com; picking first
@@ -163,19 +164,19 @@ enum OSC8URLPolicy {
         // cannot honestly validate, so refuse to emit one. Caller
         // treats nil as "no domain" → divergence/safety checks fail
         // closed and the click is blocked.
-        let atCount = envelope.reduce(0) { $0 + ($1 == "@" ? 1 : 0) }
-        guard atCount == 1 else { return nil }
-        guard let at = envelope.firstIndex(of: "@") else { return nil }
-        let domain = envelope[envelope.index(after: at)...]
+        guard atSignCount(in: envelope) == 1 else { return nil }
+        // Split on the `@` SCALAR, not the `Character`: a decoded combining
+        // mark right after the `@` fuses with it into one Character.
+        let scalars = envelope.unicodeScalars
+        guard let at = scalars.firstIndex(of: "@") else { return nil }
+        let domain = scalars[scalars.index(after: at)...]
         if domain.isEmpty { return nil }
-        // Foundation percent-encodes non-ASCII bytes in
-        // `absoluteString` (`mailto:user@аpple.com` → `mailto:user@%D0%B0pple.com`).
-        // The IDN homograph defence relies on seeing the actual
-        // non-ASCII codepoints, so decode before returning. Decoding
-        // a pure-ASCII domain is a no-op, so the punycode (`xn--…`)
-        // case still flows through unchanged.
-        let decoded = String(domain).removingPercentEncoding ?? String(domain)
-        return decoded.lowercased()
+        // The envelope is already percent-decoded, so Foundation's
+        // `mailto:user@аpple.com` → `mailto:user@%D0%B0pple.com` encoding
+        // is undone and the IDN homograph defence sees the actual
+        // non-ASCII codepoints. Don't decode again: a second pass would
+        // read `%2541` as `A` where the mail client sees `%41`.
+        return String(domain).lowercased()
     }
 
     /// True when `s` contains a percent-encoded C0 control byte
@@ -600,9 +601,25 @@ enum OSC8URLPolicy {
         // through. Compute the count from the absoluteString envelope
         // (mailto:…?…) so behaviour is identical across versions. See
         // `mailtoDomain(fromAbsoluteString:)` for the parser.
-        let envelope = mailtoEnvelope(url)
-        let atCount = envelope.reduce(0) { $0 + ($1 == "@" ? 1 : 0) }
-        if atCount > 1 { return false }
+        //
+        // The count runs on the percent-DECODED envelope: mail clients
+        // decode the to-part before splitting recipients, so
+        // `mailto:evil%40x.com,v@apple.com` has one literal `@` but
+        // addresses two people. A `,` (RFC 6068 separator) or `;`
+        // (what some clients also split on) is rejected outright, and an
+        // envelope that fails to decode is refused rather than guessed at.
+        //
+        // Every test below walks `unicodeScalars`, never `Character`s: a
+        // decoded combining mark (`%CC%81` → U+0301) fuses with the `@` or
+        // `,` in front of it into one grapheme cluster that no longer
+        // equals `"@"` / `","`, which would hide a second recipient from a
+        // Character-level count while the mail client still splits on the
+        // scalar.
+        guard let envelope = mailtoEnvelope(url) else { return false }
+        for scalar in envelope.unicodeScalars where scalar == "," || scalar == ";" {
+            return false
+        }
+        if atSignCount(in: envelope) > 1 { return false }
         // H-2: extend IDN homograph defence to mailto domain. A
         // hostile remote emitting `mailto:user@аpple.com` (Cyrillic а)
         // visually claims apple.com but sends mail to a registered
@@ -626,15 +643,29 @@ enum OSC8URLPolicy {
         return items.count == 1 && items[0].name.lowercased() == "subject"
     }
 
-    /// Return the substring between `mailto:` and the first `?`
-    /// (query) or `#` (fragment), or the entire post-prefix string
-    /// when neither is present. Empty string when the URL isn't a
-    /// mailto. Used by `isMailtoSafe` for the multi-`@` count and by
+    /// Return the percent-decoded substring between `mailto:` and the
+    /// first `?` (query) or `#` (fragment), or the entire post-prefix
+    /// string when neither is present. Empty string when the URL isn't a
+    /// mailto; nil when the envelope isn't valid percent-encoded UTF-8.
+    /// Used by `isMailtoSafe` for the recipient checks and by
     /// `mailtoDomain(fromAbsoluteString:)` for the `@`-split, both
     /// without touching `URL.path` (see `mailtoDomain` doc for why
-    /// `URL.path` is unsafe here).
-    private static func mailtoEnvelope(_ url: URL) -> Substring {
+    /// `URL.path` is unsafe here). The query/fragment cut happens on the
+    /// raw string, before decoding, so a `%3F` stays part of the envelope.
+    private static func mailtoEnvelope(_ url: URL) -> String? {
         return mailtoEnvelope(fromAbsoluteString: url.absoluteString)
+    }
+
+    /// Number of `@` scalars in `envelope`. Counts unicode scalars rather
+    /// than `Character`s so a combining mark that fused with an `@`
+    /// (see `isMailtoSafe`) can't hide it. Shared by `isMailtoSafe` and
+    /// `mailtoDomain(fromAbsoluteString:)` so the two can't drift apart.
+    private static func atSignCount(in envelope: String) -> Int {
+        var count = 0
+        for scalar in envelope.unicodeScalars where scalar == "@" {
+            count += 1
+        }
+        return count
     }
 
     /// H3: strip `user:pass@` from a URL string before display. The
@@ -655,12 +686,12 @@ enum OSC8URLPolicy {
         return comps.string ?? urlString
     }
 
-    private static func mailtoEnvelope(fromAbsoluteString s: String) -> Substring {
+    private static func mailtoEnvelope(fromAbsoluteString s: String) -> String? {
         let prefix = "mailto:"
         guard s.count >= prefix.count,
               s.prefix(prefix.count).lowercased() == prefix
         else {
-            return Substring("")
+            return ""
         }
         var envelope = Substring(s.dropFirst(prefix.count))
         if let qIdx = envelope.firstIndex(of: "?") {
@@ -669,7 +700,7 @@ enum OSC8URLPolicy {
         if let fIdx = envelope.firstIndex(of: "#") {
             envelope = envelope[envelope.startIndex..<fIdx]
         }
-        return envelope
+        return String(envelope).removingPercentEncoding
     }
 }
 
