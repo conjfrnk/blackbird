@@ -96,6 +96,11 @@ struct DiagnosticsView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .onAppear { store.reload() }
+        // The Settings window is cached and the selected pane survives a
+        // close, so reopening on Diagnostics never re-fires `.onAppear`.
+        .onReceive(NotificationCenter.default.publisher(for: SettingsWindowController.didShow)) { _ in
+            store.reload()
+        }
     }
 
     // MARK: - Actions

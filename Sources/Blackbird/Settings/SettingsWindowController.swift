@@ -27,6 +27,12 @@ final class SettingsWindow: NSWindow {
 final class SettingsWindowController {
     static let shared = SettingsWindowController()
 
+    /// Posted by `show()` every time Settings is (re)presented. The cached
+    /// SwiftUI tree never sees a fresh `.onAppear` when the window is closed
+    /// and re-shown, so panes that must reflect on-disk state (Diagnostics)
+    /// subscribe to this to reload.
+    static let didShow = Notification.Name("dev.conjfrnk.blackbird.settingsWindowDidShow")
+
     private var window: NSWindow?
     private var host: NSHostingController<SettingsView>?
 
@@ -44,6 +50,7 @@ final class SettingsWindowController {
         applyFirstShowFrame(w)
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        NotificationCenter.default.post(name: Self.didShow, object: self)
     }
 
     /// Build the window + SwiftUI host (wrapped in the Liquid-Glass blur

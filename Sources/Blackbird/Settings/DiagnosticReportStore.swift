@@ -14,7 +14,7 @@ import SwiftUI
 /// Why no FSEvents / DispatchSource watcher: `reload()` is cheap, the user
 /// reaches this tab infrequently, and a watcher would require an actor or
 /// a DispatchQueue with an extra boundary for almost no win. The view
-/// re-loads on appear.
+/// re-loads on appear and whenever the Settings window is re-shown.
 @MainActor
 final class DiagnosticReportStore: ObservableObject {
 
