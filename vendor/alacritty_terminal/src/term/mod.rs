@@ -1146,6 +1146,27 @@ impl<T> Term<T> {
         cursor_cell.extra = extra;
     }
 
+    /// Blackbird fix (re-apply on bump): blank both halves of the wide glyph that straddles the
+    /// boundary between `column - 1` and `column` on `line`, if there is one. Upstream repairs
+    /// a cut pair only on the print path (`write_at_cursor`); EL / ED / ECH / DCH / ICH
+    /// overwrote or shifted a range and left the other half behind, either a lone `WIDE_CHAR`
+    /// (drawn two cells wide over its neighbour, and treated by the column reflow as a glyph
+    /// that needs its own row, which splits the logical line) or an orphan spacer. Callers run
+    /// this on each edge of the range they are about to overwrite or shift, before touching it;
+    /// the whole glyph goes, as in xterm and tmux.
+    fn split_wide_pair_at(&mut self, line: Line, column: usize) {
+        if column == 0 || column >= self.columns() {
+            return;
+        }
+
+        let row = &mut self.grid[line];
+        if row[Column(column)].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            row[Column(column - 1)].clear_wide();
+            row[Column(column)].flags.remove(Flags::WIDE_CHAR_SPACER);
+            self.damage.damage_line(line.0 as usize, column - 1, column);
+        }
+    }
+
     /// Blackbird fix (re-apply on bump): the column of the glyph cell a zero-width scalar attaches
     /// to: the cell left of the cursor, or the cursor's own cell while a wrap is pending, stepped
     /// back once more off a wide glyph's spacer. The only place that resolves "the previous
@@ -1477,6 +1498,12 @@ impl<T: EventListener> Handler for Term<T> {
 
         let line = cursor.point.line;
         self.damage.damage_line(line.0 as usize, 0, self.columns() - 1);
+
+        // Blackbird fix (re-apply on bump): the insert cuts a wide pair at the cursor and at
+        // the right edge, where the last `count` cells fall off the row; see
+        // `split_wide_pair_at`.
+        self.split_wide_pair_at(line, source.0);
+        self.split_wide_pair_at(line, self.columns() - count);
 
         let row = &mut self.grid[line][..];
 
@@ -1840,6 +1867,10 @@ impl<T: EventListener> Handler for Term<T> {
         let bg = self.grid.cursor.template.bg;
         let line = cursor.point.line;
         self.damage.damage_line(line.0 as usize, start.0, end.0);
+        // Blackbird fix (re-apply on bump): the erased range may cut a wide pair at either
+        // edge; see `split_wide_pair_at`.
+        self.split_wide_pair_at(line, start.0);
+        self.split_wide_pair_at(line, end.0);
         let row = &mut self.grid[line];
         for cell in &mut row[start..end] {
             *cell = bg.into();
@@ -1864,6 +1895,12 @@ impl<T: EventListener> Handler for Term<T> {
 
         let line = cursor.point.line;
         self.damage.damage_line(line.0 as usize, 0, self.columns() - 1);
+
+        // Blackbird fix (re-apply on bump): the deleted range `start..start + count` may cut a
+        // wide pair at either edge; see `split_wide_pair_at`.
+        self.split_wide_pair_at(line, start);
+        self.split_wide_pair_at(line, start + count);
+
         let row = &mut self.grid[line][..];
 
         for offset in 0..num_cells {
@@ -1962,6 +1999,10 @@ impl<T: EventListener> Handler for Term<T> {
         };
 
         self.damage.damage_line(point.line.0 as usize, left.0, right.0 - 1);
+        // Blackbird fix (re-apply on bump): the cleared range may cut a wide pair at either
+        // edge; see `split_wide_pair_at`.
+        self.split_wide_pair_at(point.line, left.0);
+        self.split_wide_pair_at(point.line, right.0);
 
         let row = &mut self.grid[point.line];
         for cell in &mut row[left..right] {
@@ -2087,6 +2128,9 @@ impl<T: EventListener> Handler for Term<T> {
 
                 // Clear up to the current column in the current line.
                 let end = cmp::min(cursor.column + 1, Column(self.columns()));
+                // Blackbird fix (re-apply on bump): the cursor may sit on a wide glyph's left
+                // half; see `split_wide_pair_at`.
+                self.split_wide_pair_at(cursor.line, end.0);
                 for cell in &mut self.grid[cursor.line][..end] {
                     *cell = bg.into();
                 }
@@ -2096,6 +2140,9 @@ impl<T: EventListener> Handler for Term<T> {
             },
             ansi::ClearMode::Below => {
                 let cursor = self.grid.cursor.point;
+                // Blackbird fix (re-apply on bump): the cursor may sit on a wide glyph's right
+                // half; see `split_wide_pair_at`.
+                self.split_wide_pair_at(cursor.line, cursor.column.0);
                 for cell in &mut self.grid[cursor.line][cursor.column..] {
                     *cell = bg.into();
                 }
