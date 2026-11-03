@@ -417,14 +417,16 @@ impl CallbackCell {
 /// PtyWrite.
 ///
 /// # DoS backstop
-/// `push` is hard-capped at `COLOR_REQUEST_QUEUE_CAP` entries. A hostile
-/// stream spamming `ESC]4;N;?BEL` across a single `bb_term_input` chunk
-/// would otherwise force an unbounded number of `Arc<dyn Fn>` trait-object
-/// allocations inside one call, inconsistent with the 4 KiB `xtgettcap_buf`
-/// cap already defending the sibling DCS path (rust-core-1 F1). 256 covers
-/// any legitimate probe — xterm reads the entire 256-entry palette at
-/// startup — and is well below the point where per-entry allocation churn
-/// becomes user-visible.
+/// `push` is hard-capped at `COLOR_REQUEST_QUEUE_CAP` entries between two
+/// drains. `process_input` drains after every ESC-delimited segment, so the
+/// cap bounds one segment, not a whole `bb_term_input` chunk: it keeps a
+/// single sequence from forcing an unbounded number of `Arc<dyn Fn>`
+/// trait-object allocations, inconsistent with the 4 KiB `xtgettcap_buf`
+/// cap already defending the sibling DCS path (rust-core-1 F1). (vte keeps
+/// at most 16 OSC params, so one OSC 4 queues at most 7 entries and this is
+/// a backstop; 256 still covers any legitimate probe.) A flood of separate
+/// sequences is bounded by the sliding-window reply gate in
+/// `drain_color_requests`, which logs its first drop per window.
 ///
 /// # Thread-safety contract
 /// Same as `CallbackCell` — mutually-exclusive access under the BBTerm
@@ -496,7 +498,7 @@ impl ColorRequestQueue {
                 *logged = true;
                 eprintln!(
                     "blackbird_core: ColorRequestQueue hit cap ({COLOR_REQUEST_QUEUE_CAP}); \
-                     further OSC 4/10/11/12 queries in this batch dropped"
+                     further OSC 4/10/11/12 queries before the next drain dropped"
                 );
             }
             return false;

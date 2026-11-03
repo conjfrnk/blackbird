@@ -231,14 +231,18 @@ pub struct BBTerm {
     /// `OscLatches`; `bb_term_clear_all` leaves them alone.
     pub(crate) osc_latches: crate::osc::OscLatches,
     /// OSC 10/11/12 color-query reply sliding-window state (bug #17). The
-    /// per-call `ColorRequestQueue` cap stops a single chunk from forcing
-    /// 256+ allocations, but a hostile stream can fan replies across many
-    /// chunks. Gating each `PtyWrite` reply in `drain_color_requests` by
-    /// this 1-second window with `COLOR_QUERY_REPLY_PER_SECOND` cap makes
-    /// the rate limit total, not per-call. Persisted across
-    /// `bb_term_input` calls for the same reason as `prompt_mark_rate`.
+    /// `ColorRequestQueue` cap bounds one drain interval (an ESC-delimited
+    /// segment), not a chunk, and a hostile stream can fan queries across
+    /// many segments and chunks. Gating each `PtyWrite` reply in
+    /// `drain_color_requests` by this 1-second window with
+    /// `COLOR_QUERY_REPLY_PER_SECOND` cap makes the rate limit total, not
+    /// per-call. Persisted across `bb_term_input` calls for the same reason
+    /// as `prompt_mark_rate`.
     pub(crate) color_query_reply_window_start: std::time::Instant,
     pub(crate) color_query_reply_window_count: u32,
+    /// One-shot-per-window latch for the breadcrumb logged when the gate
+    /// above first drops a reply; re-armed whenever the window rolls.
+    pub(crate) color_query_reply_drop_logged: bool,
     pub(crate) callback: Arc<CallbackCell>,
     /// Persistent OSC 8 URI intern store (rust-core-3 F1). Maps URI string →
     /// shared `Arc<CStr>`; entries survive across snapshots so the same URI
@@ -454,6 +458,7 @@ pub unsafe extern "C" fn bb_term_new(cols: u16, rows: u16, scrollback: u32) -> *
             osc_latches: crate::osc::OscLatches::default(),
             color_query_reply_window_start: std::time::Instant::now(),
             color_query_reply_window_count: 0,
+            color_query_reply_drop_logged: false,
         });
         Box::into_raw(bb)
     })
@@ -1358,6 +1363,7 @@ pub unsafe extern "C" fn bb_term_clear_all(term: *mut BBTerm) {
         // legitimate color queries for the rest of the 1s window.
         bb.color_query_reply_window_start = std::time::Instant::now();
         bb.color_query_reply_window_count = 0;
+        bb.color_query_reply_drop_logged = false;
 
         // Audit H-3 (2026-04-29): five sibling state slots survived the
         // pre-existing reset list, leaving these adversarial-state

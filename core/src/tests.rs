@@ -77,8 +77,8 @@ fn new_clamps_above_max_dim() {
 
 /// Regression for rust-core-1 F1: ColorRequestQueue::push must cap at
 /// COLOR_REQUEST_QUEUE_CAP so a hostile stream spamming
-/// `ESC]4;N;?BEL` can't force unbounded Arc<dyn Fn> allocations inside
-/// a single bb_term_input call. Direct-construct the queue so the
+/// `ESC]4;N;?BEL` can't force unbounded Arc<dyn Fn> allocations between
+/// two drains. Direct-construct the queue so the
 /// test is insensitive to alacritty's OSC 4 parser dedup / rate policy.
 #[test]
 fn color_request_queue_push_caps_entries() {
@@ -3132,8 +3132,8 @@ fn osc_color_query_rate_limit_drops_excess() {
         bb_term_set_color_query_enabled(term, 1);
 
         // 200 separate OSC 10 queries, fed across 200 distinct
-        // bb_term_input chunks so the per-call ColorRequestQueue cap
-        // (256) does NOT come into play — this isolates the new
+        // bb_term_input chunks. The ColorRequestQueue cap (256) bounds
+        // one drain, so it does NOT come into play — this isolates the
         // sliding-window gate as the only line of defense.
         let one_query = b"\x1b]10;?\x1b\\";
         for _ in 0..200 {

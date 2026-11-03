@@ -88,15 +88,23 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // whatever order the queries were written in, so a DA1 / CPR sentinel
     // overtakes the answers it trails. Advance both parsers in lock-step
     // instead, cutting before every ESC (each sequence starts at one, so a
-    // segment holds at most one query), and drain after each segment. Both
-    // parsers are streaming, so a cut anywhere, even between the ESC and
+    // segment holds at most one query sequence) and drain after each
+    // segment. An ESC that finds a string open also ends it, which is what
+    // dispatches an unterminated OSC colour query, so that ESC is cut off
+    // alone: the sequence it begins (a CPR, or an XTVERSION the tap answers
+    // on sight) must not run before the colour reply is queued and drained.
+    // Both parsers are streaming, so a cut anywhere, even between the ESC and
     // the `\` of an ST, is invisible to them. Bytes inside a DEC 2026
     // synchronized update are replayed whole when it closes, so replies
-    // queued there keep the old order.
+    // queued there keep the old order (KNOWN_ISSUES.md).
     let mut start = 0;
     while start < slice.len() {
-        let end = memchr::memchr(0x1B, &slice[start + 1..])
-            .map_or(slice.len(), |next_esc| start + 1 + next_esc);
+        let end = if slice[start] == 0x1B && bb.processor.in_string() {
+            start + 1
+        } else {
+            memchr::memchr(0x1B, &slice[start + 1..])
+                .map_or(slice.len(), |next_esc| start + 1 + next_esc)
+        };
         let segment = &slice[start..end];
         {
             let mut osc = osc_scanner!(bb);
@@ -242,16 +250,25 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
     for entry in entries {
         // Bug #17 sliding-window gate: cap PtyWrite replies at
         // COLOR_QUERY_REPLY_PER_SECOND across the rolling
-        // COLOR_QUERY_REPLY_WINDOW. The per-chunk
-        // ColorRequestQueue cap stops in-call amplification; this
-        // covers the cross-chunk case.
+        // COLOR_QUERY_REPLY_WINDOW. The ColorRequestQueue cap only bounds
+        // one drain (one ESC-delimited segment), so this window is what
+        // bounds a flood of separate queries, in one chunk or across many.
         let now = std::time::Instant::now();
         if now.duration_since(bb.color_query_reply_window_start) >= COLOR_QUERY_REPLY_WINDOW {
             bb.color_query_reply_window_start = now;
             bb.color_query_reply_window_count = 0;
+            bb.color_query_reply_drop_logged = false;
         }
         if bb.color_query_reply_window_count >= COLOR_QUERY_REPLY_PER_SECOND {
-            // Drop silently — matching the prompt-mark limiter pattern.
+            // Per-drop logging would amplify the flood, but the first drop
+            // in each window leaves one breadcrumb: a client that never
+            // gets its colour answer needs something to find.
+            if crate::osc::once(&mut bb.color_query_reply_drop_logged) {
+                eprintln!(
+                    "blackbird_core: OSC 4/10/11/12 colour-query replies hit the \
+                     {COLOR_QUERY_REPLY_PER_SECOND}/s cap; further queries in this window dropped"
+                );
+            }
             continue;
         }
 
