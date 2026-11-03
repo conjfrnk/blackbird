@@ -561,11 +561,12 @@ RIG="$TMP_ROOT/rig"
 BASE_SHA=""
 RIG_STATE="not-built"
 
-# Copy only what `xcodegen generate` reads, into a git repo of its own.
+# Copy only what `xcodegen generate` reads (project.yml's sources, including the
+# bundled LICENSE / THIRD_PARTY_NOTICES.txt resources), into a git repo of its own.
 setup_rig() {
     mkdir -p "$RIG"
     local item
-    for item in .gitignore project.yml Blackbird.xcodeproj Sources Tests scripts .github; do
+    for item in .gitignore project.yml LICENSE THIRD_PARTY_NOTICES.txt Blackbird.xcodeproj Sources Tests scripts .github; do
         [[ -e "$BB_REPO_ROOT/$item" ]] || continue
         cp -R "$BB_REPO_ROOT/$item" "$RIG/$item"
     done
@@ -592,6 +593,9 @@ rig_baseline() {
     local rc=0
     (cd "$RIG" && xcodegen generate) >"$TMP_ROOT/xcodegen-baseline.log" 2>&1 || rc=$?
     if (( rc != 0 )); then
+        # Surface why (stderr is not captured by the caller's $(...)): the rig
+        # is a partial copy of the repo, so a missing input shows up here.
+        tail -25 "$TMP_ROOT/xcodegen-baseline.log" | sed 's/^/        xcodegen: /' >&2
         echo "xcodegen-failed(rc=$rc)"
     elif git -C "$RIG" diff --quiet -- Blackbird.xcodeproj/project.pbxproj Sources/Blackbird/Info.plist; then
         echo "clean"
