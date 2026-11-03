@@ -5,10 +5,19 @@
 # exposure; this is the lighter-weight alternative to pinning every action
 # to a specific SHA.
 #
-# Cargo and Swift package deps are pinned (Cargo.lock / Package.resolved);
-# `cargo audit` catches advisories but nothing surfaced ordinary updates, so
-# those ecosystems get a monthly channel too (Cargo.lock last moved by hand
-# on 2026-06-30).
+# Cargo deps are pinned (Cargo.lock); `cargo audit` catches advisories but
+# nothing surfaced ordinary updates, so cargo gets a monthly channel too
+# (Cargo.lock last moved by hand on 2026-06-30).
+#
+# There is deliberately NO `swift` ecosystem. Sparkle's pin lives in
+# project.yml (`packages.Sparkle.from`) and project.pbxproj is generated from
+# it, but Dependabot can only edit the generated pbxproj + Package.resolved,
+# so ci.yml's xcodegen drift gate (regenerate, fail on any diff) turns every
+# such PR red by construction. Dropping the ecosystem would otherwise leave
+# nothing watching for a new Sparkle, so
+# .github/workflows/sparkle-update-check.yml does: weekly, it files a
+# "Bump Sparkle to X.Y.Z" issue (with the manual bump steps) when a newer
+# release than Package.resolved's pin exists.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -29,16 +38,12 @@ updates:
       # The vendored fork pins alacritty_terminal exactly; a bump means
       # re-applying the documented patch hunks, not a PR.
       - dependency-name: alacritty_terminal
-  - package-ecosystem: swift
-    directory: /
-    schedule:
-      interval: monthly
-    commit-message:
-      prefix: "chore(deps)"
-    open-pull-requests-limit: 2
-    labels:
-      - dependencies
-      - swift
+      # Dependabot is not MSRV-aware: proptest 1.12 needs rustc 1.88, but
+      # the workspace rust-version and CI toolchain are 1.85, so the PR can
+      # never compile. Drop this once the MSRV reaches 1.88. Any other crate
+      # whose latest release outruns 1.85 needs the same kind of entry.
+      - dependency-name: proptest
+        versions: [">=1.12.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

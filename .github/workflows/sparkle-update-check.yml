@@ -1,0 +1,35 @@
+# Weekly check that the pinned Sparkle is still the latest release.
+#
+# dependabot.yml has no `swift` ecosystem (its Sparkle PRs can never pass the
+# pbxproj drift gate in ci.yml), so this is the only thing that notices a new
+# Sparkle. Sparkle point releases have carried installer security fixes
+# (2.9.5, 2.9.6). When a newer release exists, scripts/check-sparkle-update.sh
+# files one "Bump Sparkle to X.Y.Z" issue per release. A failure here means the
+# check itself could not run (GitHub API, unreadable Package.resolved), so a
+# red run is never a "nothing to report" run.
+
+name: Sparkle update check
+
+on:
+  # Mondays 07:00 UTC.
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+# Read the repo, file issues; nothing else.
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Newer Sparkle release than the pin?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare Package.resolved with the latest Sparkle release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-sparkle-update.sh --open-issue
