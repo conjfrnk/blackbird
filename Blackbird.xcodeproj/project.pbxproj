@@ -260,6 +260,7 @@
 		AED697821DF433FFA6BAE0ED /* GlyphBitmapCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAAC9FD6558B761F250337E /* GlyphBitmapCache.swift */; };
 		AF6C1B0BBC848BBC8F9D93FB /* CloseConfirmBypassTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F0A6FE616DD35FA222B8D0F /* CloseConfirmBypassTests.swift */; };
 		B143C3C8D2AFE0D75E447211 /* ShiftTabBackTabBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED9EEEBC5195FBAC5F07B867 /* ShiftTabBackTabBlindTests.swift */; };
+		B1F2474E0C0EFC05653AB161 /* MergeAllWindowsBackgroundTabResizeBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44972142095638AB8C1E1C67 /* MergeAllWindowsBackgroundTabResizeBlindTests.swift */; };
 		B37AC88E5CC124787CCED556 /* HyperlinkResolverBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 908DFCA17FCE4685C2E184EE /* HyperlinkResolverBlindTests.swift */; };
 		B3F09FD0F183D209DB5A8A25 /* MouseInsetMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9959E3BB61D8228703D58C58 /* MouseInsetMappingTests.swift */; };
 		B442917F5D3C702CA3C68AE7 /* BBTerm.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE9625B30620C23E398A2EB /* BBTerm.swift */; };
@@ -487,6 +488,7 @@
 		4275C967B5D8605F4B76F80E /* BackgroundedRemoteJobCwdBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundedRemoteJobCwdBlindTests.swift; sourceTree = "<group>"; };
 		42F0C84C641FACEEE80ACC59 /* NotificationPresenterBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationPresenterBlindTests.swift; sourceTree = "<group>"; };
 		439685790680BB952D8E7F2C /* CmdLetterInterceptMatrixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CmdLetterInterceptMatrixTests.swift; sourceTree = "<group>"; };
+		44972142095638AB8C1E1C67 /* MergeAllWindowsBackgroundTabResizeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergeAllWindowsBackgroundTabResizeBlindTests.swift; sourceTree = "<group>"; };
 		4612F747000A5316DE0CD55F /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		464B60F423EF4E3C274C134B /* FeedYieldBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedYieldBlindTests.swift; sourceTree = "<group>"; };
 		46DB9B60EB2FE16FE4F11A15 /* DeferredFeedQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeferredFeedQueue.swift; sourceTree = "<group>"; };
@@ -944,6 +946,7 @@
 				BBFA60B5BFD8E81CC6FAC4BE /* MainWindowControllerLifetimeTests.swift */,
 				8D8AE5D875C0C9E7683470B3 /* MemoryBudget.swift */,
 				8F72D7CF594F8484A75DF835 /* MenuValidationTests.swift */,
+				44972142095638AB8C1E1C67 /* MergeAllWindowsBackgroundTabResizeBlindTests.swift */,
 				BDBE067E31FBB9F8651F3C50 /* MetalDeviceSelectionTests.swift */,
 				F89FAA17C3055BBE6D0556C1 /* MetalDrawableCountSourcePinTests.swift */,
 				3A877407E1A0FFA4E178DC6B /* MetalRendererInsetTests.swift */,
@@ -1653,6 +1656,7 @@
 				839D0B792073C9A8B16DCF44 /* MainWindowControllerLifetimeTests.swift in Sources */,
 				39D16FEB7F4EAC7AF7E10503 /* MemoryBudget.swift in Sources */,
 				7EF890F5A6A35115DDDFBE4B /* MenuValidationTests.swift in Sources */,
+				B1F2474E0C0EFC05653AB161 /* MergeAllWindowsBackgroundTabResizeBlindTests.swift in Sources */,
 				DA92E08EEE11AD711420DDF2 /* MetalDeviceSelectionTests.swift in Sources */,
 				0B6D85142353CF96BD4391D9 /* MetalDrawableCountSourcePinTests.swift in Sources */,
 				80FE06E1A9846123A1218F5D /* MetalRendererInsetTests.swift in Sources */,

@@ -939,13 +939,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// Push this window's frame onto the other tabs in its group so their
     /// terminals reflow (and their shells get `SIGWINCH`) now, instead of when
     /// the user next cycles to them.
-    private func syncFrameToSiblingTabs() {
+    ///
+    /// Internal rather than private: `TerminalWindow.mergeAllWindows` calls it,
+    /// because a merge changes no window's frame and so never reaches any of
+    /// the resize settle points that call this.
+    func syncFrameToSiblingTabs() {
         guard !isApplyingTabGroupFrame,
               let window,
               let group = window.tabGroup else { return }
         let frame = window.frame
         for sibling in TabFrameSync.targets(front: window, frame: frame, groupWindows: group.windows) {
-            (sibling.windowController as? MainWindowController)?.applyTabGroupFrame(frame)
+            if let controller = sibling.windowController as? MainWindowController {
+                controller.applyTabGroupFrame(frame)
+            } else {
+                // A member with no controller of ours (none in the shipping
+                // app) still must not keep a stale frame and PTY winsize.
+                sibling.setFrame(frame, display: false)
+            }
         }
     }
 

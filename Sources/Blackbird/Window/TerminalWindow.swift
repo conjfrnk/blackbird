@@ -74,6 +74,11 @@ final class TerminalWindow: NSWindow {
 
     override func mergeAllWindows(_ sender: Any?) {
         super.mergeAllWindows(sender)
+        // AppKit merges but leaves each joined window at its own frame, and
+        // applies the group frame to a background tab only when it is next
+        // selected. No resize fires on a merge, so without this push the merged
+        // tabs keep a stale PTY winsize (issue #29's class, via the merge path).
+        (windowController as? MainWindowController)?.syncFrameToSiblingTabs()
         announceExternalTabAction()
     }
 
