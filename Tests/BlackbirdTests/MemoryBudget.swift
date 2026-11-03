@@ -60,6 +60,12 @@ extension XCTestCase {
     /// 2× headroom; gross under-estimates that miss order-of-magnitude
     /// effects (grids over 1000 cells wide etc.) wouldn't fit either
     /// way.
+    ///
+    /// `scrollback` is the number of lines the test will actually push
+    /// into history, not the configured cap: alacritty allocates history
+    /// lazily, so a fresh grid costs the same at 10k or 100k lines. Tests
+    /// that never scroll should pass 0; the default is the conservative
+    /// worst case for a test that fills the whole buffer.
     func estimatedGridBytes(
         cols: Int,
         rows: Int,

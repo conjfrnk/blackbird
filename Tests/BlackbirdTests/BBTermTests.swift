@@ -55,8 +55,10 @@ final class BBTermTests: XCTestCase {
     /// clamp-applied dims back to the caller pins the contract that
     /// downstream wiring depends on.
     func test_oversizedResize_returnsClampedDims_notRequested() throws {
+        // Scrollback is lazily allocated and stays empty, so only the live grid
+        // counts (the 100k-line default is a phantom 1.5 GB: skips on every host).
         try requireTestFitsInBudget(
-            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000, scrollback: 0)
         )
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
         let applied = try XCTUnwrap(term.resize(to: .init(cols: 1500, rows: 1500)))
@@ -364,8 +366,10 @@ final class BBTermTests: XCTestCase {
     /// passing `MAX_DIM + 1` is cheap and pins that the wrapper's
     /// clamp ceiling matches the Rust side.
     func test_resize_aboveCeiling_clampsToMaxDim() throws {
+        // Scrollback is lazily allocated and stays empty, so only the live grid
+        // counts (the 100k-line default is a phantom 1.5 GB: skips on every host).
         try requireTestFitsInBudget(
-            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000, scrollback: 0)
         )
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24)))
         let applied = try XCTUnwrap(term.resize(to: .init(cols: BBTerm.MAX_DIM + 1, rows: BBTerm.MAX_DIM + 1)))

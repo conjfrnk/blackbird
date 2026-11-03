@@ -16,13 +16,16 @@ final class TerminalSessionTests: XCTestCase {
         // A caller passing UInt16.max must NOT crash and must land on
         // exactly the clamp ceiling.
         //
-        // Memory budget: 1000 × max(1000, 10 000 scrollback) × 32B ≈
-        // 320 MB allocation under alacritty reflow — well within a dev
-        // machine's RAM. The pre-flight guard trips BEFORE we allocate
+        // Memory budget: the live 1000×1000 grid at 16-32B/cell ≈ 16-32 MB
+        // (measured peak RSS ~76 MB) under alacritty reflow — well within a
+        // dev machine's RAM. The pre-flight guard trips BEFORE we allocate
         // anything, mechanising Connor's post-OOM rule (a single bad
         // resize test once forced a 100+ GB alloc and froze the host).
+        // Scrollback is lazily allocated and stays empty here, so it is
+        // excluded from the estimate; the default 100k lines would be a
+        // phantom 1.5 GB and skip this test on every host.
         try requireTestFitsInBudget(
-            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000, scrollback: 0)
         )
         let session = try TerminalSession.start(
             shell: "/bin/cat",
@@ -230,8 +233,10 @@ final class TerminalSessionTests: XCTestCase {
     func test_oversizedResize_pty_seesClampedDims_notRequested() throws {
         try XCTSkipIf(ProcessInfo.processInfo.environment["BB_RUN_STRESS_TESTS"] != "1",
                       "RunLoop-pumping test SEGVs in CATransaction under cumulative ASan; set BB_RUN_STRESS_TESTS=1 for the runtime invariant")
+        // Scrollback is lazily allocated and stays empty, so only the live grid
+        // counts (the 100k-line default is a phantom 1.5 GB: skips on every host).
         try requireTestFitsInBudget(
-            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000, scrollback: 0)
         )
         let session = try TerminalSession.start(
             shell: "/bin/sh",

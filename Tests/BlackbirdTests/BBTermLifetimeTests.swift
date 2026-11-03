@@ -256,8 +256,10 @@ final class BBTermLifetimeTests: XCTestCase {
         let snapMin = try XCTUnwrap(term.snapshot())
         XCTAssertGreaterThanOrEqual(snapMin.cols, 2, "floor clamp ≥ 2 cols")
         XCTAssertGreaterThanOrEqual(snapMin.rows, 2, "floor clamp ≥ 2 rows")
+        // Scrollback is lazily allocated and stays empty, so only the live grid
+        // counts (the 100k-line default is a phantom 1.5 GB: skips on every host).
         try requireTestFitsInBudget(
-            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000)
+            estimatedBytes: estimatedGridBytes(cols: 1000, rows: 1000, scrollback: 0)
         )
         term.resize(to: .init(cols: 5000, rows: 5000))
         let snapMax = try XCTUnwrap(term.snapshot())
