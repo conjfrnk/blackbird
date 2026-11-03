@@ -345,6 +345,7 @@
 		D2FF0F603F6C135E10977E3F /* HangReportStorePruneExcessBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0FE9727273DA0D746915F5A /* HangReportStorePruneExcessBlindTests.swift */; };
 		D3A6C740DF8E3C7C91D4ED1F /* URLDetectorMultiRowWrapTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C31E953108A36157B8BE920 /* URLDetectorMultiRowWrapTests.swift */; };
 		D3FEE747D19D317F71EB45BD /* DiagnosticFileLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FEB5E2E24B725264B21AB43 /* DiagnosticFileLoader.swift */; };
+		D43545FDC81C46AD4A06D713 /* GlyphAtlasBoxLineBandedFitShapeBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8B79B979D6C1F83615D9996 /* GlyphAtlasBoxLineBandedFitShapeBlindTests.swift */; };
 		D6237259ED506C0A59DF8077 /* FindBarThemeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2215352FADE00C2471C9175 /* FindBarThemeTests.swift */; };
 		D647B933C8453D8B4C5E8877 /* WindowResizeControllerBoundingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71B97CA3B5FEE2E46183763E /* WindowResizeControllerBoundingTests.swift */; };
 		D807376E0D53CDC6C385E4FA /* FindBarKeyboardBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 825257D060E2A146B39267F6 /* FindBarKeyboardBlindTests.swift */; };
@@ -738,6 +739,7 @@
 		C7D41B7AB4C224EF793857BD /* IMEDoCommandNoAlertBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEDoCommandNoAlertBlindTests.swift; sourceTree = "<group>"; };
 		C7E84A9F3EE4A60539B7BBD4 /* AccessibilityRangeForIndexAstralBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityRangeForIndexAstralBlindTests.swift; sourceTree = "<group>"; };
 		C81B55889FCFFCA2A3AF0708 /* MainThreadWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainThreadWatchdogTests.swift; sourceTree = "<group>"; };
+		C8B79B979D6C1F83615D9996 /* GlyphAtlasBoxLineBandedFitShapeBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasBoxLineBandedFitShapeBlindTests.swift; sourceTree = "<group>"; };
 		C90B47405DE79D1CC8F01401 /* GlyphAtlasWideKeyBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasWideKeyBlindTests.swift; sourceTree = "<group>"; };
 		C9406FCA2A8E409CA36B05E5 /* FindStaleRegexScanBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindStaleRegexScanBlindTests.swift; sourceTree = "<group>"; };
 		C9B348536E063859D3D278C8 /* TabResizeFanoutBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabResizeFanoutBlindTests.swift; sourceTree = "<group>"; };
@@ -966,6 +968,7 @@
 				EF3965715F1DF2021784E790 /* FunctionKeyF13F20Tests.swift */,
 				DE379012FEC25AD2E2A641FE /* GlyphAtlasBlockGlyphYFitBlindTests.swift */,
 				CAB14510DCA7F03B6DDEDD18 /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift */,
+				C8B79B979D6C1F83615D9996 /* GlyphAtlasBoxLineBandedFitShapeBlindTests.swift */,
 				C3CFB2CCC9FC2798D95F7319 /* GlyphAtlasFallbackSlotClipBlindTests.swift */,
 				26BA0CAC55ADFCE4A1F02D62 /* GlyphAtlasInvariantTests.swift */,
 				B1B68195F4161FCEE7A5FB56 /* GlyphAtlasStorageModeBlindTests.swift */,
@@ -1712,6 +1715,7 @@
 				242064EC63C93D69A922E41C /* FunctionKeyF13F20Tests.swift in Sources */,
 				3EF5AE53F04F32047CCC4B80 /* GlyphAtlasBlockGlyphYFitBlindTests.swift in Sources */,
 				9EC3B3F7ED6213D4D6FCDBFB /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift in Sources */,
+				D43545FDC81C46AD4A06D713 /* GlyphAtlasBoxLineBandedFitShapeBlindTests.swift in Sources */,
 				1264F91E95CE8FFFB88EE0E6 /* GlyphAtlasFallbackSlotClipBlindTests.swift in Sources */,
 				986BA3465A246BA5AAFD097B /* GlyphAtlasInvariantTests.swift in Sources */,
 				E52AB9F08C03E0E5294E9D3D /* GlyphAtlasStorageModeBlindTests.swift in Sources */,

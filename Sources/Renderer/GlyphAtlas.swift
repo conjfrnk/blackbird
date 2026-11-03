@@ -1019,7 +1019,8 @@ public final class GlyphAtlas {
                 // cell top and Monaco's is 59% of the cell, which left a
                 // stripe between every pair of stacked rows. Box lines may
                 // come back as three slices (`bandedFit`) so ─ keeps its
-                // thickness; each is drawn below with its own Y scale.
+                // thickness (diagonals, arcs and dashed verticals do not:
+                // `.boxShape`); each is drawn below with its own Y scale.
                 pieces = fitted
                 // CG floors the glyph origin to a whole device pixel by
                 // default; that alone drops the top row of a cell-height
@@ -1444,22 +1445,36 @@ public final class GlyphAtlas {
     /// How a cell-fill scalar is stretched vertically so stacked rows tile.
     /// The stretch maps a *reference* glyph's ink extent onto the cell
     /// height; every other glyph of the range rides along with the same
-    /// plan. `.solidBlock` uses one uniform Y-affine; `.boxLine` uses the
-    /// three-slice `bandedFit` so horizontal strokes keep their thickness.
+    /// plan. `.solidBlock` and `.boxShape` use one uniform Y-affine;
+    /// `.boxLine` uses the three-slice `bandedFit` so horizontal strokes keep
+    /// their thickness (`.boxShape` arcs pay for their smooth curve with a
+    /// heavier horizontal arm, see there).
     private enum VerticalFit {
         /// U+2580-2590 and U+2594-259F (halves, eighths, quadrants): fitted
         /// to U+2588 FULL BLOCK. Always applied — even a font whose █ is
         /// already cell-height needs the exact, unquantized origin (Hack 12 pt
         /// at 1x has a ~20%-coverage top row without it). Smoothing is off.
         case solidBlock
-        /// U+2500-257F: fitted to U+2502 LIGHT VERTICAL, but only ever
-        /// stretched, never shrunk. A font whose │ already spans (or
-        /// overshoots) the cell (Hack) is merely re-anchored to the exact
-        /// slot. A font like Monaco (│ ~65% of the cell) is stretched only
-        /// above and below the band its horizontal strokes occupy, so the
-        /// verticals still join across rows while ─ keeps the thickness the
-        /// font drew it with (`bandedFit`).
+        /// U+2500-257F except `.boxShape`: fitted to U+2502 LIGHT VERTICAL,
+        /// but only ever stretched, never shrunk. A font whose │ already
+        /// spans (or overshoots) the cell (Hack) is merely re-anchored to the
+        /// exact slot. A font like Monaco (│ ~65% of the cell) is stretched
+        /// only above and below the band its horizontal strokes occupy, so
+        /// the verticals still join across rows while ─ keeps the thickness
+        /// the font drew it with (`bandedFit`).
         case boxLine
+        /// The box glyphs whose shape is slanted or periodic in Y: the arcs
+        /// ╭╮╯╰, the diagonals ╱╲╳ and the dashed verticals ┆┇┊┋╎╏. Same
+        /// reference and never-shrink rule as `.boxLine`, but one uniform
+        /// stretch: a different Y scale per slice would kink a straight line,
+        /// flatten part of an arc, and make the dashes unequal.
+        ///
+        /// Trade-off, accepted: no single vertical stretch both keeps a curve
+        /// smooth and leaves its bar at the font's thickness. The horizontal
+        /// arm of an arc therefore comes out `yScale` times thicker than the
+        /// banded ─ next to it (about 1.5x in Monaco), on the same centre line.
+        /// A bent corner was judged worse than a heavier one.
+        case boxShape
 
         /// `nil` for scalars that are not vertically fitted. The ░▒▓ dither
         /// shades (U+2591-2593) are deliberately NOT fitted: their pattern
@@ -1468,6 +1483,8 @@ public final class GlyphAtlas {
         /// seamlessly before.
         init?(_ scalar: UnicodeScalar) {
             switch scalar.value {
+            case 0x2506, 0x2507, 0x250A, 0x250B, 0x254E, 0x254F, 0x256D...0x2573:
+                self = .boxShape
             case 0x2500...0x257F: self = .boxLine
             case 0x2591...0x2593: return nil
             case 0x2580...0x259F: self = .solidBlock
@@ -1478,7 +1495,16 @@ public final class GlyphAtlas {
         var referenceCharacter: UniChar {
             switch self {
             case .solidBlock: return 0x2588
-            case .boxLine: return 0x2502
+            case .boxLine, .boxShape: return 0x2502
+            }
+        }
+
+        /// Whether horizontal strokes keep their own thickness (`bandedFit`)
+        /// instead of riding along with the uniform stretch.
+        var bandsHorizontalStrokes: Bool {
+            switch self {
+            case .boxLine: return true
+            case .solidBlock, .boxShape: return false
             }
         }
 
@@ -1488,7 +1514,7 @@ public final class GlyphAtlas {
             let fitted = cellHeight / referenceHeight
             switch self {
             case .solidBlock: return fitted
-            case .boxLine: return max(1, fitted)
+            case .boxLine, .boxShape: return max(1, fitted)
             }
         }
     }
@@ -1558,7 +1584,7 @@ public final class GlyphAtlas {
         let cellHeight = CGFloat(cellPxHeight) / scale
         let yScale = fit.scale(
             referenceHeight: reference.max - reference.min, cellHeight: cellHeight)
-        if fit == .boxLine, yScale > 1,
+        if fit.bandsHorizontalStrokes, yScale > 1,
            let banded = bandedFit(
                reference: reference, strokes: Self.horizontalStrokeBand(in: font),
                yScale: yScale, cellHeight: cellHeight)
