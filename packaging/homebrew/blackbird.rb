@@ -2,32 +2,35 @@ cask "blackbird" do
   version "0.9.3"
   sha256 "032722ce3c57796cd4216ca4ed2b1adff6245ad700efd339119d2f745feddf95"
 
-  url "https://github.com/conjfrnk/blackbird/releases/download/v#{version}/Blackbird-#{version}.dmg",
-      verified: "github.com/conjfrnk/blackbird/"
+  url "https://github.com/conjfrnk/blackbird/releases/download/v#{version}/Blackbird-#{version}.dmg"
   name "Blackbird"
-  desc "Minimal, native terminal emulator for macOS"
+  desc "Minimal, native terminal emulator"
   homepage "https://blackbird-terminal.com/"
 
   livecheck do
     url "https://blackbird-terminal.com/appcast.xml"
-    strategy :sparkle
+    # Plain :sparkle reports "<short>,<build>" ("0.9.3,54") because
+    # sparkle:version is a bare integer; `version` here is the short
+    # version alone (publish-update.sh seds it), so report just that.
+    strategy :sparkle, &:short_version
   end
 
   auto_updates true
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "Blackbird.app"
 
   zap trash: [
+    # Written by the app itself, not by the installer.
+    "~/.local/share/blackbird",  # shell-integration bootstrap
+    "~/.local/state/blackbird",  # ssh terminfo-wrapper cache
+    # Globbed because Apple's tic files it under the hex dir 78/, other
+    # ncurses under x/.
+    "~/.terminfo/*/xterm-kitty", # KittyTerminfo.swift
+    "~/Library/Caches/dev.conjfrnk.blackbird",
+    "~/Library/HTTPStorages/dev.conjfrnk.blackbird",
     "~/Library/Logs/Blackbird",
     "~/Library/Preferences/dev.conjfrnk.blackbird.plist",
     "~/Library/Saved Application State/dev.conjfrnk.blackbird.savedState",
-    "~/Library/HTTPStorages/dev.conjfrnk.blackbird",
-    "~/Library/Caches/dev.conjfrnk.blackbird",
-    # Written by the app itself, not by the installer. Globbed because
-    # Apple's tic files it under the hex dir 78/, other ncurses under x/.
-    "~/.terminfo/*/xterm-kitty",        # KittyTerminfo.swift
-    "~/.local/share/blackbird",         # shell-integration bootstrap
-    "~/.local/state/blackbird",         # ssh terminfo-wrapper cache
   ]
 end
