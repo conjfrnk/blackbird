@@ -13,14 +13,15 @@ import BBCore
 /// ## Queue confinement
 /// `lastAppliedGridSize` is touched ONLY from inside a `coreQueue` block (the
 /// sync `coreQueue.sync` body of `resize`, the `coreQueue.async` body of
-/// `resizeAsync`, both via `noteAppliedGridSize`). Its `@Published` reflow
+/// `resizeCoalesced` — which `resizeAsync` shares — both via
+/// `noteAppliedGridSize`). Its `@Published` reflow
 /// reaction hops to main and never re-enters `coreQueue`, so a plain `var` with
 /// no lock is safe — exactly as when these fields lived on the session.
 /// `TerminalSession.clampResize` stays a static on the session (tested directly
 /// as `TerminalSession.clampResize`); this controller calls it.
 ///
 /// ## Lifetime
-/// The deferred `coreQueue.async` (resizeAsync) and `main.async`
+/// The deferred `coreQueue.async` (resizeCoalesced) and `main.async`
 /// (noteAppliedGridSize) blocks capture `[weak session]` and `guard let`, so a
 /// resize that races teardown is a clean no-op — they never read the
 /// `unowned session` after the session is gone. The synchronous `resize` body
@@ -156,23 +157,16 @@ final class ResizeController {
     /// guaranteed non-blocking main thread. Used by the font-change path,
     /// where the resize is a one-off (not a drag loop) and a coreQueue
     /// backlog must not hold main hostage while shells stream output.
-    /// Ordering against in-flight feeds is preserved because coreQueue is
-    /// serial; the resulting snapshot is routed through the same coalescer
-    /// `feed(_:)` uses.
+    ///
+    /// Shares `resizeCoalesced`'s latest-wins slot instead of queueing a block
+    /// that captures `size`. Such a block can't be superseded: behind an
+    /// already-queued coalesced drain B1 it runs AFTER B1 has applied a newer
+    /// window size (a later tick only overwrites the slot), re-applying its
+    /// stale size last and leaving the grid/PTY winsize at it while
+    /// `lastPropagatedSize` dedups every later call. Through the slot, the first
+    /// block to run applies the newest size.
     func resizeAsync(to size: TerminalSession.Size) {
-        let clamped = TerminalSession.clampResize(size)
-        session.coreQueue.async { [weak self, weak session = self.session] in
-            guard let self, let session else { return }
-            session.drainDeferredFeedsBeforeCoreWork()
-            // Audit S1-007: same in-block termination gate as the sync
-            // path — a font-change resizeAsync queued behind terminate()
-            // used to reach a nil'd handle and emit the false
-            // 'Rust panic fallback' warning.
-            if session.isTerminatedLocked() { return }
-            self.applyGridResize(clamped, variant: " (async)")
-            guard let snap = session.bbterm.snapshot() else { return }
-            session.snapshotCoalescer.publishPendingSnapshot(snap)
-        }
+        resizeCoalesced(to: size)
     }
 
     /// Latest-wins, off-main sibling of `resize(to:)` for the live-drag path.
@@ -246,7 +240,8 @@ final class ResizeController {
         }
     }
 
-    /// True while a coalesced resize is queued but not yet applied.
+    /// True while a coalesced resize (including a font-change `resizeAsync`,
+    /// which shares the slot) is queued but not yet applied.
     ///
     /// `propagateResize` consults this before choosing the cheap synchronous
     /// path: "the columns didn't change" is only true relative to the last
