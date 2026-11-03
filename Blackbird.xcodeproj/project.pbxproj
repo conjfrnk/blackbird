@@ -25,6 +25,7 @@
 		0E28747FF245ACA6DA71B716 /* MonospaceFontFamiliesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A14ACDB4E0E64E61FFD4773 /* MonospaceFontFamiliesTests.swift */; };
 		10ED4F0567A44DC417CF66AD /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = D1D6B11109581801C6072917 /* AppIcon.icns */; };
 		11A85BB1B88C97F27058B66F /* KittyTerminfoDeletionBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70085016F53D542CFD455D7F /* KittyTerminfoDeletionBlindTests.swift */; };
+		1264F91E95CE8FFFB88EE0E6 /* GlyphAtlasFallbackSlotClipBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3CFB2CCC9FC2798D95F7319 /* GlyphAtlasFallbackSlotClipBlindTests.swift */; };
 		12AB88537876EBE9AA30AE45 /* MainThreadWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C81B55889FCFFCA2A3AF0708 /* MainThreadWatchdogTests.swift */; };
 		136F1669EF1569E1A35DA717 /* PreferencesShellIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D0E46FD735F05D644F0D1CE /* PreferencesShellIntegrationTests.swift */; };
 		152B7079067935F309BF9246 /* IMEPreeditDismissKeyLeakBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17599E31B2021814E1A09BFA /* IMEPreeditDismissKeyLeakBlindTests.swift */; };
@@ -688,6 +689,7 @@
 		C1038D22AC215585EB760B2B /* TabOrderCoordinatorPurgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabOrderCoordinatorPurgeTests.swift; sourceTree = "<group>"; };
 		C1F50B661E4AB6164DAC55FD /* FFIContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFIContractTests.swift; sourceTree = "<group>"; };
 		C2215352FADE00C2471C9175 /* FindBarThemeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindBarThemeTests.swift; sourceTree = "<group>"; };
+		C3CFB2CCC9FC2798D95F7319 /* GlyphAtlasFallbackSlotClipBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlyphAtlasFallbackSlotClipBlindTests.swift; sourceTree = "<group>"; };
 		C45783C31A12D1FC3BA38103 /* ThemeResolutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeResolutionTests.swift; sourceTree = "<group>"; };
 		C4CEB1FB9D26E0110D601313 /* SettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
 		C4E3D17753045411705CBBA6 /* OSC7BackgroundJobTrustBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSC7BackgroundJobTrustBlindTests.swift; sourceTree = "<group>"; };
@@ -914,6 +916,7 @@
 				EF3965715F1DF2021784E790 /* FunctionKeyF13F20Tests.swift */,
 				DE379012FEC25AD2E2A641FE /* GlyphAtlasBlockGlyphYFitBlindTests.swift */,
 				CAB14510DCA7F03B6DDEDD18 /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift */,
+				C3CFB2CCC9FC2798D95F7319 /* GlyphAtlasFallbackSlotClipBlindTests.swift */,
 				26BA0CAC55ADFCE4A1F02D62 /* GlyphAtlasInvariantTests.swift */,
 				B1B68195F4161FCEE7A5FB56 /* GlyphAtlasStorageModeBlindTests.swift */,
 				31710E3D7CE95A9DEB4BDBD9 /* GlyphAtlasSyntheticTraitsBlindTests.swift */,
@@ -1634,6 +1637,7 @@
 				242064EC63C93D69A922E41C /* FunctionKeyF13F20Tests.swift in Sources */,
 				3EF5AE53F04F32047CCC4B80 /* GlyphAtlasBlockGlyphYFitBlindTests.swift in Sources */,
 				9EC3B3F7ED6213D4D6FCDBFB /* GlyphAtlasBoxGlyphStrokeFitBlindTests.swift in Sources */,
+				1264F91E95CE8FFFB88EE0E6 /* GlyphAtlasFallbackSlotClipBlindTests.swift in Sources */,
 				986BA3465A246BA5AAFD097B /* GlyphAtlasInvariantTests.swift in Sources */,
 				E52AB9F08C03E0E5294E9D3D /* GlyphAtlasStorageModeBlindTests.swift in Sources */,
 				B79600DADE144E20F76E29FB /* GlyphAtlasSyntheticTraitsBlindTests.swift in Sources */,

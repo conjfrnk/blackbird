@@ -1003,6 +1003,7 @@ public final class GlyphAtlas {
         // cell height (see `VerticalFit`). Applied ONLY to the
         // cell-fill ranges so normal text keeps its natural advance.
         var xScale: CGFloat = 1
+        var originX: CGFloat = 0
         var pieces = [FitPiece(rows: nil, yScale: 1, baselineY: metrics.descent)]
         if Self.isCellFillCharacter(scalar) {
             let typographicWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
@@ -1050,6 +1051,25 @@ public final class GlyphAtlas {
             if typographicWidth > metrics.cellWidth * 1.05 {
                 xScale = metrics.cellWidth / typographicWidth
             }
+        } else if !wide,
+                  let fit = inkFit(
+                      of: line, styledFont: styledFont(for: style),
+                      slotWidthPx: w, slotHeightPx: h)
+        {
+            // A width-1 scalar the configured font lacks is drawn from a
+            // cascade font sized for its own advance: Claude Code's tool-result
+            // connector ⎿ comes from Hiragino Sans (13 pt advance, ink out to
+            // 13 pt) into an 8 pt cell, and ⬤ ① and accented capitals poke out
+            // the same way. Drawn at 1:1 the context edge slices the overhang
+            // off (⎿ kept 2 px of its arm). Fit the measured ink into the slot.
+            // The configured font's own glyphs are fitted vertically only (an
+            // accent rising out of the cell): their sideways bleed is design
+            // (the bundled italic's X runs 0.7 pt past the cell) and stays.
+            xScale = fit.scale
+            originX = fit.shiftX / fit.scale
+            pieces = [FitPiece(
+                rows: nil, yScale: fit.scale,
+                baselineY: (metrics.descent + fit.shiftY) / fit.scale)]
         }
 
         // Synthetic styles when the family lacks the variant: a thin stroke
@@ -1073,7 +1093,7 @@ public final class GlyphAtlas {
                     width: CGFloat(w) / scale, height: rows.upperBound - rows.lowerBound))
             }
             ctx.scaleBy(x: xScale, y: piece.yScale)
-            ctx.textPosition = CGPoint(x: 0, y: piece.baselineY)
+            ctx.textPosition = CGPoint(x: originX, y: piece.baselineY)
             CTLineDraw(line, ctx)
             ctx.restoreGState()
         }
@@ -1082,6 +1102,116 @@ public final class GlyphAtlas {
             ctx, cacheKey: cacheKey, w: w, h: h, bytesPerRow: w,
             resolveTarget: { self.texture }, at: origin
         )
+    }
+
+    /// The uniform `scale` and the `shiftX` / `shiftY` offsets (points, of
+    /// the scaled glyph origin from its normal place: slot left edge and
+    /// baseline) that bring the ink of a narrow glyph inside its `w`×`h` px
+    /// slot, or nil when no fit applies. None applies when:
+    ///
+    ///  - the ink already sits inside the slot, to within one device pixel of
+    ///    antialiasing and hinting noise. A glyph drawn by `styledFont` itself
+    ///    is judged on height alone: its sideways bleed past the advance is
+    ///    the font's design (the bundled italic X spans -0.7...8.6 pt in an
+    ///    8 pt cell), and fitting it would shrink ordinary bold and italic
+    ///    text. A tall accent rising out of the cell is still fitted, as is
+    ///    any overhang of a glyph from a fallback font, which is sized for its
+    ///    own advance rather than the cell's;
+    ///  - the glyph is a rule that runs on past the slot along its length
+    ///    (⎯ U+23AF, ⏤ U+23E4, ⸺ U+2E3A). Such extension glyphs are meant to be
+    ///    repeated, and the slot edge cutting each one flush is what joins the
+    ///    repeats into one line; shrunk, they would draw a dashed one.
+    ///
+    /// The glyph is shrunk only when its ink is larger than the slot, and
+    /// uniformly so a ⬤ stays round. Ink that merely sticks out (⎿ is
+    /// narrower than the cell but starts 6 pt in; an accent above a capital
+    /// is borrowing the empty descender room) is slid the shortest distance
+    /// instead, so it keeps its shape. Ink bounds come from the glyph
+    /// outlines (`.useGlyphPathBounds`), not the advance, which would squash
+    /// glyphs with wide side bearings.
+    private func inkFit(
+        of line: CTLine, styledFont: NSFont, slotWidthPx w: Int, slotHeightPx h: Int
+    ) -> (scale: CGFloat, shiftX: CGFloat, shiftY: CGFloat)? {
+        let ink = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        guard !ink.isEmpty, ink.origin.x.isFinite, ink.origin.y.isFinite,
+              ink.width.isFinite, ink.height.isFinite
+        else { return nil }
+        let fitsSideways = Self.isDrawnByFallbackFont(line, styledFont: styledFont)
+        let slotWidth = CGFloat(w) / scale
+        let slotHeight = CGFloat(h) / scale
+        // The slot in glyph space, whose origin is the draw position: x runs
+        // from the slot's left edge, y from the baseline, which sits `descent`
+        // above the slot's bottom edge.
+        let left: CGFloat = 0
+        let right = slotWidth
+        let bottom = -metrics.descent
+        let top = slotHeight - metrics.descent
+        let slack = 1 / scale
+        let overhangsX = fitsSideways && (ink.minX < left - slack || ink.maxX > right + slack)
+        let overhangsY = ink.minY < bottom - slack || ink.maxY > top + slack
+        guard overhangsX || overhangsY else { return nil }
+        // A rule at least `ruleAspect` times longer than it is thick, running
+        // past the slot along its length: a tiling extension, drawn as it is.
+        let ruleAspect: CGFloat = 6
+        if (overhangsX && ink.width >= ruleAspect * ink.height)
+            || (overhangsY && ink.height >= ruleAspect * ink.width)
+        {
+            return nil
+        }
+
+        // Aim one device pixel inside the slot: the outline bounds leave out
+        // the antialiasing and font-smoothing halo, which is up to a pixel
+        // wider and would be sliced off at the edge. (Capped so a tiny font's
+        // slot never inverts.)
+        let margin = min(slack, slotWidth / 4, slotHeight / 4)
+        // A glyph not fitted sideways is neither squeezed to the slot's width
+        // nor slid into it; the unbounded range only re-centres the scaled ink.
+        let widthFit: CGFloat = fitsSideways ? (slotWidth - 2 * margin) / ink.width : .infinity
+        let fit: CGFloat = min(1, widthFit, (slotHeight - 2 * margin) / ink.height)
+        let xFrom: CGFloat = fitsSideways ? left + margin : -.infinity
+        let xTo: CGFloat = fitsSideways ? right - margin : .infinity
+        return (
+            fit,
+            Self.slideIntoSlot(ink.minX, ink.maxX, scale: fit, from: xFrom, to: xTo),
+            Self.slideIntoSlot(ink.minY, ink.maxY, scale: fit, from: bottom + margin, to: top - margin)
+        )
+    }
+
+    /// True when CoreText drew any run of `line` with a font other than
+    /// `styledFont`, i.e. substituted one from its cascade list because the
+    /// configured font lacks the glyph. Compared by PostScript name. False
+    /// when a run carries no font attribute: with no evidence of a
+    /// substitution the glyph stays unfitted.
+    private static func isDrawnByFallbackFont(_ line: CTLine, styledFont: NSFont) -> Bool {
+        let ownName: String = CTFontCopyPostScriptName(styledFont as CTFont) as String
+        let runs: [CTRun] = (CTLineGetGlyphRuns(line) as? [CTRun]) ?? []
+        for run in runs {
+            let attributes: CFDictionary = CTRunGetAttributes(run)
+            let key: UnsafeRawPointer = UnsafeRawPointer(
+                Unmanaged.passUnretained(kCTFontAttributeName).toOpaque())
+            guard let value: UnsafeRawPointer = CFDictionaryGetValue(attributes, key) else {
+                continue
+            }
+            let runFont: CTFont = Unmanaged<CTFont>.fromOpaque(value).takeUnretainedValue()
+            if (CTFontCopyPostScriptName(runFont) as String) != ownName { return true }
+        }
+        return false
+    }
+
+    /// Offset that scales the span `lo...hi` by `scale` about its centre,
+    /// then slides it the shortest distance into `from...to` (0 if it is in).
+    private static func slideIntoSlot(
+        _ lo: CGFloat, _ hi: CGFloat, scale: CGFloat, from: CGFloat, to: CGFloat
+    ) -> CGFloat {
+        var offset = (lo + hi) / 2 * (1 - scale)
+        let scaledLo = lo * scale + offset
+        let scaledHi = hi * scale + offset
+        if scaledLo < from {
+            offset += from - scaledLo
+        } else if scaledHi > to {
+            offset -= scaledHi - to
+        }
+        return offset
     }
 
     /// Color-glyph rasterization path. Writes a premultiplied-BGRA bitmap
