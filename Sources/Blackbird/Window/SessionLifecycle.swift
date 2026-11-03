@@ -32,6 +32,13 @@ final class SessionLifecycle {
     /// it, so it deallocs (and cancels) alongside the controller.
     private var cwdCancellable: AnyCancellable?
 
+    /// Where `makeSession` reads the System Settings locale for the child's
+    /// `LANG`. Tests replace it: emulating a language through `.standard` would
+    /// write `AppleLanguages` / `AppleLocale` into the developer's real app
+    /// domain (the xctest host is Blackbird.app), where a running Blackbird
+    /// reads them and a host crash would leave them behind.
+    var systemLocale: () -> Locale = { LocaleEnvironment.currentSystemLocale() }
+
     /// The clamped (cols, rows) to start the shell at. Mirrors
     /// `TerminalView.propagateResize` via the shared `usableViewSize` formula so
     /// the start size and the first SIGWINCH can't disagree (raw `bounds.size`
@@ -78,7 +85,7 @@ final class SessionLifecycle {
             LocaleEnvironment.overrides(
                 enabled: Preferences.shared.setLocaleEnvironment,
                 parentEnv: parentEnv,
-                locale: LocaleEnvironment.currentSystemLocale(),
+                locale: systemLocale(),
                 isAvailable: LocaleEnvironment.localeDefinitionExists
             ),
             uniquingKeysWith: { current, _ in current }

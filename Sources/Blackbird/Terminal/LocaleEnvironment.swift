@@ -45,7 +45,15 @@ enum LocaleEnvironment {
     /// cached snapshot whose language is filtered by the app bundle).
     /// `Locale.current` is only the fallback for a Mac with no `AppleLocale`
     /// at all.
-    static func currentSystemLocale(defaults: UserDefaults = .standard) -> Locale {
+    ///
+    /// `defaults` and `preferredLanguages` default to the live system values;
+    /// tests pass a private suite and a fixed list so they can emulate a
+    /// System Settings choice without writing `AppleLanguages` / `AppleLocale`
+    /// into the real app domain.
+    static func currentSystemLocale(
+        defaults: UserDefaults = .standard,
+        preferredLanguages: [String] = Locale.preferredLanguages
+    ) -> Locale {
         let appleLocale: String? = defaults.string(forKey: "AppleLocale")
         let regionSetting: Locale
         if let id = appleLocale, !id.isEmpty {
@@ -53,8 +61,7 @@ enum LocaleEnvironment {
         } else {
             regionSetting = Locale.current
         }
-        return systemLocale(
-            preferredLanguages: Locale.preferredLanguages, regionSetting: regionSetting)
+        return systemLocale(preferredLanguages: preferredLanguages, regionSetting: regionSetting)
     }
 
     /// Combine the user's language and Region choices into one locale.

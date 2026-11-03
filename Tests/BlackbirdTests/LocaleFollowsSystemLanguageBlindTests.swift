@@ -27,9 +27,14 @@ import Foundation
 ///   1. Emulate "Finder launch": `LANG` / `LC_ALL` / `LC_CTYPE` are removed
 ///      from this process's environment (restored in `tearDown`).
 ///   2. Emulate the user's System Settings choice through the same preference
-///      keys macOS itself uses: `AppleLanguages` + `AppleLocale` in this
-///      app's defaults domain (previous values restored in `tearDown`;
-///      `Locale.preferredLanguages` is verified to reflect them).
+///      keys macOS itself uses (`AppleLanguages` list + `AppleLocale`), but
+///      NOT in this app's real defaults domain: the xctest host is
+///      Blackbird.app, so writing them to `.standard` would hand a running
+///      Blackbird a spoofed language (and leave it behind if the host dies
+///      before `tearDown`). The `AppleLocale` lives in a private
+///      `UserDefaults` suite and the language list is a plain array, both fed
+///      to the production `LocaleEnvironment.currentSystemLocale` through the
+///      `SessionLifecycle.systemLocale` seam.
 ///   3. Call the real `SessionLifecycle.makeSession(shell:size:)` — the exact
 ///      function every new tab runs — with a tiny executable script as the
 ///      "shell". The script records its inherited `LANG` into a file and
@@ -49,15 +54,16 @@ final class LocaleFollowsSystemLanguageBlindTests: XCTestCase {
 
     private static let sentinelUnset = "__LANG_UNSET__"
     private static let localeEnvKeys: [String] = ["LANG", "LC_ALL", "LC_CTYPE"]
+    /// Fixed (not per-scenario) so the empty plist cfprefsd leaves behind is
+    /// one file, not one per scenario per run.
+    private static let privateSuiteName = "bb-lang-blind-suite"
 
     /// The one parked controller (see class doc). Never shown / closed.
     private static var parkedController: MainWindowController?
 
     private var savedEnv: [String: String] = [:]
-    private var savedAppleLanguages: Any?
-    private var savedAppleLocale: Any?
     private var savedSetLocaleEnvironment: Bool = true
-    private var defaultsWereTouched = false
+    private var savedSystemLocale: (() -> Locale)?
     private var tempDirs: [URL] = []
 
     override class func setUp() {
@@ -72,10 +78,6 @@ final class LocaleFollowsSystemLanguageBlindTests: XCTestCase {
         for key in Self.localeEnvKeys {
             if let value = getenv(key) { savedEnv[key] = String(cString: value) }
         }
-        let domainName = Bundle.main.bundleIdentifier ?? ""
-        let domain = UserDefaults.standard.persistentDomain(forName: domainName)
-        savedAppleLanguages = domain?["AppleLanguages"]
-        savedAppleLocale = domain?["AppleLocale"]
         savedSetLocaleEnvironment = Preferences.shared.setLocaleEnvironment
     }
 
@@ -87,18 +89,11 @@ final class LocaleFollowsSystemLanguageBlindTests: XCTestCase {
                 unsetenv(key)
             }
         }
-        if defaultsWereTouched {
-            if let languages = savedAppleLanguages {
-                UserDefaults.standard.set(languages, forKey: "AppleLanguages")
-            } else {
-                UserDefaults.standard.removeObject(forKey: "AppleLanguages")
-            }
-            if let locale = savedAppleLocale {
-                UserDefaults.standard.set(locale, forKey: "AppleLocale")
-            } else {
-                UserDefaults.standard.removeObject(forKey: "AppleLocale")
-            }
+        if let saved = savedSystemLocale {
+            Self.parkedController?.sessionLifecycle.systemLocale = saved
+            savedSystemLocale = nil
         }
+        UserDefaults.standard.removePersistentDomain(forName: Self.privateSuiteName)
         if Preferences.shared.setLocaleEnvironment != savedSetLocaleEnvironment {
             Preferences.shared.setLocaleEnvironment = savedSetLocaleEnvironment
         }
@@ -134,16 +129,24 @@ final class LocaleFollowsSystemLanguageBlindTests: XCTestCase {
         }
     }
 
-    /// Emulate the System Settings language + region choice through the keys
-    /// macOS uses, and verify the process actually sees them.
+    /// Emulate the System Settings language + region choice: `AppleLocale`
+    /// goes into a private suite (never the real app domain, see the class
+    /// doc), the language list is passed alongside it, and both reach the
+    /// production `makeSession` through the parked controller's
+    /// `systemLocale` seam.
     private func emulateSystemLocale(languages: [String], appleLocale: String) {
-        defaultsWereTouched = true
-        UserDefaults.standard.set(languages, forKey: "AppleLanguages")
-        UserDefaults.standard.set(appleLocale, forKey: "AppleLocale")
-        XCTAssertEqual(Locale.preferredLanguages, languages,
-                       "rig precondition: Locale.preferredLanguages must reflect the emulated System Settings language list")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: "AppleLocale"), appleLocale,
+        guard let suite = UserDefaults(suiteName: Self.privateSuiteName) else {
+            XCTFail("rig precondition: a private UserDefaults suite must be creatable")
+            return
+        }
+        suite.set(appleLocale, forKey: "AppleLocale")
+        XCTAssertEqual(suite.string(forKey: "AppleLocale"), appleLocale,
                        "rig precondition: AppleLocale must reflect the emulated System Settings region")
+        let lifecycle = parkedController().sessionLifecycle
+        if savedSystemLocale == nil { savedSystemLocale = lifecycle.systemLocale }
+        lifecycle.systemLocale = {
+            LocaleEnvironment.currentSystemLocale(defaults: suite, preferredLanguages: languages)
+        }
     }
 
     private func makeTempDir() throws -> URL {
