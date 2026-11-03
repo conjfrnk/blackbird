@@ -36,10 +36,23 @@ final class TooltipController {
         )
         panel.contentView?.frame = NSRect(origin: .zero, size: panelSize)
         // Anchor just below-right of the pointer.
-        let origin = NSPoint(
+        var origin = NSPoint(
             x: screenPoint.x + 12,
             y: screenPoint.y - panelSize.height - 12
         )
+        // A borderless panel is never nudged back on-screen by AppKit, and this
+        // tooltip is the only place the user can verify an OSC 8 href, so a link
+        // on the last row or right-hand columns must not hide it off the edge.
+        // Flip above the pointer when it won't fit below, then slide inside the
+        // visible frame. No screen (headless host) leaves the origin untouched.
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(screenPoint) }) ?? NSScreen.main
+        if let bounds = screen?.visibleFrame {
+            if origin.y < bounds.minY {
+                origin.y = screenPoint.y + 12
+            }
+            origin.x = max(bounds.minX, min(origin.x, bounds.maxX - panelSize.width))
+            origin.y = max(bounds.minY, min(origin.y, bounds.maxY - panelSize.height))
+        }
         panel.setFrame(NSRect(origin: origin, size: panelSize), display: true)
         panel.orderFront(nil)
     }
