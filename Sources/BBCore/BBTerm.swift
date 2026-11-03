@@ -360,6 +360,45 @@ public final class BBTerm {
         return BBTermMode(rawValue: bb_term_current_mode(h))
     }
 
+    /// The frame facts of a grid — the part of a `BBSnapshot` that decides
+    /// whether (and how far) buffer positions taken from one frame still name
+    /// the same cells in a later one. See `SelectionReconciler`.
+    public struct GridState: Equatable {
+        public let cols: Int
+        public let rows: Int
+        public let historySize: Int
+        public let linesScrolled: UInt64
+        public let termMode: BBTermMode
+
+        public init(_ snapshot: BBSnapshot) {
+            cols = snapshot.cols
+            rows = snapshot.rows
+            historySize = snapshot.historySize
+            linesScrolled = snapshot.linesScrolled
+            termMode = snapshot.termMode
+        }
+
+        fileprivate init(_ raw: BBGridState) {
+            cols = Int(raw.cols)
+            rows = Int(raw.rows)
+            historySize = Int(raw.history_size)
+            linesScrolled = raw.lines_scrolled
+            termMode = BBTermMode(rawValue: raw.mode)
+        }
+    }
+
+    /// The LIVE grid's frame facts, read without taking a snapshot: O(1), and
+    /// — unlike `snapshot()` — it drains no damage and burns no sequence id,
+    /// so a reader that is not the frame pipeline can ask how far the core
+    /// has scrolled past the frame on screen without costing the renderer
+    /// rows it would repaint. Nil for a closed handle or when the core could
+    /// not answer (null / re-entrant / caught panic).
+    public var gridState: GridState? {
+        guard let h = handle else { return nil }
+        let raw = bb_term_grid_state(h)
+        return raw.cols == 0 ? nil : GridState(raw)
+    }
+
     /// Live DEC 2026 (synchronized output) state read from the core. See
     /// `bb_term_sync_status`.
     public struct SyncUpdateStatus: Equatable {

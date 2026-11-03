@@ -935,23 +935,33 @@ public final class TerminalSession: ObservableObject {
     /// the highlight. The reconcile runs inside the same `coreQueue` block as
     /// the read, so nothing can scroll in between, and applies the render
     /// path's own rules: a selection they drop (resize, alt-screen toggle,
-    /// history clear, scrolled past retention) yields "" rather than text
-    /// from cells it no longer names. The snapshot is only read for its
-    /// frame; taking it drains the core's damage set, which the renderer
-    /// already handles as a coalesced-snapshot gap (full rebuild).
-    func selectedText(_ sel: Selection, displayedIn displayed: BBSnapshot) -> String {
-        return performUserAction { () -> String in
-            guard let live = bbterm.snapshot() else { return "" }
+    /// history clear, scrolled past retention) yields nil, which a caller can
+    /// tell from "" (the highlighted cells are genuinely blank).
+    ///
+    /// The live frame comes from `gridState`, never a snapshot: a snapshot
+    /// drains the core's damage set and burns a sequence id even when it is
+    /// not published, so the next published frame would skip every row that
+    /// changed since the last one and leave it stale on screen.
+    func selectedText(_ sel: Selection, displayedIn displayed: BBSnapshot) -> String? {
+        return performUserAction { () -> String? in
+            guard let live = bbterm.gridState else {
+                Self.sessionLogger.error("selectedText: the live grid state is unreadable")
+                return nil
+            }
             let reconciled = SelectionReconciler.reconciled(
-                selection: sel, wordDragAnchor: nil, prev: displayed, next: live
+                selection: sel, wordDragAnchor: nil,
+                prev: BBTerm.GridState(displayed), next: live
             )
-            guard let current = reconciled.selection else { return "" }
+            guard let current = reconciled.selection else {
+                Self.sessionLogger.info("selectedText: the selection no longer names live cells (resize, alt-screen toggle, history clear or scrolled out of retention)")
+                return nil
+            }
             let (start, end) = current.copyRange(cols: live.cols)
             return bbterm.textRange(
                 startLine: start.line, startCol: start.col,
                 endLine: end.line, endCol: end.col,
                 rectangular: current.mode == .rectangular
-            ) ?? ""
+            )
         }
     }
 

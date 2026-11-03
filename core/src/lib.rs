@@ -63,8 +63,8 @@ pub use event::{BBEvent, BBEventCb, BBEventKind};
 use guard::{ffi_reentry_blocked, guard_no_term, guard_with_term};
 use input::{flush_sync_update, process_input, sync_status, WEDGED_STRING_CHUNKS};
 use rate_limit::*;
-pub use snapshot::{bb_mode, cell_flags, BBCell, BBSnap};
-use snapshot::{extract_mode_with_extras, snapshot, BBSnapOwned};
+pub use snapshot::{bb_mode, cell_flags, BBCell, BBGridState, BBSnap};
+use snapshot::{extract_mode_with_extras, grid_state, snapshot, BBSnapOwned};
 use text::extract_text_range;
 
 // NB: kept at the crate root (not in `snapshot`) purely so cbindgen emits this
@@ -1023,6 +1023,31 @@ pub unsafe extern "C" fn bb_term_current_mode(term: *mut BBTerm) -> u32 {
         }
         let bb = &*term;
         extract_mode_with_extras(bb)
+    })
+}
+
+/// Read the live grid's frame facts (`BBGridState`) WITHOUT taking a snapshot.
+/// O(1), pure read: unlike `bb_term_take_snapshot` it does not drain the
+/// damage set and walks no cells, so it is safe to call from a path that is
+/// not the frame pipeline (copy, Services) between two published frames.
+///
+/// # Safety
+/// Same preconditions as `bb_term_input`. Null returns an all-zero
+/// `BBGridState` (`cols == 0`).
+///
+/// Panics inside this function are caught by `catch_unwind` and delivered as a
+/// `BBEventKind::Fatal` event to the registered callback. The function returns
+/// an all-zero `BBGridState` as the fallback value.
+#[no_mangle]
+pub unsafe extern "C" fn bb_term_grid_state(term: *mut BBTerm) -> BBGridState {
+    guard_with_term(term, BBGridState::default(), || {
+        if term.is_null() {
+            return BBGridState::default();
+        }
+        if ffi_reentry_blocked("bb_term_grid_state") {
+            return BBGridState::default();
+        }
+        grid_state(&*term)
     })
 }
 

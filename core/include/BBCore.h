@@ -471,6 +471,43 @@ struct BBSnap {
 };
 
 /**
+ * The frame facts of the live grid, read without taking a snapshot: the
+ * subset of `BBSnap` a caller needs to carry buffer positions from an older
+ * snapshot's frame onto the live grid (`lines_scrolled` delta) and to decide
+ * that they no longer name the same cells (any shape, alt-screen or history
+ * change). A snapshot also drains the damage set and costs a full-grid walk;
+ * this is a pure O(1) read, so a copy / Services read can use it without
+ * costing the renderer rows it would otherwise repaint.
+ *
+ * Every field is computed by the same expression `snapshot()` uses for the
+ * `BBSnap` field of the same name. All-zero (`cols == 0`) is the fallback for
+ * a null handle, a re-entrant call or a caught panic.
+ */
+struct BBGridState {
+  /**
+   * `BBSnap::lines_scrolled`.
+   */
+  uint64_t lines_scrolled;
+  /**
+   * `BBSnap::mode` (carries the alt-screen bit).
+   */
+  uint32_t mode;
+  /**
+   * `BBSnap::history_size`.
+   */
+  uint32_t history_size;
+  /**
+   * `BBSnap::cols`.
+   */
+  uint16_t cols;
+  /**
+   * `BBSnap::rows`.
+   */
+  uint16_t rows;
+  uint8_t _pad[4];
+};
+
+/**
  * State of the parser's DEC mode 2026 (synchronized output) buffer.
  *
  * Between BSU (`CSI ?2026h`) and ESU (`CSI ?2026l`) vte buffers every byte
@@ -842,6 +879,22 @@ void bb_term_set_osc52_write_enabled(struct BBTerm *term, uint8_t enabled);
  * 0 as the fallback value.
  */
 uint32_t bb_term_current_mode(struct BBTerm *term);
+
+/**
+ * Read the live grid's frame facts (`BBGridState`) WITHOUT taking a snapshot.
+ * O(1), pure read: unlike `bb_term_take_snapshot` it does not drain the
+ * damage set and walks no cells, so it is safe to call from a path that is
+ * not the frame pipeline (copy, Services) between two published frames.
+ *
+ * # Safety
+ * Same preconditions as `bb_term_input`. Null returns an all-zero
+ * `BBGridState` (`cols == 0`).
+ *
+ * Panics inside this function are caught by `catch_unwind` and delivered as a
+ * `BBEventKind::Fatal` event to the registered callback. The function returns
+ * an all-zero `BBGridState` as the fallback value.
+ */
+struct BBGridState bb_term_grid_state(struct BBTerm *term);
 
 /**
  * Read the parser's DEC 2026 synchronized-update state. O(1), pure read —

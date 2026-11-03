@@ -2475,8 +2475,10 @@ public final class TerminalView: MTKView, MTKViewDelegate {
 
     @objc public func copy(_ sender: Any?) {
         guard let sel = selection, let session, let snap = currentSnapshot else { return }
-        let raw = session.selectedText(sel, displayedIn: snap)
-        guard !raw.isEmpty else { return }
+        // nil: the selection no longer names live cells (logged by the
+        // session); "": the highlighted cells are blank. Neither has text to
+        // put on the clipboard, which stays as it was.
+        guard let raw = session.selectedText(sel, displayedIn: snap), !raw.isEmpty else { return }
         // Cap + scrub before writing. A compromised remote can spam the
         // scrollback with bidi-override + C0 payloads; if the user
         // selects that span and copies, those bytes land on the system

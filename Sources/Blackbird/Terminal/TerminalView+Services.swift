@@ -25,7 +25,13 @@ extension TerminalView {
         forSendType sendType: NSPasteboard.PasteboardType?,
         returnType: NSPasteboard.PasteboardType?
     ) -> Any? {
-        if sendType == .string, returnType == nil, selectedStringForServices() != nil {
+        // A validation predicate: AppKit asks on every right-click / menu open
+        // (once per service), so it must be O(1) and touch neither the core
+        // queue nor the grid. A live selection always names content (a click
+        // without a drag is cleared on mouse-up); `writeSelection` still
+        // refuses if the text turns out blank.
+        if sendType == .string, returnType == nil,
+           selection != nil, session != nil, currentSnapshot != nil {
             return self
         }
         return super.validRequestor(forSendType: sendType, returnType: returnType)
@@ -137,7 +143,9 @@ extension TerminalView {
         guard let sel = selection, let session, let snap = currentSnapshot else {
             return nil
         }
-        let text = session.selectedText(sel, displayedIn: snap)
-        return text.isEmpty ? nil : text
+        guard let text = session.selectedText(sel, displayedIn: snap), !text.isEmpty else {
+            return nil
+        }
+        return text
     }
 }

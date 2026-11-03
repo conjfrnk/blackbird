@@ -500,6 +500,45 @@ pub(crate) fn extract_mode_with_extras(bb: &BBTerm) -> u32 {
     m
 }
 
+/// The frame facts of the live grid, read without taking a snapshot: the
+/// subset of `BBSnap` a caller needs to carry buffer positions from an older
+/// snapshot's frame onto the live grid (`lines_scrolled` delta) and to decide
+/// that they no longer name the same cells (any shape, alt-screen or history
+/// change). A snapshot also drains the damage set and costs a full-grid walk;
+/// this is a pure O(1) read, so a copy / Services read can use it without
+/// costing the renderer rows it would otherwise repaint.
+///
+/// Every field is computed by the same expression `snapshot()` uses for the
+/// `BBSnap` field of the same name. All-zero (`cols == 0`) is the fallback for
+/// a null handle, a re-entrant call or a caught panic.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BBGridState {
+    /// `BBSnap::lines_scrolled`.
+    pub lines_scrolled: u64,
+    /// `BBSnap::mode` (carries the alt-screen bit).
+    pub mode: u32,
+    /// `BBSnap::history_size`.
+    pub history_size: u32,
+    /// `BBSnap::cols`.
+    pub cols: u16,
+    /// `BBSnap::rows`.
+    pub rows: u16,
+    pub _pad: [u8; 4],
+}
+
+pub(crate) fn grid_state(bb: &BBTerm) -> BBGridState {
+    let grid = bb.term.grid();
+    BBGridState {
+        lines_scrolled: bb.term.primary_lines_scrolled(),
+        mode: extract_mode_with_extras(bb),
+        history_size: grid.history_size().min(u32::MAX as usize) as u32,
+        cols: grid.columns() as u16,
+        rows: grid.screen_lines() as u16,
+        _pad: [0; 4],
+    }
+}
+
 /// Build an immutable `BBSnapOwned` from the current grid state and return a
 /// `*const BBSnap` aliasing its offset-0 `snap` field. The returned pointer is
 /// caller-owned (one `bb_snap_release` per call). Pure logic over `&mut BBTerm`

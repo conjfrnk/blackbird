@@ -34,23 +34,30 @@ enum SelectionReconciler {
         prev: BBSnapshot,
         next: BBSnapshot
     ) -> (selection: Selection?, wordDragAnchor: (BufferPoint, BufferPoint)?) {
-        let colsChanged = prev.cols != next.cols
-        let rowsChanged = prev.rows != next.rows
-        let altScreenChanged = prev.termMode.contains(.altScreen)
-            != next.termMode.contains(.altScreen)
-        let historyCollapsed = prev.historySize > 0 && next.historySize == 0
-        if colsChanged || rowsChanged || altScreenChanged || historyCollapsed {
+        reconciled(selection: selection, wordDragAnchor: wordDragAnchor,
+                   prev: BBTerm.GridState(prev), next: BBTerm.GridState(next))
+    }
+
+    /// The same rules against a live grid read as `BBTerm.GridState` — the
+    /// copy path reconciles against the core without taking a snapshot.
+    static func reconciled(
+        selection: Selection,
+        wordDragAnchor: (BufferPoint, BufferPoint)?,
+        prev: BBTerm.GridState,
+        next: BBTerm.GridState
+    ) -> (selection: Selection?, wordDragAnchor: (BufferPoint, BufferPoint)?) {
+        guard let scrolled = next.linesScrolled(since: prev) else {
             // cols/rows/altScreen/history gates fire: drop the selection. The word
             // drag anchor is left as-is (matches the original branch).
             return (nil, wordDragAnchor)
         }
         // Rows are unchanged here (a row change dropped above), so a
         // linesScrolled advance is genuine output flow, not a resize.
-        guard next.linesScrolled > prev.linesScrolled else {
+        guard scrolled > 0 else {
             return (selection, wordDragAnchor)
         }
         var sel = selection
-        let delta = Int64(next.linesScrolled - prev.linesScrolled)
+        let delta = Int64(scrolled)
         let anchorLine = Int64(sel.anchor.line) - delta
         let cursorLine = Int64(sel.cursor.line) - delta
         let retentionFloor = -Int64(next.historySize)
@@ -78,5 +85,23 @@ enum SelectionReconciler {
             }
         }
         return (sel, newAnchor)
+    }
+}
+
+extension BBTerm.GridState {
+    /// Lines the primary screen has pushed toward scrollback since `earlier`
+    /// (0 when none), or nil when `earlier`'s buffer lines no longer name the
+    /// same cells here: a column reflow (#14), a vertical resize (MSC-7), an
+    /// alt-screen toggle (#15) or a history collapse (H-6). The single gate
+    /// every reader of a displayed frame's coordinates goes through — the
+    /// selection reconcile above, and Find's scrollback reads.
+    func linesScrolled(since earlier: BBTerm.GridState) -> UInt64? {
+        let altScreenChanged = earlier.termMode.contains(.altScreen)
+            != termMode.contains(.altScreen)
+        let historyCollapsed = earlier.historySize > 0 && historySize == 0
+        if cols != earlier.cols || rows != earlier.rows || altScreenChanged || historyCollapsed {
+            return nil
+        }
+        return linesScrolled > earlier.linesScrolled ? linesScrolled - earlier.linesScrolled : 0
     }
 }

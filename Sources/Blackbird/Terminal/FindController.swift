@@ -289,6 +289,13 @@ final class FindController {
     /// being collapsed, which would shift every later match left of its
     /// column). Empty rows are omitted. One entry per physical row; the
     /// soft-wrap flag each carries is what `joiningSoftWrapped` merges on.
+    ///
+    /// `topLine`/`bottomLine` are lines of `snap`'s frame, but the core is
+    /// routinely ahead of `snap`, and every line it has scrolled since moves
+    /// the scrollback a read would return. The whole capture is therefore ONE
+    /// core-queue block (nothing can scroll mid-capture) whose core reads are
+    /// shifted onto `snap`'s lines, so scrollback and viewport rows describe
+    /// the same frame.
     private func capturePhysicalRows(
         topLine: Int32,
         bottomLine: Int32,
@@ -297,8 +304,25 @@ final class FindController {
         snap: BBSnapshot?,
         joinSoftWrapped: Bool
     ) -> [PhysicalRow] {
-        var rows: [PhysicalRow] = []
         guard bottomLine >= topLine else { return [] }
+        return session.performUserAction { () -> [PhysicalRow] in
+            capturePhysicalRowsInBlock(
+                topLine: topLine, bottomLine: bottomLine, cols: cols, session: session,
+                snap: snap, joinSoftWrapped: joinSoftWrapped)
+        }
+    }
+
+    /// Body of `capturePhysicalRows`; runs on the core queue inside
+    /// `session.performUserAction`, so it reads `session.bbterm` directly.
+    private func capturePhysicalRowsInBlock(
+        topLine: Int32,
+        bottomLine: Int32,
+        cols: Int,
+        session: TerminalSession,
+        snap: BBSnapshot?,
+        joinSoftWrapped: Bool
+    ) -> [PhysicalRow] {
+        var rows: [PhysicalRow] = []
         rows.reserveCapacity(Int(bottomLine - topLine + 1))
         let offset = snap?.displayOffset ?? 0
         let screenRows = snap?.rows ?? 0
@@ -306,12 +330,34 @@ final class FindController {
             let screenRow = Int(ln) + offset
             return snap != nil && screenRow >= 0 && screenRow < screenRows
         }
-        func flushChunk(_ a: Int32, _ b: Int32) {
-            var joined = session.textRange(
-                from: BufferPoint(line: a, col: 0),
-                to:   BufferPoint(line: b, col: max(0, cols - 1)),
-                rectangular: true, keepTabFill: true, softWrapMarks: true
-            )
+        // Where `snap`'s lines sit in the live core. Without a frame (nil
+        // `snap`) they are the core's own. A frame the core has since resized,
+        // reflowed or toggled away from names different cells, so it has no
+        // scrollback left to read (`oldestLine` is past every line); its
+        // viewport rows still come from `snap`.
+        var shift: Int64 = 0
+        var oldestLine = Int32.min
+        if let snap {
+            if let live = session.bbterm.gridState,
+               let scrolled = live.linesScrolled(since: BBTerm.GridState(snap)) {
+                shift = Int64(scrolled)
+                // Lines scrolled out of retention since `snap` are gone.
+                oldestLine = Int32(clamping: Int64(scrolled) - Int64(live.historySize))
+            } else {
+                oldestLine = .max
+            }
+        }
+        func coreText(_ a: Int32, _ b: Int32, softWrapMarks: Bool = false) -> String {
+            session.bbterm.textRange(
+                startLine: Int32(clamping: Int64(a) - shift), startCol: 0,
+                endLine: Int32(clamping: Int64(b) - shift), endCol: max(0, cols - 1),
+                rectangular: true, keepTabFill: true, softWrapMarks: softWrapMarks
+            ) ?? ""
+        }
+        func flushChunk(_ chunkStart: Int32, _ b: Int32) {
+            let a = max(chunkStart, oldestLine)
+            guard a <= b else { return }
+            var joined = coreText(a, b, softWrapMarks: true)
             // Byte-level split: the Character-based `split` + `String(piece)`
             // + trim cost two String allocations and grapheme stepping per
             // row, ~16x slower over a 100k-line scan on the main thread.
@@ -326,11 +372,7 @@ final class FindController {
             if rowCount != Int(b - a + 1) {
                 var ln = a
                 while ln <= b {
-                    let hay = Self.trimmingTrailingSpaces(session.textRange(
-                        from: BufferPoint(line: ln, col: 0),
-                        to:   BufferPoint(line: ln, col: max(0, cols - 1)),
-                        rectangular: true, keepTabFill: true
-                    ))
+                    let hay = Self.trimmingTrailingSpaces(coreText(ln, ln))
                     if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil, softWrapped: false)) }
                     if ln == Int32.max { break }
                     ln += 1
@@ -374,11 +416,7 @@ final class FindController {
                     // Snapshot had no cell text for a viewport row (should not
                     // happen; the pre-v0.8.1 loop had this fallback too): take
                     // the core's text rather than dropping the row.
-                    let hay = Self.trimmingTrailingSpaces(session.textRange(
-                        from: BufferPoint(line: ln, col: 0),
-                        to:   BufferPoint(line: ln, col: max(0, cols - 1)),
-                        rectangular: true, keepTabFill: true
-                    ))
+                    let hay = Self.trimmingTrailingSpaces(coreText(ln, ln))
                     if !hay.isEmpty { rows.append((line: ln, hay: hay, utf16ToCol: nil, softWrapped: false)) }
                     if ln == Int32.max { break }
                     ln += 1
