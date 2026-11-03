@@ -5,6 +5,7 @@
 //! (REFACTOR.md Part IV).
 
 use crate::color::palette_default_rgb;
+use crate::diag::breadcrumb;
 use crate::event::{BBEvent, BBEventKind};
 use crate::osc::{osc_scanner, prompt_mark_event};
 use crate::rate_limit::{COLOR_QUERY_REPLY_PER_SECOND, COLOR_QUERY_REPLY_WINDOW};
@@ -163,7 +164,7 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
     // text unattributed. Take the flag on every advance so it never goes
     // stale, and log only the first: a flood refuses one link per row.
     if bb.term.take_hyperlink_over_budget() && crate::osc::once(&mut bb.osc8_live_cap_logged) {
-        eprintln!(
+        breadcrumb!(
             "[blackbird_core] OSC 8 hyperlink live-byte budget exhausted — new hyperlinks \
              are refused (printed without a link) until the cells holding links are \
              overwritten or scroll out of the retained scrollback. Erasing the screen frees \
@@ -351,7 +352,7 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
             // in each window leaves one breadcrumb: a client that never
             // gets its colour answer needs something to find.
             if crate::osc::once(&mut bb.color_query_reply_drop_logged) {
-                eprintln!(
+                breadcrumb!(
                     "blackbird_core: OSC 4/10/11/12 colour-query replies hit the \
                      {COLOR_QUERY_REPLY_PER_SECOND}/s cap; further queries in this window dropped"
                 );
