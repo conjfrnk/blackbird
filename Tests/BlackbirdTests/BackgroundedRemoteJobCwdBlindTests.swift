@@ -9,19 +9,19 @@ import Darwin
 /// New tabs then open in the directory the shell was in before the job
 /// started, and the title-bar proxy icon points at that stale directory.
 ///
-/// Contract under test (observable): the OSC 7 gate exists so that Blackbird
-/// does not trust paths reported by a REMOTE shell (the user is looking at an
-/// ssh / container session in the foreground). A job that is running in the
-/// BACKGROUND of the local shell (a port-forward, a tunnel, a log tail) does
-/// not own the terminal: the shell is at its own prompt, the cwd it reports
-/// is a local path, and it must be trusted. Concretely, while such a job is
-/// alive:
-///   1. the foreground namespace of the session is `.local`;
-///   2. an OSC 7 emitted by the shell after a `cd` updates `lastKnownCwd`;
-///   3. `CwdResolver.forNewTab` (Cmd-T) yields the new directory, not the
-///      pre-job one.
+/// Contract under test (observable), as corrected by bug pty-3b. The terminal
+/// cannot tell which process wrote an OSC 7 to the tty, and a background job
+/// can write there (`tostop` is off by default), so the gate stays strict: a
+/// remote-shell binary anywhere in the tree, background jobs included, makes
+/// the namespace `.remote` and the reported cwd is dropped (the "background
+/// job is trusted" half of the original pty-3 fix was reverted; see
+/// `OSC7BackgroundJobTrustBlindTests`). What must NOT go stale is Cmd-T: the
+/// shell is idle at its prompt, so while such a job is alive
+///   1. the foreground namespace of the session is `.remote` (fail-closed);
+///   2. `CwdResolver.forNewTab` (Cmd-T) yields the directory the shell is in
+///      now, read from the kernel, not the pre-job one.
 /// The counterpart must keep holding: when the same binary IS the foreground
-/// job, the namespace is still `.remote` and a reported cwd is still dropped.
+/// job, the namespace is `.remote` and a reported cwd is still dropped.
 ///
 /// Rig. One real `TerminalSession` runs `/bin/sh -c <script>` with job control
 /// on (`set -m`), exactly what an interactive shell does for `cmd &`: the job
@@ -285,18 +285,19 @@ final class BackgroundedRemoteJobCwdBlindTests: XCTestCase {
 
     // MARK: - Tests
 
-    /// The namespace verdict itself. While a backgrounded `ssh` / `kubectl` /
-    /// `docker` job is a child of an idle local shell, the terminal is
-    /// showing the local filesystem: `.local`.
-    func testBackgroundedRemoteWrapperJobDoesNotMakeNamespaceRemote() throws {
+    /// The namespace verdict itself. A backgrounded `ssh` / `kubectl` /
+    /// `docker` job could be the process that wrote an OSC 7 to the tty, so
+    /// the gate fails closed and reports `.remote` for it.
+    func testBackgroundedRemoteWrapperJobStillClassifiesRemote() throws {
         for tool in ["ssh", "kubectl", "docker"] {
             guard let scenario = try buildBackgroundScenario(tool: tool) else { return }
             let verdict = scenario.session.classifyForegroundNamespace()
-            XCTAssertEqual(
-                verdict, .local,
-                "background `\(tool) ... &` job (pid \(scenario.jobPID), child of idle shell \(scenario.shellPID)) "
-                + "must not make the foreground namespace remote; classifier returned \(verdict)"
-            )
+            guard case .remote(let basename, _) = verdict else {
+                XCTFail("background `\(tool) ... &` job (pid \(scenario.jobPID), child of idle shell \(scenario.shellPID)) "
+                        + "can write OSC 7 to the tty, so the gate must stay closed; classifier returned \(verdict)")
+                return
+            }
+            XCTAssertEqual(basename, tool, "remote verdict must name the matched wrapper")
             // Strictly one live session at a time.
             pidsToKill.forEach { if $0 > 1 { kill($0, SIGKILL) } }
             pidsToKill.removeAll()
@@ -306,10 +307,10 @@ final class BackgroundedRemoteJobCwdBlindTests: XCTestCase {
     }
 
     /// The user-visible symptom. With an `ssh -N -L ... &` tunnel alive, the
-    /// shell `cd`s and reports the new directory at its prompt; that report
-    /// must land in `lastKnownCwd` and drive Cmd-T, instead of leaving both
-    /// at the directory the shell was in before the tunnel started.
-    func testOSC7CwdUpdatesAndNewTabInheritItWhileBackgroundedSSHJobRuns() throws {
+    /// shell `cd`s and reports the new directory at its prompt. The gate drops
+    /// that report, but Cmd-T must still open in the shell's current
+    /// directory (the kernel's live cwd) instead of the pre-tunnel one.
+    func testNewTabFollowsShellCdWhileBackgroundedSSHJobRuns() throws {
         guard let scenario = try buildBackgroundScenario(tool: "ssh") else { return }
         let ws = scenario.workspace
         let session = scenario.session
@@ -318,13 +319,14 @@ final class BackgroundedRemoteJobCwdBlindTests: XCTestCase {
         session.send(Data("\n".utf8))
         XCTAssertTrue(poll(timeout: 15) { self.exists(ws.state + "/step2-done") },
                       "precondition: script never emitted the post-cd OSC 7")
-        let tracked = cwd(of: session, afterWaitingFor: ws.after, timeout: 5)
 
-        XCTAssertEqual(
-            tracked, ws.after,
-            "lastKnownCwd must follow the shell's cd while a backgrounded ssh job (pid \(scenario.jobPID)) is alive; "
-            + "stuck at the pre-job directory \(ws.before) means the OSC 7 was dropped"
-        )
+        // The dropped OSC 7 is handled on main; pump it until Cmd-T settles.
+        // Only the post-cd directory satisfies the condition, so this cannot
+        // pass early on the pre-job one.
+        let deadline = Date().addingTimeInterval(10)
+        while CwdResolver.forNewTab(source: session) != ws.after, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
         XCTAssertEqual(
             CwdResolver.forNewTab(source: session), ws.after,
             "Cmd-T must open in the directory the shell is in (\(ws.after)), not the pre-job one (\(ws.before))"

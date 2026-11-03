@@ -100,6 +100,13 @@ public final class TerminalSession: ObservableObject {
     /// directly to exercise the tab-creation path without driving the shell.
     @Published public internal(set) var lastKnownCwd: String?
 
+    /// True when the trust gate dropped an OSC 7 after the last one it
+    /// accepted: the shell has reported a newer directory we refused to
+    /// believe, so `lastKnownCwd` may be where it used to be. `CwdResolver`
+    /// then asks the kernel for the live cwd instead of reusing it. Not
+    /// `@Published` (nothing observes it). Written by `CwdTracker` on main.
+    internal var lastKnownCwdIsStale = false
+
     /// The most recent OSC 133 prompt/command mark observed from the shell,
     /// paired with its payload (exit code for kind D, empty otherwise).
     @Published public internal(set) var lastPromptMark: (kind: BBTerm.PromptMarkKind, exitCode: String)?

@@ -18,9 +18,13 @@ enum CwdResolver {
     ///      Audit cwd-hyperlink F4.
     ///   2. `lastKnownCwd` — shell-reported via OSC 7, authoritative and
     ///      cheap. Preferred at the shell prompt (no fg child) because it
-    ///      requires no syscalls.
+    ///      requires no syscalls. Skipped while `lastKnownCwdIsStale`: the
+    ///      trust gate dropped a newer OSC 7 (a remote-shell binary such as a
+    ///      background `ssh -N … &` is in the tree), so this is the old dir.
     ///   3. `foregroundWorkingDirectory()` fallback — catches shells that
-    ///      don't emit OSC 7 (default bash on macOS, custom shells).
+    ///      don't emit OSC 7 (default bash on macOS, custom shells) and the
+    ///      stale case above. It comes from the kernel, so no byte a
+    ///      background job wrote to the tty can steer it.
     ///   4. `nil` — handing `nil` to `PTY.spawn(initialWorkingDirectory:)`
     ///      triggers its built-in `$HOME` / `getpwuid` fallback (see
     ///      `PTY.spawn` in Sources/Blackbird/Terminal/PTY.swift — spec §3).
@@ -49,8 +53,10 @@ enum CwdResolver {
         if src.hasForegroundChild(), let fgCwd = src.foregroundWorkingDirectory() {
             return fgCwd
         }
-        if let cwd = src.lastKnownCwd { return cwd }
-        return src.foregroundWorkingDirectory()
+        if !src.lastKnownCwdIsStale, let cwd = src.lastKnownCwd { return cwd }
+        // Stale and the live lookup failed: the older trusted path still
+        // beats `$HOME`.
+        return src.foregroundWorkingDirectory() ?? src.lastKnownCwd
     }
 
     /// ⌘N: always a fresh start. Never inherits the active tab's cwd —

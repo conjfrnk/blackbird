@@ -1345,9 +1345,10 @@ public final class PTY {
     }
     #endif
 
-    /// Classify the PTY's foreground process tree (the security entry point
-    /// for OSC 7 cwd trust). Resolves the foreground pgroup leader under the
-    /// `masterFD` lock, then delegates the BFS walk to `ForegroundProcessProbe`.
+    /// Classify the PTY's process tree (the security entry point for OSC 7
+    /// cwd trust): the foreground pgroup leader's subtree and the shell's.
+    /// Resolves both roots under the `masterFD` lock, then delegates the BFS
+    /// walk to `ForegroundProcessProbe`.
     /// The OSC 7 ingest gate in `TerminalSession` trusts the shell-reported
     /// cwd ONLY when the result is `.local`; both `.remote` and `.unknown`
     /// cause the payload to be dropped. On any error the result is `.unknown`
@@ -1357,18 +1358,22 @@ public final class PTY {
     public func classifyForegroundNamespace() -> ForegroundNamespace {
         // F-S5-001: serialise the masterFD read against the read-loop's
         // close, same as `hasForegroundChild` / `foregroundWorkingDirectory`.
-        let target: (root: pid_t, idleShell: Bool)? = stateQueue.sync {
+        // Two roots: the foreground pgroup leader AND the shell. With job
+        // control a background job (`docker logs -f … &`) is a sibling of the
+        // foreground command, not under it, so a walk from the foreground
+        // leader alone never sees it while `vim` / `make` holds the terminal;
+        // the shell's subtree does. When the shell is the foreground leader
+        // (idle prompt) the two coincide and are walked once.
+        let roots: [pid_t]? = stateQueue.sync {
             guard _isRunning else { return nil }
             let fg = tcgetpgrp(masterFD)
             guard fg > 0 else { return nil }
-            // Same test as `hasForegroundChild() == false`: the shell is at
-            // its prompt, so any binary-matching child is a background job.
-            return (fg, fg == getpgid(childPID))
+            return fg == childPID ? [fg] : [fg, childPID]
         }
-        guard let target else {
+        guard let roots else {
             return .unknown(reason: "PTY not running or tcgetpgrp ≤ 0")
         }
-        return ForegroundProcessProbe.classify(rootPID: target.root, idleShell: target.idleShell)
+        return ForegroundProcessProbe.classify(rootPIDs: roots)
     }
 
     /// Send a signal directly to the foreground process group of the terminal.

@@ -197,6 +197,58 @@ final class CwdTests: XCTestCase {
         s._testForegroundNamespaceOverride = nil
     }
 
+    /// pty-3b: `lastKnownCwdIsStale` tracks the gate. A dropped OSC 7
+    /// (`.remote` or `.unknown`) leaves `lastKnownCwd` alone but marks it
+    /// stale, so ⌘T reads the live cwd instead; the next accepted `.local`
+    /// report refreshes the path and clears the flag.
+    func testDroppedOscCwdMarksStaleAndLocalReportClearsIt() {
+        let s = TerminalSession.makeHeadlessForTests()
+        XCTAssertFalse(s.lastKnownCwdIsStale, "a fresh session has nothing stale")
+
+        func settle(on expected: String) {
+            let deadline = Date().addingTimeInterval(2)
+            while s.lastKnownCwd != expected, Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            }
+        }
+
+        s._testForegroundNamespaceOverride = .local
+        s.feedBytesForTests(Data("\u{1b}]7;file:///Users/foo/a\u{1b}\\".utf8))
+        settle(on: "/Users/foo/a")
+        XCTAssertEqual(s.lastKnownCwd, "/Users/foo/a")
+        XCTAssertFalse(s.lastKnownCwdIsStale, "an accepted report is not stale")
+
+        s._testForegroundNamespaceOverride = .remote(basename: "ssh", pid: 99999)
+        s.feedBytesForTests(Data("\u{1b}]7;file:///Users/foo/b\u{1b}\\".utf8))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))  // let the main-queue hop land
+        XCTAssertEqual(s.lastKnownCwd, "/Users/foo/a", "a .remote verdict must drop the report")
+        XCTAssertTrue(s.lastKnownCwdIsStale, "a dropped report must mark the kept path stale")
+
+        s._testForegroundNamespaceOverride = .local
+        s.feedBytesForTests(Data("\u{1b}]7;file:///Users/foo/c\u{1b}\\".utf8))
+        settle(on: "/Users/foo/c")
+        XCTAssertEqual(s.lastKnownCwd, "/Users/foo/c")
+        XCTAssertFalse(s.lastKnownCwdIsStale, "a .local report refreshes the path and clears the flag")
+
+        s._testForegroundNamespaceOverride = .unknown(reason: "test")
+        s.feedBytesForTests(Data("\u{1b}]7;file:///Users/foo/d\u{1b}\\".utf8))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(s.lastKnownCwd, "/Users/foo/c", "an .unknown verdict must drop the report")
+        XCTAssertTrue(s.lastKnownCwdIsStale, "an .unknown drop must mark the kept path stale as well")
+        s._testForegroundNamespaceOverride = nil
+    }
+
+    /// pty-3b: a stale `lastKnownCwd` is skipped for the kernel's live cwd,
+    /// but when that lookup fails (headless session: no PTY) the older
+    /// trusted path still beats handing `$HOME` to the new shell.
+    func testNewTabKeepsStaleLastKnownCwdWhenLiveLookupFails() {
+        let s = TerminalSession.makeHeadlessForTests()
+        s.lastKnownCwd = "/tmp/somewhere"
+        s.lastKnownCwdIsStale = true
+        XCTAssertNil(s.foregroundWorkingDirectory(), "test setup: a headless session has no live cwd")
+        XCTAssertEqual(CwdResolver.forNewTab(source: s), "/tmp/somewhere")
+    }
+
     /// Headless session has no PTY → classification defaults to
     /// `.local` so existing OSC 7 tests (which don't set an override)
     /// keep working. The fail-closed posture for production is enforced
@@ -282,6 +334,35 @@ final class CwdTests: XCTestCase {
             XCTFail("ForegroundProcessProbe.classify on a syscall-failing pid must not match remote; got .remote(\(basename))")
         case .unknown:
             break  // expected
+        }
+    }
+
+    /// pty-3b: `classify(rootPIDs:)` is the union over the foreground
+    /// leader and the shell. No roots to walk is not "nothing found": it
+    /// cannot be classified, so it fails closed.
+    func testClassifyRootPIDsWithNoRootsIsUnknown() {
+        let result = ForegroundProcessProbe.classify(rootPIDs: [])
+        guard case .unknown = result else {
+            XCTFail("classify(rootPIDs: []) must fail closed to .unknown; got \(result)")
+            return
+        }
+    }
+
+    /// pty-3b: the same root listed twice (idle prompt: the foreground
+    /// leader IS the shell) is one local walk, not a different verdict.
+    func testClassifyRootPIDsDuplicateLocalRootsIsLocal() {
+        let me = getpid()
+        XCTAssertEqual(ForegroundProcessProbe.classify(rootPIDs: [me, me]), .local)
+    }
+
+    /// pty-3b: one unclassifiable root poisons the union, even when another
+    /// root is cleanly local: the gate must not trust a report it could only
+    /// half inspect.
+    func testClassifyRootPIDsWithAnUnclassifiableRootIsUnknown() {
+        let result = ForegroundProcessProbe.classify(rootPIDs: [getpid(), pid_t.max])
+        guard case .unknown = result else {
+            XCTFail("a root that cannot be probed must make the union .unknown; got \(result)")
+            return
         }
     }
 

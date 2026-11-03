@@ -75,16 +75,20 @@ enum ForegroundProcessProbe {
     /// lifecycle gate fires; this static is also the test entry point that
     /// pins the BFS without driving a real PTY.
     ///
-    /// `idleShell`: `rootPID` is the shell itself sitting at its prompt (the
-    /// foreground pgroup IS the shell's). Its direct children in another
-    /// process group are then background jobs (`ssh -N -L … &`, `kubectl
-    /// port-forward … &`) — under job control they cannot own the tty, so the
-    /// OSC 7 the shell just printed is a local path and they must not flip the
-    /// verdict to `.remote`. Children sharing the shell's pgroup (no job
-    /// control) are still walked. Only the root's direct children are
-    /// filtered: deeper pgid filtering would hide a foreground `sshpass ssh` /
-    /// `expect`, whose ssh child sits in its own session.
-    static func classify(rootPID: pid_t, idleShell: Bool = false) -> ForegroundNamespace {
+    /// Every descendant of `rootPID` counts, background jobs included: a job
+    /// started with `&` can still write to the tty (`tostop` is off by
+    /// default), so an `ssh`/`docker exec` in the background could be the one
+    /// that printed an OSC 7, and nothing on the wire says which process wrote
+    /// it. The stale cwd this costs an idle shell is recovered by
+    /// `CwdResolver` from the kernel's live cwd, not by trusting the tty.
+    ///
+    /// This walks ONE subtree. While some other job holds the terminal, a
+    /// background job is a sibling of the foreground leader, not under it, so
+    /// `PTY.classifyForegroundNamespace()` classifies the shell's subtree as
+    /// well, via `classify(rootPIDs:)`. A job that is no longer anyone's
+    /// descendant (reparented to launchd, e.g. `ssh -f`, `(cmd &)`) is outside
+    /// every walk; see KNOWN_ISSUES "OSC 7 trust over SSH".
+    static func classify(rootPID: pid_t) -> ForegroundNamespace {
         // BFS through the process tree. `seen` guards against cycles —
         // shouldn't happen in a well-formed UNIX process graph, but a
         // bug in `proc_listpids` returning stale data could otherwise
@@ -135,12 +139,6 @@ enum ForegroundProcessProbe {
         var seen: Set<pid_t> = [rootPID]
         var queue: [pid_t] = []
         for child in rootChildren where !seen.contains(child) {
-            // Fail-closed: a pgid we can't read (`getpgid` ≤ 0) keeps the child
-            // in the walk rather than assuming it is a background job.
-            if idleShell {
-                let pgid = getpgid(child)
-                if pgid > 0, pgid != rootPID { continue }
-            }
             seen.insert(child)
             queue.append(child)
         }
@@ -165,6 +163,27 @@ enum ForegroundProcessProbe {
             }
         }
         return .local
+    }
+
+    /// Union verdict over several subtrees (the foreground pgroup leader and
+    /// the shell). `.remote` if any subtree holds a remote-shell binary, else
+    /// `.unknown` if any walk could not complete, else `.local`; no roots at
+    /// all is `.unknown` (fail-closed). Duplicate roots are walked once.
+    static func classify(rootPIDs: [pid_t]) -> ForegroundNamespace {
+        var seenRoots: Set<pid_t> = []
+        var firstUnknown: ForegroundNamespace?
+        for root in rootPIDs where seenRoots.insert(root).inserted {
+            switch classify(rootPID: root) {
+            case .remote(let basename, let pid):
+                return .remote(basename: basename, pid: pid)
+            case .unknown(let reason):
+                if firstUnknown == nil { firstUnknown = .unknown(reason: reason) }
+            case .local:
+                break
+            }
+        }
+        if let firstUnknown { return firstUnknown }
+        return seenRoots.isEmpty ? .unknown(reason: "no root pids to classify") : .local
     }
 
     /// `proc_pidpath` → last path component. Returns nil if the pid is

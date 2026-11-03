@@ -67,14 +67,19 @@ final class CwdTracker {
     /// we failed to classify (PTY closing, syscall error, BFS cap hit). Both
     /// cases drop the OSC 7 payload — fail-closed posture, opposite of the
     /// advisory `hasForegroundChild` / `foregroundWorkingDirectory` helpers.
+    /// A dropped report also flags `lastKnownCwdIsStale`: the shell moved and
+    /// we declined to follow, so ⌘T must read the live cwd from the kernel
+    /// rather than reuse the older trusted path.
     ///
-    /// Cost: one syscall to read fg pgroup + at most ~256 node BFS (capped).
+    /// Cost: one syscall to read fg pgroup + at most ~256 node BFS (capped)
+    /// per root (the foreground leader and the shell; one walk when idle).
     /// Per `cd` only; well under the frame budget on main.
     func handleCwdChanged(_ path: String) {
         let classification = session.classifyForegroundNamespace()
         switch classification {
         case .local:
             session.lastKnownCwd = path
+            session.lastKnownCwdIsStale = false
             // Re-arm the L3 latch on each .local transition so a subsequent
             // .local → .unknown cycle logs again. Without this, a real-world
             // ssh-disconnect-then-reconnect-then-disconnect-again leaves only
@@ -82,8 +87,9 @@ final class CwdTracker {
             // second loss.
             loggedUnknownNamespaceDrop = false
         case .remote:
-            break
+            session.lastKnownCwdIsStale = true
         case .unknown(let reason):
+            session.lastKnownCwdIsStale = true
             // Audit L3: dropping OSC 7 silently on every emit would leave a
             // support engineer with no breadcrumb when ⌘T inheritance "isn't
             // picking up the cwd". Surface the reason once per .local→.unknown
@@ -92,7 +98,7 @@ final class CwdTracker {
             if !loggedUnknownNamespaceDrop {
                 loggedUnknownNamespaceDrop = true
                 TerminalSession.sessionLogger.notice(
-                    "OSC 7 dropped: foreground namespace classified .unknown (\(reason, privacy: .public)); ⌘T cwd inheritance disabled until classification recovers"
+                    "OSC 7 dropped: foreground namespace classified .unknown (\(reason, privacy: .public)); report ignored, ⌘T reads the shell's live cwd until classification recovers"
                 )
             }
         }
