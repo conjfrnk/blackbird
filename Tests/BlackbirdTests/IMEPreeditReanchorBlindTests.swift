@@ -60,6 +60,15 @@ final class IMEPreeditReanchorBlindTests: XCTestCase {
             frame: NSRect(x: 0, y: 0, width: 800, height: 480),
             device: device
         )
+        // The preedit layout wraps at the view's own column count, so the view
+        // has to be as wide as the 80-column grid it displays (800 pt is only
+        // ~40 columns here); otherwise a preedit at column 52 wraps.
+        let metrics = view.metrics
+        view.frame = NSRect(
+            x: 0, y: 0,
+            width: ceil(metrics.cellWidth * 80 + 2 * TerminalView.horizontalContentInsetPoints) + 2,
+            height: 480
+        )
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 80, rows: 24), scrollback: 200),
                                  "BBTerm init failed", file: file, line: line)
         let rig = Rig(view: view, term: term)
