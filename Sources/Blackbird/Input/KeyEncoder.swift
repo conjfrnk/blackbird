@@ -737,10 +737,12 @@ public final class KeyEncoder {
         // event emits nothing (legacy TUIs must never see post-keystroke
         // traffic — matches the printable release path). The mod field is
         // forced present (even unmodified) because the `:event` sub-param needs
-        // a parameter to attach to. Keypad (DECPAM/SS3) keys have no such form
-        // (`csiParamShape` returns nil) so their releases also emit nothing;
-        // their repeats fall through to the press encoding below, otherwise a
-        // held keypad key would stop auto-repeating after the first press.
+        // a parameter to attach to. Keypad keys have no such form
+        // (`csiParamShape` returns nil), so repeats AND releases fall through
+        // to `encodeKeypadKey`: a held key keeps auto-repeating, and a keypad
+        // key that went down as CSI u (flag 8, or a Ctrl / Option(Meta) chord
+        // under flag 1) gets its paired `:3` release from `encode(chars:)`,
+        // which stays silent for a press that was plain text.
         if eventType != .press {
             guard mode.contains(.reportEventTypes) else { return Data() }
             if let shape = Self.csiParamShape(for: key) {
@@ -753,7 +755,6 @@ public final class KeyEncoder {
                 bytes.append(shape.term)                                   // <final> / ~
                 return Data(bytes)
             }
-            guard eventType == .repeat else { return Data() }
         }
 
         switch key {
@@ -831,6 +832,9 @@ public final class KeyEncoder {
         let kittyOwnsKeypad = mode.contains(.disambiguateEscCodes)
             || mode.contains(.reportAllKeysAsEsc)
         if applicationKeypad && !kittyOwnsKeypad {
+            // SS3 has no event field, so a release has nothing to say; sending
+            // it would replay the press bytes. A repeat re-sends SS3 on purpose.
+            if eventType == .release { return Data() }
             // SS3 <final> — ESC O <final>
             return Data([0x1B, 0x4F, final])
         }

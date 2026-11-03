@@ -414,8 +414,9 @@ final class KittyKeyboardProtocolTests: XCTestCase {
     // traffic). The modifier field is FORCED present even when unmodified
     // (mod=1) so the `:3` sub-param has a parameter to attach to.
     // modParam = 1 + bitmask (shift=1, alt=2, ctrl=4): unmodified=1, Shift=2,
-    // Ctrl=5. Keypad keys have no CSI-parameter form, so their release is
-    // EMPTY even under flag 2.
+    // Ctrl=5. Keypad keys have no CSI-parameter form, so a plain-text keypad
+    // press has no release even under flag 2 (flag 8 / Ctrl / Option presses
+    // are CSI u and do: KeypadKittyReleaseBlindTests).
 
     /// Flag 1 + flag 2 lit together — the mode a kitty TUI negotiates when it
     /// wants both disambiguation and event-type reporting.
@@ -493,8 +494,8 @@ final class KittyKeyboardProtocolTests: XCTestCase {
     }
 
     func test_special_keypad_release_flag2_returnsEmpty() {
-        // F-S3-005: Keypad keys have no CSI-parameter form, so even under flag 2
-        // a release emits EMPTY Data.
+        // F-S3-005: An unmodified keypad key is plain text under flags 1+2, so
+        // its release emits EMPTY Data.
         let enc = KeyEncoder()
         let out = enc.encodeSpecial(.kp1, modifiers: [], mode: flag2Mode, eventType: .release)
         XCTAssertEqual(out, Data())

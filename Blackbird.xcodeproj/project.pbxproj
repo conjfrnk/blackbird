@@ -46,6 +46,7 @@
 		1E6995F6B1CF4D6CBBAE3353 /* FindViewportZeroWidthScalarsBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1734C28E3CA5E547447EEDAF /* FindViewportZeroWidthScalarsBlindTests.swift */; };
 		1EFCAE939B4A1B5F562F54E0 /* kitty.terminfo in Resources */ = {isa = PBXBuildFile; fileRef = 673FE2E71DCD08F9286D5C60 /* kitty.terminfo */; };
 		2073B0BF9DBB4D1A033A0BFF /* StartupLatencyBenchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 845E2991E45987A3A4CE6E9A /* StartupLatencyBenchTests.swift */; };
+		2097752F679E4F2C5997E724 /* KeypadKittyReleaseBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6C447639FF8B5B7EC69B5AB /* KeypadKittyReleaseBlindTests.swift */; };
 		209A7D1FE323532B05F65855 /* SelectionVerticalResizeBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED22CAA12BA4D24FA09B526D /* SelectionVerticalResizeBlindTests.swift */; };
 		20E0EC839350531D064FD050 /* KeychainCouplingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3FE9887E2B63438D12533B8 /* KeychainCouplingTests.swift */; };
 		2128B6F807CB069799F1A479 /* Preferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DD21160AFF51FCA0B6374 /* Preferences.swift */; };
@@ -711,6 +712,7 @@
 		C4F09C8D4B7B5D585744F5FB /* WindowMultiDisplayNudgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowMultiDisplayNudgeTests.swift; sourceTree = "<group>"; };
 		C52B4DB7F352CF1FCAAB2BBE /* DeferredFeedQueueBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeferredFeedQueueBlindTests.swift; sourceTree = "<group>"; };
 		C62552B7A8283B0F91AD8C6C /* PixelGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelGeometry.swift; sourceTree = "<group>"; };
+		C6C447639FF8B5B7EC69B5AB /* KeypadKittyReleaseBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeypadKittyReleaseBlindTests.swift; sourceTree = "<group>"; };
 		C735D6264882444369074ACB /* CellInstance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CellInstance.swift; sourceTree = "<group>"; };
 		C7D41B7AB4C224EF793857BD /* IMEDoCommandNoAlertBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEDoCommandNoAlertBlindTests.swift; sourceTree = "<group>"; };
 		C7E84A9F3EE4A60539B7BBD4 /* AccessibilityRangeForIndexAstralBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityRangeForIndexAstralBlindTests.swift; sourceTree = "<group>"; };
@@ -976,6 +978,7 @@
 				68C400BD5CE270E09A5E1AA0 /* KeyEncoderTests.swift */,
 				7936FD8340E39C555EDD95CD /* KeypadApplicationModeBlindTests.swift */,
 				A0BED3E60BA9B705BD83865B /* KeypadKittyPrecedenceBlindTests.swift */,
+				C6C447639FF8B5B7EC69B5AB /* KeypadKittyReleaseBlindTests.swift */,
 				8CB767EEE215AE9308F8984F /* KittyFlag1CtrlOptionBlindTests.swift */,
 				CF329646F0EF7E38D3E26B47 /* KittyKeyboardProtocolTests.swift */,
 				29B3E82A4501BBC90AF74B61 /* KittyKeyRepeatEventTypeBlindTests.swift */,
@@ -1710,6 +1713,7 @@
 				20E0EC839350531D064FD050 /* KeychainCouplingTests.swift in Sources */,
 				5DF4A2C309952861372616CE /* KeypadApplicationModeBlindTests.swift in Sources */,
 				468A7D0D6F7F9F0C485A9B70 /* KeypadKittyPrecedenceBlindTests.swift in Sources */,
+				2097752F679E4F2C5997E724 /* KeypadKittyReleaseBlindTests.swift in Sources */,
 				B4BB53B751F68CE9E03F70B7 /* KittyFlag1CtrlOptionBlindTests.swift in Sources */,
 				9B8CC12154E6A79FDE647943 /* KittyKeyRepeatEventTypeBlindTests.swift in Sources */,
 				FAE78514CC999F74C986480A /* KittyKeyboardProtocolTests.swift in Sources */,

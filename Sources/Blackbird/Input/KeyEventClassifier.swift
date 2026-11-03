@@ -57,8 +57,14 @@ enum KeyEventClassifier {
     /// the Option-Meta chord. Keypad Enter is excluded: it arrives as
     /// `doCommand(insertNewline:)`, so it already reaches the encoder.
     static func isApplicationKeypadKey(_ event: NSEvent, applicationKeypad: Bool) -> Bool {
-        guard applicationKeypad,
-              event.modifierFlags.contains(.numericPad),
+        applicationKeypad && isKeypadCharacterKey(event)
+    }
+
+    /// True for a numeric-keypad digit / operator key (0-9 + - * / . =),
+    /// whatever the keypad mode. Keypad Enter is excluded (it arrives as
+    /// `doCommand(insertNewline:)`, never as committed text).
+    static func isKeypadCharacterKey(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains(.numericPad),
               let key = keypadKey(for: event) else { return false }
         return key != .kpEnter
     }

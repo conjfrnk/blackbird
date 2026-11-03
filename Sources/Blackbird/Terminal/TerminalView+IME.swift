@@ -114,6 +114,11 @@ extension TerminalView: NSTextInputClient {
         let eventType = hadComposition
             ? KeyEncoder.EventType.press
             : Self.keyDownEventType(isRepeat: pendingInsertTextIsRepeat, mode: mode)
+        // A keypad key's `keyUp` must release this text, not the US-table
+        // character (see `keypadCommittedText`).
+        if !hadComposition, let keypadKeyCode = pendingInsertTextKeypadKeyCode {
+            keypadCommittedText[keypadKeyCode] = committed
+        }
         let bytes = encoder.encode(chars: committed, modifiers: mods, mode: mode, eventType: eventType)
         if !bytes.isEmpty { sendToSession(bytes) }
     }

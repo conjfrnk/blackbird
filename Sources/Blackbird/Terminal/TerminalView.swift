@@ -214,6 +214,17 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     var pendingInsertTextModifiers: KeyEncoder.Modifiers?
     /// `isARepeat` of that same `keyDown`; the `insertText` path can't see it.
     var pendingInsertTextIsRepeat = false
+    /// `keyCode` of that same `keyDown` when it is a numeric-keypad digit /
+    /// operator the input context may commit as layout text; nil for every
+    /// other key. Lets `insertText` file the committed text under the key.
+    var pendingInsertTextKeypadKeyCode: UInt16?
+    /// Text the input context committed for a held keypad key's `keyDown`
+    /// (`keyCode` -> text). The layout decides that text (`,` on a comma-decimal
+    /// layout, a non-Latin digit on some input sources), so `keyUp` re-encodes
+    /// THIS text for the release; the encoder's fixed US table would report a
+    /// release for a key the program never saw go down. Cleared at the next
+    /// `keyDown` and consumed by `keyUp`.
+    var keypadCommittedText = [UInt16: String]()
     /// What a forwarded `keyDown` told the TUI: the modifiers it carried and
     /// the base characters (`charactersIgnoringModifiers`) it was encoded from.
     private struct ForwardedKeyDown {
@@ -2171,9 +2182,12 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // (`CSI 97:65;2u` for Shift+A, not `CSI 97u`); cleared again below.
         pendingInsertTextModifiers = KeyEncoder.Modifiers(event: event)
         pendingInsertTextIsRepeat = event.isARepeat
+        keypadCommittedText[event.keyCode] = nil
+        pendingInsertTextKeypadKeyCode = KeyEventClassifier.isKeypadCharacterKey(event) ? event.keyCode : nil
         defer {
             pendingInsertTextModifiers = nil
             pendingInsertTextIsRepeat = false
+            pendingInsertTextKeypadKeyCode = nil
         }
         let optionMetaChord = KeyEventClassifier.isOptionMetaChord(
             optionIsMeta: encoder.optionIsMeta,
@@ -2381,6 +2395,7 @@ public final class TerminalView: MTKView, MTKViewDelegate {
     /// (partial — flag 2 of the four progressive-enhancement flags).
     public override func keyUp(with event: NSEvent) {
         let press = forwardedKeyDowns.removeValue(forKey: event.keyCode)
+        let committedKeypadText = keypadCommittedText.removeValue(forKey: event.keyCode)
         // `session != nil` rather than a binding: the release bytes go out
         // through `sendToSession`, so nothing here needs the session itself —
         // this is purely "is there anywhere to send".
@@ -2410,12 +2425,26 @@ public final class TerminalView: MTKView, MTKViewDelegate {
         // the TUI was told `CSI 97;3u` and pairs on `CSI 97;3:3u`; with Shift
         // pressed after a `2` the key-up reads `@`, a different key code.
         let mods = press.modifiers
+        // A keypad key whose press the input context committed as layout text
+        // releases as that same text, like a main-row key (which re-encodes its
+        // own characters below). `encodeSpecial` would use the US table instead.
+        if let text = committedKeypadText {
+            let bytes = encoder.encode(chars: text, modifiers: mods, mode: termMode, eventType: .release)
+            if !bytes.isEmpty {
+                sendToSession(bytes)
+            } else {
+                super.keyUp(with: event)
+            }
+            return
+        }
         if let special = KeyEventClassifier.specialKey(for: event) {
             // F-S3-005: arrows / nav / F-keys DO have flag-2 release events in
             // the Kitty spec — `CSI <n> ; <mod>:3 <final>`. encodeSpecial emits
             // that under reportEventTypes and returns empty otherwise (keypad
-            // DECPAM keys have no event field → empty), so the fallthrough is
-            // preserved for keys/modes that produce nothing.
+            // keys release via `encode(chars:)`, empty for SS3 DECPAM and for
+            // plain-text presses; a press the IME committed as text was
+            // handled above), so the fallthrough is preserved for keys/modes
+            // that produce nothing.
             let appCursor = termMode.contains(.appCursor)
             let appKeypad = termMode.contains(.appKeypad)
             let bytes = encoder.encodeSpecial(
