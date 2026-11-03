@@ -580,6 +580,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     // MARK: - NSWindowDelegate
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard closeConfirmed() else { return false }
+        // Consent is final, but AppKit has not yet pulled the window out of its
+        // tab group: it does that (and promotes its own pick) before posting
+        // `willClose`, so `windowWillClose` is too late to steer selection.
+        selectVisualNeighborIfClosingSelectedTab()
+        return true
+    }
+
+    /// The "Close this tab?" confirm; `false` means the user cancelled.
+    private func closeConfirmed() -> Bool {
         // AppDelegate's ⌘⇧W handler already got consent for the whole batch.
         if Self.bypassCloseConfirm { return true }
         guard Preferences.shared.confirmClose else { return true }
@@ -612,7 +622,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         isClosing = true
         exitCancellable?.cancel()
         exitCancellable = nil
-        selectVisualNeighborIfClosingSelectedTab()
         // Break the strip → window cycle (see `TabStripView.detachTabs`).
         titlebarTabBar?.clearTabs()
         terminateSessions()
@@ -625,11 +634,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// arrival order — which, after a drag-reorder, can be a visually
     /// non-adjacent tab. Non-selected closes don't move selection.
     ///
-    /// Runs from `windowWillClose`, i.e. only once the close is certain:
-    /// `windowShouldClose` (the "process still running" confirm) can refuse,
-    /// and selecting the neighbour before that point left the user on the
-    /// wrong tab after Cancel. Every close entry point (hover ×, ⌘W, the
-    /// strip's Delete key, the context menu) funnels through here.
+    /// Runs from `windowShouldClose`, after the "process still running"
+    /// confirm has been answered: selecting the neighbour before that point
+    /// left the user on the wrong tab after Cancel. It cannot wait for
+    /// `windowWillClose`: by then AppKit has already detached the window into
+    /// a one-window group of its own, so there is no neighbour left to pick.
+    /// Every `performClose` entry point (hover ×, ⌘W, the strip's Delete key,
+    /// the context menu, a shell exit's auto-close) funnels through here.
     private func selectVisualNeighborIfClosingSelectedTab() {
         guard let w = window, let group = w.tabGroup, group.selectedWindow === w else { return }
         let order = TabOrderCoordinator.shared.orderedTabs(for: group)

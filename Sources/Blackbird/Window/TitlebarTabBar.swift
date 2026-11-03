@@ -31,10 +31,10 @@ final class TitlebarTabBarViewController: NSTitlebarAccessoryViewController {
         }
         stripView.onCloseWindow = { w in
             // Visual-neighbour selection for a closing SELECTED tab lives in
-            // `MainWindowController.windowWillClose` (teardown is certain
-            // there). It used to run HERE, before `performClose`, so a
-            // "Close this tab?" → Cancel left the user parked on a different
-            // tab than the one they had tried to close.
+            // `MainWindowController.windowShouldClose` (after the confirm, while
+            // the window is still in its group). It used to run HERE, before
+            // `performClose`, so a "Close this tab?" → Cancel left the user
+            // parked on a different tab than the one they had tried to close.
             w.performClose(nil)
         }
         stripView.onAddTab = {
