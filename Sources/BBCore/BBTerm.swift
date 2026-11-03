@@ -74,8 +74,10 @@ public final class BBTerm {
         /// Shell-emitted OSC 133 prompt/command mark. `kind` is one of
         /// A/B/C/D (prompt start / command start / command output /
         /// command end). `exitCode` is populated only for kind D; empty
-        /// string otherwise.
-        case promptMark(kind: PromptMarkKind, exitCode: String)
+        /// string otherwise. For kind A, `linesScrolled` and `cursorRow` are
+        /// the snapshot fields of the same names as they stood the instant the
+        /// core parsed the mark, not when the handler runs; 0 for B/C/D.
+        case promptMark(kind: PromptMarkKind, exitCode: String, linesScrolled: UInt64, cursorRow: Int)
         /// OSC 9 / 777 / 99 desktop notification, scrubbed and capped in
         /// the core, which never emits one with both halves empty.
         case notification(title: String, body: String)
@@ -610,7 +612,12 @@ public final class BBTerm {
             handler(.cwdChanged(Self.string(from: ev)))
         case EventKind.promptMark:
             if let kind = PromptMarkKind(rawValue: UInt8(clamping: ev.i32_arg)) {
-                handler(.promptMark(kind: kind, exitCode: Self.string(from: ev)))
+                handler(.promptMark(
+                    kind: kind,
+                    exitCode: Self.string(from: ev),
+                    linesScrolled: ev.lines_scrolled,
+                    cursorRow: Int(ev.cursor_row)
+                ))
             } else {
                 // Audit L-3 (2026-04-29): the Rust side defines exactly
                 // the four `PromptMarkKind` raw values 1..=4. A value

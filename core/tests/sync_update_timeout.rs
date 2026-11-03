@@ -780,25 +780,23 @@ fn forced_flush_delivers_colour_query_replies_buffered_inside_the_region() {
 }
 
 #[test]
-fn flush_does_not_refire_prompt_marks_already_seen_at_feed_time() {
+fn flush_fires_a_prompt_mark_held_inside_the_region_exactly_once() {
     // The parallel OSC scanner runs over the RAW chunk, independent of
-    // sync state, so OSC 133 / OSC 7 fire at feed time even inside an
-    // open region. The flush replays only through the grid processor; if
+    // sync state, and the flush replays only through the grid processor; if
     // it ever re-fed the buffer to the OSC scanner, every prompt mark and
     // cwd change inside a stalled frame would fire twice and corrupt
     // prompt navigation.
+    //
+    // An OSC 133 mark is the one thing the scanner does not fire at feed
+    // time inside an open region: kind A carries the grid's cursor position,
+    // and the grid lags the stream until the region is replayed, so the
+    // scanner holds the mark and the replay delivers it. Once, in total.
     unsafe {
         let sink = Sink::default();
         let term = new_term();
         bb_term_set_event_cb(term, Some(capture), &sink as *const _ as *mut c_void);
 
         feed(term, b"\x1b[?2026h\x1b]133;A\x1b\\hello");
-        let at_feed = sink.of_kind(BBEventKind::PromptMark);
-        assert_eq!(
-            at_feed,
-            vec![(1, Vec::new())],
-            "an A mark inside an open region must still fire once at feed time"
-        );
         assert_eq!(
             row_text(term, 0),
             "",
@@ -809,13 +807,24 @@ fn flush_does_not_refire_prompt_marks_already_seen_at_feed_time() {
 
         assert_eq!(
             sink.of_kind(BBEventKind::PromptMark),
-            at_feed,
-            "the replay must not re-fire prompt marks the scanner already saw"
+            vec![(1, Vec::new())],
+            "an A mark inside the region must fire exactly once, with the replay"
         );
         assert_eq!(
             row_text(term, 0),
             "hello",
             "the withheld text must land on flush"
+        );
+
+        assert_eq!(
+            bb_term_flush_sync_update(term, 1),
+            0,
+            "precondition: nothing is left to flush"
+        );
+        assert_eq!(
+            sink.of_kind(BBEventKind::PromptMark),
+            vec![(1, Vec::new())],
+            "a second flush must not re-fire the mark"
         );
         bb_term_free(term);
     }

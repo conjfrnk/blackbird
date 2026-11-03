@@ -228,6 +228,8 @@ impl CallbackCell {
             payload: bytes.as_ptr(),
             len: bytes.len(),
             i32_arg: 0,
+            cursor_row: 0,
+            lines_scrolled: 0,
         });
     }
 
@@ -259,6 +261,8 @@ impl CallbackCell {
             payload: bytes.as_ptr(),
             len: bytes.len(),
             i32_arg: 0,
+            cursor_row: 0,
+            lines_scrolled: 0,
         });
         None
     }
@@ -574,6 +578,8 @@ impl EventListener for RoutingListener {
                         payload: std::ptr::null(),
                         len: 0,
                         i32_arg: 0,
+                        cursor_row: 0,
+                        lines_scrolled: 0,
                     });
                 }
                 Event::Title(ref s) => {
@@ -596,6 +602,8 @@ impl EventListener for RoutingListener {
                         payload: bytes.as_ptr(),
                         len: bytes.len(),
                         i32_arg: 0,
+                        cursor_row: 0,
+                        lines_scrolled: 0,
                     });
                 }
                 Event::ClipboardStore(_, ref s) => {
@@ -604,6 +612,8 @@ impl EventListener for RoutingListener {
                         payload: s.as_ptr(),
                         len: s.len(),
                         i32_arg: 0,
+                        cursor_row: 0,
+                        lines_scrolled: 0,
                     });
                 }
                 Event::PtyWrite(ref s) => {
@@ -621,6 +631,8 @@ impl EventListener for RoutingListener {
                         payload: bytes.as_ptr(),
                         len: bytes.len(),
                         i32_arg: 0,
+                        cursor_row: 0,
+                        lines_scrolled: 0,
                     });
                 }
                 Event::ColorRequest(index, current, formatter) => {
@@ -654,6 +666,8 @@ impl EventListener for RoutingListener {
                         payload: core::ptr::null(),
                         len: 0,
                         i32_arg: 0,
+                        cursor_row: 0,
+                        lines_scrolled: 0,
                     });
                 }
                 // All other variants (MouseCursorDirty, ClipboardLoad,

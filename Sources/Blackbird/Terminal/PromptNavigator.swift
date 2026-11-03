@@ -5,10 +5,12 @@ import BBCore
 ///
 /// Pure extraction from `TerminalSession` (REFACTOR.md Part IV — the prompt-nav
 /// concern): the ring of recorded prompt-start positions, the jump cursor, the
-/// scroll-to-mark math, and the **two-token clear-epoch / generation machinery**
-/// that prevents a phantom prompt mark from being inserted across a ⌘K clear or
-/// a reflow. Moved out of the god-object **without changing the queue
-/// confinement or the epoch-comparison semantics by a single byte.**
+/// scroll-to-mark math, and the **clear-epoch machinery** that prevents a
+/// phantom prompt mark from being inserted across a ⌘K clear. Extracted from
+/// the god-object with the queue confinement and the epoch-comparison semantics
+/// of the clear epoch unchanged; a prompt's position now comes from the core
+/// stamp on the event rather than a snapshot taken at record time, which
+/// is also why the former ring-generation token is gone.
 ///
 /// ## Why the `@Published` stores stay on the session
 /// `session.promptMarks` and `session.lastPromptMark` remain `@Published` on the
@@ -16,39 +18,33 @@ import BBCore
 /// `unowned session`, exactly as `SnapshotCoalescer` drives `@Published snapshot`
 /// via `session.publish(_:)`). Moving them onto a plain collaborator would drop
 /// the `objectWillChange` / projected-publisher surface — a behavior change. This
-/// navigator owns the *machinery* (cursor, generation, the two epochs) and the
+/// navigator owns the *machinery* (cursor, the two epochs) and the
 /// *logic* (record / scroll / jump); the observable arrays stay where the UI
 /// already reads them.
 ///
-/// ## The two-token cross-queue invariant (audit S5-008) — LOAD-BEARING
-/// A late prompt-mark append must self-discard if a clear/reflow happened in
-/// between. Two independent windows are guarded by two independent tokens, each
-/// confined to a different queue — **do not merge them, do not move which queue
-/// touches each:**
+/// ## The clear-epoch cross-queue invariant (audit S5-008) — LOAD-BEARING
+/// A late prompt-mark append must self-discard if a ⌘K clear happened in
+/// between. The OSC 133 A event fires on `coreQueue` during `feed` (before ⌘K's
+/// clear); its `recordPromptStart` call drains on main (after `clearAll`
+/// completed). `clearEpochCore` (**coreQueue-confined**) is read on coreQueue at
+/// event-fire time (`currentClearEpochCore`) and bumped inside `clearAll`'s
+/// `coreQueue.sync` (`bumpClearEpochCore()`); the captured value rides the hop to
+/// main and is compared against `clearEpochMain` (**main-confined**, bumped in
+/// `resetForClear()`) at `recordPromptStart` entry. An event that predates the
+/// clear carries a stale epoch and its append self-discards — **do not merge the
+/// two epochs, do not move which queue touches each.**
 ///
-/// - `promptMarkGeneration` (**main-confined**): guards the
-///   `recordPromptStart` → main-hop-append window. Captured at
-///   `recordPromptStart` entry (on main) and re-compared on the main-hop append;
-///   bumped by `resetForClear()` (⌘K) and `invalidateForReflow()` (resize), both
-///   on main. A clear/reflow between capture and drain moves it, so the append
-///   self-discards instead of re-inserting a mark anchored to deleted scrollback.
-/// - `clearEpochCore` (**coreQueue-confined**) + `clearEpochMain`
-///   (**main-confined**): guard the *event-hop* window the generation token can't
-///   see. The OSC 133 A event fires on `coreQueue` during `feed` (before ⌘K's
-///   clear); its `recordPromptStart` call drains on main (after `clearAll`
-///   completed). `clearEpochCore` is read on coreQueue at event-fire time
-///   (`currentClearEpochCore`) and bumped inside `clearAll`'s `coreQueue.sync`
-///   (`bumpClearEpochCore()`); the captured value rides the hop to main and is
-///   compared against `clearEpochMain` (bumped in `resetForClear()` on main) at
-///   `recordPromptStart` entry. An event that predates the clear carries a stale
-///   epoch and its append self-discards.
+/// ## Why a reflow needs no token
+/// The core stamps each A mark with the position it had when the mark was parsed
+/// (`BBTerm.Event.promptMark`), so `recordPromptStart` appends synchronously on
+/// main: nothing is in flight between the stamp and the append. A resize wipes
+/// the ring from a main hop enqueued after the resize ran on coreQueue, so after
+/// the hop of every event parsed before it. A pre-reflow mark is appended and then
+/// wiped; a post-reflow mark is stamped on the new grid and survives.
 ///
 /// ## Lifetime
-/// Synchronous methods read the `unowned session` directly (the session strongly
-/// owns this navigator for its whole lifetime). The deferred `coreQueue.async` /
-/// `main.async` blocks in `recordPromptStart` — which can fire after the session
-/// tears down — capture `[weak session]` explicitly and `guard let`, never the
-/// `unowned session`, mirroring `SnapshotCoalescer` / `PaletteApplier`.
+/// Methods read the `unowned session` directly: the session strongly owns this
+/// navigator for its whole lifetime and nothing here defers work past a call.
 public final class PromptNavigator {
 
     /// Position of a recorded prompt, anchored to the core's monotonic
@@ -85,28 +81,13 @@ public final class PromptNavigator {
 
     private static let promptMarkCap = 200
 
-    /// Generation token for the prompt-mark ring (audit S5-008).
-    /// Main-owned, like the ring itself. Every path that wipes the ring
-    /// (⌘K clearAll, reflow invalidation) bumps it; recordPromptStart
-    /// captures the value at entry (on main, before its coreQueue hop)
-    /// and the main-hop append drops the mark when the generation moved
-    /// — closing the race where a pre-clear snapshot's append drained
-    /// AFTER resetForClear wiped the ring and re-inserted a mark
-    /// anchored to deleted scrollback (a phantom ⌘[ entry).
-    private var promptMarkGeneration: UInt64 = 0
-
-    /// Clear-epoch pair (audit S5-008, second half — found by the blind
-    /// regression test for the first half). The generation token guards
-    /// the recordPromptStart→append window, but the race ALSO spans the
-    /// event hop: the OSC 133 A event fires on coreQueue during feed
-    /// BEFORE ⌘K's clear, while the main-side event switch (and its
-    /// recordPromptStart call) drains AFTER clearAll completed on main —
-    /// so the generation captured at recordPromptStart entry was already
-    /// post-bump and the phantom mark still landed. The epoch is
-    /// captured AT EVENT-FIRE TIME on coreQueue (`clearEpochCore`,
-    /// coreQueue-confined, bumped inside clearAll's coreQueue.sync) and
-    /// compared on main against `clearEpochMain` (main-owned, bumped in
-    /// resetForClear): an event that predates the clear carries a
+    /// Clear-epoch pair (audit S5-008). The race spans the event hop: the
+    /// OSC 133 A event fires on coreQueue during feed BEFORE ⌘K's clear, while
+    /// the main-side event switch (and its recordPromptStart call) drains AFTER
+    /// clearAll completed on main. The epoch is captured AT EVENT-FIRE TIME on
+    /// coreQueue (`clearEpochCore`, coreQueue-confined, bumped inside clearAll's
+    /// coreQueue.sync) and compared on main against `clearEpochMain` (main-owned,
+    /// bumped in resetForClear): an event that predates the clear carries a
     /// stale epoch and its append self-discards.
     private var clearEpochCore: UInt64 = 0
     private var clearEpochMain: UInt64 = 0
@@ -115,7 +96,7 @@ public final class PromptNavigator {
         self.session = session
     }
 
-    // MARK: - Clear-epoch / generation machinery (cross-queue, S5-008)
+    // MARK: - Clear-epoch machinery (cross-queue, S5-008)
 
     /// Read on **coreQueue** at OSC 133 event-fire time. Ordered against
     /// `bumpClearEpochCore()` because both run inside the session's coreQueue
@@ -135,14 +116,11 @@ public final class PromptNavigator {
 
     /// ⌘K (`clearAll`) reset of the main-owned prompt state. MUST run on
     /// **main** — the session calls it from the `@MainActor` `resetPromptState`
-    /// closure (via `onMain`). Bumps the ring generation so an in-flight
-    /// recordPromptStart whose snapshot predates the clear drops its append
-    /// instead of re-inserting a mark anchored to the scrollback we just
-    /// deleted — and the main-side clear epoch so events that FIRED before the
-    /// clear (but drain after) self-discard too. Then wipes the ring + last
-    /// mark + cycle cursor.
+    /// closure (via `onMain`). Bumps the main-side clear epoch so events that
+    /// FIRED before the clear (but drain after) self-discard instead of
+    /// re-inserting a mark anchored to the scrollback we just deleted. Then
+    /// wipes the ring + last mark + cycle cursor.
     func resetForClear() {
-        promptMarkGeneration &+= 1
         clearEpochMain &+= 1
         session.promptMarks = []
         promptCursor = nil
@@ -151,76 +129,40 @@ public final class PromptNavigator {
 
     /// Reflow invalidation (audit S5-004/S5-005): ANY applied grid-size change
     /// invalidates lines-scrolled anchors. MUST run on **main** — the session
-    /// calls it from `noteAppliedGridSize`'s `main.async` hop. Bumps the
-    /// generation FIRST so any in-flight recordPromptStart append from the
-    /// pre-reflow grid self-discards (the S5-008 token doubles here), then
-    /// wipes the ring + cursor. Does NOT touch `lastPromptMark` or
+    /// calls it from `noteAppliedGridSize`'s `main.async` hop, which is queued
+    /// after the hop of every mark parsed before the resize, so it also wipes
+    /// those. Wipes the ring + cursor. Does NOT touch `lastPromptMark` or
     /// `clearEpochMain` — a reflow is not a clear.
     func invalidateForReflow() {
-        promptMarkGeneration &+= 1
         session.promptMarks = []
         promptCursor = nil
     }
 
     // MARK: - Prompt navigation
 
-    /// Record the (history, grid row) position at which an OSC 133 A
-    /// fired. Called on main from the event switch; the snapshot read
-    /// is dispatched async to coreQueue so a heavy feed backlog can't
-    /// block main while we wait for `bbterm.snapshot()` to drain.
+    /// Record the position at which an OSC 133 A was parsed. Called on main
+    /// from the event switch with the (lines scrolled, grid row) the core
+    /// stamped on the event as it parsed the mark. A snapshot taken here would
+    /// show wherever the core has got to by now: a burst of prompts or output
+    /// parsed behind the mark would collapse every mark onto the last row or
+    /// push it far below its prompt.
     /// A new prompt resets `promptCursor` to nil so the next jump
     /// starts from the newest mark.
-    func recordPromptStart(eventClearEpoch: UInt64) {
-        // M-12: tripwire the same way scroll / scrollToBottom / clearAll do.
-        // `coreQueue.sync` self-deadlocks if invoked from coreQueue, and the
-        // bbterm event handler's pre-main fast-path for ptyWrite already
-        // demonstrates a precedent for handlers calling back into us off
-        // their queue. Fail loud if a future caller lands here on coreQueue.
-        dispatchPrecondition(condition: .notOnQueue(session.coreQueue))
-        // Audit S5-008: capture the ring generation NOW (we're on main,
-        // ahead of the coreQueue hop). If ⌘K's resetForClear runs
-        // while our snapshot block is in flight, the generation moves
-        // and the append below self-discards instead of re-inserting a
-        // mark anchored to wiped scrollback. The eventClearEpoch guard
-        // covers the OTHER half of the window: an event that fired on
-        // coreQueue before the clear but drained on main after it
-        // arrives here with a stale epoch (blind-test finding on the
-        // first cut of this fix).
+    func recordPromptStart(linesScrolled: UInt64, gridRow: Int, eventClearEpoch: UInt64) {
+        // The ring and cursor are main-owned.
+        dispatchPrecondition(condition: .onQueue(.main))
+        // Audit S5-008: an event that fired on coreQueue before ⌘K's clear but
+        // drained on main after it arrives here with a stale epoch.
         guard eventClearEpoch == clearEpochMain else { return }
-        let generation = promptMarkGeneration
-        // Audit L7. Was `coreQueue.sync(execute: bbterm.snapshot)` —
-        // under heavy streaming output the sync would block main
-        // until every queued feed ahead of us drained. The audit
-        // acknowledged "missing a line or two of drift is negligible";
-        // hand the snapshot off async, then hop back to main to
-        // mutate `promptMarks` / `promptCursor` (those are owned by main).
-        session.coreQueue.async { [weak self, weak session = self.session] in
-            guard let self, let session else { return }
-            // Audit fix-#11 (2026-05-11): mirror the F11 / M-1 / L-1
-            // termination-gate pattern that feed / publishPendingSnapshot /
-            // applyPalette use. Without this, a coreQueue.async block
-            // already in flight when terminate() runs would still capture
-            // a snapshot and queue a main-hop append, mutating
-            // promptMarks on a session whose consumers are tearing down.
-            if session.isTerminatedLocked() { return }
-            guard let snap = session.bbterm.snapshot() else { return }
-            let mark = PromptMark(linesScrolled: snap.linesScrolled, gridRow: snap.cursorRow)
-            DispatchQueue.main.async { [weak self, weak session] in
-                guard let self, let session else { return }
-                // Re-check on the main hop: terminate() could have run
-                // between the coreQueue body and main drain.
-                if session.isTerminatedLocked() { return }
-                // Audit S5-008: a clear/reflow between capture and this
-                // drain invalidated the anchor — drop instead of
-                // re-inserting a phantom mark.
-                guard generation == self.promptMarkGeneration else { return }
-                session.promptMarks.append(mark)
-                if session.promptMarks.count > Self.promptMarkCap {
-                    session.promptMarks.removeFirst(session.promptMarks.count - Self.promptMarkCap)
-                }
-                self.promptCursor = nil
-            }
+        // Audit fix-#11: terminate() could have run between the event firing
+        // and this main drain; don't mutate promptMarks on a session whose
+        // consumers are tearing down.
+        if session.isTerminatedLocked() { return }
+        session.promptMarks.append(PromptMark(linesScrolled: linesScrolled, gridRow: gridRow))
+        if session.promptMarks.count > Self.promptMarkCap {
+            session.promptMarks.removeFirst(session.promptMarks.count - Self.promptMarkCap)
         }
+        promptCursor = nil
     }
 
     /// Scroll the viewport to the previous recorded prompt. First press

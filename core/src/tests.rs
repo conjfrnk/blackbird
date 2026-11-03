@@ -125,6 +125,8 @@ fn callback_cell_allows_serialized_cross_thread_access() {
             payload: std::ptr::null(),
             len: 0,
             i32_arg: 0,
+            cursor_row: 0,
+            lines_scrolled: 0,
         });
     }
     let cell_clone = Arc::clone(&cell);
@@ -134,6 +136,8 @@ fn callback_cell_allows_serialized_cross_thread_access() {
             payload: std::ptr::null(),
             len: 0,
             i32_arg: 0,
+            cursor_row: 0,
+            lines_scrolled: 0,
         });
     })
     .join()
@@ -2634,6 +2638,8 @@ fn routing_listener_arc_survives_bbterm_drop() {
             payload: std::ptr::null(),
             len: 0,
             i32_arg: 0,
+            cursor_row: 0,
+            lines_scrolled: 0,
         });
 
         // Same for the color queue: push must not touch freed

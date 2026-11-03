@@ -120,9 +120,8 @@ public final class TerminalSession: ObservableObject {
     @Published public internal(set) var promptMarks: [PromptMark] = []
 
     /// The prompt-mark navigation concern (the ring's cursor, the scroll-to-mark
-    /// math, the OSC 133 A record path, and the **two-token clear-epoch /
-    /// generation** machinery that defends against phantom marks across a clear
-    /// or reflow) lives in `PromptNavigator`. The `@Published` ring above and
+    /// math, the OSC 133 A record path, and the **clear-epoch** machinery that
+    /// defends against phantom marks across a clear) lives in `PromptNavigator`. The `@Published` ring above and
     /// `lastPromptMark` below stay here as the observable UI surface — the
     /// navigator drives them through its `unowned session`, exactly as
     /// `SnapshotCoalescer` drives `@Published snapshot` via `publish(_:)`.
@@ -666,7 +665,7 @@ public final class TerminalSession: ObservableObject {
     // MARK: - Prompt navigation
     //
     // The ring's cursor, the scroll-to-mark math, the OSC 133 A record path, and
-    // the two-token clear-epoch / generation machinery live in `PromptNavigator`
+    // the clear-epoch machinery live in `PromptNavigator`
     // (REFACTOR.md Part IV — prompt-nav peel). These are thin forwarders so menu
     // actions / `AppDelegate` / `PromptJumpTests` bind unchanged.
 
@@ -830,11 +829,9 @@ public final class TerminalSession: ObservableObject {
         // e.g. `coreQueue.async(execute:)` would now fail to compile,
         // instead of trapping at runtime via `MainActor.assumeIsolated`.
         //
-        // The body (S5-008: bump the ring generation so an in-flight
-        // recordPromptStart whose snapshot predates the clear drops its
-        // append instead of re-inserting a mark anchored to deleted
-        // scrollback — and the main-side clear epoch so events that FIRED
-        // before the clear but drain after self-discard too; then wipe the
+        // The body (S5-008: bump the main-side clear epoch so events that
+        // FIRED before the clear but drain after self-discard instead of
+        // re-inserting a mark anchored to deleted scrollback; then wipe the
         // ring + last-mark + cursor) lives in `PromptNavigator.resetForClear`.
         let resetPromptState: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
@@ -1311,18 +1308,21 @@ public final class TerminalSession: ObservableObject {
             // the trust classification + store run here exactly as the
             // inline switch did.
             cwdTracker.handleCwdChanged(path)
-        case .promptMark(let kind, let exitCode):
+        case .promptMark(let kind, let exitCode, let linesScrolled, let cursorRow):
             // Shell integration: A = prompt start, B = command start,
             // C = output start, D = command end (with exit code).
             self.lastPromptMark = (kind, exitCode)
             // Record kind-A positions so the user can jump back to
-            // previous prompts. A fresh snapshot pins (history, row)
-            // at this instant — the main-queue hop means the core
-            // queue may have advanced slightly, but missing a line
-            // or two of drift is negligible next to a multi-screen
-            // scrollback jump.
+            // previous prompts. The position is the one the core stamped
+            // when it parsed the mark: a snapshot taken here would come
+            // after every chunk queued behind the mark, which for a burst
+            // (cat of a log, pasted type-ahead) is thousands of lines on.
             if kind == .promptStart {
-                self.promptNavigator.recordPromptStart(eventClearEpoch: clearEpochAtDispatch)
+                self.promptNavigator.recordPromptStart(
+                    linesScrolled: linesScrolled,
+                    gridRow: cursorRow,
+                    eventClearEpoch: clearEpochAtDispatch
+                )
             }
         case .fatal(let msg):
             // Surface as a title prefix for visibility — the unified

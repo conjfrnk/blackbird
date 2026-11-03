@@ -402,3 +402,26 @@ the reason each was left:
   `preferredFrameRateRange`; not adopted here because the 3-drawable pool
   + MTKView loop is what unlocked steady 120 Hz on ProMotion and a swap
   needs a hands-on ProMotion measurement, not just CI.
+
+## Prompt-mark positions — residuals of the parse-time stamp
+
+The core stamps each OSC 133;A mark with the cursor row and lines-scrolled
+counter as they stand when the mark is parsed (`BBEvent.cursor_row` /
+`lines_scrolled`), so ⌘↑/⌘↓ stay exact for bursts of prompts. Two residuals:
+
+- **Several prompts inside ONE DEC 2026 synchronized update share a
+  position.** While an update is open the grid only buffers, so the core
+  holds the marks and stamps them as soon as the update is replayed
+  (`input.rs::advance_grid`). That is exact for a prompt that is the last
+  thing in its update, and for prompts in separate updates, but vte replays
+  a buffer in one call, so N prompts (or output after a prompt) inside the
+  same BSU/ESU pair all read the grid after the replay. Shells wrap one
+  prompt per update; a recorded session replayed inside a single update is
+  the only realistic trigger. Fix would need a replay hook in `vendor/vte`.
+- **zsh marks can sit one row above the prompt after output with no
+  trailing newline.** `osc133.zsh` emits `A` from `precmd`, which runs before
+  `PROMPT_SP` moves the prompt to the next row, so the stamp is the last
+  output line.
+  Cosmetic (the prompt is the row below the jump target); emitting `A` from
+  the prompt string instead would move it but risks the PROMPT_SUBST issue
+  the B-mark already works around.

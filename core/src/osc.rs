@@ -5,9 +5,10 @@
 //! mutation path (Part I §8). Moved out of the monolith verbatim
 //! (REFACTOR.md Wave 1); behavior unchanged.
 
+use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::{Params, Perform};
 
-use crate::callback::CallbackCell;
+use crate::callback::{CallbackCell, RoutingListener};
 use crate::event::{BBEvent, BBEventKind};
 use crate::rate_limit::{EventRateState, PROMPT_MARK_PER_SECOND};
 use crate::scrub::{
@@ -30,6 +31,8 @@ macro_rules! osc_scanner {
     ($bb:expr) => {
         $crate::osc::OscScanner {
             cell: &$bb.callback,
+            term: &$bb.term,
+            sync_pending: $bb.processor.sync_timeout().sync_timeout().is_some(),
             tap: &mut $bb.osc_tap,
             latches: &mut $bb.osc_latches,
             prompt_mark_rate: &mut $bb.prompt_mark_rate,
@@ -69,6 +72,19 @@ pub(crate) use osc_scanner;
 /// scanner is re-created per call and borrows the state via `&mut`.
 pub(crate) struct OscScanner<'a> {
     pub(crate) cell: &'a CallbackCell,
+    /// The grid, read only to stamp an OSC 133;A mark with where the cursor is
+    /// when the mark is parsed. `process_input` advances the tap over exactly
+    /// the bytes that precede a `133;A`, so the grid is in step with it there
+    /// UNLESS a DEC 2026 synchronized update is open (`sync_pending`): then
+    /// the grid parser is only buffering, and the cursor is where it was
+    /// before the update began.
+    pub(crate) term: &'a Term<RoutingListener>,
+    /// A DEC 2026 synchronized update is open as this scanner is built, so the
+    /// grid has NOT consumed the bytes the tap is about to see. A prompt mark
+    /// parsed now cannot be stamped from `term`; it is held on
+    /// `tap.held_prompt_marks` until the update closes
+    /// (`release_held_prompt_marks`).
+    pub(crate) sync_pending: bool,
     /// DCS / OSC 99 / `modifyOtherKeys` state that must persist across
     /// `bb_term_input` calls (the scanner is rebuilt per call).
     pub(crate) tap: &'a mut OscTapState,
@@ -117,6 +133,22 @@ pub(crate) struct OscTapState {
     /// `CSI > 4 ; N m`. Swift-side KeyEncoder reads this indirectly via
     /// `bb_mode::MODIFY_OTHER_KEYS` (any non-zero level -> bit set).
     pub(crate) modify_other_keys: u8,
+    /// OSC 133 marks parsed while a DEC 2026 synchronized update was open,
+    /// oldest first, awaiting the replay that moves the grid to where the
+    /// stream is. Every kind is held (not just A) so A/B/C/D reach the host in
+    /// the order they were parsed. Bounded by the mark rate cap and by the
+    /// 2 MiB sync buffer, since every held mark's bytes sit inside it.
+    pub(crate) held_prompt_marks: Vec<HeldPromptMark>,
+}
+
+/// An OSC 133 mark that passed the scanner's checks but was parsed while the
+/// grid lagged the stream (a DEC 2026 synchronized update was open).
+#[derive(Debug)]
+pub(crate) struct HeldPromptMark {
+    /// `BBPromptMarkKind` as `u8` (A/B/C/D = 1..=4).
+    pub(crate) kind: u8,
+    /// Exit code (D) or shell-supplied metadata (A/B/C), already validated.
+    pub(crate) payload: Vec<u8>,
 }
 
 impl Default for OscTapState {
@@ -128,6 +160,7 @@ impl Default for OscTapState {
             decrqss_buf: Vec::with_capacity(16),
             osc99_pending: None,
             modify_other_keys: 0,
+            held_prompt_marks: Vec::new(),
         }
     }
 }
@@ -143,6 +176,7 @@ impl OscTapState {
         self.decrqss_buf.clear();
         self.osc99_pending = None;
         self.modify_other_keys = 0;
+        self.held_prompt_marks.clear();
     }
 }
 
@@ -273,6 +307,8 @@ impl Perform for OscScanner<'_> {
                         payload: reply.as_ptr(),
                         len: reply.len(),
                         i32_arg: 0,
+                        cursor_row: 0,
+                        lines_scrolled: 0,
                     });
                 }
             }
@@ -366,6 +402,8 @@ impl Perform for OscScanner<'_> {
                     payload: reply.as_ptr(),
                     len: reply.len(),
                     i32_arg: 0,
+                    cursor_row: 0,
+                    lines_scrolled: 0,
                 });
             }
             return;
@@ -399,6 +437,8 @@ unsafe fn dispatch_xtgettcap(cell: &CallbackCell, payload: &[u8]) {
             payload: reply.as_ptr(),
             len: reply.len(),
             i32_arg: 0,
+            cursor_row: 0,
+            lines_scrolled: 0,
         });
         // `reply` drops here; `fire` is synchronous so the C callback
         // has already consumed the bytes by the time we release.
@@ -661,6 +701,8 @@ impl OscScanner<'_> {
                 payload: payload.as_ptr(),
                 len: payload.len(),
                 i32_arg: 0,
+                cursor_row: 0,
+                lines_scrolled: 0,
             });
         }
     }
@@ -961,6 +1003,8 @@ impl OscScanner<'_> {
             payload: decoded.as_ptr(),
             len: decoded.len(),
             i32_arg: 0,
+            cursor_row: 0,
+            lines_scrolled: 0,
         };
         // SAFETY: `cell` is a live reference for the duration of this call;
         // `fire` invokes the C callback synchronously, so `decoded` (owned
@@ -1106,17 +1150,50 @@ impl OscScanner<'_> {
             }
         }
 
-        let ev = BBEvent {
-            kind: BBEventKind::PromptMark,
-            payload: payload.as_ptr(),
-            len: payload.len(),
-            // Pack kind (A/B/C/D as 1..=4) into i32_arg so Swift can
-            // branch without parsing the payload.
-            i32_arg: kind as i32,
-        };
+        // The grid lags the stream while a synchronized update is open (vte
+        // only buffers until ESU, the timeout, or the 2 MiB cap), so the
+        // cursor read below would predate everything the update drew. Hold
+        // the mark, and every mark behind it so A/B/C/D keep their order, for
+        // `release_held_prompt_marks` to stamp once the update is replayed.
+        if self.sync_pending || !self.tap.held_prompt_marks.is_empty() {
+            self.tap.held_prompt_marks.push(HeldPromptMark {
+                kind,
+                payload: payload.to_vec(),
+            });
+            return;
+        }
+        let ev = prompt_mark_event(self.term, kind, payload);
         // SAFETY: `payload` borrows `params` which the caller (vte parser)
         // owns for the duration of this callback. `fire` delivers
         // synchronously, so the borrow is alive for the full dispatch.
         unsafe { self.cell.fire(ev) };
+    }
+}
+
+/// Build the `PromptMark` event for `kind` (`BBPromptMarkKind` as `u8`).
+///
+/// Kind A carries the cursor position of `term` at the moment of the call, the
+/// same expressions `snapshot()` uses for `cursor_row` and `lines_scrolled`;
+/// the caller must call it when `term` has consumed exactly the bytes before
+/// the mark. B/C/D carry zeroes.
+pub(crate) fn prompt_mark_event(term: &Term<RoutingListener>, kind: u8, payload: &[u8]) -> BBEvent {
+    let is_prompt_start = kind == BBPromptMarkKind::A as u8;
+    BBEvent {
+        kind: BBEventKind::PromptMark,
+        payload: payload.as_ptr(),
+        len: payload.len(),
+        // Pack kind (A/B/C/D as 1..=4) into i32_arg so Swift can
+        // branch without parsing the payload.
+        i32_arg: kind as i32,
+        cursor_row: if is_prompt_start {
+            term.grid().cursor.point.line.0.max(0) as u16
+        } else {
+            0
+        },
+        lines_scrolled: if is_prompt_start {
+            term.primary_lines_scrolled()
+        } else {
+            0
+        },
     }
 }

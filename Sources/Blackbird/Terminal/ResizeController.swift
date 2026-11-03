@@ -309,14 +309,12 @@ final class ResizeController {
         // dispatch context is coreQueue, and a synchronous @Published
         // reaction touching scroll/resize would trip their
         // .notOnQueue(coreQueue) tripwires from inside the held queue.
-        // Async delivery is safe: the S5-008 generation token already
-        // makes a late ring wipe race-free against in-flight appends.
+        // Async delivery is safe: this hop is queued after the hop of every
+        // prompt mark parsed before the resize, so the wipe also takes those
+        // pre-reflow marks (see PromptNavigator's reflow note).
         DispatchQueue.main.async { [weak session = self.session] in
             guard let session else { return }
-            // Bump the generation FIRST so any in-flight
-            // recordPromptStart append from the pre-reflow grid
-            // self-discards (audit S5-008's token doubles here), then
-            // wipe the ring + cursor. Main-confined, exactly as before.
+            // Wipe the ring + cursor. Main-confined, exactly as before.
             session.promptNavigator.invalidateForReflow()
         }
     }

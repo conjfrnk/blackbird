@@ -444,7 +444,7 @@ final class ShellIntegrationFirstPromptMarkBlindTests: XCTestCase {
             "rig precondition: BBTerm(80x24) must construct")
         var events: [BBTerm.PromptMarkKind] = []
         term.onEvent { event in
-            if case .promptMark(let kind, _) = event { events.append(kind) }
+            if case .promptMark(let kind, _, _, _) = event { events.append(kind) }
         }
         term.input(bytes)
 

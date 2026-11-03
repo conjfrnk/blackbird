@@ -77,6 +77,8 @@ pub(crate) unsafe fn guard_with_term<T>(
                         },
                         len: bytes.len(),
                         i32_arg: 0,
+                        cursor_row: 0,
+                        lines_scrolled: 0,
                     };
                     // Double-panic safety: if the callback itself panics,
                     // catch and discard. Better to drop the Fatal notification

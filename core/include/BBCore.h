@@ -321,6 +321,22 @@ struct BBEvent {
    * - 0 for every other event kind.
    */
   int32_t i32_arg;
+  /**
+   * `PromptMark` kind A: the cursor's grid row (0 = top of the live grid)
+   * at the instant the mark was parsed. Same value `BBSnap::cursor_row`
+   * would have held there. A mark inside a DEC 2026 synchronized update is
+   * delivered when the update is replayed, with the position the grid has
+   * then. 0 for every other mark kind and event kind.
+   */
+  uint16_t cursor_row;
+  /**
+   * `PromptMark` kind A: the primary screen's monotonic lines-scrolled
+   * counter at the instant the mark was parsed (`BBSnap::lines_scrolled`
+   * then). With `cursor_row` it pins the prompt's absolute line, which a
+   * snapshot taken after the event cannot: the core may have parsed further
+   * by then. 0 for every other mark kind and event kind.
+   */
+  uint64_t lines_scrolled;
 };
 
 /**

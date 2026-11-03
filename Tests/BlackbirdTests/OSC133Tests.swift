@@ -24,7 +24,7 @@ final class OSC133Tests: XCTestCase {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 3)))
         var captured: (BBTerm.PromptMarkKind, String)?
         term.onEvent { event in
-            if case .promptMark(let kind, let exit) = event, captured == nil {
+            if case .promptMark(let kind, let exit, _, _) = event, captured == nil {
                 captured = (kind, exit)
             }
         }

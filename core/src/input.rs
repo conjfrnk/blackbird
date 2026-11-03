@@ -6,7 +6,7 @@
 
 use crate::color::palette_default_rgb;
 use crate::event::{BBEvent, BBEventKind};
-use crate::osc::osc_scanner;
+use crate::osc::{osc_scanner, prompt_mark_event};
 use crate::rate_limit::{COLOR_QUERY_REPLY_PER_SECOND, COLOR_QUERY_REPLY_WINDOW};
 use crate::{BBSyncStatus, BBTerm};
 
@@ -15,6 +15,10 @@ use crate::{BBSyncStatus, BBTerm};
 /// it, not a string cut by a read boundary. A boundary leaves the count at 1.
 /// `bb_term_clear_all` aborts the string at this count.
 pub(crate) const WEDGED_STRING_CHUNKS: u32 = 2;
+
+/// DEC 2026 synchronized-update end (`CSI ? 2026 l`), the exact bytes vte's
+/// sync handling scans for.
+const ESU_CSI: &[u8] = b"\x1b[?2026l";
 
 /// Feed one chunk of PTY bytes through the grid processor + parallel OSC tap.
 ///
@@ -36,7 +40,11 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // any CSI sequence, so the OSC-parser is only needed when a prior
     // chunk left one pending.
     if memchr::memchr(0x1B, slice).is_none() {
-        bb.processor.advance(&mut bb.term, slice);
+        // The tap runs BEFORE the grid, as in the ESC branch below: an OSC 133
+        // mark completed here (the tail of a sequence the read boundary cut)
+        // is stamped with the cursor as it stood before this chunk's text
+        // moved it.
+        //
         // OSC parser skip: pure-text chunks don't need the parallel
         // state machine UNLESS (a) a prior chunk opened an OSC that
         // may still be open, or (b) this chunk contains a BEL that
@@ -74,6 +82,7 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
             // and every plain-text chunk ran through both parsers.
             bb.osc_possibly_pending = !bb.osc_parser.is_ground();
         }
+        advance_grid(bb, slice);
         finish_advance(bb);
         return;
     }
@@ -97,6 +106,14 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     // the `\` of an ST, is invisible to them. Bytes inside a DEC 2026
     // synchronized update are replayed whole when it closes, so replies
     // queued there keep the old order (KNOWN_ISSUES.md).
+    //
+    // The same cuts give OSC 133;A its cursor position: the tap stamps a
+    // kind-A mark with the cursor at the moment it parses it (Swift cannot
+    // recover that later - a snapshot is taken after the whole burst), and
+    // since every segment starts at an ESC the grid has consumed everything
+    // before the mark and nothing after it. Inside a DEC 2026 synchronized
+    // update the grid only buffers, so the tap holds the marks it parses and
+    // `advance_grid` stamps them once the update has been replayed.
     let mut start = 0;
     while start < slice.len() {
         let end = if slice[start] == 0x1B && bb.processor.in_string() {
@@ -111,7 +128,7 @@ pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
             bb.osc_parser.advance(&mut osc, segment);
         }
         bb.osc_possibly_pending = !bb.osc_parser.is_ground();
-        bb.processor.advance(&mut bb.term, segment);
+        advance_grid(bb, segment);
         drain_color_requests(bb);
         start = end;
     }
@@ -153,6 +170,69 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
              row for up to ~1000 more scrolls after that). Symptom: 'links stopped working'. \
              One-shot per session."
         );
+    }
+}
+
+/// Advance the grid parser over `bytes`, delivering the OSC 133 marks the tap
+/// held as soon as this advance replays the synchronized update they sit in.
+///
+/// While a DEC 2026 synchronized update is open, `Processor::advance` only
+/// appends to its sync buffer, so the grid lags the stream and a mark the tap
+/// parses meanwhile cannot be stamped from it (see `OscScanner::sync_pending`).
+/// The advance that replays the buffer is the one that moves the grid past
+/// those marks, and a mark is stamped from the grid right after it. So while
+/// marks are held, `bytes` is advanced in two steps at the first ESU: bytes
+/// after the ESU (the command's output, say) then cannot move the cursor before
+/// the held marks read it. A pure append grows the buffer by exactly the bytes
+/// fed; any other outcome, or the update no longer being open, means a replay
+/// happened. That also covers the replays the ESU scan cannot see: the 2 MiB
+/// cap, an ESU split across feeds, and an ESU followed by a further BSU, which
+/// leaves that BSU's bytes buffered.
+///
+/// Marks held by `flush_sync_update` are released there instead.
+///
+/// # Safety
+/// Same single-thread discipline as `process_input`.
+unsafe fn advance_grid(bb: &mut BBTerm, mut bytes: &[u8]) {
+    while !bytes.is_empty() && !bb.osc_tap.held_prompt_marks.is_empty() {
+        let (step, rest) = match memchr::memmem::find(bytes, ESU_CSI) {
+            Some(at) => bytes.split_at(at + ESU_CSI.len()),
+            None => (bytes, &bytes[bytes.len()..]),
+        };
+        let buffered_if_appended = bb.processor.sync_bytes_count() + step.len();
+        bb.processor.advance(&mut bb.term, step);
+        let still_buffering = bb.processor.sync_timeout().sync_timeout().is_some()
+            && bb.processor.sync_bytes_count() == buffered_if_appended;
+        if !still_buffering {
+            release_held_prompt_marks(bb);
+        }
+        bytes = rest;
+    }
+    bb.processor.advance(&mut bb.term, bytes);
+}
+
+/// Deliver the OSC 133 marks the tap held while a DEC 2026 synchronized
+/// update was open, oldest first, now that the update has been replayed into
+/// the grid.
+///
+/// The tap parsed each mark when its bytes arrived, but the grid only catches
+/// up at the replay, so the cursor position a kind-A mark carries is read here
+/// instead, from the grid as the replay left it. That is exact for a single
+/// prompt in an update. vte replays the whole buffer in one go, so several
+/// prompts inside ONE update share the position the grid holds after the
+/// replay (a position between them is never observable); prompts in separate
+/// updates, or outside any, are each exact.
+///
+/// # Safety
+/// Same single-thread discipline as `process_input`; fires events, so the
+/// caller must not be inside an event dispatch.
+unsafe fn release_held_prompt_marks(bb: &mut BBTerm) {
+    let held = std::mem::take(&mut bb.osc_tap.held_prompt_marks);
+    for mark in &held {
+        let ev = prompt_mark_event(&bb.term, mark.kind, &mark.payload);
+        // `fire` delivers synchronously, so `mark.payload` outlives the
+        // callback that borrows it.
+        bb.callback.fire(ev);
     }
 }
 
@@ -214,8 +294,13 @@ pub(crate) unsafe fn flush_sync_update(bb: &mut BBTerm, force: bool) -> bool {
     // It must never re-feed the buffer to `bb.osc_parser`: that parser is
     // advanced over the raw chunk at feed time regardless of sync state, so
     // OSC 7 (cwd), OSC 133 (prompt marks) and the modifyOtherKeys CSI have
-    // already fired. Re-feeding would double-fire them.
+    // already fired. Re-feeding would double-fire them. (The one thing a mark
+    // parsed inside the update is owed is its grid position, which only the
+    // replay provides: the tap held it, and it is delivered just below.)
     bb.processor.stop_sync(&mut bb.term);
+    // The update is closed (post-condition above), so the marks the tap held
+    // inside it can be stamped from the replayed grid.
+    release_held_prompt_marks(bb);
     finish_advance(bb);
     true
 }
@@ -298,6 +383,8 @@ unsafe fn drain_color_requests(bb: &mut BBTerm) {
             payload: bytes.as_ptr(),
             len: bytes.len(),
             i32_arg: 0,
+            cursor_row: 0,
+            lines_scrolled: 0,
         });
         // Audit fix-#14 (2026-05-21): increment AFTER successful fire so
         // a user-callback panic (caught by guard_with_term's outer
