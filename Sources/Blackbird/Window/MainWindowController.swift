@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Metal
 import os
+import QuartzCore
 
 extension Notification.Name {
     /// Fired whenever any MainWindowController observes its own window's
@@ -465,14 +466,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// the controller) and the `exitCancellable` binding; delegates session
     /// creation, the proxy-icon binding, and the failure-recovery alert to
     /// `SessionLifecycle`. `internal` so `SessionLifecycle`'s "Retry" sheet
-    /// handler can re-invoke it.
-    func startSession(inView view: TerminalView) {
+    /// handler can re-invoke it. `bypassShellPreference` skips Settings → Shell
+    /// for this one start (the custom-shell startup-failure fallback below).
+    func startSession(inView view: TerminalView, bypassShellPreference: Bool = false) {
+        let preference = bypassShellPreference ? nil : Preferences.shared.shellPath
         let resolved = ShellResolver.resolve(
-            preference: Preferences.shared.shellPath,
+            preference: preference,
             loginShell: ShellResolver.loginShellFromPasswd(),
             environmentShell: ProcessInfo.processInfo.environment["SHELL"],
             isExecutable: ShellResolver.isExecutableFile
         )
+        let usesCustomShell = !resolved.preferenceRejected
+            && !(preference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").isEmpty
         if resolved.preferenceRejected {
             Self.tabsLogger.error("Settings → Shell names '\(Preferences.shared.shellPath, privacy: .public)', which is not an executable file; using \(resolved.path, privacy: .public)")
         }
@@ -497,7 +502,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 sessionProvider: { [weak self] in self?.session },
                 viewProvider:    { [weak self] in self?.terminalView }
             )
-            bindSessionAutoClose(s)
+            bindSessionAutoClose(s, in: view, customShell: usesCustomShell ? shell : nil)
             sessionLifecycle.bindSessionProxyIcon(s)
         } catch {
             // Shell spawn failed (bad $SHELL, exec permission denied, etc.).
@@ -520,20 +525,48 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// next tick so the modal's result handler runs first. (main-window F4)
     /// The `exitCancellable` field stays on the controller (cancelled in
     /// `windowWillClose`); the auto-close logic lives in `SessionLifecycle`.
-    private func bindSessionAutoClose(_ s: TerminalSession) {
+    ///
+    /// `customShell` is the Settings → Shell program this session runs, nil for
+    /// the login-shell default. Any exit, whatever its status, within
+    /// `startupFailureWindow` of spawn is that program failing to start
+    /// (execv failure, dyld error, `/usr/bin/false`, a wrapper script that
+    /// ends in `exit 0` without exec'ing a shell), not the user typing `exit`.
+    /// Auto-closing would quit the app on every launch (last window) with no
+    /// way to reach Settings, so the tab restarts once on the login shell
+    /// instead; the fallback session binds with `customShell: nil` and closes
+    /// normally if it dies too. The only cost is a user typing `exit` in a
+    /// brand-new custom-shell tab inside the window, who gets a login-shell tab.
+    private func bindSessionAutoClose(_ s: TerminalSession, in view: TerminalView, customShell: String?) {
+        let spawnedAt = s.spawnedAt
         exitCancellable = s.$exitCode
             .compactMap { $0 }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
+            .sink { [weak self, weak view] code in
                 guard let self else { return }
                 // A core failure ends the child too, but the exit is ours, not
                 // the shell's: the sheet's Close Tab / Keep Open choice owns
                 // whether the window goes away. Auto-closing here would turn
                 // Keep Open into a close the moment the sheet is dismissed.
                 guard self.session?.coreFailureMessage == nil else { return }
+                let uptime = CACurrentMediaTime() - spawnedAt
+                if let customShell, let view, uptime < Self.startupFailureWindow {
+                    Self.tabsLogger.error("Settings → Shell '\(customShell, privacy: .public)' exited with status \(code) \(Int(uptime * 1000)) ms after launch; falling back to the login shell")
+                    // Hop first: startSession replaces `exitCancellable`, which
+                    // must not be released from inside its own sink.
+                    DispatchQueue.main.async { [weak self, weak view] in
+                        guard let self, let view, !self.isClosing else { return }
+                        self.startSession(inView: view, bypassShellPreference: true)
+                    }
+                    return
+                }
                 self.sessionLifecycle.deferredAutoCloseIfNeeded()
             }
     }
+
+    /// How soon after spawn an exit of the Settings → Shell program counts as
+    /// a failed start. Measured failures take 15-300 ms; a user typing `exit`
+    /// in a custom shell takes longer than this.
+    private static let startupFailureWindow: TimeInterval = 2.0
 
     func terminateSessions() {
         session?.terminate()
