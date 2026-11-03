@@ -44,9 +44,9 @@
 //!                                 `Term::swap_alt`, `Term::scroll_down_relative`,
 //!                                 `Term::scroll_up_relative` (term/mod.rs)
 //!   emoji ZWJ / skin-tone width . `is_pictographic`, `is_emoji_modifier`,
-//!                                 `Term::can_widen_prev_glyph`, `Term::widen_prev_glyph`,
-//!                                 `Term::joins_emoji_cluster` (term/mod.rs) and the
-//!                                 `Handler::input` call sites
+//!                                 `Term::prev_glyph_column`, `Term::can_widen_prev_glyph`,
+//!                                 `Term::widen_prev_glyph`, `Term::joins_emoji_cluster`
+//!                                 (term/mod.rs) and the `Handler::input` call sites
 //!
 //! Rig preconditions (so a green run cannot mean "looked at nothing"):
 //! every site must resolve to exactly one item (its enclosing scope is also
@@ -612,6 +612,11 @@ fn emoji_cluster_width_fix_carries_reapply_marker() {
                 file: TERM,
                 scope: None,
                 needle: "fn is_emoji_modifier",
+            },
+            Site {
+                file: TERM,
+                scope: Some(TERM_IMPL),
+                needle: "fn prev_glyph_column",
             },
             Site {
                 file: TERM,

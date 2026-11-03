@@ -156,8 +156,8 @@ fn is_pictographic(c: char) -> bool {
     )
 }
 
-/// Blackbird addition (re-apply on bump): Emoji_Modifier, the five Fitzpatrick skin-tone
-/// swatches U+1F3FB..=U+1F3FF.
+/// Blackbird fix (re-apply on bump): Emoji_Modifier, the five Fitzpatrick skin-tone swatches
+/// U+1F3FB..=U+1F3FF.
 #[inline]
 fn is_emoji_modifier(c: char) -> bool {
     matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
@@ -1146,6 +1146,25 @@ impl<T> Term<T> {
         cursor_cell.extra = extra;
     }
 
+    /// Blackbird fix (re-apply on bump): the column of the glyph cell a zero-width scalar attaches
+    /// to: the cell left of the cursor, or the cursor's own cell while a wrap is pending, stepped
+    /// back once more off a wide glyph's spacer. The only place that resolves "the previous
+    /// cell", shared by `input` (which pushes the mark) and `joins_emoji_cluster` (which decides
+    /// whether to), so the decision and the cell the scalar lands on cannot disagree. At column 0
+    /// without a pending wrap it stays on the cell under the cursor, as upstream always did.
+    #[inline]
+    fn prev_glyph_column(&self) -> Column {
+        let point = self.grid.cursor.point;
+        let mut column = point.column;
+        if !self.grid.cursor.input_needs_wrap {
+            column.0 = column.saturating_sub(1);
+        }
+        if self.grid[point.line][column].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            column.0 = column.saturating_sub(1);
+        }
+        column
+    }
+
     /// Blackbird fix (re-apply on bump): whether the glyph at `column` (the cell `input` attaches
     /// zero-width marks to) may be retroactively widened to a native wide glyph by
     /// `widen_prev_glyph`. This is the guard of the VS16 / keycap promotion, shared with
@@ -1242,20 +1261,13 @@ impl<T> Term<T> {
             return false;
         }
         let point = self.grid.cursor.point;
-        let needs_wrap = self.grid.cursor.input_needs_wrap;
-        if self.glyph_end != Some(point) || (point.column.0 == 0 && !needs_wrap) {
+        if self.glyph_end != Some(point)
+            || (point.column.0 == 0 && !self.grid.cursor.input_needs_wrap)
+        {
             return false;
         }
-        // Previous cell, exactly as the zero-width branch of `input` resolves it.
-        let mut column = point.column;
-        if !needs_wrap {
-            column.0 -= 1;
-        }
-        let row = &self.grid[point.line];
-        if row[column].flags.contains(Flags::WIDE_CHAR_SPACER) {
-            column.0 = column.saturating_sub(1);
-        }
-        let base = &row[column];
+        let column = self.prev_glyph_column();
+        let base = &self.grid[point.line][column];
         if !is_pictographic(base.c) {
             return false;
         }
@@ -1330,17 +1342,9 @@ impl<T: EventListener> Handler for Term<T> {
 
         // Handle zero-width characters.
         if width == 0 {
-            // Get previous column.
-            let mut column = self.grid.cursor.point.column;
-            if !self.grid.cursor.input_needs_wrap {
-                column.0 = column.saturating_sub(1);
-            }
-
-            // Put zerowidth characters over first fullwidth character cell.
+            // Put zerowidth characters over the previous glyph's first cell.
+            let column = self.prev_glyph_column();
             let line = self.grid.cursor.point.line;
-            if self.grid[line][column].flags.contains(Flags::WIDE_CHAR_SPACER) {
-                column.0 = column.saturating_sub(1);
-            }
 
             // Blackbird fix (re-apply on bump): emoji-presentation / keycap / skin-tone width
             // parity. VS16 (U+FE0F), the keycap combiner (U+20E3) and an Emoji_Modifier that
