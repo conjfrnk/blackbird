@@ -98,6 +98,13 @@ final class MultiTabConcurrentSoakTests: XCTestCase {
     /// sustained main-queue stall from Combine sink fanout under the
     /// 6× session load).
     private static let mainQueueMaxGapToleranceSeconds: Double = 0.032
+    /// Minimum wall time the responsiveness test keeps all sessions feeding.
+    /// One 1 MiB pass per session finishes in ~0.2 s (the core parses far
+    /// faster than when this gate was sized), which leaves the 5 ms probe ~30 samples; the feeders
+    /// therefore repeat the payload until this window has elapsed. 1.5 s at
+    /// 5 ms is ~300 fires, clear of the 100-fire floor, and the terminal's
+    /// scrollback is bounded so the repeats do not grow memory.
+    private static let mainProbeMinFeedWindowSeconds: Double = 1.5
 
     // MARK: - Tests
 
@@ -349,11 +356,12 @@ final class MultiTabConcurrentSoakTests: XCTestCase {
         )
     }
 
-    /// Pre-flight cost: same shape as the RSS test (6 sessions × 1 MiB,
-    /// ~12 MiB peak, ~5 s wall) plus a main-queue probe timer firing
-    /// every 5 ms. The probe records max gap between fires; the
-    /// budgeted ~5 s × 200 fires/s = ~1000 timer callbacks per run,
-    /// negligible memory.
+    /// Pre-flight cost: same shape as the RSS test (6 sessions, ~12 MiB
+    /// peak) but each session re-feeds its 1 MiB payload for
+    /// `mainProbeMinFeedWindowSeconds` (~1.5 s wall, a few MiB parsed per
+    /// session, none retained), plus a main-queue probe timer firing
+    /// every 5 ms. The probe records max gap between fires; ~1.5 s ×
+    /// 200 fires/s = ~300 timer callbacks per run, negligible memory.
     ///
     /// Asserts: while 6 headless sessions feed concurrently, the main
     /// queue is responsive within 32 ms (2× frame budget). A regression
@@ -443,15 +451,18 @@ final class MultiTabConcurrentSoakTests: XCTestCase {
             )
             feedQueue.async {
                 defer { group.leave() }
-                var offset = 0
-                while offset < payload.count {
-                    let end = min(offset + Self.feedChunkBytes, payload.count)
-                    let chunk = payload.subdata(in: offset..<end)
-                    autoreleasepool {
-                        session.feedBytesForTests(chunk)
+                let windowEnd = CACurrentMediaTime() + Self.mainProbeMinFeedWindowSeconds
+                repeat {
+                    var offset = 0
+                    while offset < payload.count {
+                        let end = min(offset + Self.feedChunkBytes, payload.count)
+                        let chunk = payload.subdata(in: offset..<end)
+                        autoreleasepool {
+                            session.feedBytesForTests(chunk)
+                        }
+                        offset = end
                     }
-                    offset = end
-                }
+                } while CACurrentMediaTime() < windowEnd
             }
         }
 

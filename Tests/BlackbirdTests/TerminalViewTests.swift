@@ -114,6 +114,13 @@ final class TerminalViewTests: XCTestCase {
         )
         // Guarantee child reap even if the wait() below times out.
         defer { session.terminate() }
+        // The view sizes its grid from the saved font size, which
+        // `Preferences.shared` reads from the real UserDefaults. A large saved
+        // size (32 pt cells are 37 px tall) leaves the 900 pt frame with fewer
+        // than 24 rows, so pin the default the assertions below assume.
+        let savedFontSize = Preferences.shared.fontSize
+        Preferences.shared.fontSize = 13
+        defer { Preferences.shared.fontSize = savedFontSize }
         let device = MTLCreateSystemDefaultDevice()!
         let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 480), device: device)
         view.session = session

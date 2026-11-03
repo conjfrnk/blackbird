@@ -211,6 +211,19 @@ jobs:
       # Swift test target into multiple binaries or moving ASan to a
       # nightly job with a curated subset.
       - name: xcodebuild build + test
+        env:
+          # Unlocks the BB_RUN_STRESS_TESTS XCTSkipIf gate (~40 tests: real
+          # PTY -> TerminalSession -> snapshot, TerminalView resize / title
+          # wiring, Preferences repair + SwiftUI-bridge same-value guards).
+          # The gate exists for a CATransaction SEGV "under cumulative ASan",
+          # and this job runs with ASan off, so leaving it unset just skipped
+          # those tests on every PR. Only the TEST_RUNNER_ prefix reaches the
+          # xctest host (see nightly-soak.yml); a bare BB_RUN_STRESS_TESTS=1
+          # does not. The window-lifecycle and soak gates stay out of this
+          # shared process on purpose: nightly-soak runs them (lifecycle
+          # tests one xcodebuild process each, since several real windows in
+          # one xctest host crash it).
+          TEST_RUNNER_BB_RUN_STRESS_TESTS: "1"
         run: |
           # ENABLE_ADDRESS_SANITIZER=NO overrides the scheme's ASan
           # setting at the BUILD step (the -enableAddressSanitizer

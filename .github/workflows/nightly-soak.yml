@@ -44,7 +44,12 @@
 #   6. BBTermAdversarialTests::test_soak_10s_feedAndSnapshot
 #      (BB_RUN_SOAK=1) — the existing 10-second feed-and-snapshot soak
 #      with first-second / final peak ratio bound.
-#   7. RealLatencyProbeWindowedTests (BB_RUN_LATENCY_PROBE=1) — the
+#   7. MultiTabConcurrentSoakTests + SingleSessionSteadyStateLeakTests
+#      (BB_RUN_SOAK=1) — the 6-session fan-out RSS / main-thread-gap gate
+#      and the single-session 1 MiB steady-state / snapshot-churn drift
+#      gates. They sat behind the same gate but in no -only-testing list,
+#      so they ran in no job at all.
+#   8. RealLatencyProbeWindowedTests (BB_RUN_LATENCY_PROBE=1) — the
 #      P4.6 honesty fix. The PR-CI `latency-gate` job (ci.yml) only
 #      pins the LatencyProbe log-line FORMAT — the synthetic harness
 #      it runs measures back-to-back ~0 µs deltas, not real latency.
@@ -53,6 +58,11 @@
 #      until frames present, and asserts max sample > 0.5 ms (real
 #      frame latency, not the synthetic harness's ~0 µs floor).
 #      Canonical real-world keypress→pixel latency measurement.
+#   9. The seven BB_RUN_WINDOW_LIFECYCLE_TESTS=1 real-window tests (F-S6-001
+#      dock zombie, tabbingMode revert, band-click tab hijack, pill
+#      accessibility frames, close-confirm bypass, core-failure keep-open,
+#      joined-tab release) — each in its OWN xcodebuild process, because
+#      two real windows / merged tab groups in one xctest host crash it.
 #
 # Env-propagation hazard (load-bearing — read this before editing)
 # ----------------------------------------------------------------
@@ -230,8 +240,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     # 60-min cap - see rust-soak for rationale. Swift soak is
     # ~10 min wall (toolchain + xcodegen + universal core build +
-    # xcodebuild test for two test classes including 32x1 MiB
-    # session iterations + 10 s adversarial soak); 60 min is
+    # xcodebuild test for the soak classes including 32x1 MiB
+    # session iterations + 10 s adversarial soak, plus seven
+    # one-process window-lifecycle runs); 60 min is
     # headroom for runner-image churn on Xcode select / brew install.
     timeout-minutes: 60
     steps:
@@ -303,12 +314,14 @@ jobs:
         # into the test runner's environment. Confirmed working
         # on Xcode 16.4 and 26.6.
         #
-        # BB_RUN_SOAK gates BOTH Swift soak suites
-        # (SwiftSessionRSSReturnsToBaselineTests and
-        # BBTermAdversarialTests::test_soak_10s_*), so the single test
-        # action covers both Swift soak gates.
+        # BB_RUN_SOAK gates ALL the Swift soak suites
+        # (SwiftSessionRSSReturnsToBaselineTests,
+        # MultiTabConcurrentSoakTests, SingleSessionSteadyStateLeakTests
+        # and BBTermAdversarialTests::test_soak_10s_*), so the single test
+        # action covers every Swift soak gate - provided each class is
+        # named in the -only-testing list below.
         #
-        # `-only-testing` filters to the two soak test groups only;
+        # `-only-testing` filters to the named soak test classes only;
         # without this filter we'd run the entire 900+ test PR-CI
         # suite (which is what ci.yml exists for). The nightly soak
         # is exclusively for the env-gated and `#[ignore]`-gated
@@ -359,6 +372,8 @@ jobs:
             -scheme Blackbird \
             -destination "platform=macOS,arch=arm64" \
             -only-testing:BlackbirdTests/SwiftSessionRSSReturnsToBaselineTests \
+            -only-testing:BlackbirdTests/MultiTabConcurrentSoakTests \
+            -only-testing:BlackbirdTests/SingleSessionSteadyStateLeakTests \
             -only-testing:BlackbirdTests/BBTermAdversarialTests/test_soak_10s_feedAndSnapshot_underBoundedMemory \
             -only-testing:BlackbirdTests/RealLatencyProbeWindowedTests \
             -enableAddressSanitizer NO \
@@ -429,6 +444,18 @@ jobs:
           if ! grep -qE "Test Case .*test_soak_10s_feedAndSnapshot.*' passed" /tmp/swift-soak.log; then
             missing+=("BBTermAdversarialTests.test_soak_10s_feedAndSnapshot_underBoundedMemory")
           fi
+          if ! grep -qE "Test Case .*test_concurrent_headlessSessions_steadyStateRSS_returnsToBaseline.*' passed" /tmp/swift-soak.log; then
+            missing+=("MultiTabConcurrentSoakTests.test_concurrent_headlessSessions_steadyStateRSS_returnsToBaseline")
+          fi
+          if ! grep -qE "Test Case .*test_concurrent_headlessSessions_mainThreadResponsive.*' passed" /tmp/swift-soak.log; then
+            missing+=("MultiTabConcurrentSoakTests.test_concurrent_headlessSessions_mainThreadResponsive")
+          fi
+          if ! grep -qE "Test Case .*test_singleSession_steadyState_1Mb_no_drift.*' passed" /tmp/swift-soak.log; then
+            missing+=("SingleSessionSteadyStateLeakTests.test_singleSession_steadyState_1Mb_no_drift")
+          fi
+          if ! grep -qE "Test Case .*test_singleSession_steadyState_snapshotChurn_no_drift.*' passed" /tmp/swift-soak.log; then
+            missing+=("SingleSessionSteadyStateLeakTests.test_singleSession_steadyState_snapshotChurn_no_drift")
+          fi
           # P4.6: real-windowed latency test. We accept EITHER `passed`
           # (the runner has a real display server, the test measured
           # real latency) OR `skipped` (the runner couldn't acquire a
@@ -469,7 +496,140 @@ jobs:
             grep -E "Test Case .*' skipped" /tmp/swift-soak.log >&2 || true
             exit 1
           fi
-          echo "::notice::Soak sentinel OK - all four soak tests emitted 'passed' markers."
+          echo "::notice::Soak sentinel OK - all soak tests emitted 'passed' markers."
+
+      - name: xcodebuild test - window-lifecycle tests, one process each
+        # BB_RUN_WINDOW_LIFECYCLE_TESTS gates seven real-window tests
+        # (MainWindowControllerLifetimeTests x4 incl. the F-S6-001
+        # dock-zombie regression, CloseConfirmBypassTests,
+        # CoreFailureKeepOpenBlindTests, JoinedTabCloseReleaseBlindTests).
+        # They are gated, and so ran in no job, because several real
+        # windows / merged tab groups in ONE xctest process crash the
+        # host: a close() on a merged window poisons a deferred
+        # CATransaction that SEGVs a later test (CLAUDE.md test-authoring
+        # rules). Each test passes on its own, so each gets its own
+        # xcodebuild process here. Do NOT fold them into the soak step
+        # above or into ci.yml's whole-suite run.
+        #
+        # Runs even when the soak step above failed (a soak flake or RSS
+        # drift must not also drop the seven lifecycle runs for the night);
+        # only a cancelled workflow skips it.
+        #
+        # Same TEST_RUNNER_ env-propagation and ASan-off build settings as
+        # the soak step (the build products are reused after the first
+        # iteration).
+        #
+        # Pass / skip policy. A bare "no failed line" is not enough: every
+        # one of these tests can XCTSkip on a headless runner (no Metal
+        # device, miniaturize honoured by no Dock, no tab-group merge), and
+        # a step that treated any skip as success would stay green while the
+        # F-S6-001 dock-zombie test never asserted anything. So:
+        #   * a test must emit `passed`, OR `skipped` with a reason on its
+        #     own ALLOW-LIST (allowed_skip below: the specific host
+        #     limitations that test throws XCTSkip for). Any other skip
+        #     reason - the env-gate message (TEST_RUNNER_ propagation
+        #     broken), a reworded XCTSkip, a skip added later - fails;
+        #   * at least one of the seven must actually pass, so "all seven
+        #     skipped on a runner limitation" cannot go green;
+        #   * every allow-listed skip is surfaced as a ::warning:: and in
+        #     the step summary, with a passed / skipped tally.
+        # A test that skips every night is thereby visible, and a runner
+        # change that turns skips into passes needs no edit here.
+        if: ${{ !cancelled() }}
+        env:
+          TEST_RUNNER_BB_RUN_WINDOW_LIFECYCLE_TESTS: "1"
+        run: |
+          tests=(
+            MainWindowControllerLifetimeTests/test_bandClick_doesNotHijackTabSelection
+            MainWindowControllerLifetimeTests/test_deferredAutoClose_miniaturizedWindow_closesZombie
+            MainWindowControllerLifetimeTests/test_newWindow_tabbingMode_revertsFromDisallowedAfterCreation
+            MainWindowControllerLifetimeTests/test_pillAccessibilityFrame_matchesActualScreenPosition
+            CloseConfirmBypassTests/test_windowShouldClose_bypassBranch
+            CoreFailureKeepOpenBlindTests/test_keepOpenOnCoreFailureSheet_leavesTheWindowOpen
+            JoinedTabCloseReleaseBlindTests/test_tabJoinedViaAddTabbedWindow_isFullyReleasedAfterClose
+          )
+
+          # ERE of the skip reasons (matched at the START of the reason, after
+          # "Test skipped - ") that are a genuine headless-host limitation for
+          # the test method $1. Empty = no skip is acceptable.
+          allowed_skip() {
+            case "$1" in
+              test_newWindow_tabbingMode_revertsFromDisallowedAfterCreation | \
+              test_windowShouldClose_bypassBranch | \
+              test_keepOpenOnCoreFailureSheet_leavesTheWindowOpen)
+                echo "no Metal device" ;;
+              test_bandClick_doesNotHijackTabSelection)
+                echo "no Metal device|headless host refused to form a tab group" ;;
+              test_pillAccessibilityFrame_matchesActualScreenPosition)
+                echo "no Metal device|headless host refused to form a tab group|headless host produced no pill frames" ;;
+              test_deferredAutoClose_miniaturizedWindow_closesZombie)
+                echo "no Metal device|headless xctest host did not honor miniaturize" ;;
+              test_tabJoinedViaAddTabbedWindow_isFullyReleasedAfterClose)
+                echo "no Metal device|xctest host refused the headless addTabbedWindow merge|even a bare TerminalWindow that joined a group|xctest host did not merge the controller's window" ;;
+              *) echo "" ;;
+            esac
+          }
+
+          : > /tmp/swift-lifecycle.log
+          bad=()
+          passed=()
+          skipped=()
+          for t in "${tests[@]}"; do
+            m="${t#*/}"
+            one=/tmp/swift-lifecycle-one.log
+            : > "$one"
+            set +e
+            xcodebuild test \
+              -project Blackbird.xcodeproj \
+              -scheme Blackbird \
+              -destination "platform=macOS,arch=arm64" \
+              -only-testing:BlackbirdTests/"$t" \
+              -enableAddressSanitizer NO \
+              -enableUndefinedBehaviorSanitizer NO \
+              ENABLE_ADDRESS_SANITIZER=NO \
+              ENABLE_UNDEFINED_BEHAVIOR_SANITIZER=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGN_IDENTITY="" \
+              2>&1 | tee "$one"
+            xcb_rc="${PIPESTATUS[0]}"
+            set -e
+            cat "$one" >> /tmp/swift-lifecycle.log
+            if [[ "$xcb_rc" -ne 0 ]]; then
+              bad+=("$t (xcodebuild exited $xcb_rc)")
+            elif grep -qE "Test Case .*${m}.*' passed" "$one"; then
+              passed+=("$t")
+            elif grep -qE "Test Case .*${m}.*' skipped" "$one"; then
+              allow="$(allowed_skip "$m")"
+              reason="$(grep -E "${m}.*Test skipped - " "$one" | head -1 | sed 's/.*Test skipped - //' || true)"
+              if [[ -n "$allow" ]] && grep -qE "${m}.*Test skipped - (${allow})" "$one"; then
+                skipped+=("$t: $reason")
+              else
+                bad+=("$t (skipped for a reason outside its allow-list - env-gate / TEST_RUNNER_BB_RUN_WINDOW_LIFECYCLE_TESTS propagation, or a reworded XCTSkip: '${reason:-<no reason line>}')")
+              fi
+            else
+              bad+=("$t (no passed/skipped line)")
+            fi
+          done
+
+          if (( ${#passed[@]} == 0 )); then
+            bad+=("none of the ${#tests[@]} window-lifecycle tests passed - every one failed or skipped, so this step asserted nothing")
+          fi
+
+          {
+            echo "### Window-lifecycle tests: ${#passed[@]} passed, ${#skipped[@]} skipped on a runner limitation, ${#bad[@]} problem(s)"
+            for p in "${passed[@]}"; do echo "- passed: $p"; done
+            for s in "${skipped[@]}"; do echo "- skipped: $s"; done
+            for b in "${bad[@]}"; do echo "- PROBLEM: $b"; done
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          for s in "${skipped[@]}"; do
+            echo "::warning::Window-lifecycle test skipped on a runner limitation (it asserted nothing tonight): $s"
+          done
+          if (( ${#bad[@]} > 0 )); then
+            echo "::error::Window-lifecycle tests FAILED:"
+            for b in "${bad[@]}"; do echo "::error::  - $b"; done
+            exit 1
+          fi
+          echo "::notice::Window-lifecycle tests: ${#passed[@]} passed, ${#skipped[@]} skipped on an allow-listed runner limitation (of ${#tests[@]})."
 
       - name: Upload test logs on failure
         # Same shape as ci.yml's xcode-test-logs step: keep DerivedData
@@ -485,5 +645,6 @@ jobs:
           path: |
             ~/Library/Developer/Xcode/DerivedData/**/Logs/Test
             /tmp/swift-soak.log
+            /tmp/swift-lifecycle.log
           if-no-files-found: ignore
           retention-days: 7

@@ -30,6 +30,15 @@
 # workflow. The Blackbird scheme is untouched (ASan stays on for Xcode Cmd-U),
 # per CLAUDE.md hard-rule 6.
 #
+# BB_RUN_STRESS_TESTS: ~40 RunLoop-pumping tests (real PTY -> TerminalSession,
+# TerminalView wiring, Preferences repair / SwiftUI-bridge guards, ...) skip
+# unless that gate reaches the xctest host, and a plain `BB_RUN_STRESS_TESTS=1`
+# never does -- only `TEST_RUNNER_BB_RUN_STRESS_TESTS=1` is forwarded. The gate
+# exists for the cumulative-ASan SEGV above, so a whole-suite run (ASan already
+# off, like CI) exports it by default; a scoped run keeps it off unless the
+# caller sets TEST_RUNNER_BB_RUN_STRESS_TESTS=1 themselves. Pass
+# TEST_RUNNER_BB_RUN_STRESS_TESTS=0 to opt a whole-suite run back out.
+#
 # BB_SUPPRESS_BELL silences the prompt-nav NSSound.beep() and AppKit's
 # unhandled-key NSBeep in the xctest host so an automated run doesn't emit a
 # stream of system beeps (production + Xcode Cmd-U ring normally).
@@ -50,6 +59,7 @@ case " $* " in
 esac
 if [[ "$WHOLE_SUITE" -eq 1 ]]; then
     SAN_FLAGS="-enableAddressSanitizer NO -enableUndefinedBehaviorSanitizer NO ENABLE_ADDRESS_SANITIZER=NO ENABLE_UNDEFINED_BEHAVIOR_SANITIZER=NO"
+    export TEST_RUNNER_BB_RUN_STRESS_TESTS="${TEST_RUNNER_BB_RUN_STRESS_TESTS:-1}"
 fi
 
 # A whole-suite run can trip a known infra quirk even with ASan off: at ~900
