@@ -36,6 +36,63 @@ enum LocaleEnvironment {
         return ["LANG": candidate(for: locale, isAvailable: isAvailable) ?? fallback]
     }
 
+    /// The locale the user chose in System Settings, for `overrides(locale:)`,
+    /// read from the live preferences. Production wiring of
+    /// `systemLocale(preferredLanguages:regionSetting:)`.
+    ///
+    /// The Region comes from the `AppleLocale` preference (what System
+    /// Settings writes; `Locale.current` is derived from it, but it is a
+    /// cached snapshot whose language is filtered by the app bundle).
+    /// `Locale.current` is only the fallback for a Mac with no `AppleLocale`
+    /// at all.
+    static func currentSystemLocale(defaults: UserDefaults = .standard) -> Locale {
+        let appleLocale: String? = defaults.string(forKey: "AppleLocale")
+        let regionSetting: Locale
+        if let id = appleLocale, !id.isEmpty {
+            regionSetting = Locale(identifier: id)
+        } else {
+            regionSetting = Locale.current
+        }
+        return systemLocale(
+            preferredLanguages: Locale.preferredLanguages, regionSetting: regionSetting)
+    }
+
+    /// Combine the user's language and Region choices into one locale.
+    ///
+    /// `Locale.current` can't be used as-is: Foundation resolves its language
+    /// against the app bundle's localizations, and Blackbird ships English
+    /// only, so on a German Mac it reads `en_DE` (no such definition ->
+    /// `en_US.UTF-8` fallback). The un-filtered preference list still has the
+    /// real language, so the language comes from its first tag.
+    ///
+    /// The region comes from `regionSetting` (the Region the user picked; it
+    /// also honours an `@rg=` override), NOT from the tag: a tag's region is
+    /// often not the user's country (`es-419` is a UN M.49 macro-region with
+    /// no locale definition, and `en-US` + Region United Kingdom must still
+    /// give `en_GB`). The tag's region is only the fallback when
+    /// `regionSetting` has no country region. Only 2-letter country regions
+    /// are used; numeric macro-regions (`419`, `001`, `150`) never name a
+    /// `/usr/share/locale` entry. With no usable language or region,
+    /// `regionSetting` is returned unchanged.
+    static func systemLocale(preferredLanguages: [String], regionSetting: Locale) -> Locale {
+        guard let tag = preferredLanguages.first else { return regionSetting }
+        let language = Locale.Language(identifier: tag)
+        guard let lang = language.languageCode?.identifier else { return regionSetting }
+        let regions: [Locale.Region?] = [regionSetting.region, language.region]
+        for region in regions {
+            if let id = region?.identifier, isCountryRegion(id) {
+                return Locale(identifier: "\(lang)_\(id)")
+            }
+        }
+        return regionSetting
+    }
+
+    /// Is `id` a 2-letter ISO 3166 country code (as opposed to a UN M.49
+    /// numeric macro-region such as `419`)?
+    private static func isCountryRegion(_ id: String) -> Bool {
+        id.count == 2 && id.allSatisfy { $0.isASCII && $0.isUppercase && $0.isLetter }
+    }
+
     /// `<language>_<REGION>.UTF-8` for the locale, if it names an available
     /// locale definition. A language without a region (or a script-qualified
     /// identifier like `zh-Hans`) rarely has a matching `locale -a` entry;

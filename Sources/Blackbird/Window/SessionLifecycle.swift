@@ -78,7 +78,7 @@ final class SessionLifecycle {
             LocaleEnvironment.overrides(
                 enabled: Preferences.shared.setLocaleEnvironment,
                 parentEnv: parentEnv,
-                locale: Locale.current,
+                locale: LocaleEnvironment.currentSystemLocale(),
                 isAvailable: LocaleEnvironment.localeDefinitionExists
             ),
             uniquingKeysWith: { current, _ in current }
