@@ -10,7 +10,9 @@ import Combine
 ///     ceiling — explicit call omitted because no grid / PTY / Metal
 ///     allocations are involved.
 ///   - Worst case wallclock is the 1000-mutation stress test below;
-///     budget is 2 s on a sanitiser-enabled xctest host.
+///     budget is 6 s: ~0.3 s measured locally, but 2.08 s on a loaded CI runner
+///     (the old 2 s budget failed there), while a per-toggle palette re-apply
+///     costs far more than that.
 ///   - All writes restored in tearDown to avoid pref pollution per
 ///     `feedback_test_real_shell_controllers.md` and PreferencesTests'
 ///     own snapshot pattern.
@@ -202,10 +204,10 @@ final class PaletteInputsEqualityStressTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(start)
 
         XCTAssertLessThan(
-            elapsed, 2.0,
+            elapsed, 6.0,
             """
             TST-S7-001: \(iterations) fontSize toggles took \(elapsed) s
-            (budget 2 s). The palette-equality gate at
+            (budget 6 s). The palette-equality gate at
             ThemeManager.applyToAllIfPaletteChanged should short-circuit
             on fontSize-only changes (F-S7 line 249); a wallclock blow-
             up indicates the gate regressed and every fontSize tick is
@@ -242,10 +244,10 @@ final class PaletteInputsEqualityStressTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(start)
 
         XCTAssertLessThan(
-            elapsed, 2.0,
+            elapsed, 6.0,
             """
             TST-S7-001: \(iterations) fontName toggles took \(elapsed) s
-            (budget 2 s). Per F-S7 line 249 PaletteInputs should
+            (budget 6 s). Per F-S7 line 249 PaletteInputs should
             exclude fontName so applyToAllIfPaletteChanged short-
             circuits. Wallclock blow-up indicates the gate regressed.
             """
