@@ -125,8 +125,11 @@ extension TerminalView {
         let value = currentA11yValue()
         let utf16 = value.utf16
         let count = utf16.count
+        // `length <= count - location`, not `location + length <= count`: the
+        // client picks the range, and `{1, Int.max}` would trap on the add.
+        // The subtraction is safe once `0 <= location <= count`.
         guard range.location >= 0, range.length >= 0,
-              range.location <= count, range.location + range.length <= count else {
+              range.location <= count, range.length <= count - range.location else {
             return nil
         }
         guard let start = utf16.index(utf16.startIndex, offsetBy: range.location, limitedBy: utf16.endIndex),
