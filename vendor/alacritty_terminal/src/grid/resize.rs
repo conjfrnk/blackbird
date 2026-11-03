@@ -283,6 +283,18 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                             // whitespace and need to wrap it like normal content.
                             Vec::new()
                         } else {
+                            // Blackbird fix (re-apply on bump): without reflow (alt screen) the
+                            // cut is not followed by the spacer fixup below. A cut between a wide
+                            // glyph's head and its spacer drops the spacer and leaves a head in
+                            // the last column that the renderer draws overhanging the grid edge,
+                            // so blank the half glyph. There is no next row to wrap it into.
+                            if !reflow
+                                && row.len() >= columns
+                                && row[Column(columns - 1)].flags().contains(Flags::WIDE_CHAR)
+                            {
+                                row[Column(columns - 1)].reset(&T::default());
+                            }
+
                             // Since it fits, just push the existing line without any reflow.
                             new_raw.push(row);
                             break;
