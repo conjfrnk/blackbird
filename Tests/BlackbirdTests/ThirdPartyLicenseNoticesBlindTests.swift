@@ -115,10 +115,14 @@ final class ThirdPartyLicenseNoticesBlindTests: XCTestCase {
 
     /// Locate the application bundle under test (the xctest host).
     private static func locateAppBundle() -> Bundle? {
-        if Bundle.main.bundleIdentifier == appBundleID { return Bundle.main }
-        return Bundle.allBundles.first { (bundle: Bundle) -> Bool in
-            bundle.bundleIdentifier == appBundleID
+        // The unit-test host carries its own id (`dev.conjfrnk.blackbird.xctest`,
+        // so test runs do not write the developer's real defaults domain), so
+        // match the app by id prefix and by being a `.app`, not by exact id.
+        func isApp(_ bundle: Bundle) -> Bool {
+            (bundle.bundleIdentifier ?? "").hasPrefix(appBundleID) && bundle.bundlePath.hasSuffix(".app")
         }
+        if isApp(Bundle.main) { return Bundle.main }
+        return Bundle.allBundles.first(where: isApp)
     }
 
     /// Build the corpus, asserting the preconditions that make the scan
