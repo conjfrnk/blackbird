@@ -189,6 +189,7 @@
 		85FF81EC8B3EDAE4FE6BD44A /* TerminalSessionBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 173C25905C5C1D2D008F3EEA /* TerminalSessionBoundaryTests.swift */; };
 		8607A6814364EAEB906EB2AF /* TabStripTrafficLightAlignmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 510C18DF4FEAFB814E841BCE /* TabStripTrafficLightAlignmentTests.swift */; };
 		8743B171BF258DCAF8182762 /* IMETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CFAD8B88865C349CC141C65 /* IMETests.swift */; };
+		8895FA7D1EA5EDCDF66DEA93 /* FindMatchRevealBelowBarBlindTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2008954F76AA7987FDB636FD /* FindMatchRevealBelowBarBlindTests.swift */; };
 		88A7F10A655AB3A4DF475698 /* SyncUpdateFlushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA6CB5E0B80FEA2E7834664E /* SyncUpdateFlushTests.swift */; };
 		8A112AE6CDEE5609A2B25C48 /* ssh.zsh in Resources */ = {isa = PBXBuildFile; fileRef = 33477EFA01A5AAA333C3D734 /* ssh.zsh */; };
 		8ABE26FA9AECA5A0AF213670 /* StartupTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC563B552C1105D7EA9558F5 /* StartupTelemetry.swift */; };
@@ -445,6 +446,7 @@
 		1AEB45EA52FFBE9B147D5D9B /* NotificationUndeterminedAuthBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationUndeterminedAuthBlindTests.swift; sourceTree = "<group>"; };
 		1CA9E6BAC56657CC6C61F678 /* TerminalView+ContextMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TerminalView+ContextMenu.swift"; sourceTree = "<group>"; };
 		1E2A96EC0F3EF77F0164B1B4 /* KittyReleaseAltCmdBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KittyReleaseAltCmdBlindTests.swift; sourceTree = "<group>"; };
+		2008954F76AA7987FDB636FD /* FindMatchRevealBelowBarBlindTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindMatchRevealBelowBarBlindTests.swift; sourceTree = "<group>"; };
 		20CE086EA354443743E30486 /* SelectionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionController.swift; sourceTree = "<group>"; };
 		20D4A2742422F440F7C65BB5 /* IMEAstralRectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IMEAstralRectTests.swift; sourceTree = "<group>"; };
 		21725BF76F3013670913A84E /* RecordingPTY.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingPTY.swift; sourceTree = "<group>"; };
@@ -888,6 +890,7 @@
 				7A233489320F986819D9668B /* FindCaptureOneFrameTests.swift */,
 				6EA5A9A40E642096A6A99805 /* FindCaptureRowsBlindTests.swift */,
 				700C66494AF64A4D3E560B29 /* FindCycleSurvivesSnapshotSwapBlindTests.swift */,
+				2008954F76AA7987FDB636FD /* FindMatchRevealBelowBarBlindTests.swift */,
 				80658BFD68D76771BDEC3456 /* FindMenuWhileFindFieldFocusedBlindTests.swift */,
 				A8CDAE1F06200AF8AEA9FA67 /* FindRefreshCoalescingBlindTests.swift */,
 				02BD9CCE40265848D3687EBC /* FindRegexTimeoutLatchBlindTests.swift */,
@@ -1604,6 +1607,7 @@
 				2496AFD2AA95631BABFE97BE /* FindCaptureOneFrameTests.swift in Sources */,
 				F12C8BA147BF04E7F1068152 /* FindCaptureRowsBlindTests.swift in Sources */,
 				38FBC04853C51549762F18B4 /* FindCycleSurvivesSnapshotSwapBlindTests.swift in Sources */,
+				8895FA7D1EA5EDCDF66DEA93 /* FindMatchRevealBelowBarBlindTests.swift in Sources */,
 				777C49E23548F78A92489015 /* FindMenuWhileFindFieldFocusedBlindTests.swift in Sources */,
 				2D36CF8A509FBC807D32FFB9 /* FindRefreshCoalescingBlindTests.swift in Sources */,
 				640914FDED057C6CDF4AB6B2 /* FindRegexTimeoutLatchBlindTests.swift in Sources */,

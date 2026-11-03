@@ -1326,20 +1326,96 @@ final class FindController {
             mode: .character
         )
         guard scroll else { return }
-        // Scroll the match into view. displayOffset is how many lines
-        // the viewport is above the live grid; positive delta to scroll()
-        // means "show older content" (upward).
-        // A match across a soft wrap has to show its last row too: above the
-        // viewport it lands on the top row, below it on the bottom row. One too
-        // tall for the screen keeps its start row (the top) in view.
-        guard let snap = view.currentSnapshot else { return }
-        let displayRowForMatch = Int(m.line) + snap.displayOffset
-        let displayEndRow = displayRowForMatch + endRows
-        if displayRowForMatch < 0 {
-            view.session?.scroll(delta: Int32(clamping: -displayRowForMatch))
-        } else if displayEndRow >= snap.rows {
-            view.session?.scroll(delta: Int32(clamping: max(snap.rows - 1 - displayEndRow, -displayRowForMatch)))
+        scrollCurrentMatchIntoView(followOffscreen: true)
+    }
+
+    /// Slack for pixel rounding when deciding how much of a row the bar covers
+    /// (a row with at most this much under the bar counts as clear of it).
+    static let barOverlapTolerancePoints: CGFloat = 0.5
+
+    /// How many viewport rows an opaque strip covering the top `overlapPoints`
+    /// of the grid hides. Pure so the geometry is testable without a view.
+    static func rowsHidden(byOverlap overlapPoints: CGFloat, cellHeight: CGFloat) -> Int {
+        guard overlapPoints.isFinite, cellHeight.isFinite, cellHeight > 0 else { return 0 }
+        let uncovered = overlapPoints - barOverlapTolerancePoints
+        guard uncovered > 0 else { return 0 }
+        // Cap before the Int conversion: an absurd overlap must not trap.
+        return Int(min((uncovered / cellHeight).rounded(.up), 1_000_000))
+    }
+
+    /// Scroll delta (positive = toward older history) that moves a match on
+    /// viewport row `matchRow` clear of the find bar, or onto the screen.
+    ///
+    /// - A match above the first visible row (`hiddenRows` rows are under the
+    ///   bar; the target row is capped so a very short grid keeps one) is
+    ///   scrolled down to that row. The delta is limited to
+    ///   `scrollableHistory` (how much older content is left to scroll into),
+    ///   so a match near the top of the buffer that cannot be lowered any
+    ///   further yields 0 instead of a no-op scroll that would still publish
+    ///   a snapshot and trigger a rescan.
+    /// - A match below the last row is scrolled up onto it. `spanRows` is how
+    ///   many rows further down a soft-wrapped match ends; its last row is the
+    ///   one that has to fit, unless that would push the start row under the bar.
+    /// - `followOffscreen: false` leaves a match that is off the grid alone,
+    ///   so a bar resize never drags the viewport back from where the user
+    ///   scrolled it on purpose; it only rescues a match hidden under the bar.
+    static func revealScrollDelta(
+        matchRow: Int, hiddenRows: Int, rows: Int, scrollableHistory: Int, followOffscreen: Bool,
+        spanRows: Int = 0
+    ) -> Int {
+        let topVisibleRow = max(0, min(hiddenRows, rows - 1))
+        if matchRow < topVisibleRow {
+            if matchRow < 0 && !followOffscreen { return 0 }
+            return max(0, min(topVisibleRow - matchRow, scrollableHistory))
         }
+        // A match across a soft wrap ends `spanRows` rows below its start and has
+        // to show its last row too. One too tall for the screen keeps its start
+        // row (the first below the bar) in view.
+        let matchEndRow = matchRow + max(0, spanRows)
+        if matchEndRow >= rows {
+            guard followOffscreen else { return 0 }
+            return max(rows - 1 - matchEndRow, topVisibleRow - matchRow)
+        }
+        return 0
+    }
+
+    /// Rows at the top of the grid the find bar paints over right now. Read
+    /// from the bar's live geometry (its bottom edge against the first grid
+    /// row), not its nominal height, so it stays right if the bar's placement
+    /// or the grid inset changes. The renderer is not inset for the bar.
+    private var barHiddenRows: Int {
+        guard let bar = findBar, let parent = bar.superview else { return 0 }
+        let r = view.convert(bar.frame, from: parent)
+        let barBottom = view.isFlipped ? r.maxY : view.bounds.height - r.minY
+        let overlap = barBottom - view.cellOriginPx(row: 0, col: 0).y
+        return Self.rowsHidden(byOverlap: overlap, cellHeight: view.metrics.cellHeight)
+    }
+
+    /// Scroll the current match into view and below the find bar.
+    /// displayOffset is how many lines the viewport is above the live grid;
+    /// a positive delta to scroll() means "show older content" (upward).
+    private func scrollCurrentMatchIntoView(followOffscreen: Bool) {
+        guard findCurrentIndex >= 0, findCurrentIndex < findMatches.count,
+              let snap = view.currentSnapshot else { return }
+        let m = findMatches[findCurrentIndex]
+        let delta = Self.revealScrollDelta(
+            matchRow: Int(m.line) + snap.displayOffset,
+            hiddenRows: barHiddenRows,
+            rows: snap.rows,
+            scrollableHistory: snap.historySize - snap.displayOffset,
+            followOffscreen: followOffscreen,
+            spanRows: snap.cols > 0 ? m.endCol / snap.cols : 0
+        )
+        if delta != 0 { view.session?.scroll(delta: Int32(clamping: delta)) }
+    }
+
+    /// The bar changed height (the replace row was shown or hidden), so a
+    /// match that was placed just below the old edge may now be under it. Move
+    /// it clear again. Skipped while the matches are stale against the live
+    /// snapshot (their lines would point at the wrong rows).
+    func barHeightDidChange() {
+        guard let snap = view.currentSnapshot, findMatchesSeq == snap.sequenceID else { return }
+        scrollCurrentMatchIntoView(followOffscreen: false)
     }
 
     // MARK: - Replace

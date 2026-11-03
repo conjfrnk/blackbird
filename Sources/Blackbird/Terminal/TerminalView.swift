@@ -3019,6 +3019,10 @@ extension TerminalView: FindBarDelegate {
         findController.performSearch(query: findController.findQuery)
     }
 
+    public func findBarDidChangeHeight(_ bar: FindBar) {
+        findController.barHeightDidChange()
+    }
+
     public func findBarDidClose(_ bar: FindBar) {
         findController.findBar?.removeFromSuperview()
         findController.findBar = nil

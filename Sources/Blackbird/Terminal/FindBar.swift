@@ -17,6 +17,11 @@ public protocol FindBarDelegate: AnyObject {
     /// state. Implementations should re-run the current search against
     /// the new options. Default: no-op (options are ignored).
     func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options)
+    /// Called after the bar resized itself because the replace row was shown
+    /// or hidden (its frame already has the new `preferredHeight`). The bar
+    /// is opaque and overlays the grid, so a taller bar can cover a match that
+    /// was clear of the shorter one. Default: no-op.
+    func findBarDidChangeHeight(_ bar: FindBar)
 }
 
 extension FindBarDelegate {
@@ -26,6 +31,8 @@ extension FindBarDelegate {
     /// Default: no-op. TerminalView's conformer overrides to re-run
     /// performSearch with the new flags.
     public func findBar(_ bar: FindBar, didChangeOptions options: FindBar.Options) {}
+    /// Default: no-op. TerminalView's conformer re-reveals the current match.
+    public func findBarDidChangeHeight(_ bar: FindBar) {}
 }
 
 public final class FindBar: NSView, NSTextFieldDelegate {
@@ -456,8 +463,10 @@ public final class FindBar: NSView, NSTextFieldDelegate {
 
     // MARK: - Replace row visibility
 
-    /// Show or hide the replace row. Callers are responsible for resizing the
-    /// bar's frame to `preferredHeight` after calling this if needed.
+    /// Show or hide the replace row. Resizes the bar's frame to
+    /// `preferredHeight` (top edge fixed) and tells the delegate, so the
+    /// bar's real coverage and `preferredHeight` agree on every path (the
+    /// caret, ⌘⌥E on an open bar, ⌘⌥E that opens the bar).
     public func setReplaceVisible(_ visible: Bool) {
         guard visible != isReplaceVisible else { return }
         isReplaceVisible = visible
@@ -481,17 +490,18 @@ public final class FindBar: NSView, NSTextFieldDelegate {
         // color — re-tint from the theme so the ▸/▾ swap doesn't strip it.
         styleGlyphButtonTitles()
         needsLayout = true
+        // Resize the bar's own frame so the new height takes effect visually.
+        let h = preferredHeight
+        guard frame.height != h else { return }
+        let newOriginY = frame.origin.y + frame.height - h
+        frame = NSRect(x: frame.origin.x, y: newOriginY, width: frame.width, height: h)
+        delegate?.findBarDidChangeHeight(self)
     }
 
     // MARK: - Actions
 
     @objc private func toggleReplaceRow() {
-        let nowVisible = !isReplaceVisible
-        setReplaceVisible(nowVisible)
-        // Resize the bar's own frame so the new height takes effect visually.
-        let h = preferredHeight
-        let newOriginY = frame.origin.y + frame.height - h
-        frame = NSRect(x: frame.origin.x, y: newOriginY, width: frame.width, height: h)
+        setReplaceVisible(!isReplaceVisible)
     }
 
     @objc private func closeAction() {
