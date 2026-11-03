@@ -1309,6 +1309,28 @@ public final class PTY {
             return fg > 0 ? fg : childPID
         }
         guard let pid = targetPID else { return nil }
+        return Self.workingDirectory(ofPID: pid)
+    }
+
+    /// Current working directory of the shell itself (our direct child),
+    /// ignoring whatever job holds the foreground. `foregroundWorkingDirectory`
+    /// can't answer when the fg pgroup leader is setuid-root (`sudo`, `top`:
+    /// `proc_pidinfo` gives EPERM) or already reaped (`ls | less`: the
+    /// leader pid is gone, ESRCH); the shell is our own unprivileged child,
+    /// so its cwd stays readable and is where the user is working.
+    public func shellWorkingDirectory() -> String? {
+        // Same `_isRunning` gate as the siblings: nothing to report once stopped.
+        let shellPID: pid_t? = stateQueue.sync { () -> pid_t? in
+            guard _isRunning else { return nil }
+            return childPID
+        }
+        guard let pid = shellPID else { return nil }
+        return Self.workingDirectory(ofPID: pid)
+    }
+
+    /// `proc_pidinfo(PROC_PIDVNODEPATHINFO)` cwd read shared by
+    /// `foregroundWorkingDirectory` and `shellWorkingDirectory`.
+    private static func workingDirectory(ofPID pid: pid_t) -> String? {
         var info = proc_vnodepathinfo()
         let infoSize = Int32(MemoryLayout<proc_vnodepathinfo>.stride)
         let bytes = proc_pidinfo(
@@ -1336,7 +1358,7 @@ public final class PTY {
         // signal. Log the short-read case so a future debugger sees it.
         guard bytes > 0 else { return nil }
         guard bytes == infoSize else {
-            Self.logger.error("foregroundWorkingDirectory: proc_pidinfo short read pid=\(pid, privacy: .public) got=\(bytes, privacy: .public) want=\(infoSize, privacy: .public) — kernel contract violation, returning nil")
+            Self.logger.error("workingDirectory(ofPID:): proc_pidinfo short read pid=\(pid, privacy: .public) got=\(bytes, privacy: .public) want=\(infoSize, privacy: .public) — kernel contract violation, returning nil")
             return nil
         }
         return withUnsafePointer(to: &info.pvi_cdir.vip_path) { tuple -> String? in

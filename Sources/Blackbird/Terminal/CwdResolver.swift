@@ -25,7 +25,15 @@ enum CwdResolver {
     ///      don't emit OSC 7 (default bash on macOS, custom shells) and the
     ///      stale case above. It comes from the kernel, so no byte a
     ///      background job wrote to the tty can steer it.
-    ///   4. `nil` — handing `nil` to `PTY.spawn(initialWorkingDirectory:)`
+    ///   4. `shellWorkingDirectory()` — the shell's own cwd, for when (1) and
+    ///      (3) both fail because the fg pgroup leader is setuid-root (`sudo`,
+    ///      `top`: EPERM) or already reaped (`ls | less`: ESRCH) and no
+    ///      trusted OSC 7 is available. Ranked after a trusted OSC 7 so a
+    ///      shell-reported (logical) path still beats the kernel's physical
+    ///      one.
+    ///   5. the stale `lastKnownCwd` — an older but once-trusted path still
+    ///      beats `$HOME` when every live lookup failed.
+    ///   6. `nil` — handing `nil` to `PTY.spawn(initialWorkingDirectory:)`
     ///      triggers its built-in `$HOME` / `getpwuid` fallback (see
     ///      `PTY.spawn` in Sources/Blackbird/Terminal/PTY.swift — spec §3).
     ///      Callers shouldn't rewrite that policy here.
@@ -54,9 +62,12 @@ enum CwdResolver {
             return fgCwd
         }
         if !src.lastKnownCwdIsStale, let cwd = src.lastKnownCwd { return cwd }
-        // Stale and the live lookup failed: the older trusted path still
-        // beats `$HOME`.
-        return src.foregroundWorkingDirectory() ?? src.lastKnownCwd
+        // No trusted OSC 7: ask the kernel, first about the foreground leader,
+        // then about the shell itself (the leader can be unreadable or gone).
+        // A stale OSC 7 path is the last resort before `$HOME`.
+        return src.foregroundWorkingDirectory()
+            ?? src.shellWorkingDirectory()
+            ?? src.lastKnownCwd
     }
 
     /// ⌘N: always a fresh start. Never inherits the active tab's cwd —

@@ -606,6 +606,12 @@ public final class TerminalSession: ObservableObject {
         pty?.foregroundWorkingDirectory()
     }
 
+    /// Current working directory of the shell itself, for when the foreground
+    /// process's cwd is unreadable (setuid-root or already-reaped leader).
+    public func shellWorkingDirectory() -> String? {
+        pty?.shellWorkingDirectory()
+    }
+
     /// Classify the foreground process tree for the OSC 7 ingest gate.
     /// `.local` → trust shell-reported cwd. `.remote` / `.unknown` →
     /// drop the OSC 7 payload (audit synthesis #4 / KNOWN_ISSUES "OSC 7
