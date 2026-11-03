@@ -102,6 +102,15 @@
  */
 #define WRAPLINE (1 << 14)
 
+/**
+ * CSI 8 m — conceal / invisible. The cell keeps its real `ch` (copy,
+ * find and scrollback read the grid text, as in xterm) but the renderer
+ * must not draw the glyph. Not expressible as fg == bg: a default-bg
+ * cell on a translucent window, the selection tint and the block cursor
+ * would each reveal a glyph painted in any colour.
+ */
+#define HIDDEN (1 << 15)
+
 #define ALT_SCREEN (1 << 0)
 
 #define APP_CURSOR (1 << 1)

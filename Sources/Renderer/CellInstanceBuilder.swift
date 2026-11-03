@@ -257,8 +257,12 @@ struct CellInstanceBuilder {
         let quadSize = SIMD2<Float>(quadW, cellH)
 
         let scalar = cell.ch
+        // HIDDEN (SGR 8) cells keep their scalar in the grid but never get a
+        // glyph quad; they take the bg/accent-only path below like a space, so
+        // the selection tint and block cursor can't reveal them either.
+        let isConcealed = (cell.flags & UInt16(HIDDEN)) != 0
         // Render cell if it has a glyph OR a non-default background.
-        if scalar != 0 && scalar != 0x20 /* space */ {
+        if scalar != 0 && scalar != 0x20 /* space */ && !isConcealed {
             let glyphStyle = GlyphAtlas.Style(
                 bold: (cell.flags & UInt16(BOLD)) != 0,
                 italic: (cell.flags & UInt16(ITALIC)) != 0

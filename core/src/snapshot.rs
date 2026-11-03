@@ -85,6 +85,12 @@ pub mod cell_flags {
     /// hard newline. Apps that lay rows out with cursor motion (tmux, TUIs)
     /// never set it, even where their text visually wraps.
     pub const WRAPLINE: u16 = 1 << 14;
+    /// CSI 8 m — conceal / invisible. The cell keeps its real `ch` (copy,
+    /// find and scrollback read the grid text, as in xterm) but the renderer
+    /// must not draw the glyph. Not expressible as fg == bg: a default-bg
+    /// cell on a translucent window, the selection tint and the block cursor
+    /// would each reveal a glyph painted in any colour.
+    pub const HIDDEN: u16 = 1 << 15;
 }
 
 /// Terminal mode bitflags mirrored from `alacritty_terminal::term::TermMode`.
@@ -381,6 +387,9 @@ pub(crate) fn extract_cell_flags(f: CellFlags) -> u16 {
     }
     if f.contains(CellFlags::STRIKEOUT) {
         out |= cell_flags::STRIKE;
+    }
+    if f.contains(CellFlags::HIDDEN) {
+        out |= cell_flags::HIDDEN;
     }
     if f.contains(CellFlags::WIDE_CHAR) {
         out |= cell_flags::WIDE_CHAR;
