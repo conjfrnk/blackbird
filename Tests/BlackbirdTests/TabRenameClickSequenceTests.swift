@@ -822,13 +822,17 @@ final class TabRenameClickSequenceTests: XCTestCase {
                        "the opening click of the run selects that pill, once")
 
         // Second oracle: the in-flight edit is real and targets pill 1.
+        // The pre-filled text is read off the field and then replaced: an
+        // untouched field commits as a cancel (it must not pin the auto title).
+        XCTAssertEqual(rig.editFieldSubview?.stringValue, "genuine-1",
+                       "the field is pre-filled with that pill's title")
+        rig.strip.setEditTextForTesting("typed")
         rig.strip.commitEditIfNeeded()
         XCTAssertEqual(rig.renameCommits.count, 1,
                        "commitEditIfNeeded must publish the in-flight rename")
         XCTAssertEqual(rig.renameCommits.first?.window, rig.tabs[1],
                        "rename must target the double-clicked pill's window")
-        XCTAssertEqual(rig.renameCommits.first?.title, "genuine-1",
-                       "the field is pre-filled with that pill's title")
+        XCTAssertEqual(rig.renameCommits.first?.title, "typed")
     }
 
     // MARK: - Integration: a background pill switches and stops
@@ -899,13 +903,18 @@ final class TabRenameClickSequenceTests: XCTestCase {
         XCTAssertTrue(rig.isRenaming,
                       "click, pause, double-click is the documented way to "
                           + "rename a background tab and must work")
+
+        // The pre-filled text is read off the field and then replaced: an
+        // untouched field commits as a cancel (it must not pin the auto title).
+        XCTAssertEqual(rig.editFieldSubview?.stringValue, "pause-1",
+                       "the field is pre-filled from that pill's title")
+        rig.strip.setEditTextForTesting("typed")
         rig.strip.commitEditIfNeeded()
         XCTAssertEqual(rig.renameCommits.count, 1,
                        "the edit is real")
         XCTAssertEqual(rig.renameCommits.first?.window, rig.tabs[1],
                        "rename targets the pill the user double-clicked")
-        XCTAssertEqual(rig.renameCommits.first?.title, "pause-1",
-                       "the field is pre-filled from that pill's title")
+        XCTAssertEqual(rig.renameCommits.first?.title, "typed")
     }
 
     /// THE MECHANISM, pinned directly. `targetWasSelected` is INHERITED through
@@ -1041,13 +1050,18 @@ final class TabRenameClickSequenceTests: XCTestCase {
             rigB.isRenaming,
             "the second half of a double-click delivered to another strip must "
                 + "open rename — SOME strip saw click 1, on a selected pill")
+
+        // The pre-filled text is read off the field and then replaced: an
+        // untouched field commits as a cancel (it must not pin the auto title).
+        XCTAssertEqual(rigB.editFieldSubview?.stringValue, "winB-1",
+                       "the field is pre-filled from that pill's title")
+        rigB.strip.setEditTextForTesting("typed")
         rigB.strip.commitEditIfNeeded()
         XCTAssertEqual(rigB.renameCommits.count, 1,
                        "the edit on strip B is real")
         XCTAssertEqual(rigB.renameCommits.first?.window, rigB.tabs[1],
                        "rename targets the pill the user double-clicked")
-        XCTAssertEqual(rigB.renameCommits.first?.title, "winB-1",
-                       "the field is pre-filled from that pill's title")
+        XCTAssertEqual(rigB.renameCommits.first?.title, "typed")
         XCTAssertEqual(rigB.selections.count, 0,
                        "the renaming click must not ALSO select")
         XCTAssertFalse(rigA.isRenaming,

@@ -1848,7 +1848,7 @@ final class TabStripView: NSView, NSViewToolTipOwner {
             // Targets THIS strip, not the pill's controller: for a
             // background tab the controller's own strip lives in an
             // ordered-out window, so the editor opened there is invisible
-            // and a later tab-list change commits its untouched text as a
+            // and a later tab-list change commits whatever it holds as a
             // permanent title override. This strip is the one on screen.
             let rename = NSMenuItem(
                 title: "Rename…",
@@ -2369,6 +2369,10 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
     /// Field editor used while a pill is being renamed. Lifetime matches
     /// `editingPill` — nil'd together by `teardownEdit`.
     private(set) var editField: NSTextField? = nil
+    /// The text `beginEditing` pre-filled the field with, kept so
+    /// `commitEdit` can tell an untouched field from a typed name. Nil'd by
+    /// `teardownEdit` together with `editField`.
+    private var seededText: String? = nil
 
     /// `true` while any pill is in inline-edit mode. The strip's hover /
     /// close / draw paths short-circuit on this so the editing pill doesn't
@@ -2404,6 +2408,7 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         field.textColor = NSColor.labelColor
         field.focusRingType = .none
         field.stringValue = TabStripView.displayTitle(view.tabs[pillIndex].title)
+        seededText = field.stringValue
         field.delegate = self
         // Enter fires the action; action selector + target here is a
         // defense-in-depth for environments where the field-editor
@@ -2435,11 +2440,23 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
     /// empty string so the consumer can map it to "revert to OSC".
     /// Modifying that behaviour would be a test-owner change; deferred
     /// here.
+    ///
+    /// A field still holding exactly the pre-filled title is a cancel, not a
+    /// commit: forwarding it would make `applyInlineRename` pin the tab's
+    /// current auto title as a permanent override, freezing the pill against
+    /// every later OSC 0/2 title. Every implicit exit (focus loss, a tab
+    /// opening or closing, an outside click) reaches here too, so a user who
+    /// only opened the editor never pays for it. The comparison is against
+    /// the raw, untrimmed seed so a whitespace-only clear still forwards.
     func commitEdit() {
         guard let idx = editingPill,
               let field = editField,
               idx < view.tabs.count
         else {
+            cancelEdit()
+            return
+        }
+        if field.stringValue == seededText {
             cancelEdit()
             return
         }
@@ -2507,6 +2524,7 @@ private final class TabRenameController: NSObject, NSTextFieldDelegate {
         editField?.delegate = nil
         editField?.removeFromSuperview()
         editField = nil
+        seededText = nil
         editingPill = nil
         view.needsDisplay = true
         // Removing the field as a subview triggers AppKit's

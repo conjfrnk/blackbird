@@ -156,6 +156,12 @@ final class TabRenameActivationClickTests: XCTestCase {
             strip.subviews.contains { $0 is NSTextField }
         }
 
+        /// The text currently in the inline-rename field, if one is installed.
+        var editFieldText: String? {
+            strip.subviews.compactMap { (v: NSView) -> NSTextField? in v as? NSTextField }
+                .first?.stringValue
+        }
+
         /// What the app does after a click switches tabs: the controller pushes
         /// the new selection back into every strip of the group. Same tab list,
         /// so it is NOT a list-shape change and the shared click mark survives
@@ -261,13 +267,17 @@ final class TabRenameActivationClickTests: XCTestCase {
                        "the clickCount==1 half of the gesture selects the pill")
 
         // Second oracle: the in-flight edit is real and targets pill 1.
+        // The pre-filled text is read off the field and then replaced: an
+        // untouched field commits as a cancel (it must not pin the auto title).
+        XCTAssertEqual(rig.editFieldText, "genuine-1",
+                       "the field is pre-filled with that pill's title")
+        rig.strip.setEditTextForTesting("typed")
         rig.strip.commitEditIfNeeded()
         XCTAssertEqual(rig.renameCommits.count, 1,
                        "commitEditIfNeeded must publish the in-flight rename")
         XCTAssertEqual(rig.renameCommits.first?.window, rig.tabs[1],
                        "rename must target the double-clicked pill's window")
-        XCTAssertEqual(rig.renameCommits.first?.title, "genuine-1",
-                       "the field is pre-filled with that pill's title")
+        XCTAssertEqual(rig.renameCommits.first?.title, "typed")
     }
 
     /// Same sequence minus the intervening mouseup. The mark the strip
@@ -285,6 +295,7 @@ final class TabRenameActivationClickTests: XCTestCase {
             "the strip received the clickCount==1 mousedown on this pill, so "
                 + "the clickCount==2 mousedown is its own double-click"
         )
+        rig.strip.setEditTextForTesting("typed")  // untouched text commits as a cancel
         rig.strip.commitEditIfNeeded()
         XCTAssertEqual(rig.renameCommits.first?.window, rig.tabs[2])
     }
@@ -395,13 +406,18 @@ final class TabRenameActivationClickTests: XCTestCase {
             "click, pause, double-click is the documented way to rename a "
                 + "background tab and must work"
         )
+
+        // The pre-filled text is read off the field and then replaced: an
+        // untouched field commits as a cancel (it must not pin the auto title).
+        XCTAssertEqual(rig.editFieldText, "pause-1",
+                       "the field is pre-filled with that pill's title")
+        rig.strip.setEditTextForTesting("typed")
         rig.strip.commitEditIfNeeded()
         XCTAssertEqual(rig.renameCommits.count, 1,
                        "the in-flight edit is real")
         XCTAssertEqual(rig.renameCommits.first?.window, rig.tabs[1],
                        "rename targets the pill the user double-clicked")
-        XCTAssertEqual(rig.renameCommits.first?.title, "pause-1",
-                       "the field is pre-filled with that pill's title")
+        XCTAssertEqual(rig.renameCommits.first?.title, "typed")
     }
 
     /// Same shape, but the strip HAS seen a first click — just too long
@@ -515,13 +531,18 @@ final class TabRenameActivationClickTests: XCTestCase {
                 + "fresh strip, must open rename — some strip saw click 1 on "
                 + "this (already selected) pill within the interval"
         )
+
+        // The pre-filled text is read off the field and then replaced: an
+        // untouched field commits as a cancel (it must not pin the auto title).
+        XCTAssertEqual(rigB.editFieldText, "winB-1",
+                       "the field is pre-filled with that pill's title")
+        rigB.strip.setEditTextForTesting("typed")
         rigB.strip.commitEditIfNeeded()
         XCTAssertEqual(rigB.renameCommits.count, 1,
                        "the in-flight edit on strip B is real")
         XCTAssertEqual(rigB.renameCommits.first?.window, rigB.tabs[1],
                        "rename targets the pill the user double-clicked")
-        XCTAssertEqual(rigB.renameCommits.first?.title, "winB-1",
-                       "the field is pre-filled with that pill's title")
+        XCTAssertEqual(rigB.renameCommits.first?.title, "typed")
         XCTAssertEqual(rigB.selections.count, 0,
                        "the renaming click must not ALSO select a tab")
         assertNotRenaming(
@@ -592,9 +613,14 @@ final class TabRenameActivationClickTests: XCTestCase {
             "a genuine double-click after a phantom activation click must "
                 + "still open rename"
         )
+
+        // The pre-filled text is read off the field and then replaced: an
+        // untouched field commits as a cancel (it must not pin the auto title).
+        XCTAssertEqual(rig.editFieldText, "recover-1")
+        rig.strip.setEditTextForTesting("typed")
         rig.strip.commitEditIfNeeded()
         XCTAssertEqual(rig.renameCommits.count, 1)
         XCTAssertEqual(rig.renameCommits.first?.window, rig.tabs[1])
-        XCTAssertEqual(rig.renameCommits.first?.title, "recover-1")
+        XCTAssertEqual(rig.renameCommits.first?.title, "typed")
     }
 }
