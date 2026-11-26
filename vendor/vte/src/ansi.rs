@@ -1233,50 +1233,58 @@ impl StandardCharset {
     pub fn map(self, c: char) -> char {
         match self {
             StandardCharset::Ascii => c,
-            StandardCharset::SpecialCharacterAndLineDrawing => match c {
-                // Blackbird patch: arrows and solid block. The bundled
-                // xterm-kitty `acsc` (and kitty's own table) advertises
-                // `++,,--..00`, so ncurses sends these ASCII bytes under
-                // `ESC ( 0` expecting glyphs; upstream maps only 0x5F-0x7E.
-                '+' => '\u{2192}', // ACS_RARROW
-                ',' => '\u{2190}', // ACS_LARROW
-                '-' => '\u{2191}', // ACS_UARROW
-                '.' => '\u{2193}', // ACS_DARROW
-                '0' => '\u{2588}', // ACS_BLOCK
-                '_' => ' ',
-                '`' => '◆',
-                'a' => '▒',
-                'b' => '\u{2409}', // Symbol for horizontal tabulation
-                'c' => '\u{240c}', // Symbol for form feed
-                'd' => '\u{240d}', // Symbol for carriage return
-                'e' => '\u{240a}', // Symbol for line feed
-                'f' => '°',
-                'g' => '±',
-                'h' => '\u{2424}', // Symbol for newline
-                'i' => '\u{240b}', // Symbol for vertical tabulation
-                'j' => '┘',
-                'k' => '┐',
-                'l' => '┌',
-                'm' => '└',
-                'n' => '┼',
-                'o' => '⎺',
-                'p' => '⎻',
-                'q' => '─',
-                'r' => '⎼',
-                's' => '⎽',
-                't' => '├',
-                'u' => '┤',
-                'v' => '┴',
-                'w' => '┬',
-                'x' => '│',
-                'y' => '≤',
-                'z' => '≥',
-                '{' => 'π',
-                '|' => '≠',
-                '}' => '£',
-                '~' => '·',
-                _ => c,
-            },
+            StandardCharset::SpecialCharacterAndLineDrawing => Self::map_special(c),
+        }
+    }
+
+    /// Blackbird patch: the DEC special-graphics table lives out of line. Inlined into every
+    /// print it cost plain-text throughput once the five ACS entries below widened it.
+    #[cold]
+    #[inline(never)]
+    fn map_special(c: char) -> char {
+        match c {
+            // Blackbird patch: arrows and solid block. The bundled
+            // xterm-kitty `acsc` (and kitty's own table) advertises
+            // `++,,--..00`, so ncurses sends these ASCII bytes under
+            // `ESC ( 0` expecting glyphs; upstream maps only 0x5F-0x7E.
+            '+' => '\u{2192}', // ACS_RARROW
+            ',' => '\u{2190}', // ACS_LARROW
+            '-' => '\u{2191}', // ACS_UARROW
+            '.' => '\u{2193}', // ACS_DARROW
+            '0' => '\u{2588}', // ACS_BLOCK
+            '_' => ' ',
+            '`' => '◆',
+            'a' => '▒',
+            'b' => '\u{2409}', // Symbol for horizontal tabulation
+            'c' => '\u{240c}', // Symbol for form feed
+            'd' => '\u{240d}', // Symbol for carriage return
+            'e' => '\u{240a}', // Symbol for line feed
+            'f' => '°',
+            'g' => '±',
+            'h' => '\u{2424}', // Symbol for newline
+            'i' => '\u{240b}', // Symbol for vertical tabulation
+            'j' => '┘',
+            'k' => '┐',
+            'l' => '┌',
+            'm' => '└',
+            'n' => '┼',
+            'o' => '⎺',
+            'p' => '⎻',
+            'q' => '─',
+            'r' => '⎼',
+            's' => '⎽',
+            't' => '├',
+            'u' => '┤',
+            'v' => '┴',
+            'w' => '┬',
+            'x' => '│',
+            'y' => '≤',
+            'z' => '≥',
+            '{' => 'π',
+            '|' => '≠',
+            '}' => '£',
+            '~' => '·',
+            _ => c,
         }
     }
 }

@@ -206,6 +206,16 @@ final class ExportScrollbackLiveHistoryBlindTests: XCTestCase {
         let panel = try XCTUnwrap(rig.window.attachedSheet as? NSSavePanel,
                                   "fixture: the attached sheet must be an NSSavePanel; got \(String(describing: rig.window.attachedSheet))",
                                   file: file, line: line)
+        // `NSNavLastRootDirectory` is only a hint: the macOS 27 runner has
+        // opened the panel in ~/Documents regardless. Point the panel itself
+        // at the temp dir and wait until it reports that destination.
+        panel.directoryURL = dir
+        let wantDir = dir.resolvingSymlinksInPath().path
+        let steered = pump(until: 5.0) {
+            panel.url?.deletingLastPathComponent().resolvingSymlinksInPath().path == wantDir
+        }
+        XCTAssertTrue(steered, "fixture: the save panel must accept the temp dir as its destination within 5 s",
+                      file: file, line: line)
         return OpenSheet(panel: panel, saveDir: dir)
     }
 
