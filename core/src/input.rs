@@ -165,8 +165,9 @@ pub(crate) unsafe fn finish_advance(bb: &mut BBTerm) {
     // stale, and log only the first: a flood refuses one link per row.
     //
     // What an erase frees depends on WHICH SCREEN holds the links, not on how
-    // many rows the grid keeps: `Grid::clear_history` truncates, so the rows an
-    // erase reaches are released at once. `osc8_refusal_log_truth_blind.rs`
+    // many rows the grid keeps: `Term::free_purged_hyperlinks` truncates while a
+    // link is charged, so the rows an erase reaches are released at once.
+    // `osc8_refusal_log_truth_blind.rs`
     // measures each case and reads every clause below that names a remedy as a
     // claim about the screen holding the links, which it checks against the
     // measurement; keep them in step (a changed claim also needs the test's

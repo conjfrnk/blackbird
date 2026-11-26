@@ -2,7 +2,7 @@
 
 use std::ops::{Index, IndexMut, Range};
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{cmp, mem, ptr, slice, str};
 
 #[cfg(feature = "serde")]
@@ -572,6 +572,19 @@ impl<T> Term<T> {
         self.inactive_grid.clear_history();
         if !self.mode.contains(TermMode::ALT_SCREEN) {
             self.inactive_grid.reset_region(..);
+        }
+        self.free_purged_hyperlinks();
+    }
+
+    /// Blackbird fix (re-apply on bump): `Grid::clear_history` keeps up to `MAX_CACHE_SIZE`
+    /// purged rows in the ring, cells and OSC 8 links intact, so erasing scrollback (ED 3, RIS,
+    /// clear-all) did not credit the hyperlink byte budget. Free those rows, but only when a
+    /// link is still charged: dropping the ring on every erase makes the next scroll reallocate
+    /// it, which cost a `cat /dev/urandom` stream a fifth of its throughput.
+    fn free_purged_hyperlinks(&mut self) {
+        if self.hyperlink_live.load(Ordering::Relaxed) != 0 {
+            self.grid.truncate();
+            self.inactive_grid.truncate();
         }
     }
 
@@ -2173,6 +2186,7 @@ impl<T: EventListener> Handler for Term<T> {
             },
             ansi::ClearMode::Saved if self.history_size() > 0 => {
                 self.grid.clear_history();
+                self.free_purged_hyperlinks();
 
                 self.vi_mode_cursor.point.line =
                     self.vi_mode_cursor.point.line.grid_clamp(self, Boundary::Cursor);
@@ -2209,6 +2223,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.cursor_style = None;
         self.grid.reset();
         self.inactive_grid.reset();
+        self.free_purged_hyperlinks();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();

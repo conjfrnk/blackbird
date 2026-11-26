@@ -294,9 +294,9 @@ pub struct BBTerm {
     /// live-byte budget on retained hyperlink strings (`HYPERLINK_LIVE_MAX`,
     /// vendored alacritty_terminal). Past it the grid refuses every new link
     /// until the cells holding links are overwritten, scroll out of the
-    /// retained scrollback, or are erased (`Grid::clear_history` truncates, so
-    /// the rows an erase reaches are released at once). A plain erase reaches
-    /// only the screen that is showing; ⌘K also erases both grids' history
+    /// retained scrollback, or are erased (`Term::free_purged_hyperlinks` truncates
+    /// while a link is charged, so the rows an erase reaches are released at
+    /// once). A plain erase reaches only the screen that is showing; ⌘K also erases both grids' history
     /// and, with the primary screen up, the alt grid's visible cells too, but
     /// not the shell's visible rows while the alt screen is up. Cells print
     /// with no attribution and nothing says why. Re-armed by
