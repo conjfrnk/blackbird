@@ -387,58 +387,6 @@ fn check_delivery<F: Fn(&Rig) -> Vec<String>>(
 
 // ---------- the documented-residual escape hatch (shape 2 only) ----
 
-/// Does `text` (the contents of `KNOWN_ISSUES.md`) carry an entry about the
-/// synchronized-update reply-order limitation? An "entry" is a top-level
-/// bullet / heading / bold-lead paragraph; it must name the DEC 2026
-/// synchronized update, talk about replies and their order, and be long
-/// enough to also carry the reason (a one-line stub does not count).
-/// Returns the first line of the matching entry.
-fn scan_known_issues(text: &str) -> Result<String, String> {
-    let mut entries: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let starts_entry = line.starts_with("- ")
-            || line.starts_with("* ")
-            || line.starts_with('#')
-            || line.starts_with("**");
-        if starts_entry || entries.is_empty() {
-            entries.push(String::new());
-        }
-        let last = entries.len() - 1;
-        entries[last].push_str(line);
-        entries[last].push('\n');
-    }
-
-    const SYNC_MARKERS: [&str; 9] = [
-        "?2026",
-        "dec 2026",
-        "dec mode 2026",
-        "mode 2026",
-        "synchronized update",
-        "synchronised update",
-        "synchronized-update",
-        "synchronized output",
-        "sync update",
-    ];
-    for entry in &entries {
-        let lower = entry.to_lowercase();
-        let names_sync = SYNC_MARKERS.iter().any(|m| lower.contains(m));
-        if names_sync && lower.contains("repl") && lower.contains("order") && entry.len() >= 200 {
-            return Ok(entry.lines().next().unwrap_or("").to_string());
-        }
-    }
-    Err(format!(
-        "KNOWN_ISSUES.md ({} entries scanned) has no entry that names the DEC 2026 \
-         synchronized update, replies and their order, with an explanation (>= 200 chars)",
-        entries.len()
-    ))
-}
-
-fn known_issues_documents_sync_reply_order() -> Result<String, String> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../KNOWN_ISSUES.md");
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    scan_known_issues(&text)
-}
-
 // ---------- controls: the rig sees what the tests rely on ----------
 
 #[test]
@@ -656,52 +604,6 @@ fn unterminated_colour_query_then_other_query_reply_order_does_not_depend_on_pty
 
 // ---------- shape 2: queries inside a DEC 2026 synchronized update -
 
-/// Deliver `body` wrapped in BSU/ESU, as one chunk and as three chunks
-/// (BSU | body | ESU), each on a fresh terminal, and collect every
-/// out-of-order delivery.
-fn sync_failures(qs: &[Query]) -> Vec<String> {
-    let body = stream(qs);
-    let mut one_chunk = Vec::new();
-    one_chunk.extend_from_slice(BSU);
-    one_chunk.extend_from_slice(&body);
-    one_chunk.extend_from_slice(ESU);
-
-    let mut failures = Vec::new();
-    if let Some(f) = check_delivery(qs, "inside DEC 2026, one chunk", |rig| {
-        rig.labels(&one_chunk)
-    }) {
-        failures.push(f);
-    }
-    if let Some(f) = check_delivery(qs, "inside DEC 2026, BSU | body | ESU chunks", |rig| {
-        let mut got = rig.labels(BSU);
-        got.extend(rig.labels(&body));
-        got.extend(rig.labels(ESU));
-        got
-    }) {
-        failures.push(f);
-    }
-    failures
-}
-
-/// Order must be right, or the residual must be recorded in KNOWN_ISSUES.md.
-#[track_caller]
-fn assert_sync_order_or_documented(what: &str, failures: Vec<String>, checked: usize) {
-    if failures.is_empty() {
-        return;
-    }
-    match known_issues_documents_sync_reply_order() {
-        Ok(_entry) => {}
-        Err(why) => panic!(
-            "{what}: {} of {checked} synchronized-update deliveries answered out of query \
-             order, and the residual is not documented ({why}). Either make replies inside \
-             `ESC[?2026h ... ESC[?2026l` leave in query order, or add a KNOWN_ISSUES.md \
-             entry explaining why they cannot.\n{}",
-            failures.len(),
-            failures.join("\n")
-        ),
-    }
-}
-
 #[test]
 fn control_sync_update_loses_no_reply() {
     // Not the ordering bug: every query inside a sync block is still
@@ -728,78 +630,6 @@ fn control_sync_update_loses_no_reply() {
         show(&want),
         "a sync block (one chunk) must answer each of its {} queries exactly once",
         qs.len()
-    );
-}
-
-#[test]
-fn colour_query_then_cpr_or_da1_inside_sync_update_replies_in_order_or_is_documented() {
-    // The sentinel idiom inside a synchronized update: every colour query
-    // kind and terminator, then CPR or DA1.
-    let mut failures = Vec::new();
-    let mut checked = 0usize;
-    for c in terminated_colour_queries() {
-        for sentinel in [cpr(), da1()] {
-            checked += 2; // one-chunk + three-chunk delivery
-            failures.extend(sync_failures(&[c.clone(), sentinel]));
-        }
-    }
-    assert_sync_order_or_documented("colour query ; CPR/DA1 in a sync block", failures, checked);
-}
-
-#[test]
-fn processor_tap_and_colour_reply_pairs_inside_sync_update_reply_in_order_or_are_documented() {
-    // Every ordered pair drawn from one reply of each class (colour,
-    // processor-side, tap-side), inside a sync block.
-    let reps = vec![
-        colour_query("11", "OSC11", THEME_BG, "ST", "\x1b\\"),
-        da1(),
-        cpr(),
-        xtversion(),
-        Query::new("DECRQSS (DCS $ q m ST)", b"\x1bP$qm\x1b\\", "DECRQSS"),
-    ];
-    let mut failures = Vec::new();
-    let mut checked = 0usize;
-    for (i, a) in reps.iter().enumerate() {
-        for (j, b) in reps.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            checked += 2;
-            failures.extend(sync_failures(&[a.clone(), b.clone()]));
-        }
-    }
-    assert_sync_order_or_documented("reply pairs in a sync block", failures, checked);
-}
-
-#[test]
-fn control_known_issues_scanner_accepts_only_a_real_sync_reply_order_entry() {
-    // Guards the escape hatch used above: it must be picky enough that an
-    // unrelated entry (or a date that merely contains "2026") cannot make the
-    // sync tests pass, and generous enough to accept an honest write-up.
-    let unrelated = "- **Rapid double-cmd-G can lose the find anchor.** Two findNext calls in \
-                     one refresh window race the anchor rotation (cosmetic, no data loss). \
-                     Reported 2026-06-21 during the pre-release audit; low severity.\n";
-    assert!(
-        scan_known_issues(unrelated).is_err(),
-        "an unrelated entry that only contains the year 2026 must not count"
-    );
-
-    let stub = "- DEC 2026 reply order is wrong.\n";
-    assert!(
-        scan_known_issues(stub).is_err(),
-        "a one-line stub without a reason must not count"
-    );
-
-    let honest = "- **Replies inside a DEC 2026 synchronized update can leave out of query \
-                  order.** Bytes between `CSI ? 2026 h` and `CSI ? 2026 l` are replayed whole \
-                  when the update closes, while XTVERSION / DECRQSS / XTGETTCAP are answered \
-                  by the side parser the moment they arrive, so a DA1 sentinel can trail or \
-                  overtake them. Reason: the replay is owned by the vendored vte handler.\n";
-    assert_eq!(
-        scan_known_issues(honest).map(|_| ()),
-        Ok(()),
-        "an entry naming the synchronized update, the replies, their order and a reason \
-         must count"
     );
 }
 

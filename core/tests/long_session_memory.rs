@@ -304,12 +304,3 @@ mod macos {
         unsafe { bc::bb_term_free(term) };
     }
 }
-
-#[cfg(not(target_os = "macos"))]
-#[test]
-#[ignore]
-fn memory_test_macos_only() {
-    // mach_task_basic_info is macOS-only. Blackbird itself is macOS-only, so
-    // this restriction is fine. Keep the test harness buildable on Linux
-    // (for fuzz CI) by stubbing out.
-}

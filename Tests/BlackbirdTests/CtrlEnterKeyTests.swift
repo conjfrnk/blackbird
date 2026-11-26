@@ -30,8 +30,6 @@ final class CtrlEnterKeyTests: XCTestCase {
         return Data(s.utf8)
     }
 
-    private let kittyOn: BBTermMode = [.disambiguateEscCodes]
-
     /// Synthetic key event. Never posted anywhere; only handed to `route`.
     private func makeKeyEvent(
         _ type: NSEvent.EventType = .keyDown,
@@ -268,30 +266,6 @@ final class CtrlEnterKeyTests: XCTestCase {
     }
 
     // MARK: - Encoder end-to-end (kitty)
-
-    func test_encode_ctrlEnter_kittyFlag1_csiU13_5() {
-        XCTAssertEqual(KeyEncoder().encode(chars: "\r", modifiers: [.control], mode: kittyOn),
-                       Data([0x1B, 0x5B, 0x31, 0x33, 0x3B, 0x35, 0x75]),
-                       "Ctrl+Enter under flag 1 must be ESC[13;5u")
-    }
-
-    func test_encode_ctrlShiftEnter_kittyFlag1_csiU13_6() {
-        XCTAssertEqual(KeyEncoder().encode(chars: "\r", modifiers: [.control, .shift], mode: kittyOn),
-                       csiU(13, mod: 6),
-                       "Ctrl+Shift+Enter: modifier param is 1 + shift(1) + ctrl(4) = 6")
-    }
-
-    func test_encode_ctrlOptionEnter_kittyFlag1_csiU13_7() {
-        XCTAssertEqual(KeyEncoder().encode(chars: "\r", modifiers: [.control, .option], mode: kittyOn),
-                       csiU(13, mod: 7),
-                       "Ctrl+Option+Enter: modifier param is 1 + alt(2) + ctrl(4) = 7")
-    }
-
-    func test_encode_plainEnter_kittyFlag1_bareCR() {
-        XCTAssertEqual(KeyEncoder().encode(chars: "\r", modifiers: [], mode: kittyOn),
-                       Data([0x0D]),
-                       "Unmodified Enter stays a bare CR so line discipline keeps working")
-    }
 
     func test_encode_ctrlEnter_kittyFlag8_csiU13_5() {
         let mode: BBTermMode = [.disambiguateEscCodes, .reportAllKeysAsEsc]

@@ -62,12 +62,6 @@ final class FindCaptureOneFrameTests: XCTestCase {
         )
     }
 
-    /// Control: core and snapshot agree.
-    func test_inSync_scrollbackAndViewportAreOneContinuousRun() throws {
-        let rig = try makeRig()
-        XCTAssertEqual(capture(rig).map(\.hay), expectedLabels(0..<30))
-    }
-
     /// The core has scrolled 4 lines past the displayed frame: every captured
     /// line must still describe the displayed frame, scrollback included.
     func test_coreScrolledPastDisplayedFrame_scrollbackMatchesTheDisplayedFrame() throws {

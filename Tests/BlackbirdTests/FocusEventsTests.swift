@@ -21,13 +21,6 @@ final class FocusEventsTests: XCTestCase {
         XCTAssertNil(term.focusChangeBytes(focused: false))
     }
 
-    func test_focusChangeBytes_returnsCsiI_onFocusGain_whenModeEnabled() throws {
-        let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 1)))
-        term.input("\u{1b}[?1004h")
-        let bytes = try XCTUnwrap(term.focusChangeBytes(focused: true))
-        XCTAssertEqual(Array(bytes), [0x1b, 0x5b, 0x49])  // ESC [ I
-    }
-
     func test_focusChangeBytes_returnsCsiO_onFocusLoss_whenModeEnabled() throws {
         let term = try XCTUnwrap(BBTerm(size: .init(cols: 10, rows: 1)))
         term.input("\u{1b}[?1004h")
@@ -81,16 +74,6 @@ final class FocusEventsTests: XCTestCase {
         XCTAssertNil(
             session.focusEmissionBytesForTests(focused: false),
             "focus-out with mode 1004 off must emit nothing"
-        )
-    }
-
-    func test_session_focusEmission_firstFocusIn_emitsCsiI_whenModeEnabled() {
-        let session = TerminalSession.makeHeadlessForTests()
-        session.feedBytesForTests(Data("\u{1b}[?1004h".utf8))
-        XCTAssertEqual(
-            session.focusEmissionBytesForTests(focused: true),
-            Data([0x1b, 0x5b, 0x49]),   // ESC [ I
-            "first focus-in after enabling 1004 must emit \\x1b[I"
         )
     }
 

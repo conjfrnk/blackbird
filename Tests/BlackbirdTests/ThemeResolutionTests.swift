@@ -47,16 +47,6 @@ final class ThemeResolutionTests: XCTestCase {
 
     // MARK: - Theme enum coverage
 
-    func test_allThemes_returnPaletteForDarkAndLight_noCrash() {
-        for theme in Theme.allCases {
-            let dark = theme.palette(dark: true)
-            let light = theme.palette(dark: false)
-            // Just touch the values to ensure no lazy fatal occurs.
-            XCTAssertGreaterThanOrEqual(dark.ansi.count, 0, "Theme \(theme.rawValue) dark palette invalid")
-            XCTAssertGreaterThanOrEqual(light.ansi.count, 0, "Theme \(theme.rawValue) light palette invalid")
-        }
-    }
-
     func test_allThemes_ansiArrayHasExactlySixteenEntries() {
         for theme in Theme.allCases {
             let dark = theme.palette(dark: true)

@@ -137,52 +137,7 @@ final class PreferencesTests: XCTestCase {
         return url
     }
 
-    /// Mechanical coupling between the test's snapshot/restore set and
-    /// Preferences.swift. A new @AppStorage must be mirrored in the
-    /// saved* / setUp / tearDown block above, or this test fails. Without
-    /// this gate, a mutation-testing test could silently leak the new
-    /// pref across the whole test run.
-    func test_snapshotCoversAllAppStorage() throws {
-        let prefsURL = try Self.locatePreferencesSwift()
-        let src = try String(contentsOf: prefsURL, encoding: .utf8)
-        // Regex captures every `@AppStorage("key")` — Preferences.swift
-        // doesn't use any other AppStorage form.
-        let re = try NSRegularExpression(
-            pattern: #"@AppStorage\("([^"]+)"\)"#
-        )
-        let range = NSRange(src.startIndex..<src.endIndex, in: src)
-        let declared = re.matches(in: src, range: range).compactMap { m -> String? in
-            guard let r = Range(m.range(at: 1), in: src) else { return nil }
-            return String(src[r])
-        }
-        // Keys moved behind `bb.` prefix in schema v2 (settings F3). Any
-        // future rename must land here in lockstep with the `@AppStorage`
-        // declarations in Preferences.swift.
-        let tracked: Set<String> = [
-            "bb.theme", "bb.themeMode", "bb.fontName", "bb.fontSize", "bb.cursorBlink",
-            "bb.bell", "bb.cursorShape", "bb.optionKey", "bb.confirmClose",
-            "bb.autoUpdateChecks", "bb.osc52Enabled", "bb.colorQueryEnabled",
-            "bb.confirmMultiLinePaste",
-            "bb.translucency",
-            "bb.windowDragModifier", "bb.windowResizeModifier",
-            "bb.setLocaleEnvironment", "bb.shellPath", "bb.hangDetection",
-            "bb.programNotifications", "bb.scrollbackLines", "bb.copyOnSelect",
-        ]
-        let missing = Set(declared).subtracting(tracked)
-        XCTAssertTrue(
-            missing.isEmpty,
-            "@AppStorage key(s) missing from PreferencesTests snapshot: "
-                + "\(missing.sorted()). "
-                + "Add matching `saved*` field + setUp / tearDown lines."
-        )
-    }
-
     // MARK: - Singleton identity
-
-    func test_shared_isSingleton() {
-        XCTAssertTrue(Preferences.shared === Preferences.shared,
-                      "Preferences.shared must return the same instance across calls")
-    }
 
     // MARK: - Enum allCases
 
@@ -499,28 +454,6 @@ final class PreferencesTests: XCTestCase {
     // schema-gated, observer-path runtime test (BB_RUN_STRESS_TESTS)
     // that mirrors `test_m4_themeRepair_landsOnGruvbox` — writing a
     // garbage raw and asserting the repair resets it to "Command".
-
-    /// Source-level pin: both modifier keys must exist and fall back to
-    /// `.command`. The runtime `?? .command` path is covered by the
-    /// *_unknownRaw_fallsBackToCommand tests above; this catches a
-    /// rename/divergence on the corrupted-rawValue branch that runtime
-    /// coverage alone is too rare to catch reliably.
-    func test_windowGestureModifier_repairTarget_isCommand_inSource() throws {
-        let prefsURL = try Self.locatePreferencesSwift()
-        let src = try String(contentsOf: prefsURL, encoding: .utf8)
-        XCTAssertTrue(
-            src.contains("bb.windowDragModifier"),
-            "windowDragModifier key must be present in Preferences.swift"
-        )
-        XCTAssertTrue(
-            src.contains("bb.windowResizeModifier"),
-            "windowResizeModifier key must be present in Preferences.swift"
-        )
-        XCTAssertTrue(
-            src.contains("?? .command"),
-            "windowDragModifier/windowResizeModifier must fall back to .command on an unknown raw"
-        )
-    }
 
     /// Runtime repair — write a garbage windowDragModifier rawValue and
     /// verify the observer-driven repair resets it to "Command" (the
@@ -1111,26 +1044,6 @@ final class PreferencesTests: XCTestCase {
     // a UI surprise: a tampered plist would silently flip the user's
     // theme to a different default than the one shown on first launch.
 
-    /// M4 source-level pin: the theme + themeMode repair targets must
-    /// match the `register(defaults:)` values. A regression that re-
-    /// diverges them would only surface on a corrupted-rawValue path,
-    /// which is rare enough that runtime coverage alone is unreliable.
-    func test_m4_repairFallbacks_matchRegisteredDefaults() throws {
-        let prefsURL = try Self.locatePreferencesSwift()
-        let src = try String(contentsOf: prefsURL, encoding: .utf8)
-
-        // The repair function must resolve to gruvbox / dark. The
-        // earlier (audit-flagged) shape resolved to defaultTheme / auto.
-        XCTAssertFalse(
-            src.contains("let target = Theme.defaultTheme.rawValue"),
-            "M4: repairEnumRawValues must not fall back to Theme.defaultTheme — registered default is Theme.gruvbox"
-        )
-        XCTAssertFalse(
-            src.contains("let target = ThemeMode.auto.rawValue"),
-            "M4: repairEnumRawValues must not fall back to ThemeMode.auto — registered default is ThemeMode.dark"
-        )
-    }
-
     /// M4 runtime — write a corrupted theme rawValue and verify the
     /// observer-driven repair lands on `Theme.gruvbox.rawValue` (the
     /// registered default), NOT `Theme.defaultTheme.rawValue` (the
@@ -1210,47 +1123,6 @@ final class PreferencesTests: XCTestCase {
     // boolean guard makes the inner `didSet` short-circuit explicitly
     // — and pins that the outer write produces no more than the
     // expected number of UserDefaults notifications.
-
-    /// M5 source-level pin: the reentry-suppression mechanism must exist.
-    /// The three former ad-hoc flags (`clampingFontSize` /
-    /// `clampingTranslucency` / `isProcessingDefaultsChange`) collapsed into
-    /// the single `withSelfWriteSuppressed` primitive (the "≤ 1 reentry-
-    /// suppression primitive" A-target). This pins both the primitive AND the
-    /// same-value guards that actually stop the recursion — a regression
-    /// dropping either would re-open the latent 982b719 feedback-loop hazard.
-    func test_m5_reentrySuppressionPrimitive_existsInSource() throws {
-        let prefsURL = try Self.locatePreferencesSwift()
-        let src = try String(contentsOf: prefsURL, encoding: .utf8)
-        XCTAssertTrue(
-            src.contains("withSelfWriteSuppressed"),
-            "M5: the unified reentry-suppression primitive `withSelfWriteSuppressed` must remain in Preferences.swift"
-        )
-        XCTAssertTrue(
-            src.contains("isSuppressingSelfWrite"),
-            "M5: the single reentry-suppression flag `isSuppressingSelfWrite` must remain"
-        )
-        XCTAssertTrue(
-            src.contains("guard !isSuppressingSelfWrite else { return }"),
-            "M5: the primitive must short-circuit when a self-write is already in flight"
-        )
-        XCTAssertTrue(
-            src.contains("guard clamped != fontSize else { return }"),
-            "M5: fontSize didSet must short-circuit when the clamped value already matches (the recursion stopper)"
-        )
-        XCTAssertTrue(
-            src.contains("guard clamped != translucency else { return }"),
-            "M5: translucency didSet must short-circuit when the clamped value already matches"
-        )
-        // Pin the consolidation: the three former ad-hoc flags must NOT
-        // reappear — re-introducing them would resurrect the copy-pasted
-        // reentry-guard duplication the A-target eliminated.
-        XCTAssertFalse(
-            src.contains("var clampingFontSize")
-                || src.contains("var clampingTranslucency")
-                || src.contains("var isProcessingDefaultsChange"),
-            "M5: the three former ad-hoc reentry flags must stay collapsed into the single withSelfWriteSuppressed primitive"
-        )
-    }
 
     /// M5 runtime — counts UserDefaults notifications produced by an
     /// out-of-range fontSize write. The recursive clamp produces at

@@ -70,20 +70,6 @@ final class MenuValidationTests: XCTestCase {
         return w
     }
 
-    /// Bare stub windows (no shell). Each ~40 KB.
-    private func makeStubWindows(_ count: Int, prefix: String = "mv") -> [NSWindow] {
-        (0..<count).map { i in
-            let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
-                styleMask: [.titled],
-                backing: .buffered,
-                defer: true
-            )
-            w.title = "\(prefix)-\(i)"
-            return w
-        }
-    }
-
     /// A synthetic `NSMenuItem` carrying the selector + tag we want to
     /// validate. NSMenuItem itself doesn't gate; we ask AppDelegate's
     /// `validateMenuItem(_:)` via the `NSMenuItemValidation` protocol
@@ -163,57 +149,6 @@ final class MenuValidationTests: XCTestCase {
                     + "(F-S6-009). Got valid=true for tag=\(tag)."
             )
         }
-    }
-
-    /// Pre-flight: same as above but with one synthetic stub window made
-    /// the keyWindow via makeKeyAndOrderFront. Memory: ~50 KB. Time:
-    /// <50 ms (one runloop tick for makeKey).
-    ///
-    /// With one tab alive (single Blackbird window, no tab group), ⌘1
-    /// SHOULD validate true; ⌘2..9 SHOULD validate false (tag exceeds
-    /// tab count).
-    func test_selectTab_validation_oneTab_onlyTag1Enabled() throws {
-        // Same xctest-ASan hazard as the fiveTabs / tenTabs siblings:
-        // a fresh AppDelegate + NSWindow.makeKeyAndOrderFront pairing
-        // trips objc_release in the autorelease-pool teardown under
-        // ASan. Skip until F-S6-009 has a proper test seam that doesn't
-        // require a real app delegate.
-        throw XCTSkip("xctest host cannot safely construct AppDelegate + NSWindow.makeKey under ASan; TST-S6-008 deferred")
-    }
-
-
-    /// Pre-flight: 5 stub windows. Memory: ~200 KB. Time: <50 ms.
-    ///
-    /// With 5 tabs alive in a tab group, ⌘1..⌘5 should be ENABLED and
-    /// ⌘6..⌘9 should be DISABLED. We can't form a real tab group in a
-    /// test host (NSWindowTabGroup requires a window controller + UI
-    /// integration), so we pin the count-aware behaviour by checking
-    /// that EITHER ⌘5 is enabled when 5 windows are key-eligible OR
-    /// the validator returns false (because no real Blackbird tab group
-    /// exists). The strong assertion is on ⌘6..⌘9: those must be
-    /// disabled regardless of tab-group state.
-    func test_selectTab_validation_fiveTabs_tags6through9Disabled() throws {
-        // Constructing a fresh `AppDelegate` in the xctest host, opening
-        // stub NSWindows, and closing them on teardown reliably trips an
-        // ASan SEGV inside `objc_release` — the side-effects of AppDelegate
-        // init (Sparkle / preferences / notification observers) don't
-        // survive without a full NSApplication lifecycle. Skip until the
-        // selectTab validator has a proper seam that doesn't require a
-        // real app delegate. TST-S6-008 stays open as architecture-defer.
-        throw XCTSkip("xctest host cannot safely construct AppDelegate + NSWindows under ASan; TST-S6-008 deferred")
-    }
-
-    /// Pre-flight: 10 stub windows. Memory: ~400 KB. Time: <50 ms.
-    ///
-    /// With 10 tabs alive — exceeding the ⌘1-9 menu range — every
-    /// ⌘1..⌘9 item is potentially in-range (tag <= count). The strong
-    /// invariant: NO ⌘1..⌘9 item is disabled solely on account of count.
-    /// (They may still be disabled if the validator gates on Blackbird
-    /// key-window class — that's also valid.)
-    func test_selectTab_validation_tenTabs_noneDisabledOnCountAlone() throws {
-        // Same ASan hazard as the fiveTabs test — fresh AppDelegate +
-        // stub-window open/close under the xctest host trips objc_release.
-        throw XCTSkip("xctest host cannot safely construct AppDelegate + NSWindows under ASan; TST-S6-008 deferred")
     }
 
     // MARK: - F-S6-009: closeWindow against non-Blackbird keyWindow

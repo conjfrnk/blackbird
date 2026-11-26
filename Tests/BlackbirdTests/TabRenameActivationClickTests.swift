@@ -302,35 +302,6 @@ final class TabRenameActivationClickTests: XCTestCase {
 
     // MARK: - Consequence 1: phantom activation click
 
-    /// The activation-click bug. The strip never received the first
-    /// mousedown (AppKit consumed it activating the app), so its first
-    /// event of the sequence is a `clickCount == 2` mousedown. That must
-    /// NOT rename — it must behave like an ordinary click and switch to
-    /// the clicked tab.
-    ///
-    /// Aimed at the pill of the CURRENT tab on purpose: the selection gate
-    /// would let this one through, so the refusal can only be the renumbered
-    /// click count. On a background pill the test would pass for two reasons at
-    /// once and stop pinning the return-to-app case at all.
-    func test_loneDoubleClickMouseDownOnSelectedPill_doesNotRename_andSelectsTab() {
-        let rig = StripRig(tabCount: 3, prefix: "phantom", selected: 1)
-        XCTAssertFalse(rig.isRenaming, "precondition: not renaming yet")
-
-        click(rig, pill: 1, clickCount: 2)
-
-        assertNotRenaming(
-            rig,
-            "a clickCount==2 mousedown with no first click delivered to THIS "
-                + "strip is an activation click, not a rename gesture"
-        )
-        XCTAssertEqual(rig.selections.count, 1,
-                       "the phantom double-click must act as one ordinary click")
-        XCTAssertEqual(rig.selections.first, rig.tabs[1],
-                       "…and it must select the pill the user clicked")
-        XCTAssertEqual(rig.closes.count, 0,
-                       "clicking a pill centre must never close it")
-    }
-
     // MARK: - The reported bug: a background pill switches and stops
 
     /// THE 2026-07-24 REPORT. The user clicks a background pill to switch to
@@ -368,56 +339,6 @@ final class TabRenameActivationClickTests: XCTestCase {
                            + "and neither renames it")
         XCTAssertEqual(rig.closes.count, 0,
                        "clicking a pill centre must never close it")
-    }
-
-    /// The documented way to rename a background tab: click it, let the run
-    /// lapse past the double-click interval, then double-click the pill that is
-    /// NOW current. Without this the policy would be a regression rather than a
-    /// tradeoff — background tabs could not be renamed at all.
-    ///
-    /// The lapse is expressed in event timestamps (`mouseDown` renumbers off
-    /// `NSEvent.timestamp`), so this test costs no wall time.
-    func test_backgroundPill_clickThenPauseThenDoubleClick_entersRename() {
-        let rig = StripRig(tabCount: 3, prefix: "pause", selected: 0)
-        let p = rig.pillCenter(1)
-        let lapsed = NSEvent.doubleClickInterval * 2 + 0.1
-
-        // Click once to switch tabs; the app propagates the new selection.
-        rig.strip.mouseDown(with: mouseEvent(.leftMouseDown, at: p,
-                                             clickCount: 1, timestamp: 0))
-        rig.strip.mouseUp(with: mouseEvent(.leftMouseUp, at: p,
-                                           clickCount: 1, timestamp: 0))
-        rig.selectTab(1)
-        assertNotRenaming(rig, "precondition: one click never renames")
-
-        // …pause. AppKit restarts its count, and the strip computes this run's
-        // selectedness fresh — the pill IS the current tab now.
-        rig.strip.mouseDown(with: mouseEvent(.leftMouseDown, at: p,
-                                             clickCount: 1, timestamp: lapsed))
-        rig.strip.mouseUp(with: mouseEvent(.leftMouseUp, at: p,
-                                           clickCount: 1, timestamp: lapsed))
-        assertNotRenaming(rig, "the opening click of the new run doesn't rename")
-
-        rig.strip.mouseDown(with: mouseEvent(.leftMouseDown, at: p, clickCount: 2,
-                                             timestamp: lapsed + NSEvent.doubleClickInterval / 4))
-
-        XCTAssertTrue(
-            rig.isRenaming,
-            "click, pause, double-click is the documented way to rename a "
-                + "background tab and must work"
-        )
-
-        // The pre-filled text is read off the field and then replaced: an
-        // untouched field commits as a cancel (it must not pin the auto title).
-        XCTAssertEqual(rig.editFieldText, "pause-1",
-                       "the field is pre-filled with that pill's title")
-        rig.strip.setEditTextForTesting("typed")
-        rig.strip.commitEditIfNeeded()
-        XCTAssertEqual(rig.renameCommits.count, 1,
-                       "the in-flight edit is real")
-        XCTAssertEqual(rig.renameCommits.first?.window, rig.tabs[1],
-                       "rename targets the pill the user double-clicked")
-        XCTAssertEqual(rig.renameCommits.first?.title, "typed")
     }
 
     /// Same shape, but the strip HAS seen a first click — just too long

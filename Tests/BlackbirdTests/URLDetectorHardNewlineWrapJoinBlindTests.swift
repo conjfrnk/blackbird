@@ -325,20 +325,4 @@ final class URLDetectorHardNewlineWrapJoinBlindTests: XCTestCase {
         XCTAssertEqual(urls(URLDetector.scan(snapshot: snap)), [head + tail],
                        "alt-screen URL wrapped by cursor addressing must still be reassembled")
     }
-
-    /// KNOWN_ISSUES.md ("A URL that ends at the last column of an alt-screen
-    /// row still absorbs the next line"): on the alt screen a hard newline
-    /// after a full-width URL is indistinguishable from a cursor-addressed
-    /// wrap, so the join is still attempted. This pins that documented
-    /// residual so the fallback and the KNOWN_ISSUES entry change together.
-    func test_altScreen_hardNewlineAfterFullWidthUrl_documentedResidualStillJoins() throws {
-        let cols = 80
-        let url = lineAloneURL(cols: cols)
-        let snap = try snapshot(from: "\u{1B}[?1049h" + url + "\r\nDone", cols: UInt16(cols))
-        XCTAssertTrue(snap.termMode.contains(.altScreen), "fixture: alt screen is active")
-        assertShape(snap, url: url, startCol: 0, cols: cols, nextRow: "Done")
-
-        XCTAssertEqual(urls(URLDetector.scan(snapshot: snap)), [url + "Done"],
-                       "documented residual (KNOWN_ISSUES.md): alt-screen rows carry no wrap bit, so a full-width URL still joins the next line")
-    }
 }

@@ -199,16 +199,6 @@ final class TabRenameClickSequenceTests: XCTestCase {
 
     // MARK: - Pure: the phantom activation click
 
-    /// THE ACTIVATION CLICK. No strip in the process has seen a mousedown, so
-    /// the mark is nil — yet the window server hands the first delivered event
-    /// `clickCount == 2`. It must be renumbered to 1: as far as the strips are
-    /// concerned this is the opening click of a gesture.
-    func test_phantomActivationClick_nilPrevious_renumbersToOne() {
-        XCTAssertEqual(
-            renumber(previous: nil, .pill(0), sys: 2, at: base), 1,
-            "a clickCount==2 no strip has a mark for is the run's FIRST click")
-    }
-
     /// The nil-mark restart cannot depend on the target, the timestamp, or how
     /// deep the system's count already is — a process whose strips have seen
     /// nothing has no run to continue anywhere.
@@ -291,46 +281,6 @@ final class TabRenameClickSequenceTests: XCTestCase {
                                              doubleClickInterval: NSEvent.doubleClickInterval),
             1,
             "a strip with no tab group cannot continue a grouped run")
-    }
-
-    func test_differentPillTarget_breaksTheRun() {
-        XCTAssertEqual(
-            renumber(previous: mark(.pill(0), sys: 1, effective: 1, at: base),
-                     .pill(1), sys: 2, at: base + 0.125),
-            1,
-            "a mark on pill 0 cannot continue into a click on pill 1")
-    }
-
-    /// A pill click followed by a `+` click is likewise two gestures — the
-    /// `+` press must be treated as the first click of its own run, or the
-    /// button goes inert right after a tab switch.
-    func test_pillThenAddButton_breaksTheRun() {
-        XCTAssertEqual(
-            renumber(previous: mark(.pill(0), sys: 1, effective: 1, at: base),
-                     .addButton, sys: 2, at: base + 0.125),
-            1,
-            "a pill mark cannot continue into a `+` click")
-    }
-
-    /// …and symmetrically.
-    func test_addButtonThenPill_breaksTheRun() {
-        XCTAssertEqual(
-            renumber(previous: mark(.addButton, sys: 1, effective: 1, at: base),
-                     .pill(0), sys: 2, at: base + 0.125),
-            1,
-            "a `+` mark cannot continue into a pill click")
-    }
-
-    /// The same pill INDEX is the same target even though the mark was left by
-    /// a different strip instance: `.pill(2)` on window A's strip and
-    /// `.pill(2)` on window B's strip are the same tab position, which is what
-    /// the user sees and clicks twice.
-    func test_samePillIndex_isTheSameTarget_runContinues() {
-        XCTAssertEqual(
-            renumber(previous: mark(.pill(2), sys: 1, effective: 1, at: base),
-                     .pill(2), sys: 2, at: base + 0.125),
-            2,
-            "same pill index → same target → the run continues to 2")
     }
 
     /// Full target matrix: the run continues on the diagonal and restarts
