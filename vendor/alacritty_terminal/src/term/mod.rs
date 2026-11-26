@@ -1268,6 +1268,29 @@ impl<T> Term<T> {
         self.glyph_end = Some(self.grid.cursor.point);
     }
 
+    /// Put a zero-width character over the previous glyph's first cell.
+    ///
+    /// Blackbird fix (re-apply on bump): emoji-presentation / keycap / skin-tone width parity.
+    /// VS16 (U+FE0F), the keycap combiner (U+20E3) and an Emoji_Modifier that
+    /// `joins_emoji_cluster` admitted widen a width-1 base to the 2 columns `string-width`
+    /// measures; see `can_widen_prev_glyph` for the guards and `widen_prev_glyph` for the
+    /// promotion. A mark the guards refuse is still pushed. Out of line so `input`'s
+    /// printable path stays as small as upstream's.
+    #[cold]
+    #[inline(never)]
+    fn input_zerowidth(&mut self, c: char) {
+        let column = self.prev_glyph_column();
+        let line = self.grid.cursor.point.line;
+
+        if (matches!(c, '\u{FE0F}' | '\u{20E3}') || is_emoji_modifier(c))
+            && self.can_widen_prev_glyph(column)
+        {
+            self.widen_prev_glyph(column);
+        }
+
+        self.grid[line][column].push_zerowidth(c);
+    }
+
     /// Blackbird fix (re-apply on bump): emoji-cluster width parity, the ZWJ / skin-tone sibling
     /// of the VS16 promotion in `input`. True when `c` continues the emoji cluster whose
     /// pictograph base the cursor sits directly after: an Emoji_Modifier (skin tone) after an
@@ -1289,7 +1312,7 @@ impl<T> Term<T> {
     /// CJK stays a standalone glyph (as in `string-width`). A base whose zerowidth list is full
     /// (`ZEROWIDTH_MAX`) joins nothing: `push_zerowidth` would drop `c`, swallowing a visible
     /// emoji without advancing the cursor.
-    #[inline]
+    #[inline(never)]
     fn joins_emoji_cluster(&self, c: char) -> bool {
         if !is_pictographic(c) {
             return false;
@@ -1369,30 +1392,14 @@ impl<T: EventListener> Handler for Term<T> {
         let width = match c.width() {
             // Blackbird fix (re-apply on bump): a skin-tone modifier or the pictograph after a
             // ZWJ continues the previous emoji's cluster and takes no cell of its own.
-            Some(_) if self.joins_emoji_cluster(c) => 0,
+            Some(_) if is_pictographic(c) && self.joins_emoji_cluster(c) => 0,
             Some(width) => width,
             None => return,
         };
 
         // Handle zero-width characters.
         if width == 0 {
-            // Put zerowidth characters over the previous glyph's first cell.
-            let column = self.prev_glyph_column();
-            let line = self.grid.cursor.point.line;
-
-            // Blackbird fix (re-apply on bump): emoji-presentation / keycap / skin-tone width
-            // parity. VS16 (U+FE0F), the keycap combiner (U+20E3) and an Emoji_Modifier that
-            // `joins_emoji_cluster` admitted widen a width-1 base to the 2 columns `string-width`
-            // measures; see `can_widen_prev_glyph` for the guards and `widen_prev_glyph` for the
-            // promotion. Re-apply this patch on any alacritty_terminal bump. A mark the guards
-            // refuse falls through to push_zerowidth.
-            if (matches!(c, '\u{FE0F}' | '\u{20E3}') || is_emoji_modifier(c))
-                && self.can_widen_prev_glyph(column)
-            {
-                self.widen_prev_glyph(column);
-            }
-
-            self.grid[line][column].push_zerowidth(c);
+            self.input_zerowidth(c);
             return;
         }
 
