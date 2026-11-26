@@ -33,7 +33,6 @@ public final class BBTerm {
         bb_set_log_cb(BBTerm.coreLogSink)
     }()
     fileprivate static let didLogDimClamp = OSAllocatedUnfairLock(initialState: false)
-    fileprivate static let didLogInvalidCell = OSAllocatedUnfairLock(initialState: false)
 
     public struct Size: Equatable, Sendable {
         public var cols: UInt16
@@ -520,8 +519,6 @@ public final class BBSnapshot {
         case spacer
         /// Never written: alacritty's `\0` sentinel.
         case empty
-        /// A non-zero scalar that is not a valid `Unicode.Scalar`. Row walkers skip it without halting.
-        case invalid
     }
 
     public func cellKind(at col: Int, row: Int) -> CellKind {
@@ -539,7 +536,7 @@ public final class BBSnapshot {
         }
         let scalar = cell.ch
         guard scalar != 0 else { return .empty }
-        guard let us = Unicode.Scalar(scalar) else { return .invalid }
+        guard let us = Unicode.Scalar(scalar) else { return .empty }
         return .character(Character(us))
     }
 
@@ -594,16 +591,6 @@ public final class BBSnapshot {
                 sentinel = next
                 c = next
             case .spacer:
-                c += 1
-            case .invalid:
-                // Skip without truncating the row, so one bad cell cannot hide matches to its right.
-                let invalidCol = c
-                BBTerm.didLogInvalidCell.withLock { logged in
-                    if !logged {
-                        logged = true
-                        BBTerm.clampLogger.warning("rowTextWithUTF16ToColMap: encountered .invalid cell at row=\(row, privacy: .public) col=\(invalidCol, privacy: .public) — alacritty filter regression?")
-                    }
-                }
                 c += 1
             case .empty:
                 c = cols
@@ -722,7 +709,7 @@ extension BBSnapshot: A11ySnapshotSource {
             for c in 0..<cols {
                 guard let idx = Self.flatIndex(row: r, col: c, cols: cols) else { break }
                 guard idx < cellLen else { break }
-                // Empty / invalid cells become a space so column alignment survives for screen readers.
+                // Empty cells become a space so column alignment survives for screen readers.
                 switch Self.classify(cellsPtr[idx]) {
                 case .character(let ch):
                     line.append(ch)
@@ -731,7 +718,7 @@ extension BBSnapshot: A11ySnapshotSource {
                     }
                 case .spacer:
                     continue
-                case .empty, .invalid:
+                case .empty:
                     line.append(" ")
                 }
             }

@@ -395,15 +395,14 @@ const OSC8_TOTAL_INTERN_BYTES_CAP: usize = 1024 * 1024;
 
 /// Returns a per-snapshot local link id (1-based; 0 = no link).
 fn resolve_link_id(
-    uri: Option<&str>,
+    uri: &str,
     phase1_uris: &mut Vec<Arc<str>>,
     local_uri_to_id: &mut std::collections::HashMap<Arc<str>, u16>,
     exhausted: &mut bool,
 ) -> u16 {
-    let uri = match uri {
-        Some(u) if !u.is_empty() && u.len() <= OSC8_URI_MAX => u,
-        _ => return 0,
-    };
+    if uri.is_empty() || uri.len() > OSC8_URI_MAX {
+        return 0;
+    }
     if let Some(&id) = local_uri_to_id.get(uri) {
         return id;
     }
@@ -515,7 +514,7 @@ pub(crate) fn snapshot(bb: &mut BBTerm) -> *const BBSnap {
                 Some((lh, id)) if *lh == h => *id,
                 _ => {
                     let id = resolve_link_id(
-                        Some(h.uri()),
+                        h.uri(),
                         &mut phase1_uris,
                         &mut local_uri_to_id,
                         &mut osc8_id_exhausted_this_snapshot,

@@ -159,7 +159,7 @@ final class PromptMarkBurstPositionBlindTests: XCTestCase {
                 switch snap.cellKind(at: c, row: r) {
                 case .character(let ch):
                     line.append(ch)
-                case .spacer, .empty, .invalid:
+                case .spacer, .empty:
                     line.append(" ")
                 }
             }

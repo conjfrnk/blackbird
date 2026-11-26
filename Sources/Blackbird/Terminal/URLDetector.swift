@@ -198,8 +198,7 @@ public enum URLDetector {
                 }
             }
             // After the URL pass so emails inside a URL match (`https://user:pass@host.com`) are dropped.
-            if !utf16ToCol.isEmpty,
-               line.contains("@"), line.contains(".") {
+            if line.contains("@"), line.contains(".") {
                 emailRegex.enumerateMatches(
                     in: line,
                     range: NSRange(location: searchStartUTF16, length: nsLine.length - searchStartUTF16)

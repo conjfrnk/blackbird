@@ -13,13 +13,11 @@ pub(crate) const WEDGED_STRING_CHUNKS: u32 = 2;
 pub(crate) unsafe fn process_input(bb: &mut BBTerm, slice: &[u8]) {
     if memchr::memchr(0x1B, slice).is_none() {
         // Tap BEFORE grid: an OSC 133 mark completed here is stamped with the pre-chunk cursor.
-        let has_bel = memchr::memchr(0x07, slice).is_some();
-        if bb.osc_possibly_pending || has_bel || bb.osc_tap.in_xtgettcap {
+        if bb.osc_possibly_pending {
             {
                 let mut osc = osc_scanner!(bb);
                 bb.osc_parser.advance(&mut osc, slice);
             }
-            // Clear on Ground, NOT only on a BEL: the bundled prompt marks terminate with ST.
             bb.osc_possibly_pending = !bb.osc_parser.is_ground();
         }
         advance_grid(bb, slice);

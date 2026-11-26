@@ -9,17 +9,6 @@ public final class MetalRenderer {
     private static let logger = Logger(subsystem: "dev.conjfrnk.blackbird",
                                        category: "renderer")
 
-    /// Plain static without a lock: the renderer is main-thread only.
-    private static var negativeDisplayOffsetWarned = false
-
-    private static func clampDisplayOffset(_ raw: Int) -> UInt32 {
-        if raw < 0, !MetalRenderer.negativeDisplayOffsetWarned {
-            MetalRenderer.negativeDisplayOffsetWarned = true
-            logger.error("displayOffset went negative (\(raw, privacy: .public)); clamping to 0. BBCore contract violated — investigate scrollback math.")
-        }
-        return UInt32(clamping: raw)
-    }
-
     static let atlasCapacity = 4096
 
     public let device: MTLDevice
@@ -598,7 +587,7 @@ public final class MetalRenderer {
                 focused: focused,
                 cursorShape: cursorState.shapeOverride ?? UInt8(clamping: snapshot?.cursorShape ?? 3),
                 cursorVisible: snapshot?.cursorVisible ?? false,
-                displayOffset: Self.clampDisplayOffset(snapshot?.displayOffset ?? 0),
+                displayOffset: UInt32(clamping: snapshot?.displayOffset ?? 0),
                 topInsetPoints: insets.topInsetPoints,
                 leftInsetPoints: insets.leftInsetPoints,
                 defaultBgRgb: themeColors.defaultBgRgb,

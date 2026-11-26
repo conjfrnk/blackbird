@@ -115,7 +115,7 @@ public final class PromptNavigator {
             }
             return
         }
-        let clampedTarget = max(0, min(target, snap.historySize))
+        let clampedTarget = max(0, target)
         let delta = clampedTarget - snap.displayOffset
         if delta != 0 {
             session.scroll(delta: Int32(clamping: delta))

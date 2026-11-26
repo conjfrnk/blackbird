@@ -40,7 +40,7 @@ public struct CellMetrics {
         let rawCellHeight = (ascent + descent + leading).rounded()
         self.cellHeight = rawCellHeight.isFinite ? max(1, rawCellHeight) : 1
         var glyph = CGGlyph(0)
-        var chars: [UniChar] = [UInt16(("M" as Character).asciiValue ?? 77)]
+        var chars: [UniChar] = [UniChar(UInt8(ascii: "M"))]
         CTFontGetGlyphsForCharacters(ct, &chars, &glyph, 1)
         var advance = CGSize.zero
         CTFontGetAdvancesForGlyphs(ct, .horizontal, &glyph, &advance, 1)
@@ -547,7 +547,6 @@ public final class TerminalView: MTKView, MTKViewDelegate {
             metrics: metrics
         )
         let grid = metrics.grid(forPixelSize: usable)
-        guard grid.cols > 0, grid.rows > 0 else { return }
         // cols/rows can exceed UInt16.max on a degenerate cell size; `clamping:` avoids the trap.
         let size = PTY.Size(
             cols: UInt16(clamping: grid.cols),

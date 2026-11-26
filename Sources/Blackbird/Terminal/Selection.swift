@@ -141,7 +141,7 @@ public func wordRange(
         while c >= 0, case .spacer = kindAt(c) { c -= 1 }
         guard c >= 0, case .character = kindAt(c) else { return nil }
         anchorCol = c
-    case .empty, .invalid:
+    case .empty:
         return nil
     }
 
@@ -157,7 +157,7 @@ public func wordRange(
             l -= 1
         case .spacer:
             l -= 1
-        case .empty, .invalid:
+        case .empty:
             break backwardLoop
         }
     }
@@ -170,7 +170,7 @@ public func wordRange(
             r += 1
         case .spacer:
             r += 1
-        case .empty, .invalid:
+        case .empty:
             break forwardLoop
         }
     }
